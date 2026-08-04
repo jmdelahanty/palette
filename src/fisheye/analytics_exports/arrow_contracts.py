@@ -19,6 +19,24 @@ from .contracts import (
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     BOUT_KINEMATICS_METRICS_TABLE,
+    CHASER_BOUT_EVENTS_TABLE,
+    CHASER_BOUT_HISTOGRAM_TABLE,
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_IBI_HISTOGRAM_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_SPATIAL_TABLE,
+    CHASER_SPEED_DISTANCE_TABLE,
     DESCRIPTIVE_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
     KINEMATICS_SAMPLES_TABLE,
@@ -54,6 +72,24 @@ EXACT_ARROW_SCHEMA_TABLES = (
     ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
     TAIL_TRACE_SAMPLES_TABLE,
+    CHASER_SPATIAL_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_BOUT_EVENTS_TABLE,
+    CHASER_BOUT_HISTOGRAM_TABLE,
+    CHASER_IBI_HISTOGRAM_TABLE,
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_SPEED_DISTANCE_TABLE,
+    CHASER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
 )
 
 _ENVELOPE_FIELDS = {
@@ -134,6 +170,702 @@ class ArrowTableContract:
 def _field(name: str, arrow_type: str, *, nullable: bool = False) -> ArrowFieldContract:
     return ArrowFieldContract(name=name, arrow_type=arrow_type, nullable=nullable)
 
+
+_EXPORT_IDENTITY_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+)
+
+_COLLECTION_FIELDS = (
+    _field("collection_id", "string", nullable=True),
+    _field("collection_manifest_sha256", "string", nullable=True),
+    _field("collection_manifest_path", "string", nullable=True),
+)
+
+# These fields describe the independently selected chaser-distance authority.
+# Nullable provenance reflects the current compatibility reader. The dormant
+# derivative tables remain fail closed until their own component manifests are
+# sealed; exact Arrow schemas do not reactivate those readers.
+_CHASER_RUN_FIELDS = (
+    _field("chaser_distance_run", "string"),
+    _field("chaser_distance_path", "string"),
+    _field("chaser_distance_schema_id", "string", nullable=True),
+    _field("chaser_distance_schema_version", "int64", nullable=True),
+    _field("chaser_distance_method", "string", nullable=True),
+    _field("chaser_distance_method_version", "string", nullable=True),
+    _field("source_detection_path", "string", nullable=True),
+    _field("source_detection_kind", "string", nullable=True),
+    _field("source_stimulus_run", "string", nullable=True),
+    _field("source_stimulus_path", "string", nullable=True),
+    _field("source_stimulus_epoch_run", "string", nullable=True),
+    _field("source_stimulus_epoch_path", "string", nullable=True),
+    _field("source_refs_json", "string"),
+    _field("coordinate_frame", "string", nullable=True),
+    _field("coordinate_origin", "string", nullable=True),
+    _field("fps", "float64", nullable=True),
+    _field("total_frames", "int64", nullable=True),
+    _field("pixels_per_mm_projector", "float64", nullable=True),
+)
+
+_CHASER_OPTIONAL_WINDOW_FIELDS = (
+    _field("window_index", "int64"),
+    _field("window_id", "int64"),
+    _field("window_label", "string", nullable=True),
+    _field("start_frame", "int64", nullable=True),
+    _field("end_frame", "int64", nullable=True),
+    _field("start_time_s", "float64", nullable=True),
+    _field("end_time_s", "float64", nullable=True),
+    _field("duration_s", "float64", nullable=True),
+)
+
+_CHASER_REQUIRED_WINDOW_FIELDS = (
+    _field("window_id", "int64"),
+    _field("window_index", "int64"),
+    _field("window_label", "string"),
+    _field("start_frame", "int64"),
+    _field("end_frame", "int64"),
+    _field("start_time_s", "float64"),
+    _field("end_time_s", "float64"),
+    _field("duration_s", "float64"),
+)
+
+_EPOCH_BEHAVIOR_COMPONENT_FIELDS = (
+    _field("epoch_behavior_component", "string"),
+    _field("epoch_behavior_path", "string"),
+    _field("epoch_behavior_schema_id", "string", nullable=True),
+    _field("epoch_behavior_schema_version", "int64", nullable=True),
+    _field("epoch_behavior_method", "string", nullable=True),
+    _field("epoch_behavior_method_version", "string", nullable=True),
+    _field("epoch_behavior_status", "string", nullable=True),
+    _field("epoch_behavior_created_at_utc", "string", nullable=True),
+    _field("epoch_behavior_source_refs_json", "string"),
+    _field("epoch_behavior_parameters_json", "string"),
+    _field("source_track_kinematics_run", "string", nullable=True),
+    _field("source_track_kinematics_scope", "string", nullable=True),
+    _field("source_track_kinematics_track_id", "int64", nullable=True),
+    _field("source_track_kinematics_track_path", "string", nullable=True),
+    _field("source_swim_bout_run", "string", nullable=True),
+    _field("source_swim_bout_path", "string", nullable=True),
+    _field("source_swim_bout_level_path", "string", nullable=True),
+    _field("source_speed_level", "string", nullable=True),
+    _field("swim_bout_signal_level", "string", nullable=True),
+)
+
+_CHASER_SPATIAL_FIELDS = _EXPORT_IDENTITY_FIELDS + (
+    _field("detection_occupancy_run", "string"),
+    _field("detection_occupancy_path", "string"),
+    _field("detection_occupancy_schema_id", "string", nullable=True),
+    _field("detection_occupancy_schema_version", "int64", nullable=True),
+    _field("detection_occupancy_method", "string", nullable=True),
+    _field("detection_occupancy_method_version", "string", nullable=True),
+    _field("source_detection_path", "string", nullable=True),
+    _field("source_detection_kind", "string", nullable=True),
+    _field("source_stimulus_epoch_run", "string", nullable=True),
+    _field("source_stimulus_epoch_path", "string", nullable=True),
+    _field("source_refs_json", "string"),
+    _field("zone_schema_id", "string", nullable=True),
+    _field("zone_schema_version", "int64", nullable=True),
+    _field("zone_set_id", "string"),
+    _field("zone_set_source", "string", nullable=True),
+    _field("zone_set_source_ref", "string", nullable=True),
+    _field("coordinate_frame", "string", nullable=True),
+    _field("coordinate_origin", "string", nullable=True),
+    _field("x_axis_direction", "string", nullable=True),
+    _field("y_axis_direction", "string", nullable=True),
+    _field("width_px", "int64", nullable=True),
+    _field("height_px", "int64", nullable=True),
+    _field("fps", "float64", nullable=True),
+    _field("detection_selection_policy", "string", nullable=True),
+    _field("zone_overlap_policy", "string", nullable=True),
+    _field("time_basis", "string", nullable=True),
+    _field("window_index", "int64"),
+    _field("window_id", "int64"),
+    _field("window_label", "string", nullable=True),
+    _field("start_frame", "int64", nullable=True),
+    _field("end_frame", "int64", nullable=True),
+    _field("start_time_s", "float64", nullable=True),
+    _field("end_time_s", "float64", nullable=True),
+    _field("duration_s", "float64", nullable=True),
+    _field("zone_index", "int64"),
+    _field("zone_id", "string"),
+    _field("zone_label", "string"),
+    _field("display_order", "int64", nullable=True),
+    _field("geometry_type", "string", nullable=True),
+    _field("x_min", "float64", nullable=True),
+    _field("y_min", "float64", nullable=True),
+    _field("x_max", "float64", nullable=True),
+    _field("y_max", "float64", nullable=True),
+    _field("frame_count", "int64"),
+    _field("time_s", "float64", nullable=True),
+    _field("fraction_of_epoch", "float64", nullable=True),
+    _field("fraction_of_detected", "float64", nullable=True),
+    _field("detected_frame_count", "int64", nullable=True),
+    _field("missing_frame_count", "int64", nullable=True),
+    _field("total_span_frames", "int64", nullable=True),
+    _field("coverage_pct", "float64", nullable=True),
+) + _COLLECTION_FIELDS
+
+_CHASER_DISTANCE_SUMMARY_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _CHASER_OPTIONAL_WINDOW_FIELDS
+    + (
+        _field("chaser_column_index", "int64"),
+        _field("chaser_index", "int64"),
+        _field("behavior_class_id", "int64"),
+        _field("behavior_class", "string"),
+        _field("threshold_mm", "float64", nullable=True),
+        _field("valid_frame_count", "int64"),
+        _field("mean_distance_mm", "float64", nullable=True),
+        _field("min_distance_mm", "float64", nullable=True),
+        _field("p05_distance_mm", "float64", nullable=True),
+        _field("p50_distance_mm", "float64", nullable=True),
+        _field("p95_distance_mm", "float64", nullable=True),
+        _field("fraction_within_threshold", "float64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_EPOCH_BEHAVIOR_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _EPOCH_BEHAVIOR_COMPONENT_FIELDS
+    + _CHASER_REQUIRED_WINDOW_FIELDS
+    + (
+        _field("total_span_frames", "int64"),
+        _field("valid_frame_count", "int64"),
+        _field("missing_frame_count", "int64"),
+        _field("tracking_dropout_fraction", "float64", nullable=True),
+        _field("center_distance_sample_count", "int64"),
+        _field("mean_distance_from_arena_center_mm", "float64", nullable=True),
+        _field("median_distance_from_arena_center_mm", "float64", nullable=True),
+        _field("p05_distance_from_arena_center_mm", "float64", nullable=True),
+        _field("p95_distance_from_arena_center_mm", "float64", nullable=True),
+        _field("max_distance_from_arena_center_mm", "float64", nullable=True),
+        _field("arena_radius_mm", "float64", nullable=True),
+        _field("wall_band_mm", "float64"),
+        _field("wall_frame_count", "int64"),
+        _field("wall_fraction", "float64", nullable=True),
+        _field("wall_time_s", "float64"),
+        _field("speed_sample_count", "int64"),
+        _field("mean_speed_mm_s", "float64", nullable=True),
+        _field("median_speed_mm_s", "float64", nullable=True),
+        _field("p05_speed_mm_s", "float64", nullable=True),
+        _field("p95_speed_mm_s", "float64", nullable=True),
+        _field("max_speed_mm_s", "float64", nullable=True),
+        _field("total_path_mm", "float64", nullable=True),
+        _field("bout_count", "int64"),
+        _field("bout_rate_per_min", "float64", nullable=True),
+        _field("median_bout_duration_s", "float64", nullable=True),
+        _field("mean_bout_duration_s", "float64", nullable=True),
+        _field("median_bout_path_length_mm", "float64", nullable=True),
+        _field("mean_bout_path_length_mm", "float64", nullable=True),
+        _field("bout_heading_sample_count", "int64"),
+        _field("mean_bout_net_heading_change_deg", "float64", nullable=True),
+        _field("median_bout_net_heading_change_deg", "float64", nullable=True),
+        _field("mean_abs_bout_net_heading_change_deg", "float64", nullable=True),
+        _field("median_abs_bout_net_heading_change_deg", "float64", nullable=True),
+        _field("mean_bout_heading_path_deg", "float64", nullable=True),
+        _field("median_bout_heading_path_deg", "float64", nullable=True),
+        _field("inter_bout_interval_count", "int64"),
+        _field("mean_inter_bout_interval_s", "float64", nullable=True),
+        _field("median_inter_bout_interval_s", "float64", nullable=True),
+        _field("p05_inter_bout_interval_s", "float64", nullable=True),
+        _field("p95_inter_bout_interval_s", "float64", nullable=True),
+        _field("inter_bout_interval_rate_per_min", "float64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_BOUT_EVENT_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _EPOCH_BEHAVIOR_COMPONENT_FIELDS
+    + _CHASER_REQUIRED_WINDOW_FIELDS
+    + (
+        _field("bout_source_row", "int64"),
+        _field("bout_id", "int64"),
+        _field("bout_event_frame", "int64"),
+        _field("bout_event_time_s", "float64", nullable=True),
+        _field("bout_start_frame", "int64"),
+        _field("bout_end_frame", "int64"),
+        _field("bout_start_time_s", "float64", nullable=True),
+        _field("bout_end_time_s", "float64", nullable=True),
+        _field("bout_duration_s", "float64", nullable=True),
+        _field("bout_path_length_mm", "float64", nullable=True),
+        _field("bout_net_heading_change_deg", "float64", nullable=True),
+        _field("abs_bout_net_heading_change_deg", "float64", nullable=True),
+        _field("bout_heading_path_deg", "float64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_EPOCH_HISTOGRAM_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _EPOCH_BEHAVIOR_COMPONENT_FIELDS
+    + (
+        _field("histogram_dataset", "string"),
+        _field("histogram_bin_contract_json", "string"),
+        _field("metric_name", "string"),
+        _field("units", "string"),
+    )
+    + _CHASER_REQUIRED_WINDOW_FIELDS
+    + (
+        _field("bin_index", "int64"),
+        _field("bin_left", "float64"),
+        _field("bin_right", "float64"),
+        _field("bin_center", "float64"),
+        _field("bin_width", "float64"),
+        _field("hist_count", "int64"),
+        _field("hist_fraction", "float64", nullable=True),
+        _field("hist_density", "float64", nullable=True),
+        _field("source_sample_count", "int64"),
+        _field("finite_sample_count", "int64"),
+        _field("bin_policy", "string"),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CENTER_DISTANCE_COMPONENT_FIELDS = _EPOCH_BEHAVIOR_COMPONENT_FIELDS[:10] + (
+    _field("source_track_kinematics_run", "string", nullable=True),
+    _field("source_swim_bout_run", "string", nullable=True),
+)
+
+_CHASER_CENTER_DISTANCE_HISTOGRAM_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _CENTER_DISTANCE_COMPONENT_FIELDS
+    + _CHASER_REQUIRED_WINDOW_FIELDS
+    + (
+        _field("bin_index", "int64"),
+        _field("bin_left_mm", "float64"),
+        _field("bin_right_mm", "float64"),
+        _field("bin_center_mm", "float64"),
+        _field("bin_width_mm", "float64"),
+        _field("hist_count", "int64"),
+        _field("hist_fraction", "float64", nullable=True),
+        _field("hist_density_per_mm", "float64", nullable=True),
+        _field("valid_frame_count", "int64"),
+        _field("arena_radius_mm", "float64"),
+        _field("wall_band_mm", "float64"),
+        _field("geometry_status", "string"),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_SPEED_DISTANCE_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _CHASER_OPTIONAL_WINDOW_FIELDS
+    + (
+        _field("source_position_path", "string"),
+        _field("source_distance_path", "string"),
+        _field("speed_distance_definition", "string"),
+        _field("chaser_column_index", "int64"),
+        _field("chaser_index", "int64"),
+        _field("distance_bin_index", "int64"),
+        _field("distance_bin_left_mm", "float64"),
+        _field("distance_bin_right_mm", "float64"),
+        _field("distance_bin_center_mm", "float64"),
+        _field("distance_bin_width_mm", "float64"),
+        _field("speed_sample_count", "int64"),
+        _field("speed_sum_mm_s", "float64"),
+        _field("mean_speed_mm_s", "float64", nullable=True),
+        _field("median_speed_mm_s", "float64", nullable=True),
+        _field("p05_speed_mm_s", "float64", nullable=True),
+        _field("p95_speed_mm_s", "float64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_DISTANCE_HISTOGRAM_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _CHASER_OPTIONAL_WINDOW_FIELDS
+    + (
+        _field("chaser_column_index", "int64"),
+        _field("chaser_index", "int64"),
+        _field("behavior_class_id", "int64"),
+        _field("behavior_class", "string"),
+        _field("distance_bin_index", "int64"),
+        _field("bin_left_mm", "float64", nullable=True),
+        _field("bin_right_mm", "float64", nullable=True),
+        _field("bin_center_mm", "float64", nullable=True),
+        _field("bin_width_mm", "float64", nullable=True),
+        _field("hist_count", "int64"),
+        _field("hist_density", "float64", nullable=True),
+        _field("valid_sample_count", "int64", nullable=True),
+        _field("density_normalization", "string", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_QUADRANT_COMPONENT_FIELDS = (
+    _field("cra_primary_endpoint_component", "string"),
+    _field("cra_primary_endpoint_path", "string"),
+    _field("source_cra_primary_endpoint_component", "string"),
+    _field("source_cra_primary_endpoint_path", "string"),
+    _field("source_component_schema_id", "string"),
+    _field("source_component_schema_version", "int64"),
+    _field("source_component_fingerprint", "string", nullable=True),
+    _field("source_component_fingerprint_status", "string", nullable=True),
+    _field("cra_primary_endpoint_schema_id", "string"),
+    _field("cra_primary_endpoint_schema_version", "int64"),
+    _field("cra_primary_endpoint_method", "string"),
+    _field("cra_primary_endpoint_method_version", "string"),
+    _field("cra_primary_endpoint_created_at_utc", "string"),
+    _field("endpoint_status", "string"),
+    _field("cra_primary_endpoint_source_refs_json", "string"),
+    _field("cra_primary_endpoint_parameters_json", "string"),
+    _field("qc_warnings_json", "string"),
+    _field("diagnostics_json", "string"),
+    _field("source_chaser_distance_run", "string"),
+    _field("source_chaser_distance_path", "string"),
+    _field("x_axis_direction", "string", nullable=True),
+    _field("y_axis_direction", "string", nullable=True),
+    _field("quadrant_bounds_source", "string"),
+    _field("quadrant_width_px", "float64"),
+    _field("quadrant_height_px", "float64"),
+)
+
+_NEAR_FIELD_COMPONENT_FIELDS = (
+    _field("cra_near_field_component", "string"),
+    _field("cra_near_field_path", "string"),
+    _field("source_cra_near_field_component", "string"),
+    _field("source_cra_near_field_path", "string"),
+    _field("source_component_schema_id", "string"),
+    _field("source_component_schema_version", "int64"),
+    _field("source_component_fingerprint", "string", nullable=True),
+    _field("source_component_fingerprint_status", "string", nullable=True),
+    _field("cra_near_field_schema_id", "string"),
+    _field("cra_near_field_schema_version", "int64"),
+    _field("cra_near_field_method", "string"),
+    _field("cra_near_field_method_version", "string"),
+    _field("cra_near_field_created_at_utc", "string"),
+    _field("endpoint_status", "string"),
+    _field("cra_near_field_source_refs_json", "string"),
+    _field("cra_near_field_parameters_json", "string"),
+    _field("qc_warnings_json", "string"),
+    _field("diagnostics_json", "string"),
+    _field("source_chaser_distance_run", "string"),
+    _field("source_chaser_distance_path", "string"),
+    _field("source_quadrant_occupancy_component", "string"),
+    _field("source_quadrant_occupancy_path", "string"),
+    _field("x_axis_direction", "string", nullable=True),
+    _field("y_axis_direction", "string", nullable=True),
+    _field("geometry_status", "string"),
+    _field("arena_shape", "string"),
+    _field("arena_geometry_source", "string"),
+    _field("arena_center_x_px", "float64", nullable=True),
+    _field("arena_center_y_px", "float64", nullable=True),
+    _field("arena_radius_px", "float64", nullable=True),
+    _field("arena_width_px", "float64", nullable=True),
+    _field("arena_height_px", "float64", nullable=True),
+    _field("r_zone_mm", "float64"),
+    _field("r_in_mm", "float64"),
+    _field("r_out_mm", "float64"),
+    _field("perimeter_band_mm", "float64"),
+)
+
+_EGOCENTRIC_COMPONENT_FIELDS = (
+    _field("egocentric_component_name", "string"),
+    _field("egocentric_component_path", "string"),
+    _field("egocentric_schema_id", "string"),
+    _field("egocentric_schema_version", "int64"),
+    _field("egocentric_method", "string"),
+    _field("egocentric_method_version", "string"),
+    _field("egocentric_created_at_utc", "string"),
+    _field("egocentric_source_refs_json", "string"),
+    _field("egocentric_parameters_json", "string"),
+    _field("source_chaser_distance_run", "string"),
+    _field("source_chaser_distance_path", "string"),
+    _field("source_track_kinematics_run", "string"),
+    _field("source_track_kinematics_scope", "string"),
+    _field("source_track_kinematics_track_id", "int64"),
+    _field("source_track_kinematics_track_path", "string"),
+    _field("source_heading_array", "string"),
+    _field("heading_level", "string"),
+    _field("angle_convention", "string"),
+    _field("distance_bin_width_mm", "float64"),
+    _field("bearing_bin_width_deg", "float64"),
+)
+
+_CHASER_QUADRANT_SUMMARY_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _QUADRANT_COMPONENT_FIELDS
+    + (
+        _field("fish_id", "string"),
+        _field("dpf", "int64", nullable=True),
+        _field("chaser_count", "int64"),
+        _field("phase_labels", "string"),
+        _field("valid_frame_count_by_phase", "string"),
+        _field("per_chaser", "string"),
+        _field("per_role", "string"),
+        _field("pairwise_role_contrast_policy", "string"),
+        _field("cra_summary_recording_id", "string"),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_QUADRANT_PHASE_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _QUADRANT_COMPONENT_FIELDS
+    + (
+        _field("phase_axis_index", "int64"),
+        _field("phase_index", "int64", nullable=True),
+        _field("phase_label", "string"),
+        _field("source_window_label", "string", nullable=True),
+        _field("source_start_frame", "int64", nullable=True),
+        _field("source_end_frame", "int64", nullable=True),
+        _field("effective_start_frame", "int64", nullable=True),
+        _field("effective_end_frame", "int64", nullable=True),
+        _field("settle_excluded_frame_count", "int64", nullable=True),
+        _field("object_column_index", "int64"),
+        _field("object_index", "int64"),
+        _field("object_role", "string"),
+        _field("behavior_class", "string"),
+        _field("raw_color_hex", "string", nullable=True),
+        _field("enable_chase", "bool", nullable=True),
+        _field("behavior_mode", "int64", nullable=True),
+        _field("start_position_preset", "string", nullable=True),
+        _field("end_position_preset", "string", nullable=True),
+        _field("object_x_px", "float64", nullable=True),
+        _field("object_y_px", "float64", nullable=True),
+        _field("object_x_mm", "float64", nullable=True),
+        _field("object_y_mm", "float64", nullable=True),
+        _field("object_quadrant_code", "int64", nullable=True),
+        _field("object_quadrant_label", "string", nullable=True),
+        _field("object_position_sample_count", "int64", nullable=True),
+        _field("object_max_drift_mm", "float64", nullable=True),
+        _field("object_median_drift_mm", "float64", nullable=True),
+        _field("median_distance_mm", "float64", nullable=True),
+        _field("mean_distance_mm", "float64", nullable=True),
+        _field("occupancy_fraction", "float64", nullable=True),
+        _field("occupancy_fraction_of_epoch", "float64", nullable=True),
+        _field("valid_frame_count", "int64", nullable=True),
+        _field("distance_valid_frame_count", "int64", nullable=True),
+        _field("total_frame_count", "int64", nullable=True),
+        _field("missing_frame_count", "int64", nullable=True),
+        _field("tracking_dropout_fraction", "float64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_QUADRANT_DENSITY_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _QUADRANT_COMPONENT_FIELDS
+    + (
+        _field("fish_id", "string"),
+        _field("phase_axis_index", "int64"),
+        _field("phase_index", "int64", nullable=True),
+        _field("phase_label", "string"),
+        _field("source_window_label", "string", nullable=True),
+        _field("source_start_frame", "int64", nullable=True),
+        _field("source_end_frame", "int64", nullable=True),
+        _field("effective_start_frame", "int64"),
+        _field("effective_end_frame", "int64"),
+        _field("settle_excluded_frame_count", "int64", nullable=True),
+        _field("quadrant_code", "int64"),
+        _field("quadrant_id", "string"),
+        _field("quadrant_label", "string"),
+        _field("display_order", "int64"),
+        _field("frame_count", "int64"),
+        _field("occupancy_fraction", "float64", nullable=True),
+        _field("fraction_of_detected", "float64", nullable=True),
+        _field("occupancy_fraction_of_epoch", "float64", nullable=True),
+        _field("fraction_of_epoch", "float64", nullable=True),
+        _field("total_frame_count", "int64"),
+        _field("valid_frame_count", "int64"),
+        _field("quadrant_valid_frame_count", "int64"),
+        _field("missing_frame_count", "int64"),
+        _field("out_of_bounds_frame_count", "int64"),
+        _field("tracking_dropout_fraction", "float64", nullable=True),
+        _field("chaser_object_index", "int64", nullable=True),
+        _field("chaser_object_role", "string"),
+        _field("chaser_raw_color_hex", "string", nullable=True),
+        _field("chaser_x_px", "float64", nullable=True),
+        _field("chaser_y_px", "float64", nullable=True),
+        _field("chaser_quadrant_code", "int64", nullable=True),
+        _field("chaser_quadrant_label", "string", nullable=True),
+        _field("chaser_quadrant_occ", "float64", nullable=True),
+        _field("is_chaser_quadrant", "bool"),
+        _field("series_role", "string"),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_NEAR_FIELD_SUMMARY_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _NEAR_FIELD_COMPONENT_FIELDS
+    + (
+        _field("fish_id", "string"),
+        _field("dpf", "int64", nullable=True),
+        _field("chaser_count", "int64"),
+        _field("phase_labels", "string"),
+        _field("approach_percentile_cdf_max_abs_error", "float64", nullable=True),
+        _field("per_chaser", "string"),
+        _field("per_role", "string"),
+        _field("fish_phase_values", "string"),
+        _field("pairwise_role_contrast_policy", "string"),
+        _field("cra_near_field_summary_recording_id", "string"),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_NEAR_FIELD_PHASE_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _NEAR_FIELD_COMPONENT_FIELDS
+    + (
+        _field("phase_axis_index", "int64"),
+        _field("phase_index", "int64", nullable=True),
+        _field("phase_label", "string"),
+        _field("effective_start_frame", "int64", nullable=True),
+        _field("effective_end_frame", "int64", nullable=True),
+        _field("total_frame_count", "int64", nullable=True),
+        _field("object_column_index", "int64"),
+        _field("object_index", "int64"),
+        _field("object_role", "string"),
+        _field("behavior_class", "string"),
+        _field("object_role_code", "int64", nullable=True),
+        _field("raw_color_hex", "string", nullable=True),
+        _field("near_zone_occupancy_fraction", "float64", nullable=True),
+        _field("near_zone_occupancy_fraction_of_epoch", "float64", nullable=True),
+        _field("near_zone_dwell_s", "float64", nullable=True),
+        _field("near_zone_density_per_mm2", "float64", nullable=True),
+        _field("near_zone_available_area_mm2", "float64", nullable=True),
+        _field("near_zone_entry_count", "int64", nullable=True),
+        _field("near_zone_entry_rate_per_min", "float64", nullable=True),
+        _field("near_zone_visit_median_dwell_s", "float64", nullable=True),
+        _field("near_zone_visit_total_dwell_s", "float64", nullable=True),
+        _field("valid_distance_count", "int64", nullable=True),
+        _field("missing_frame_count", "int64", nullable=True),
+        _field("tracking_dropout_fraction", "float64", nullable=True),
+        # Physical v1 deliberately freezes the maintained percentile axis.
+        # Future arbitrary percentile sets need a row axis, not new columns.
+        _field("approach_p05_mm", "float64", nullable=True),
+        _field("approach_p05_mm_percentile", "float64"),
+        _field("approach_p10_mm", "float64", nullable=True),
+        _field("approach_p10_mm_percentile", "float64"),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_NEAR_FIELD_RADIAL_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _NEAR_FIELD_COMPONENT_FIELDS
+    + (
+        _field("phase_axis_index", "int64"),
+        _field("phase_index", "int64", nullable=True),
+        _field("phase_label", "string"),
+        _field("effective_start_frame", "int64", nullable=True),
+        _field("effective_end_frame", "int64", nullable=True),
+        _field("total_frame_count", "int64", nullable=True),
+        _field("object_column_index", "int64"),
+        _field("object_index", "int64"),
+        _field("object_role", "string"),
+        _field("behavior_class", "string"),
+        _field("raw_color_hex", "string", nullable=True),
+        _field("radial_bin_index", "int64"),
+        _field("radial_bin_left_mm", "float64"),
+        _field("radial_bin_right_mm", "float64"),
+        _field("radial_bin_center_mm", "float64"),
+        _field("radial_bin_width_mm", "float64"),
+        _field("radial_count", "int64", nullable=True),
+        _field("radial_fraction", "float64", nullable=True),
+        _field("radial_density_per_mm2", "float64", nullable=True),
+        _field("radial_available_area_mm2", "float64", nullable=True),
+        _field("radial_count_wall_excluded", "int64", nullable=True),
+        _field("radial_fraction_wall_excluded", "float64", nullable=True),
+        _field("radial_density_wall_excluded_per_mm2", "float64", nullable=True),
+        _field("radial_available_area_wall_excluded_mm2", "float64", nullable=True),
+        _field("radial_wall_excluded_valid_count", "int64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_NEAR_FIELD_CDF_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _NEAR_FIELD_COMPONENT_FIELDS
+    + (
+        _field("phase_axis_index", "int64"),
+        _field("phase_index", "int64", nullable=True),
+        _field("phase_label", "string"),
+        _field("effective_start_frame", "int64", nullable=True),
+        _field("effective_end_frame", "int64", nullable=True),
+        _field("total_frame_count", "int64", nullable=True),
+        _field("object_column_index", "int64"),
+        _field("object_index", "int64"),
+        _field("object_role", "string"),
+        _field("behavior_class", "string"),
+        _field("raw_color_hex", "string", nullable=True),
+        _field("cdf_threshold_index", "int64"),
+        _field("distance_threshold_mm", "float64"),
+        _field("cdf_fraction", "float64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_EGOCENTRIC_SUMMARY_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _EGOCENTRIC_COMPONENT_FIELDS
+    + _CHASER_REQUIRED_WINDOW_FIELDS
+    + (
+        _field("chaser_column_index", "int64"),
+        _field("chaser_index", "int64"),
+        _field("behavior_class_id", "int64"),
+        _field("behavior_class", "string"),
+        _field("valid_frame_count", "int64"),
+        _field("circular_mean_bearing_deg", "float64", nullable=True),
+        _field("circular_resultant_length", "float64", nullable=True),
+        _field("mean_alignment_cos", "float64", nullable=True),
+        _field("mean_lateral_sin", "float64", nullable=True),
+        _field("fraction_front_45", "float64", nullable=True),
+        _field("fraction_lateral_45", "float64", nullable=True),
+        _field("fraction_behind_45", "float64", nullable=True),
+        _field("front_definition", "string"),
+        _field("lateral_definition", "string"),
+        _field("behind_definition", "string"),
+    )
+    + _COLLECTION_FIELDS
+)
+
+_CHASER_EGOCENTRIC_HISTOGRAM_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + _CHASER_RUN_FIELDS
+    + _EGOCENTRIC_COMPONENT_FIELDS
+    + _CHASER_REQUIRED_WINDOW_FIELDS
+    + (
+        _field("chaser_column_index", "int64"),
+        _field("chaser_index", "int64"),
+        _field("behavior_class_id", "int64"),
+        _field("behavior_class", "string"),
+        _field("distance_bin_index", "int64"),
+        _field("distance_bin_left_mm", "float64"),
+        _field("distance_bin_right_mm", "float64"),
+        _field("distance_bin_center_mm", "float64"),
+        _field("bearing_bin_index", "int64"),
+        _field("bearing_bin_left_deg", "float64"),
+        _field("bearing_bin_right_deg", "float64"),
+        _field("bearing_bin_center_deg", "float64"),
+        _field("hist_count", "int64"),
+        _field("hist_probability", "float64"),
+        _field("valid_sample_count", "int64"),
+        _field("probability_normalization", "string"),
+    )
+    + _COLLECTION_FIELDS
+)
 
 # Detection-occupancy is the first exact table because its writer has one
 # closed row shape, its physical units are already frozen, and it exercises
@@ -1453,6 +2185,78 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     TAIL_TRACE_SAMPLES_TABLE: ArrowTableContract(
         table_name=TAIL_TRACE_SAMPLES_TABLE,
         fields=_TAIL_TRACE_SAMPLES_FIELDS,
+    ),
+    CHASER_SPATIAL_TABLE: ArrowTableContract(
+        table_name=CHASER_SPATIAL_TABLE,
+        fields=_CHASER_SPATIAL_FIELDS,
+    ),
+    CHASER_DISTANCE_SUMMARY_TABLE: ArrowTableContract(
+        table_name=CHASER_DISTANCE_SUMMARY_TABLE,
+        fields=_CHASER_DISTANCE_SUMMARY_FIELDS,
+    ),
+    CHASER_EPOCH_BEHAVIOR_TABLE: ArrowTableContract(
+        table_name=CHASER_EPOCH_BEHAVIOR_TABLE,
+        fields=_CHASER_EPOCH_BEHAVIOR_FIELDS,
+    ),
+    CHASER_BOUT_EVENTS_TABLE: ArrowTableContract(
+        table_name=CHASER_BOUT_EVENTS_TABLE,
+        fields=_CHASER_BOUT_EVENT_FIELDS,
+    ),
+    CHASER_BOUT_HISTOGRAM_TABLE: ArrowTableContract(
+        table_name=CHASER_BOUT_HISTOGRAM_TABLE,
+        fields=_CHASER_EPOCH_HISTOGRAM_FIELDS,
+    ),
+    CHASER_IBI_HISTOGRAM_TABLE: ArrowTableContract(
+        table_name=CHASER_IBI_HISTOGRAM_TABLE,
+        fields=_CHASER_EPOCH_HISTOGRAM_FIELDS,
+    ),
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE: ArrowTableContract(
+        table_name=CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+        fields=_CHASER_CENTER_DISTANCE_HISTOGRAM_FIELDS,
+    ),
+    CHASER_SPEED_DISTANCE_TABLE: ArrowTableContract(
+        table_name=CHASER_SPEED_DISTANCE_TABLE,
+        fields=_CHASER_SPEED_DISTANCE_FIELDS,
+    ),
+    CHASER_DISTANCE_HISTOGRAM_TABLE: ArrowTableContract(
+        table_name=CHASER_DISTANCE_HISTOGRAM_TABLE,
+        fields=_CHASER_DISTANCE_HISTOGRAM_FIELDS,
+    ),
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE: ArrowTableContract(
+        table_name=CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+        fields=_CHASER_QUADRANT_SUMMARY_FIELDS,
+    ),
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE: ArrowTableContract(
+        table_name=CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+        fields=_CHASER_QUADRANT_PHASE_FIELDS,
+    ),
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE: ArrowTableContract(
+        table_name=CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+        fields=_CHASER_QUADRANT_DENSITY_FIELDS,
+    ),
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE: ArrowTableContract(
+        table_name=CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+        fields=_CHASER_NEAR_FIELD_SUMMARY_FIELDS,
+    ),
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE: ArrowTableContract(
+        table_name=CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+        fields=_CHASER_NEAR_FIELD_PHASE_FIELDS,
+    ),
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE: ArrowTableContract(
+        table_name=CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+        fields=_CHASER_NEAR_FIELD_RADIAL_FIELDS,
+    ),
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE: ArrowTableContract(
+        table_name=CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+        fields=_CHASER_NEAR_FIELD_CDF_FIELDS,
+    ),
+    CHASER_EGOCENTRIC_SUMMARY_TABLE: ArrowTableContract(
+        table_name=CHASER_EGOCENTRIC_SUMMARY_TABLE,
+        fields=_CHASER_EGOCENTRIC_SUMMARY_FIELDS,
+    ),
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE: ArrowTableContract(
+        table_name=CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+        fields=_CHASER_EGOCENTRIC_HISTOGRAM_FIELDS,
     ),
 }
 

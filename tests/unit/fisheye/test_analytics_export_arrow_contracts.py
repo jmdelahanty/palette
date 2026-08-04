@@ -26,6 +26,24 @@ from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     BOUT_KINEMATICS_METRICS_TABLE,
+    CHASER_BOUT_EVENTS_TABLE,
+    CHASER_BOUT_HISTOGRAM_TABLE,
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_IBI_HISTOGRAM_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_SPATIAL_TABLE,
+    CHASER_SPEED_DISTANCE_TABLE,
     DESCRIPTIVE_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
     EXPORT_SCHEMA_VERSION,
@@ -152,6 +170,53 @@ def _valid_core_analytics_row(table_name: str) -> dict[str, object]:
             "recording_id": "recording-1",
             "zarr_path": "/recordings/recording-1_analysis.zarr",
             "source_lineage_hash": "f" * 64,
+        }
+    )
+    return row
+
+
+CHASER_ARROW_TABLES = (
+    CHASER_SPATIAL_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_BOUT_EVENTS_TABLE,
+    CHASER_BOUT_HISTOGRAM_TABLE,
+    CHASER_IBI_HISTOGRAM_TABLE,
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_SPEED_DISTANCE_TABLE,
+    CHASER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+)
+
+
+def _valid_chaser_row(table_name: str) -> dict[str, object]:
+    row: dict[str, object] = {}
+    for field in ARROW_TABLE_CONTRACTS[table_name].fields:
+        if field.nullable:
+            row[field.name] = None
+        elif field.arrow_type in {"int32", "int64"}:
+            row[field.name] = 1
+        elif field.arrow_type == "float64":
+            row[field.name] = 1.5
+        elif field.arrow_type == "bool":
+            row[field.name] = True
+        else:
+            row[field.name] = "value"
+    row.update(
+        {
+            "export_schema_version": EXPORT_SCHEMA_VERSION,
+            "table_name": table_name,
+            "recording_id": "recording-1",
+            "zarr_path": "/recordings/recording-1_analysis.zarr",
+            "source_lineage_hash": "7" * 64,
         }
     )
     return row
@@ -374,6 +439,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         ACTIVITY_SPATIAL_TIME_BINS_TABLE,
         EYE_TRACE_SAMPLES_TABLE,
         TAIL_TRACE_SAMPLES_TABLE,
+        *CHASER_ARROW_TABLES,
     )
     fields = ARROW_TABLE_CONTRACTS[RECORDING_SUMMARY_TABLE].fields
     assert tuple(field.name for field in fields) == (
@@ -890,6 +956,137 @@ def test_core_analytics_contracts_have_closed_unique_field_sets(
         "collection_manifest_sha256",
         "collection_manifest_path",
     )
+
+
+def test_every_analytics_table_has_an_exact_arrow_contract() -> None:
+    assert set(ARROW_TABLE_CONTRACTS) == set(TABLE_CONTRACTS)
+    assert set(EXACT_ARROW_SCHEMA_TABLES) == set(TABLE_CONTRACTS)
+    envelope = arrow_contract_envelope(tuple(TABLE_CONTRACTS))
+    assert envelope["inferred_v2_compatibility_tables"] == []
+    assert set(envelope["exact_tables"]) == set(TABLE_CONTRACTS)
+
+
+@pytest.mark.parametrize(
+    ("table_name", "field_count"),
+    (
+        (CHASER_SPATIAL_TABLE, 59),
+        (CHASER_DISTANCE_SUMMARY_TABLE, 46),
+        (CHASER_EPOCH_BEHAVIOR_TABLE, 94),
+        (CHASER_BOUT_EVENTS_TABLE, 66),
+        (CHASER_BOUT_HISTOGRAM_TABLE, 68),
+        (CHASER_IBI_HISTOGRAM_TABLE, 68),
+        (CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE, 58),
+        (CHASER_SPEED_DISTANCE_TABLE, 50),
+        (CHASER_DISTANCE_HISTOGRAM_TABLE, 47),
+        (CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE, 60),
+        (CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE, 87),
+        (CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE, 86),
+        (CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE, 72),
+        (CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE, 90),
+        (CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE, 87),
+        (CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE, 76),
+        (CHASER_EGOCENTRIC_SUMMARY_TABLE, 69),
+        (CHASER_EGOCENTRIC_HISTOGRAM_TABLE, 70),
+    ),
+)
+def test_chaser_arrow_contracts_are_closed_unique_and_keyed(
+    table_name: str,
+    field_count: int,
+) -> None:
+    fields = ARROW_TABLE_CONTRACTS[table_name].fields
+    names = tuple(field.name for field in fields)
+    by_name = {field.name: field for field in fields}
+
+    assert len(fields) == field_count
+    assert len(set(names)) == field_count
+    assert names[:5] == (
+        "export_schema_version",
+        "table_name",
+        "recording_id",
+        "zarr_path",
+        "source_lineage_hash",
+    )
+    assert names[-3:] == (
+        "collection_id",
+        "collection_manifest_sha256",
+        "collection_manifest_path",
+    )
+    for key in TABLE_CONTRACTS[table_name].primary_key:
+        assert key in by_name
+        assert not by_name[key].nullable
+
+
+def test_near_field_v1_freezes_percentiles_without_dynamic_columns() -> None:
+    names = tuple(
+        field.name
+        for field in ARROW_TABLE_CONTRACTS[
+            CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE
+        ].fields
+    )
+    percentile_names = tuple(name for name in names if name.startswith("approach_p"))
+    assert percentile_names == (
+        "approach_p05_mm",
+        "approach_p05_mm_percentile",
+        "approach_p10_mm",
+        "approach_p10_mm_percentile",
+    )
+
+
+@pytest.mark.parametrize("table_name", CHASER_ARROW_TABLES)
+def test_chaser_exact_writer_uses_declared_schema(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    count, parts = _write_table_parts(
+        generation_root=tmp_path / table_name,
+        table=table_name,
+        rows_by_source=(("source-1", [_valid_chaser_row(table_name)]),),
+    )
+
+    assert count == 1
+    schema = pq.ParquetFile(parts[0]).schema_arrow
+    validate_arrow_schema(table_name, schema)
+    assert schema.remove_metadata() == exact_arrow_schema(
+        table_name,
+        metadata={},
+    ).remove_metadata()
+
+
+@pytest.mark.parametrize("table_name", CHASER_ARROW_TABLES)
+def test_chaser_exact_writer_rejects_unexpected_missing_and_duplicate_rows(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    unexpected = _valid_chaser_row(table_name)
+    unexpected["surprise"] = 1
+    with pytest.raises(ValueError, match="unexpected fields"):
+        _write_table_parts(
+            generation_root=tmp_path / table_name / "unexpected",
+            table=table_name,
+            rows_by_source=(("source", [unexpected]),),
+        )
+
+    missing = _valid_chaser_row(table_name)
+    required_name = next(
+        field.name
+        for field in ARROW_TABLE_CONTRACTS[table_name].fields
+        if not field.nullable and field.name not in TABLE_CONTRACTS[table_name].primary_key
+    )
+    del missing[required_name]
+    with pytest.raises(ValueError, match="null/missing non-nullable"):
+        _write_table_parts(
+            generation_root=tmp_path / table_name / "missing",
+            table=table_name,
+            rows_by_source=(("source", [missing]),),
+        )
+
+    duplicate = _valid_chaser_row(table_name)
+    with pytest.raises(ValueError, match="duplicate primary key"):
+        _write_table_parts(
+            generation_root=tmp_path / table_name / "duplicate",
+            table=table_name,
+            rows_by_source=(("source", [duplicate, dict(duplicate)]),),
+        )
 
 
 def test_bout_kinematics_contract_keys_every_measurement_level() -> None:

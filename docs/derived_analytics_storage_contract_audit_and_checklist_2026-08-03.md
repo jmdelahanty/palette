@@ -712,13 +712,19 @@ a v3 storage-candidate regression.
           exact instance-key-to-track join, exposes dimensionless body-frame
           position/curvature for comparison, and retains camera-space geometry
           only as diagnostics.
-    - [ ] Replace inferred schemas only after producer semantics and nullability
-          are frozen. The canonical envelope currently has 16 exact and 16
-          inferred tables; the remaining inferred tables are the chaser
-          exports. Both group-statistics tables use exact schemas. Baseline strategy
-          consumes exact canonical baseline inputs but still writes four
-          separately inferred output tables; training response likewise has
-          three inferred output tables.
+    - [x] Replace all 18 inferred chaser schemas after tracing their exact
+          producer vocabularies, types, nullability, and primary-key grains.
+          The canonical 34-table envelope now has 34 exact tables and no
+          inferred member. Seventeen dormant chaser exports remain fail closed
+          until their independent component authorities are adopted; exact
+          schema installation does not reactivate legacy raw-group readers.
+          Near-field physical v1 freezes the maintained `[5, 10]` percentile
+          axis instead of generating columns by observation. See
+          `docs/cross_recording_chaser_arrow_contracts_2026-08-04.md`.
+    - [ ] Add closed envelopes and exact schemas to the four baseline-strategy
+          v1 outputs and three whole-training-response v1 outputs. Their
+          canonical inputs are exact, but these separate publication families
+          still infer their own physical Arrow schemas.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
       bout-classification, and tail-posture manifests completed so far.
 - [ ] Add equivalent adversarial coverage for every remaining new manifest.
@@ -747,7 +753,10 @@ a v3 storage-candidate regression.
       permitted only through an explicit compatibility flag.
 - [ ] Migrate the remaining chained scientific consumers and exports to exact
       component handles.
-- [ ] Keep export of unsealed component tables fail closed.
+- [x] Keep export of unsealed component tables fail closed. Exact schemas are
+      now installed for future publication, but preflight still removes all 17
+      unadopted component tables before legacy raw-Zarr loaders run; the
+      cross-recording exporter/preflight matrix passes 77/77 tests.
 - [ ] Add recovery tests for interrupted component publication and stale
       pointers. Post-selector failure rollback is covered; add interruption
       points for each adopted component workflow.

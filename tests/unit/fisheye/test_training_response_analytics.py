@@ -9,7 +9,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
+from fisheye.analytics_exports.arrow_contracts import (
+    ARROW_TABLE_CONTRACTS,
+    arrow_contract_envelope,
+    exact_arrow_schema,
+)
 from apps.marimo.components.training_response import (
     filter_training_response_rows,
     strategy_transition_sankey_figure,
@@ -308,13 +312,25 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
     for table_name, raw_rows in rows_by_table.items():
         rows = []
         for raw in raw_rows:
-            row = {column: None for column in TABLE_CONTRACTS[table_name].required_columns}
+            row: dict[str, object] = {}
+            for field in ARROW_TABLE_CONTRACTS[table_name].fields:
+                if field.nullable:
+                    row[field.name] = None
+                elif field.arrow_type in {"int32", "int64"}:
+                    row[field.name] = 1
+                elif field.arrow_type == "float64":
+                    row[field.name] = 1.0
+                elif field.arrow_type == "bool":
+                    row[field.name] = True
+                else:
+                    row[field.name] = "fixture"
             row.update(raw)
             row["export_schema_version"] = EXPORT_SCHEMA_VERSION
             row["table_name"] = table_name
             rows.append(row)
-        table = pa.Table.from_pylist(rows).replace_schema_metadata(
-            {
+        schema = exact_arrow_schema(
+            table_name,
+            metadata={
                 b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
                 b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
                 b"palette.table_contract": json.dumps(
@@ -322,9 +338,9 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode(),
-                b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
-            }
+            },
         )
+        table = pa.Table.from_pylist(rows, schema=schema)
         part = root / generation_path / "tables" / table_name / "part-00000.parquet"
         part.parent.mkdir(parents=True)
         pq.write_table(table, part)
