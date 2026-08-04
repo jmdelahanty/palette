@@ -279,6 +279,33 @@ def test_preflight_binds_both_families_to_executable_candidate_receipt(
     assert result["candidate_validation"]["selector_eligible"] is False
 
 
+def test_primary_indexed_read_batches_rows_on_declared_growth_axis(
+    tmp_path: Path,
+) -> None:
+    group = zarr.open_group(str(tmp_path / "axis-one.zarr"), mode="w", zarr_format=3)
+    values = np.arange(100, dtype=np.float32).reshape(1, 100)
+    array = group.create_array("signal", data=values)
+    selection = {
+        "mode": "indexed_row_resolution",
+        "selection_axis": 1,
+        "selection_extent": 100,
+        "selection_extent_source": "observed_facts_growth_axis",
+        "index_rows": [2, 7, 19],
+        "execution_strategy": "batched_orthogonal_index",
+        "value_ranges": "resolve_from_persisted_index_during_execution",
+    }
+
+    result = benchmark._primary_read(array, selection, growth_axis=1)
+
+    assert result["execution_axis"] == 1
+    assert result["operation_count"] == 1
+    assert result["decoded_bytes"] == 3 * np.dtype(np.float32).itemsize
+    assert result["selection_extent_source"] == "observed_facts_growth_axis"
+
+    with pytest.raises(ValueError, match="selection axis differs"):
+        benchmark._primary_read(array, selection, growth_axis=0)
+
+
 def test_matrix_uses_fresh_processes_and_preserves_archive_metadata(
     tmp_path: Path,
 ) -> None:

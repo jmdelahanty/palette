@@ -535,7 +535,7 @@ def build_candidate_execution_request(
         is not CandidateRunnerStatus.IMPLEMENTED
     ):
         raise ValueError("execution requests require an implemented typed adapter")
-    require_analysis_benchmark_suite_manifest(benchmark_suite)
+    require_analysis_benchmark_suite_manifest(benchmark_suite, require_current=True)
     _require_suite_matches_adapter(adapter, benchmark_suite)
     require_candidate_invocation_manifest(
         invocation,

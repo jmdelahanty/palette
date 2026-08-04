@@ -37,7 +37,14 @@ from fisheye.shared.zarr.storage_intent import AccessPattern
 
 
 ANALYSIS_BENCHMARK_SUITE_SCHEMA_ID = "palette.analysis_storage_benchmark_suite"
-ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION = 1
+ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION = 2
+ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION = 1
+_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {
+        ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION,
+        ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION,
+    }
+)
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _PRIMARY_READ_WORKLOAD = {
@@ -126,15 +133,37 @@ def _primary_read_selection_from_facts(
     *,
     path: str,
     shape: tuple[int, ...],
+    growth_axis: int | None,
     access: AccessPattern,
     seed: int,
+    schema_version: int,
 ) -> dict[str, object]:
-    n_rows = int(shape[0]) if shape else 1
+    if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
+        raise ValueError("unsupported analysis benchmark-suite schema version")
+    if schema_version == ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION:
+        selection_axis = 0 if shape else None
+    else:
+        selection_axis = growth_axis
+    n_rows = int(shape[selection_axis]) if selection_axis is not None else 1
     if access is AccessPattern.EAGER:
         return {"mode": "whole_array"}
+    axis_binding = (
+        {}
+        if schema_version == ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION
+        else {
+            "selection_axis": selection_axis,
+            "selection_extent": n_rows,
+            "selection_extent_source": "observed_facts_growth_axis",
+        }
+    )
     if access is AccessPattern.WINDOWED:
         if n_rows == 0:
-            return {"mode": "bounded_row_windows", "window_rows": 0, "ranges": []}
+            return {
+                "mode": "bounded_row_windows",
+                **axis_binding,
+                "window_rows": 0,
+                "ranges": [],
+            }
         window_rows = min(4_096, n_rows)
         maximum_start = n_rows - window_rows
         starts = sorted(
@@ -142,6 +171,7 @@ def _primary_read_selection_from_facts(
         )
         return {
             "mode": "bounded_row_windows",
+            **axis_binding,
             "window_rows": window_rows,
             "ranges": [[start, start + window_rows] for start in starts],
         }
@@ -152,10 +182,20 @@ def _primary_read_selection_from_facts(
         count=128,
     )
     if access is AccessPattern.PER_ROW:
-        return {"mode": "random_complete_rows", "row_indices": rows}
+        return {
+            "mode": "random_complete_rows",
+            **axis_binding,
+            "row_indices": rows,
+        }
     return {
         "mode": "indexed_row_resolution",
+        **axis_binding,
         "index_rows": rows,
+        **(
+            {}
+            if schema_version == ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION
+            else {"execution_strategy": "batched_orthogonal_index"}
+        ),
         "value_ranges": "resolve_from_persisted_index_during_execution",
     }
 
@@ -168,8 +208,10 @@ def _primary_read_selection(
     return _primary_read_selection_from_facts(
         path=entry.declaration.path,
         shape=entry.plan.logical_shape,
+        growth_axis=entry.facts.growth_axis,
         access=AccessPattern(entry.plan.access_pattern),
         seed=seed,
+        schema_version=ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION,
     )
 
 
@@ -306,8 +348,17 @@ def _manifest_error(message: str) -> ValueError:
     return ValueError(f"Invalid analysis benchmark suite: {message}")
 
 
-def require_analysis_benchmark_suite_manifest(value: Mapping[str, Any]) -> None:
-    """Deeply validate a suite, including rehashed linkage tampering."""
+def require_analysis_benchmark_suite_manifest(
+    value: Mapping[str, Any],
+    *,
+    require_current: bool = False,
+) -> None:
+    """Deeply validate a current or explicitly retained legacy suite.
+
+    Version 1 derived read-selection extents from logical axis zero.  It remains
+    readable so immutable historical evidence can be audited, but callers that
+    execute new timing or promotion workloads must pass ``require_current=True``.
+    """
 
     if not isinstance(value, Mapping) or set(value) != {
         "schema_id",
@@ -318,8 +369,13 @@ def require_analysis_benchmark_suite_manifest(value: Mapping[str, Any]) -> None:
         raise _manifest_error("unexpected envelope field set")
     if value["schema_id"] != ANALYSIS_BENCHMARK_SUITE_SCHEMA_ID:
         raise _manifest_error("unsupported schema ID")
-    if value["schema_version"] != ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION:
+    schema_version = value["schema_version"]
+    if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
         raise _manifest_error("unsupported schema version")
+    if require_current and schema_version != ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION:
+        raise _manifest_error(
+            "legacy v1 selection extents are timing- and promotion-ineligible"
+        )
     payload = value["payload"]
     if not isinstance(payload, Mapping) or set(payload) != {
         "family_id",
@@ -383,6 +439,7 @@ def require_analysis_benchmark_suite_manifest(value: Mapping[str, Any]) -> None:
     receipt_arrays = receipt_payload.get("arrays")
     if not isinstance(receipt_arrays, list):
         raise _manifest_error("storage-plan receipt arrays are missing")
+    record_by_path: dict[str, Mapping[str, Any]] = {}
     plan_by_path: dict[str, Mapping[str, Any]] = {}
     schema_by_path: dict[str, Mapping[str, Any]] = {}
     for record in receipt_arrays:
@@ -395,6 +452,9 @@ def require_analysis_benchmark_suite_manifest(value: Mapping[str, Any]) -> None:
         path = record.get("path")
         if type(path) is not str or path in plan_by_path:
             raise _manifest_error("invalid or duplicate storage-plan array path")
+        if not isinstance(record.get("observed_facts"), Mapping):
+            raise _manifest_error("storage-plan array lacks observed facts")
+        record_by_path[path] = record
         plan_by_path[path] = record["plan"]
         logical_contract = record["declaration"].get("logical_contract")
         if not isinstance(logical_contract, Mapping):
@@ -467,11 +527,15 @@ def require_analysis_benchmark_suite_manifest(value: Mapping[str, Any]) -> None:
             expected_selection = _primary_read_selection_from_facts(
                 path=path,
                 shape=tuple(plan_by_path[path]["logical_shape"]),
+                growth_axis=record_by_path[path]["observed_facts"]["growth_axis"],
                 access=AccessPattern(plan_access),
                 seed=payload["seed"],
+                schema_version=schema_version,
             )
         if record["selection"] != expected_selection:
-            raise _manifest_error("case selection differs from deterministic v1")
+            raise _manifest_error(
+                f"case selection differs from deterministic v{schema_version}"
+            )
         workload_ids_by_path[path].add(workload_id)
     for path, workload_ids in workload_ids_by_path.items():
         access = AccessPattern(plan_by_path[path]["access_pattern"])
@@ -532,6 +596,7 @@ def require_analysis_benchmark_suite_manifest(value: Mapping[str, Any]) -> None:
 
 __all__ = [
     "ANALYSIS_BENCHMARK_SUITE_SCHEMA_ID",
+    "ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION",
     "ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION",
     "AnalysisBenchmarkScale",
     "build_analysis_benchmark_suite",

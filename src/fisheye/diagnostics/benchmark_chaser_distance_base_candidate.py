@@ -1357,7 +1357,7 @@ def run_single_trial(
         raise ValueError("order_position must be 0 or 1.")
     if not cache_state.strip():
         raise ValueError("cache_state must be explicitly declared.")
-    require_analysis_benchmark_suite_manifest(suite_manifest)
+    require_analysis_benchmark_suite_manifest(suite_manifest, require_current=True)
     suite_payload = suite_manifest["payload"]
     if (
         suite_payload["family_id"] != FAMILY_ID

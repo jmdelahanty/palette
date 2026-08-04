@@ -1058,6 +1058,19 @@ Recommended benchmark and promotion-review order:
       timestamps around atomic publication, so per-phase timing is not yet
       accepted as promotion evidence even though the scientific publication
       and nonmutation gates passed.
+- [x] Diagnose and version the full-duration primary-read workload before
+      changing the physical profile. All of the apparent regression was in 89
+      `INDEXED` columns: suite v1 issued 128 independent scalar reads per
+      column, repeatedly fetching/decompressing candidate 1 MiB inner chunks,
+      while Palette and Crimson load or batch these compact tables. Eager and
+      windowed reads improved, full scans improved by 2.4x, and read-only
+      batched probes also favored the candidate. Suite v2 therefore derives
+      selection extent from each receipt's declared `growth_axis`, records the
+      axis and extent explicitly, and performs indexed rows as one orthogonal
+      batch. New execution requests and trials reject suite v1; immutable v1
+      evidence remains structurally auditable as nonpromotion scalar-
+      sensitivity evidence. No smaller-chunk production profile is inferred
+      from the invalid promotion workload.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,

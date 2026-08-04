@@ -646,11 +646,25 @@ def _selection_index(array: Any, *, axis: int, row: int) -> tuple[Any, ...]:
     return tuple(selection)
 
 
+def _selection_orthogonal_indices(
+    array: Any, *, axis: int, rows: Sequence[int]
+) -> tuple[Any, ...]:
+    selection: list[Any] = [slice(None)] * int(array.ndim)
+    selection[axis] = [int(row) for row in rows]
+    return tuple(selection)
+
+
 def _primary_read(
     array: Any, selection: Mapping[str, Any], *, growth_axis: int | None
 ) -> dict[str, Any]:
     mode = selection.get("mode")
     axis = 0 if growth_axis is None else growth_axis
+    declared_axis = selection.get("selection_axis")
+    if declared_axis is not None and declared_axis != axis:
+        raise ValueError(
+            "Benchmark-suite selection axis differs from the executable "
+            "storage receipt growth axis."
+        )
     digest = hashlib.sha256()
     decoded_bytes = 0
     operations = 0
@@ -675,22 +689,36 @@ def _primary_read(
         for row in selection["row_indices"]:
             consume(array[_selection_index(array, axis=axis, row=int(row))])
     elif mode == "indexed_row_resolution":
-        for row in selection["index_rows"]:
-            consume(array[_selection_index(array, axis=axis, row=int(row))])
+        if selection.get("execution_strategy") == "batched_orthogonal_index":
+            rows = [int(row) for row in selection["index_rows"]]
+            if rows:
+                consume(
+                    array.oindex[
+                        _selection_orthogonal_indices(array, axis=axis, rows=rows)
+                    ]
+                )
+        else:
+            # Retained only for immutable suite-v1 scalar-sensitivity evidence.
+            for row in selection["index_rows"]:
+                consume(array[_selection_index(array, axis=axis, row=int(row))])
     else:
         raise ValueError(f"Unsupported benchmark-suite selection mode {mode!r}.")
     result = {
         "mode": mode,
         "execution_axis": axis,
-        "suite_v1_selection_extent_source": "logical_shape_axis_0",
+        "selection_extent_source": selection.get(
+            "selection_extent_source", "legacy_suite_v1_logical_shape_axis_0"
+        ),
         "operation_count": operations,
         "decoded_bytes": decoded_bytes,
         "selection_digest": digest.hexdigest(),
     }
     if mode == "indexed_row_resolution":
         result["indexed_resolution"] = (
-            "deterministic_complete_table_rows; no common persisted ptr_len "
-            "range index exists in exact-tabular v1"
+            "deterministic_batched_complete_table_rows; no common persisted "
+            "ptr_len range index exists in exact-tabular v1"
+            if selection.get("execution_strategy") == "batched_orthogonal_index"
+            else "legacy_deterministic_scalar_complete_table_rows"
         )
     return result
 
@@ -821,7 +849,7 @@ def run_single_trial(
         raise ValueError("order_position must be 0 or 1.")
     if not cache_state.strip():
         raise ValueError("cache_state must be explicitly declared.")
-    require_analysis_benchmark_suite_manifest(suite_manifest)
+    require_analysis_benchmark_suite_manifest(suite_manifest, require_current=True)
     suite_payload = suite_manifest["payload"]
     if suite_payload["family_id"] != family.family_id or suite_payload["seed"] != seed:
         raise ValueError("Benchmark suite family/seed differs from this trial.")

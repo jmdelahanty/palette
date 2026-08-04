@@ -140,6 +140,19 @@ def _suite(*, profile=PUBLISHED_HTTP_V1):
     )
 
 
+def _legacy_suite_v1():
+    suite = deepcopy(_suite())
+    suite["schema_version"] = 1
+    for record in suite["payload"]["array_cases"]:
+        selection = record["selection"]
+        selection.pop("selection_axis", None)
+        selection.pop("selection_extent", None)
+        selection.pop("selection_extent_source", None)
+        selection.pop("execution_strategy", None)
+    suite["payload_digest"] = canonical_json_sha256(suite["payload"])
+    return suite
+
+
 def group_path(group, path):
     current = group
     parts = path.split("/")
@@ -438,6 +451,32 @@ def test_execution_request_requires_exact_bound_invocation(
     )
     with pytest.raises(ValueError, match="storage profile differs"):
         require_candidate_execution_request(changed_profile)
+
+
+def test_new_execution_request_rejects_legacy_axis_zero_benchmark_suite(
+    implemented_adapter,
+) -> None:
+    with pytest.raises(ValueError, match="timing- and promotion-ineligible"):
+        build_candidate_execution_request(
+            execution_id="legacy_suite",
+            adapter_manifest=implemented_adapter,
+            invocation=_exact_invocation(),
+            benchmark_suite=_legacy_suite_v1(),
+            archive_path="/tmp/.palette_benchmarks/execution/archive.zarr",
+            source_run_path="analysis/swim_bout_runs/source_v1",
+            candidate_run_path="analysis/swim_bout_runs/candidate_v1",
+            scratch_root="/tmp/palette-candidate-execution-scratch",
+            source_identity_sha256="b" * 64,
+            palette_commit="a" * 40,
+            repetition_index=0,
+            candidate_order_index=0,
+            candidate_order_count=1,
+            cache_state="fresh_process_os_cache_uncontrolled",
+            physical_io_scope=PhysicalIOScope.UNAVAILABLE,
+            selector_before_sha256="f" * 64,
+            registry_probe_path=Path(__file__).resolve(),
+            production_profiles_probe_path=Path(__file__).resolve(),
+        )
 
 
 def test_execution_request_rejects_nonbenchmark_archive(implemented_adapter) -> None:

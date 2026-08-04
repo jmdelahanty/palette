@@ -61,6 +61,9 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
     require_candidate_execution_request,
     required_execution_phases,
 )
+from fisheye.shared.zarr.analysis_benchmark_suite import (
+    require_analysis_benchmark_suite_manifest,
+)
 from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
 )
@@ -996,6 +999,9 @@ def execute_exact_tabular_candidate(
 
     require_candidate_execution_request(request)
     payload = request["payload"]
+    require_analysis_benchmark_suite_manifest(
+        payload["benchmark_suite"], require_current=True
+    )
     adapter = payload["adapter_manifest"]["payload"]
     invocation = payload["invocation"]["payload"]
     family = _family(str(adapter["stage_id"]))

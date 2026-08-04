@@ -11,6 +11,8 @@ from fisheye.shared.zarr.analysis_array_contracts import (
     AnalysisAuthorityRole,
 )
 from fisheye.shared.zarr.analysis_benchmark_suite import (
+    ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION,
+    ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION,
     AnalysisBenchmarkScale,
     build_analysis_benchmark_suite,
     require_analysis_benchmark_suite_manifest,
@@ -124,6 +126,78 @@ def test_suite_is_deterministic_and_changes_with_seed() -> None:
     # The builder intentionally accepts typed receipts only; deterministic
     # mutation behavior is covered by rebuilding through _suite.
     assert receipt["payload_digest"] == canonical_json_sha256(receipt["payload"])
+
+
+def test_suite_v2_uses_observed_growth_axis_for_selection_extent() -> None:
+    declaration = AnalysisArrayDeclaration(
+        path="signals/timeline",
+        contract=ArrayContract(
+            schema_id="palette.test.axis_one_timeline",
+            schema_version=1,
+            dtype=FLOAT32,
+            shape_template=("n_subjects", "n_frames"),
+            axis_names=("subject", "frame"),
+            description="Axis-one timeline used to prove growth-axis selection.",
+        ),
+        required=True,
+        access_pattern=AccessPattern.WINDOWED,
+        write_mode=WriteMode.IMMUTABLE,
+        authority_role=AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY,
+        fill_semantics="every frame is present",
+        null_semantics="none",
+        physical_policy_owner="test_candidate",
+        byte_planner_adopted=False,
+    )
+    receipt = plan_analysis_storage(
+        (declaration,),
+        {
+            declaration.path: AnalysisArrayStorageFacts(
+                path=declaration.path,
+                shape=(1, 200_000),
+                dtype=np.float32,
+                access_unit_semantics="one subject-frame value",
+                growth_axis=1,
+            )
+        },
+        profile=PUBLISHED_HTTP_V1,
+        dimensions={"n_subjects": 1, "n_frames": 200_000},
+    )
+    suite = build_analysis_benchmark_suite(
+        family_id="axis_one_family",
+        scale=AnalysisBenchmarkScale(
+            scale_id="full",
+            dimensions=(("n_frames", 200_000), ("n_subjects", 1)),
+            description="Axis-one full-duration fixture.",
+        ),
+        storage_receipt=receipt,
+    )
+    primary = next(
+        record
+        for record in suite["payload"]["array_cases"]
+        if record["selection"]["mode"] == "bounded_row_windows"
+    )
+
+    assert suite["schema_version"] == ANALYSIS_BENCHMARK_SUITE_SCHEMA_VERSION
+    assert primary["selection"]["selection_axis"] == 1
+    assert primary["selection"]["selection_extent"] == 200_000
+    assert primary["selection"]["ranges"][-1] == [195_904, 200_000]
+
+
+def test_legacy_v1_suite_is_auditable_but_not_current_timing_evidence() -> None:
+    suite = _suite(200_000)
+    legacy = deepcopy(suite)
+    legacy["schema_version"] = ANALYSIS_BENCHMARK_SUITE_LEGACY_SCHEMA_VERSION
+    for record in legacy["payload"]["array_cases"]:
+        selection = record["selection"]
+        selection.pop("selection_axis", None)
+        selection.pop("selection_extent", None)
+        selection.pop("selection_extent_source", None)
+        selection.pop("execution_strategy", None)
+    legacy["payload_digest"] = canonical_json_sha256(legacy["payload"])
+
+    require_analysis_benchmark_suite_manifest(legacy)
+    with pytest.raises(ValueError, match="timing- and promotion-ineligible"):
+        require_analysis_benchmark_suite_manifest(legacy, require_current=True)
 
 
 def test_rehashed_case_plan_tampering_fails() -> None:
