@@ -88,6 +88,18 @@ def test_legacy_flat_runtime_is_auditable_but_timing_ineligible() -> None:
         require_runtime_telemetry(legacy, require_current=True)
 
 
+def test_runtime_telemetry_rejects_phase_outside_execution_interval() -> None:
+    telemetry = PhaseTelemetry(materializer="unit_test")
+    with telemetry.phase("first"):
+        pass
+    payload = telemetry.to_json()
+    payload["phases"][0]["started_at_utc"] = "2000-01-01T00:00:00+00:00"
+    payload["phases"][0]["finished_at_utc"] = "2000-01-01T00:00:00+00:00"
+
+    with pytest.raises(ValueError, match="escapes the execution interval"):
+        require_runtime_telemetry(payload, require_current=True)
+
+
 def test_phase_telemetry_records_failure_type_and_reraises() -> None:
     telemetry = PhaseTelemetry(materializer="unit_test")
 

@@ -28,6 +28,11 @@ from .analysis_candidate_invocation import (
     CandidateInvocationContract,
     require_candidate_invocation_manifest,
 )
+from .materializers.atomic_run_publisher import (
+    ATOMIC_RUN_PUBLISHER_OPTIONAL_SUCCESS_PHASES,
+    ATOMIC_RUN_PUBLISHER_PHASE_ORDER,
+)
+from .materializers.runtime_telemetry import require_runtime_telemetry
 
 ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_ID = (
     "palette.analysis_candidate_execution_request"
@@ -36,8 +41,9 @@ ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_VERSION = 2
 ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_ID = (
     "palette.analysis_candidate_execution_receipt"
 )
-ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION = 3
+ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION = 4
 ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_LEGACY_SCHEMA_VERSION = 2
+ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_HIERARCHICAL_SCHEMA_VERSION = 3
 ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_ID = (
     "palette.analysis_candidate_execution_adapter"
 )
@@ -1062,6 +1068,90 @@ def _require_current_phase_chronology(
             raise ValueError("execution receipt child wall time exceeds its parent")
 
 
+def _require_atomic_publication_runtime_telemetry(
+    value: Mapping[str, Any],
+    *,
+    phases: Sequence[CandidatePhaseMeasurement],
+) -> None:
+    """Validate and bind the mechanical publisher trace to its parent phase."""
+
+    require_runtime_telemetry(
+        value,
+        expected_materializer="atomic_run_publisher",
+        allowed_phase_order=ATOMIC_RUN_PUBLISHER_PHASE_ORDER,
+        require_error_phase=False,
+        require_current=True,
+    )
+    observed_names = tuple(str(phase["name"]) for phase in value["phases"])
+    required_names = set(ATOMIC_RUN_PUBLISHER_PHASE_ORDER).difference(
+        ATOMIC_RUN_PUBLISHER_OPTIONAL_SUCCESS_PHASES
+    )
+    if set(observed_names).difference(ATOMIC_RUN_PUBLISHER_PHASE_ORDER):
+        raise ValueError("atomic publication telemetry contains an unknown phase")
+    if not required_names.issubset(observed_names):
+        raise ValueError("atomic publication telemetry omits a required success phase")
+    if any(phase["outcome"] != "ok" for phase in value["phases"]):
+        raise ValueError("successful execution contains failed publication telemetry")
+
+    parent = next(
+        (
+            phase
+            for phase in phases
+            if phase.phase is CandidateExecutionPhase.ATOMIC_PUBLICATION
+        ),
+        None,
+    )
+    if parent is None or parent.outcome is not PhaseOutcome.SUCCEEDED:
+        raise ValueError("atomic publication telemetry lacks a successful parent phase")
+    parent_started = _require_utc_timestamp(
+        parent.started_at_utc,
+        label="atomic publication parent started_at_utc",
+    )
+    parent_finished = _require_utc_timestamp(
+        parent.completed_at_utc,
+        label="atomic publication parent completed_at_utc",
+    )
+    nested_started = _require_utc_timestamp(
+        value["started_at_utc"],
+        label="atomic publisher started_at_utc",
+    )
+    nested_finished = _require_utc_timestamp(
+        value["finished_at_utc"],
+        label="atomic publisher finished_at_utc",
+    )
+    if nested_started < parent_started or nested_finished > parent_finished:
+        raise ValueError("atomic publication telemetry escapes its execution parent")
+
+    assert parent.wall_seconds is not None
+    nested_wall = _require_nonnegative_number(
+        value["wall_seconds"], label="atomic publisher wall_seconds"
+    )
+    if nested_wall > float(parent.wall_seconds) + 1e-9:
+        raise ValueError("atomic publisher wall time exceeds its execution parent")
+
+    assert parent.cpu_user_seconds is not None
+    assert parent.cpu_system_seconds is not None
+    cpu = value["cpu_seconds"]
+    nested_user = float(cpu["own_user_cpu_seconds"]) + float(
+        cpu["child_user_cpu_seconds"]
+    )
+    nested_system = float(cpu["own_system_cpu_seconds"]) + float(
+        cpu["child_system_cpu_seconds"]
+    )
+    if nested_user > float(parent.cpu_user_seconds) + 1e-9:
+        raise ValueError("atomic publisher user CPU exceeds its execution parent")
+    if nested_system > float(parent.cpu_system_seconds) + 1e-9:
+        raise ValueError("atomic publisher system CPU exceeds its execution parent")
+
+    assert parent.peak_process_tree_rss_bytes is not None
+    nested_peak = max(
+        int(value["process_peak_rss_bytes"]),
+        int(value["children_peak_rss_bytes"]),
+    )
+    if nested_peak > parent.peak_process_tree_rss_bytes:
+        raise ValueError("atomic publisher peak RSS exceeds its execution parent")
+
+
 def require_candidate_execution_receipt(
     value: Mapping[str, Any],
     *,
@@ -1083,27 +1173,31 @@ def require_candidate_execution_receipt(
         or schema_version
         not in {
             ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_LEGACY_SCHEMA_VERSION,
+            ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_HIERARCHICAL_SCHEMA_VERSION,
             ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION,
         }
     ):
         raise ValueError("execution receipt schema identity differs")
+    payload_fields = {
+        "status",
+        "request",
+        "request_payload_digest",
+        "fresh_process",
+        "environment",
+        "phases",
+        "coordinate_evidence",
+        "logical_equality",
+        "metadata_equivalence",
+        "physical_io",
+        "output_storage",
+        "nonmutation_evidence",
+        "publication_gate_passed",
+    }
+    if schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION:
+        payload_fields.add("publication_runtime_telemetry")
     payload = _require_exact_fields(
         value["payload"],
-        {
-            "status",
-            "request",
-            "request_payload_digest",
-            "fresh_process",
-            "environment",
-            "phases",
-            "coordinate_evidence",
-            "logical_equality",
-            "metadata_equivalence",
-            "physical_io",
-            "output_storage",
-            "nonmutation_evidence",
-            "publication_gate_passed",
-        },
+        payload_fields,
         label="execution receipt payload",
     )
     if value["payload_digest"] != canonical_json_sha256(payload):
@@ -1155,7 +1249,11 @@ def require_candidate_execution_receipt(
         )
         expected_fields = (
             current_fields
-            if schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION
+            if schema_version
+            in {
+                ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_HIERARCHICAL_SCHEMA_VERSION,
+                ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION,
+            }
             else current_fields - {"parent_phase"}
         )
         phase_record = _require_exact_fields(
@@ -1192,7 +1290,11 @@ def require_candidate_execution_receipt(
             error_message=phase_record["error_message"],
         )
         if (
-            schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION
+            schema_version
+            in {
+                ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_HIERARCHICAL_SCHEMA_VERSION,
+                ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION,
+            }
             and phase_record["parent_phase"]
             != measurement.as_manifest()["parent_phase"]
         ):
@@ -1200,8 +1302,16 @@ def require_candidate_execution_receipt(
         measurements.append(measurement)
         outcomes.append(outcome)
 
-    if schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION:
+    if schema_version in {
+        ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_HIERARCHICAL_SCHEMA_VERSION,
+        ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    }:
         _require_current_phase_chronology(measurements)
+    if schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION:
+        _require_atomic_publication_runtime_telemetry(
+            payload["publication_runtime_telemetry"],
+            phases=measurements,
+        )
 
     fresh = _require_exact_fields(
         payload["fresh_process"],
@@ -1570,6 +1680,7 @@ def build_candidate_execution_receipt(
     fresh_process: Mapping[str, Any],
     environment: Mapping[str, Any],
     phases: Sequence[CandidatePhaseMeasurement],
+    publication_runtime_telemetry: Mapping[str, Any],
     coordinate_evidence: Mapping[str, Any],
     logical_equality: Mapping[str, Any],
     metadata_equivalence: Mapping[str, Any],
@@ -1589,6 +1700,9 @@ def build_candidate_execution_receipt(
         "fresh_process": _json_copy(fresh_process),
         "environment": _json_copy(environment),
         "phases": [phase.as_manifest() for phase in phases],
+        "publication_runtime_telemetry": _json_copy(
+            publication_runtime_telemetry
+        ),
         "coordinate_evidence": _json_copy(coordinate_evidence),
         "logical_equality": _json_copy(logical_equality),
         "metadata_equivalence": _json_copy(metadata_equivalence),
@@ -1622,6 +1736,7 @@ __all__ = [
     "ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_ID",
     "ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_VERSION",
     "ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_ID",
+    "ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_HIERARCHICAL_SCHEMA_VERSION",
     "ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_LEGACY_SCHEMA_VERSION",
     "ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION",
     "ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_ID",

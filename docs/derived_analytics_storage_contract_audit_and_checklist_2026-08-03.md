@@ -1085,6 +1085,16 @@ Recommended benchmark and promotion-review order:
       and tail-posture real fresh-process checks pass the new hierarchy; the
       tail-posture fixture was updated from its stale eleven-phase expectation
       and then passed.
+- [x] Bind the mechanical atomic-publisher trace into current execution
+      receipts. Receipt v4 requires the exact successful publisher phase
+      inventory and order (with only the rsync checksum probe optional), binds
+      its timestamps, wall/CPU time, and process-tree RSS inside the parent
+      `atomic_publication` phase, and rejects omitted, reordered, escaped, or
+      unrelated telemetry. All ten executable runners now retain the trace.
+      Receipt v3 remains auditable hierarchy-only evidence and receipt v2
+      remains auditable flat evidence; neither is current writer-timing
+      evidence. Focused validation passed 134 tests across every runner shape,
+      atomic recovery, and real-Zarr publication paths.
 - [x] Rerun the first full-duration read and physical-I/O checkpoint under the
       corrected suite-v2 workload without republishing either immutable run.
       Five clean-revision, rotated fresh-process repetitions passed exact

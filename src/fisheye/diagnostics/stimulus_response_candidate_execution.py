@@ -485,6 +485,9 @@ def execute_stimulus_response_candidate(
                 "cache_state": payload["cache_state"],
             },
             phases=phases,
+            publication_runtime_telemetry=materialized["publication"][
+                "runtime_telemetry"
+            ],
             coordinate_evidence=acceptance["coordinate_evidence"],
             logical_equality={
                 "contract_id": adapter["logical_equality_contract"],

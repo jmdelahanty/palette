@@ -35,6 +35,13 @@ from fisheye.analysis_workflows.analysis_candidate_invocation import (
 from fisheye.analysis_workflows.storage_candidate_catalog import (
     DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE,
 )
+from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+    ATOMIC_RUN_PUBLISHER_OPTIONAL_SUCCESS_PHASES,
+    ATOMIC_RUN_PUBLISHER_PHASE_ORDER,
+)
+from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+    PhaseTelemetry,
+)
 from fisheye.shared.zarr.analysis_array_contracts import (
     AnalysisArrayDeclaration,
     AnalysisAuthorityRole,
@@ -282,6 +289,46 @@ def _phases() -> list[CandidatePhaseMeasurement]:
     ]
 
 
+def _atomic_publication_runtime_telemetry():
+    telemetry = PhaseTelemetry(materializer="atomic_run_publisher")
+    for name in ATOMIC_RUN_PUBLISHER_PHASE_ORDER:
+        if name in ATOMIC_RUN_PUBLISHER_OPTIONAL_SUCCESS_PHASES:
+            continue
+        with telemetry.phase(name):
+            pass
+    result = telemetry.to_json()
+    result["started_at_utc"] = "2026-08-03T12:00:06.100000+00:00"
+    result["finished_at_utc"] = "2026-08-03T12:00:12.900000+00:00"
+    result["wall_seconds"] = 0.0
+    result["cpu_seconds"] = {
+        "own_user_cpu_seconds": 0.0,
+        "own_system_cpu_seconds": 0.0,
+        "child_user_cpu_seconds": 0.0,
+        "child_system_cpu_seconds": 0.0,
+        "total": 0.0,
+    }
+    result["average_effective_cpu_cores"] = 0.0
+    result["process_peak_rss_bytes"] = 0
+    result["children_peak_rss_bytes"] = 0
+    result["phase_wall_seconds_sum"] = 0.0
+    for phase in result["phases"]:
+        phase["started_at_utc"] = "2026-08-03T12:00:07+00:00"
+        phase["finished_at_utc"] = "2026-08-03T12:00:07+00:00"
+        phase["wall_seconds"] = 0.0
+        phase["cpu_seconds"] = {
+            "own_user_cpu_seconds": 0.0,
+            "own_system_cpu_seconds": 0.0,
+            "child_user_cpu_seconds": 0.0,
+            "child_system_cpu_seconds": 0.0,
+            "total": 0.0,
+        }
+        phase["average_effective_cpu_cores"] = 0.0
+        phase["process_peak_rss_bytes_at_end"] = 0
+        phase["children_peak_rss_bytes_at_end"] = 0
+        phase["process_io_delta"] = {}
+    return result
+
+
 def _receipt(
     adapter_manifest,
     *,
@@ -323,6 +370,7 @@ def _receipt(
             "cache_state": "fresh_process_os_cache_uncontrolled",
         },
         phases=_phases(),
+        publication_runtime_telemetry=_atomic_publication_runtime_telemetry(),
         coordinate_evidence={
             "role": "bound_derivative",
             "status": CoordinateEvidenceStatus.VERIFIED_BOUND_SOURCE.value,
@@ -492,6 +540,7 @@ def test_legacy_v2_receipt_remains_auditable_without_current_hierarchy(
 ) -> None:
     receipt = _receipt(implemented_adapter)
     receipt["schema_version"] = 2
+    receipt["payload"].pop("publication_runtime_telemetry")
     receipt["payload"]["phases"] = [
         phase
         for phase in receipt["payload"]["phases"]
@@ -505,6 +554,50 @@ def test_legacy_v2_receipt_remains_auditable_without_current_hierarchy(
         receipt,
         expected_request_payload_digest=receipt["payload"]["request_payload_digest"],
     )
+
+
+def test_hierarchical_v3_receipt_remains_auditable_without_atomic_trace(
+    implemented_adapter,
+) -> None:
+    receipt = _receipt(implemented_adapter)
+    receipt["schema_version"] = 3
+    receipt["payload"].pop("publication_runtime_telemetry")
+    receipt["payload_digest"] = canonical_json_sha256(receipt["payload"])
+
+    require_candidate_execution_receipt(
+        receipt,
+        expected_request_payload_digest=receipt["payload"]["request_payload_digest"],
+    )
+
+
+def test_current_receipt_rejects_dropped_or_escaped_atomic_trace(
+    implemented_adapter,
+) -> None:
+    receipt = _receipt(implemented_adapter)
+    request_digest = receipt["payload"]["request_payload_digest"]
+
+    dropped = deepcopy(receipt)
+    dropped["payload"]["publication_runtime_telemetry"]["phases"].pop()
+    dropped["payload"]["publication_runtime_telemetry"][
+        "phase_parent_by_name"
+    ].pop("publication_lock_release")
+    dropped["payload_digest"] = canonical_json_sha256(dropped["payload"])
+    with pytest.raises(ValueError, match="omits a required success phase"):
+        require_candidate_execution_receipt(
+            dropped,
+            expected_request_payload_digest=request_digest,
+        )
+
+    escaped = deepcopy(receipt)
+    escaped["payload"]["publication_runtime_telemetry"][
+        "started_at_utc"
+    ] = "2026-08-03T12:00:05+00:00"
+    escaped["payload_digest"] = canonical_json_sha256(escaped["payload"])
+    with pytest.raises(ValueError, match="escapes its execution parent"):
+        require_candidate_execution_receipt(
+            escaped,
+            expected_request_payload_digest=request_digest,
+        )
 
 
 def test_execution_request_requires_exact_bound_invocation(

@@ -446,6 +446,9 @@ def execute_eye_angle_candidate(
                 "cache_state": payload["cache_state"],
             },
             phases=phases,
+            publication_runtime_telemetry=materialized["publish"][
+                "runtime_telemetry"
+            ],
             coordinate_evidence=source_coordinate,
             logical_equality={
                 "contract_id": adapter["logical_equality_contract"],

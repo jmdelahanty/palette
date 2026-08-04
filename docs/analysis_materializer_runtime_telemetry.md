@@ -6,7 +6,7 @@ scientific data.
 
 ## Identity boundary
 
-The schema is `palette.materializer_phase_telemetry`, version 1. Its identity
+The current schema is `palette.materializer_phase_telemetry`, version 2. Its identity
 policy is:
 
 ```text
@@ -18,6 +18,12 @@ run to run. They must not affect scientific payload digests, storage identity,
 selector eligibility, or reproducibility comparisons. In particular, the
 shared publisher returns telemetry to the materializer report but does not add
 it to the persisted `cluster_output_staging` attribute.
+
+Version 2 adds `phase_parent_by_name`, requires non-overlapping siblings and
+contained children, and counts only top-level phases in
+`phase_wall_seconds_sum`. Every current phase must also lie within the root
+execution interval, and the top-level phase sum cannot exceed root wall time.
+Version 1 documents remain structurally auditable but are timing-ineligible.
 
 ## Measurements
 
@@ -39,6 +45,27 @@ benchmark needs process-tree RSS, thread count, and time-series CPU samples.
 Guarded jobs rendered by `scripts/submit_analysis_workflow_bsub.sh` run through
 that sampler and publish its summary, JSONL samples, and captured workflow log
 beside the execution report.
+
+## Candidate execution receipt binding
+
+`palette.analysis_candidate_execution_receipt` version 4 preserves the shared
+atomic publisher's complete version-2 telemetry under
+`publication_runtime_telemetry`. The receipt validator requires the exact
+`atomic_run_publisher` identity, the frozen successful phase inventory and
+order, and an all-success outcome. The rsync checksum dry run is the only
+optional successful phase.
+
+The nested publisher start and finish must lie within the materializer's
+`atomic_publication` phase. Its wall time, user/system CPU, and process-tree
+peak RSS cannot exceed that parent measurement. This prevents a caller from
+substituting an unrelated publisher trace or presenting nested work as a
+second serial transaction.
+
+Receipt v3 retains the canonical materializer hierarchy but has no mechanical
+publisher trace. Receipt v2 is the earlier flat form without publication-
+acceptance timing. Both remain auditable compatibility documents, but only
+receipt v4 is current writer/publication timing evidence. Runtime telemetry is
+still report-only and excluded from scientific array and authority identity.
 
 ## Track-kinematics phases
 

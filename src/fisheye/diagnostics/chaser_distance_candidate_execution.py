@@ -494,6 +494,9 @@ def execute_chaser_distance_candidate(
                 "cache_state": payload["cache_state"],
             },
             phases=phases,
+            publication_runtime_telemetry=materialized["publication"][
+                "runtime_telemetry"
+            ],
             coordinate_evidence=coordinate,
             logical_equality={
                 "contract_id": adapter["logical_equality_contract"],

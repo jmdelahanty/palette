@@ -324,6 +324,10 @@ def require_runtime_telemetry(
             prior_finished: datetime | None = None
             for name in siblings:
                 phase_started, phase_finished = interval_by_name[name]
+                if phase_started < started or phase_finished > finished:
+                    raise ValueError(
+                        "Runtime telemetry phase escapes the execution interval."
+                    )
                 if prior_finished is not None and phase_started < prior_finished:
                     raise ValueError("Runtime telemetry sibling phase intervals overlap.")
                 prior_finished = phase_finished
@@ -344,6 +348,8 @@ def require_runtime_telemetry(
     )
     if not math.isclose(phase_sum, observed_phase_wall, rel_tol=1e-9, abs_tol=1e-9):
         raise ValueError("Runtime telemetry phase-wall sum differs.")
+    if phase_sum > wall + 1e-9:
+        raise ValueError("Runtime telemetry phase-wall sum exceeds execution wall time.")
     if require_error_phase and not saw_error:
         raise ValueError("Runtime telemetry contains no failed phase.")
     execution = value["execution"]

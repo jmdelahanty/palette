@@ -42,6 +42,43 @@ SERIALIZATION_POLICY = "per_recording_advisory_file_lock"
 ATOMIC_PUBLICATION_OWNER_ATTR = "atomic_publication_owner_uuid"
 ATOMIC_PUBLICATION_TOMBSTONE_ATTR = "atomic_publication_tombstone"
 
+# This order is a report-only execution contract, not part of scientific
+# identity.  Successful candidate publication executes every phase except the
+# checksum dry run, which is present only for the rsync+content-checksum path.
+# Keep it explicit so candidate execution receipts can reject fabricated,
+# reordered, or silently dropped mechanical-publication timing.
+ATOMIC_RUN_PUBLISHER_PHASE_ORDER = (
+    "local_run_validation",
+    "publication_lock_wait",
+    "initial_authoritative_open_and_parent_prepare",
+    "parent_attribute_snapshot",
+    "source_physical_inventory",
+    "physical_tree_copy",
+    "rsync_checksum_dry_run",
+    "target_physical_inventory",
+    "physical_inventory_comparison",
+    "hidden_target_owner_stamp_and_verification",
+    "hidden_target_validation",
+    "atomic_rename",
+    "renamed_target_owner_verification",
+    "renamed_authoritative_open_and_parent_prepare",
+    "post_rename_binding",
+    "initial_publication_metadata_write",
+    "pre_pointer_validation",
+    "pre_pointer_metadata_write",
+    "completion_and_pointer_publication",
+    "final_run_validation",
+    "pointer_verification",
+    "final_authoritative_open_and_parent_snapshot",
+    "final_publication_metadata_write",
+    "activation_preflight",
+    "selector_activation",
+    "publication_lock_release",
+)
+ATOMIC_RUN_PUBLISHER_OPTIONAL_SUCCESS_PHASES = frozenset(
+    {"rsync_checksum_dry_run"}
+)
+
 RunValidator = Callable[[Path], Mapping[str, Any]]
 PrepareParents = Callable[[zarr.Group], Sequence[zarr.Group]]
 CompleteRun = Callable[[zarr.Group, zarr.Group, zarr.Group], None]
