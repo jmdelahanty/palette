@@ -18,10 +18,11 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import zarr
 
@@ -39,20 +40,57 @@ from ...analysis.tail_kinematics_runs import (
     _resolve_tail_kinematics_sources,
     write_tail_kinematics_run_group,
 )
+from ...analysis_workflows.tail_kinematics_candidate_execution import (
+    compute_tail_kinematics_logical_hashes,
+)
 from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared import tail_coordinate_publication as tail_publication_mod
 from ...shared.zarr_io import open_zarr_root
-from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from ...shared.zarr.benchmark_runtime import storage_stats
+from ...shared.zarr.manifest_digest import canonical_json_sha256
+from ...shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
+from ...shared.zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+    RUN_STATUS_FAILED,
+    mark_run_complete,
+    mark_run_failed,
+    require_runs_parent,
+)
 from ...shared.zarr.storage_profiles import StorageProfile, get_storage_profile
-from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from ...shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    consolidate_metadata_capture_expected_warnings,
+)
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from .runtime_telemetry import PhaseTelemetry
 
 MATERIALIZATION_SCHEMA_ID = "palette.tail_kinematics_materialization.v1"
 STAGING_SCHEMA_ID = "palette.tail_kinematics_source_staging.v1"
 PUBLISH_SCHEMA_ID = "palette.tail_kinematics_run_publish.v1"
 GROUP_METADATA_NAMES = ("zarr.json", ".zgroup", ".zattrs")
 DEFAULT_CAPACITY_MARGIN_BYTES = 512 * 1024 * 1024
+TAIL_KINEMATICS_EXECUTION_PHASE_ORDER = (
+    "plan",
+    "source_staging",
+    "scientific_compute",
+    "local_validation",
+    "local_consolidation",
+    "local_direct_consolidated_comparison",
+    "atomic_publication",
+    "published_validation",
+    "published_direct_consolidated_comparison",
+    "decoded_equality",
+    "physical_inventory",
+)
+EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
+EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
+PublicationAcceptanceValidator = Callable[
+    [zarr.Group, zarr.Group, zarr.Group], Mapping[str, Any]
+]
 
 
 @dataclass(frozen=True)
@@ -623,15 +661,123 @@ def _validate_tail_run(
     }
 
 
+def _ordered_runtime_telemetry(telemetry: PhaseTelemetry) -> dict[str, Any]:
+    result = telemetry.to_json()
+    order = {
+        name: index for index, name in enumerate(TAIL_KINEMATICS_EXECUTION_PHASE_ORDER)
+    }
+    phases = list(result["phases"])
+    if any(phase["name"] not in order for phase in phases):
+        raise RuntimeError("Tail-kinematics telemetry contains an unknown phase.")
+    phases.sort(key=lambda phase: order[phase["name"]])
+    result["phases"] = phases
+    return result
+
+
+def tombstone_tail_kinematics_execution_candidate(
+    source_zarr: str | Path,
+    *,
+    run_name: str,
+    expected_execution_binding: Mapping[str, Any],
+    failure_phase: str,
+    error_type: str,
+    error_message: str,
+) -> dict[str, Any]:
+    """Fail one exact execution-owned candidate without touching selectors."""
+
+    archive = Path(source_zarr).expanduser().resolve()
+    name = _validate_run_name(run_name)
+    expected_binding = json_attr_safe(dict(expected_execution_binding))
+    if not expected_binding:
+        raise ValueError("expected_execution_binding must be nonempty.")
+    payload = {
+        "schema_id": "palette.analysis_candidate_execution_tombstone",
+        "schema_version": 1,
+        "execution_binding": expected_binding,
+        "failure_phase": str(failure_phase),
+        "error_type": str(error_type),
+        "error_message": str(error_message),
+    }
+    tombstone = {**payload, "payload_sha256": canonical_json_sha256(payload)}
+    run_path = f"analysis/tail_kinematics_runs/{name}"
+    with archive_metadata_publication_lock(archive):
+        root = open_zarr_root(archive, mode="a")
+        parent = root["analysis/tail_kinematics_runs"]
+        run = parent.get(name)
+        if not isinstance(run, zarr.Group):
+            return {"target_present": False, "tombstoned": False}
+        if run.attrs.get(EXECUTION_BINDING_ATTR) != expected_binding:
+            raise RuntimeError(
+                "Refusing to tombstone a tail-kinematics candidate owned by another execution."
+            )
+        if run.attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError(
+                "Refusing to tombstone a selector-eligible tail-kinematics run."
+            )
+        existing = run.attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR)
+        status = run.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+        if status == RUN_STATUS_FAILED:
+            if existing != tombstone:
+                raise RuntimeError(
+                    "Existing tail-kinematics execution tombstone differs."
+                )
+        else:
+            if status != RUN_STATUS_COMPLETE:
+                raise RuntimeError(
+                    "Tail-kinematics execution candidate is neither complete nor failed."
+                )
+            mark_run_failed(
+                run,
+                parent_group=None,
+                run_name=name,
+                error=f"{error_type}: {error_message}",
+            )
+            run.attrs["stage_selector_eligible"] = False
+            run.attrs[EXECUTION_FAILURE_TOMBSTONE_ATTR] = tombstone
+        consolidate_metadata_capture_expected_warnings(archive)
+        receipt = validate_direct_consolidated_subtree(
+            archive,
+            subtree_path=run_path,
+        )
+        fresh = open_zarr_root(archive, mode="r")[run_path]
+        if (
+            fresh.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_FAILED
+            or fresh.attrs.get("stage_selector_eligible") is not False
+            or fresh.attrs.get(EXECUTION_BINDING_ATTR) != expected_binding
+            or fresh.attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR) != tombstone
+        ):
+            raise RuntimeError(
+                "Tail-kinematics execution tombstone did not persist exactly."
+            )
+    return {
+        "target_present": True,
+        "tombstoned": True,
+        "metadata_declarations_sha256": receipt.declarations_sha256,
+    }
+
+
 def publish_tail_kinematics_run(
     plan: TailKinematicsMaterializationPlan,
     *,
     staging_payload: dict[str, Any],
     copy_backend: str = "rsync",
+    telemetry: PhaseTelemetry | None = None,
+    expected_source_logical_hashes: Mapping[str, Any] | None = None,
+    publication_acceptance_validator: PublicationAcceptanceValidator | None = None,
 ) -> dict[str, Any]:
     """Validate and atomically publish one completed local run group."""
 
     byte_planner_candidate = plan.storage_profile_id is not None
+    if (
+        expected_source_logical_hashes is not None
+        or publication_acceptance_validator is not None
+    ) and not byte_planner_candidate:
+        raise ValueError(
+            "Execution acceptance is valid for tail-kinematics candidates only."
+        )
+
+    def phase(name: str):
+        return telemetry.phase(name) if telemetry is not None else nullcontext()
 
     source_run = plan.local_run_path
     source_owner = open_zarr_root(source_run, mode="r").attrs.get(
@@ -648,6 +794,7 @@ def publish_tail_kinematics_run(
             "Tail-kinematics publication source owner is not one canonical UUID."
         )
     deferred_activation: list[Any] = []
+    publication_acceptance: dict[str, Any] = {}
 
     def validate(path: Path) -> dict[str, Any]:
         return _validate_tail_run(
@@ -705,10 +852,59 @@ def publish_tail_kinematics_run(
                 raise RuntimeError(
                     "Tail-kinematics storage candidate became selector eligible."
                 )
+            run_path = f"analysis/tail_kinematics_runs/{plan.run_name}"
+            with phase("published_validation"):
+                published_validation = validate(plan.target_run_path)
+                if not published_validation["valid"]:
+                    raise RuntimeError(
+                        "Published tail-kinematics candidate is invalid: "
+                        f"{published_validation}"
+                    )
             tail_mod.consolidate_and_validate_tail_kinematics_metadata(
                 root,
-                run_path=f"analysis/tail_kinematics_runs/{plan.run_name}",
+                run_path=run_path,
             )
+            with phase("published_direct_consolidated_comparison"):
+                published_metadata = validate_direct_consolidated_subtree(
+                    plan.source_zarr,
+                    subtree_path=run_path,
+                )
+            with phase("decoded_equality"):
+                published_hashes = compute_tail_kinematics_logical_hashes(run_group)
+                if (
+                    expected_source_logical_hashes is not None
+                    and published_hashes != dict(expected_source_logical_hashes)
+                ):
+                    raise RuntimeError(
+                        "Published tail-kinematics decoded values differ from the source run."
+                    )
+            with phase("physical_inventory"):
+                published_storage = storage_stats(plan.target_run_path)
+                if (
+                    published_storage["file_count"] < 1
+                    or published_storage["apparent_bytes"] < 1
+                    or published_storage["allocated_bytes"] < 1
+                ):
+                    raise RuntimeError(
+                        "Published tail-kinematics candidate has no physical payload."
+                    )
+            publication_acceptance.update(
+                {
+                    "published_validation": published_validation,
+                    "published_direct_consolidated_array_count": int(
+                        published_metadata.array_count
+                    ),
+                    "published_logical_hashes": published_hashes,
+                    "published_logical_manifest_sha256": canonical_json_sha256(
+                        published_hashes
+                    ),
+                    "output_storage": published_storage,
+                }
+            )
+            if publication_acceptance_validator is not None:
+                publication_acceptance["caller_acceptance"] = json_attr_safe(
+                    dict(publication_acceptance_validator(root, parent, run_group))
+                )
             return
         if len(deferred_activation) != 1:
             raise RuntimeError(
@@ -749,7 +945,7 @@ def publish_tail_kinematics_run(
                 "Tail-kinematics parent pointers were not updated to the published run."
             )
 
-    return atomic_publish_run_group(
+    result = atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
             local_run_path=source_run,
@@ -763,6 +959,7 @@ def publish_tail_kinematics_run(
                 "stage_specific_receipt_rollback_only"
             ),
             publication_owner_attr=tail_publication_mod.TAIL_PUBLICATION_OWNER_ATTR,
+            content_checksum=True,
             # The sealed stage receipt is the only selector rollback authority.
             # A generic pre-copy snapshot can predate an intervening publication.
         ),
@@ -783,6 +980,10 @@ def publish_tail_kinematics_run(
             "source_staging": json_attr_safe(staging_payload),
         },
     )
+    if byte_planner_candidate:
+        result.update(publication_acceptance)
+        result["registry_updated"] = False
+    return result
 
 
 def materialize_tail_kinematics(
@@ -802,21 +1003,57 @@ def materialize_tail_kinematics(
     check_capacity: bool = True,
     stage_command: str | None = None,
     storage_profile: StorageProfile | None = None,
+    execution_binding: Mapping[str, Any] | None = None,
+    expected_source_logical_hashes: Mapping[str, Any] | None = None,
+    publication_acceptance_validator: PublicationAcceptanceValidator | None = None,
 ) -> dict[str, Any]:
     """Execute or plan the complete staged materialization workflow."""
 
-    plan = build_tail_kinematics_materialization_plan(
-        source_zarr,
-        scratch_root=scratch_root,
-        shape_run=shape_run,
-        run_name=run_name,
-        tail_angle_sample_count=tail_angle_sample_count,
-        block_rows=block_rows,
-        output_shard_rows=output_shard_rows,
-        execution_backend=execution_backend,
-        num_workers=num_workers,
-        storage_profile=storage_profile,
+    execution_requested = any(
+        value is not None
+        for value in (
+            execution_binding,
+            expected_source_logical_hashes,
+            publication_acceptance_validator,
+        )
     )
+    if execution_requested and storage_profile is None:
+        raise ValueError(
+            "Typed execution evidence requires one explicit storage candidate profile."
+        )
+    if execution_requested and not isinstance(execution_binding, Mapping):
+        raise ValueError("Typed execution requires one nonempty execution binding.")
+    normalized_binding = (
+        json_attr_safe(dict(execution_binding))
+        if isinstance(execution_binding, Mapping)
+        else None
+    )
+    if execution_requested and not normalized_binding:
+        raise ValueError("Typed execution binding must be nonempty.")
+    telemetry = PhaseTelemetry(
+        materializer="tail_kinematics_candidate",
+        context={
+            "run_name": str(run_name),
+            "shape_run": shape_run,
+            "storage_profile_id": (
+                storage_profile.profile_id if storage_profile is not None else None
+            ),
+            "execution_requested": execution_requested,
+        },
+    )
+    with telemetry.phase("plan"):
+        plan = build_tail_kinematics_materialization_plan(
+            source_zarr,
+            scratch_root=scratch_root,
+            shape_run=shape_run,
+            run_name=run_name,
+            tail_angle_sample_count=tail_angle_sample_count,
+            block_rows=block_rows,
+            output_shard_rows=output_shard_rows,
+            execution_backend=execution_backend,
+            num_workers=num_workers,
+            storage_profile=storage_profile,
+        )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
@@ -824,54 +1061,130 @@ def materialize_tail_kinematics(
         "plan": plan.to_json(),
     }
     if not apply:
+        result["runtime_telemetry"] = _ordered_runtime_telemetry(telemetry)
         return result
 
     succeeded = False
     try:
-        staging = stage_tail_kinematics_sources(
-            plan,
-            copy_backend=copy_backend,
-            check_capacity=check_capacity,
-        )
-        local_root = open_zarr_root(plan.staged_zarr, mode="a")
-        local_summary = write_tail_kinematics_run_group(
-            local_root,
-            shape_run=plan.shape_run,
-            run_name=plan.run_name,
-            tail_angle_sample_count=plan.tail_angle_sample_count,
-            block_rows=plan.requested_block_rows,
-            output_shard_rows=plan.requested_output_shard_rows,
-            execution_backend=plan.execution_backend,
-            num_workers=plan.requested_num_workers,
-            worker_zarr_path=plan.staged_zarr,
-            overwrite=False,
-            dry_run=False,
-            stage_command=stage_command
-            or (" ".join(sys.argv) if sys.argv else "unknown"),
-            storage_profile=(
-                get_storage_profile(plan.storage_profile_id)
-                if plan.storage_profile_id is not None
-                else None
-            ),
-            _staged_source_authority=plan.staged_source_authority,
-        )
+        with telemetry.phase("source_staging"):
+            staging = stage_tail_kinematics_sources(
+                plan,
+                copy_backend=copy_backend,
+                check_capacity=check_capacity,
+            )
+        with telemetry.phase("scientific_compute"):
+            local_root = open_zarr_root(plan.staged_zarr, mode="a")
+            local_summary = write_tail_kinematics_run_group(
+                local_root,
+                shape_run=plan.shape_run,
+                run_name=plan.run_name,
+                tail_angle_sample_count=plan.tail_angle_sample_count,
+                block_rows=plan.requested_block_rows,
+                output_shard_rows=plan.requested_output_shard_rows,
+                execution_backend=plan.execution_backend,
+                num_workers=plan.requested_num_workers,
+                worker_zarr_path=plan.staged_zarr,
+                overwrite=False,
+                dry_run=False,
+                stage_command=stage_command
+                or (" ".join(sys.argv) if sys.argv else "unknown"),
+                storage_profile=(
+                    get_storage_profile(plan.storage_profile_id)
+                    if plan.storage_profile_id is not None
+                    else None
+                ),
+                _staged_source_authority=plan.staged_source_authority,
+            )
         local_run = local_root["analysis"]["tail_kinematics_runs"][plan.run_name]
         local_run.attrs["node_local_source_staging"] = staging
-        publish = publish_tail_kinematics_run(
-            plan,
-            staging_payload=staging,
-            copy_backend=copy_backend,
-        )
+        if normalized_binding is not None:
+            local_run.attrs[EXECUTION_BINDING_ATTR] = normalized_binding
+            local_run.attrs["storage_candidate_profile_promoted"] = False
+        local_validation: dict[str, Any] | None = None
+        local_hashes: dict[str, object] | None = None
+        local_metadata: Any | None = None
+        if plan.storage_profile_id is not None:
+            with telemetry.phase("local_validation"):
+                local_validation = _validate_tail_run(
+                    plan.local_run_path,
+                    row_count=plan.row_count,
+                    sample_count=plan.tail_angle_sample_count,
+                )
+                if not local_validation["valid"]:
+                    raise RuntimeError(
+                        "Local tail-kinematics candidate is invalid: "
+                        f"{local_validation}"
+                    )
+                local_hashes = compute_tail_kinematics_logical_hashes(local_run)
+                if expected_source_logical_hashes is not None and local_hashes != dict(
+                    expected_source_logical_hashes
+                ):
+                    raise RuntimeError(
+                        "Local tail-kinematics decoded values differ from the source run."
+                    )
+            with telemetry.phase("local_consolidation"):
+                consolidate_metadata_capture_expected_warnings(plan.staged_zarr)
+            with telemetry.phase("local_direct_consolidated_comparison"):
+                local_metadata = validate_direct_consolidated_subtree(
+                    plan.staged_zarr,
+                    subtree_path=f"analysis/tail_kinematics_runs/{plan.run_name}",
+                )
+        with telemetry.phase("atomic_publication"):
+            publish = publish_tail_kinematics_run(
+                plan,
+                staging_payload=staging,
+                copy_backend=copy_backend,
+                telemetry=telemetry,
+                expected_source_logical_hashes=expected_source_logical_hashes,
+                publication_acceptance_validator=(publication_acceptance_validator),
+            )
         result.update(
             {
                 "status": "complete",
                 "staging": staging,
                 "local_materialization": local_summary,
+                "local_validation": local_validation,
+                "local_direct_consolidated_array_count": (
+                    int(local_metadata.array_count)
+                    if local_metadata is not None
+                    else None
+                ),
+                "source_logical_manifest_sha256": (
+                    canonical_json_sha256(expected_source_logical_hashes)
+                    if expected_source_logical_hashes is not None
+                    else (
+                        canonical_json_sha256(local_hashes)
+                        if local_hashes is not None
+                        else None
+                    )
+                ),
+                "local_logical_manifest_sha256": (
+                    canonical_json_sha256(local_hashes)
+                    if local_hashes is not None
+                    else None
+                ),
+                "published_logical_manifest_sha256": publish.get(
+                    "published_logical_manifest_sha256"
+                ),
+                "published_direct_consolidated_array_count": publish.get(
+                    "published_direct_consolidated_array_count"
+                ),
+                "output_storage": publish.get("output_storage"),
+                "caller_acceptance": publish.get("caller_acceptance"),
                 "publish": publish,
             }
         )
+        result["runtime_telemetry"] = _ordered_runtime_telemetry(telemetry)
         succeeded = True
         return result
+    except BaseException as exc:
+        try:
+            setattr(
+                exc, "palette_runtime_telemetry", _ordered_runtime_telemetry(telemetry)
+            )
+        except BaseException:
+            pass
+        raise
     finally:
         if succeeded and not keep_scratch and plan.scratch_root.is_dir():
             shutil.rmtree(plan.scratch_root)

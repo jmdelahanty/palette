@@ -13,6 +13,9 @@ from fisheye.analysis import tail_kinematics_runs as tail_mod
 from fisheye.analysis import subject_shape_io
 from fisheye.analysis_workflows.materializers import tail_kinematics as mod
 from fisheye.analysis_workflows.materializers import atomic_run_publisher as atomic_mod
+from fisheye.analysis_workflows.tail_kinematics_candidate_execution import (
+    compute_tail_kinematics_logical_hashes,
+)
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 
@@ -452,8 +455,7 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
         == "per_recording_advisory_file_lock"
     )
     assert (
-        tmp_path
-        / f".source.zarr.{atomic_mod.ARCHIVE_PUBLICATION_LOCK_SUFFIX}.lock"
+        tmp_path / f".source.zarr.{atomic_mod.ARCHIVE_PUBLICATION_LOCK_SUFFIX}.lock"
     ).is_file()
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
     assert run.attrs["effective_block_rows"] == 4
@@ -515,6 +517,112 @@ def test_materialize_byte_planned_tail_candidate_never_updates_selectors(
     consolidated_run = consolidated["analysis/tail_kinematics_runs/tail_candidate"]
     assert consolidated_run.attrs["stage_selector_eligible"] is False
     assert np.asarray(consolidated_run["tail_angle_rad"][:]).shape == (20_000, 10)
+
+
+def test_typed_candidate_executes_all_phases_and_supports_owned_tombstone(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_provenance(monkeypatch)
+    source = tmp_path / "source.zarr"
+    _build_source_zarr(source, row_count=9)
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    frames = np.asarray(shape["source_acquisition_frame_index"][:], dtype=np.int64)
+    del shape["source_acquisition_frame_index"]
+    shape.create_array(
+        "source_acquisition_frame_index",
+        data=frames,
+        chunks=(9,),
+        overwrite=True,
+    )
+
+    source_result = mod.materialize_tail_kinematics(
+        source,
+        scratch_root=tmp_path / "source-scratch",
+        shape_run="shape_001",
+        run_name="tail_source",
+        copy_backend="python",
+        apply=True,
+        keep_scratch=False,
+        check_capacity=False,
+    )
+    assert source_result["status"] == "complete"
+    source_root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    source_hashes = compute_tail_kinematics_logical_hashes(
+        source_root["analysis/tail_kinematics_runs/tail_source"]
+    )
+    binding = {
+        "schema_id": "palette.analysis_candidate_execution_binding",
+        "schema_version": 1,
+        "execution_id": "tail-unit",
+        "request_payload_digest": "a" * 64,
+        "candidate_run_path": "analysis/tail_kinematics_runs/tail_candidate",
+    }
+
+    def accept(_root, parent, candidate):
+        assert parent.attrs["latest"] == "tail_source"
+        assert candidate.attrs[mod.EXECUTION_BINDING_ATTR] == binding
+        assert candidate.attrs["storage_candidate_profile_promoted"] is False
+        return {"execution_binding": binding, "selector": "tail_source"}
+
+    result = mod.materialize_tail_kinematics(
+        source,
+        scratch_root=tmp_path / "candidate-scratch",
+        shape_run="shape_001",
+        run_name="tail_candidate",
+        block_rows=9,
+        execution_backend="serial",
+        num_workers=1,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=False,
+        check_capacity=False,
+        storage_profile=PUBLISHED_HTTP_V1,
+        execution_binding=binding,
+        expected_source_logical_hashes=source_hashes,
+        publication_acceptance_validator=accept,
+    )
+
+    assert result["status"] == "complete"
+    assert [phase["name"] for phase in result["runtime_telemetry"]["phases"]] == list(
+        mod.TAIL_KINEMATICS_EXECUTION_PHASE_ORDER
+    )
+    assert result["local_direct_consolidated_array_count"] == 23
+    assert result["published_direct_consolidated_array_count"] == 23
+    assert (
+        result["source_logical_manifest_sha256"]
+        == result["published_logical_manifest_sha256"]
+    )
+    assert result["caller_acceptance"] == {
+        "execution_binding": binding,
+        "selector": "tail_source",
+    }
+    published = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = published["analysis/tail_kinematics_runs"]
+    assert parent.attrs["latest"] == "tail_source"
+    assert parent.attrs["latest_complete"] == "tail_source"
+    assert parent["tail_candidate"].attrs["stage_selector_eligible"] is False
+
+    tombstone = mod.tombstone_tail_kinematics_execution_candidate(
+        source,
+        run_name="tail_candidate",
+        expected_execution_binding=binding,
+        failure_phase="driver_receipt_publication",
+        error_type="RuntimeError",
+        error_message="receipt write failed",
+    )
+    assert tombstone["tombstoned"] is True
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    for view in (direct, consolidated):
+        run = view["analysis/tail_kinematics_runs/tail_candidate"]
+        assert run.attrs["palette_run_completion_status"] == "failed"
+        assert run.attrs["stage_selector_eligible"] is False
+        assert (
+            run.attrs[mod.EXECUTION_FAILURE_TOMBSTONE_ATTR]["execution_binding"]
+            == binding
+        )
 
 
 def test_materialize_tail_kinematics_process_workers_own_complete_shards(
