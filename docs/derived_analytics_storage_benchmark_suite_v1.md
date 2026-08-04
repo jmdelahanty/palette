@@ -2,7 +2,17 @@
 
 Date: 2026-08-03
 
-Status: benchmark planning contract implemented; no profile promoted.
+Status: historical suite-v1 contract. New timing and promotion evidence must use
+[`derived_analytics_storage_benchmark_suite_v2.md`](derived_analytics_storage_benchmark_suite_v2.md).
+Suite-v1 documents remain valid only as immutable audit evidence; no profile was
+promoted from them.
+
+> **Superseded timing boundary (2026-08-04):** suite v1 selected every array on
+> logical axis zero and executed `INDEXED` selections as separate scalar reads.
+> That was incorrect for arrays whose declared growth axis is not zero and did
+> not represent Palette's or Crimson's batched compact-table consumers. The v1
+> schema remains readable, but current execution requests and benchmark trials
+> reject it.
 
 `fisheye.shared.zarr.analysis_benchmark_suite` turns one exact
 `AnalysisStoragePlanReceipt` into a deterministic writer/read/publish workload

@@ -1085,6 +1085,30 @@ Recommended benchmark and promotion-review order:
       and tail-posture real fresh-process checks pass the new hierarchy; the
       tail-posture fixture was updated from its stale eleven-phase expectation
       and then passed.
+- [x] Rerun the first full-duration read and physical-I/O checkpoint under the
+      corrected suite-v2 workload without republishing either immutable run.
+      Five clean-revision, rotated fresh-process repetitions passed exact
+      decoded equality, direct/consolidated equivalence, manifest/receipt
+      validation, and the archive nonmutation guard. Candidate median primary
+      access improved from 1.723 s to 0.577 s, full scan improved from 1.455 s
+      to 0.635 s, peak RSS fell 2.6%, payload objects fell 17.5%, and apparent
+      bytes fell 14.4%. The bound process-tree trace reduced requested file
+      bytes from the obsolete scalar suite's 2.438 GB to 244.6 MB and reads
+      from 87,267 to 17,896; those are file-syscall sensitivity measurements,
+      not network-transfer or traced-latency evidence. Matrix digest
+      `61c51e64473fbd07b50f6173ef1b0efece4047f0ea844c4980a0594bc4756b19`
+      and trace digest
+      `3252e8799fe400059c21760a06cb441ab806702b94fd70310ac34ae7838c4676`
+      are documented in
+      `docs/diagnostics/swim_bout_full_duration_storage_suite_v2_2026-08-04.md`.
+      The existing `published_http_v1` candidate therefore passes the corrected
+      full-duration Palette read gate, but short-scale, current writer timing,
+      Crimson, and explicit promotion/rollback gates remain open. A read-only
+      census found 120,221-143,305-frame GoodCopBadCop sources, but they predate
+      the required sealed track-motion authority; current sealed authorities
+      exist only on the full-duration Sleepyfish camera archives. The short
+      gate remains honestly missing rather than being fabricated by stamping a
+      legacy run as current.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
