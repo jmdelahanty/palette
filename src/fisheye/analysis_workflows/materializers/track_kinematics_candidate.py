@@ -8,8 +8,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
-import time
-from typing import Any, Optional, Sequence
+import subprocess
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import zarr
 
@@ -17,6 +17,7 @@ from fisheye.analysis.track_kinematics_storage import (
     TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID,
     build_flat_candidate_declarations,
     build_flat_candidate_storage_receipt,
+    flat_candidate_logical_hashes,
     persist_flat_candidate_contract,
     rematerialize_flat_candidate,
     source_flat_projection_hashes,
@@ -28,10 +29,13 @@ from fisheye.analysis.track_kinematics_schema import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.zarr.storage_profiles import get_storage_profile
+from fisheye.shared.zarr.benchmark_runtime import storage_stats
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
 from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
@@ -40,18 +44,38 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_NAME_ATTR,
     RUN_STATUS_COMPLETE,
+    RUN_STATUS_FAILED,
     RUN_STATUS_RUNNING,
     mark_run_complete,
+    mark_run_failed,
 )
 
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
-
+from .runtime_telemetry import PhaseTelemetry
 
 MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_flat_candidate_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.track_kinematics_flat_candidate_publish.v1"
 SUPPORTED_PROFILE_ID = "published_http_v1"
 PARENT_PATH = "analysis/track_kinematics_runs"
 RUN_TYPE = "offline"
+TRACK_FLAT_EXECUTION_PHASE_ORDER = (
+    "plan",
+    "source_staging",
+    "logical_rematerialization",
+    "local_validation",
+    "local_consolidation",
+    "local_direct_consolidated_comparison",
+    "atomic_publication",
+    "published_validation",
+    "published_direct_consolidated_comparison",
+    "decoded_equality",
+    "physical_inventory",
+)
+EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
+EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
+PublicationAcceptanceValidator = Callable[
+    [zarr.Group, zarr.Group, zarr.Group], Mapping[str, Any]
+]
 
 
 def _safe_name(value: str, *, label: str) -> str:
@@ -80,7 +104,6 @@ def _direct_consolidated_check(
     run_path: str,
     declaration_paths: Sequence[str],
 ) -> int:
-    consolidate_metadata_capture_expected_warnings(archive)
     receipt = validate_direct_consolidated_subtree(
         archive,
         subtree_path=run_path,
@@ -91,6 +114,60 @@ def _direct_consolidated_check(
             f"expected {len(declaration_paths)}, got {receipt.array_count}."
         )
     return receipt.array_count
+
+
+def _ordered_runtime_telemetry(telemetry: PhaseTelemetry) -> dict[str, Any]:
+    result = telemetry.to_json()
+    order = {name: index for index, name in enumerate(TRACK_FLAT_EXECUTION_PHASE_ORDER)}
+    phases = list(result["phases"])
+    if any(phase["name"] not in order for phase in phases):
+        raise RuntimeError("Track-flat telemetry contains an unknown phase.")
+    phases.sort(key=lambda phase: order[phase["name"]])
+    result["phases"] = phases
+    return result
+
+
+def _require_symlink_free_tree(path: Path, *, label: str) -> None:
+    links: list[str] = []
+    if path.is_symlink():
+        links.append(str(path))
+    for root, directories, filenames in os.walk(path, followlinks=False):
+        for name in (*directories, *filenames):
+            candidate = Path(root) / name
+            if candidate.is_symlink():
+                links.append(str(candidate))
+                if len(links) >= 8:
+                    break
+        if len(links) >= 8:
+            break
+    if links:
+        raise ValueError(
+            f"{label} must be self-contained and symlink-free; found {links!r}."
+        )
+
+
+def _copy_source_run_to_scratch(
+    source: Path,
+    target: Path,
+    *,
+    backend: str,
+) -> None:
+    if target.exists():
+        raise FileExistsError(f"Refusing existing staged source: {target}.")
+    _require_symlink_free_tree(source, label="Authoritative track source run")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if backend == "python":
+        shutil.copytree(source, target, symlinks=False)
+        _require_symlink_free_tree(target, label="Staged track source run")
+        return
+    if backend != "rsync":
+        raise ValueError(f"Unsupported source-staging backend: {backend!r}.")
+    target.mkdir()
+    subprocess.run(
+        ["rsync", "-aL", "--", f"{source}/", f"{target}/"],
+        check=True,
+    )
+    _require_symlink_free_tree(target, label="Staged track source run")
 
 
 @dataclass(frozen=True)
@@ -217,6 +294,109 @@ def build_track_kinematics_flat_candidate_plan(
     )
 
 
+def tombstone_track_kinematics_execution_candidate(
+    source_zarr: str | Path,
+    *,
+    run_name: str,
+    expected_execution_binding: Mapping[str, Any],
+    failure_phase: str,
+    error_type: str,
+    error_message: str,
+) -> dict[str, Any]:
+    """Fail one complete benchmark candidate owned by the named execution."""
+
+    archive = Path(source_zarr).expanduser().resolve()
+    name = _safe_name(run_name, label="candidate run")
+    expected_binding = json_attr_safe(dict(expected_execution_binding))
+    if not expected_binding:
+        raise ValueError("expected_execution_binding must be nonempty.")
+    tombstone_payload = {
+        "schema_id": "palette.analysis_candidate_execution_tombstone",
+        "schema_version": 1,
+        "execution_binding": expected_binding,
+        "failure_phase": str(failure_phase),
+        "error_type": str(error_type),
+        "error_message": str(error_message),
+    }
+    tombstone = {
+        **tombstone_payload,
+        "payload_sha256": canonical_json_sha256(tombstone_payload),
+    }
+    run_path = f"{PARENT_PATH}/{RUN_TYPE}/{name}"
+    with archive_metadata_publication_lock(archive):
+        root = open_zarr_root(archive, mode="a")
+        parent = root[PARENT_PATH]
+        offline = parent[RUN_TYPE]
+        parent_before = _pointer_snapshot(
+            parent, ("latest", "latest_complete", "latest_offline")
+        )
+        offline_before = _pointer_snapshot(offline, ("latest", "latest_complete"))
+        run = offline.get(name)
+        if not isinstance(run, zarr.Group):
+            return {"target_present": False, "tombstoned": False}
+        attrs = run.attrs
+        if attrs.get(EXECUTION_BINDING_ATTR) != expected_binding:
+            raise RuntimeError(
+                "Refusing to tombstone a track candidate owned by another execution."
+            )
+        if attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError("Refusing to tombstone a selector-eligible track run.")
+        if attrs.get("storage_candidate_profile_promoted") is not False:
+            raise RuntimeError("Refusing to tombstone a promoted track profile.")
+        existing = attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR)
+        if attrs.get(RUN_COMPLETION_STATUS_ATTR) == RUN_STATUS_FAILED:
+            if existing != tombstone:
+                raise RuntimeError("Existing track execution tombstone differs.")
+        else:
+            if attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
+                raise RuntimeError(
+                    "Track execution candidate is neither complete nor failed."
+                )
+            mark_run_failed(
+                run,
+                parent_group=None,
+                run_name=name,
+                error=f"{error_type}: {error_message}",
+            )
+            run.attrs["stage_selector_eligible"] = False
+            run.attrs["storage_candidate_profile_promoted"] = False
+            run.attrs[EXECUTION_FAILURE_TOMBSTONE_ATTR] = tombstone
+        if (
+            _pointer_snapshot(parent, ("latest", "latest_complete", "latest_offline"))
+            != parent_before
+            or _pointer_snapshot(offline, ("latest", "latest_complete"))
+            != offline_before
+        ):
+            raise RuntimeError("Track execution tombstone changed selector state.")
+        consolidate_metadata_capture_expected_warnings(archive)
+        receipt = validate_direct_consolidated_subtree(
+            archive,
+            subtree_path=run_path,
+        )
+        direct = zarr.open_group(
+            str(archive), mode="r", zarr_format=3, use_consolidated=False
+        )[run_path]
+        consolidated = zarr.open_group(
+            str(archive), mode="r", zarr_format=3, use_consolidated=True
+        )[run_path]
+        for fresh in (direct, consolidated):
+            if (
+                fresh.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_FAILED
+                or fresh.attrs.get("stage_selector_eligible") is not False
+                or fresh.attrs.get("storage_candidate_profile_promoted") is not False
+                or fresh.attrs.get(EXECUTION_BINDING_ATTR) != expected_binding
+                or fresh.attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR) != tombstone
+            ):
+                raise RuntimeError(
+                    "Track execution failure tombstone did not persist exactly."
+                )
+    return {
+        "target_present": True,
+        "tombstoned": True,
+        "metadata_declarations_sha256": receipt.declarations_sha256,
+    }
+
+
 def materialize_track_kinematics_flat_candidate(
     source_zarr: str | Path,
     *,
@@ -227,16 +407,30 @@ def materialize_track_kinematics_flat_candidate(
     copy_backend: str = "rsync",
     apply: bool = False,
     keep_scratch: bool = False,
+    stage_source_to_scratch: bool = False,
+    exclude_physical_bundle: bool = False,
+    execution_binding: Mapping[str, Any] | None = None,
+    publication_acceptance_validator: PublicationAcceptanceValidator | None = None,
 ) -> dict[str, Any]:
     """Rematerialize and atomically publish one non-promoting v2 candidate."""
 
-    plan = build_track_kinematics_flat_candidate_plan(
-        source_zarr,
-        source_run=source_run,
-        run_name=run_name,
-        scratch_root=scratch_root,
-        profile_id=profile_id,
+    telemetry = PhaseTelemetry(
+        materializer="track_kinematics_flat_candidate",
+        context={
+            "source_run": source_run,
+            "run_name": run_name,
+            "stage_source_to_scratch": bool(stage_source_to_scratch),
+            "exclude_physical_bundle": bool(exclude_physical_bundle),
+        },
     )
+    with telemetry.phase("plan"):
+        plan = build_track_kinematics_flat_candidate_plan(
+            source_zarr,
+            source_run=source_run,
+            run_name=run_name,
+            scratch_root=scratch_root,
+            profile_id=profile_id,
+        )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
@@ -244,83 +438,158 @@ def materialize_track_kinematics_flat_candidate(
         "plan": plan.as_dict(),
     }
     if not apply:
+        result["runtime_telemetry"] = _ordered_runtime_telemetry(telemetry)
         return result
-    if plan.scratch_root.exists():
-        raise FileExistsError(f"Refusing existing scratch root: {plan.scratch_root}.")
-    plan.scratch_root.mkdir(parents=True)
     succeeded = False
     try:
-        source_root = _published_root(plan.source_zarr)
-        source_group = source_root[plan.source_run_path]
-        declarations = build_flat_candidate_declarations(source_group)
-        paths = tuple(declaration.path for declaration in declarations)
-        source_hashes = source_flat_projection_hashes(source_group, declarations)
-        receipt = build_flat_candidate_storage_receipt(
-            source_group,
-            profile=get_storage_profile(plan.profile_id),
-        )
-
-        started = time.perf_counter()
-        local_root = zarr.open_group(
-            str(plan.local_zarr), mode="w-", zarr_format=3, use_consolidated=False
-        )
-        local_parent = local_root
-        for component in (PARENT_PATH + "/" + RUN_TYPE).split("/"):
-            local_parent = local_parent.require_group(component)
-        local_group = local_parent.create_group(plan.run_name)
-        rematerialize_flat_candidate(
-            source_group,
-            local_group,
-            receipt=receipt,
-        )
-        local_group.attrs.update(
-            {
-                "schema_id": TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID,
-                "schema_version": TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION,
-                "method": "track_kinematics_v1_exact_flat_lineage_rematerialization",
-                "method_version": "track_kinematics.flat_lineage_candidate.v2",
-                RUN_NAME_ATTR: plan.run_name,
-                RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
-                "stage_selector_eligible": False,
-                "storage_candidate_profile_promoted": False,
-                "storage_candidate_source_run": plan.source_run_name,
-                "storage_candidate_source_run_path": plan.source_run_path,
-                "legacy_compatibility_policy": (
-                    "v1_structured_source_explicit_only_no_dtype_probe"
-                ),
-            }
-        )
-        local_group.attrs.pop(RUN_COMPLETED_AT_ATTR, None)
-        persist_flat_candidate_contract(
-            local_group,
-            receipt=receipt,
-            declarations=declarations,
-            source_run_path=plan.source_run_path,
-            source_projection_hashes=source_hashes,
-        )
-        mark_run_complete(
-            local_group,
-            parent_group=None,
-            run_name=plan.run_name,
-            run_provenance=build_run_provenance_from_stage_record(
-                source_group.attrs.get("provenance", {}),
-                fallback_command="track_kinematics_flat_candidate_materializer",
-            ),
-        )
-        local_validation = validate_flat_candidate(
-            local_group,
-            source_group=source_group,
-        )
-        if not local_validation["valid"]:
-            raise RuntimeError(
-                f"Local track flat candidate is invalid: {local_validation}."
+        if plan.scratch_root.exists():
+            raise FileExistsError(
+                f"Refusing existing scratch root: {plan.scratch_root}."
             )
-        local_compared = _direct_consolidated_check(
-            plan.local_zarr,
-            run_path=plan.run_path,
-            declaration_paths=paths,
+        plan.scratch_root.mkdir(parents=True)
+        with telemetry.phase("source_staging"):
+            source_root = _published_root(plan.source_zarr)
+            authoritative_source_group = source_root[plan.source_run_path]
+            authoritative_declarations = build_flat_candidate_declarations(
+                authoritative_source_group
+            )
+            if exclude_physical_bundle and any(
+                declaration.path.endswith("/positions_mm")
+                for declaration in authoritative_declarations
+            ):
+                raise ValueError(
+                    "track_flat_v1 explicitly excludes the physical track bundle."
+                )
+            source_hashes = source_flat_projection_hashes(
+                authoritative_source_group,
+                authoritative_declarations,
+            )
+            if stage_source_to_scratch:
+                staged_source_path = plan.scratch_root / "staged-source-run"
+                authoritative_source_path = plan.source_zarr.joinpath(
+                    *plan.source_run_path.split("/")
+                )
+                _copy_source_run_to_scratch(
+                    authoritative_source_path,
+                    staged_source_path,
+                    backend=copy_backend,
+                )
+                source_group = zarr.open_group(
+                    str(staged_source_path),
+                    mode="r",
+                    zarr_format=3,
+                    use_consolidated=False,
+                )
+                declarations = build_flat_candidate_declarations(source_group)
+                staged_hashes = source_flat_projection_hashes(
+                    source_group,
+                    declarations,
+                )
+                if [item.as_manifest() for item in declarations] != [
+                    item.as_manifest() for item in authoritative_declarations
+                ] or staged_hashes != source_hashes:
+                    raise ValueError(
+                        "Staged track source differs from the authoritative projection."
+                    )
+            else:
+                source_group = authoritative_source_group
+                declarations = authoritative_declarations
+            paths = tuple(declaration.path for declaration in declarations)
+            receipt = build_flat_candidate_storage_receipt(
+                source_group,
+                profile=get_storage_profile(plan.profile_id),
+            )
+
+        with telemetry.phase("logical_rematerialization"):
+            local_root = zarr.open_group(
+                str(plan.local_zarr),
+                mode="w-",
+                zarr_format=3,
+                use_consolidated=False,
+            )
+            local_parent = local_root
+            for component in (PARENT_PATH + "/" + RUN_TYPE).split("/"):
+                local_parent = local_parent.require_group(component)
+            local_group = local_parent.create_group(plan.run_name)
+            rematerialize_flat_candidate(
+                source_group,
+                local_group,
+                receipt=receipt,
+            )
+            local_group.attrs.update(
+                {
+                    "schema_id": TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID,
+                    "schema_version": TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION,
+                    "method": (
+                        "track_kinematics_v1_exact_flat_lineage_rematerialization"
+                    ),
+                    "method_version": "track_kinematics.flat_lineage_candidate.v2",
+                    RUN_NAME_ATTR: plan.run_name,
+                    RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
+                    "stage_selector_eligible": False,
+                    "storage_candidate_profile_promoted": False,
+                    "storage_candidate_source_run": plan.source_run_name,
+                    "storage_candidate_source_run_path": plan.source_run_path,
+                    "legacy_compatibility_policy": (
+                        "v1_structured_source_explicit_only_no_dtype_probe"
+                    ),
+                    "physical_bundle_mode": (
+                        "excluded_from_flat_candidate_v1"
+                        if exclude_physical_bundle
+                        else "source_layout_preserved"
+                    ),
+                }
+            )
+            if execution_binding is not None:
+                binding = json_attr_safe(dict(execution_binding))
+                if not binding:
+                    raise ValueError("execution_binding must be one nonempty mapping.")
+                local_group.attrs[EXECUTION_BINDING_ATTR] = binding
+            local_group.attrs.pop(RUN_COMPLETED_AT_ATTR, None)
+            persist_flat_candidate_contract(
+                local_group,
+                receipt=receipt,
+                declarations=declarations,
+                source_run_path=plan.source_run_path,
+                source_projection_hashes=source_hashes,
+            )
+            mark_run_complete(
+                local_group,
+                parent_group=None,
+                run_name=plan.run_name,
+                run_provenance=build_run_provenance_from_stage_record(
+                    source_group.attrs.get("provenance", {}),
+                    fallback_command="track_kinematics_flat_candidate_materializer",
+                ),
+            )
+        with telemetry.phase("local_validation"):
+            local_validation = validate_flat_candidate(
+                local_group,
+                source_group=source_group,
+            )
+            if not local_validation["valid"]:
+                raise RuntimeError(
+                    f"Local track flat candidate is invalid: {local_validation}."
+                )
+        with telemetry.phase("local_consolidation"):
+            consolidate_metadata_capture_expected_warnings(plan.local_zarr)
+        with telemetry.phase("local_direct_consolidated_comparison"):
+            local_compared = _direct_consolidated_check(
+                plan.local_zarr,
+                run_path=plan.run_path,
+                declaration_paths=paths,
+            )
+        materialization_seconds = float(
+            sum(
+                telemetry.duration_seconds(name) or 0.0
+                for name in (
+                    "logical_rematerialization",
+                    "local_validation",
+                    "local_consolidation",
+                    "local_direct_consolidated_comparison",
+                )
+            )
         )
-        materialization_seconds = float(time.perf_counter() - started)
 
         def validate(path: Path) -> dict[str, Any]:
             group = zarr.open_group(
@@ -377,10 +646,10 @@ def materialize_track_kinematics_flat_candidate(
                     "Published track flat candidate is not complete and ineligible."
                 )
 
-        archive_consolidated_counts: list[int] = []
+        publication_acceptance: dict[str, Any] = {}
 
         def consolidate_archive(
-            _root: zarr.Group,
+            root: zarr.Group,
             _parent: zarr.Group,
             run_group: zarr.Group,
         ) -> None:
@@ -392,60 +661,125 @@ def materialize_track_kinematics_flat_candidate(
                 raise RuntimeError(
                     "Track flat candidate lost its complete ineligible state."
                 )
-            archive_consolidated_counts.append(
-                _direct_consolidated_check(
+            authoritative = root[plan.source_run_path]
+            with telemetry.phase("published_validation"):
+                published_validation = validate_flat_candidate(
+                    run_group,
+                    source_group=authoritative,
+                )
+                if not published_validation["valid"]:
+                    raise RuntimeError(
+                        "Published track flat candidate is invalid: "
+                        f"{published_validation}."
+                    )
+            consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+            with telemetry.phase("published_direct_consolidated_comparison"):
+                published_compared = _direct_consolidated_check(
                     plan.source_zarr,
                     run_path=plan.run_path,
                     declaration_paths=paths,
                 )
+            with telemetry.phase("decoded_equality"):
+                published_hashes = flat_candidate_logical_hashes(
+                    run_group,
+                    declarations,
+                )
+                if published_hashes != source_hashes:
+                    raise RuntimeError(
+                        "Published track flat decoded values differ from source."
+                    )
+            with telemetry.phase("physical_inventory"):
+                published_storage = storage_stats(plan.target_run_path)
+                if (
+                    published_storage["file_count"] < 1
+                    or published_storage["apparent_bytes"] < 1
+                    or published_storage["allocated_bytes"] < 1
+                ):
+                    raise RuntimeError(
+                        "Published track flat candidate has no physical payload."
+                    )
+            publication_acceptance.update(
+                archive_direct_consolidated_array_count=published_compared,
+                published_validation=published_validation,
+                published_direct_consolidated_array_count=published_compared,
+                published_hashes=published_hashes,
+                output_storage=published_storage,
             )
+            if publication_acceptance_validator is not None:
+                caller_acceptance = dict(
+                    publication_acceptance_validator(root, _parent, run_group)
+                )
+                publication_acceptance["caller_acceptance"] = json_attr_safe(
+                    caller_acceptance
+                )
 
         def repair_failed_visibility(_target_path: Path) -> None:
             consolidate_metadata_capture_expected_warnings(plan.source_zarr)
 
-        publication = atomic_publish_run_group(
-            AtomicRunPublishSpec(
-                source_zarr=plan.source_zarr,
-                local_run_path=plan.local_run_path,
-                target_run_path=plan.target_run_path,
-                run_name=plan.run_name,
-                lock_suffix="track-flat-lineage-storage-candidate",
-                publish_schema_id=PUBLISH_SCHEMA_ID,
-                policy="track_flat_lineage_byte_planned_atomic_nonpromoting_publish",
-                rollback_policy=(
-                    "retain_failed_public_tombstone_leave_track_selectors_untouched"
+        with telemetry.phase("atomic_publication"):
+            publication = atomic_publish_run_group(
+                AtomicRunPublishSpec(
+                    source_zarr=plan.source_zarr,
+                    local_run_path=plan.local_run_path,
+                    target_run_path=plan.target_run_path,
+                    run_name=plan.run_name,
+                    lock_suffix="track-flat-lineage-storage-candidate",
+                    publish_schema_id=PUBLISH_SCHEMA_ID,
+                    policy=(
+                        "track_flat_lineage_byte_planned_atomic_nonpromoting_publish"
+                    ),
+                    rollback_policy=(
+                        "retain_failed_public_tombstone_leave_track_selectors_untouched"
+                    ),
+                    content_checksum=True,
                 ),
-                content_checksum=True,
-            ),
-            copy_backend=copy_backend,
-            validate_run=validate,
-            prepare_parents=prepare,
-            complete_run=complete,
-            verify_pointers=verify,
-            activate_run=consolidate_archive,
-            repair_failed_publication_visibility=repair_failed_visibility,
-            payload_metadata={
-                "profile_id": plan.profile_id,
-                "source_run": plan.source_run_name,
-                "source_projection_hashes": source_hashes,
-                "local_direct_consolidated_array_count": local_compared,
-                "materialization_seconds": materialization_seconds,
-            },
-        )
-        if archive_consolidated_counts != [len(declarations)]:
-            raise RuntimeError(
-                "Track flat archive metadata was not consolidated exactly once."
+                copy_backend=copy_backend,
+                validate_run=validate,
+                prepare_parents=prepare,
+                complete_run=complete,
+                verify_pointers=verify,
+                activate_run=consolidate_archive,
+                repair_failed_publication_visibility=repair_failed_visibility,
+                payload_metadata={
+                    "profile_id": plan.profile_id,
+                    "source_run": plan.source_run_name,
+                    "source_projection_hashes": source_hashes,
+                    "local_direct_consolidated_array_count": local_compared,
+                    "materialization_seconds": materialization_seconds,
+                },
             )
+        published_hashes = publication_acceptance["published_hashes"]
         result.update(
             status="complete",
             local_validation=local_validation,
             local_direct_consolidated_array_count=local_compared,
-            archive_direct_consolidated_array_count=archive_consolidated_counts[0],
+            archive_direct_consolidated_array_count=publication_acceptance[
+                "archive_direct_consolidated_array_count"
+            ],
+            published_validation=publication_acceptance["published_validation"],
+            published_direct_consolidated_array_count=publication_acceptance[
+                "published_direct_consolidated_array_count"
+            ],
+            source_logical_manifest_sha256=canonical_json_sha256(source_hashes),
+            published_logical_manifest_sha256=canonical_json_sha256(published_hashes),
+            output_storage=publication_acceptance["output_storage"],
+            caller_acceptance=publication_acceptance.get("caller_acceptance"),
             materialization_seconds=materialization_seconds,
             publication=publication,
+            runtime_telemetry=_ordered_runtime_telemetry(telemetry),
         )
         succeeded = True
         return json_attr_safe(result)
+    except BaseException as exc:
+        try:
+            setattr(
+                exc,
+                "palette_runtime_telemetry",
+                _ordered_runtime_telemetry(telemetry),
+            )
+        except BaseException:
+            pass
+        raise
     finally:
         if succeeded and not keep_scratch and plan.scratch_root.exists():
             shutil.rmtree(plan.scratch_root)
