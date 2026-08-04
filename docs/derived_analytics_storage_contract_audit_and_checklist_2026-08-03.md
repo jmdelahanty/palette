@@ -1291,6 +1291,14 @@ Recommended benchmark and promotion-review order:
       any live source, and the unchanged selected full-duration track now
       passes the exact binder. See
       `docs/analytics_query_export_benchmark_contract_v1_2026-08-04.md`.
+- [x] Exercise the runner through its first real full-duration publication and
+      fix the canonical-JSON telemetry boundary it exposed. Sorted JSON object
+      keys no longer masquerade as phase order; the explicit ordered field
+      remains authoritative, exact phase membership and totals still fail
+      closed, and the four-export regression gate passes 69/69 tests. The
+      incomplete immutable v1 attempt is retained as failure evidence and is
+      not a matrix or promotion result. See
+      `docs/analytics_query_export_benchmark_execution_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,

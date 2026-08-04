@@ -114,9 +114,12 @@ def validate_export_runtime_telemetry(payload: Mapping[str, object]) -> None:
     ):
         raise ValueError("Analytics-export runtime telemetry contract is invalid.")
     phases = payload.get("phases_seconds")
-    if not isinstance(phases, Mapping) or tuple(phases) != EXPORT_RUNTIME_PHASES:
-        raise ValueError("Analytics-export runtime phase set or order is invalid.")
-    values = tuple(phases.values())
+    if not isinstance(phases, Mapping) or set(phases) != set(EXPORT_RUNTIME_PHASES):
+        raise ValueError("Analytics-export runtime phase set is invalid.")
+    # JSON object member order is not semantic, and canonical/sorted JSON
+    # publication deliberately reorders this mapping. The separately required
+    # phase_order field owns sequence; totals must follow that explicit order.
+    values = tuple(phases[phase] for phase in EXPORT_RUNTIME_PHASES)
     if any(
         isinstance(value, bool)
         or not isinstance(value, (int, float))
