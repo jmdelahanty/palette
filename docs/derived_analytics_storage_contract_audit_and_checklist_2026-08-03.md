@@ -807,6 +807,17 @@ Recommended benchmark and promotion-review order:
       strace overhead would make that comparison dishonest. The receipt is
       always nonpromoting; representative execution and Crimson/macOS metrics
       remain pending.
+- [x] Implement the immutable cross-language Palette/Crimson consumer receipt.
+      It binds one catalog stage, representative scale, deeply validated family
+      matrix, mounted archive translation, clean producer revision, executable,
+      workload contract, and alternating fresh-process source/candidate trials.
+      The validator derives compatibility from exact typed opens, explicit
+      selection, zero dtype probes/stale publications/production mutations,
+      direct/consolidated equivalence, equal decoded/workload digests, and the
+      fixed latency/throughput/RSS/physical-read metric surface. Receipts from
+      dirty revisions are never evidence-eligible, cross-stage attachment is
+      rejected, and the contract cannot authorize promotion. Representative
+      Palette and Crimson executions remain pending.
 - [x] Add a deterministic suite planner that binds every array workload and
       the whole-run publication workload to the exact logical declaration,
       storage-plan receipt, logical dimensions, seed, and safety policy. It

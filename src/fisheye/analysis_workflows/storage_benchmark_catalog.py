@@ -204,6 +204,25 @@ class DerivedAnalysisStorageBenchmark:
 
         return extract_storage_benchmark_identity(self.stage_id, matrix).as_record()
 
+    def validate_consumer_evidence(
+        self,
+        evidence: Any,
+        *,
+        replay_matrix: bool = False,
+    ) -> None:
+        """Validate external Palette/Crimson evidence for this exact stage."""
+
+        from .storage_consumer_evidence import (
+            require_storage_consumer_evidence,
+        )
+
+        require_storage_consumer_evidence(
+            evidence,
+            replay_matrix=replay_matrix,
+        )
+        if evidence["payload"]["stage_id"] != self.stage_id:
+            raise ValueError("consumer evidence belongs to a different catalog stage")
+
     @property
     def benchmark_coverage_complete(self) -> bool:
         """Return whether every declared evidence category is bound and passed.

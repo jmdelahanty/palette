@@ -62,6 +62,40 @@ The measurement scope is deliberately named `process_tree_file_syscalls`:
 Crimson/macOS still requires its own TensorStore/file metrics and mounted-path
 consumer evidence. The Linux trace cannot substitute for that gate.
 
+## Palette and Crimson consumer evidence
+
+`fisheye.analysis_workflows.storage_consumer_evidence` defines the shared v1
+receipt that a real Palette or Crimson consumer must emit. A receipt covers
+one catalog stage, one representative scale, one exact validated family
+matrix, and one consumer implementation revision. It translates the
+matrix-owned relative source/candidate paths beneath the consumer's mounted
+archive path rather than rewriting scientific run identity.
+
+The required execution is balanced and process-first. Every repetition has
+one source and one candidate trial, source/candidate order alternates, and
+every trial has a distinct process identity. The receipt records exact-schema
+opens, direct/consolidated metadata equivalence, explicit run selection, dtype
+probe count, stale-publication count, production mutations, decoded and
+workload result digests, and a fixed performance measurement surface:
+
+- readiness;
+- primary-read p95;
+- full-scan duration and row throughput;
+- peak RSS; and
+- physical read operations/bytes when the consumer exposes them.
+
+The validator derives the verdict. It requires equal decoded and workload
+digests across both layouts, exact typed opens, metadata equivalence, explicit
+selection, zero dtype probes, zero stale publications, successful processes,
+and no production mutation. A dirty producer revision may record a compatible
+debug result but is never evidence-eligible. The receipt always keeps
+`promotion_authorized=false`; a separate versioned promotion gate remains
+mandatory.
+
+The catalog owns stage-specific validation through
+`DerivedAnalysisStorageBenchmark.validate_consumer_evidence(...)`, preventing
+a valid receipt for one family from being attached to another.
+
 Next steps per family:
 
 - [ ] Connect the scientific writer to the exact plan receipt behind an opt-in
@@ -71,6 +105,9 @@ Next steps per family:
 - [ ] Run balanced repetitions on node-local and shared storage.
 - [ ] Add the real Palette reader workload.
 - [ ] Add the Crimson consumer workload when the family is user-facing there.
+- [x] Define one immutable, cross-language Palette/Crimson consumer evidence
+      contract with exact matrix, revision, workload, path, trial, metric, and
+      derived-verdict bindings.
 - [ ] Compare exact decoded values and direct/consolidated metadata.
 - [x] Implement process-tree file-read, CPU, RSS, raw-trace, and exact matrix
       binding for Linux benchmark commands.
