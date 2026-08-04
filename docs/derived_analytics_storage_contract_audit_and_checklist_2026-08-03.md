@@ -1027,6 +1027,37 @@ Recommended benchmark and promotion-review order:
           axis, scientific parameters, and stimulus windows where applicable.
           Fresh-process tests prove post-request detection, stimulus, and time-
           axis swaps fail before candidate publication.
+- [x] Execute the first full-duration representative family checkpoint for
+      swim bouts on 2026-08-04. The selector-ineligible production-era source
+      could not be silently stamped as current: it lacked the exact array
+      manifest and declared three narrower fixed-byte columns. A disposable
+      benchmark-only compatibility projection widened those columns without
+      changing decoded bytes, was made eligible only inside the isolated
+      archive so the production materializer could consume it, and left the
+      copied parent selectors plus every production selector, registry, and
+      profile unchanged. The clean `e8f3e020` runner then published a 132-array
+      candidate with exact decoded equality, direct/consolidated equivalence,
+      and verified coordinate lineage. The publication receipt digest is
+      `fe03b07bc7a5e93b97f860950e940669cac01abab6062ab7087724485c73cd88`.
+      The five-repetition matrix digest
+      `92e48b23897d352402aa6773ecb366749e89cccc24da1ef60cf346e9a7fa77af`
+      passed every correctness check. The candidate reduced payload objects
+      from 137 to 113 and median full-scan time from 1.356 s to 0.561 s, but
+      median primary-access time regressed from 13.700 s to 30.164 s and median
+      RSS rose from 500.7 MiB to 511.8 MiB. A separate one-pair process-tree
+      trace, digest
+      `4ba30f354dff3944b068e7d080bbf255f68aa1f135d8be9087e0c3c7b6094e03`,
+      bound 2,437,806,661 process-requested file bytes, 87,267 attributed read
+      operations, and 541 unique objects to that matrix. Those bytes are not
+      network-transfer evidence, traced latency is invalid, and the evidence
+      remains under the disposable `/tmp/.palette_benchmarks` workflow rather
+      than an immutable shared publication. The candidate is therefore not a
+      profile-promotion result; the access regression, durable evidence
+      publication, short-scale execution, and Palette/Crimson consumer gates
+      remain open. The execution receipt also exposed non-monotone phase
+      timestamps around atomic publication, so per-phase timing is not yet
+      accepted as promotion evidence even though the scientific publication
+      and nonmutation gates passed.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
