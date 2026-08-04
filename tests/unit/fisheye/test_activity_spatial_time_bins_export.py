@@ -110,6 +110,32 @@ def test_binning_contract_rejects_invalid_widths(value: object) -> None:
         )
 
 
+def test_extraction_policy_batches_whole_bins_with_bounded_source_windows() -> None:
+    policy = mod.activity_spatial_extraction_policy(
+        source_window_rows=131_072,
+        bin_size_frames=150,
+    )
+
+    assert policy["requested_source_window_rows"] == 131_072
+    assert policy["effective_bins_per_source_window"] == 873
+    assert policy["effective_source_frame_span"] == 130_950
+    assert policy["read_policy"] == ("consecutive_global_bins_bounded_source_window_v1")
+    assert policy["payload_sha256"] == canonical_json_sha256(
+        {key: value for key, value in policy.items() if key != "payload_sha256"}
+    )
+
+
+@pytest.mark.parametrize("value", (0, -1, True, 1.5))
+def test_extraction_policy_rejects_nonpositive_or_noninteger_windows(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="positive exact integer"):
+        mod.activity_spatial_extraction_policy(
+            source_window_rows=value,  # type: ignore[arg-type]
+            bin_size_frames=150,
+        )
+
+
 def test_time_bins_preserve_gaps_and_split_bout_occupancy() -> None:
     frames = np.asarray([0, 1, 2, 6, 7], dtype=np.int64)
     rows = mod.summarize_activity_spatial_track(
@@ -529,6 +555,7 @@ def _publish(
     *,
     export_run_id: str,
     output_name: str = "exports",
+    source_window_rows: int = mod.DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     bound = _publisher_bound_source(monkeypatch, tmp_path)
@@ -548,6 +575,7 @@ def _publish(
         output_root=tmp_path / output_name,
         export_run_id=export_run_id,
         scratch_root=tmp_path / f"scratch_{output_name}",
+        source_window_rows=source_window_rows,
         row_group_rows=1,
         overwrite=overwrite,
     )
@@ -576,6 +604,58 @@ def test_activity_spatial_publisher_writes_exact_manifest_selected_part(
     assert table["time_bin_index"] == [0, 1]
     assert table["source_swim_bout_run"] == ["bouts_track_7"] * 2
     assert table["position_coordinate_space"] == ["physical_mm"] * 2
+    extraction = result["activity_spatial_time_bins_export"]["extraction_policy"]
+    assert extraction["requested_source_window_rows"] == (
+        mod.DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS
+    )
+
+
+def test_multi_bin_source_windows_preserve_exact_rows_and_reduce_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    original = mod.track_export._read_projected_window
+    active = "single"
+    calls = {"single": 0, "batched": 0}
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls[active] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mod.track_export, "_read_projected_window", counted)
+    single = _publish(
+        monkeypatch,
+        tmp_path,
+        export_run_id="window_equivalence",
+        output_name="single_bin_exports",
+        source_window_rows=1,
+    )
+    active = "batched"
+    batched = _publish(
+        monkeypatch,
+        tmp_path,
+        export_run_id="window_equivalence",
+        output_name="multi_bin_exports",
+        source_window_rows=4,
+    )
+
+    assert calls == {"single": 2, "batched": 1}
+    assert (
+        single["activity_spatial_time_bins_export"]["decoded_payload"]
+        == batched["activity_spatial_time_bins_export"]["decoded_payload"]
+    )
+    single_part = next((tmp_path / "single_bin_exports").rglob("*.parquet"))
+    batched_part = next((tmp_path / "multi_bin_exports").rglob("*.parquet"))
+    single_payload, single_columns = mod._decoded_part_payload(single_part)
+    batched_payload, batched_columns = mod._decoded_part_payload(batched_part)
+    assert single_payload == batched_payload
+    assert tuple(single_columns) == tuple(batched_columns)
+    for name, values in single_columns.items():
+        assert len(values) == len(batched_columns[name])
+        assert all(
+            mod._same_float(left, right)
+            for left, right in zip(values, batched_columns[name], strict=True)
+        )
 
 
 def test_activity_spatial_validator_rejects_rehashed_parquet_tampering(

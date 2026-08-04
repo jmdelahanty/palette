@@ -44,6 +44,7 @@ def _request(tmp_path: Path, *, family_id: str = "kinematics_samples"):
         }
         publisher_parameters = {
             "requested_bin_size_s": 5.0,
+            "source_window_rows": 131_072,
             "row_group_rows": 65_536,
         }
     else:

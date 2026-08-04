@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from fisheye.analytics_exports.activity_spatial_time_bins import (
+    DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
     export_activity_spatial_time_bins,
 )
 
@@ -58,6 +59,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--export-run-id", required=True)
     parser.add_argument("--scratch-root", type=Path, required=True)
+    parser.add_argument(
+        "--source-window-rows",
+        type=int,
+        default=DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
+    )
     parser.add_argument("--row-group-rows", type=int, default=65_536)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -83,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         scratch_root=args.scratch_root,
         swim_bout_runs_by_track=run_map,
         single_track_swim_bout_run=args.single_track_swim_bout_run,
+        source_window_rows=args.source_window_rows,
         row_group_rows=args.row_group_rows,
         overwrite=bool(args.overwrite),
     )

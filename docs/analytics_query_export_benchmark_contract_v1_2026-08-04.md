@@ -82,7 +82,9 @@ One fresh process calls the real maintained exporter. The result binds:
 - the exporter's exact final decoded validation;
 - all ten publisher phase durations;
 - publisher wall/CPU time and process-local peak RSS; and
-- process-tree wall/CPU/RSS/thread samples from the outer wrapper.
+- process-tree wall/CPU/RSS/thread samples from the outer wrapper; and
+- process-tree requested characters, read/write syscall counts, and
+  OS-reported storage bytes from resource-telemetry v2.
 
 Runtime telemetry is result-only. The runner rejects an immutable export
 manifest containing that field.
@@ -111,9 +113,13 @@ the root, selected parents, and every selected source subtree. Any change
 invalidates the matrix.
 
 The local Parquet reader cannot report network requests or compressed network
-transfer. Those fields remain exact JSON nulls. Linux process-requested file
-bytes must be measured separately with `trace_storage_io`; mounted Crimson
-request/transfer behavior remains separate consumer evidence.
+transfer. Those fields remain exact JSON nulls. Resource-telemetry v2 records
+process-tree requested characters/syscalls and OS-reported storage bytes. The
+requested-character counter includes cache-served reads, while storage bytes
+depend on what the host OS reports; neither may be labeled network transfer.
+Path-attributed Linux reads remain the responsibility of `trace_storage_io`,
+and mounted Crimson request/transfer behavior remains separate consumer
+evidence.
 
 No matrix result authorizes promotion. `promotion_authorized` is required to
 remain false.

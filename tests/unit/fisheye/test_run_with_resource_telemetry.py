@@ -10,13 +10,19 @@ import time
 from fisheye.diagnostics.run_with_resource_telemetry import run_with_resource_telemetry
 
 
-def test_run_with_resource_telemetry_writes_summary_samples_and_stdout(tmp_path: Path) -> None:
+def test_run_with_resource_telemetry_writes_summary_samples_and_stdout(
+    tmp_path: Path,
+) -> None:
     summary_path = tmp_path / "resources.json"
     samples_path = tmp_path / "resources.jsonl"
     stdout_path = tmp_path / "command.stdout"
 
     summary = run_with_resource_telemetry(
-        [sys.executable, "-c", "sum(i * i for i in range(2_000_000)); print('telemetry-ok')"],
+        [
+            sys.executable,
+            "-c",
+            "sum(i * i for i in range(2_000_000)); print('telemetry-ok')",
+        ],
         summary_json=summary_path,
         samples_jsonl=samples_path,
         stdout_log=stdout_path,
@@ -26,7 +32,10 @@ def test_run_with_resource_telemetry_writes_summary_samples_and_stdout(tmp_path:
     )
 
     persisted = json.loads(summary_path.read_text(encoding="utf-8"))
-    samples = [json.loads(line) for line in samples_path.read_text(encoding="utf-8").splitlines()]
+    samples = [
+        json.loads(line)
+        for line in samples_path.read_text(encoding="utf-8").splitlines()
+    ]
     assert summary == persisted
     assert persisted["status"] == "ok"
     assert persisted["exit_code"] == 0
@@ -37,6 +46,12 @@ def test_run_with_resource_telemetry_writes_summary_samples_and_stdout(tmp_path:
     assert persisted["sample_count"] == len(samples)
     assert samples
     assert max(int(item["process_count"]) for item in samples) >= 1
+    process_io = persisted["process_tree_io"]
+    assert process_io["available_process_count"] >= 1
+    assert process_io["read_characters"] > 0
+    assert process_io["read_syscalls"] > 0
+    assert process_io["semantics"]["not_network_transfer"] is True
+    assert all("process_tree_io" in item for item in samples)
     assert "telemetry-ok" in stdout_path.read_text(encoding="utf-8")
 
 

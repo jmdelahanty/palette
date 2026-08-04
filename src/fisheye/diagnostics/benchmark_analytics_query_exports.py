@@ -56,7 +56,6 @@ from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr.benchmark_runtime import peak_rss_bytes, utc_now
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
-
 BENCHMARK_ID = "analytics_query_export_benchmark_v1"
 REQUEST_SCHEMA_ID = "palette.analytics_query_export_benchmark.request"
 REQUEST_SCHEMA_VERSION = 1
@@ -139,7 +138,11 @@ _FAMILIES = {
             "track_scope",
             "swim_bout_runs_by_track",
         ),
-        publisher_fields=("requested_bin_size_s", "row_group_rows"),
+        publisher_fields=(
+            "requested_bin_size_s",
+            "source_window_rows",
+            "row_group_rows",
+        ),
         axis_column="start_acquisition_frame_index",
         hot_columns=(
             "recording_id",
@@ -1383,6 +1386,9 @@ def _request_from_args(args: argparse.Namespace) -> dict[str, Any]:
         parameters = {
             "requested_bin_size_s": _required_cli_value(
                 args.requested_bin_size_s, option="--requested-bin-size-s"
+            ),
+            "source_window_rows": _required_cli_value(
+                args.source_window_rows, option="--source-window-rows"
             ),
             "row_group_rows": args.row_group_rows,
         }

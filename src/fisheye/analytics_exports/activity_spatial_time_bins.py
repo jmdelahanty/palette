@@ -93,7 +93,7 @@ ACTIVITY_SPATIAL_BINNING_POLICY = (
 ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID = (
     "palette.analytics_export.activity_spatial_time_bins"
 )
-ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION = 2
+ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION = 3
 ACTIVITY_SPATIAL_DECODED_PAYLOAD_SCHEMA_ID = (
     "palette.activity_spatial_time_bins.decoded_payload"
 )
@@ -102,6 +102,11 @@ ACTIVITY_SPATIAL_PARQUET_POLICY_SCHEMA_ID = (
     "palette.activity_spatial_time_bins.parquet_policy"
 )
 ACTIVITY_SPATIAL_PARQUET_POLICY_SCHEMA_VERSION = 1
+ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_ID = (
+    "palette.activity_spatial_time_bins.extraction_policy"
+)
+ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_VERSION = 1
+DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS = 131_072
 
 _REQUIRED_BOUT_FIELDS = frozenset(
     {
@@ -805,6 +810,33 @@ def activity_spatial_parquet_policy(*, row_group_rows: int) -> dict[str, Any]:
     return {**body, "payload_sha256": canonical_json_sha256(body)}
 
 
+def activity_spatial_extraction_policy(
+    *,
+    source_window_rows: int,
+    bin_size_frames: int,
+) -> dict[str, Any]:
+    """Return the bounded multi-bin source-read policy."""
+
+    for label, value in (
+        ("source_window_rows", source_window_rows),
+        ("bin_size_frames", bin_size_frames),
+    ):
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"{label} must be a positive exact integer.")
+    bins_per_window = max(1, source_window_rows // bin_size_frames)
+    body: dict[str, Any] = {
+        "schema_id": ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_ID,
+        "schema_version": ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_VERSION,
+        "requested_source_window_rows": source_window_rows,
+        "bin_size_frames": bin_size_frames,
+        "effective_bins_per_source_window": bins_per_window,
+        "effective_source_frame_span": bins_per_window * bin_size_frames,
+        "read_policy": "consecutive_global_bins_bounded_source_window_v1",
+        "semantic_equivalence": "identical_per_bin_rows_independent_of_window_size",
+    }
+    return {**body, "payload_sha256": canonical_json_sha256(body)}
+
+
 def _footer_metadata() -> dict[bytes, bytes]:
     return {
         b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
@@ -967,9 +999,10 @@ def _write_streaming_part(
     *,
     part_path: Path,
     binning_contract: Mapping[str, Any],
+    source_window_rows: int,
     row_group_rows: int,
 ) -> dict[str, Any]:
-    """Read one global bin at a time and write one bounded exact part."""
+    """Read bounded consecutive-bin windows and write one exact part."""
 
     import pyarrow.parquet as pq
 
@@ -994,6 +1027,11 @@ def _write_streaming_part(
     decoded_hasher = _DecodedPayloadHasher()
     track_source = bound.binding["track_source_binding"]
     bin_frames = int(binning_contract["bin_size_frames"])
+    extraction = activity_spatial_extraction_policy(
+        source_window_rows=source_window_rows,
+        bin_size_frames=bin_frames,
+    )
+    bins_per_window = int(extraction["effective_bins_per_source_window"])
     try:
         for track_record in track_source["tracks"]:
             track_id = int(track_record["track_id"])
@@ -1016,11 +1054,19 @@ def _write_streaming_part(
                 binning_contract=binning_contract,
             )
             track_rows: list[dict[str, Any]] = []
-            for bin_index in range(first_bin, last_bin + 1):
-                lower = bin_index * bin_frames
-                upper = lower + bin_frames
-                start = int(np.searchsorted(frame_axis, lower, side="left"))
-                stop = int(np.searchsorted(frame_axis, upper, side="left"))
+            for window_first_bin in range(
+                first_bin,
+                last_bin + 1,
+                bins_per_window,
+            ):
+                window_last_bin = min(
+                    last_bin,
+                    window_first_bin + bins_per_window - 1,
+                )
+                window_lower = window_first_bin * bin_frames
+                window_upper = (window_last_bin + 1) * bin_frames
+                start = int(np.searchsorted(frame_axis, window_lower, side="left"))
+                stop = int(np.searchsorted(frame_axis, window_upper, side="left"))
                 if stop > start:
                     columns, source_frames = track_export._read_projected_window(
                         track_group,
@@ -1035,7 +1081,7 @@ def _write_streaming_part(
                         raise ValueError(
                             f"Track {track_id} source frame axis changed while reading."
                         )
-                    positions = np.column_stack(
+                    window_positions = np.column_stack(
                         (columns["position_x_mm"], columns["position_y_mm"])
                     )
                 else:
@@ -1048,32 +1094,51 @@ def _write_streaming_part(
                         "frame_path_distance_mm": np.empty(0, dtype=np.float32),
                     }
                     source_frames = np.empty(0, dtype=np.int64)
-                    positions = np.empty((0, 2), dtype=np.float64)
-                metric_rows = summarize_activity_spatial_track(
-                    track_id=track_id,
-                    source_acquisition_frame_index=source_frames,
-                    source_observed=columns["source_observed"],
-                    sample_valid=columns["sample_valid"],
-                    position_finite=columns["position_finite"],
-                    transition_valid=columns["transition_valid"],
-                    positions_mm=positions,
-                    filtered_speed_mm_s=columns["speed_mm_s"],
-                    filtered_path_distance_mm=columns["frame_path_distance_mm"],
-                    bouts=bout_source.events.bouts,
-                    source_sample_rate_hz=float(
-                        binning_contract["source_sample_rate_hz"]
-                    ),
-                    requested_bin_size_s=float(
-                        binning_contract["requested_bin_size_s"]
-                    ),
-                    track_frame_span=(first_frame, last_frame),
-                    time_bin_range=(bin_index, bin_index),
-                )
-                if len(metric_rows) != 1:
-                    raise RuntimeError(
-                        "One requested bin did not yield exactly one row."
+                    window_positions = np.empty((0, 2), dtype=np.float64)
+                for bin_index in range(window_first_bin, window_last_bin + 1):
+                    lower = bin_index * bin_frames
+                    upper = lower + bin_frames
+                    local_start = int(
+                        np.searchsorted(source_frames, lower, side="left")
                     )
-                track_rows.append({**static, **metric_rows[0]})
+                    local_stop = int(np.searchsorted(source_frames, upper, side="left"))
+                    metric_rows = summarize_activity_spatial_track(
+                        track_id=track_id,
+                        source_acquisition_frame_index=source_frames[
+                            local_start:local_stop
+                        ],
+                        source_observed=columns["source_observed"][
+                            local_start:local_stop
+                        ],
+                        sample_valid=columns["sample_valid"][local_start:local_stop],
+                        position_finite=columns["position_finite"][
+                            local_start:local_stop
+                        ],
+                        transition_valid=columns["transition_valid"][
+                            local_start:local_stop
+                        ],
+                        positions_mm=window_positions[local_start:local_stop],
+                        filtered_speed_mm_s=columns["speed_mm_s"][
+                            local_start:local_stop
+                        ],
+                        filtered_path_distance_mm=columns["frame_path_distance_mm"][
+                            local_start:local_stop
+                        ],
+                        bouts=bout_source.events.bouts,
+                        source_sample_rate_hz=float(
+                            binning_contract["source_sample_rate_hz"]
+                        ),
+                        requested_bin_size_s=float(
+                            binning_contract["requested_bin_size_s"]
+                        ),
+                        track_frame_span=(first_frame, last_frame),
+                        time_bin_range=(bin_index, bin_index),
+                    )
+                    if len(metric_rows) != 1:
+                        raise RuntimeError(
+                            "One requested bin did not yield exactly one row."
+                        )
+                    track_rows.append({**static, **metric_rows[0]})
             source_hasher.finish()
             table = _rows_to_arrow_table(track_rows)
             decoded_hasher.update(table.to_pydict())
@@ -1089,6 +1154,7 @@ _EXPORT_ENVELOPE_FIELDS = frozenset(
         "schema_version",
         "source_binding",
         "binning_contract",
+        "extraction_policy",
         "decoded_payload",
         "parquet_policy",
         "payload_sha256",
@@ -1255,6 +1321,16 @@ def _validate_export_envelope(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     )
     if dict(binning) != expected_binning:
         raise ValueError("Activity/spatial binning contract differs from policy.")
+    extraction = _validate_payload_digest(
+        body.get("extraction_policy"),
+        label="activity/spatial extraction policy",
+    )
+    expected_extraction = activity_spatial_extraction_policy(
+        source_window_rows=extraction.get("requested_source_window_rows"),
+        bin_size_frames=binning["bin_size_frames"],
+    )
+    if dict(extraction) != expected_extraction:
+        raise ValueError("Activity/spatial extraction policy differs from policy.")
     decoded = _validate_payload_digest(
         body.get("decoded_payload"),
         label="activity/spatial decoded payload",
@@ -1542,6 +1618,7 @@ def export_activity_spatial_time_bins(
     scratch_root: str | Path,
     swim_bout_runs_by_track: Mapping[int, str] | None = None,
     single_track_swim_bout_run: str | None = None,
+    source_window_rows: int = DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
     row_group_rows: int = 65_536,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -1618,6 +1695,10 @@ def export_activity_spatial_time_bins(
             ),
             requested_bin_size_s=requested_bin_size_s,
         )
+        extraction = activity_spatial_extraction_policy(
+            source_window_rows=source_window_rows,
+            bin_size_frames=int(binning["bin_size_frames"]),
+        )
     generation_id = uuid.uuid4().hex
     final_generation_path = generation_relative_path(run_id, generation_id)
     staging = publication_staging_root(destination, run_id, generation_id)
@@ -1642,6 +1723,7 @@ def export_activity_spatial_time_bins(
                 before,
                 part_path=scratch_part,
                 binning_contract=binning,
+                source_window_rows=source_window_rows,
                 row_group_rows=row_group_rows,
             )
         with runtime.measure("source_binding_after"):
@@ -1700,6 +1782,7 @@ def export_activity_spatial_time_bins(
             "schema_version": ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION,
             "source_binding": before.binding,
             "binning_contract": binning,
+            "extraction_policy": extraction,
             "decoded_payload": decoded_payload,
             "parquet_policy": policy,
         }
@@ -1746,6 +1829,7 @@ def export_activity_spatial_time_bins(
                 "source_mutation": False,
                 "scratch_root": str(scratch),
                 "requested_bin_size_s": float(requested_bin_size_s),
+                "source_window_rows": source_window_rows,
                 "overwrite": bool(overwrite),
             },
             "activity_spatial_time_bins_export": export_envelope,
@@ -1784,10 +1868,13 @@ __all__ = [
     "ACTIVITY_SPATIAL_BINNING_POLICY",
     "ACTIVITY_SPATIAL_BINNING_SCHEMA_ID",
     "ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID",
+    "ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_ID",
     "ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID",
+    "DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS",
     "BoundActivitySpatialSources",
     "BoundSwimBoutSource",
     "activity_spatial_binning_contract",
+    "activity_spatial_extraction_policy",
     "activity_spatial_parquet_policy",
     "bind_activity_spatial_sources",
     "export_activity_spatial_time_bins",

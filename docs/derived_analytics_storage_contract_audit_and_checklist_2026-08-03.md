@@ -1313,6 +1313,18 @@ Recommended benchmark and promotion-review order:
       `bout_metrics_valid=false`; infinities and negative values still fail.
       The disposable preflight is not clean-revision benchmark evidence. See
       `docs/diagnostics/activity_spatial_source_fixture_preflight_2026-08-04.md`.
+- [x] Run the clean full-duration activity/spatial baseline and correct the
+      access pattern it exposed. The 7,920-row product and five fresh-process
+      read matrix passed exact validation, but one 150-frame source read per
+      bin made scratch publication take 2,437.4 seconds and reached at least
+      82.17 billion requested read characters during live diagnostics. The
+      export envelope is now revision 3 with a digested bounded multi-bin
+      extraction policy: the 131,072-row default covers 873 bins per read for
+      this 30 FPS source, while unit evidence proves identical decoded rows.
+      Process resource telemetry v2 now persists requested characters,
+      syscalls, and OS-reported storage bytes without labeling them network
+      transfer. The paired clean optimized run remains required; see
+      `docs/diagnostics/activity_spatial_full_duration_baseline_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,

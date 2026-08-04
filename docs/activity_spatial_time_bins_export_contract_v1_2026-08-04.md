@@ -2,11 +2,12 @@
 
 Date: 2026-08-04
 
-Status: exact logical/Arrow schema, per-track bout-source binder, bounded bin
-aggregator, manifest-exclusive publisher, decoded validator, CLI, and workflow
-execution adapter implemented. Promotion evidence remains unimplemented. This
-decision activates no workflow default, selector, registry authority, Zarr
-physical profile, or canonical-data change.
+Status: exact logical/Arrow schema, per-track bout-source binder, bounded
+multi-bin source reader, manifest-exclusive publisher, decoded validator, CLI,
+and workflow execution adapter implemented. A full-duration unoptimized
+baseline passed and motivated the multi-bin reader; the paired optimized gate
+remains pending. This decision activates no workflow default, selector,
+registry authority, Zarr physical profile, or canonical-data change.
 
 ## Decision
 
@@ -85,7 +86,8 @@ so a bout spanning two bins contributes occupancy to both without double
 counting overlapping frames. These two allocation rules are deliberately
 separate and named.
 
-The source-binding, binning, and export envelopes are revision 2. A finite
+The source-binding and binning envelopes are revision 2. The export envelope is
+revision 3 because it additionally binds an exact extraction policy. A finite
 nonnegative bout duration is mandatory. Bout path length may additionally be
 IEEE NaN when the source trajectory cannot support that measurement; infinity
 and negative finite values remain invalid. If any bout starting in a bin has an
@@ -107,14 +109,22 @@ The publisher must fail closed unless it can prove and recheck:
 - unchanged source manifests, completion state, and selection snapshots before
   the manifest-exclusive export becomes visible.
 
-The publisher streams one globally aligned bin at a time, constructs its part
-on an explicit non-overlapping node-local scratch root, verifies every selected
-track-motion source byte against the sealed source manifest, hashes every exact
-decoded Arrow column, copies into a hidden generation, and publishes only
-through the existing manifest-exclusive compare-and-swap boundary. It rebinds
-all track and bout sources after extraction and before visibility. Failed
-replacement leaves the prior manifest-selected generation intact. The compact
-in-memory exporter rejects this dedicated table name.
+The publisher reads consecutive globally aligned bins in bounded source
+windows. `source_window_rows` is a positive exact integer; the effective bins
+per read are `max(1, source_window_rows // bin_size_frames)`. A read never
+splits a bin, restarts bin identity, or changes decoded rows. The default
+131,072-row budget turns a 30 FPS, 5-second-bin recording from roughly 7,920
+150-row reads into nine bounded reads. Requested/effective rows, bins per
+window, and the policy ID are persisted in the digested export envelope.
+
+The publisher constructs its part on an explicit non-overlapping node-local
+scratch root, verifies every selected track-motion source byte against the
+sealed source manifest, hashes every exact decoded Arrow column, copies into a
+hidden generation, and publishes only through the existing manifest-exclusive
+compare-and-swap boundary. It rebinds all track and bout sources after
+extraction and before visibility. Failed replacement leaves the prior
+manifest-selected generation intact. The compact in-memory exporter rejects
+this dedicated table name.
 
 The CLI accepts a repeated exact `TRACK_ID=SWIM_BOUT_RUN` map. The packaged DAG
 currently carries one swim-bout dependency, so its adapter uses the explicit
@@ -144,8 +154,9 @@ position moments as arena occupancy.
 
 ## Remaining Gates
 
-- Benchmark short and full-duration writer/read/copy/validation/publication
-  behavior before considering default activation.
+- Complete the paired optimized full-duration run and representative-short
+  writer/read/copy/validation/publication gate before considering default
+  activation.
 
 ## Validation Evidence
 
