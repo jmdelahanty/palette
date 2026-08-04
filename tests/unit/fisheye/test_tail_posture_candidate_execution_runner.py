@@ -37,6 +37,8 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye.test_tail_posture_candidate_execution import (
     SOURCE_RUN,
     _invocation_parameters,
+    canonical_refined_template,  # noqa: F401
+    canonical_subject_shape_profile_template,  # noqa: F401
     tail_posture_execution_archive,  # noqa: F401
 )
 

@@ -14,7 +14,6 @@ from fisheye.analysis_workflows.storage_contract_catalog import (
     DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE,
 )
 
-
 EXPECTED_ATOMIC = {
     "track_kinematics",
     "swim_bouts",
@@ -27,9 +26,10 @@ EXPECTED_ATOMIC = {
     "detection_occupancy",
     "session_occupancy",
     "chaser_distance",
+    "tail_posture_view",
     "bout_classification",
 }
-EXPECTED_DIRECT = {"tail_posture_view"}
+EXPECTED_DIRECT: set[str] = set()
 
 
 def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:
@@ -47,11 +47,13 @@ def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:
         expected_parent = (
             "analysis/chaser_distance_storage_candidates"
             if candidate.stage_id == "chaser_distance"
-            else "analysis/track_kinematics_runs/offline"
-            if candidate.stage_id == "track_kinematics"
-            else DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[
-                candidate.stage_id
-            ].run_parent
+            else (
+                "analysis/track_kinematics_runs/offline"
+                if candidate.stage_id == "track_kinematics"
+                else DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[
+                    candidate.stage_id
+                ].run_parent
+            )
         )
         assert candidate.run_parent == expected_parent
         record = candidate.as_record()
@@ -62,13 +64,17 @@ def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:
 def test_atomic_and_guarded_direct_boundaries_are_exact() -> None:
     for stage_id in EXPECTED_ATOMIC:
         candidate = DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE[stage_id]
-        assert candidate.publication_mode is StorageCandidatePublicationMode.SHARED_ATOMIC
+        assert (
+            candidate.publication_mode is StorageCandidatePublicationMode.SHARED_ATOMIC
+        )
         assert candidate.consolidates_before_return is True
         assert candidate.repairs_failed_visibility is True
         assert candidate.uses_shared_atomic_publisher()
     for stage_id in EXPECTED_DIRECT:
         candidate = DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE[stage_id]
-        assert candidate.publication_mode is StorageCandidatePublicationMode.GUARDED_DIRECT
+        assert (
+            candidate.publication_mode is StorageCandidatePublicationMode.GUARDED_DIRECT
+        )
         assert candidate.consolidates_before_return is False
         assert candidate.repairs_failed_visibility is False
         assert not candidate.uses_shared_atomic_publisher()
@@ -87,9 +93,7 @@ def test_track_candidate_owns_the_existing_offline_scope_only() -> None:
     candidate = DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE["track_kinematics"]
 
     assert contract.run_parent == "analysis/track_kinematics_runs"
-    assert contract.availability_parents == (
-        "analysis/track_kinematics_runs/offline",
-    )
+    assert contract.availability_parents == ("analysis/track_kinematics_runs/offline",)
     assert candidate.run_parent == "analysis/track_kinematics_runs/offline"
 
 
@@ -121,8 +125,14 @@ def test_candidate_declaration_fails_closed(
 
 def test_guarded_direct_candidate_cannot_claim_atomic_guarantees() -> None:
     base = DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE["tail_posture_view"]
+    guarded = replace(
+        base,
+        publication_mode=StorageCandidatePublicationMode.GUARDED_DIRECT,
+        consolidates_before_return=False,
+        repairs_failed_visibility=False,
+    )
     with pytest.raises(ValueError, match="do not own archive consolidation"):
-        replace(base, consolidates_before_return=True)
+        replace(guarded, consolidates_before_return=True)
 
 
 def test_shared_atomic_candidate_requires_consolidation_and_repair() -> None:

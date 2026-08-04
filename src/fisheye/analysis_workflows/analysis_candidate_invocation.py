@@ -37,8 +37,7 @@ class CandidateInvocationContract(str, Enum):
     STIMULUS_RESPONSE_V1 = "stimulus_response_v1"
     STIMULUS_EPOCHS_V1 = "stimulus_epochs_v1"
     CHASER_DISTANCE_BASE_V1 = "chaser_distance_base_v1"
-    TAIL_POSTURE_DIRECT_V1 = "tail_posture_direct_v1"
-    BOUT_CLASSIFICATION_DIRECT_V1 = "bout_classification_direct_v1"
+    TAIL_POSTURE_V1 = "tail_posture_v1"
     BOUT_CLASSIFICATION_V1 = "bout_classification_v1"
 
 
@@ -449,6 +448,22 @@ def _require_chaser_distance_base(parameters: object) -> Mapping[str, Any]:
     return parsed
 
 
+def _require_stimulus_response(parameters: object) -> Mapping[str, Any]:
+    from .stimulus_response_candidate_execution import (
+        require_stimulus_response_invocation_parameters,
+    )
+
+    return require_stimulus_response_invocation_parameters(parameters)
+
+
+def _require_tail_posture(parameters: object) -> Mapping[str, Any]:
+    from .tail_posture_candidate_execution import (
+        require_tail_posture_invocation_parameters,
+    )
+
+    return require_tail_posture_invocation_parameters(parameters)
+
+
 def _require_bout_classification(parameters: object) -> Mapping[str, Any]:
     from .bout_classification_candidate_execution import (
         require_bout_classification_invocation_parameters,
@@ -467,9 +482,9 @@ _PARAMETER_VALIDATORS = {
     CandidateInvocationContract.CHASER_DISTANCE_BASE_V1: (
         _require_chaser_distance_base
     ),
-    CandidateInvocationContract.BOUT_CLASSIFICATION_V1: (
-        _require_bout_classification
-    ),
+    CandidateInvocationContract.STIMULUS_RESPONSE_V1: _require_stimulus_response,
+    CandidateInvocationContract.TAIL_POSTURE_V1: _require_tail_posture,
+    CandidateInvocationContract.BOUT_CLASSIFICATION_V1: (_require_bout_classification),
 }
 
 
@@ -776,6 +791,108 @@ def build_chaser_distance_base_invocation(
     )
 
 
+def build_stimulus_response_invocation(
+    *,
+    source_track_kinematics_scope: str,
+    source_track_kinematics_run: str,
+    source_track_motion_manifest_sha256: str,
+    source_stimulus_run: str,
+    source_stimulus_logical_tree_sha256: str,
+    source_stimulus_coordinate_lineage_sha256: str,
+    source_bout_mode: str,
+    source_swim_bout_run: str | None,
+    source_swim_bout_logical_tree_sha256: str | None,
+    scientific_parameters: Mapping[str, Any],
+    execution_backend: str,
+    source_staging_mode: str,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+    check_capacity: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.STIMULUS_RESPONSE_V1,
+        {
+            "source_track_kinematics_scope": source_track_kinematics_scope,
+            "source_track_kinematics_run": source_track_kinematics_run,
+            "source_track_motion_manifest_sha256": (
+                source_track_motion_manifest_sha256
+            ),
+            "source_stimulus_run": source_stimulus_run,
+            "source_stimulus_logical_tree_sha256": (
+                source_stimulus_logical_tree_sha256
+            ),
+            "source_stimulus_coordinate_lineage_sha256": (
+                source_stimulus_coordinate_lineage_sha256
+            ),
+            "source_bout_mode": source_bout_mode,
+            "source_swim_bout_run": source_swim_bout_run,
+            "source_swim_bout_logical_tree_sha256": (
+                source_swim_bout_logical_tree_sha256
+            ),
+            "scientific_parameters": dict(scientific_parameters),
+            "execution_backend": execution_backend,
+            "source_staging_mode": source_staging_mode,
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+            "check_capacity": check_capacity,
+        },
+    )
+
+
+def build_tail_posture_invocation(
+    *,
+    source_schema_id: str,
+    source_schema_version: int,
+    source_logical_schema_mode: str,
+    source_subject_shape_run: str,
+    source_tail_posture_manifest_sha256: str,
+    source_subject_shape_manifest_sha256: str,
+    source_tail_kinematics_run: str | None,
+    source_tail_kinematics_manifest_sha256: str | None,
+    view_family: str,
+    head_source: str,
+    keypoint_count: int,
+    execution_backend: str,
+    num_workers: int,
+    source_staging_mode: str,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+    check_capacity: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.TAIL_POSTURE_V1,
+        {
+            "source_schema_id": source_schema_id,
+            "source_schema_version": source_schema_version,
+            "source_logical_schema_mode": source_logical_schema_mode,
+            "source_subject_shape_run": source_subject_shape_run,
+            "source_tail_posture_manifest_sha256": (
+                source_tail_posture_manifest_sha256
+            ),
+            "source_subject_shape_manifest_sha256": (
+                source_subject_shape_manifest_sha256
+            ),
+            "source_tail_kinematics_run": source_tail_kinematics_run,
+            "source_tail_kinematics_manifest_sha256": (
+                source_tail_kinematics_manifest_sha256
+            ),
+            "view_family": view_family,
+            "head_source": head_source,
+            "keypoint_count": keypoint_count,
+            "execution_backend": execution_backend,
+            "num_workers": num_workers,
+            "source_staging_mode": source_staging_mode,
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+            "check_capacity": check_capacity,
+        },
+    )
+
+
 def build_bout_classification_invocation(
     *,
     source_scientific_identity_sha256: str,
@@ -789,12 +906,8 @@ def build_bout_classification_invocation(
         {
             "source_schema_id": "analysis.bout_classification_runs",
             "source_schema_version": 2,
-            "source_logical_schema_mode": (
-                "exact_bout_classification_v2_arrays_v1"
-            ),
-            "source_scientific_identity_sha256": (
-                source_scientific_identity_sha256
-            ),
+            "source_logical_schema_mode": ("exact_bout_classification_v2_arrays_v1"),
+            "source_scientific_identity_sha256": (source_scientific_identity_sha256),
             "writer_replay_mode": "exact_result_direct_writer_replay_v1",
             "execution_backend": "serial",
             "num_workers": 1,
@@ -815,9 +928,11 @@ __all__ = [
     "build_chaser_distance_base_invocation",
     "build_exact_tabular_invocation",
     "build_eye_angle_invocation",
+    "build_stimulus_response_invocation",
     "build_subject_shape_invocation",
     "build_stimulus_epoch_invocation",
     "build_tail_kinematics_invocation",
+    "build_tail_posture_invocation",
     "build_track_flat_invocation",
     "candidate_invocation_contract_is_frozen",
     "require_candidate_invocation_manifest",

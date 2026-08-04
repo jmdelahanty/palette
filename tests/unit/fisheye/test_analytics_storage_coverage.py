@@ -59,9 +59,7 @@ def test_live_report_covers_every_maintained_derived_stage_exactly_once() -> Non
 def test_report_preserves_live_storage_and_classification_statuses() -> None:
     report = build_analytics_storage_coverage_report()
     contracts = {record["stage_id"]: record for record in report["storage_contracts"]}
-    candidates = {
-        record["stage_id"]: record for record in report["storage_candidates"]
-    }
+    candidates = {record["stage_id"]: record for record in report["storage_candidates"]}
     surfaces = {
         record["surface_id"]: record for record in report["classified_surfaces"]
     }
@@ -73,8 +71,8 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         "derived_stage_count": 14,
         "central_storage_contract_count": 13,
         "storage_candidate_count": 13,
-        "atomic_storage_candidate_count": 12,
-        "guarded_direct_storage_candidate_count": 1,
+        "atomic_storage_candidate_count": 13,
+        "guarded_direct_storage_candidate_count": 0,
         "classified_non_catalog_stage_count": 1,
         "classified_surface_count": 18,
         "additional_classified_surface_count": 17,
@@ -91,8 +89,7 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         "eye_angle_access_aware_candidate_v1"
     )
     assert all(
-        record["selector_eligible"] is False
-        and record["profile_promoted"] is False
+        record["selector_eligible"] is False and record["profile_promoted"] is False
         for record in candidates.values()
     )
     assert all(
@@ -100,9 +97,11 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         == (
             "analysis/chaser_distance_storage_candidates"
             if stage_id == "chaser_distance"
-            else "analysis/track_kinematics_runs/offline"
-            if stage_id == "track_kinematics"
-            else contracts[stage_id]["run_parent"]
+            else (
+                "analysis/track_kinematics_runs/offline"
+                if stage_id == "track_kinematics"
+                else contracts[stage_id]["run_parent"]
+            )
         )
         for stage_id, record in candidates.items()
     )
@@ -222,9 +221,11 @@ def test_classified_fallback_cannot_hide_required_central_adoption() -> None:
         central_storage_catalog_required=True,
     )
     surfaces = tuple(
-        required_fallback
-        if surface.surface_id == "track_kinematics_visualization"
-        else surface
+        (
+            required_fallback
+            if surface.surface_id == "track_kinematics_visualization"
+            else surface
+        )
         for surface in ANALYTICS_SURFACE_CLASSIFICATIONS
     )
 

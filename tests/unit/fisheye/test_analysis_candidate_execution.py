@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +30,6 @@ from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
     ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS,
 )
 from fisheye.analysis_workflows.analysis_candidate_invocation import (
-    CandidateInvocationContract,
     build_exact_tabular_invocation,
 )
 from fisheye.analysis_workflows.storage_candidate_catalog import (
@@ -366,7 +364,8 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         manifest["payload"]["stage_id"]: manifest["payload"]["runner_status"]
         for manifest in manifests
     }
-    assert status["tail_posture_view"] == "blocked_direct_publication"
+    assert status["tail_posture_view"] == "implemented"
+    assert status["stimulus_response"] == "implemented"
     assert status["bout_classification"] == "implemented"
     assert status["detection_occupancy"] == "blocked_coordinate_authority"
     assert status["session_occupancy"] == "blocked_coordinate_authority"
@@ -379,6 +378,8 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "chaser_distance",
         "tail_kinematics",
         "subject_shape",
+        "stimulus_response",
+        "tail_posture_view",
         "bout_classification",
     }
 
@@ -391,6 +392,8 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "chaser_distance",
         "tail_kinematics",
         "subject_shape",
+        "stimulus_response",
+        "tail_posture_view",
         "bout_classification",
     ):
         adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[stage]
@@ -398,17 +401,10 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         assert adapter.resolves_runner() is True
         assert adapter.resolves_suite_validator() is True
 
-    implemented = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["swim_bouts"]
-    with pytest.raises(ValueError, match="frozen invocation grammar"):
-        replace(
-            implemented,
-            invocation_contract=CandidateInvocationContract.STIMULUS_RESPONSE_V1,
-        )
 
-
-def test_contract_only_adapter_cannot_mint_execution_request() -> None:
+def test_blocked_adapter_cannot_mint_execution_request() -> None:
     adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
-        "stimulus_response"
+        "detection_occupancy"
     ].as_manifest()
     with pytest.raises(ValueError, match="implemented typed adapter"):
         build_candidate_execution_request(

@@ -8,6 +8,9 @@ import pytest
 import zarr
 
 from fisheye.analysis import tail_posture_view_runs as tail_writer
+from fisheye.analysis_workflows.analysis_candidate_invocation import (
+    build_tail_posture_invocation,
+)
 from fisheye.analysis_workflows.materializers.tail_posture import (
     TAIL_POSTURE_EXECUTION_PHASE_ORDER,
     build_tail_posture_materialization_plan,
@@ -157,6 +160,10 @@ def test_suite_and_invocation_parameter_grammar_are_closed(
     )
     parameters = _invocation_parameters(publication)
     require_tail_posture_invocation_parameters(parameters)
+    assert (
+        build_tail_posture_invocation(**parameters)["payload"]["parameters"]
+        == parameters
+    )
     parameters["unexpected"] = True
     with pytest.raises(ValueError, match="field set"):
         require_tail_posture_invocation_parameters(parameters)

@@ -16,7 +16,6 @@ from typing import Any
 
 from .storage_contract_catalog import DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE
 
-
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 _PROFILE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 _MODULE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
@@ -75,7 +74,10 @@ class DerivedAnalysisStorageCandidate:
                 "failure-visibility repair requires candidate consolidation"
             )
         if self.publication_mode is StorageCandidatePublicationMode.SHARED_ATOMIC:
-            if not self.consolidates_before_return or not self.repairs_failed_visibility:
+            if (
+                not self.consolidates_before_return
+                or not self.repairs_failed_visibility
+            ):
                 raise ValueError(
                     "shared atomic candidates must consolidate and repair failed views"
                 )
@@ -139,33 +141,7 @@ def _atomic_candidate(
     )
 
 
-def _direct_candidate(
-    stage_id: str,
-    *,
-    profile_id: str,
-    owner_module: str,
-    entrypoint_attr: str,
-    run_parent: str | None = None,
-) -> DerivedAnalysisStorageCandidate:
-    return DerivedAnalysisStorageCandidate(
-        stage_id=stage_id,
-        run_parent=(
-            DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[stage_id].run_parent
-            if run_parent is None
-            else run_parent
-        ),
-        profile_id=profile_id,
-        owner_module=owner_module,
-        entrypoint_attr=entrypoint_attr,
-        publication_mode=StorageCandidatePublicationMode.GUARDED_DIRECT,
-        consolidates_before_return=False,
-        repairs_failed_visibility=False,
-    )
-
-
-DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
-    DerivedAnalysisStorageCandidate, ...
-] = (
+DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[DerivedAnalysisStorageCandidate, ...] = (
     _atomic_candidate(
         "track_kinematics",
         run_parent="analysis/track_kinematics_runs/offline",
@@ -213,7 +189,7 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
         "stimulus_response",
         profile_id="published_http_v1",
         owner_module="fisheye.analysis_workflows.materializers.stimulus_response",
-        entrypoint_attr="materialize_stimulus_response",
+        entrypoint_attr="materialize_stimulus_response_execution_candidate",
     ),
     _atomic_candidate(
         "stimulus_epochs",
@@ -241,23 +217,20 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
         "chaser_distance",
         run_parent="analysis/chaser_distance_storage_candidates",
         profile_id="published_http_v1",
-        owner_module=(
-            "fisheye.analysis_workflows.materializers.chaser_distance_base"
-        ),
+        owner_module=("fisheye.analysis_workflows.materializers.chaser_distance_base"),
         entrypoint_attr="materialize_chaser_distance_base_candidate",
     ),
-    _direct_candidate(
+    _atomic_candidate(
         "tail_posture_view",
         profile_id="published_http_v1",
-        owner_module="fisheye.analysis.tail_posture_view_runs",
-        entrypoint_attr="write_tail_posture_view_run",
+        owner_module="fisheye.analysis_workflows.materializers.tail_posture",
+        entrypoint_attr="materialize_tail_posture_candidate",
     ),
     _atomic_candidate(
         "bout_classification",
         profile_id="published_http_v1",
         owner_module=(
-            "fisheye.analysis_workflows.materializers."
-            "bout_classification_candidate"
+            "fisheye.analysis_workflows.materializers." "bout_classification_candidate"
         ),
         entrypoint_attr="materialize_bout_classification_candidate",
     ),
@@ -265,13 +238,14 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
 
 
 DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE = {
-    candidate.stage_id: candidate
-    for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES
+    candidate.stage_id: candidate for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES
 }
 
 
 def resolved_storage_candidates() -> tuple[dict[str, object], ...]:
-    return tuple(candidate.as_record() for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES)
+    return tuple(
+        candidate.as_record() for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES
+    )
 
 
 __all__ = [

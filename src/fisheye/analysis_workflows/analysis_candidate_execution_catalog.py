@@ -166,25 +166,6 @@ class AnalysisCandidateExecutionAdapter:
         return callable(getattr(module, self.suite_validator_entrypoint, None))
 
 
-def _contract_only(
-    stage_id: str,
-    invocation: CandidateInvocationContract,
-    computation: CandidateComputationMode,
-    coordinate_role: CoordinateContractRole,
-    coordinate_status: CoordinateContractStatus,
-    logical_equality_contract: CandidateLogicalEqualityContract,
-) -> AnalysisCandidateExecutionAdapter:
-    return AnalysisCandidateExecutionAdapter(
-        stage_id=stage_id,
-        invocation_contract=invocation,
-        computation_mode=computation,
-        runner_status=CandidateRunnerStatus.CONTRACT_ONLY,
-        coordinate_role=coordinate_role,
-        coordinate_contract_status=coordinate_status,
-        logical_equality_contract=logical_equality_contract,
-    )
-
-
 def _implemented_exact_tabular(
     stage_id: str,
     logical_equality_contract: CandidateLogicalEqualityContract,
@@ -348,17 +329,56 @@ def _implemented_bout_classification() -> AnalysisCandidateExecutionAdapter:
         logical_equality_contract=(
             CandidateLogicalEqualityContract.BOUT_CLASSIFICATION_V2_ARRAYS_V1
         ),
-        runner_module=(
-            "fisheye.diagnostics.bout_classification_candidate_execution"
-        ),
+        runner_module=("fisheye.diagnostics.bout_classification_candidate_execution"),
         runner_entrypoint="execute_bout_classification_candidate",
         suite_validator_module=(
-            "fisheye.analysis_workflows."
-            "bout_classification_candidate_execution"
+            "fisheye.analysis_workflows." "bout_classification_candidate_execution"
         ),
-        suite_validator_entrypoint=(
-            "require_bout_classification_execution_suite"
+        suite_validator_entrypoint=("require_bout_classification_execution_suite"),
+    )
+
+
+def _implemented_stimulus_response() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="stimulus_response",
+        invocation_contract=CandidateInvocationContract.STIMULUS_RESPONSE_V1,
+        computation_mode=CandidateComputationMode.SCIENTIFIC_COMPUTE,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.BOUND_DERIVATIVE,
+        coordinate_contract_status=(
+            CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED
         ),
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.STIMULUS_RESPONSE_V3_ARRAYS_V1
+        ),
+        runner_module=("fisheye.diagnostics.stimulus_response_candidate_execution"),
+        runner_entrypoint="execute_stimulus_response_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.stimulus_response_candidate_execution"
+        ),
+        suite_validator_entrypoint=("require_stimulus_response_execution_suite"),
+    )
+
+
+def _implemented_tail_posture() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="tail_posture_view",
+        invocation_contract=CandidateInvocationContract.TAIL_POSTURE_V1,
+        computation_mode=CandidateComputationMode.SCIENTIFIC_COMPUTE,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.CANONICAL_PRODUCER,
+        coordinate_contract_status=(
+            CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED
+        ),
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.TAIL_POSTURE_V3_ARRAYS_V1
+        ),
+        runner_module="fisheye.diagnostics.tail_posture_candidate_execution",
+        runner_entrypoint="execute_tail_posture_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.tail_posture_candidate_execution"
+        ),
+        suite_validator_entrypoint="require_tail_posture_execution_suite",
     )
 
 
@@ -377,24 +397,6 @@ def _coordinate_blocked(
     )
 
 
-def _direct_blocked(
-    stage_id: str,
-    invocation: CandidateInvocationContract,
-    coordinate_role: CoordinateContractRole,
-    coordinate_status: CoordinateContractStatus,
-    logical_equality_contract: CandidateLogicalEqualityContract,
-) -> AnalysisCandidateExecutionAdapter:
-    return AnalysisCandidateExecutionAdapter(
-        stage_id=stage_id,
-        invocation_contract=invocation,
-        computation_mode=CandidateComputationMode.GUARDED_DIRECT_WRITER,
-        runner_status=CandidateRunnerStatus.BLOCKED_DIRECT_PUBLICATION,
-        coordinate_role=coordinate_role,
-        coordinate_contract_status=coordinate_status,
-        logical_equality_contract=logical_equality_contract,
-    )
-
-
 ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, ...] = (
     _implemented_track_flat(),
     _implemented_exact_tabular(
@@ -409,14 +411,7 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
     _implemented_stimulus_epochs(),
     _implemented_subject_shape(),
     _implemented_tail_kinematics(),
-    _contract_only(
-        "stimulus_response",
-        CandidateInvocationContract.STIMULUS_RESPONSE_V1,
-        CandidateComputationMode.SCIENTIFIC_COMPUTE,
-        CoordinateContractRole.BOUND_DERIVATIVE,
-        CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED,
-        CandidateLogicalEqualityContract.STIMULUS_RESPONSE_V3_ARRAYS_V1,
-    ),
+    _implemented_stimulus_response(),
     _coordinate_blocked(
         "detection_occupancy",
         CandidateLogicalEqualityContract.DETECTION_OCCUPANCY_DECLARED_ARRAYS_V1,
@@ -426,13 +421,7 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
         CandidateLogicalEqualityContract.SESSION_OCCUPANCY_DECLARED_ARRAYS_V1,
     ),
     _implemented_chaser_distance(),
-    _direct_blocked(
-        "tail_posture_view",
-        CandidateInvocationContract.TAIL_POSTURE_DIRECT_V1,
-        CoordinateContractRole.CANONICAL_PRODUCER,
-        CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED,
-        CandidateLogicalEqualityContract.TAIL_POSTURE_V3_ARRAYS_V1,
-    ),
+    _implemented_tail_posture(),
     _implemented_bout_classification(),
 )
 

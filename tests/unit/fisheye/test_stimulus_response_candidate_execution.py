@@ -20,6 +20,9 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
 from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
     ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE,
 )
+from fisheye.analysis_workflows.analysis_candidate_invocation import (
+    build_stimulus_response_invocation,
+)
 from fisheye.analysis_workflows.materializers import stimulus_response as materializer
 from fisheye.analysis_workflows.stimulus_response_candidate_execution import (
     STIMULUS_RESPONSE_SOURCE_STAGING_MODE,
@@ -214,6 +217,10 @@ def test_invocation_is_closed_and_translates_every_scientific_knob(
     parameters = _invocation_parameters(root)
 
     assert require_stimulus_response_invocation_parameters(parameters) == parameters
+    assert (
+        build_stimulus_response_invocation(**parameters)["payload"]["parameters"]
+        == parameters
+    )
     arguments = stimulus_response_writer_arguments(parameters)
     assert arguments[:4] == (
         "--track-kinematics-type",
