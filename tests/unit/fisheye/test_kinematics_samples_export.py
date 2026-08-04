@@ -20,6 +20,9 @@ from fisheye.analytics_exports.runtime_telemetry import (
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.diagnostics.validate_kinematics_query_window_equivalence import (
+    validate_kinematics_query_window_equivalence,
+)
 from tests.unit.fisheye.test_track_motion_publication import (
     _clone_canonical_physical_motion_run,
     _clone_physical_motion_run,
@@ -279,6 +282,51 @@ def test_kinematics_export_persists_and_enforces_frame_window(
     table = pq.read_table(part).to_pydict()
     assert table["source_acquisition_frame_index"] == [1]
     assert table["track_sample_index"] == [1]
+
+
+def test_bounded_export_equals_exact_unbounded_frame_slice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _export(
+        monkeypatch,
+        tmp_path,
+        export_run_id="kinematics_full",
+        output_name="exports_full",
+        source_window_rows=1,
+        row_group_rows=1,
+        requested_sample_rate_hz=1.0,
+    )
+    _export(
+        monkeypatch,
+        tmp_path,
+        export_run_id="kinematics_window",
+        output_name="exports_window",
+        source_window_rows=2,
+        row_group_rows=2,
+        requested_sample_rate_hz=1.0,
+        source_frame_start=0,
+        source_frame_stop_exclusive=1,
+    )
+
+    evidence = validate_kinematics_query_window_equivalence(
+        full_export_root=tmp_path / "exports_full",
+        full_export_run_id="kinematics_full",
+        bounded_export_root=tmp_path / "exports_window",
+        bounded_export_run_id="kinematics_window",
+        output=tmp_path
+        / "palette_benchmarks"
+        / "kinematics_window_equivalence.json",
+    )
+
+    assert evidence["payload"]["status"] == "passed"
+    assert evidence["payload"]["frame_interval"] == {
+        "start": 0,
+        "stop_exclusive": 1,
+        "frame_count": 1,
+    }
+    assert evidence["payload"]["logical_equality"]["equal"] is True
+    assert evidence["payload"]["promotion_authorized"] is False
 
 
 def test_streaming_writer_preserves_multiple_tracks_as_distinct_primary_keys(
