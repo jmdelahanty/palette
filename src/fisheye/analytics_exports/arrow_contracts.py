@@ -19,6 +19,7 @@ from .contracts import (
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     BOUT_KINEMATICS_METRICS_TABLE,
     DESCRIPTIVE_TABLE,
+    EYE_TRACE_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
     STATISTICS_TABLE,
@@ -46,6 +47,7 @@ EXACT_ARROW_SCHEMA_TABLES = (
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     STATISTICS_TABLE,
     DESCRIPTIVE_TABLE,
+    EYE_TRACE_SAMPLES_TABLE,
 )
 
 _ENVELOPE_FIELDS = {
@@ -146,7 +148,9 @@ _POSITION_OCCUPANCY_FIELDS = (
     _field("source_segment_path", "string", nullable=True),
     _field("source_refs_json", "string"),
     _field("window_index", "int64"),
-    _field("window_id", "int64", nullable=True),
+    # ``window_id`` participates in the logical primary key.  Missing IDs must
+    # fail publication rather than create an unaddressable nullable key.
+    _field("window_id", "int64"),
     _field("window_label", "string", nullable=True),
     _field("start_frame", "int64", nullable=True),
     _field("end_frame", "int64", nullable=True),
@@ -1055,6 +1059,46 @@ _BASELINE_KINEMATIC_SAMPLES_FIELDS = (
 )
 
 
+# One row per camera frame from the exact compact-v7 frame axis.  Floating
+# values deliberately remain float32 so the query product preserves the
+# recording-local authority's decoded representation instead of silently
+# widening it.  Invalid scientific values remain IEEE NaN under the source
+# contract; they are not Arrow nulls.
+_EYE_TRACE_SAMPLES_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("source_eye_angle_run", "string"),
+    _field("source_eye_angle_path", "string"),
+    _field("source_eye_angle_schema_id", "string"),
+    _field("source_eye_angle_schema_version", "int64"),
+    _field("source_eye_angle_layout", "string"),
+    _field("source_eye_angle_method", "string", nullable=True),
+    _field("source_eye_angle_method_version", "string", nullable=True),
+    _field("source_binding_sha256", "string"),
+    _field("projection_contract_sha256", "string"),
+    _field("source_acquisition_frame_index", "int64"),
+    _field("time_seconds", "float32"),
+    _field("left_eye_angle_deg", "float32"),
+    _field("right_eye_angle_deg", "float32"),
+    _field("vergence_eye_angle_deg", "float32"),
+    _field("left_eye_angle_deg_smoothed", "float32"),
+    _field("right_eye_angle_deg_smoothed", "float32"),
+    _field("vergence_eye_angle_deg_smoothed", "float32"),
+    _field("left_gaze_signed_deg", "float32"),
+    _field("right_gaze_signed_deg", "float32"),
+    _field("left_gaze_signed_deg_smoothed", "float32"),
+    _field("right_gaze_signed_deg_smoothed", "float32"),
+    _field("mean_eye_vergence_gaze_deg", "float32"),
+    _field("mean_eye_vergence_gaze_deg_smoothed", "float32"),
+    _field("valid_frame", "bool"),
+    _field("major_axis_marginal", "bool"),
+    _field("reason_codes", "uint16"),
+)
+
+
 # Group statistics are published by one closed producer.  Statistical values
 # are nullable because insufficient complete recordings, disabled bootstrap
 # work, or an unavailable test legitimately produce nulls; status and
@@ -1197,6 +1241,10 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
         table_name=DESCRIPTIVE_TABLE,
         fields=_GROUP_DESCRIPTIVE_FIELDS,
     ),
+    EYE_TRACE_SAMPLES_TABLE: ArrowTableContract(
+        table_name=EYE_TRACE_SAMPLES_TABLE,
+        fields=_EYE_TRACE_SAMPLES_FIELDS,
+    ),
 }
 
 
@@ -1263,11 +1311,13 @@ def _arrow_type(type_id: str) -> Any:
 
     types = {
         "bool": pa.bool_(),
+        "float32": pa.float32(),
         "float64": pa.float64(),
         "int32": pa.int32(),
         "int64": pa.int64(),
         "list<string>": pa.list_(pa.string()),
         "string": pa.string(),
+        "uint16": pa.uint16(),
     }
     try:
         return types[type_id]

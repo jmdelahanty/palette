@@ -11,8 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import contextmanager
+import os
 from pathlib import Path
 import re
+import shutil
 from typing import Any, Iterator, Mapping
 
 
@@ -475,6 +477,87 @@ def validate_staged_publication(
         raise ValueError("Staged publication capabilities are invalid")
 
 
+def commit_staged_publication(
+    export_root: Path,
+    staging_root: Path,
+    payload: Mapping[str, Any],
+    *,
+    baseline_manifest_identity: str | None,
+) -> Path:
+    """Validate and atomically commit one immutable analytics generation.
+
+    This is the shared visibility boundary for compact tables and streaming
+    trace exports.  Generation bytes become visible first under their immutable
+    identity; a short compare-and-swap manifest rename is the sole authority
+    commit.  Any failure before that rename removes the unpublished generation.
+    """
+
+    root = Path(export_root).expanduser().resolve()
+    stage = Path(staging_root).expanduser().resolve()
+    raw_run_id = payload.get("export_run_id")
+    if not isinstance(raw_run_id, str):
+        raise ValueError("Export run ID must be a string")
+    run_id = safe_component(raw_run_id, label="export run ID")
+    publication = payload.get("publication")
+    if not isinstance(publication, Mapping):
+        raise ValueError("Export publication envelope is missing or invalid")
+    generation_id = safe_component(
+        publication.get("generation_id"),
+        label="generation ID",
+    )
+    expected_stage = publication_staging_root(root, run_id, generation_id)
+    if stage != expected_stage:
+        raise ValueError("Staged publication path does not match its generation identity")
+    manifest_path = export_manifest_path(root, run_id)
+    final_generation = publication_generation_root(root, run_id, generation_id)
+
+    try:
+        # Cleanup is authorized only after the supplied path has been proven to
+        # be this payload's canonical hidden staging generation.
+        validate_publication_envelope(payload)
+        if final_generation.exists():
+            raise FileExistsError(
+                f"Analytics export generation already exists: {final_generation}"
+            )
+        validate_staged_publication(stage, payload)
+    except Exception:
+        if stage.exists():
+            shutil.rmtree(stage)
+        raise
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    final_generation.parent.mkdir(parents=True, exist_ok=True)
+    tmp_manifest = manifest_path.parent / (
+        f".export_run_id={run_id}.generation={generation_id}.json.tmp"
+    )
+    os.replace(stage, final_generation)
+    try:
+        tmp_manifest.write_text(
+            json.dumps(
+                dict(payload),
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with manifest_commit_lock(manifest_path):
+            if manifest_identity(manifest_path) != baseline_manifest_identity:
+                raise RuntimeError(
+                    "Analytics export manifest changed during publication; "
+                    "the staged generation was not committed"
+                )
+            os.replace(tmp_manifest, manifest_path)
+    except Exception:
+        tmp_manifest.unlink(missing_ok=True)
+        if final_generation.exists():
+            shutil.rmtree(final_generation)
+        raise
+    return manifest_path
+
+
 def manifest_selected_part_files_from_payload(
     export_root: Path,
     payload: Mapping[str, Any],
@@ -573,6 +656,7 @@ __all__ = [
     "PUBLICATION_SCHEMA_VERSION",
     "export_manifest_directory",
     "export_manifest_path",
+    "commit_staged_publication",
     "generation_relative_path",
     "has_exclusive_inventory",
     "load_export_manifest",

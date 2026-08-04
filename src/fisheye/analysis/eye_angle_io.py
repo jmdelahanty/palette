@@ -1006,6 +1006,144 @@ def _dense_columns(
     return result
 
 
+def load_eye_angle_series_rows(
+    root: zarr.Group,
+    *,
+    run_name: str,
+    start_row: int,
+    stop_row: int,
+    angle_channels: Sequence[str],
+    qa_channels: Sequence[str] = (
+        "valid_frame",
+        "major_axis_marginal",
+        "reason_codes",
+    ),
+    max_rows: int = 300_000,
+) -> EyeAngleSeriesWindow:
+    """Read one exact bounded compact-v7 frame-row interval.
+
+    This is the non-lossy export counterpart to the time-window reader below.
+    Row bounds are half-open and never inferred from floating time values, so
+    adjacent batches cannot overlap or omit a camera frame.  Maintained exports
+    deliberately require the current frame axis and do not enter the legacy
+    compatibility adapter.
+    """
+
+    if type(start_row) is not int or type(stop_row) is not int:
+        raise EyeAngleIOError("Eye-angle row bounds must be exact integers.")
+    if start_row < 0 or stop_row < start_row:
+        raise EyeAngleIOError("Eye-angle row bounds must form a nonnegative half-open interval.")
+    if type(max_rows) is not int or max_rows <= 0:
+        raise EyeAngleIOError("Eye-angle row-window limit must be a positive exact integer.")
+    if stop_row - start_row > max_rows:
+        raise EyeAngleIOError(
+            f"Requested eye-angle row window spans {stop_row - start_row:,} rows; "
+            f"the bounded reader limit is {max_rows:,}."
+        )
+
+    catalog = catalog_eye_angle_series(
+        root,
+        run_name=run_name,
+        prefer_frame=True,
+        legacy_compatibility=False,
+    )
+    if catalog.row_axis != "frame":
+        raise EyeAngleIOError(
+            f"Eye-angle run {catalog.run_name!r} has no maintained frame-axis trace."
+        )
+    if stop_row > catalog.row_count:
+        raise EyeAngleIOError(
+            f"Eye-angle row stop {stop_row:,} exceeds frame count {catalog.row_count:,}."
+        )
+    requested_angles = tuple(dict.fromkeys(str(name) for name in angle_channels))
+    if not requested_angles:
+        raise EyeAngleIOError("At least one eye-angle channel must be requested.")
+    missing_angles = [
+        name for name in requested_angles if name not in catalog.angle_channels
+    ]
+    if missing_angles:
+        raise EyeAngleIOError(
+            f"Unavailable eye-angle channels: {', '.join(missing_angles)}"
+        )
+    requested_qa = tuple(dict.fromkeys(str(name) for name in qa_channels))
+    missing_qa = [name for name in requested_qa if name not in catalog.qa_channels]
+    if missing_qa:
+        raise EyeAngleIOError(f"Unavailable eye-angle QA channels: {', '.join(missing_qa)}")
+
+    run_group, _resolved_run, run_path = resolve_eye_angle_run(
+        root,
+        catalog.run_name,
+        legacy_compatibility=False,
+    )
+    row_slice = slice(start_row, stop_row)
+    angle_array = run_group["frame_angles"]
+    angle_index = _child_group(run_group, "angle_channel_index")
+    all_angle_names = _channel_names(
+        angle_index,
+        expected_count=int(angle_array.shape[1]),
+    )
+    angle_indexes = [all_angle_names.index(name) for name in requested_angles]
+    angle_values = _dense_columns(
+        angle_array,
+        row_slice=row_slice,
+        indexes=angle_indexes,
+    )
+    angles = {
+        name: np.asarray(angle_values[:, column_index])
+        for column_index, name in enumerate(requested_angles)
+    }
+
+    qa_array = run_group["frame_qa"]
+    qa_index = _child_group(run_group, "qa_channel_index")
+    all_qa_names = _channel_names(qa_index, expected_count=int(qa_array.shape[1]))
+    qa_indexes = [all_qa_names.index(name) for name in requested_qa]
+    qa_values = _dense_columns(
+        qa_array,
+        row_slice=row_slice,
+        indexes=qa_indexes,
+    )
+    qa = {
+        name: np.asarray(qa_values[:, column_index])
+        for column_index, name in enumerate(requested_qa)
+    }
+
+    support_group = _child_group(run_group, "support")
+    if support_group is None or "frame_time_seconds" not in support_group:
+        raise EyeAngleIOError(
+            f"Eye-angle run {catalog.run_name!r} lacks support/frame_time_seconds."
+        )
+    times = np.asarray(
+        support_group["frame_time_seconds"][row_slice],
+        dtype=np.float64,
+    ).reshape(-1)
+    expected_rows = stop_row - start_row
+    if times.shape != (expected_rows,) or not np.all(np.isfinite(times)):
+        raise EyeAngleIOError(
+            "Eye-angle frame-time coordinate is incomplete or non-finite."
+        )
+    frame_indices = np.arange(start_row, stop_row, dtype=np.int64)
+    source_paths = {
+        "run": run_path,
+        "time_seconds": f"{run_path}/support/frame_time_seconds",
+        **{
+            f"angles/{name}": f"{run_path}/frame_angles[:,{index}]"
+            for name, index in zip(requested_angles, angle_indexes, strict=True)
+        },
+        **{
+            f"qa/{name}": f"{run_path}/frame_qa[:,{index}]"
+            for name, index in zip(requested_qa, qa_indexes, strict=True)
+        },
+    }
+    return EyeAngleSeriesWindow(
+        catalog=catalog,
+        time_seconds=times,
+        frame_indices=frame_indices,
+        angles=angles,
+        qa=qa,
+        source_paths=source_paths,
+    )
+
+
 def load_eye_angle_series_window(
     root: zarr.Group,
     *,
@@ -1255,11 +1393,16 @@ __all__ = [
     "EyeAngleIOError",
     "EyeAngleRunOption",
     "EyeAngleRunTables",
+    "EyeAngleSeriesCatalog",
+    "EyeAngleSeriesWindow",
     "aligned_frame_values",
+    "catalog_eye_angle_series",
     "discover_eye_angle_run_options",
     "first_array_length",
     "frame_time_seconds",
     "load_eye_angle_run_tables",
+    "load_eye_angle_series_rows",
+    "load_eye_angle_series_window",
     "load_eye_gaze_frame_series",
     "optional_1d_array",
     "resolve_eye_angle_run",

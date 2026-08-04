@@ -12,9 +12,14 @@ have explicit unpromoted physical candidates. No production profile,
 scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
+The 2026-08-04 coordination checkpoint adds the first exact framewise query
+product: a bounded, source-manifest-bound `eye_trace_samples` Parquet exporter.
+It remains non-default and selector/registry-ineligible; its declared workflow
+node is not yet wired to execution.
+
 Benchmark coverage is now separately executable rather than inferred from
-candidate presence. Ten of thirteen families have an executable
-source/candidate read matrix; none yet has the complete writer, publication, physical-I/O,
+candidate presence. All thirteen families have an executable source/candidate
+read matrix; none yet has the complete writer, publication, physical-I/O,
 representative-scale, and real-consumer evidence required for promotion. The
 catalog binds any future measured/executed claims to an immutable evidence
 receipt and versioned passing gate; complete catalog coverage still does not
@@ -141,8 +146,8 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes nine unique exact schemas across writing, staging, and manifest-selected reads: position occupancy, recording summary, stimulus steps, per-fish stimulus-step summary, the three baseline tables, and both group-statistics tables | Freeze the canonical envelope's remaining 21 inferred tables, baseline-strategy's four inferred outputs, and training-response's three inferred outputs only after producer semantics and nullability are resolved |
-| Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes 13 exact schemas across writing, staging, and manifest-selected reads. The new non-default `eye_trace_samples` table preserves compact-v7 float32/bool/uint16 semantics through bounded row-group streaming, exact source-manifest binding, and full decoded-payload validation | Freeze the canonical envelope's remaining 16 inferred chaser tables plus baseline-strategy's four inferred outputs and training-response's three inferred outputs only after producer semantics and nullability are resolved; benchmark the eye-trace publisher before workflow adoption |
+| Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces; the eye-trace node now has an exact non-default contract and publisher | Wire the eye-trace execution adapter; implement sampled-kinematic, activity/spatial-summary, and tail-trace contracts and publishers |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
 ## Evidence And Known Disagreements
@@ -422,6 +427,16 @@ now implemented on the coordination branch:
   authority activation now prove exact direct/inline metadata, including
   rollback and unknown-ack paths. Arbitrary legacy or external mutators remain
   safe only on a quiescent archive until migrated.
+- the first exact framewise cross-recording query product,
+  `eye_trace_samples`, with one compact-v7 camera-frame row per output row,
+  exact float32/bool/uint16 Arrow types, strict nested manifests, bounded
+  node-local row-group construction, batch-independent decoded column hashes,
+  source binding checked before and after extraction, and the shared immutable
+  generation/manifest compare-and-swap publication boundary. The generic
+  compact exporter rejects this full-duration table so callers cannot
+  accidentally materialize it in memory. Workflow execution and performance
+  gates remain open. The final focused eye/export/publication matrix passed 247
+  tests; Ruff, Python compilation, and `git diff --check` also passed.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. A later independent adversarial review
@@ -614,8 +629,12 @@ a v3 storage-candidate regression.
           Its grain and primary key now include measurement level, storage-only
           fixed-text suffixes are removed from the query representation, and
           unknown measurement families fail closed.
+    - [x] Freeze the exact ordered 31-field `eye_trace_samples` schema. The
+          explicit compact-v7 source projection preserves float32 trace/time,
+          bool QA, uint16 reason, and int64 camera-frame identity without dtype
+          inference or Arrow null substitution.
     - [ ] Replace inferred schemas only after producer semantics and nullability
-          are frozen. The canonical envelope currently has 12 exact and 18
+          are frozen. The canonical envelope currently has 13 exact and 16
           inferred tables; the remaining inferred tables are the chaser
           exports. Both group-statistics tables use exact schemas. Baseline strategy
           consumes exact canonical baseline inputs but still writes four
@@ -774,11 +793,18 @@ Recommended benchmark and promotion-review order:
 - [ ] Implement exact contracts and publishers for:
     - [ ] sampled kinematic exports;
     - [ ] activity/spatial summaries;
-    - [ ] eye traces;
+    - [x] eye traces. The v1 publisher reads exact bounded compact-v7 frame
+          intervals, produces one immutable manifest-selected Parquet part,
+          validates complete decoded payload hashes, and remains non-default;
+          workflow execution wiring and benchmarks remain separate gates.
     - [ ] tail traces.
 - [ ] Keep recording-local Zarr authorities separate from immutable
       cross-recording Parquet query products.
+    - [x] `eye_trace_samples` is explicitly a query projection; its compact-v7
+          Zarr source remains the only recording-local scientific authority.
 - [ ] Bind each export to exact selected recording-local manifests.
+    - [x] `eye_trace_samples` binds and rechecks the explicit completed/eligible
+          compact-v7 run and all required semantic manifest digests.
 
 ### Phase 9 — Benchmark and promote one family at a time
 
@@ -1175,15 +1201,16 @@ gates pass:
 
 ## Immediate Next Checkpoint
 
-Continue consumer closure and measurement without promoting defaults:
+Continue workflow-output closure without promoting defaults:
 
-1. extend deterministic per-family writer/rematerialization/publication/read
-   benchmarks, first for stimulus response/epochs, occupancy, subject shape,
-   track kinematics, and chaser distance;
-2. run representative short and full-duration matrices with physical I/O,
-   object count, phase timing, CPU, and RSS evidence;
-3. close remaining chaser component consumer/recovery and cross-recording Arrow
-   dtype gaps in isolated worktrees, returning shared-format changes to this
-   coordination lane; and
-4. review promotion one family at a time, retaining the current production
-   writer/profile and selector as the rollback boundary until every gate passes.
+1. wire the exact eye-trace publisher into the declared workflow execution
+   boundary without changing any default profile;
+2. freeze the generic sampled-kinematic table independently of the existing
+   chaser-specific baseline sample representation;
+3. freeze activity/spatial-summary semantics and decide the cross-recording
+   tail-trace representation before implementing those publishers;
+4. benchmark the eye-trace writer, bounded reads, scratch copy, validation,
+   publication, and manifest-selected consumer at representative short and
+   full duration; and
+5. retain each recording-local Zarr authority and current production profile
+   as the rollback boundary until its complete promotion gate passes.

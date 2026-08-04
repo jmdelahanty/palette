@@ -24,6 +24,7 @@ POSITION_OCCUPANCY_HISTOGRAM_TABLE = "position_occupancy_histogram_2d"
 BASELINE_BEHAVIOR_SUMMARY_TABLE = "baseline_behavior_summary"
 BASELINE_BEHAVIOR_TIME_BINS_TABLE = "baseline_behavior_time_bins"
 BASELINE_KINEMATIC_SAMPLES_TABLE = "baseline_kinematic_samples"
+EYE_TRACE_SAMPLES_TABLE = "eye_trace_samples"
 
 CHASER_SPATIAL_TABLE = "chaser_epoch_spatial_occupancy_zones"
 CHASER_DISTANCE_SUMMARY_TABLE = "chaser_epoch_distance_summary"
@@ -289,6 +290,54 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
             "effective_sample_rate_hz": "Hz",
         },
     ),
+    EYE_TRACE_SAMPLES_TABLE: _contract(
+        EYE_TRACE_SAMPLES_TABLE,
+        "recording_x_eye_angle_run_x_camera_frame",
+        (
+            "recording_id",
+            "source_eye_angle_run",
+            "source_acquisition_frame_index",
+        ),
+        (
+            "source_eye_angle_run",
+            "source_eye_angle_path",
+            "source_acquisition_frame_index",
+            "time_seconds",
+            "left_eye_angle_deg",
+            "right_eye_angle_deg",
+            "vergence_eye_angle_deg",
+            "left_eye_angle_deg_smoothed",
+            "right_eye_angle_deg_smoothed",
+            "vergence_eye_angle_deg_smoothed",
+            "left_gaze_signed_deg",
+            "right_gaze_signed_deg",
+            "left_gaze_signed_deg_smoothed",
+            "right_gaze_signed_deg_smoothed",
+            "mean_eye_vergence_gaze_deg",
+            "mean_eye_vergence_gaze_deg_smoothed",
+            "valid_frame",
+            "major_axis_marginal",
+            "reason_codes",
+            "source_binding_sha256",
+            "projection_contract_sha256",
+        ),
+        {
+            "source_acquisition_frame_index": "camera_frame",
+            "time_seconds": "s",
+            "left_eye_angle_deg": "deg",
+            "right_eye_angle_deg": "deg",
+            "vergence_eye_angle_deg": "deg",
+            "left_eye_angle_deg_smoothed": "deg",
+            "right_eye_angle_deg_smoothed": "deg",
+            "vergence_eye_angle_deg_smoothed": "deg",
+            "left_gaze_signed_deg": "deg",
+            "right_gaze_signed_deg": "deg",
+            "left_gaze_signed_deg_smoothed": "deg",
+            "right_gaze_signed_deg_smoothed": "deg",
+            "mean_eye_vergence_gaze_deg": "deg",
+            "mean_eye_vergence_gaze_deg_smoothed": "deg",
+        },
+    ),
     CHASER_SPATIAL_TABLE: _contract(
         CHASER_SPATIAL_TABLE,
         "recording_x_chaser_epoch_x_spatial_zone",
@@ -517,6 +566,11 @@ BASELINE_TABLES = (
     BASELINE_KINEMATIC_SAMPLES_TABLE,
 )
 
+# Framewise trace products are explicit opt-ins.  They are intentionally not
+# part of ``DEFAULT_TABLES`` because a full-duration export is much larger than
+# the compact summary tables and must bind one exact recording-local authority.
+TRACE_TABLES = (EYE_TRACE_SAMPLES_TABLE,)
+
 CHASER_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     CHASER_SPATIAL_TABLE,
@@ -539,7 +593,7 @@ CHASER_TABLES = (
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
 )
 
-ALL_TABLES = DEFAULT_TABLES + BASELINE_TABLES + CHASER_TABLES
+ALL_TABLES = DEFAULT_TABLES + BASELINE_TABLES + CHASER_TABLES + TRACE_TABLES
 
 
 def contract_snapshot(table_names: Sequence[str]) -> dict[str, dict[str, Any]]:

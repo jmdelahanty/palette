@@ -58,6 +58,7 @@ from fisheye.analytics_exports.contracts import (
     STIMULUS_RESPONSE_TABLE,
     SWIM_BOUT_METRICS_TABLE,
     TABLE_CONTRACTS,
+    TRACE_TABLES,
     canonicalize_export_row,
     contract_snapshot,
     validate_table_columns,
@@ -70,15 +71,14 @@ from fisheye.analytics_exports.arrow_contracts import (
 from fisheye.analytics_exports.publication import (
     PUBLICATION_SCHEMA_ID,
     PUBLICATION_SCHEMA_VERSION,
+    commit_staged_publication,
     export_manifest_path,
     generation_relative_path,
-    manifest_commit_lock,
     manifest_identity,
     publication_generation_root,
     publication_staging_root,
     safe_component,
     sha256_file,
-    validate_staged_publication,
 )
 from fisheye.analytics_exports.baseline import (
     BaselineArrays,
@@ -128,7 +128,10 @@ from fisheye.utils.virtual_collection_manifest import load_manifest, verify_mani
 from fisheye.shared.zarr_io import open_zarr_root
 
 
-AVAILABLE_TABLES = ALL_TABLES
+# Full-duration framewise trace products use dedicated bounded streaming
+# exporters.  The compact cross-recording exporter must not accept them and
+# silently construct an empty generation through its row-accumulating path.
+AVAILABLE_TABLES = tuple(table for table in ALL_TABLES if table not in TRACE_TABLES)
 
 # The recording-Zarr extraction functions predate the protocol-neutral V2
 # Parquet contract. These names are internal source adapters only; callers and
@@ -5547,6 +5550,12 @@ def _parse_tables(value: str | Sequence[str] | None) -> tuple[str, ...]:
         for item in value:
             raw.extend(part.strip() for part in str(item).split(","))
     tables = tuple(item for item in raw if item)
+    trace_tables = sorted(set(tables) & set(TRACE_TABLES))
+    if trace_tables:
+        raise ValueError(
+            "Framewise trace table(s) require their bounded streaming exporter: "
+            + ", ".join(trace_tables)
+        )
     unknown = sorted(set(tables) - set(AVAILABLE_TABLES))
     if unknown:
         expected = ", ".join(AVAILABLE_TABLES)
@@ -5639,13 +5648,6 @@ def _write_table_parts(
     if not all_rows:
         return 0, []
 
-    if table in {
-        STIMULUS_RESPONSE_TABLE,
-        SWIM_BOUT_METRICS_TABLE,
-        BOUT_KINEMATICS_METRICS_TABLE,
-    }:
-        _validate_exact_primary_keys(table, all_rows)
-
     exact_contract = ARROW_TABLE_CONTRACTS.get(table)
     if exact_contract is not None:
         exact_names = {field.name for field in exact_contract.fields}
@@ -5654,6 +5656,16 @@ def _write_table_parts(
             raise ValueError(
                 f"{table}: unexpected fields for exact Arrow schema: {unexpected}"
             )
+    primary_key_first = table in {
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
+    }
+    if primary_key_first:
+        # Preserve the established diagnostic contract for the first three
+        # exact scientific tables, whose callers distinguish malformed keys
+        # from other missing required fields.
+        _validate_exact_primary_keys(table, all_rows)
     columns = (
         [field.name for field in exact_contract.fields]
         if exact_contract is not None
@@ -5666,6 +5678,12 @@ def _write_table_parts(
         )
     normalized_all = _normalize_rows(all_rows, columns)
     schema = _build_arrow_schema(normalized_all, table=table)
+    if exact_contract is not None and not primary_key_first:
+        # Field-set and nullability errors are more fundamental than key
+        # uniqueness and retain their precise fail-closed diagnostics.  Once
+        # the row shape is proven exact, every persisted key must be complete
+        # and unique across all source parts.
+        _validate_exact_primary_keys(table, normalized_all)
 
     row_count = 0
     part_paths: list[str] = []
@@ -5784,7 +5802,6 @@ def export_sources(
     if int(baseline_spatial_grid_size) < 2:
         raise ValueError("baseline_spatial_grid_size must be at least 2")
     manifest_path = export_manifest_path(output_root, export_run_id)
-    manifest_dir = manifest_path.parent
     baseline_manifest_identity = manifest_identity(manifest_path)
     if manifest_path.exists() and not overwrite:
         raise FileExistsError(f"Export manifest already exists: {manifest_path}")
@@ -5967,36 +5984,18 @@ def export_sources(
             },
         },
     }
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        validate_staged_publication(staging_root, manifest)
-    except Exception:
-        if staging_root.exists():
-            shutil.rmtree(staging_root)
-        raise
-    tmp_manifest = manifest_dir / (
-        f".export_run_id={export_run_id}.generation={generation_id}.json.tmp"
+    safe_manifest = _json_safe(manifest)
+    if not isinstance(safe_manifest, Mapping):
+        raise TypeError("Analytics export manifest did not normalize to an object")
+    committed_manifest_path = commit_staged_publication(
+        output_root,
+        staging_root,
+        safe_manifest,
+        baseline_manifest_identity=baseline_manifest_identity,
     )
-    final_generation_root.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staging_root, final_generation_root)
-    try:
-        tmp_manifest.write_text(
-            json.dumps(_json_safe(manifest), indent=2, sort_keys=True) + "\n"
-        )
-        with manifest_commit_lock(manifest_path):
-            if manifest_identity(manifest_path) != baseline_manifest_identity:
-                raise RuntimeError(
-                    "Analytics export manifest changed during publication; "
-                    "the staged generation was not committed"
-                )
-            os.replace(tmp_manifest, manifest_path)
-    except Exception:
-        tmp_manifest.unlink(missing_ok=True)
-        if final_generation_root.exists():
-            shutil.rmtree(final_generation_root)
-        raise
-    manifest["manifest_path"] = str(manifest_path)
-    return manifest
+    result_manifest = dict(safe_manifest)
+    result_manifest["manifest_path"] = str(committed_manifest_path)
+    return result_manifest
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

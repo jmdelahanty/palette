@@ -28,6 +28,7 @@ from .contracts import (
     CHASER_SPATIAL_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
     DESCRIPTIVE_TABLE,
+    EYE_TRACE_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     STATISTICS_TABLE,
     TABLE_CONTRACTS,
@@ -75,6 +76,7 @@ CAPABILITY_DEFINITIONS = (
         "core.baseline.kinematic_samples",
         (BASELINE_KINEMATIC_SAMPLES_TABLE,),
     ),
+    CapabilityDefinition("core.eye.trace_samples", (EYE_TRACE_SAMPLES_TABLE,)),
     CapabilityDefinition(
         "position.epoch.occupancy_histogram_2d",
         (POSITION_OCCUPANCY_HISTOGRAM_TABLE,),

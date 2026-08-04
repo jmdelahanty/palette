@@ -26,6 +26,7 @@ from fisheye.analytics_exports.contracts import (
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     BOUT_KINEMATICS_METRICS_TABLE,
     DESCRIPTIVE_TABLE,
+    EYE_TRACE_SAMPLES_TABLE,
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
@@ -366,6 +367,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         BASELINE_KINEMATIC_SAMPLES_TABLE,
         STATISTICS_TABLE,
         DESCRIPTIVE_TABLE,
+        EYE_TRACE_SAMPLES_TABLE,
     )
     fields = ARROW_TABLE_CONTRACTS[RECORDING_SUMMARY_TABLE].fields
     assert tuple(field.name for field in fields) == (
@@ -1150,6 +1152,28 @@ def test_core_analytics_exact_writer_rejects_null_primary_keys(
             generation_root=tmp_path / table_name,
             table=table_name,
             rows_by_source=(("source-1", [row]),),
+        )
+
+
+@pytest.mark.parametrize(
+    ("table_name", "row_factory"),
+    (
+        (BASELINE_BEHAVIOR_SUMMARY_TABLE, _valid_baseline_summary_row),
+        (BASELINE_BEHAVIOR_TIME_BINS_TABLE, _valid_baseline_time_bin_row),
+        (BASELINE_KINEMATIC_SAMPLES_TABLE, _valid_baseline_sample_row),
+    ),
+)
+def test_baseline_exact_writers_reject_duplicate_primary_keys(
+    tmp_path: Path,
+    table_name: str,
+    row_factory: Any,
+) -> None:
+    row = row_factory()
+    with pytest.raises(ValueError, match="duplicate primary key"):
+        _write_table_parts(
+            generation_root=tmp_path / table_name,
+            table=table_name,
+            rows_by_source=(("source-1", [row, dict(row)]),),
         )
 
 

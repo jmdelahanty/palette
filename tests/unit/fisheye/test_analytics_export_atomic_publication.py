@@ -150,16 +150,16 @@ def test_concurrent_first_publication_uses_manifest_compare_and_swap(
         "fisheye.utils.export_cross_recording_analytics.get_git_info",
         lambda _path: {"commit_hash": "test", "is_dirty": False},
     )
-    import fisheye.utils.export_cross_recording_analytics as exporter
+    import fisheye.analytics_exports.publication as publication
 
-    real_validate = exporter.validate_staged_publication
+    real_validate = publication.validate_staged_publication
     ready_to_commit = threading.Barrier(2)
 
     def synchronized_validate(staging_root: Path, payload: object) -> None:
         real_validate(staging_root, payload)
         ready_to_commit.wait(timeout=10)
 
-    monkeypatch.setattr(exporter, "validate_staged_publication", synchronized_validate)
+    monkeypatch.setattr(publication, "validate_staged_publication", synchronized_validate)
 
     def publish(source: str) -> dict[str, object]:
         return export_sources(

@@ -321,6 +321,14 @@ def validate_export_payload(
             "manifest capabilities do not match capabilities resolved from Parquet schemas"
         )
 
+    if "eye_trace_samples" in tables:
+        try:
+            from .eye_trace_samples import validate_eye_trace_export_payload
+
+            validate_eye_trace_export_payload(root, payload)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            errors.append(f"eye_trace_samples: {exc}")
+
     if errors:
         raise ExportValidationError(
             f"Analytics export {run_id!r} failed validation:\n- " + "\n- ".join(errors)
