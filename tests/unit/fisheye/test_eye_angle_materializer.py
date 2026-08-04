@@ -2411,3 +2411,184 @@ def test_publication_rolls_back_when_source_revision_changes(
     assert "injected source revision change" in tombstone["failure"]
     assert parent.attrs.get("latest") != "eye_1"
     assert parent.attrs.get("latest_complete") != "eye_1"
+
+
+def _materialize_established_eye_source(
+    monkeypatch: pytest.MonkeyPatch,
+    source: Path,
+    scratch: Path,
+) -> dict[str, object]:
+    _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    return mod.materialize_eye_angles(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+        run_name="eye_source",
+        chunk_rows=2,
+        output_shard_rows=3,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_workers=1,
+        fps=100.0,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+        check_capacity=False,
+        stage_command="unit-test-eye-source",
+    )
+
+
+def test_candidate_execution_binding_acceptance_and_post_return_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    _build_source(source)
+    _materialize_established_eye_source(
+        monkeypatch,
+        source,
+        tmp_path / "source-scratch",
+    )
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    source_hashes = mod.compute_eye_angle_logical_hashes(
+        root["analysis/eye_angle_runs/eye_source"]
+    )
+    binding = {
+        "schema_id": "palette.analysis_candidate_execution_binding",
+        "schema_version": 1,
+        "execution_id": "eye-unit",
+        "request_payload_digest": "a" * 64,
+        "candidate_run_path": "analysis/eye_angle_runs/eye_candidate",
+    }
+    accepted: list[str] = []
+
+    def accept(_root, _parent, candidate):  # type: ignore[no-untyped-def]
+        assert candidate.attrs[mod.EXECUTION_BINDING_ATTR] == binding
+        accepted.append("called")
+        return {"accepted": True, "execution_binding": binding}
+
+    result = mod.materialize_eye_angles(
+        source,
+        scratch_root=tmp_path / "candidate-scratch",
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+        run_name="eye_candidate",
+        storage_profile=EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        chunk_rows=2,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_workers=1,
+        native_threads=1,
+        fps=100.0,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+        check_capacity=False,
+        execution_binding=binding,
+        expected_source_logical_hashes=source_hashes,
+        publication_acceptance_validator=accept,
+    )
+
+    assert accepted == ["called"]
+    assert result["caller_acceptance"] == {
+        "accepted": True,
+        "execution_binding": binding,
+    }
+    assert result["source_logical_manifest_sha256"] == result[
+        "published_logical_manifest_sha256"
+    ]
+    assert [
+        phase["name"] for phase in result["runtime_telemetry"]["phases"]
+    ] == list(mod.EYE_ANGLE_EXECUTION_PHASE_ORDER)
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = direct["analysis/eye_angle_runs"]
+    assert parent.attrs["latest"] == "eye_source"
+    assert parent.attrs["latest_complete"] == "eye_source"
+    assert parent["eye_candidate"].attrs["stage_selector_eligible"] is False
+
+    tombstone = mod.tombstone_eye_angle_execution_candidate(
+        source,
+        run_name="eye_candidate",
+        expected_execution_binding=binding,
+        failure_phase="runner_receipt_assembly",
+        error_type="RuntimeError",
+        error_message="injected post-return failure",
+    )
+    assert tombstone["tombstoned"] is True
+    for consolidated in (False, True):
+        view = zarr.open_group(
+            str(source),
+            mode="r",
+            use_consolidated=consolidated,
+        )
+        failed = view["analysis/eye_angle_runs/eye_candidate"]
+        assert failed.attrs["palette_run_completion_status"] == "failed"
+        assert failed.attrs["stage_selector_eligible"] is False
+        assert failed.attrs[mod.EXECUTION_FAILURE_TOMBSTONE_ATTR][
+            "failure_phase"
+        ] == "runner_receipt_assembly"
+
+
+def test_candidate_atomic_acceptance_failure_is_failed_and_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    _build_source(source)
+    _materialize_established_eye_source(
+        monkeypatch,
+        source,
+        tmp_path / "source-scratch",
+    )
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    source_hashes = mod.compute_eye_angle_logical_hashes(
+        root["analysis/eye_angle_runs/eye_source"]
+    )
+    binding = {
+        "schema_id": "palette.analysis_candidate_execution_binding",
+        "schema_version": 1,
+        "execution_id": "eye-fail",
+        "request_payload_digest": "b" * 64,
+        "candidate_run_path": "analysis/eye_angle_runs/eye_candidate",
+    }
+
+    def reject(*_args):  # type: ignore[no-untyped-def]
+        raise RuntimeError("injected atomic acceptance rejection")
+
+    with pytest.raises(RuntimeError, match="atomic acceptance rejection") as error:
+        mod.materialize_eye_angles(
+            source,
+            scratch_root=tmp_path / "candidate-scratch",
+            subject_shape_run="shape_1",
+            keypoint_run="kp_raw_1",
+            run_name="eye_candidate",
+            storage_profile=EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+            chunk_rows=2,
+            execution_backend="serial_driver",
+            scheduler="single-threaded",
+            num_workers=1,
+            shard_workers=1,
+            native_threads=1,
+            fps=100.0,
+            copy_backend="python",
+            apply=True,
+            keep_scratch=True,
+            check_capacity=False,
+            execution_binding=binding,
+            expected_source_logical_hashes=source_hashes,
+            publication_acceptance_validator=reject,
+        )
+    assert isinstance(
+        getattr(error.value, "palette_runtime_telemetry", None),
+        dict,
+    )
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = direct["analysis/eye_angle_runs"]
+    failed = parent["eye_candidate"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert parent.attrs["latest"] == "eye_source"
+    assert parent.attrs["latest_complete"] == "eye_source"

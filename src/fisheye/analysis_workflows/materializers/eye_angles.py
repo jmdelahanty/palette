@@ -14,6 +14,7 @@ the result in the authoritative recording.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -26,7 +27,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
@@ -44,6 +45,7 @@ from ...analysis.eye_angle_storage import (
     validate_eye_angle_candidate_storage,
     validate_eye_angle_direct_consolidated_storage,
 )
+from ..eye_angle_candidate_execution import compute_eye_angle_logical_hashes
 from ...shared.derived_analysis_registry_status import (
     emit_eye_angle_stage_completion,
 )
@@ -53,14 +55,28 @@ from ...shared.metadata import get_fps
 from ...shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
-from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from ...shared.zarr.benchmark_runtime import storage_stats
+from ...shared.zarr.manifest_digest import canonical_json_sha256
+from ...shared.zarr.metadata_equivalence import validate_direct_consolidated_subtree
+from ...shared.zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+    RUN_STATUS_FAILED,
+    mark_run_complete,
+    mark_run_failed,
+    require_runs_parent,
+)
 from ...shared.zarr_sharded_copy import ShardedArrayLayout, copy_completed_run_to_sharded
-from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from ...shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    consolidate_metadata_capture_expected_warnings,
+)
 from .atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
+from .runtime_telemetry import PhaseTelemetry, require_runtime_telemetry
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.eye_angle_materialization.v1"
@@ -84,6 +100,24 @@ NATIVE_THREAD_ENV_VARS = (
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
+EYE_ANGLE_EXECUTION_PHASE_ORDER = (
+    "plan",
+    "source_staging",
+    "scientific_compute",
+    "local_validation",
+    "local_consolidation",
+    "local_direct_consolidated_comparison",
+    "atomic_publication",
+    "published_validation",
+    "published_direct_consolidated_comparison",
+    "decoded_equality",
+    "physical_inventory",
+)
+EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
+EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
+PublicationAcceptanceValidator = Callable[
+    [zarr.Group, zarr.Group, zarr.Group], Mapping[str, Any]
+]
 
 
 @dataclass(frozen=True)
@@ -1340,11 +1374,106 @@ def _require_candidate_direct_consolidated_equivalence(
     return 41
 
 
+def _ordered_runtime_telemetry(telemetry: PhaseTelemetry) -> dict[str, Any]:
+    result = telemetry.to_json()
+    order = {name: index for index, name in enumerate(EYE_ANGLE_EXECUTION_PHASE_ORDER)}
+    phases = list(result["phases"])
+    if any(phase["name"] not in order for phase in phases):
+        raise RuntimeError("Eye-angle telemetry contains an unknown phase.")
+    phases.sort(key=lambda phase: order[phase["name"]])
+    result["phases"] = phases
+    require_runtime_telemetry(
+        result,
+        expected_materializer="eye_angle_candidate",
+        allowed_phase_order=EYE_ANGLE_EXECUTION_PHASE_ORDER,
+    )
+    return result
+
+
+def tombstone_eye_angle_execution_candidate(
+    source_zarr: str | Path,
+    *,
+    run_name: str,
+    expected_execution_binding: Mapping[str, Any],
+    failure_phase: str,
+    error_type: str,
+    error_message: str,
+) -> dict[str, Any]:
+    """Fail one owned eye-angle benchmark candidate after runner finalization."""
+
+    archive = Path(source_zarr).expanduser().resolve()
+    name = _validate_run_name(run_name)
+    expected_binding = json_attr_safe(dict(expected_execution_binding))
+    if not expected_binding:
+        raise ValueError("expected_execution_binding must be nonempty.")
+    payload = {
+        "schema_id": "palette.analysis_candidate_execution_tombstone",
+        "schema_version": 1,
+        "execution_binding": expected_binding,
+        "failure_phase": str(failure_phase),
+        "error_type": str(error_type),
+        "error_message": str(error_message),
+    }
+    tombstone = {**payload, "payload_sha256": canonical_json_sha256(payload)}
+    run_path = f"analysis/eye_angle_runs/{name}"
+    with archive_metadata_publication_lock(archive):
+        root = open_zarr_root(archive, mode="a")
+        parent = root["analysis/eye_angle_runs"]
+        run = parent.get(name)
+        if not isinstance(run, zarr.Group):
+            return {"target_present": False, "tombstoned": False}
+        if run.attrs.get(EXECUTION_BINDING_ATTR) != expected_binding:
+            raise RuntimeError(
+                "Refusing to tombstone an eye-angle candidate owned by another execution."
+            )
+        if run.attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError("Refusing to tombstone a selector-eligible eye-angle run.")
+        existing = run.attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR)
+        status = run.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+        if status == RUN_STATUS_FAILED:
+            if existing != tombstone:
+                raise RuntimeError("Existing eye-angle execution tombstone differs.")
+        else:
+            if status != RUN_STATUS_COMPLETE:
+                raise RuntimeError(
+                    "Eye-angle execution candidate is neither complete nor failed."
+                )
+            mark_run_failed(
+                run,
+                parent_group=None,
+                run_name=name,
+                error=f"{error_type}: {error_message}",
+            )
+            run.attrs["stage_selector_eligible"] = False
+            run.attrs[EXECUTION_FAILURE_TOMBSTONE_ATTR] = tombstone
+        consolidate_metadata_capture_expected_warnings(archive)
+        receipt = validate_direct_consolidated_subtree(
+            archive,
+            subtree_path=run_path,
+        )
+        fresh = open_zarr_root(archive, mode="r")[run_path]
+        if (
+            fresh.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_FAILED
+            or fresh.attrs.get("stage_selector_eligible") is not False
+            or fresh.attrs.get(EXECUTION_BINDING_ATTR) != expected_binding
+            or fresh.attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR) != tombstone
+        ):
+            raise RuntimeError("Eye-angle execution tombstone did not persist exactly.")
+    return {
+        "target_present": True,
+        "tombstoned": True,
+        "metadata_declarations_sha256": receipt.declarations_sha256,
+    }
+
+
 def publish_eye_angle_run(
     plan: EyeAngleMaterializationPlan,
     *,
     materialization_payload: dict[str, Any],
     copy_backend: str,
+    telemetry: PhaseTelemetry | None = None,
+    expected_source_logical_hashes: Mapping[str, Any] | None = None,
+    publication_acceptance_validator: PublicationAcceptanceValidator | None = None,
 ) -> dict[str, Any]:
     """Validate and atomically publish one final physical eye-angle run."""
 
@@ -1352,7 +1481,16 @@ def publish_eye_angle_run(
         plan.staged_input_integrity_receipt
     )
     storage_candidate = is_eye_angle_storage_candidate(plan.storage_profile_id)
+    if (
+        expected_source_logical_hashes is not None
+        or publication_acceptance_validator is not None
+    ) and not storage_candidate:
+        raise ValueError("Execution acceptance is valid for eye-angle candidates only.")
     publication_pointer_snapshot: dict[str, tuple[bool, Any]] = {}
+    publication_acceptance: dict[str, Any] = {}
+
+    def phase(name: str):
+        return telemetry.phase(name) if telemetry is not None else nullcontext()
 
     def candidate_dimensions() -> EyeAngleDimensions:
         return EyeAngleDimensions(
@@ -1474,6 +1612,13 @@ def publish_eye_angle_run(
                     "Eye-angle candidate lost its complete, selector-ineligible, "
                     "pointer-preserving state before metadata consolidation."
                 )
+            with phase("published_validation"):
+                published_validation = validate(plan.target_run_path)
+                if not published_validation["valid"]:
+                    raise RuntimeError(
+                        "Published eye-angle candidate is invalid: "
+                        f"{published_validation}"
+                    )
             consolidate_metadata_capture_expected_warnings(plan.source_zarr)
             direct_root = zarr.open_group(
                 str(plan.source_zarr), mode="r", use_consolidated=False
@@ -1490,14 +1635,49 @@ def publish_eye_angle_run(
                     "Eye-angle candidate consolidated metadata does not preserve "
                     "the publication-lock selector snapshot."
                 )
-            archive_consolidated_counts.append(
-                _require_candidate_direct_consolidated_equivalence(
+            with phase("published_direct_consolidated_comparison"):
+                published_compared = _require_candidate_direct_consolidated_equivalence(
                     direct_root[f"analysis/eye_angle_runs/{plan.run_name}"],
                     consolidated_root[f"analysis/eye_angle_runs/{plan.run_name}"],
                     dimensions=candidate_dimensions(),
                     label="Authoritative",
                 )
+            archive_consolidated_counts.append(published_compared)
+            with phase("decoded_equality"):
+                published_hashes = compute_eye_angle_logical_hashes(run_group)
+                if (
+                    expected_source_logical_hashes is not None
+                    and published_hashes != dict(expected_source_logical_hashes)
+                ):
+                    raise RuntimeError(
+                        "Published eye-angle decoded values differ from the source run."
+                    )
+            with phase("physical_inventory"):
+                published_storage = storage_stats(plan.target_run_path)
+                if (
+                    published_storage["file_count"] < 1
+                    or published_storage["apparent_bytes"] < 1
+                    or published_storage["allocated_bytes"] < 1
+                ):
+                    raise RuntimeError(
+                        "Published eye-angle candidate has no physical payload."
+                    )
+            publication_acceptance.update(
+                published_validation=published_validation,
+                published_direct_consolidated_array_count=published_compared,
+                published_hashes=published_hashes,
+                output_storage=published_storage,
             )
+            if publication_acceptance_validator is not None:
+                publication_acceptance["caller_acceptance"] = json_attr_safe(
+                    dict(
+                        publication_acceptance_validator(
+                            _root,
+                            parent,
+                            run_group,
+                        )
+                    )
+                )
             return
         if (
             str(parent.attrs.get("latest")) != plan.run_name
@@ -1653,6 +1833,7 @@ def publish_eye_angle_run(
         archive_consolidated_counts[0] if archive_consolidated_counts else None
     )
     if storage_candidate:
+        result.update(publication_acceptance)
         result["registry_updated"] = False
         return result
     authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
@@ -1693,29 +1874,66 @@ def materialize_eye_angles(
     keep_scratch: bool = False,
     check_capacity: bool = True,
     stage_command: str | None = None,
+    execution_binding: Mapping[str, Any] | None = None,
+    expected_source_logical_hashes: Mapping[str, Any] | None = None,
+    publication_acceptance_validator: PublicationAcceptanceValidator | None = None,
 ) -> dict[str, Any]:
     """Plan or execute the complete staged eye-angle materialization."""
 
-    plan = build_eye_angle_materialization_plan(
-        source_zarr,
-        scratch_root=scratch_root,
-        subject_shape_run=subject_shape_run,
-        keypoint_run=keypoint_run,
-        run_name=run_name,
-        storage_profile=storage_profile,
-        chunk_rows=chunk_rows,
-        angle_chunk_rows=angle_chunk_rows,
-        angle_chunk_columns=angle_chunk_columns,
-        output_shard_rows=output_shard_rows,
-        angle_shard_columns=angle_shard_columns,
-        execution_backend=execution_backend,
-        scheduler=scheduler,
-        num_workers=num_workers,
-        shard_workers=shard_workers,
-        native_threads=native_threads,
-        fps=fps,
-        smoothing_window=smoothing_window,
+    telemetry = PhaseTelemetry(
+        materializer="eye_angle_candidate",
+        context={
+            "run_name": run_name,
+            "subject_shape_run": subject_shape_run,
+            "keypoint_run": keypoint_run,
+            "storage_profile_id": storage_profile,
+        },
     )
+    with telemetry.phase("plan"):
+        plan = build_eye_angle_materialization_plan(
+            source_zarr,
+            scratch_root=scratch_root,
+            subject_shape_run=subject_shape_run,
+            keypoint_run=keypoint_run,
+            run_name=run_name,
+            storage_profile=storage_profile,
+            chunk_rows=chunk_rows,
+            angle_chunk_rows=angle_chunk_rows,
+            angle_chunk_columns=angle_chunk_columns,
+            output_shard_rows=output_shard_rows,
+            angle_shard_columns=angle_shard_columns,
+            execution_backend=execution_backend,
+            scheduler=scheduler,
+            num_workers=num_workers,
+            shard_workers=shard_workers,
+            native_threads=native_threads,
+            fps=fps,
+            smoothing_window=smoothing_window,
+        )
+    execution_mode = any(
+        value is not None
+        for value in (
+            execution_binding,
+            expected_source_logical_hashes,
+            publication_acceptance_validator,
+        )
+    )
+    if execution_mode and not is_eye_angle_storage_candidate(plan.storage_profile_id):
+        raise ValueError("Shared execution hooks require an eye-angle candidate profile.")
+    binding: dict[str, Any] | None = None
+    if execution_binding is not None:
+        binding = json_attr_safe(dict(execution_binding))
+        if not binding:
+            raise ValueError("execution_binding must be one nonempty mapping.")
+    if execution_mode and (
+        binding is None
+        or expected_source_logical_hashes is None
+        or publication_acceptance_validator is None
+    ):
+        raise ValueError(
+            "Eye-angle shared execution requires binding, source equality, and "
+            "atomic acceptance together."
+        )
     sealed_identity = _sealed_output_identity_digests(
         plan.staged_input_integrity_receipt
     )
@@ -1726,16 +1944,18 @@ def materialize_eye_angles(
         "plan": plan.to_json(),
     }
     if not apply:
+        result["runtime_telemetry"] = _ordered_runtime_telemetry(telemetry)
         return result
 
     succeeded = False
     native_environment = _configure_native_threads(plan.native_threads)
     try:
-        staging = stage_eye_angle_sources(
-            plan,
-            copy_backend=copy_backend,
-            check_capacity=check_capacity,
-        )
+        with telemetry.phase("source_staging"):
+            staging = stage_eye_angle_sources(
+                plan,
+                copy_backend=copy_backend,
+                check_capacity=check_capacity,
+            )
         writer_argv = [
             str(plan.staged_zarr),
             "--subject-shape-run",
@@ -1766,17 +1986,22 @@ def materialize_eye_angles(
             writer_argv.extend(("--fps", str(plan.fps)))
         if plan.smoothing_window is not None:
             writer_argv.extend(("--smoothing-window", str(plan.smoothing_window)))
-        compute_started = time.perf_counter()
-        eye_writer.main(
-            writer_argv,
-            _staged_input_integrity_receipt=(
-                plan.staged_input_integrity_receipt
-            ),
-        )
-        compute_seconds = float(time.perf_counter() - compute_started)
+        with telemetry.phase("scientific_compute"):
+            compute_started = time.perf_counter()
+            eye_writer.main(
+                writer_argv,
+                _staged_input_integrity_receipt=(
+                    plan.staged_input_integrity_receipt
+                ),
+            )
+            compute_seconds = float(time.perf_counter() - compute_started)
 
-        regular_validation = _validate_eye_angle_run(
-            plan.local_run_path,
+        with telemetry.phase("local_validation"):
+            regular_run = open_zarr_root(plan.local_run_path, mode="a")
+            if binding is not None:
+                regular_run.attrs[EXECUTION_BINDING_ATTR] = binding
+            regular_validation = _validate_eye_angle_run(
+                plan.local_run_path,
             row_count=plan.row_count,
             frame_count=plan.frame_count,
             expected_source_contract_sha256=plan.source_contract_sha256,
@@ -1806,19 +2031,19 @@ def materialize_eye_angles(
                 else plan.angle_shard_columns
             ),
             storage_profile_id=plan.storage_profile_id,
-        )
+            )
         # The validation contract requires materialization provenance, which is
         # appended immediately after validating the scientific writer surface.
-        non_provenance_errors = [
-            error
-            for error in regular_validation["errors"]
-            if error != "node_local_materialization provenance is missing"
-        ]
-        if non_provenance_errors:
-            raise RuntimeError(
-                "Node-local regular eye-angle run is invalid: "
-                f"{regular_validation}"
-            )
+            non_provenance_errors = [
+                error
+                for error in regular_validation["errors"]
+                if error != "node_local_materialization provenance is missing"
+            ]
+            if non_provenance_errors:
+                raise RuntimeError(
+                    "Node-local regular eye-angle run is invalid: "
+                    f"{regular_validation}"
+                )
 
         materialization_payload = json_attr_safe(
             {
@@ -1877,7 +2102,6 @@ def materialize_eye_angles(
                 },
             }
         )
-        regular_run = open_zarr_root(plan.local_run_path, mode="a")
         regular_run.attrs["node_local_materialization"] = materialization_payload
         provenance = dict(regular_run.attrs.get("provenance", {}))
         provenance["materialization"] = {
@@ -1916,6 +2140,14 @@ def materialize_eye_angles(
                     "Node-local final eye-angle candidate is invalid: "
                     f"{candidate_validation}"
                 )
+            local_hashes = compute_eye_angle_logical_hashes(regular_run)
+            if (
+                expected_source_logical_hashes is not None
+                and local_hashes != dict(expected_source_logical_hashes)
+            ):
+                raise RuntimeError(
+                    "Node-local eye-angle decoded values differ from the source run."
+                )
             materialization_payload.update(
                 {
                     "local_direct_consolidated_array_count": 41,
@@ -1923,34 +2155,69 @@ def materialize_eye_angles(
                 }
             )
             regular_run.attrs["node_local_materialization"] = materialization_payload
-            consolidate_metadata_capture_expected_warnings(plan.staged_zarr)
+
+        if is_eye_angle_storage_candidate(plan.storage_profile_id):
+            with telemetry.phase("local_consolidation"):
+                consolidate_metadata_capture_expected_warnings(plan.staged_zarr)
             direct_root = zarr.open_group(
                 str(plan.staged_zarr), mode="r", use_consolidated=False
             )
             consolidated_root = zarr.open_group(
                 str(plan.staged_zarr), mode="r", use_consolidated=True
             )
-            _require_candidate_direct_consolidated_equivalence(
-                direct_root[f"analysis/eye_angle_runs/{plan.run_name}"],
-                consolidated_root[f"analysis/eye_angle_runs/{plan.run_name}"],
-                dimensions=EyeAngleDimensions(
-                    n_roi_rows=plan.row_count,
-                    n_frames=plan.frame_count,
-                    angle_block_width=plan.angle_chunk_columns,
-                ),
-                label="Node-local",
-            )
-            publish = publish_eye_angle_run(
-                plan,
-                materialization_payload=materialization_payload,
-                copy_backend=copy_backend,
-            )
+            with telemetry.phase("local_direct_consolidated_comparison"):
+                local_compared = _require_candidate_direct_consolidated_equivalence(
+                    direct_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                    consolidated_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                    dimensions=EyeAngleDimensions(
+                        n_roi_rows=plan.row_count,
+                        n_frames=plan.frame_count,
+                        angle_block_width=plan.angle_chunk_columns,
+                    ),
+                    label="Node-local",
+                )
+            with telemetry.phase("atomic_publication"):
+                publish_kwargs: dict[str, Any] = {
+                    "materialization_payload": materialization_payload,
+                    "copy_backend": copy_backend,
+                }
+                if execution_mode:
+                    publish_kwargs.update(
+                        telemetry=telemetry,
+                        expected_source_logical_hashes=(
+                            expected_source_logical_hashes
+                        ),
+                        publication_acceptance_validator=(
+                            publication_acceptance_validator
+                        ),
+                    )
+                publish = publish_eye_angle_run(plan, **publish_kwargs)
+            published_hashes = publish.get("published_hashes")
             result.update(
                 {
                     "status": "complete",
                     "staging": staging,
                     "local_materialization": materialization_payload,
                     "publish": publish,
+                    "source_logical_manifest_sha256": (
+                        None
+                        if expected_source_logical_hashes is None
+                        else canonical_json_sha256(expected_source_logical_hashes)
+                    ),
+                    "local_logical_manifest_sha256": canonical_json_sha256(
+                        local_hashes
+                    ),
+                    "published_logical_manifest_sha256": canonical_json_sha256(
+                        published_hashes
+                    ),
+                    "local_direct_consolidated_array_count": local_compared,
+                    "published_validation": publish.get("published_validation"),
+                    "published_direct_consolidated_array_count": publish.get(
+                        "published_direct_consolidated_array_count"
+                    ),
+                    "output_storage": publish.get("output_storage"),
+                    "caller_acceptance": publish.get("caller_acceptance"),
+                    "runtime_telemetry": _ordered_runtime_telemetry(telemetry),
                 }
             )
             succeeded = True
@@ -2026,6 +2293,12 @@ def materialize_eye_angles(
         )
         succeeded = True
         return result
+    except BaseException as exc:
+        try:
+            setattr(exc, "palette_runtime_telemetry", _ordered_runtime_telemetry(telemetry))
+        except BaseException:
+            pass
+        raise
     finally:
         if succeeded and not keep_scratch and plan.scratch_root.is_dir():
             shutil.rmtree(plan.scratch_root)

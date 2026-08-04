@@ -551,8 +551,13 @@ def resolve_eye_angle_run(
     else:
         normalized = _normalize_path(str(run_name).strip())
         parts = normalized.split("/")
-        if normalized.startswith(EYE_ANGLE_RUN_PARENT + "/") and len(parts) >= 3:
+        if normalized.startswith(EYE_ANGLE_RUN_PARENT + "/") and len(parts) == 3:
             resolved = parts[2]
+        elif "/" in normalized:
+            raise EyeAngleIOError(
+                "Explicit eye-angle selection must be one run name or exactly "
+                "analysis/eye_angle_runs/<run>; descendant and alias paths are invalid."
+            )
         else:
             resolved = parts[-1]
 

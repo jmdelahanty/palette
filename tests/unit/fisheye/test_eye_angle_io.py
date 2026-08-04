@@ -33,6 +33,19 @@ class _SelectionGroup(dict[str, object]):
         ]
 
 
+def test_explicit_run_resolution_rejects_descendant_and_alias_paths() -> None:
+    parent = _SelectionGroup()
+    root = _SelectionGroup()
+    root["analysis/eye_angle_runs"] = parent
+
+    for value in (
+        "analysis/eye_angle_runs/run_1/support/frame_indices",
+        "other/alias/run_1",
+    ):
+        with pytest.raises(EyeAngleIOError, match="descendant and alias paths"):
+            resolve_eye_angle_run(root, run_name=value)
+
+
 def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
     group.create_array(name, data=values, chunks=values.shape, overwrite=True)
 
