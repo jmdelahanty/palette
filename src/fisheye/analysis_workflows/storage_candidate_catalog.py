@@ -252,11 +252,14 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
         owner_module="fisheye.analysis.tail_posture_view_runs",
         entrypoint_attr="write_tail_posture_view_run",
     ),
-    _direct_candidate(
+    _atomic_candidate(
         "bout_classification",
         profile_id="published_http_v1",
-        owner_module="fisheye.analysis.megabouts_classifier",
-        entrypoint_attr="write_megabouts_classification_run",
+        owner_module=(
+            "fisheye.analysis_workflows.materializers."
+            "bout_classification_candidate"
+        ),
+        entrypoint_attr="materialize_bout_classification_candidate",
     ),
 )
 

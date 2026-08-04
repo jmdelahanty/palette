@@ -367,7 +367,7 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         for manifest in manifests
     }
     assert status["tail_posture_view"] == "blocked_direct_publication"
-    assert status["bout_classification"] == "blocked_direct_publication"
+    assert status["bout_classification"] == "implemented"
     assert status["detection_occupancy"] == "blocked_coordinate_authority"
     assert status["session_occupancy"] == "blocked_coordinate_authority"
     assert {stage for stage, value in status.items() if value == "implemented"} == {
@@ -379,6 +379,7 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "chaser_distance",
         "tail_kinematics",
         "subject_shape",
+        "bout_classification",
     }
 
     for stage in (
@@ -390,6 +391,7 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "chaser_distance",
         "tail_kinematics",
         "subject_shape",
+        "bout_classification",
     ):
         adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[stage]
         assert adapter.resolves_candidate_owner() is True

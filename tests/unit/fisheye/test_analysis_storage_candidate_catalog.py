@@ -27,8 +27,9 @@ EXPECTED_ATOMIC = {
     "detection_occupancy",
     "session_occupancy",
     "chaser_distance",
+    "bout_classification",
 }
-EXPECTED_DIRECT = {"tail_posture_view", "bout_classification"}
+EXPECTED_DIRECT = {"tail_posture_view"}
 
 
 def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:

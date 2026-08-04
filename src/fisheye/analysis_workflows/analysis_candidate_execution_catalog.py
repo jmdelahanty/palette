@@ -335,6 +335,33 @@ def _implemented_subject_shape() -> AnalysisCandidateExecutionAdapter:
     )
 
 
+def _implemented_bout_classification() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="bout_classification",
+        invocation_contract=CandidateInvocationContract.BOUT_CLASSIFICATION_V1,
+        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.BOUND_DERIVATIVE,
+        coordinate_contract_status=(
+            CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED
+        ),
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.BOUT_CLASSIFICATION_V2_ARRAYS_V1
+        ),
+        runner_module=(
+            "fisheye.diagnostics.bout_classification_candidate_execution"
+        ),
+        runner_entrypoint="execute_bout_classification_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows."
+            "bout_classification_candidate_execution"
+        ),
+        suite_validator_entrypoint=(
+            "require_bout_classification_execution_suite"
+        ),
+    )
+
+
 def _coordinate_blocked(
     stage_id: str,
     logical_equality_contract: CandidateLogicalEqualityContract,
@@ -406,13 +433,7 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
         CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED,
         CandidateLogicalEqualityContract.TAIL_POSTURE_V3_ARRAYS_V1,
     ),
-    _direct_blocked(
-        "bout_classification",
-        CandidateInvocationContract.BOUT_CLASSIFICATION_DIRECT_V1,
-        CoordinateContractRole.BOUND_DERIVATIVE,
-        CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED,
-        CandidateLogicalEqualityContract.BOUT_CLASSIFICATION_V2_ARRAYS_V1,
-    ),
+    _implemented_bout_classification(),
 )
 
 

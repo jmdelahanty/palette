@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 import shutil
+import subprocess
+import uuid
 
 import numpy as np
 import pytest
@@ -21,8 +24,37 @@ from fisheye.analysis.megabouts_classifier import (
     write_megabouts_classification_run,
 )
 from fisheye.analysis.megabouts_classifier_inputs import MegaboutsClassifierInputPack
+from fisheye.analysis_workflows.bout_classification_candidate_execution import (
+    bout_classification_logical_manifest_sha256,
+    build_bout_classification_coordinate_evidence,
+    build_bout_classification_execution_suite,
+    build_bout_classification_scientific_identity,
+    compute_bout_classification_logical_hashes,
+    reconstruct_bout_classification_writer_inputs,
+    require_bout_classification_execution_suite,
+)
+from fisheye.analysis_workflows.analysis_candidate_execution import (
+    PhysicalIOScope,
+    build_candidate_execution_request,
+    require_candidate_execution_receipt,
+)
+from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
+    ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE,
+)
+from fisheye.analysis_workflows.analysis_candidate_invocation import (
+    build_bout_classification_invocation,
+)
+from fisheye.analysis_workflows.materializers.bout_classification_candidate import (
+    materialize_bout_classification_candidate,
+)
 from fisheye.diagnostics import (
     benchmark_bout_classification_v2_reads as benchmark,
+)
+from fisheye.diagnostics.bout_classification_candidate_execution import (
+    BoutClassificationCandidateExecutionFailed,
+    bout_classification_selector_snapshot_sha256,
+    require_bout_classification_execution_attempt,
+    run_bout_classification_candidate_fresh_process,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
@@ -183,6 +215,194 @@ def _coordinated_pair_rewrite(
 @pytest.fixture()
 def pair_archive(tmp_path: Path) -> Path:
     return _build_pair_archive(tmp_path)
+
+
+def test_typed_execution_suite_replays_exact_direct_writer_payload(
+    pair_archive: Path,
+) -> None:
+    root = zarr.open_group(pair_archive, mode="a", use_consolidated=False)
+    source = root[f"analysis/bout_classification_runs/{SOURCE}"]
+    pack, result = reconstruct_bout_classification_writer_inputs(source)
+
+    replay_name = "typed_writer_replay_v2"
+    write_megabouts_classification_run(
+        root,
+        run_name=replay_name,
+        pack=pack,
+        result=result,
+        storage_profile=PUBLISHED_HTTP_V1,
+    )
+    replay = root[f"analysis/bout_classification_runs/{replay_name}"]
+
+    assert compute_bout_classification_logical_hashes(replay) == (
+        compute_bout_classification_logical_hashes(source)
+    )
+    assert build_bout_classification_scientific_identity(replay) == (
+        build_bout_classification_scientific_identity(source)
+    )
+    coordinate = build_bout_classification_coordinate_evidence(source, replay)
+    assert coordinate["status"] == "verified_bound_source"
+    assert coordinate["coordinate_gate_passed"] is True
+
+    suite = build_bout_classification_execution_suite(
+        source,
+        seed=23,
+        repetitions=2,
+    )
+    require_bout_classification_execution_suite("bout_classification", suite)
+    assert len(suite["payload"]["storage_plan_receipt"]["payload"]["arrays"]) == 20
+
+
+def test_atomic_typed_materializer_preserves_source_and_selectors(
+    pair_archive: Path,
+    tmp_path: Path,
+) -> None:
+    before = zarr.open_group(pair_archive, mode="r", use_consolidated=False)[
+        "analysis/bout_classification_runs"
+    ]
+    latest_before = before.attrs["latest"]
+    latest_complete_before = before.attrs["latest_complete"]
+
+    result = materialize_bout_classification_candidate(
+        pair_archive,
+        source_run=SOURCE,
+        run_name="atomic_typed_candidate_v2",
+        scratch_root=tmp_path / "bout-typed-scratch",
+        copy_backend="python",
+        apply=True,
+    )
+
+    assert result["status"] == "complete"
+    assert result["local_direct_consolidated_array_count"] == 20
+    assert result["published_direct_consolidated_array_count"] == 20
+    root = zarr.open_group(pair_archive, mode="r", use_consolidated=False)
+    parent = root["analysis/bout_classification_runs"]
+    assert parent.attrs["latest"] == latest_before
+    assert parent.attrs["latest_complete"] == latest_complete_before
+    source = parent[SOURCE]
+    candidate = parent["atomic_typed_candidate_v2"]
+    assert candidate.attrs["stage_selector_eligible"] is False
+    assert compute_bout_classification_logical_hashes(candidate) == (
+        compute_bout_classification_logical_hashes(source)
+    )
+
+
+@pytest.mark.parametrize("valid_source_identity", [True, False])
+def test_fresh_process_executes_or_fails_closed(
+    tmp_path: Path,
+    valid_source_identity: bool,
+) -> None:
+    benchmark_root = tmp_path / ".palette_benchmarks" / "bout-execution"
+    benchmark_root.mkdir(parents=True)
+    archive = _build_pair_archive(benchmark_root)
+    root = zarr.open_group(archive, mode="r", use_consolidated=False)
+    source_path = f"analysis/bout_classification_runs/{SOURCE}"
+    source = root[source_path]
+    source_identity = bout_classification_logical_manifest_sha256(source)
+    scientific_identity = canonical_json_sha256(
+        build_bout_classification_scientific_identity(source)
+    )
+    candidate_name = (
+        "typed_fresh_candidate_valid"
+        if valid_source_identity
+        else "typed_fresh_candidate_invalid"
+    )
+    candidate_path = f"analysis/bout_classification_runs/{candidate_name}"
+    probe = benchmark_root / "protected.json"
+    probe.write_text("{}\n", encoding="utf-8")
+    scratch = Path("/tmp") / f"palette-bout-runner-{uuid.uuid4().hex}"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["bout_classification"]
+    request = build_candidate_execution_request(
+        execution_id=f"bout_{uuid.uuid4().hex}",
+        adapter_manifest=adapter.as_manifest(),
+        invocation=build_bout_classification_invocation(
+            source_scientific_identity_sha256=scientific_identity,
+            storage_profile_id="published_http_v1",
+            copy_backend="python",
+            keep_scratch=False,
+            check_capacity=False,
+        ),
+        benchmark_suite=build_bout_classification_execution_suite(
+            source,
+            repetitions=1,
+        ),
+        archive_path=archive,
+        source_run_path=source_path,
+        candidate_run_path=candidate_path,
+        scratch_root=scratch,
+        source_identity_sha256=(source_identity if valid_source_identity else "f" * 64),
+        palette_commit=commit,
+        repetition_index=0,
+        candidate_order_index=0,
+        candidate_order_count=1,
+        cache_state="fresh_process_os_cache_uncontrolled",
+        physical_io_scope=PhysicalIOScope.UNAVAILABLE,
+        selector_before_sha256=(bout_classification_selector_snapshot_sha256(archive)),
+        registry_probe_path=probe,
+        production_profiles_probe_path=probe,
+    )
+    workflow = benchmark_root / f"driver-{valid_source_identity}"
+    evidence_dir = workflow / "evidence"
+    evidence_dir.mkdir(parents=True)
+    request_path = workflow / "request.json"
+    receipt_path = evidence_dir / "receipt.json"
+    attempt_path = evidence_dir / "attempt.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+
+    if valid_source_identity:
+        evidence = run_bout_classification_candidate_fresh_process(
+            request_path,
+            receipt_path=receipt_path,
+            attempt_path=attempt_path,
+        )
+        require_candidate_execution_receipt(
+            evidence,
+            expected_request_payload_digest=request["payload_digest"],
+        )
+        assert evidence["payload"]["logical_equality"] == {
+            "contract_id": "bout_classification_v2_arrays_v1",
+            "compared_array_count": 20,
+            "source_logical_manifest_sha256": source_identity,
+            "candidate_logical_manifest_sha256": source_identity,
+            "equal": True,
+        }
+        assert evidence["payload"]["coordinate_evidence"]["status"] == (
+            "verified_bound_source"
+        )
+        assert evidence["payload"]["publication_gate_passed"] is False
+        assert receipt_path.is_file()
+        assert not attempt_path.exists()
+        candidate = zarr.open_group(archive, mode="r", use_consolidated=False)[
+            candidate_path
+        ]
+        assert candidate.attrs["stage_selector_eligible"] is False
+        assert candidate.attrs["storage_candidate_profile_promoted"] is False
+    else:
+        with pytest.raises(
+            BoutClassificationCandidateExecutionFailed,
+            match="see attempt record",
+        ) as raised:
+            run_bout_classification_candidate_fresh_process(
+                request_path,
+                receipt_path=receipt_path,
+                attempt_path=attempt_path,
+            )
+        evidence = raised.value.attempt
+        require_bout_classification_execution_attempt(
+            evidence,
+            expected_request_payload_digest=request["payload_digest"],
+        )
+        assert evidence["payload"]["failure_phase"] == "runner_preflight"
+        assert evidence["payload"]["target_state"]["exists"] is False
+        assert attempt_path.is_file()
+        assert not receipt_path.exists()
+    assert not scratch.exists()
 
 
 def test_real_writers_public_source_private_candidate_and_five_process_matrix(

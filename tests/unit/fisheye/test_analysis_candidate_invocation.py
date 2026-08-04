@@ -6,6 +6,7 @@ import pytest
 
 from fisheye.analysis_workflows.analysis_candidate_invocation import (
     CandidateInvocationContract,
+    build_bout_classification_invocation,
     build_chaser_distance_base_invocation,
     build_exact_tabular_invocation,
     build_eye_angle_invocation,
@@ -256,6 +257,33 @@ def test_stimulus_epoch_invocation_binds_migration_and_staged_source() -> None:
     _rehash(bypassed_staging)
     with pytest.raises(ValueError, match="source_staging_mode"):
         require_candidate_invocation_manifest(bypassed_staging)
+
+
+def test_bout_classification_invocation_binds_exact_writer_replay() -> None:
+    invocation = build_bout_classification_invocation(
+        source_scientific_identity_sha256="d" * 64,
+        storage_profile_id="published_http_v1",
+        copy_backend="python",
+        keep_scratch=False,
+        check_capacity=True,
+    )
+    require_candidate_invocation_manifest(
+        invocation,
+        expected_contract=CandidateInvocationContract.BOUT_CLASSIFICATION_V1,
+        expected_profile_id="published_http_v1",
+    )
+
+    changed = deepcopy(invocation)
+    changed["payload"]["parameters"]["writer_replay_mode"] = "rerun_model"
+    _rehash(changed)
+    with pytest.raises(ValueError, match="writer replay mode"):
+        require_candidate_invocation_manifest(changed)
+
+    parallel = deepcopy(invocation)
+    parallel["payload"]["parameters"]["num_workers"] = 2
+    _rehash(parallel)
+    with pytest.raises(ValueError, match="serial writer"):
+        require_candidate_invocation_manifest(parallel)
 
 
 def test_chaser_distance_invocation_binds_authority_projection_and_staging() -> None:

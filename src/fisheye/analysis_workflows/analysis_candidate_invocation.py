@@ -39,6 +39,7 @@ class CandidateInvocationContract(str, Enum):
     CHASER_DISTANCE_BASE_V1 = "chaser_distance_base_v1"
     TAIL_POSTURE_DIRECT_V1 = "tail_posture_direct_v1"
     BOUT_CLASSIFICATION_DIRECT_V1 = "bout_classification_direct_v1"
+    BOUT_CLASSIFICATION_V1 = "bout_classification_v1"
 
 
 def _json_copy(value: object) -> Any:
@@ -448,6 +449,14 @@ def _require_chaser_distance_base(parameters: object) -> Mapping[str, Any]:
     return parsed
 
 
+def _require_bout_classification(parameters: object) -> Mapping[str, Any]:
+    from .bout_classification_candidate_execution import (
+        require_bout_classification_invocation_parameters,
+    )
+
+    return require_bout_classification_invocation_parameters(parameters)
+
+
 _PARAMETER_VALIDATORS = {
     CandidateInvocationContract.EXACT_TABULAR_V1: _require_exact_tabular,
     CandidateInvocationContract.TRACK_FLAT_V1: _require_track_flat,
@@ -457,6 +466,9 @@ _PARAMETER_VALIDATORS = {
     CandidateInvocationContract.STIMULUS_EPOCHS_V1: _require_stimulus_epochs,
     CandidateInvocationContract.CHASER_DISTANCE_BASE_V1: (
         _require_chaser_distance_base
+    ),
+    CandidateInvocationContract.BOUT_CLASSIFICATION_V1: (
+        _require_bout_classification
     ),
 }
 
@@ -764,10 +776,42 @@ def build_chaser_distance_base_invocation(
     )
 
 
+def build_bout_classification_invocation(
+    *,
+    source_scientific_identity_sha256: str,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+    check_capacity: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.BOUT_CLASSIFICATION_V1,
+        {
+            "source_schema_id": "analysis.bout_classification_runs",
+            "source_schema_version": 2,
+            "source_logical_schema_mode": (
+                "exact_bout_classification_v2_arrays_v1"
+            ),
+            "source_scientific_identity_sha256": (
+                source_scientific_identity_sha256
+            ),
+            "writer_replay_mode": "exact_result_direct_writer_replay_v1",
+            "execution_backend": "serial",
+            "num_workers": 1,
+            "source_staging_mode": "source_run_snapshot_copy_v1",
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+            "check_capacity": check_capacity,
+        },
+    )
+
+
 __all__ = [
     "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID",
     "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION",
     "CandidateInvocationContract",
+    "build_bout_classification_invocation",
     "build_chaser_distance_base_invocation",
     "build_exact_tabular_invocation",
     "build_eye_angle_invocation",
