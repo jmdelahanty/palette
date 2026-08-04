@@ -53,6 +53,7 @@ from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
 from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
@@ -60,9 +61,11 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETED_AT_ATTR,
     RUN_NAME_ATTR,
     RUN_STATUS_COMPLETE,
+    RUN_STATUS_FAILED,
     RUN_STATUS_RUNNING,
     RUN_COMPLETION_STATUS_ATTR,
     mark_run_complete,
+    mark_run_failed,
     require_runs_parent,
 )
 
@@ -84,7 +87,7 @@ _NODE_LOCAL_SCRATCH_ROOTS = tuple(
         "/lscratch",
     )
 )
-_EXECUTION_PHASE_ORDER = (
+EXACT_TABULAR_EXECUTION_PHASE_ORDER = (
     "plan",
     "source_staging",
     "logical_rematerialization",
@@ -97,6 +100,11 @@ _EXECUTION_PHASE_ORDER = (
     "decoded_equality",
     "physical_inventory",
 )
+EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
+EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
+PublicationAcceptanceValidator = Callable[
+    [zarr.Group, zarr.Group, zarr.Group], Mapping[str, Any]
+]
 
 
 @dataclass(frozen=True)
@@ -201,7 +209,9 @@ def _require_symlink_free_tree(path: Path, *, label: str) -> None:
 
 def _ordered_runtime_telemetry(telemetry: PhaseTelemetry) -> dict[str, Any]:
     result = telemetry.to_json()
-    order = {name: index for index, name in enumerate(_EXECUTION_PHASE_ORDER)}
+    order = {
+        name: index for index, name in enumerate(EXACT_TABULAR_EXECUTION_PHASE_ORDER)
+    }
     phases = list(result["phases"])
     if any(phase["name"] not in order for phase in phases):
         raise RuntimeError("Exact-tabular telemetry contains an unknown phase.")
@@ -337,7 +347,12 @@ def _array_at_path(group: Any, path: str) -> Any:
     return node
 
 
-def _logical_hashes(group: Any, declarations: Sequence[Any]) -> dict[str, str]:
+def compute_exact_tabular_logical_hashes(
+    group: Any,
+    declarations: Sequence[Any],
+) -> dict[str, str]:
+    """Hash every declared decoded array in one deterministic logical order."""
+
     hashes: dict[str, str] = {}
     for declaration in declarations:
         array = _array_at_path(group, declaration.path)
@@ -374,7 +389,11 @@ def _direct_consolidated_check(
             "Direct/consolidated candidate subtree omits declared arrays: "
             f"expected at least {len(declarations)}, got {receipt.array_count}."
         )
-    return receipt.array_count
+    # The execution receipt's equality surface is the exact declared schema.
+    # Explicitly non-authoritative report/visualization arrays may coexist in
+    # the subtree and are still checked by the full metadata comparison, but
+    # they do not increase the logical compared-array count.
+    return len(declarations)
 
 
 def _local_direct_consolidated_check(
@@ -440,7 +459,7 @@ def _validate_candidate_group(
         errors.append("candidate is not selector-ineligible")
     if group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
         errors.append("candidate is not complete")
-    hashes = _logical_hashes(group, declarations)
+    hashes = compute_exact_tabular_logical_hashes(group, declarations)
     if dict(hashes) != dict(expected_hashes):
         errors.append("candidate decoded logical hashes differ from source")
     return {
@@ -448,6 +467,87 @@ def _validate_candidate_group(
         "errors": errors,
         "array_count": len(declarations),
         "logical_hashes": hashes,
+    }
+
+
+def tombstone_exact_tabular_execution_candidate(
+    source_zarr: str | Path,
+    *,
+    family_id: str,
+    run_name: str,
+    expected_execution_binding: Mapping[str, Any],
+    failure_phase: str,
+    error_type: str,
+    error_message: str,
+) -> dict[str, Any]:
+    """Fail one exact owned benchmark candidate after runner finalization fails."""
+
+    family = _family(family_id)
+    archive = Path(source_zarr).expanduser().resolve()
+    name = _safe_name(run_name, label="candidate run")
+    expected_binding = json_attr_safe(dict(expected_execution_binding))
+    if not expected_binding:
+        raise ValueError("expected_execution_binding must be nonempty.")
+    tombstone_payload = {
+        "schema_id": "palette.analysis_candidate_execution_tombstone",
+        "schema_version": 1,
+        "execution_binding": expected_binding,
+        "failure_phase": str(failure_phase),
+        "error_type": str(error_type),
+        "error_message": str(error_message),
+    }
+    tombstone = {
+        **tombstone_payload,
+        "payload_sha256": canonical_json_sha256(tombstone_payload),
+    }
+    run_path = f"{family.parent_path}/{name}"
+    with archive_metadata_publication_lock(archive):
+        root = open_zarr_root(archive, mode="a")
+        parent = root[family.parent_path]
+        run = parent.get(name)
+        if not isinstance(run, zarr.Group):
+            return {"target_present": False, "tombstoned": False}
+        attrs = run.attrs
+        if attrs.get(EXECUTION_BINDING_ATTR) != expected_binding:
+            raise RuntimeError(
+                "Refusing to tombstone a candidate owned by another execution."
+            )
+        if attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError("Refusing to tombstone a selector-eligible run.")
+        existing = attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR)
+        if attrs.get(RUN_COMPLETION_STATUS_ATTR) == RUN_STATUS_FAILED:
+            if existing != tombstone:
+                raise RuntimeError("Existing execution tombstone differs.")
+        else:
+            if attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
+                raise RuntimeError(
+                    "Execution candidate is neither complete nor already failed."
+                )
+            mark_run_failed(
+                run,
+                parent_group=None,
+                run_name=name,
+                error=f"{error_type}: {error_message}",
+            )
+            run.attrs["stage_selector_eligible"] = False
+            run.attrs[EXECUTION_FAILURE_TOMBSTONE_ATTR] = tombstone
+        consolidate_metadata_capture_expected_warnings(archive)
+        receipt = validate_direct_consolidated_subtree(
+            archive,
+            subtree_path=run_path,
+        )
+        fresh = open_zarr_root(archive, mode="r")[run_path]
+        if (
+            fresh.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_FAILED
+            or fresh.attrs.get("stage_selector_eligible") is not False
+            or fresh.attrs.get(EXECUTION_BINDING_ATTR) != expected_binding
+            or fresh.attrs.get(EXECUTION_FAILURE_TOMBSTONE_ATTR) != tombstone
+        ):
+            raise RuntimeError("Execution failure tombstone did not persist exactly.")
+    return {
+        "target_present": True,
+        "tombstoned": True,
+        "metadata_declarations_sha256": receipt.declarations_sha256,
     }
 
 
@@ -463,6 +563,8 @@ def materialize_exact_tabular_candidate(
     apply: bool = False,
     keep_scratch: bool = False,
     stage_source_to_scratch: bool = False,
+    execution_binding: Mapping[str, Any] | None = None,
+    publication_acceptance_validator: PublicationAcceptanceValidator | None = None,
 ) -> dict[str, Any]:
     """Create and optionally atomically publish one named physical candidate."""
 
@@ -506,7 +608,7 @@ def materialize_exact_tabular_candidate(
                 authoritative_source_group,
                 byte_planner_adopted=False,
             )
-            source_hashes = _logical_hashes(
+            source_hashes = compute_exact_tabular_logical_hashes(
                 authoritative_source_group,
                 source_declarations,
             )
@@ -531,7 +633,13 @@ def materialize_exact_tabular_candidate(
                     source_group,
                     byte_planner_adopted=False,
                 )
-                if _logical_hashes(source_group, staged_declarations) != source_hashes:
+                if (
+                    compute_exact_tabular_logical_hashes(
+                        source_group,
+                        staged_declarations,
+                    )
+                    != source_hashes
+                ):
                     raise ValueError(
                         "Staged exact compact source differs from authoritative source."
                     )
@@ -566,6 +674,11 @@ def materialize_exact_tabular_candidate(
             local_group.attrs["stage_selector_eligible"] = False
             local_group.attrs["storage_candidate_source_run"] = plan.source_run_name
             local_group.attrs["storage_candidate_source_run_path"] = plan.source_run_path
+            if execution_binding is not None:
+                binding = json_attr_safe(dict(execution_binding))
+                if not binding:
+                    raise ValueError("execution_binding must be one nonempty mapping.")
+                local_group.attrs[EXECUTION_BINDING_ATTR] = binding
             local_group.attrs["storage_candidate_profile_promoted"] = False
             family.write_manifest(local_group, byte_planner_adopted=True)
             persist_exact_tabular_storage_receipt(local_group, receipt)
@@ -693,7 +806,7 @@ def materialize_exact_tabular_candidate(
                     declarations=candidate_declarations,
                 )
             with telemetry.phase("decoded_equality"):
-                published_hashes = _logical_hashes(
+                published_hashes = compute_exact_tabular_logical_hashes(
                     run_group,
                     candidate_declarations,
                 )
@@ -718,6 +831,13 @@ def materialize_exact_tabular_candidate(
                 published_hashes=published_hashes,
                 output_storage=published_storage,
             )
+            if publication_acceptance_validator is not None:
+                caller_acceptance = dict(
+                    publication_acceptance_validator(_root, _parent, run_group)
+                )
+                publication_acceptance["caller_acceptance"] = json_attr_safe(
+                    caller_acceptance
+                )
 
         def repair_failed_visibility(_target_path: Path) -> None:
             consolidate_metadata_capture_expected_warnings(plan.source_zarr)
@@ -768,6 +888,7 @@ def materialize_exact_tabular_candidate(
                 published_hashes
             ),
             output_storage=publication_acceptance["output_storage"],
+            caller_acceptance=publication_acceptance.get("caller_acceptance"),
             materialization_seconds=materialization_seconds,
             publication=publication,
             runtime_telemetry=_ordered_runtime_telemetry(telemetry),

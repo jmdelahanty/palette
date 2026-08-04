@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+import hashlib
 import json
 import math
 from pathlib import Path, PurePosixPath
@@ -61,22 +62,14 @@ class CandidateLogicalEqualityContract(str, Enum):
 
     TRACK_FLAT_PROJECTION_V1 = "track_flat_projection_v1"
     SWIM_BOUTS_DECLARED_ARRAYS_V1 = "swim_bouts_declared_arrays_v1"
-    BOUT_KINEMATICS_DECLARED_ARRAYS_V1 = (
-        "bout_kinematics_declared_arrays_v1"
-    )
+    BOUT_KINEMATICS_DECLARED_ARRAYS_V1 = "bout_kinematics_declared_arrays_v1"
     EYE_ANGLE_COMPACT_V7_ARRAYS_V1 = "eye_angle_compact_v7_arrays_v1"
     SUBJECT_SHAPE_V4_ARRAYS_V1 = "subject_shape_v4_arrays_v1"
-    TAIL_KINEMATICS_DECLARED_ARRAYS_V1 = (
-        "tail_kinematics_declared_arrays_v1"
-    )
+    TAIL_KINEMATICS_DECLARED_ARRAYS_V1 = "tail_kinematics_declared_arrays_v1"
     STIMULUS_RESPONSE_V3_ARRAYS_V1 = "stimulus_response_v3_arrays_v1"
     STIMULUS_EPOCH_V2_ARRAYS_V1 = "stimulus_epoch_v2_arrays_v1"
-    DETECTION_OCCUPANCY_DECLARED_ARRAYS_V1 = (
-        "detection_occupancy_declared_arrays_v1"
-    )
-    SESSION_OCCUPANCY_DECLARED_ARRAYS_V1 = (
-        "session_occupancy_declared_arrays_v1"
-    )
+    DETECTION_OCCUPANCY_DECLARED_ARRAYS_V1 = "detection_occupancy_declared_arrays_v1"
+    SESSION_OCCUPANCY_DECLARED_ARRAYS_V1 = "session_occupancy_declared_arrays_v1"
     CHASER_DISTANCE_SEALED_BASE_V2_ARRAYS_V1 = (
         "chaser_distance_sealed_base_v2_arrays_v1"
     )
@@ -114,9 +107,7 @@ class CoordinateContractStatus(str, Enum):
     """Current executable coordinate gate behind one adapter."""
 
     CANONICAL_PUBLICATION_IMPLEMENTED = "canonical_publication_implemented"
-    BOUND_SOURCE_VALIDATION_IMPLEMENTED = (
-        "bound_source_validation_implemented"
-    )
+    BOUND_SOURCE_VALIDATION_IMPLEMENTED = "bound_source_validation_implemented"
     TEMPORAL_AXIS_IMPLEMENTED = "temporal_axis_implemented"
     SOURCE_PRESERVATION_ONLY = "source_preservation_only"
     BLOCKED_CANONICAL_BINDING = "blocked_canonical_binding"
@@ -128,9 +119,7 @@ class CoordinateEvidenceStatus(str, Enum):
     VERIFIED_CANONICAL_PUBLICATION = "verified_canonical_publication"
     VERIFIED_BOUND_SOURCE = "verified_bound_source"
     VERIFIED_TEMPORAL_AXIS = "verified_temporal_axis"
-    VERIFIED_SOURCE_PRESERVATION_NONMINTING = (
-        "verified_source_preservation_nonminting"
-    )
+    VERIFIED_SOURCE_PRESERVATION_NONMINTING = "verified_source_preservation_nonminting"
     BLOCKED = "blocked"
 
 
@@ -143,9 +132,7 @@ class CandidateExecutionPhase(str, Enum):
     LOGICAL_REMATERIALIZATION = "logical_rematerialization"
     LOCAL_VALIDATION = "local_validation"
     LOCAL_CONSOLIDATION = "local_consolidation"
-    LOCAL_DIRECT_CONSOLIDATED_COMPARISON = (
-        "local_direct_consolidated_comparison"
-    )
+    LOCAL_DIRECT_CONSOLIDATED_COMPARISON = "local_direct_consolidated_comparison"
     ATOMIC_PUBLICATION = "atomic_publication"
     PUBLISHED_VALIDATION = "published_validation"
     PUBLISHED_DIRECT_CONSOLIDATED_COMPARISON = (
@@ -186,6 +173,7 @@ _NODE_LOCAL_SCRATCH_ROOTS = (
     Path("/lscratch"),
 )
 _NONMUTATION_SNAPSHOT_CONTRACT_ID = "analysis_candidate_nonmutation_v1"
+_PROTECTED_PATH_SNAPSHOT_CONTRACT_ID = "palette.protected_path_content_sha256.v1"
 
 
 def _json_copy(value: object) -> Any:
@@ -249,10 +237,10 @@ def _absolute_path(value: object, *, label: str) -> Path:
 
 def _require_node_local_scratch_path(value: object, *, label: str) -> Path:
     path = _absolute_path(value, label=label)
-    if not any(path == root or path.is_relative_to(root) for root in _NODE_LOCAL_SCRATCH_ROOTS):
-        raise ValueError(
-            f"{label} must be below a recognized node-local scratch root"
-        )
+    if not any(
+        path == root or path.is_relative_to(root) for root in _NODE_LOCAL_SCRATCH_ROOTS
+    ):
+        raise ValueError(f"{label} must be below a recognized node-local scratch root")
     return path
 
 
@@ -315,9 +303,7 @@ def require_candidate_execution_adapter_manifest(
     try:
         CandidateLogicalEqualityContract(payload["logical_equality_contract"])
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "adapter logical_equality_contract is unsupported"
-        ) from exc
+        raise ValueError("adapter logical_equality_contract is unsupported") from exc
     try:
         CandidateComputationMode(payload["computation_mode"])
         CandidateRunnerStatus(payload["runner_status"])
@@ -346,8 +332,7 @@ def require_candidate_execution_adapter_manifest(
     ):
         raise ValueError("runner_module must be None or one module path")
     if runner_entrypoint is not None and (
-        type(runner_entrypoint) is not str
-        or not _CALLABLE.fullmatch(runner_entrypoint)
+        type(runner_entrypoint) is not str or not _CALLABLE.fullmatch(runner_entrypoint)
     ):
         raise ValueError("runner_entrypoint must be None or one callable name")
     if suite_validator_module is not None and (
@@ -359,9 +344,7 @@ def require_candidate_execution_adapter_manifest(
         type(suite_validator_entrypoint) is not str
         or not _CALLABLE.fullmatch(suite_validator_entrypoint)
     ):
-        raise ValueError(
-            "suite_validator_entrypoint must be None or one callable name"
-        )
+        raise ValueError("suite_validator_entrypoint must be None or one callable name")
     status = CandidateRunnerStatus(payload["runner_status"])
     if status is CandidateRunnerStatus.IMPLEMENTED:
         if any(
@@ -400,14 +383,12 @@ def require_candidate_execution_adapter_manifest(
     ):
         raise ValueError("unbound coordinate adapters must remain execution blocked")
     mode = CandidateComputationMode(payload["computation_mode"])
-    if (
-        payload["publication_mode"] == "guarded_direct_nonpromoting_v1"
-    ) != (mode is CandidateComputationMode.GUARDED_DIRECT_WRITER):
+    if (payload["publication_mode"] == "guarded_direct_nonpromoting_v1") != (
+        mode is CandidateComputationMode.GUARDED_DIRECT_WRITER
+    ):
         raise ValueError("adapter computation and publication modes disagree")
     role = CoordinateContractRole(payload["coordinate_role"])
-    coordinate_status = CoordinateContractStatus(
-        payload["coordinate_contract_status"]
-    )
+    coordinate_status = CoordinateContractStatus(payload["coordinate_contract_status"])
     allowed_statuses = {
         CoordinateContractRole.CANONICAL_PRODUCER: {
             CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED,
@@ -458,6 +439,72 @@ def _require_suite_matches_adapter(
     validator(str(adapter["stage_id"]), benchmark_suite)
 
 
+def _require_immediate_run_child(
+    path: str,
+    *,
+    run_parent: str,
+    label: str,
+) -> str:
+    """Require exactly ``<catalog parent>/<one immutable run name>``."""
+
+    prefix = f"{run_parent}/"
+    if not path.startswith(prefix):
+        raise ValueError(f"{label} must use the adapter run parent")
+    run_name = path[len(prefix) :]
+    if not run_name or "/" in run_name:
+        raise ValueError(f"{label} must name one immediate run child")
+    return path
+
+
+def protected_path_snapshot_sha256(path: str | Path) -> str:
+    """Digest one explicit protected file/tree with unambiguous entry framing."""
+
+    def frame(digest: Any, tag: bytes, payload: bytes) -> None:
+        digest.update(tag)
+        digest.update(len(payload).to_bytes(8, byteorder="big", signed=False))
+        digest.update(payload)
+
+    def file_digest(candidate: Path) -> bytes:
+        content = hashlib.sha256()
+        with candidate.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                content.update(block)
+        return content.digest()
+
+    supplied = Path(path).expanduser()
+    if not supplied.is_absolute():
+        raise ValueError("Protected-state probe path must be absolute.")
+    if supplied.is_symlink():
+        raise ValueError(f"Protected-state probe target is a symlink: {supplied}.")
+    target = supplied.resolve(strict=True)
+    digest = hashlib.sha256()
+    if target.is_file():
+        digest.update(b"palette-protected-file-v2\0")
+        frame(digest, b"content\0", file_digest(target))
+        return digest.hexdigest()
+    if not target.is_dir():
+        raise ValueError(f"Protected-state probe target is not a file/tree: {target}.")
+    digest.update(b"palette-protected-tree-v2\0")
+    entries = sorted(target.rglob("*"), key=lambda candidate: candidate.as_posix())
+    for candidate in entries:
+        if candidate.is_symlink():
+            raise ValueError(
+                f"Protected-state probe tree contains a symlink: {candidate}."
+            )
+        relative = candidate.relative_to(target).as_posix().encode("utf-8")
+        if candidate.is_dir():
+            frame(digest, b"directory\0", relative)
+            continue
+        if candidate.is_file():
+            frame(digest, b"file-path\0", relative)
+            frame(digest, b"file-content-sha256\0", file_digest(candidate))
+            continue
+        raise ValueError(
+            f"Protected-state probe tree has an unsupported node: {candidate}."
+        )
+    return digest.hexdigest()
+
+
 def build_candidate_execution_request(
     *,
     execution_id: str,
@@ -475,14 +522,17 @@ def build_candidate_execution_request(
     cache_state: str,
     physical_io_scope: PhysicalIOScope,
     selector_before_sha256: str,
-    registry_before_sha256: str,
-    production_profiles_before_sha256: str,
+    registry_probe_path: str | Path,
+    production_profiles_probe_path: str | Path,
     nonmutation_snapshot_contract_id: str = _NONMUTATION_SNAPSHOT_CONTRACT_ID,
 ) -> dict[str, object]:
     """Build one executable, nonproduction, digest-bound request."""
 
     adapter = _require_registered_adapter_manifest(adapter_manifest)
-    if CandidateRunnerStatus(adapter["runner_status"]) is not CandidateRunnerStatus.IMPLEMENTED:
+    if (
+        CandidateRunnerStatus(adapter["runner_status"])
+        is not CandidateRunnerStatus.IMPLEMENTED
+    ):
         raise ValueError("execution requests require an implemented typed adapter")
     require_analysis_benchmark_suite_manifest(benchmark_suite)
     _require_suite_matches_adapter(adapter, benchmark_suite)
@@ -503,19 +553,23 @@ def build_candidate_execution_request(
         or scratch.is_relative_to(archive)
     ):
         raise ValueError("scratch and benchmark archive must not contain one another")
-    source_path = _require_relative_run_path(
-        source_run_path, label="source_run_path"
-    )
+    source_path = _require_relative_run_path(source_run_path, label="source_run_path")
     candidate_path = _require_relative_run_path(
         candidate_run_path, label="candidate_run_path"
     )
     if source_path == candidate_path:
         raise ValueError("source and candidate run paths must differ")
     run_parent = str(adapter["run_parent"])
-    if not source_path.startswith(f"{run_parent}/") or not candidate_path.startswith(
-        f"{run_parent}/"
-    ):
-        raise ValueError("source and candidate paths must use the adapter run parent")
+    _require_immediate_run_child(
+        source_path,
+        run_parent=run_parent,
+        label="source_run_path",
+    )
+    _require_immediate_run_child(
+        candidate_path,
+        run_parent=run_parent,
+        label="candidate_run_path",
+    )
     _require_identifier(execution_id, label="execution_id")
     _require_sha256(source_identity_sha256, label="source_identity_sha256")
     if type(palette_commit) is not str or not _GIT_SHA.fullmatch(palette_commit):
@@ -538,12 +592,15 @@ def build_candidate_execution_request(
     _require_identifier(cache_state, label="cache_state")
     if not isinstance(physical_io_scope, PhysicalIOScope):
         raise TypeError("physical_io_scope must use PhysicalIOScope")
-    for label, digest in (
-        ("selector_before_sha256", selector_before_sha256),
-        ("registry_before_sha256", registry_before_sha256),
-        ("production_profiles_before_sha256", production_profiles_before_sha256),
-    ):
-        _require_sha256(digest, label=label)
+    _require_sha256(selector_before_sha256, label="selector_before_sha256")
+    registry_supplied = Path(registry_probe_path).expanduser()
+    profiles_supplied = Path(production_profiles_probe_path).expanduser()
+    registry_before_sha256 = protected_path_snapshot_sha256(registry_supplied)
+    production_profiles_before_sha256 = protected_path_snapshot_sha256(
+        profiles_supplied
+    )
+    registry_probe = registry_supplied.resolve(strict=True)
+    profiles_probe = profiles_supplied.resolve(strict=True)
     if nonmutation_snapshot_contract_id != _NONMUTATION_SNAPSHOT_CONTRACT_ID:
         raise ValueError("nonmutation snapshot contract differs")
     payload: dict[str, object] = {
@@ -566,6 +623,9 @@ def build_candidate_execution_request(
             "selector_sha256": selector_before_sha256,
             "registry_sha256": registry_before_sha256,
             "production_profiles_sha256": production_profiles_before_sha256,
+            "probe_contract_id": _PROTECTED_PATH_SNAPSHOT_CONTRACT_ID,
+            "registry_probe_path": str(registry_probe),
+            "production_profiles_probe_path": str(profiles_probe),
         },
         "execution_policy": {
             "benchmark_only": True,
@@ -627,7 +687,10 @@ def require_candidate_execution_request(value: Mapping[str, Any]) -> None:
         raise ValueError("execution request payload digest differs")
     _json_copy(value)
     adapter = _require_registered_adapter_manifest(payload["adapter_manifest"])
-    if CandidateRunnerStatus(adapter["runner_status"]) is not CandidateRunnerStatus.IMPLEMENTED:
+    if (
+        CandidateRunnerStatus(adapter["runner_status"])
+        is not CandidateRunnerStatus.IMPLEMENTED
+    ):
         raise ValueError("execution request adapter is not implemented")
     suite = payload["benchmark_suite"]
     require_analysis_benchmark_suite_manifest(suite)
@@ -658,15 +721,19 @@ def require_candidate_execution_request(value: Mapping[str, Any]) -> None:
         payload["candidate_run_path"], label="candidate_run_path"
     )
     run_parent = str(adapter["run_parent"])
-    if (
-        source_path == candidate_path
-        or not source_path.startswith(f"{run_parent}/")
-        or not candidate_path.startswith(f"{run_parent}/")
-    ):
+    if source_path == candidate_path:
         raise ValueError("execution request run paths differ from adapter ownership")
-    _require_sha256(
-        payload["source_identity_sha256"], label="source_identity_sha256"
+    _require_immediate_run_child(
+        source_path,
+        run_parent=run_parent,
+        label="source_run_path",
     )
+    _require_immediate_run_child(
+        candidate_path,
+        run_parent=run_parent,
+        label="candidate_run_path",
+    )
+    _require_sha256(payload["source_identity_sha256"], label="source_identity_sha256")
     if type(payload["palette_commit"]) is not str or not _GIT_SHA.fullmatch(
         payload["palette_commit"]
     ):
@@ -701,17 +768,27 @@ def require_candidate_execution_request(value: Mapping[str, Any]) -> None:
             "selector_sha256",
             "registry_sha256",
             "production_profiles_sha256",
+            "probe_contract_id",
+            "registry_probe_path",
+            "production_profiles_probe_path",
         },
         label="protected pre-state",
     )
     if protected["snapshot_contract_id"] != _NONMUTATION_SNAPSHOT_CONTRACT_ID:
         raise ValueError("protected pre-state snapshot contract differs")
+    if protected["probe_contract_id"] != _PROTECTED_PATH_SNAPSHOT_CONTRACT_ID:
+        raise ValueError("protected pre-state path-probe contract differs")
     for field in (
         "selector_sha256",
         "registry_sha256",
         "production_profiles_sha256",
     ):
         _require_sha256(protected[field], label=f"protected pre-state {field}")
+    _absolute_path(protected["registry_probe_path"], label="registry_probe_path")
+    _absolute_path(
+        protected["production_profiles_probe_path"],
+        label="production_profiles_probe_path",
+    )
     if payload["execution_policy"] != {
         "benchmark_only": True,
         "node_local_compute": True,
@@ -761,7 +838,9 @@ class CandidatePhaseMeasurement:
                 or self.error_type is not None
                 or self.error_message is not None
             ):
-                raise ValueError("not-applicable phase reason is missing or inconsistent")
+                raise ValueError(
+                    "not-applicable phase reason is missing or inconsistent"
+                )
             return
         started = _require_utc_timestamp(
             self.started_at_utc, label="phase started_at_utc"
@@ -860,11 +939,7 @@ def _require_nonnegative_int(value: object, *, label: str) -> int:
 
 
 def _require_nonnegative_number(value: object, *, label: str) -> float:
-    if (
-        type(value) not in {int, float}
-        or not math.isfinite(float(value))
-        or value < 0
-    ):
+    if type(value) not in {int, float} or not math.isfinite(float(value)) or value < 0:
         raise ValueError(f"{label} must be one nonnegative finite number")
     return float(value)
 
@@ -967,9 +1042,7 @@ def require_candidate_execution_receipt(
             wall_seconds=phase_record["wall_seconds"],
             cpu_user_seconds=phase_record["cpu_user_seconds"],
             cpu_system_seconds=phase_record["cpu_system_seconds"],
-            peak_process_tree_rss_bytes=phase_record[
-                "peak_process_tree_rss_bytes"
-            ],
+            peak_process_tree_rss_bytes=phase_record["peak_process_tree_rss_bytes"],
             not_applicable_reason=phase_record["not_applicable_reason"],
             error_type=phase_record["error_type"],
             error_message=phase_record["error_message"],
@@ -1027,7 +1100,7 @@ def require_candidate_execution_receipt(
     _require_sha256(environment["runner_sha256"], label="runner_sha256")
     if environment["cache_state"] != request["payload"]["cache_state"]:
         raise ValueError("execution environment cache state differs")
-    expected_runner_ref = f'{adapter["runner_module"]}:{adapter["runner_entrypoint"]}'
+    expected_runner_ref = f"{adapter['runner_module']}:{adapter['runner_entrypoint']}"
     if environment["runner_ref"] != expected_runner_ref:
         raise ValueError("execution environment runner identity differs")
 
@@ -1074,9 +1147,10 @@ def require_candidate_execution_receipt(
         observed = coordinate[field]
         if observed is not None and (type(observed) is not str or not observed):
             raise ValueError(f"{field} must be None or one nonempty reference")
-    if type(coordinate["validator_ref"]) is not str or ":" not in coordinate[
-        "validator_ref"
-    ]:
+    if (
+        type(coordinate["validator_ref"]) is not str
+        or ":" not in coordinate["validator_ref"]
+    ):
         raise ValueError("coordinate validator_ref is invalid")
     _require_sha256(
         coordinate["validation_receipt_sha256"],
@@ -1244,9 +1318,10 @@ def require_candidate_execution_receipt(
                 _require_nonnegative_int(physical[field], label=field)
         if not any(physical[field] is not None for field in counters):
             raise ValueError("available physical I/O lacks every counter")
-        if type(physical["measurement_ref"]) is not str or not physical[
-            "measurement_ref"
-        ]:
+        if (
+            type(physical["measurement_ref"]) is not str
+            or not physical["measurement_ref"]
+        ):
             raise ValueError("measured I/O lacks a measurement receipt reference")
         _require_sha256(
             physical["measurement_sha256"], label="physical I/O measurement_sha256"
@@ -1269,7 +1344,10 @@ def require_candidate_execution_receipt(
         storage["metadata_file_count"] + storage["payload_file_count"]
     ):
         raise ValueError("output storage file counts do not add up")
-    if storage["file_count"] < 1 or storage["metadata_file_count"] < planned_array_count:
+    if (
+        storage["file_count"] < 1
+        or storage["metadata_file_count"] < planned_array_count
+    ):
         raise ValueError("output storage does not contain the planned array metadata")
     if storage["apparent_bytes"] < 1 or storage["allocated_bytes"] < 1:
         raise ValueError("completed output storage must occupy positive bytes")
@@ -1349,9 +1427,7 @@ def build_candidate_execution_receipt(
 
     require_candidate_execution_request(request)
     if status != "complete":
-        raise ValueError(
-            "execution receipt v1 represents completed publications only"
-        )
+        raise ValueError("execution receipt v1 represents completed publications only")
     payload: dict[str, object] = {
         "status": status,
         "request": _json_copy(request),
@@ -1408,6 +1484,7 @@ __all__ = [
     "TRANSFER_PHYSICAL_IO_SCOPES",
     "build_candidate_execution_receipt",
     "build_candidate_execution_request",
+    "protected_path_snapshot_sha256",
     "require_candidate_execution_adapter_manifest",
     "require_candidate_execution_receipt",
     "require_candidate_execution_request",

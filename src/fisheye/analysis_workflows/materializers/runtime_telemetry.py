@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import math
 import os
 import resource
 import socket
@@ -20,6 +21,48 @@ RUNTIME_TELEMETRY_SCHEMA_ID = "palette.materializer_phase_telemetry"
 RUNTIME_TELEMETRY_SCHEMA_VERSION = 1
 RUNTIME_TELEMETRY_IDENTITY_POLICY = (
     "report_only_excluded_from_scientific_identity_and_payload_digests"
+)
+
+_CPU_FIELDS = (
+    "own_user_cpu_seconds",
+    "own_system_cpu_seconds",
+    "child_user_cpu_seconds",
+    "child_system_cpu_seconds",
+)
+_ROOT_FIELDS = frozenset(
+    {
+        "schema_id",
+        "schema_version",
+        "identity_policy",
+        "materializer",
+        "started_at_utc",
+        "finished_at_utc",
+        "wall_seconds",
+        "cpu_seconds",
+        "average_effective_cpu_cores",
+        "process_peak_rss_bytes",
+        "children_peak_rss_bytes",
+        "phase_wall_seconds_sum",
+        "phases",
+        "execution",
+    }
+)
+_PHASE_BASE_FIELDS = frozenset(
+    {
+        "name",
+        "started_at_utc",
+        "finished_at_utc",
+        "outcome",
+        "wall_seconds",
+        "cpu_seconds",
+        "average_effective_cpu_cores",
+        "process_peak_rss_bytes_at_end",
+        "children_peak_rss_bytes_at_end",
+        "process_io_delta",
+    }
+)
+_EXECUTION_BASE_FIELDS = frozenset(
+    {"host", "pid", "lsb_jobid", "lsb_jobname", "lsb_queue", "allocated_slots"}
 )
 
 
@@ -68,6 +111,186 @@ def _snapshot() -> dict[str, Any]:
 
 def _nonnegative_delta(after: float | int, before: float | int) -> float:
     return max(0.0, float(after) - float(before))
+
+
+def _require_timestamp(value: object, *, label: str) -> datetime:
+    if type(value) is not str or not value:
+        raise ValueError(f"{label} must be one nonempty ISO-8601 timestamp.")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} is not an ISO-8601 timestamp.") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include a timezone.")
+    return parsed
+
+
+def _require_nonnegative_number(value: object, *, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be one finite nonnegative number.")
+    number = float(value)
+    if not math.isfinite(number) or number < 0.0:
+        raise ValueError(f"{label} must be one finite nonnegative number.")
+    return number
+
+
+def _require_nonnegative_int(value: object, *, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{label} must be one nonnegative exact integer.")
+    return value
+
+
+def _require_cpu_record(value: object, *, label: str) -> dict[str, float]:
+    fields = {*_CPU_FIELDS, "total"}
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError(f"{label} CPU field set differs.")
+    record = {
+        name: _require_nonnegative_number(value[name], label=f"{label}.{name}")
+        for name in fields
+    }
+    expected_total = sum(record[name] for name in _CPU_FIELDS)
+    if not math.isclose(record["total"], expected_total, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError(f"{label}.total differs from its CPU components.")
+    return record
+
+
+def _require_average_cpu(
+    value: object,
+    *,
+    total_cpu: float,
+    wall_seconds: float,
+    label: str,
+) -> None:
+    observed = _require_nonnegative_number(value, label=label)
+    expected = total_cpu / wall_seconds if wall_seconds > 0.0 else 0.0
+    if not math.isclose(observed, expected, rel_tol=1e-9, abs_tol=1e-12):
+        raise ValueError(f"{label} differs from CPU/wall measurements.")
+
+
+def require_runtime_telemetry(
+    value: Mapping[str, Any],
+    *,
+    expected_materializer: str | None = None,
+    allowed_phase_order: tuple[str, ...] | None = None,
+    require_error_phase: bool = False,
+) -> None:
+    """Deeply validate report-only materializer telemetry.
+
+    ``allowed_phase_order`` permits a failure-prefix/subsequence while still
+    rejecting duplicate, unknown, or reordered phase claims.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != _ROOT_FIELDS:
+        raise ValueError("Runtime telemetry root field set differs.")
+    if (
+        value["schema_id"] != RUNTIME_TELEMETRY_SCHEMA_ID
+        or value["schema_version"] != RUNTIME_TELEMETRY_SCHEMA_VERSION
+        or value["identity_policy"] != RUNTIME_TELEMETRY_IDENTITY_POLICY
+    ):
+        raise ValueError("Runtime telemetry contract identity differs.")
+    if type(value["materializer"]) is not str or not value["materializer"]:
+        raise ValueError("Runtime telemetry materializer is invalid.")
+    if expected_materializer is not None and value["materializer"] != expected_materializer:
+        raise ValueError("Runtime telemetry materializer differs.")
+    started = _require_timestamp(value["started_at_utc"], label="runtime started_at_utc")
+    finished = _require_timestamp(value["finished_at_utc"], label="runtime finished_at_utc")
+    if finished < started:
+        raise ValueError("Runtime telemetry finishes before it starts.")
+    wall = _require_nonnegative_number(value["wall_seconds"], label="runtime wall_seconds")
+    cpu = _require_cpu_record(value["cpu_seconds"], label="runtime")
+    _require_average_cpu(
+        value["average_effective_cpu_cores"],
+        total_cpu=cpu["total"],
+        wall_seconds=wall,
+        label="runtime average_effective_cpu_cores",
+    )
+    _require_nonnegative_int(value["process_peak_rss_bytes"], label="runtime process_peak_rss_bytes")
+    _require_nonnegative_int(value["children_peak_rss_bytes"], label="runtime children_peak_rss_bytes")
+    phase_sum = _require_nonnegative_number(
+        value["phase_wall_seconds_sum"], label="runtime phase_wall_seconds_sum"
+    )
+    phases = value["phases"]
+    if not isinstance(phases, list):
+        raise ValueError("Runtime telemetry phases must be one array.")
+    order = (
+        {name: index for index, name in enumerate(allowed_phase_order)}
+        if allowed_phase_order is not None
+        else None
+    )
+    prior_index = -1
+    observed_names: set[str] = set()
+    observed_phase_wall = 0.0
+    saw_error = False
+    for index, phase in enumerate(phases):
+        if not isinstance(phase, Mapping):
+            raise ValueError("Runtime telemetry phase must be one object.")
+        outcome = phase.get("outcome")
+        expected_fields = _PHASE_BASE_FIELDS | ({"error_type"} if outcome == "error" else set())
+        if set(phase) != expected_fields or outcome not in {"ok", "error"}:
+            raise ValueError("Runtime telemetry phase field set or outcome differs.")
+        name = phase["name"]
+        if type(name) is not str or not name or name in observed_names:
+            raise ValueError("Runtime telemetry phase name is invalid or duplicated.")
+        observed_names.add(name)
+        if order is not None:
+            if name not in order or order[name] <= prior_index:
+                raise ValueError("Runtime telemetry phase names are unknown or reordered.")
+            prior_index = order[name]
+        phase_started = _require_timestamp(
+            phase["started_at_utc"], label=f"runtime phase {index} started_at_utc"
+        )
+        phase_finished = _require_timestamp(
+            phase["finished_at_utc"], label=f"runtime phase {index} finished_at_utc"
+        )
+        if phase_finished < phase_started:
+            raise ValueError("Runtime telemetry phase finishes before it starts.")
+        phase_wall = _require_nonnegative_number(
+            phase["wall_seconds"], label=f"runtime phase {name} wall_seconds"
+        )
+        observed_phase_wall += phase_wall
+        phase_cpu = _require_cpu_record(phase["cpu_seconds"], label=f"runtime phase {name}")
+        _require_average_cpu(
+            phase["average_effective_cpu_cores"],
+            total_cpu=phase_cpu["total"],
+            wall_seconds=phase_wall,
+            label=f"runtime phase {name} average_effective_cpu_cores",
+        )
+        _require_nonnegative_int(
+            phase["process_peak_rss_bytes_at_end"],
+            label=f"runtime phase {name} process_peak_rss_bytes_at_end",
+        )
+        _require_nonnegative_int(
+            phase["children_peak_rss_bytes_at_end"],
+            label=f"runtime phase {name} children_peak_rss_bytes_at_end",
+        )
+        io = phase["process_io_delta"]
+        if not isinstance(io, Mapping) or any(
+            type(key) is not str or type(item) is not int or item < 0
+            for key, item in io.items()
+        ):
+            raise ValueError("Runtime telemetry phase I/O counters are invalid.")
+        if outcome == "error":
+            saw_error = True
+            if type(phase["error_type"]) is not str or not phase["error_type"]:
+                raise ValueError("Runtime telemetry error phase lacks an error type.")
+    if not math.isclose(phase_sum, observed_phase_wall, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError("Runtime telemetry phase-wall sum differs.")
+    if require_error_phase and not saw_error:
+        raise ValueError("Runtime telemetry contains no failed phase.")
+    execution = value["execution"]
+    if not isinstance(execution, Mapping) or not _EXECUTION_BASE_FIELDS.issubset(execution):
+        raise ValueError("Runtime telemetry execution context is incomplete.")
+    if type(execution["host"]) is not str or not execution["host"]:
+        raise ValueError("Runtime telemetry execution host is invalid.")
+    if type(execution["pid"]) is not int or execution["pid"] <= 0:
+        raise ValueError("Runtime telemetry execution pid is invalid.")
+    for field in ("lsb_jobid", "lsb_jobname", "lsb_queue", "allocated_slots"):
+        if execution[field] is not None and type(execution[field]) is not str:
+            raise ValueError(f"Runtime telemetry execution {field} is invalid.")
+    # This also rejects NaN/infinity and non-JSON context values.
+    import json
+
+    json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":"))
 
 
 class PhaseTelemetry:
@@ -200,4 +423,5 @@ __all__ = [
     "RUNTIME_TELEMETRY_IDENTITY_POLICY",
     "RUNTIME_TELEMETRY_SCHEMA_ID",
     "RUNTIME_TELEMETRY_SCHEMA_VERSION",
+    "require_runtime_telemetry",
 ]

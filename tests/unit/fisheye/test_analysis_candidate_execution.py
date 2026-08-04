@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -14,12 +14,12 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
     CandidateComputationMode,
     CandidateExecutionPhase,
     CandidatePhaseMeasurement,
-    CandidateRunnerStatus,
     CoordinateEvidenceStatus,
     PhaseOutcome,
     PhysicalIOScope,
     build_candidate_execution_receipt,
     build_candidate_execution_request,
+    protected_path_snapshot_sha256,
     require_candidate_execution_adapter_manifest,
     require_candidate_execution_receipt,
     require_candidate_execution_request,
@@ -73,6 +73,26 @@ class _Group:
 
     def groups(self):
         return tuple(self._groups.items())
+
+
+def test_protected_tree_snapshot_has_unambiguous_entry_framing(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "a").write_bytes(b"x\nb\0y")
+    (second / "a").write_bytes(b"x")
+    (second / "b").write_bytes(b"y")
+
+    assert protected_path_snapshot_sha256(first) != protected_path_snapshot_sha256(
+        second
+    )
+
+    before_empty_directory = protected_path_snapshot_sha256(second)
+    (second / "empty").mkdir()
+    assert protected_path_snapshot_sha256(second) != before_empty_directory
 
 
 def _suite(*, profile=PUBLISHED_HTTP_V1):
@@ -172,28 +192,9 @@ def _unrelated_suite():
     )
 
 
-def _implemented_adapter_descriptor():
-    return replace(
-        ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["swim_bouts"],
-        runner_status=CandidateRunnerStatus.IMPLEMENTED,
-        runner_module="fisheye.diagnostics.analysis_candidate_execution",
-        runner_entrypoint="execute_exact_tabular_candidate",
-        suite_validator_module=(
-            "fisheye.analysis_workflows.analysis_candidate_suite_validation"
-        ),
-        suite_validator_entrypoint="require_exact_tabular_execution_suite",
-    )
-
-
 @pytest.fixture
-def implemented_adapter(monkeypatch):
-    descriptor = _implemented_adapter_descriptor()
-    monkeypatch.setitem(
-        ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE,
-        "swim_bouts",
-        descriptor,
-    )
-    return descriptor.as_manifest()
+def implemented_adapter():
+    return ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["swim_bouts"].as_manifest()
 
 
 def _request(
@@ -217,8 +218,8 @@ def _request(
         cache_state="fresh_process_os_cache_uncontrolled",
         physical_io_scope=physical_io_scope,
         selector_before_sha256="f" * 64,
-        registry_before_sha256="1" * 64,
-        production_profiles_before_sha256="2" * 64,
+        registry_probe_path=Path(__file__).resolve(),
+        production_profiles_probe_path=Path(__file__).resolve(),
     )
 
 
@@ -252,9 +253,11 @@ def _receipt(
     measured = physical_io_scope is PhysicalIOScope.FILESYSTEM_OR_NETWORK_TRANSFER
     unavailable = physical_io_scope is PhysicalIOScope.UNAVAILABLE
     array_count = len(
-        request["payload"]["benchmark_suite"]["payload"]
-        ["storage_plan_receipt"]["payload"]["arrays"]
+        request["payload"]["benchmark_suite"]["payload"]["storage_plan_receipt"][
+            "payload"
+        ]["arrays"]
     )
+    protected = request["payload"]["protected_state_before"]
     return build_candidate_execution_receipt(
         request=request,
         status="complete",
@@ -282,9 +285,7 @@ def _receipt(
         coordinate_evidence={
             "role": "bound_derivative",
             "status": CoordinateEvidenceStatus.VERIFIED_BOUND_SOURCE.value,
-            "source_authority_digests": [
-                {"role": "track_motion", "sha256": "d" * 64}
-            ],
+            "source_authority_digests": [{"role": "track_motion", "sha256": "d" * 64}],
             "published_authority_sha256": None,
             "published_authority_ref": None,
             "temporal_axis_sha256": None,
@@ -326,10 +327,12 @@ def _receipt(
         nonmutation_evidence={
             "selector_before_sha256": "f" * 64,
             "selector_after_sha256": "f" * 64,
-            "registry_before_sha256": "1" * 64,
-            "registry_after_sha256": "1" * 64,
-            "production_profiles_before_sha256": "2" * 64,
-            "production_profiles_after_sha256": "2" * 64,
+            "registry_before_sha256": protected["registry_sha256"],
+            "registry_after_sha256": protected["registry_sha256"],
+            "production_profiles_before_sha256": protected[
+                "production_profiles_sha256"
+            ],
+            "production_profiles_after_sha256": protected["production_profiles_sha256"],
             "snapshot_contract_id": "analysis_candidate_nonmutation_v1",
             "unchanged": True,
         },
@@ -341,7 +344,9 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
     assert set(ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE) == set(
         DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE
     )
-    manifests = [adapter.as_manifest() for adapter in ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS]
+    manifests = [
+        adapter.as_manifest() for adapter in ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS
+    ]
     for manifest in manifests:
         require_candidate_execution_adapter_manifest(manifest)
 
@@ -353,12 +358,15 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
     assert status["bout_classification"] == "blocked_direct_publication"
     assert status["detection_occupancy"] == "blocked_coordinate_authority"
     assert status["session_occupancy"] == "blocked_coordinate_authority"
-    assert all(value != "implemented" for value in status.values())
+    assert {stage for stage, value in status.items() if value == "implemented"} == {
+        "swim_bouts",
+        "bout_kinematics",
+    }
 
 
 def test_contract_only_adapter_cannot_mint_execution_request() -> None:
     adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
-        "swim_bouts"
+        "track_kinematics"
     ].as_manifest()
     with pytest.raises(ValueError, match="implemented typed adapter"):
         build_candidate_execution_request(
@@ -377,8 +385,8 @@ def test_contract_only_adapter_cannot_mint_execution_request() -> None:
             cache_state="fresh_process_os_cache_uncontrolled",
             physical_io_scope=PhysicalIOScope.UNAVAILABLE,
             selector_before_sha256="f" * 64,
-            registry_before_sha256="1" * 64,
-            production_profiles_before_sha256="2" * 64,
+            registry_probe_path=Path(__file__).resolve(),
+            production_profiles_probe_path=Path(__file__).resolve(),
         )
 
 
@@ -414,8 +422,8 @@ def test_execution_request_rejects_nonbenchmark_archive(implemented_adapter) -> 
             cache_state="fresh_process_os_cache_uncontrolled",
             physical_io_scope=PhysicalIOScope.UNAVAILABLE,
             selector_before_sha256="f" * 64,
-            registry_before_sha256="1" * 64,
-            production_profiles_before_sha256="2" * 64,
+            registry_probe_path=Path(__file__).resolve(),
+            production_profiles_probe_path=Path(__file__).resolve(),
         )
 
 
@@ -437,9 +445,9 @@ def test_rehashed_adapter_tampering_fails(implemented_adapter) -> None:
 def test_rehashed_logical_equality_tampering_fails(implemented_adapter) -> None:
     receipt = _receipt(implemented_adapter)
     tampered = deepcopy(receipt)
-    tampered["payload"]["logical_equality"][
-        "candidate_logical_manifest_sha256"
-    ] = "9" * 64
+    tampered["payload"]["logical_equality"]["candidate_logical_manifest_sha256"] = (
+        "9" * 64
+    )
     tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
 
     with pytest.raises(ValueError, match="decoded equality"):
@@ -469,9 +477,7 @@ def test_unavailable_physical_io_requires_null_counters(implemented_adapter) -> 
     )
     require_candidate_execution_receipt(
         receipt,
-        expected_request_payload_digest=receipt["payload"][
-            "request_payload_digest"
-        ],
+        expected_request_payload_digest=receipt["payload"]["request_payload_digest"],
     )
     assert receipt["payload"]["publication_gate_passed"] is False
 
@@ -519,8 +525,8 @@ def test_execution_request_rejects_nonlocal_scratch(implemented_adapter) -> None
             cache_state="fresh_process_os_cache_uncontrolled",
             physical_io_scope=PhysicalIOScope.UNAVAILABLE,
             selector_before_sha256="f" * 64,
-            registry_before_sha256="1" * 64,
-            production_profiles_before_sha256="2" * 64,
+            registry_probe_path=Path(__file__).resolve(),
+            production_profiles_probe_path=Path(__file__).resolve(),
         )
 
 
@@ -544,8 +550,8 @@ def test_execution_request_rejects_storage_profile_mismatch(
             cache_state="fresh_process_os_cache_uncontrolled",
             physical_io_scope=PhysicalIOScope.UNAVAILABLE,
             selector_before_sha256="f" * 64,
-            registry_before_sha256="1" * 64,
-            production_profiles_before_sha256="2" * 64,
+            registry_probe_path=Path(__file__).resolve(),
+            production_profiles_probe_path=Path(__file__).resolve(),
         )
 
 
@@ -569,8 +575,8 @@ def test_execution_request_rejects_unrelated_family_labeled_suite(
             cache_state="fresh_process_os_cache_uncontrolled",
             physical_io_scope=PhysicalIOScope.UNAVAILABLE,
             selector_before_sha256="f" * 64,
-            registry_before_sha256="1" * 64,
-            production_profiles_before_sha256="2" * 64,
+            registry_probe_path=Path(__file__).resolve(),
+            production_profiles_probe_path=Path(__file__).resolve(),
         )
 
 

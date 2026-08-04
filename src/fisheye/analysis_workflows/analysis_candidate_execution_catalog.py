@@ -189,6 +189,29 @@ def _contract_only(
     )
 
 
+def _implemented_exact_tabular(
+    stage_id: str,
+    logical_equality_contract: CandidateLogicalEqualityContract,
+) -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id=stage_id,
+        invocation_contract=CandidateInvocationContract.EXACT_TABULAR_V1,
+        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.BOUND_DERIVATIVE,
+        coordinate_contract_status=(
+            CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED
+        ),
+        logical_equality_contract=logical_equality_contract,
+        runner_module="fisheye.diagnostics.analysis_candidate_execution",
+        runner_entrypoint="execute_exact_tabular_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.analysis_candidate_suite_validation"
+        ),
+        suite_validator_entrypoint="require_exact_tabular_execution_suite",
+    )
+
+
 def _coordinate_blocked(
     stage_id: str,
     logical_equality_contract: CandidateLogicalEqualityContract,
@@ -233,20 +256,12 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[
         CoordinateContractStatus.SOURCE_PRESERVATION_ONLY,
         CandidateLogicalEqualityContract.TRACK_FLAT_PROJECTION_V1,
     ),
-    _contract_only(
+    _implemented_exact_tabular(
         "swim_bouts",
-        CandidateInvocationContract.EXACT_TABULAR_V1,
-        CandidateComputationMode.LOGICAL_REMATERIALIZATION,
-        CoordinateContractRole.BOUND_DERIVATIVE,
-        CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED,
         CandidateLogicalEqualityContract.SWIM_BOUTS_DECLARED_ARRAYS_V1,
     ),
-    _contract_only(
+    _implemented_exact_tabular(
         "bout_kinematics",
-        CandidateInvocationContract.EXACT_TABULAR_V1,
-        CandidateComputationMode.LOGICAL_REMATERIALIZATION,
-        CoordinateContractRole.BOUND_DERIVATIVE,
-        CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED,
         CandidateLogicalEqualityContract.BOUT_KINEMATICS_DECLARED_ARRAYS_V1,
     ),
     _contract_only(
