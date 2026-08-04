@@ -850,12 +850,25 @@ Recommended benchmark and promotion-review order:
       exact live family-suite projection, a recognized node-local scratch root,
       immutable production pre-state probes, and a benchmark-only nonmutation
       policy.
-      Receipt v1 represents completed publications only, requires all eleven
+      Receipt v2 represents completed publications only, requires all eleven
       measured phases, externally anchors the request digest, distinguishes
       application counters from genuine filesystem/network transfer, and
       rejects zero-byte or coordinate-minting claims. Failed attempts require a
       separate runner-owned attempt record rather than a dishonest partial
       success receipt.
+- [x] Bind every runner-affecting argument in a closed invocation envelope as
+      `fbbce911`. Request, receipt, and failed-attempt envelopes are now honest
+      v2 contracts: each rejects legacy v1 and numeric schema-version aliases.
+      The first frozen parameter grammars cover exact-tabular, eye-angle, and
+      track-flat execution. Implemented adapters cannot select a contract that
+      still lacks an exact parameter grammar, and the exact-tabular child/CLI
+      no longer accepts unsigned copy-backend or scratch-retention flags.
+      Track-flat publication is explicitly scoped to the existing
+      `analysis/track_kinematics_runs/offline` namespace; the broad family
+      parent remains `analysis/track_kinematics_runs`, whose independent online
+      and offline scopes are semantic sources rather than matched layout pairs.
+      Independent adversarial review is ACCEPT, and the complete focused gate
+      passed 73 tests outside the sandbox.
 - [x] Implement the first shared typed runner for swim bouts and bout
       kinematics as `71d13675`. It requires immediate immutable run children,
       resolves the live public track-motion authority, resolves the swim-bout
