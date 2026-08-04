@@ -1119,8 +1119,18 @@ Recommended benchmark and promotion-review order:
       exist only on the full-duration Sleepyfish camera archives. The short
       gate remains honestly missing rather than being fabricated by stamping a
       legacy run as current.
-- [ ] Measure node-local compute, validation, consolidation, copy, and atomic
-      publication separately.
+- [x] Measure node-local compute, validation, consolidation, copy, and atomic
+      publication separately for the first full-duration representative
+      family. The clean `7808967a` swim-bout execution produced receipt-v4
+      digest `e614c56a51f51612dca8ca1fdfbcf713fe72bde0cb79d65786b6f9ae9fa665e8`.
+      Top-level wall time was 222.967 s; atomic publication was 211.163 s, of
+      which caller-owned acceptance consumed 196.945 s (93.27%). The physical
+      tree copy took 61 ms, rename 0.15 ms, and four publisher-owned validation
+      passes 8.469 s. Peak process-tree RSS was 2.21 GB. Exact equality,
+      direct/consolidated equivalence, coordinate binding, nonmutation, and the
+      current receipt validator passed. This is process-I/O benchmark evidence,
+      not transfer or profile-promotion evidence; see
+      `docs/diagnostics/swim_bout_full_duration_writer_telemetry_v4_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,
