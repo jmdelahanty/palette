@@ -177,4 +177,7 @@ random/window/full-scan reads, exact source-metadata guard coverage, and
 fail-closed missing Parquet statistics. The kinematics suite additionally
 covers v1/v2 projection reconstruction, exact half-open range enforcement,
 invalid range rejection, batch-boundary independence, and independent decoded
-validation. The current combined focused result is 38/38.
+validation. The current combined focused result is 39/39. The first clean
+representative-short execution and independent v1-slice/v2 equality receipt
+are recorded in
+`docs/diagnostics/kinematics_query_export_representative_short_2026-08-04.md`.

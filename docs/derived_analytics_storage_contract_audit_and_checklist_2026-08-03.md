@@ -1342,8 +1342,21 @@ Recommended benchmark and promotion-review order:
       independent validation rejects out-of-range rows, and unbounded v1
       exports remain valid. The initial writer intentionally rehashes the full
       selected authority, so short writer timing is conservative rather than
-      weakened. The combined focused exporter/runner gate passes 38/38; real
-      representative execution remains the next checkpoint.
+      weakened. The combined focused exporter/runner gate passes 39/39.
+- [x] Execute the clean representative-short kinematics query-export gate.
+      Five fresh processes published and read the exact `[0, 200000)` v2
+      projection at clean `18458f9b`: 66,464 rows, two objects, 2.226 MB,
+      10.668 s publication, 9.63 ms median random-read p95, 8.83 ms median
+      window p95, and 0.136 s median full scan. The 123-file source metadata
+      guard remained unchanged. A separate clean `1f67fc59` receipt proves all
+      23 ordered scientific columns exactly equal the same slice of the prior
+      full-duration v1 export. Matrix digest
+      `31dddaedf6630ea8b29e3ccd7efbe0c5ed2e7ee21ff2aa7f1aef9567735e7a3b`;
+      equality digest
+      `d095ebdf3a6caec1251879a26aa48e92fab7be4342030421eb31c7dce8aee079`.
+      Network transfer, Crimson, physical-profile comparison, and promotion
+      remain open; see
+      `docs/diagnostics/kinematics_query_export_representative_short_2026-08-04.md`.
 - [x] Record the eye/tail semantic-source prerequisite exposed by the real
       full-duration canary. Recording-level mask shard finalization published
       modern bundle/storage manifests but omitted the canonical coordinate
