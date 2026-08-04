@@ -18,6 +18,9 @@ from fisheye.analysis.detection_occupancy_runs import (
 from fisheye.analysis.exact_tabular_storage import (
     ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
 )
+from fisheye.analysis_workflows.storage_benchmark_catalog import (
+    DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE,
+)
 from fisheye.analysis_workflows.materializers.exact_tabular_candidate import (
     materialize_exact_tabular_candidate,
 )
@@ -294,10 +297,18 @@ def test_matrix_uses_fresh_processes_and_preserves_archive_metadata(
     )
 
     benchmark.require_matrix_result(result)
+    normalized = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE[
+        "swim_bouts"
+    ].validated_matrix_identity(result)
     payload = result["payload"]
     assert payload["correctness"]["all_passed"] is True
     assert payload["archive_read_only_guard"]["unchanged"] is True
     assert payload["balanced_read_matrix_complete"] is False
+    assert normalized["balanced_repetitions"] == "failed"
+    assert normalized["decoded_equality"] == "passed"
+    assert normalized["metadata_equivalence"] == "passed"
+    assert normalized["physical_io"] == "unavailable"
+    assert normalized["crimson_consumer"] == "not_recorded"
     assert [trial["payload"]["role"] for trial in payload["trials"]] == [
         "candidate",
         "source",

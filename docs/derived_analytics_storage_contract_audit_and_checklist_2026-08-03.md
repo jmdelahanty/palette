@@ -309,7 +309,7 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Eighth and ninth exact Arrow export schemas | `/tmp/palette-group-statistics-arrow-contract-20260803` / `agent/palette/group-statistics-arrow-contract-20260803` | integrated as `f7d02e9e` from reviewed checkpoint `3a4ac29b` | Exact ordered 45-field inferential and 30-field descriptive group-statistics schemas, closed metric-unit/effect-size/CI semantics, deterministic result identities, schema-bearing zero-row generations, strict viewer validation, and explicit read-only inferred-v2 compatibility | Independently reviewed ACCEPT; 158 tests passed with 5 expected compatibility xfails; production publication evidence remains separate |
 | Eye-angle compact-v7 source/candidate read matrix | `/tmp/palette-eye-angle-v7-read-benchmark-20260803` / `agent/palette/eye-angle-v7-read-benchmark-20260803` | integrated and hardened through `35995e23`; cataloged by `9c771842` | Complete 41-array decoded equality, executable schema/storage replay, exact publication and nested materialization bindings, logical-input role identities, fresh processes, archive guards, and hard nonpromotion | Independently re-reviewed ACCEPT; full-duration execution, physical-I/O tracing, public candidate API decision, real consumers, and promotion remain pending |
 | Track-kinematics v1/v2 source/candidate read matrix | `/tmp/palette-track-kinematics-v2-read-benchmark-20260803` / `agent/palette/track-kinematics-v2-read-benchmark-20260803` | integrated as `c56b3103`; cataloged by `bf23020c` | Complete no-physical logical projection, public v1 source reader, diagnostic-only v2 adapter, exact backend/verification policy, live selector/receipt/workload replay, fresh processes, and hard nonpromotion | Independently re-reviewed ACCEPT; representative execution, physical-I/O tracing, maintained v2 consumer decision, and the optional 35-array physical bundle remain pending |
-| Shared candidate execution contract | coordination lane | integrated as `71d13675`, with the 11-runner activation sealed as `81970487` and occupancy closure in the current coordination checkpoint | Closed 13-family typed adapter catalog; family-specific decoded-equality IDs; live family-suite validation; node-local and benchmark-namespace requests; collision-resistant protected-state snapshots; parent-observed fresh-process identity; exact coordinate evidence; complete-only 11-phase receipts; atomic acceptance/tombstoning; and hard selector/registry/profile/canonical nonmutation. All 13 adapters now have dedicated typed runners | The original eight-blocker review remains satisfied; representative-scale physical-I/O and consumer gates remain pending |
+| Shared candidate execution contract | coordination lane | integrated as `71d13675`, with the 11-runner activation sealed as `81970487` and occupancy closure in the current coordination checkpoint | Closed 13-family typed adapter catalog; family-specific decoded-equality IDs; live family-suite validation; node-local and benchmark-namespace requests; collision-resistant protected-state snapshots; parent-observed fresh-process identity; exact coordinate evidence; complete-only 11-phase receipts; atomic acceptance/tombstoning; and hard selector/registry/profile/canonical nonmutation. All 13 adapters now have dedicated typed runners. The catalog also owns each exact matrix schema and validator, while one normalized reader projects the heterogeneous matrices into four-state evidence without treating absent physical-I/O, Palette, Crimson, or promotion evidence as success | The original eight-blocker review remains satisfied; representative-scale physical-I/O and consumer gates remain pending |
 | Subject-shape typed execution | `/tmp/palette-subject-shape-typed-runner-20260803` / `agent/palette/subject-shape-typed-runner-20260803` | family checkpoint `271aceec`, integrated as `4fe0cd19`; shared activation in the current coordination checkpoint | Exact current-v4 suite replay, refined-mask and coordinate-authority binding, node-local archive staging, eleven measured phases, atomic ineligible acceptance, direct/consolidated equivalence, exact decoded equality, owned tombstoning, and parent-owned fresh-process receipt/attempt publication | Family-local tests and the integrated success/failure fresh-process gate pass; representative physical-I/O tracing and real consumers remain pending |
 | Tail-kinematics typed execution | `/tmp/palette-tail-kinematics-typed-runner-20260803` / `agent/palette/tail-kinematics-typed-runner-20260803` | family checkpoint `30dc30cc`, integrated as `a8a03e5a`; shared activation in the current coordination checkpoint | Exact 21-array core plus atomic optional revision bundle, both source coordinate-manifest bindings, node-local scientific compute, eleven measured phases, atomic ineligible acceptance, direct/consolidated equivalence, decoded equality, owned tombstoning, and parent-owned fresh-process receipt/attempt publication | Integrated 47-test gate passes; the intentionally unrealistic 20,000-row/two-row-chunk stress fixture remains deferred, while representative physical-I/O tracing and real consumers remain pending |
 | Bout-classification typed execution | coordination lane | integrated as `642a4b1d` | Exact 20-array v2 scientific identity, direct-writer result replay without rerunning hardware-sensitive inference, node-local source staging, eleven measured phases, atomic selector-ineligible publication, sorted dependency/coordinate evidence, direct/consolidated equivalence, decoded equality, and owned failure evidence | Complete 87-test runner, writer-replay, fresh-process success/failure, read-matrix, catalog, and recovery gate passes; representative-scale physical-I/O tracing remains pending |
@@ -790,13 +790,24 @@ Recommended benchmark and promotion-review order:
       versioned passing gate. All thirteen current families now resolve an
       executable read matrix; none yet claims complete benchmark coverage, and
       the catalog never serves as profile-promotion authorization.
+- [x] Give the catalog an executable result-reader boundary. Each family now
+      declares its exact matrix schema and deep validator. The normalized
+      projection binds stage, archive, source/candidate paths, balanced
+      execution, decoded equality, metadata equivalence, physical I/O,
+      Palette consumers, Crimson consumers, and promotion evidence using
+      `passed`/`failed`/`unavailable`/`not_recorded` states. One real-Zarr
+      fresh-process exact-tabular matrix passes through this catalog-owned
+      reader; absent external evidence remains a hard gap.
 - [x] Add a deterministic suite planner that binds every array workload and
       the whole-run publication workload to the exact logical declaration,
       storage-plan receipt, logical dimensions, seed, and safety policy. It
       covers 200,000- and 1,000,000-row contract scales and rejects rehashed
       plan, selection, publication, or eligibility-policy tampering.
-- [ ] Define a deterministic writer/publisher/reader workload for every
-      maintained family.
+- [x] Define a deterministic writer/publisher/reader workload for every
+      maintained family. The thirteen typed candidate runners own the
+      writer/publication phases and the thirteen cataloged read matrices own
+      access-class and full-scan work. Representative execution remains a
+      separate evidence gate below.
 - [x] Implement the deterministic read-side source/candidate matrix for exact
       swim-bout and bout-kinematics candidates. It exercises receipt-bound
       access selections and full scans in rotated fresh processes. Publication
@@ -902,7 +913,7 @@ Recommended benchmark and promotion-review order:
       tombstone the exact owned candidate. Independent re-review is ACCEPT.
       The complete 67-test post-fix execution, runner, materializer, telemetry,
       and atomic-publication suite passed.
-- [ ] Implement and independently review dedicated typed runners for the
+- [x] Implement and independently review dedicated typed runners for the
       remaining catalog families. Do not infer executability from a contract-only
       catalog entry.
     - [x] Eye angles (`159742e6`) now execute the frozen request-v2 invocation,

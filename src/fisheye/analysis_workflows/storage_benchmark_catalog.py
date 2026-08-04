@@ -19,8 +19,8 @@ from .storage_candidate_catalog import (
     DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE,
 )
 
-
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
+_SCHEMA_ID = re.compile(r"^[a-z][a-z0-9_.]*$")
 _MODULE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _CALLABLE = re.compile(r"^_?[a-z][a-z0-9_]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -42,6 +42,10 @@ class DerivedAnalysisStorageBenchmark:
     crimson_consumer_required: bool
     adapter_module: str | None = None
     adapter_entrypoint: str | None = None
+    validator_module: str | None = None
+    validator_entrypoint: str | None = None
+    matrix_schema_id: str | None = None
+    matrix_schema_version: int | None = None
     writer_phase_measured: bool = False
     publication_phase_measured: bool = False
     reader_workload_implemented: bool = False
@@ -59,9 +63,7 @@ class DerivedAnalysisStorageBenchmark:
     gate_passed: bool = False
 
     def __post_init__(self) -> None:
-        if type(self.stage_id) is not str or not _IDENTIFIER.fullmatch(
-            self.stage_id
-        ):
+        if type(self.stage_id) is not str or not _IDENTIFIER.fullmatch(self.stage_id):
             raise ValueError("stage_id must be one canonical identifier")
         if self.stage_id not in DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE:
             raise ValueError("benchmark stage must own one storage candidate")
@@ -91,17 +93,37 @@ class DerivedAnalysisStorageBenchmark:
                 or not _MODULE.fullmatch(self.adapter_module)
                 or type(self.adapter_entrypoint) is not str
                 or not _CALLABLE.fullmatch(self.adapter_entrypoint)
+                or type(self.validator_module) is not str
+                or not _MODULE.fullmatch(self.validator_module)
+                or type(self.validator_entrypoint) is not str
+                or not _CALLABLE.fullmatch(self.validator_entrypoint)
+                or type(self.matrix_schema_id) is not str
+                or not _SCHEMA_ID.fullmatch(self.matrix_schema_id)
+                or type(self.matrix_schema_version) is not int
+                or self.matrix_schema_version < 1
             ):
                 raise ValueError(
-                    "implemented benchmark adapters require an exact module and "
-                    "entrypoint"
+                    "implemented benchmark adapters require exact runner and "
+                    "validator callables"
                 )
             if not self.reader_workload_implemented:
                 raise ValueError(
                     "an implemented read adapter must declare its reader workload"
                 )
-        elif self.adapter_module is not None or self.adapter_entrypoint is not None:
-            raise ValueError("plan-only benchmark coverage must not claim an adapter")
+        elif any(
+            value is not None
+            for value in (
+                self.adapter_module,
+                self.adapter_entrypoint,
+                self.validator_module,
+                self.validator_entrypoint,
+                self.matrix_schema_id,
+                self.matrix_schema_version,
+            )
+        ):
+            raise ValueError(
+                "plan-only benchmark coverage must not claim an adapter or validator"
+            )
 
         if (
             self.physical_io_measured
@@ -158,6 +180,30 @@ class DerivedAnalysisStorageBenchmark:
         module: Any = import_module(self.adapter_module)
         return callable(getattr(module, self.adapter_entrypoint, None))
 
+    def resolves_validator(self) -> bool:
+        """Return whether the declared matrix validator is importable."""
+
+        if self.validator_module is None or self.validator_entrypoint is None:
+            return False
+        module: Any = import_module(self.validator_module)
+        return callable(getattr(module, self.validator_entrypoint, None))
+
+    def validated_matrix_identity(
+        self,
+        matrix: Any,
+    ) -> dict[str, object]:
+        """Deeply validate and normalize one persisted matrix result.
+
+        The local import avoids a catalog/evidence import cycle while keeping
+        the catalog as the public owner of both execution and evidence reads.
+        """
+
+        from .storage_benchmark_evidence import (
+            extract_storage_benchmark_identity,
+        )
+
+        return extract_storage_benchmark_identity(self.stage_id, matrix).as_record()
+
     @property
     def benchmark_coverage_complete(self) -> bool:
         """Return whether every declared evidence category is bound and passed.
@@ -195,6 +241,10 @@ class DerivedAnalysisStorageBenchmark:
             "adapter_status": self.adapter_status.value,
             "adapter_module": self.adapter_module,
             "adapter_entrypoint": self.adapter_entrypoint,
+            "validator_module": self.validator_module,
+            "validator_entrypoint": self.validator_entrypoint,
+            "matrix_schema_id": self.matrix_schema_id,
+            "matrix_schema_version": self.matrix_schema_version,
             "writer_phase_measured": self.writer_phase_measured,
             "publication_phase_measured": self.publication_phase_measured,
             "reader_workload_implemented": self.reader_workload_implemented,
@@ -215,19 +265,23 @@ class DerivedAnalysisStorageBenchmark:
         }
 
 
-_CRIMSON_REQUIRED_STAGES = frozenset(
-    DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE
-)
+_CRIMSON_REQUIRED_STAGES = frozenset(DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE)
 
 
 def _read_matrix(stage_id: str) -> DerivedAnalysisStorageBenchmark:
     adapter_module, adapter_entrypoint = _READ_MATRIX_ADAPTERS[stage_id]
+    validator_module, validator_entrypoint = _READ_MATRIX_VALIDATORS[stage_id]
+    matrix_schema_id, matrix_schema_version = _READ_MATRIX_SCHEMAS[stage_id]
     return DerivedAnalysisStorageBenchmark(
         stage_id=stage_id,
         adapter_status=StorageBenchmarkAdapterStatus.READ_MATRIX_IMPLEMENTED,
         crimson_consumer_required=stage_id in _CRIMSON_REQUIRED_STAGES,
         adapter_module=adapter_module,
         adapter_entrypoint=adapter_entrypoint,
+        validator_module=validator_module,
+        validator_entrypoint=validator_entrypoint,
+        matrix_schema_id=matrix_schema_id,
+        matrix_schema_version=matrix_schema_version,
         reader_workload_implemented=True,
         decoded_equality_implemented=True,
         metadata_equivalence_implemented=True,
@@ -289,25 +343,62 @@ _READ_MATRIX_ADAPTERS = {
     ),
 }
 
-DERIVED_ANALYSIS_STORAGE_BENCHMARKS: tuple[
-    DerivedAnalysisStorageBenchmark, ...
-] = tuple(
-    (
-        _read_matrix(stage_id)
-        if stage_id in _READ_MATRIX_ADAPTERS
-        else _plan_only(stage_id)
+_READ_MATRIX_VALIDATORS = {
+    stage_id: (module, "require_matrix_result")
+    for stage_id, (module, _entrypoint) in _READ_MATRIX_ADAPTERS.items()
+}
+_READ_MATRIX_VALIDATORS.update(
+    {
+        "tail_kinematics": (
+            "fisheye.diagnostics.benchmark_tail_kinematics_candidate_reads",
+            "validate_matrix",
+        ),
+        "tail_posture_view": (
+            "fisheye.diagnostics.benchmark_tail_posture_view_v3_candidate",
+            "validate_matrix_evidence",
+        ),
+    }
+)
+
+_READ_MATRIX_SCHEMAS = {
+    "track_kinematics": ("palette.track_kinematics.v2_read_matrix", 1),
+    "swim_bouts": ("palette.exact_tabular_candidate_read_matrix", 2),
+    "bout_kinematics": ("palette.exact_tabular_candidate_read_matrix", 2),
+    "eye_angles": ("palette.eye_angle.v7_read_matrix", 1),
+    "subject_shape": ("palette.subject_shape.v4_read_matrix", 1),
+    "tail_kinematics": ("palette.tail_kinematics.v2_read_matrix", 1),
+    "stimulus_response": ("palette.stimulus_response.read_matrix", 1),
+    "stimulus_epochs": ("palette.stimulus_epoch.read_matrix", 1),
+    "detection_occupancy": ("palette.exact_tabular_candidate_read_matrix", 2),
+    "session_occupancy": ("palette.exact_tabular_candidate_read_matrix", 2),
+    "chaser_distance": ("palette.chaser_distance.sealed_base_read_matrix", 1),
+    "tail_posture_view": ("palette.tail_posture_view.v3_read_matrix", 1),
+    "bout_classification": (
+        "palette.bout_classification.compact_v2_read_matrix",
+        1,
+    ),
+}
+
+DERIVED_ANALYSIS_STORAGE_BENCHMARKS: tuple[DerivedAnalysisStorageBenchmark, ...] = (
+    tuple(
+        (
+            _read_matrix(stage_id)
+            if stage_id in _READ_MATRIX_ADAPTERS
+            else _plan_only(stage_id)
+        )
+        for stage_id in DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE
     )
-    for stage_id in DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE
 )
 
 DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE = {
-    benchmark.stage_id: benchmark
-    for benchmark in DERIVED_ANALYSIS_STORAGE_BENCHMARKS
+    benchmark.stage_id: benchmark for benchmark in DERIVED_ANALYSIS_STORAGE_BENCHMARKS
 }
 
 
 def resolved_storage_benchmarks() -> tuple[dict[str, object], ...]:
-    return tuple(benchmark.as_record() for benchmark in DERIVED_ANALYSIS_STORAGE_BENCHMARKS)
+    return tuple(
+        benchmark.as_record() for benchmark in DERIVED_ANALYSIS_STORAGE_BENCHMARKS
+    )
 
 
 __all__ = [
