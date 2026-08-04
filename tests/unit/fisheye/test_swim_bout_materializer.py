@@ -185,6 +185,10 @@ def test_materializer_computes_locally_and_publishes_atomically(
     )
 
     assert result["status"] == "complete"
+    assert result["publish"]["physical_copy"]["verification"] == (
+        "sha256_all_physical_files"
+    )
+    assert result["publish"]["physical_copy"]["content_sha256"]
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     parent = root["analysis/swim_bout_runs"]
     assert parent.attrs["latest"] == "bouts_1"

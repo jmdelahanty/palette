@@ -51,7 +51,7 @@ class ChaserComponentPublishRequest:
     relative_path: str
     contract: ChaserComponentContract
     copy_backend: str = "python"
-    content_checksum: bool = False
+    content_checksum: bool = True
     activate_selector: bool = False
 
 

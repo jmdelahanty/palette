@@ -836,7 +836,15 @@ Recommended benchmark and promotion-review order:
       SQLite transaction.
 - [ ] Decide production selection policy for body frame and keypoint quality;
       do not infer activation from their selector-ineligible canaries.
-- [ ] Standardize copy-integrity policy across maintained families.
+- [x] Standardize copy-integrity policy across maintained families. Atomic
+      run-group publication now defaults to content verification: Python
+      copies hash every source/target file, while rsync copies require a clean
+      checksum dry-run. Historical path/size-only behavior requires an
+      explicit `content_checksum=False` compatibility opt-out. Sealed chaser
+      components share the same safe default, and the cross-family real-Zarr
+      gate passes 60/60. Pre-policy writer timings for formerly weaker callers
+      must be rerun before promotion; see
+      `docs/analytics_atomic_copy_integrity_policy_2026-08-04.md`.
 - [x] Require direct and consolidated metadata equivalence before serialized
       registry visibility. The generic subtree comparator reads persisted JSON
       rather than accepting Zarr's direct-metadata fallback.

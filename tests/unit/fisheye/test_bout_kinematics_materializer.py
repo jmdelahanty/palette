@@ -156,6 +156,10 @@ def test_materialize_bout_kinematics_storage_publishes_without_promotion(
     )
 
     assert result["status"] == "complete"
+    assert result["publish"]["physical_copy"]["verification"] == (
+        "sha256_all_physical_files"
+    )
+    assert result["publish"]["physical_copy"]["content_sha256"]
     assert result["promoted"] is False
     assert result["local_validation"]["valid"] is True
     assert result["local_validation"]["logical_fingerprint"]["logical_sha256"] == (
@@ -398,6 +402,10 @@ def test_compute_materializer_publishes_and_promotes_local_run(
     )
 
     assert result["status"] == "complete"
+    assert result["publish"]["physical_copy"]["verification"] == (
+        "sha256_all_physical_files"
+    )
+    assert result["publish"]["physical_copy"]["content_sha256"]
     assert result["promoted"] is True
     assert not scratch.exists()
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)

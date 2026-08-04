@@ -122,6 +122,8 @@ def test_atomic_component_publication_commits_selector_last(
     assert component.attrs["stage_selector_eligible"] is True
     assert "latest" not in parent.attrs
     assert receipt["component_manifest_sha256"] == selector["component_manifest_sha256"]
+    assert receipt["physical_copy"]["verification"] == "sha256_all_physical_files"
+    assert receipt["physical_copy"]["content_sha256"]
     assert local.is_dir()
 
     with pytest.raises(FileExistsError, match="Refusing to replace"):

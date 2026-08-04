@@ -273,6 +273,10 @@ def test_atomic_typed_materializer_preserves_source_and_selectors(
     )
 
     assert result["status"] == "complete"
+    assert result["publication"]["physical_copy"]["verification"] == (
+        "sha256_all_physical_files"
+    )
+    assert result["publication"]["physical_copy"]["content_sha256"]
     assert result["local_direct_consolidated_array_count"] == 20
     assert result["published_direct_consolidated_array_count"] == 20
     root = zarr.open_group(pair_archive, mode="r", use_consolidated=False)

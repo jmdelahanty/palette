@@ -39,6 +39,8 @@ from .runtime_telemetry import PhaseTelemetry
 ATOMIC_RUN_PUBLISHER_SCHEMA_ID = "palette.atomic_run_group_publisher"
 ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION = 1
 SERIALIZATION_POLICY = "per_recording_advisory_file_lock"
+DEFAULT_COPY_INTEGRITY_POLICY = "content_checksum_required_v1"
+DEFAULT_COPY_CONTENT_CHECKSUM = True
 ATOMIC_PUBLICATION_OWNER_ATTR = "atomic_publication_owner_uuid"
 ATOMIC_PUBLICATION_TOMBSTONE_ATTR = "atomic_publication_tombstone"
 
@@ -131,7 +133,10 @@ class AtomicRunPublishSpec:
     publish_schema_id: str
     policy: str
     rollback_policy: str
-    content_checksum: bool = False
+    # Maintained publishers fail safe: Python copies hash every physical file,
+    # while rsync copies use a checksum dry-run. Historical compatibility
+    # callers must opt out explicitly and retain path/size verification.
+    content_checksum: bool = DEFAULT_COPY_CONTENT_CHECKSUM
     publication_owner_attr: str | None = None
     selector_owner_attr: str | None = None
     selector_generation_attr: str | None = None
@@ -1185,6 +1190,8 @@ __all__ = [
     "ATOMIC_PUBLICATION_TOMBSTONE_ATTR",
     "ATOMIC_RUN_PUBLISHER_SCHEMA_ID",
     "ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION",
+    "DEFAULT_COPY_CONTENT_CHECKSUM",
+    "DEFAULT_COPY_INTEGRITY_POLICY",
     "AtomicRunPublishSpec",
     "SERIALIZATION_POLICY",
     "atomic_publish_run_group",

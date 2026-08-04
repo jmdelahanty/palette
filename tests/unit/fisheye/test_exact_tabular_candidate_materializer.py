@@ -157,6 +157,10 @@ def test_exact_tabular_candidate_publishes_complete_ineligible_without_pointer_c
     )
 
     assert result["status"] == "complete"
+    assert result["publication"]["physical_copy"]["verification"] == (
+        "sha256_all_physical_files"
+    )
+    assert result["publication"]["physical_copy"]["content_sha256"]
     reopened = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     parent_name = (
         "swim_bout_runs" if family == "swim_bouts" else "bout_kinematics_runs"

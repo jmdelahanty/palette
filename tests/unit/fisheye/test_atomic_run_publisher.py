@@ -71,6 +71,11 @@ def _publication_fixture(tmp_path: Path):
     return source, target, spec, owner, validate, prepare
 
 
+def test_atomic_copy_integrity_defaults_fail_safe() -> None:
+    assert mod.DEFAULT_COPY_INTEGRITY_POLICY == "content_checksum_required_v1"
+    assert mod.DEFAULT_COPY_CONTENT_CHECKSUM is True
+
+
 def test_atomic_publisher_checks_renamed_owner_before_callbacks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -359,6 +364,8 @@ def test_atomic_activation_callback_is_absolute_final_metadata_commit(
 
     assert events == ["complete", "verify", "activate"]
     assert result["final_validation"]["valid"] is True
+    assert result["physical_copy"]["verification"] == "sha256_all_physical_files"
+    assert result["physical_copy"]["content_sha256"]
     telemetry = result["runtime_telemetry"]
     assert telemetry["identity_policy"] == (
         "report_only_excluded_from_scientific_identity_and_payload_digests"
