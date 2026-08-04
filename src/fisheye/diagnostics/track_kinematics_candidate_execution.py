@@ -1214,6 +1214,9 @@ def run_track_flat_candidate_fresh_process(
                 reported_phase = str(child_payload["failure_phase"])
                 reported_error_type = str(child_payload["error_type"])
                 reported_error_message = str(child_payload["error_message"])
+                child_error = RuntimeError(
+                    f"{reported_error_type}: {reported_error_message}"
+                )
         attempt = fail_driver(
             child_error,
             phase=reported_phase,

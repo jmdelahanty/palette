@@ -67,9 +67,7 @@ class AnalysisCandidateExecutionAdapter:
         if type(self.adapter_version) is not int or self.adapter_version < 1:
             raise ValueError("adapter_version must be one positive exact integer")
         if self.runner_status is CandidateRunnerStatus.IMPLEMENTED:
-            if not candidate_invocation_contract_is_frozen(
-                self.invocation_contract
-            ):
+            if not candidate_invocation_contract_is_frozen(self.invocation_contract):
                 raise ValueError(
                     "implemented adapters require one frozen invocation grammar"
                 )
@@ -97,8 +95,7 @@ class AnalysisCandidateExecutionAdapter:
 
         candidate = DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE[self.stage_id]
         if (
-            candidate.publication_mode
-            is StorageCandidatePublicationMode.GUARDED_DIRECT
+            candidate.publication_mode is StorageCandidatePublicationMode.GUARDED_DIRECT
             and self.runner_status
             is not CandidateRunnerStatus.BLOCKED_DIRECT_PUBLICATION
         ):
@@ -158,7 +155,10 @@ class AnalysisCandidateExecutionAdapter:
         return callable(getattr(module, self.runner_entrypoint, None))
 
     def resolves_suite_validator(self) -> bool:
-        if self.suite_validator_module is None or self.suite_validator_entrypoint is None:
+        if (
+            self.suite_validator_module is None
+            or self.suite_validator_entrypoint is None
+        ):
             return False
         module: Any = import_module(self.suite_validator_module)
         return callable(getattr(module, self.suite_validator_entrypoint, None))
@@ -206,6 +206,48 @@ def _implemented_exact_tabular(
     )
 
 
+def _implemented_track_flat() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="track_kinematics",
+        invocation_contract=CandidateInvocationContract.TRACK_FLAT_V1,
+        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.CANONICAL_PRODUCER,
+        coordinate_contract_status=CoordinateContractStatus.SOURCE_PRESERVATION_ONLY,
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.TRACK_FLAT_PROJECTION_V1
+        ),
+        runner_module="fisheye.diagnostics.track_kinematics_candidate_execution",
+        runner_entrypoint="execute_track_flat_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.track_kinematics_candidate_suite"
+        ),
+        suite_validator_entrypoint="require_track_flat_execution_suite",
+    )
+
+
+def _implemented_eye_angles() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="eye_angles",
+        invocation_contract=CandidateInvocationContract.EYE_ANGLES_V1,
+        computation_mode=CandidateComputationMode.SCIENTIFIC_COMPUTE,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.BOUND_DERIVATIVE,
+        coordinate_contract_status=(
+            CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED
+        ),
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.EYE_ANGLE_COMPACT_V7_ARRAYS_V1
+        ),
+        runner_module="fisheye.diagnostics.eye_angle_candidate_execution",
+        runner_entrypoint="execute_eye_angle_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.eye_angle_candidate_execution"
+        ),
+        suite_validator_entrypoint="require_eye_angle_execution_suite",
+    )
+
+
 def _coordinate_blocked(
     stage_id: str,
     logical_equality_contract: CandidateLogicalEqualityContract,
@@ -239,17 +281,8 @@ def _direct_blocked(
     )
 
 
-ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[
-    AnalysisCandidateExecutionAdapter, ...
-] = (
-    _contract_only(
-        "track_kinematics",
-        CandidateInvocationContract.TRACK_FLAT_V1,
-        CandidateComputationMode.LOGICAL_REMATERIALIZATION,
-        CoordinateContractRole.CANONICAL_PRODUCER,
-        CoordinateContractStatus.SOURCE_PRESERVATION_ONLY,
-        CandidateLogicalEqualityContract.TRACK_FLAT_PROJECTION_V1,
-    ),
+ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, ...] = (
+    _implemented_track_flat(),
     _implemented_exact_tabular(
         "swim_bouts",
         CandidateLogicalEqualityContract.SWIM_BOUTS_DECLARED_ARRAYS_V1,
@@ -258,14 +291,7 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[
         "bout_kinematics",
         CandidateLogicalEqualityContract.BOUT_KINEMATICS_DECLARED_ARRAYS_V1,
     ),
-    _contract_only(
-        "eye_angles",
-        CandidateInvocationContract.EYE_ANGLES_V1,
-        CandidateComputationMode.SCIENTIFIC_COMPUTE,
-        CoordinateContractRole.BOUND_DERIVATIVE,
-        CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED,
-        CandidateLogicalEqualityContract.EYE_ANGLE_COMPACT_V7_ARRAYS_V1,
-    ),
+    _implemented_eye_angles(),
     _contract_only(
         "subject_shape",
         CandidateInvocationContract.SUBJECT_SHAPE_V1,
@@ -342,7 +368,9 @@ if set(ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE) != set(
 
 
 def resolved_candidate_execution_adapters() -> tuple[dict[str, object], ...]:
-    return tuple(adapter.as_manifest() for adapter in ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS)
+    return tuple(
+        adapter.as_manifest() for adapter in ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS
+    )
 
 
 __all__ = [

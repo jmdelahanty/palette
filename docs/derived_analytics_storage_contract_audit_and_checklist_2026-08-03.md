@@ -896,6 +896,30 @@ Recommended benchmark and promotion-review order:
 - [ ] Implement and independently review dedicated typed runners for the other
       eleven catalog families. Do not infer executability from a contract-only
       catalog entry.
+    - [x] Eye angles (`159742e6`) now execute the frozen request-v2 invocation,
+          reconstruct and validate the exact 41-array compact-v7 suite, bind
+          live subject-shape and canonical-keypoint authorities, measure all
+          eleven phases, and keep acceptance, selector ineligibility, protected
+          post-state observation, and terminal tombstoning inside the typed
+          execution boundary.
+    - [x] Track kinematics (`15d5e0a7`) now executes the primitive flat-v2
+          migration candidate from the current structured v1 source. The
+          source/candidate dual validation is migration evidence, not a policy
+          to retain structured dtypes in new writers. The diagnostic suite
+          excludes the optional 35-array physical-coordinate bundle and
+          therefore remains deliberately nonminting and unable to pass the
+          publication gate.
+    - [x] Activate both typed runners in the shared executable catalog and
+          remove test-local catalog substitutions. Track success and failure
+          now traverse the real parent driver and fresh child, publish exactly
+          one receipt or attempt sidecar, preserve exact child error identity,
+          and re-observe selector, registry, and production-profile state
+          before exposing terminal evidence. The live eye runner performs an
+          exact 41-array compute/rematerialize/publication pass; its untraced,
+          dirty-worktree unit receipt correctly remains nonpromoting. The
+          combined shared/eye/track execution, materializer, recovery, and read
+          matrix gate passed 136 tests outside the sandbox.
+    - [ ] Implement the remaining nine typed family runners.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,

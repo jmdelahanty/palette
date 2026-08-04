@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import multiprocessing
+import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any
 import uuid
 
 import pytest
@@ -20,20 +19,11 @@ from fisheye.analysis.track_kinematics_storage import (
 )
 from fisheye.analysis_workflows import analysis_candidate_execution_catalog as catalog
 from fisheye.analysis_workflows.analysis_candidate_execution import (
-    CandidateComputationMode,
-    CandidateLogicalEqualityContract,
-    CandidateRunnerStatus,
-    CoordinateContractRole,
-    CoordinateContractStatus,
     PhysicalIOScope,
     build_candidate_execution_request,
     require_candidate_execution_receipt,
 )
-from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
-    AnalysisCandidateExecutionAdapter,
-)
 from fisheye.analysis_workflows.analysis_candidate_invocation import (
-    CandidateInvocationContract,
     build_track_flat_invocation,
 )
 from fisheye.analysis_workflows.materializers.track_kinematics_candidate import (
@@ -49,8 +39,8 @@ from fisheye.analysis_workflows.track_kinematics_candidate_suite import (
 )
 from fisheye.diagnostics.track_kinematics_candidate_execution import (
     TrackFlatCandidateExecutionFailed,
-    execute_track_flat_candidate,
     require_track_flat_execution_attempt,
+    run_track_flat_candidate_fresh_process,
     track_flat_selector_snapshot_sha256,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -63,38 +53,6 @@ from tests.unit.fisheye.test_track_kinematics_flat_candidate import (
     _build_source_archive,
     _populate_v1_run,
 )
-
-
-def _implemented_adapter() -> AnalysisCandidateExecutionAdapter:
-    return AnalysisCandidateExecutionAdapter(
-        stage_id="track_kinematics",
-        invocation_contract=CandidateInvocationContract.TRACK_FLAT_V1,
-        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
-        runner_status=CandidateRunnerStatus.IMPLEMENTED,
-        coordinate_role=CoordinateContractRole.CANONICAL_PRODUCER,
-        coordinate_contract_status=CoordinateContractStatus.SOURCE_PRESERVATION_ONLY,
-        logical_equality_contract=(
-            CandidateLogicalEqualityContract.TRACK_FLAT_PROJECTION_V1
-        ),
-        runner_module=("fisheye.diagnostics.track_kinematics_candidate_execution"),
-        runner_entrypoint="execute_track_flat_candidate",
-        suite_validator_module=(
-            "fisheye.analysis_workflows.track_kinematics_candidate_suite"
-        ),
-        suite_validator_entrypoint="require_track_flat_execution_suite",
-    )
-
-
-def _patch_implemented_adapter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> dict[str, object]:
-    adapter = _implemented_adapter()
-    monkeypatch.setitem(
-        catalog.ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE,
-        "track_kinematics",
-        adapter,
-    )
-    return adapter.as_manifest()
 
 
 def _git_commit() -> str:
@@ -153,22 +111,6 @@ def _request(
         registry_probe_path=probe,
         production_profiles_probe_path=probe,
     )
-
-
-def _execute_in_child(
-    queue: Any,
-    request: dict[str, object],
-    driver_pid: int,
-) -> None:
-    catalog.ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["track_kinematics"] = (
-        _implemented_adapter()
-    )
-    try:
-        queue.put(
-            ("receipt", execute_track_flat_candidate(request, driver_pid=driver_pid))
-        )
-    except TrackFlatCandidateExecutionFailed as exc:
-        queue.put(("attempt", exc.attempt))
 
 
 def test_track_suite_is_exact_and_explicitly_excludes_physical_bundle(
@@ -336,7 +278,6 @@ def test_acceptance_failure_stays_inside_atomic_tombstone_boundary(
 
 @pytest.mark.parametrize("valid_authority", [True, False])
 def test_real_canonical_source_executes_or_fails_closed_in_fresh_child(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     valid_authority: bool,
 ) -> None:
@@ -345,7 +286,9 @@ def test_real_canonical_source_executes_or_fails_closed_in_fresh_child(
     archive = _build_canonical_sealed_source(benchmark_root)
     probe = benchmark_root / "protected-probe.json"
     probe.write_text("{}\n", encoding="utf-8")
-    adapter = _patch_implemented_adapter(monkeypatch)
+    adapter = catalog.ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
+        "track_kinematics"
+    ].as_manifest()
     scratch = Path("/tmp") / f"palette-track-test-{uuid.uuid4().hex}"
     request = _request(
         archive,
@@ -354,21 +297,20 @@ def test_real_canonical_source_executes_or_fails_closed_in_fresh_child(
         probe=probe,
         motion_digest=None if valid_authority else "f" * 64,
     )
-    context = multiprocessing.get_context("spawn")
-    queue = context.Queue()
-    process = context.Process(
-        target=_execute_in_child,
-        args=(queue, request, os.getpid()),
-    )
-    process.start()
-    kind, evidence = queue.get(timeout=180)
-    process.join(timeout=15)
-    assert process.exitcode == 0
-    queue.close()
-    queue.join_thread()
+    workflow = benchmark_root / f"driver-{valid_authority}"
+    evidence_dir = workflow / "evidence"
+    evidence_dir.mkdir(parents=True)
+    request_path = workflow / "request.json"
+    receipt_path = evidence_dir / "receipt.json"
+    attempt_path = evidence_dir / "attempt.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
 
     if valid_authority:
-        assert kind == "receipt"
+        evidence = run_track_flat_candidate_fresh_process(
+            request_path,
+            receipt_path=receipt_path,
+            attempt_path=attempt_path,
+        )
         require_candidate_execution_receipt(
             evidence,
             expected_request_payload_digest=request["payload_digest"],
@@ -377,18 +319,31 @@ def test_real_canonical_source_executes_or_fails_closed_in_fresh_child(
         assert evidence["payload"]["coordinate_evidence"]["status"] == (
             "verified_source_preservation_nonminting"
         )
-        assert evidence["payload"]["fresh_process"]["child_pid"] == process.pid
+        assert evidence["payload"]["fresh_process"]["child_pid"] != os.getpid()
+        assert receipt_path.is_file()
+        assert not attempt_path.exists()
         run = zarr.open_group(
             str(archive), mode="r", zarr_format=3, use_consolidated=False
         )["analysis/track_kinematics_runs/offline/typed_candidate_v2"]
         assert run.attrs["stage_selector_eligible"] is False
         assert run.attrs["storage_candidate_profile_promoted"] is False
     else:
-        assert kind == "attempt"
+        with pytest.raises(
+            TrackFlatCandidateExecutionFailed,
+            match="full-motion authority",
+        ) as raised:
+            run_track_flat_candidate_fresh_process(
+                request_path,
+                receipt_path=receipt_path,
+                attempt_path=attempt_path,
+            )
+        evidence = raised.value.attempt
         require_track_flat_execution_attempt(
             evidence,
             expected_request_payload_digest=request["payload_digest"],
         )
         assert evidence["payload"]["failure_phase"] == "runner_preflight"
         assert evidence["payload"]["target_state"]["exists"] is False
+        assert attempt_path.is_file()
+        assert not receipt_path.exists()
     assert not scratch.exists()

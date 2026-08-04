@@ -104,13 +104,11 @@ def _suite(*, profile=PUBLISHED_HTTP_V1):
     group = _Group()
     for path, spec in _swim_bout_required_specs().items():
         shape = tuple(
-            16
-            if axis == "utf8_byte"
-            else 2_048
-            if axis == "frame"
-            else 2
-            if axis == "detector_signal"
-            else 3
+            (
+                16
+                if axis == "utf8_byte"
+                else 2_048 if axis == "frame" else 2 if axis == "detector_signal" else 3
+            )
             for axis in spec.axes
         )
         group.add(path, _Array(shape=shape, dtype=spec.dtype))
@@ -373,9 +371,17 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
     assert status["detection_occupancy"] == "blocked_coordinate_authority"
     assert status["session_occupancy"] == "blocked_coordinate_authority"
     assert {stage for stage, value in status.items() if value == "implemented"} == {
+        "track_kinematics",
         "swim_bouts",
         "bout_kinematics",
+        "eye_angles",
     }
+
+    for stage in ("track_kinematics", "swim_bouts", "bout_kinematics", "eye_angles"):
+        adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[stage]
+        assert adapter.resolves_candidate_owner() is True
+        assert adapter.resolves_runner() is True
+        assert adapter.resolves_suite_validator() is True
 
     implemented = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["swim_bouts"]
     with pytest.raises(ValueError, match="frozen invocation grammar"):
@@ -387,7 +393,7 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
 
 def test_contract_only_adapter_cannot_mint_execution_request() -> None:
     adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
-        "track_kinematics"
+        "subject_shape"
     ].as_manifest()
     with pytest.raises(ValueError, match="implemented typed adapter"):
         build_candidate_execution_request(
@@ -470,9 +476,7 @@ def test_execution_request_requires_exact_bound_invocation(
 
     changed_profile = deepcopy(request)
     invocation = changed_profile["payload"]["invocation"]
-    invocation["payload"]["parameters"]["storage_profile_id"] = (
-        "scratch_compute_v1"
-    )
+    invocation["payload"]["parameters"]["storage_profile_id"] = "scratch_compute_v1"
     invocation["payload_digest"] = canonical_json_sha256(invocation["payload"])
     changed_profile["payload_digest"] = canonical_json_sha256(
         changed_profile["payload"]
