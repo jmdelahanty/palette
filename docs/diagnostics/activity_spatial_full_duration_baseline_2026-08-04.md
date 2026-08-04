@@ -84,8 +84,9 @@ Resource-telemetry v2 now persists process-tree requested characters,
 read/write syscall counts, and OS-reported storage bytes. It explicitly marks
 these counters as distinct from compressed network transfer.
 
-The next admissible gate is a clean-revision v6 matrix using the same immutable
+The clean-revision v6 matrix subsequently passed against the same immutable
 fixture, source runs, binning, row-group policy, workload, and five-process
-reader matrix. It must match the baseline full-scan logical digest exactly and
-materially reduce publication time and requested I/O. This document does not
-promote either implementation.
+reader matrix. It matched the baseline full-scan logical digest and reduced
+publisher wall time by 59.3x. See
+`activity_spatial_full_duration_optimized_2026-08-04.md`. Neither result
+promotes a storage profile or production selector.

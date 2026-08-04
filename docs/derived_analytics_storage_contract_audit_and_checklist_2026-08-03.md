@@ -1323,8 +1323,18 @@ Recommended benchmark and promotion-review order:
       this 30 FPS source, while unit evidence proves identical decoded rows.
       Process resource telemetry v2 now persists requested characters,
       syscalls, and OS-reported storage bytes without labeling them network
-      transfer. The paired clean optimized run remains required; see
+      transfer. The baseline and correction boundary are recorded in
       `docs/diagnostics/activity_spatial_full_duration_baseline_2026-08-04.md`.
+- [x] Complete the clean paired full-duration activity/spatial optimized gate.
+      Both matrices contain 7,920 rows and the same maintained full-scan
+      logical digest. Bounded 131,072-row source windows reduced publisher wall
+      time from 2,445.6 to 41.2 seconds (59.3x), scratch writing by 75.6x, CPU
+      by 95.4%, and peak RSS by 10.9%, without a material reader regression.
+      Telemetry v2 measured 453.8 million requested read characters and 15,598
+      syscalls; relative to live baseline lower bounds this is at least 181x
+      and 43.7x lower. Both remain selector-ineligible and
+      `promotion_authorized=false`; see
+      `docs/diagnostics/activity_spatial_full_duration_optimized_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,

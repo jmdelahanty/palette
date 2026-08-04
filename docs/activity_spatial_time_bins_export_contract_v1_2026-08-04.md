@@ -6,8 +6,9 @@ Status: exact logical/Arrow schema, per-track bout-source binder, bounded
 multi-bin source reader, manifest-exclusive publisher, decoded validator, CLI,
 and workflow execution adapter implemented. A full-duration unoptimized
 baseline passed and motivated the multi-bin reader; the paired optimized gate
-remains pending. This decision activates no workflow default, selector,
-registry authority, Zarr physical profile, or canonical-data change.
+then passed with identical decoded rows and a 59.3x publication improvement.
+This decision activates no workflow default, selector, registry authority,
+Zarr physical profile, or canonical-data change.
 
 ## Decision
 
@@ -154,9 +155,10 @@ position moments as arena occupancy.
 
 ## Remaining Gates
 
-- Complete the paired optimized full-duration run and representative-short
-  writer/read/copy/validation/publication gate before considering default
-  activation.
+- Complete the representative-short writer/read/copy/validation/publication
+  gate before considering default activation. The full-duration paired gate is
+  recorded in
+  `docs/diagnostics/activity_spatial_full_duration_optimized_2026-08-04.md`.
 
 ## Validation Evidence
 
