@@ -1335,6 +1335,23 @@ Recommended benchmark and promotion-review order:
       and 43.7x lower. Both remain selector-ineligible and
       `promotion_authorized=false`; see
       `docs/diagnostics/activity_spatial_full_duration_optimized_2026-08-04.md`.
+- [x] Freeze the honest representative-short query-export boundary. A
+      `representative_short` kinematics request now requires exactly one
+      explicit 200,000-frame half-open acquisition interval; full-duration
+      requests reject bounded intervals. Projection v2 persists the selection,
+      independent validation rejects out-of-range rows, and unbounded v1
+      exports remain valid. The initial writer intentionally rehashes the full
+      selected authority, so short writer timing is conservative rather than
+      weakened. The combined focused exporter/runner gate passes 38/38; real
+      representative execution remains the next checkpoint.
+- [x] Record the eye/tail semantic-source prerequisite exposed by the real
+      full-duration canary. Recording-level mask shard finalization published
+      modern bundle/storage manifests but omitted the canonical coordinate
+      owner required by subject-shape v4. The materializer correctly failed
+      closed before eye-angle v7 or tail-kinematics v2 could be produced.
+      Restamping selected v5/v1 or subject-shape v3 runs is prohibited; the
+      collection finalizer must aggregate clip coordinate proofs first. See
+      `docs/diagnostics/eye_tail_query_export_source_prerequisite_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,

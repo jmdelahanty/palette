@@ -100,6 +100,73 @@ def test_request_rejects_recomputed_digest_with_extra_publisher_parameter(
         require_request(request)
 
 
+def test_representative_short_kinematics_requires_exact_200k_frame_window(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    archive.mkdir()
+    (archive / "zarr.json").write_text("{}\n", encoding="utf-8")
+    common = {
+        "family_id": "kinematics_samples",
+        "scale_id": "representative_short",
+        "zarr_path": archive,
+        "export_root": tmp_path / "palette_benchmarks" / "exports",
+        "scratch_root": tmp_path / "node_benchmarks" / "scratch",
+        "benchmark_output_dir": tmp_path / "palette_benchmarks" / "evidence",
+        "export_run_id": "kinematics_short_01",
+        "source_runs": {
+            "track_kinematics_run": "track_v1",
+            "track_scope": "offline",
+        },
+    }
+    base_parameters = {
+        "requested_sample_rate_hz": 10.0,
+        "source_window_rows": 131_072,
+        "row_group_rows": 65_536,
+    }
+
+    with pytest.raises(ValueError, match="requires an explicit frame range"):
+        build_request(**common, publisher_parameters=base_parameters)
+    with pytest.raises(ValueError, match="exactly 200000 frames"):
+        build_request(
+            **common,
+            publisher_parameters={
+                **base_parameters,
+                "source_frame_start": 0,
+                "source_frame_stop_exclusive": 199_999,
+            },
+        )
+
+    request = build_request(
+        **common,
+        publisher_parameters={
+            **base_parameters,
+            "source_frame_start": 0,
+            "source_frame_stop_exclusive": 200_000,
+        },
+    )
+    assert require_request(request)["publisher_parameters"] == {
+        **base_parameters,
+        "source_frame_start": 0,
+        "source_frame_stop_exclusive": 200_000,
+    }
+
+
+def test_full_duration_kinematics_rejects_frame_window(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    request["payload"]["publisher_parameters"].update(
+        {
+            "source_frame_start": 0,
+            "source_frame_stop_exclusive": 200_000,
+        }
+    )
+    from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+
+    request["payload_digest"] = canonical_json_sha256(request["payload"])
+    with pytest.raises(ValueError, match="Full-duration kinematics"):
+        require_request(request)
+
+
 def test_request_rejects_nonbenchmark_publication_path(tmp_path: Path) -> None:
     archive = tmp_path / "recording_analysis.zarr"
     archive.mkdir()

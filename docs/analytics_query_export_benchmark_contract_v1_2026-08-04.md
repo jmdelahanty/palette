@@ -46,6 +46,16 @@ must contain an explicit benchmark namespace, must be outside the source
 archive, and must not overlap the other writable roots. An existing export
 manifest cannot be replaced.
 
+For `kinematics_samples`, `representative_short` is an executable scale
+contract rather than a free-form label. It requires one explicit half-open
+acquisition-frame interval of exactly 200,000 frames. The maintained exporter
+persists that interval in projection schema v2 and independent validation
+rejects every output row outside it. `full_duration` requests reject a bounded
+interval. Existing unbounded projection-v1 exports remain valid and unchanged.
+The initial bounded implementation still streams and rehashes the complete
+selected source surfaces, so its writer time is deliberately conservative; it
+does not trade source-integrity validation for a better short-scale number.
+
 `build-request` supplies the maintained CLI boundary. For example:
 
 ```bash
@@ -63,6 +73,14 @@ scripts/py -m fisheye.diagnostics.benchmark_analytics_query_exports \
   --benchmark-output-dir /benchmark/evidence \
   --export-run-id immutable_export_id \
   --output /benchmark/request.json
+```
+
+A representative-short request additionally supplies:
+
+```text
+--scale representative_short \
+--source-frame-start 0 \
+--source-frame-stop-exclusive 200000
 ```
 
 Execution is a separate command:
@@ -142,12 +160,21 @@ kinematics-query contracts now require float32 without casting. See
 
 Track and activity/spatial benchmarks must now use their real exact
 full-duration authorities. Eye and tail still require selector-isolated
-maintained semantic rematerialization, not metadata stamping. No benchmark may
-mutate or restamp the historical archive.
+maintained semantic rematerialization, not metadata stamping. A later
+full-duration canary preflight established a narrower upstream prerequisite:
+recording-level shard finalization did not publish the canonical refined-
+subject-mask coordinate ownership required to rematerialize subject-shape v4.
+The subject-shape materializer correctly fails closed before eye/tail work
+begins. See
+`docs/diagnostics/eye_tail_query_export_source_prerequisite_2026-08-04.md`.
+No benchmark may mutate or restamp the historical archive.
 
 ## Validation
 
 Focused tests cover all four closed requests, recomputed-digest field-set
 tampering, benchmark-path isolation, the request CLI, deterministic multipart
 random/window/full-scan reads, exact source-metadata guard coverage, and
-fail-closed missing Parquet statistics. The current focused result is 10/10.
+fail-closed missing Parquet statistics. The kinematics suite additionally
+covers v1/v2 projection reconstruction, exact half-open range enforcement,
+invalid range rejection, batch-boundary independence, and independent decoded
+validation. The current combined focused result is 38/38.

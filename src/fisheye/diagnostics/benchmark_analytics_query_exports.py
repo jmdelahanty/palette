@@ -86,6 +86,7 @@ class _Family:
     axis_column: str
     hot_columns: tuple[str, ...]
     publisher: Callable[..., dict[str, Any]]
+    optional_publisher_field_sets: tuple[tuple[str, ...], ...] = ()
 
 
 _COMMON_HOT = (
@@ -129,6 +130,9 @@ _FAMILIES = {
             "sample_valid",
         ),
         publisher=export_kinematics_samples,
+        optional_publisher_field_sets=(
+            ("source_frame_start", "source_frame_stop_exclusive"),
+        ),
     ),
     "activity_spatial_time_bins": _Family(
         family_id="activity_spatial_time_bins",
@@ -371,8 +375,16 @@ def require_request(
         raise ValueError(
             "Benchmark source-run declaration is not exact for its family."
         )
-    if not isinstance(parameters, Mapping) or set(parameters) != set(
-        family.publisher_fields
+    required_parameter_fields = set(family.publisher_fields)
+    allowed_parameter_field_sets = {
+        frozenset(required_parameter_fields),
+        *(
+            frozenset(required_parameter_fields | set(optional_fields))
+            for optional_fields in family.optional_publisher_field_sets
+        ),
+    }
+    if not isinstance(parameters, Mapping) or frozenset(parameters) not in (
+        allowed_parameter_field_sets
     ):
         raise ValueError("Benchmark publisher parameters are not exact for its family.")
     for name, value in source_runs.items():
@@ -391,7 +403,10 @@ def require_request(
         else:
             safe_component(value, label=name.replace("_", " "))
     for name, value in parameters.items():
-        if name in {
+        if name in {"source_frame_start", "source_frame_stop_exclusive"}:
+            if isinstance(value, bool) or type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a nonnegative exact integer.")
+        elif name in {
             "row_group_rows",
             "source_window_rows",
             "source_rows_per_part",
@@ -399,6 +414,25 @@ def require_request(
             _safe_positive_int(value, label=name)
         else:
             _safe_positive_float(value, label=name)
+    if family.family_id == "kinematics_samples":
+        has_frame_range = "source_frame_start" in parameters
+        if payload["scale_id"] == "representative_short":
+            if not has_frame_range:
+                raise ValueError(
+                    "Representative-short kinematics requires an explicit frame range."
+                )
+            if (
+                int(parameters["source_frame_stop_exclusive"])
+                - int(parameters["source_frame_start"])
+                != 200_000
+            ):
+                raise ValueError(
+                    "Representative-short kinematics must span exactly 200000 frames."
+                )
+        elif has_frame_range:
+            raise ValueError(
+                "Full-duration kinematics cannot declare a bounded source frame range."
+            )
     workload = payload.get("workload")
     if not isinstance(workload, Mapping) or set(workload) != {
         "seed",
@@ -1309,6 +1343,8 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--requested-sample-rate-hz", type=float)
     build.add_argument("--requested-bin-size-s", type=float)
     build.add_argument("--source-window-rows", type=int)
+    build.add_argument("--source-frame-start", type=int)
+    build.add_argument("--source-frame-stop-exclusive", type=int)
     build.add_argument("--source-rows-per-part", type=int)
     build.add_argument("--row-group-rows", type=int, default=65_536)
     build.add_argument("--seed", type=int, default=DEFAULT_SEED)
@@ -1365,6 +1401,20 @@ def _request_from_args(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "row_group_rows": args.row_group_rows,
         }
+        if (args.source_frame_start is None) != (
+            args.source_frame_stop_exclusive is None
+        ):
+            raise ValueError(
+                "--source-frame-start and --source-frame-stop-exclusive must be "
+                "provided together."
+            )
+        if args.source_frame_start is not None:
+            parameters.update(
+                {
+                    "source_frame_start": args.source_frame_start,
+                    "source_frame_stop_exclusive": args.source_frame_stop_exclusive,
+                }
+            )
     elif family == "activity_spatial_time_bins":
         run_map: dict[str, str] = {}
         for raw in args.track_swim_bout_run:

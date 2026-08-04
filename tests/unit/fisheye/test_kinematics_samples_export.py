@@ -57,18 +57,23 @@ def _export(
     output_name: str,
     source_window_rows: int,
     row_group_rows: int,
+    requested_sample_rate_hz: float = 0.5,
+    source_frame_start: int | None = None,
+    source_frame_stop_exclusive: int | None = None,
 ) -> dict[str, Any]:
     _eligible_source(monkeypatch)
     return mod.export_kinematics_samples(
         tmp_path / "recording_analysis.zarr",
         track_kinematics_run="motion_physical",
         track_scope="offline",
-        requested_sample_rate_hz=0.5,
+        requested_sample_rate_hz=requested_sample_rate_hz,
         output_root=tmp_path / output_name,
         export_run_id=export_run_id,
         scratch_root=tmp_path / f"scratch_{output_name}",
         source_window_rows=source_window_rows,
         row_group_rows=row_group_rows,
+        source_frame_start=source_frame_start,
+        source_frame_stop_exclusive=source_frame_stop_exclusive,
     )
 
 
@@ -95,6 +100,44 @@ def test_projection_contract_uses_global_acquisition_frame_stride() -> None:
     )
     assert clamped["sampling_stride_frames"] == 1
     assert clamped["nominal_sample_rate_hz"] == 5.0
+
+
+def test_projection_contract_versions_exact_half_open_frame_range() -> None:
+    contract = mod.kinematics_projection_contract(
+        source_sample_rate_hz=30.0,
+        requested_sample_rate_hz=10.0,
+        source_frame_start=0,
+        source_frame_stop_exclusive=200_000,
+    )
+
+    assert contract["schema_version"] == (
+        mod.KINEMATICS_PROJECTION_SCHEMA_VERSION_V2
+    )
+    assert contract["frame_selection_policy"] == (
+        mod.KINEMATICS_FRAME_SELECTION_POLICY
+    )
+    assert contract["source_frame_start"] == 0
+    assert contract["source_frame_stop_exclusive"] == 200_000
+    assert contract["payload_sha256"] == canonical_json_sha256(
+        {key: value for key, value in contract.items() if key != "payload_sha256"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "stop"),
+    ((0, None), (None, 1), (-1, 1), (1, 1), (2, 1), (False, 1), (0, True)),
+)
+def test_projection_contract_rejects_invalid_frame_ranges(
+    start: int | None,
+    stop: int | None,
+) -> None:
+    with pytest.raises(ValueError, match="source frame"):
+        mod.kinematics_projection_contract(
+            source_sample_rate_hz=30.0,
+            requested_sample_rate_hz=10.0,
+            source_frame_start=start,
+            source_frame_stop_exclusive=stop,
+        )
 
 
 @pytest.mark.parametrize("invalid", (0.0, -1.0, float("inf"), float("nan")))
@@ -205,6 +248,37 @@ def test_kinematics_export_is_bounded_and_batch_boundary_independent(
     assert pq.ParquetFile(part).schema_arrow.field("speed_mm_s").type == (
         __import__("pyarrow").float32()
     )
+
+
+def test_kinematics_export_persists_and_enforces_frame_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _export(
+        monkeypatch,
+        tmp_path,
+        export_run_id="kinematics_windowed",
+        output_name="exports_windowed",
+        source_window_rows=1,
+        row_group_rows=1,
+        requested_sample_rate_hz=1.0,
+        source_frame_start=1,
+        source_frame_stop_exclusive=2,
+    )
+
+    projection = result["kinematics_samples_export"]["projection_contract"]
+    assert projection["schema_version"] == 2
+    assert projection["source_frame_start"] == 1
+    assert projection["source_frame_stop_exclusive"] == 2
+    assert result["row_counts_by_table"] == {KINEMATICS_SAMPLES_TABLE: 1}
+    assert result["kinematics_samples_validation"]["valid"] is True
+
+    import pyarrow.parquet as pq
+
+    part = next((tmp_path / "exports_windowed").rglob("*.parquet"))
+    table = pq.read_table(part).to_pydict()
+    assert table["source_acquisition_frame_index"] == [1]
+    assert table["track_sample_index"] == [1]
 
 
 def test_streaming_writer_preserves_multiple_tracks_as_distinct_primary_keys(

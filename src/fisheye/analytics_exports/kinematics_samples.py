@@ -82,6 +82,7 @@ KINEMATICS_SOURCE_BINDING_SCHEMA_ID = "palette.kinematics_samples.source_binding
 KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION = 1
 KINEMATICS_PROJECTION_SCHEMA_ID = "palette.kinematics_samples.projection"
 KINEMATICS_PROJECTION_SCHEMA_VERSION = 1
+KINEMATICS_PROJECTION_SCHEMA_VERSION_V2 = 2
 KINEMATICS_PROJECTED_PAYLOAD_SCHEMA_ID = "palette.kinematics_samples.projected_payload"
 KINEMATICS_PROJECTED_PAYLOAD_SCHEMA_VERSION = 1
 KINEMATICS_PARQUET_POLICY_SCHEMA_ID = "palette.kinematics_samples.parquet_policy"
@@ -89,6 +90,7 @@ KINEMATICS_PARQUET_POLICY_SCHEMA_VERSION = 1
 
 KINEMATICS_SPEED_LEVEL = "filtered"
 KINEMATICS_SAMPLING_POLICY = "global_acquisition_frame_modulo_stride_v1"
+KINEMATICS_FRAME_SELECTION_POLICY = "half_open_acquisition_frame_range_v1"
 KINEMATICS_POSITION_SPACE = "physical_mm"
 
 _SELECTED_SURFACES = (
@@ -429,15 +431,40 @@ def kinematics_projection_contract(
     *,
     source_sample_rate_hz: float,
     requested_sample_rate_hz: float,
+    source_frame_start: int | None = None,
+    source_frame_stop_exclusive: int | None = None,
 ) -> dict[str, Any]:
     """Return the closed acquisition-frame-aligned sample projection."""
 
     source_rate = float(source_sample_rate_hz)
     requested_rate = float(requested_sample_rate_hz)
     stride = _sampling_stride(source_rate, requested_rate)
+    if (source_frame_start is None) != (source_frame_stop_exclusive is None):
+        raise ValueError(
+            "source frame start and stop must either both be omitted or both be set."
+        )
+    frame_range: tuple[int, int] | None = None
+    if source_frame_start is not None and source_frame_stop_exclusive is not None:
+        if (
+            isinstance(source_frame_start, bool)
+            or type(source_frame_start) is not int
+            or source_frame_start < 0
+            or isinstance(source_frame_stop_exclusive, bool)
+            or type(source_frame_stop_exclusive) is not int
+            or source_frame_stop_exclusive <= source_frame_start
+        ):
+            raise ValueError(
+                "source frame range must be one nonempty half-open interval of "
+                "nonnegative exact integers."
+            )
+        frame_range = (source_frame_start, source_frame_stop_exclusive)
     payload: dict[str, Any] = {
         "schema_id": KINEMATICS_PROJECTION_SCHEMA_ID,
-        "schema_version": KINEMATICS_PROJECTION_SCHEMA_VERSION,
+        "schema_version": (
+            KINEMATICS_PROJECTION_SCHEMA_VERSION
+            if frame_range is None
+            else KINEMATICS_PROJECTION_SCHEMA_VERSION_V2
+        ),
         "table_name": KINEMATICS_SAMPLES_TABLE,
         "source_speed_level": KINEMATICS_SPEED_LEVEL,
         "source_sample_rate_hz": source_rate,
@@ -463,6 +490,19 @@ def kinematics_projection_contract(
         "invalid_float_semantics": "source_ieee_nan_not_arrow_null",
         "position_authority": "source_camera_physical_mm",
     }
+    if frame_range is not None:
+        payload.update(
+            {
+                "frame_selection_policy": KINEMATICS_FRAME_SELECTION_POLICY,
+                "source_frame_start": frame_range[0],
+                "source_frame_stop_exclusive": frame_range[1],
+                "selection_expression": (
+                    "source_frame_start <= source_acquisition_frame_index < "
+                    "source_frame_stop_exclusive and "
+                    "source_acquisition_frame_index % stride == 0"
+                ),
+            }
+        )
     return {**payload, "payload_sha256": canonical_json_sha256(payload)}
 
 
@@ -881,6 +921,8 @@ def _read_projected_window(
     stride: int,
     source_rate_hz: float,
     source_hasher: _SelectedSourcePayloadHasher,
+    source_frame_start: int | None = None,
+    source_frame_stop_exclusive: int | None = None,
 ) -> tuple[dict[str, np.ndarray[Any, Any]], np.ndarray[Any, Any]]:
     source: dict[str, np.ndarray[Any, Any]] = {}
     for path in _SELECTED_SURFACES:
@@ -917,6 +959,11 @@ def _read_projected_window(
     if not np.array_equal(source["position_finite"], finite):
         raise ValueError(f"Track {track_id} position-finite flags are inconsistent.")
     selection = np.asarray(frames % stride == 0, dtype=bool)
+    if source_frame_start is not None or source_frame_stop_exclusive is not None:
+        if source_frame_start is None or source_frame_stop_exclusive is None:
+            raise ValueError("Projected source frame range is incomplete.")
+        selection &= frames >= source_frame_start
+        selection &= frames < source_frame_stop_exclusive
     positions = source["positions_mm"][selection]
     columns = {
         "track_id": np.full(np.count_nonzero(selection), track_id, dtype=np.int64),
@@ -1050,6 +1097,10 @@ def _write_streaming_part(
                     stride=int(projection["sampling_stride_frames"]),
                     source_rate_hz=float(projection["source_sample_rate_hz"]),
                     source_hasher=source_hasher,
+                    source_frame_start=projection.get("source_frame_start"),
+                    source_frame_stop_exclusive=projection.get(
+                        "source_frame_stop_exclusive"
+                    ),
                 )
                 if source_frames.size:
                     if last_frame is not None and int(source_frames[0]) <= last_frame:
@@ -1220,9 +1271,20 @@ def _validate_kinematics_envelope(payload: Mapping[str, Any]) -> Mapping[str, An
     projection = envelope["projection_contract"]
     if not isinstance(projection, Mapping):
         raise ValueError("Kinematic projection contract is invalid.")
+    projection_version = projection.get("schema_version")
+    if projection_version == KINEMATICS_PROJECTION_SCHEMA_VERSION:
+        frame_start = None
+        frame_stop = None
+    elif projection_version == KINEMATICS_PROJECTION_SCHEMA_VERSION_V2:
+        frame_start = projection.get("source_frame_start")
+        frame_stop = projection.get("source_frame_stop_exclusive")
+    else:
+        raise ValueError("Kinematic projection schema version is unsupported.")
     expected_projection = kinematics_projection_contract(
         source_sample_rate_hz=float(source["source_sample_rate_hz"]),
         requested_sample_rate_hz=float(projection.get("requested_sample_rate_hz")),
+        source_frame_start=frame_start,
+        source_frame_stop_exclusive=frame_stop,
     )
     if dict(projection) != expected_projection:
         raise ValueError("Kinematic projection differs from the installed contract.")
@@ -1355,6 +1417,11 @@ def validate_kinematics_samples_export_payload(
         stride = int(projection["sampling_stride_frames"])
         if np.any(frames < 0) or np.any(frames % stride != 0):
             raise ValueError("Kinematic Parquet frame sampling is invalid.")
+        if projection["schema_version"] == KINEMATICS_PROJECTION_SCHEMA_VERSION_V2:
+            if np.any(frames < int(projection["source_frame_start"])) or np.any(
+                frames >= int(projection["source_frame_stop_exclusive"])
+            ):
+                raise ValueError("Kinematic Parquet frame range is invalid.")
         expected_time = np.asarray(
             frames.astype(np.float64) / float(projection["source_sample_rate_hz"]),
             dtype=np.float32,
@@ -1411,6 +1478,8 @@ def export_kinematics_samples(
     scratch_root: str | Path,
     source_window_rows: int = 131_072,
     row_group_rows: int = 65_536,
+    source_frame_start: int | None = None,
+    source_frame_stop_exclusive: int | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Stream all tracks into one exact immutable portable sample table."""
@@ -1454,6 +1523,8 @@ def export_kinematics_samples(
     projection = kinematics_projection_contract(
         source_sample_rate_hz=float(before.binding["source_sample_rate_hz"]),
         requested_sample_rate_hz=float(requested_sample_rate_hz),
+        source_frame_start=source_frame_start,
+        source_frame_stop_exclusive=source_frame_stop_exclusive,
     )
     generation_id = uuid.uuid4().hex
     final_generation_path = generation_relative_path(run_id, generation_id)
@@ -1574,6 +1645,8 @@ def export_kinematics_samples(
                 "source_mutation": False,
                 "scratch_root": str(scratch),
                 "source_window_rows": source_window_rows,
+                "source_frame_start": source_frame_start,
+                "source_frame_stop_exclusive": source_frame_stop_exclusive,
                 "overwrite": bool(overwrite),
             },
             "kinematics_samples_export": kinematics_envelope,
@@ -1627,6 +1700,8 @@ def export_kinematics_samples(
 __all__ = [
     "KINEMATICS_EXPORT_SCHEMA_ID",
     "KINEMATICS_EXPORT_SCHEMA_VERSION",
+    "KINEMATICS_FRAME_SELECTION_POLICY",
+    "KINEMATICS_PROJECTION_SCHEMA_VERSION_V2",
     "KINEMATICS_SAMPLING_POLICY",
     "KINEMATICS_SCIENTIFIC_DTYPES",
     "export_kinematics_samples",
