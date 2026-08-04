@@ -316,6 +316,62 @@ def test_execution_materializer_stages_publishes_validates_and_tombstones(
             expected_source_identity_sha256=canonical_json_sha256(identity),
         )
 
+    with pytest.raises(ValueError, match="recognized node-local"):
+        materializer.materialize_stimulus_response_execution_candidate(
+            archive,
+            source_run=SOURCE_PATH,
+            run_name="nonlocal_candidate",
+            scratch_root=Path("/groups/palette-stimulus-response-nonlocal"),
+            writer_arguments=stimulus_response_writer_arguments(parameters),
+            copy_backend="python",
+            keep_scratch=False,
+            check_capacity=False,
+            execution_binding=binding,
+            expected_source_logical_hashes=source_hashes,
+            expected_source_identity_sha256=canonical_json_sha256(identity),
+        )
+
+    linked_archive = tmp_path / "linked-archive.zarr"
+    linked_archive.symlink_to(archive, target_is_directory=True)
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        materializer.materialize_stimulus_response_execution_candidate(
+            linked_archive,
+            source_run=SOURCE_PATH,
+            run_name="linked_archive_candidate",
+            scratch_root=tmp_path / "linked-archive-scratch",
+            writer_arguments=stimulus_response_writer_arguments(parameters),
+            copy_backend="python",
+            keep_scratch=False,
+            check_capacity=False,
+            execution_binding=binding,
+            expected_source_logical_hashes=source_hashes,
+            expected_source_identity_sha256=canonical_json_sha256(identity),
+        )
+
+    external_payload = tmp_path / "network-like-payload"
+    external_payload.write_bytes(b"must-not-be-followed")
+    source_link = archive / "network-backed-symlink"
+    source_link.symlink_to(external_payload)
+    with pytest.raises(ValueError, match="self-contained and symlink-free"):
+        materializer.materialize_stimulus_response_execution_candidate(
+            archive,
+            source_run=SOURCE_PATH,
+            run_name="symlink_candidate",
+            scratch_root=tmp_path / "symlink-scratch",
+            writer_arguments=stimulus_response_writer_arguments(parameters),
+            copy_backend="python",
+            keep_scratch=False,
+            check_capacity=False,
+            execution_binding=binding,
+            expected_source_logical_hashes=source_hashes,
+            expected_source_identity_sha256=canonical_json_sha256(identity),
+        )
+    assert not (tmp_path / "symlink-scratch" / "staged-source.zarr").exists()
+    assert not (
+        archive / "analysis" / "stimulus_response_runs" / "symlink_candidate"
+    ).exists()
+    source_link.unlink()
+
     result = materializer.materialize_stimulus_response_execution_candidate(
         archive,
         source_run=SOURCE_PATH,

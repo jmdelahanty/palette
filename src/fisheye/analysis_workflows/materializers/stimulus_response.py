@@ -68,6 +68,17 @@ STIMULUS_RESPONSE_EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding
 STIMULUS_RESPONSE_EXECUTION_FAILURE_TOMBSTONE_ATTR = (
     "analysis_candidate_execution_tombstone"
 )
+_NODE_LOCAL_SCRATCH_ROOTS = tuple(
+    Path(value)
+    for value in (
+        "/tmp",
+        "/var/tmp",
+        "/scratch",
+        "/dev/shm",
+        "/local",
+        "/lscratch",
+    )
+)
 STIMULUS_RESPONSE_EXECUTION_PHASE_ORDER = (
     "plan",
     "source_staging",
@@ -542,17 +553,58 @@ def _selector_snapshot(parent: Any) -> dict[str, Any]:
     }
 
 
+def _require_node_local_scratch(path: Path) -> None:
+    if not any(
+        path == root or path.is_relative_to(root) for root in _NODE_LOCAL_SCRATCH_ROOTS
+    ):
+        raise ValueError(
+            "Stimulus-response scratch must be below a recognized node-local "
+            "filesystem."
+        )
+
+
+def _require_symlink_free_tree(path: Path, *, label: str) -> None:
+    links: list[str] = []
+    if path.is_symlink():
+        links.append(str(path))
+    for root, directories, filenames in os.walk(path, followlinks=False):
+        for name in (*directories, *filenames):
+            candidate = Path(root) / name
+            if candidate.is_symlink():
+                links.append(str(candidate))
+                if len(links) >= 8:
+                    break
+        if len(links) >= 8:
+            break
+    if links:
+        raise ValueError(
+            f"{label} must be self-contained and symlink-free; found {links!r}."
+        )
+
+
 def _copy_archive_snapshot(source: Path, target: Path, *, backend: str) -> None:
     if target.exists() or target.is_symlink():
         raise FileExistsError(f"Refusing existing staged archive: {target}.")
+    _require_symlink_free_tree(
+        source,
+        label="Authoritative stimulus-response source archive",
+    )
     if backend == "python":
-        shutil.copytree(source, target, symlinks=True)
+        shutil.copytree(source, target, symlinks=False)
+        _require_symlink_free_tree(
+            target,
+            label="Staged stimulus-response source archive",
+        )
         return
     if backend == "rsync":
         target.mkdir(parents=True)
         subprocess.run(
-            ["rsync", "--archive", f"{source}/", f"{target}/"],
+            ["rsync", "--archive", "--copy-links", "--", f"{source}/", f"{target}/"],
             check=True,
+        )
+        _require_symlink_free_tree(
+            target,
+            label="Staged stimulus-response source archive",
         )
         return
     raise ValueError(f"Unsupported copy backend: {backend!r}.")
@@ -688,7 +740,12 @@ def materialize_stimulus_response_execution_candidate(
         compute_stimulus_response_logical_hashes,
     )
 
-    archive = Path(source_zarr).expanduser().resolve()
+    source_archive_argument = Path(source_zarr).expanduser()
+    if source_archive_argument.is_symlink():
+        raise ValueError(
+            "Authoritative stimulus-response source archive must not be a symlink."
+        )
+    archive = source_archive_argument.resolve()
     if (
         type(source_run) is not str
         or source_run != source_run.strip()
@@ -743,6 +800,7 @@ def materialize_stimulus_response_execution_candidate(
         },
     )
     scratch = Path(scratch_root).expanduser().resolve()
+    _require_node_local_scratch(scratch)
     if scratch == archive or scratch.is_relative_to(archive):
         raise ValueError(
             "Stimulus-response scratch must be outside the source archive."
