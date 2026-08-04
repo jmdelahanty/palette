@@ -24,13 +24,16 @@ from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
+    BOUT_KINEMATICS_METRICS_TABLE,
     DESCRIPTIVE_TABLE,
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
     STATISTICS_TABLE,
+    STIMULUS_RESPONSE_TABLE,
     STIMULUS_STEP_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
+    SWIM_BOUT_METRICS_TABLE,
     TABLE_CONTRACTS,
 )
 from fisheye.analytics_exports.publication import (
@@ -120,6 +123,31 @@ def _valid_recording_summary_row() -> dict[str, object]:
             "zarr_path": "/recordings/recording-1_analysis.zarr",
             "source_lineage_hash": "a" * 64,
             "stimulus_step_count": 0,
+        }
+    )
+    return row
+
+
+def _valid_core_analytics_row(table_name: str) -> dict[str, object]:
+    row: dict[str, object] = {}
+    for field in ARROW_TABLE_CONTRACTS[table_name].fields:
+        if field.nullable:
+            row[field.name] = None
+        elif field.arrow_type in {"int32", "int64"}:
+            row[field.name] = 1
+        elif field.arrow_type == "float64":
+            row[field.name] = 1.5
+        elif field.arrow_type == "bool":
+            row[field.name] = True
+        else:
+            row[field.name] = "value"
+    row.update(
+        {
+            "export_schema_version": EXPORT_SCHEMA_VERSION,
+            "table_name": table_name,
+            "recording_id": "recording-1",
+            "zarr_path": "/recordings/recording-1_analysis.zarr",
+            "source_lineage_hash": "f" * 64,
         }
     )
     return row
@@ -276,6 +304,9 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
             RECORDING_SUMMARY_TABLE,
             STIMULUS_STEPS_TABLE,
             STIMULUS_STEP_SUMMARY_TABLE,
+            STIMULUS_RESPONSE_TABLE,
+            SWIM_BOUT_METRICS_TABLE,
+            BOUT_KINEMATICS_METRICS_TABLE,
             BASELINE_BEHAVIOR_SUMMARY_TABLE,
             BASELINE_BEHAVIOR_TIME_BINS_TABLE,
             BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -289,6 +320,9 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
         RECORDING_SUMMARY_TABLE,
         STIMULUS_STEPS_TABLE,
         STIMULUS_STEP_SUMMARY_TABLE,
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -304,6 +338,9 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
                 RECORDING_SUMMARY_TABLE,
                 STIMULUS_STEPS_TABLE,
                 STIMULUS_STEP_SUMMARY_TABLE,
+                STIMULUS_RESPONSE_TABLE,
+                SWIM_BOUT_METRICS_TABLE,
+                BOUT_KINEMATICS_METRICS_TABLE,
                 BASELINE_BEHAVIOR_SUMMARY_TABLE,
                 BASELINE_BEHAVIOR_TIME_BINS_TABLE,
                 BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -321,6 +358,9 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         RECORDING_SUMMARY_TABLE,
         STIMULUS_STEPS_TABLE,
         STIMULUS_STEP_SUMMARY_TABLE,
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -589,6 +629,70 @@ def test_stimulus_step_summary_contract_freezes_all_38_maintained_fields_in_orde
         ("collection_manifest_sha256", "string", True),
         ("collection_manifest_path", "string", True),
     )
+
+
+@pytest.mark.parametrize(
+    ("table_name", "field_count"),
+    (
+        (STIMULUS_RESPONSE_TABLE, 129),
+        (SWIM_BOUT_METRICS_TABLE, 70),
+        (BOUT_KINEMATICS_METRICS_TABLE, 150),
+    ),
+)
+def test_core_analytics_contracts_have_closed_unique_field_sets(
+    table_name: str,
+    field_count: int,
+) -> None:
+    fields = ARROW_TABLE_CONTRACTS[table_name].fields
+    names = tuple(field.name for field in fields)
+
+    assert len(fields) == field_count
+    assert len(set(names)) == field_count
+    assert names[:5] == (
+        "export_schema_version",
+        "table_name",
+        "recording_id",
+        "zarr_path",
+        "source_lineage_hash",
+    )
+    assert names[-3:] == (
+        "collection_id",
+        "collection_manifest_sha256",
+        "collection_manifest_path",
+    )
+
+
+def test_bout_kinematics_contract_keys_every_measurement_level() -> None:
+    contract = TABLE_CONTRACTS[BOUT_KINEMATICS_METRICS_TABLE]
+
+    assert contract.contract_version == 2
+    assert contract.grain == "recording_x_swim_bout_x_measurement_level"
+    assert contract.primary_key == ("recording_id", "bout_id", "measurement_level")
+
+
+def test_core_analytics_exact_types_preserve_semantic_text_and_nullable_unions() -> None:
+    response = {
+        field.name: (field.arrow_type, field.nullable)
+        for field in ARROW_TABLE_CONTRACTS[STIMULUS_RESPONSE_TABLE].fields
+    }
+    swim = {
+        field.name: (field.arrow_type, field.nullable)
+        for field in ARROW_TABLE_CONTRACTS[SWIM_BOUT_METRICS_TABLE].fields
+    }
+    bout = {
+        field.name: (field.arrow_type, field.nullable)
+        for field in ARROW_TABLE_CONTRACTS[BOUT_KINEMATICS_METRICS_TABLE].fields
+    }
+
+    assert response["fish_id"] == ("int64", False)
+    assert response["omr_path_index"] == ("float64", True)
+    assert response["radial_path_index"] == ("float64", True)
+    assert swim["bout_id"] == ("int64", False)
+    assert swim["threshold_crossing_valid"] == ("bool", True)
+    assert bout["measurement_level"] == ("string", False)
+    assert bout["physical_active_boundary_policy"] == ("string", True)
+    assert bout["failure_reason"] == ("string", True)
+    assert "failure_reason_bytes" not in bout
 
 
 def test_baseline_summary_contract_freezes_all_95_fields_in_order() -> None:
@@ -865,6 +969,9 @@ def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
         RECORDING_SUMMARY_TABLE,
         STIMULUS_STEPS_TABLE,
         STIMULUS_STEP_SUMMARY_TABLE,
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -977,6 +1084,73 @@ def test_stimulus_step_summary_exact_writer_uses_declared_schema(tmp_path: Path)
     assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
         ARROW_TABLE_CONTRACTS[table_name].payload_sha256
     )
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    (
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
+    ),
+)
+def test_core_analytics_exact_writer_uses_declared_schema(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    count, parts = _write_table_parts(
+        generation_root=tmp_path / table_name,
+        table=table_name,
+        rows_by_source=(("source-1", [_valid_core_analytics_row(table_name)]),),
+    )
+
+    assert count == 1
+    validate_arrow_schema(table_name, pq.ParquetFile(parts[0]).schema_arrow)
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    (
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
+    ),
+)
+def test_core_analytics_exact_writer_rejects_duplicate_primary_keys(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    row = _valid_core_analytics_row(table_name)
+
+    with pytest.raises(ValueError, match="duplicate primary key"):
+        _write_table_parts(
+            generation_root=tmp_path / table_name,
+            table=table_name,
+            rows_by_source=(("source-1", [row, dict(row)]),),
+        )
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    (
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
+    ),
+)
+def test_core_analytics_exact_writer_rejects_null_primary_keys(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    row = _valid_core_analytics_row(table_name)
+    row[TABLE_CONTRACTS[table_name].primary_key[-1]] = None
+
+    with pytest.raises(ValueError, match="null/missing primary key"):
+        _write_table_parts(
+            generation_root=tmp_path / table_name,
+            table=table_name,
+            rows_by_source=(("source-1", [row]),),
+        )
 
 
 def test_baseline_summary_exact_writer_uses_declared_schema(tmp_path: Path) -> None:

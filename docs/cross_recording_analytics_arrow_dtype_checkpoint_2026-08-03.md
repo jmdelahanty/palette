@@ -3,18 +3,34 @@
 ## Outcome
 
 Palette now has a closed, digest-bound Arrow-contract envelope for canonical
-immutable analytics exports. The first exact physical table is
-`position_occupancy_histogram_2d`: its 62 fields have frozen order, Arrow type,
-and nullability. Its writer rejects unexpected fields and null/missing required
-values; staged publication and manifest-selected reads compare the complete
-physical schema and footer digest against the installed declaration.
+immutable analytics exports. Twelve of the 30 canonical tables have exact
+ordered schemas; the remaining 18 are the chaser tables and remain explicitly
+classified as `inferred_v2_compatibility`.
 
-This is deliberately a bounded checkpoint, not a claim that every analytics
-table is frozen. Every other canonical V2 table is listed explicitly in the
-manifest envelope as `inferred_v2_compatibility`. Historical canonical exports
-that predate the envelope require the existing explicit
-`allow_legacy_layout=True` compatibility path. A strict current reader does
-not silently infer their contract.
+The exact set now includes the six default recording-level tables, the four
+baseline/occupancy tables, and both group-statistics tables. This checkpoint
+closes the final three default tables:
+
+- `stimulus_response_per_fish_step`: 129 fields;
+- `swim_bout_metrics`: 70 fields; and
+- `bout_kinematics_metrics`: 150 fields.
+
+Their installed declaration digests are, respectively,
+`a8550bb949bdba74b98b81adaa787ab776f92344dbd16059cbeb815b5a1d60ba`,
+`de9862bfbe6d14049af4d17526ccd85660d92e50f74eda87fe664338f1f76637`,
+and `9f3376755e77782da65f844667f71f80e9429378f1bf0f181a83d92f446f1234`.
+
+Their writers reject unexpected fields, null/missing or duplicate primary
+keys, and data-dependent schema expansion. Staged publication and
+manifest-selected reads compare complete physical schemas and footer digests
+against installed declarations. Historical swim-bout and bout-kinematics
+inputs require the explicit `legacy_compatibility=True` source policy; current
+inputs fail closed by default.
+
+This remains a bounded checkpoint, not a claim that every analytics export is
+frozen. Historical canonical exports that predate the envelope require the
+existing explicit `allow_legacy_layout=True` publication-reader compatibility
+path. A strict current reader does not silently infer their contract.
 
 No recording-local Zarr schema, selector, registry authority, storage planner,
 production archive, or physical Zarr profile changed.
@@ -80,14 +96,24 @@ Compatibility tables carry `palette.arrow_schema_mode =
 inferred_v2_compatibility`; this makes the remaining migration surface visible
 instead of presenting inferred schemas as exact contracts.
 
-## Why position occupancy is first
+## Core-table decisions
 
-`position_occupancy_histogram_2d` has a closed writer row shape and already
-frozen coordinate/units semantics. It exercises the contract machinery across
-strings, signed integers, float64 measurements, booleans, nullable lineage and
-coverage values, and `list<string>` axis order. It is therefore a better first
-physical checkpoint than a broad table whose optional fields still vary by
-source capability.
+`position_occupancy_histogram_2d` was the first exact table because it had a
+closed writer row shape and frozen coordinate/units semantics. The subsequent
+default-table closure adds these rules:
+
+- stimulus-response rows are a nullable closed union of maintained stimulus
+  modes; arbitrary child attributes are not flattened, and only the two named
+  OMR method-version attributes are projected;
+- swim-bout rows preserve explicit candidate and signal identity and the
+  complete maintained compact payload; and
+- bout kinematics is keyed by recording, bout, and measurement level. Its
+  movement, heading, and optional gaze fields form a nullable union, while
+  physical fixed-width text names are exported without the storage-only
+  `_bytes` suffix.
+
+These are representation contracts for immutable query products. Recording-
+local Zarr authorities and their selectors are unchanged.
 
 ## Implementation checklist
 
@@ -103,16 +129,22 @@ source capability.
 - [x] Reject reordered, wrong-type, wrong-nullability, unexpected, missing,
   and fully rehashed declaration tampering.
 - [x] Keep pre-envelope reads behind explicit legacy compatibility.
-- [ ] Freeze the six default canonical tables, beginning with stable identity
+- [x] Freeze the six default canonical tables, beginning with stable identity
   and provenance columns shared by every row.
-- [ ] Freeze baseline behavior and kinematic tables.
+- [x] Freeze baseline behavior and kinematic tables.
 - [ ] Freeze the remaining chaser table schemas family by family.
-- [ ] Freeze `group_statistical_summary` and `group_descriptive_summary` after
+- [x] Freeze `group_statistical_summary` and `group_descriptive_summary` after
   deciding whether method-specific result columns remain one wide table or
   become versioned table variants.
 - [ ] Add a closed Arrow envelope and exact schemas to baseline-strategy v2.
 - [ ] Add a closed Arrow envelope and exact schemas to training-response v2.
 - [ ] Add cross-language fixture reads after each family is exact.
+
+Validation for this checkpoint passed 241 focused contract, Arrow,
+atomic-publication, cross-recording exporter, and swim-bout tests. The matrix
+also covers rehashed declaration tampering, exact empty tables, duplicate
+primary keys, undeclared stimulus-response fields, explicit legacy input
+policy, direct Parquet schema equality, and manifest-exclusive selection.
 
 ## Promotion rule
 

@@ -134,9 +134,10 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
     ),
     BOUT_KINEMATICS_METRICS_TABLE: _contract(
         BOUT_KINEMATICS_METRICS_TABLE,
-        "recording_x_swim_bout_kinematics",
-        ("recording_id", "bout_id"),
-        ("bout_id",),
+        "recording_x_swim_bout_x_measurement_level",
+        ("recording_id", "bout_id", "measurement_level"),
+        ("bout_id", "measurement_level"),
+        contract_version=2,
     ),
     POSITION_OCCUPANCY_HISTOGRAM_TABLE: _contract(
         POSITION_OCCUPANCY_HISTOGRAM_TABLE,

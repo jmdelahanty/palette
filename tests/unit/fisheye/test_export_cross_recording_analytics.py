@@ -5,8 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
+import pytest
 import zarr
 
+from fisheye.analytics_exports.arrow_contracts import ARROW_TABLE_CONTRACTS
 from fisheye.analytics_exports.contracts import (
     CHASER_BOUT_EVENTS_TABLE,
     CHASER_BOUT_HISTOGRAM_TABLE,
@@ -568,6 +570,7 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
         export_run_id="test_export",
         jobs=1,
         collection_manifest_path=tmp_path / "collection.manifest.json",
+        legacy_compatibility=True,
     )
 
     assert manifest["row_counts_by_table"]["recording_summary"] == 1
@@ -581,6 +584,7 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     payload = json.loads(manifest_path.read_text())
     assert payload["source_recording_count"] == 1
     assert payload["row_counts_by_table"]["swim_bout_metrics"] == 2
+    assert payload["export_parameters"]["legacy_compatibility"] is True
     assert payload["collection_manifest"]["collection_id"] == "collection_test"
     assert payload["collection_manifest"]["manifest_sha256"] == collection_manifest["manifest_sha256"]
 
@@ -603,6 +607,8 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert moving["protocol_duration_sequence_s"] == "1.6667,1.6667"
     assert moving["protocol_step_count"] == 2
     assert moving["omr_family"] == "moving_grating_omr"
+    assert moving["omr_attr_method_version"] == "omr.v1"
+    assert "omr_attr_quality_flag_codes" not in moving
     np.testing.assert_allclose(moving["omr_path_index"], 0.75)
     assert moving["first_aligned_bout_latency_s"] is None
 
@@ -636,6 +642,51 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert len(movement_rows) == 2
     assert movement_rows[0]["measurement_family"] == "movement"
     assert movement_rows[0]["physical_active_duration_s"] == 0.12
+    assert "failure_reason_bytes" not in movement_rows[0]
+
+    for table_name in (
+        "stimulus_response_per_fish_step",
+        "swim_bout_metrics",
+        "bout_kinematics_metrics",
+    ):
+        part = manifest_selected_part_files(output, "test_export", table_name)[0]
+        assert tuple(pq.ParquetFile(part).schema_arrow.names) == tuple(
+            field.name for field in ARROW_TABLE_CONTRACTS[table_name].fields
+        )
+
+
+def test_export_cross_recording_analytics_requires_explicit_legacy_policy(
+    tmp_path: Path,
+) -> None:
+    source = _make_source_zarr(tmp_path / "recording_legacy_analysis.zarr")
+
+    with pytest.raises(ValueError, match="legacy_compatibility=True"):
+        export_sources(
+            [source],
+            output_root=tmp_path / "exports",
+            export_run_id="legacy_denied",
+            tables=("bout_kinematics_metrics",),
+            jobs=1,
+        )
+
+
+def test_exact_response_export_rejects_schema_by_observation(tmp_path: Path) -> None:
+    source = _make_source_zarr(tmp_path / "recording_extra_field_analysis.zarr")
+    root = zarr.open_group(str(source), mode="a")
+    per_fish = root[
+        "analysis/stimulus_response_runs/stimulus_response_test/steps/step_0/per_fish"
+    ]
+    _array(per_fish, "future_uncontracted_metric", [1.0])
+
+    with pytest.raises(ValueError, match="undeclared logical fields"):
+        export_sources(
+            [source],
+            output_root=tmp_path / "exports",
+            export_run_id="extra_field_denied",
+            tables=("stimulus_response_per_fish_step",),
+            jobs=1,
+            legacy_compatibility=True,
+        )
 
 
 def test_export_cross_recording_analytics_fails_closed_for_unsealed_chaser_tables(
@@ -724,7 +775,13 @@ def test_export_cross_recording_analytics_uses_bout_kinematics_source_refs_fallb
         del bout_kin.attrs[name]
 
     output = tmp_path / "exports" / "palette_analytics"
-    manifest = export_sources([source], output_root=output, export_run_id="source_refs", jobs=1)
+    manifest = export_sources(
+        [source],
+        output_root=output,
+        export_run_id="source_refs",
+        jobs=1,
+        legacy_compatibility=True,
+    )
 
     assert manifest["row_counts_by_table"]["bout_kinematics_metrics"] == 6
     bout_kin_rows = _read_dataset(output, "bout_kinematics_metrics", "source_refs")
@@ -739,7 +796,13 @@ def test_export_cross_recording_analytics_reads_compact_stimulus_response(tmp_pa
     _replace_stimulus_response_fixture_with_compact_v2(source)
     output = tmp_path / "exports" / "palette_analytics"
 
-    manifest = export_sources([source], output_root=output, export_run_id="compact_response", jobs=1)
+    manifest = export_sources(
+        [source],
+        output_root=output,
+        export_run_id="compact_response",
+        jobs=1,
+        legacy_compatibility=True,
+    )
 
     assert manifest["row_counts_by_table"]["recording_summary"] == 1
     assert manifest["row_counts_by_table"]["stimulus_step_summary"] == 2
@@ -773,6 +836,7 @@ def test_export_cross_recording_analytics_reads_compact_bout_kinematics(tmp_path
         export_run_id="compact_export",
         tables=("bout_kinematics_metrics",),
         jobs=1,
+        legacy_compatibility=True,
     )
 
     assert manifest["row_counts_by_table"]["bout_kinematics_metrics"] == 6
@@ -799,6 +863,7 @@ def test_export_cross_recording_analytics_can_limit_tables(tmp_path: Path) -> No
         export_run_id="summary_only",
         tables=("recording_summary",),
         jobs=1,
+        legacy_compatibility=True,
     )
 
     assert manifest["row_counts_by_table"] == {"recording_summary": 1}

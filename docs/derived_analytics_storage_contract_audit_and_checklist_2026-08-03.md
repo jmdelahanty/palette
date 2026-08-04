@@ -597,10 +597,21 @@ a v3 storage-candidate regression.
           of dynamic compatibility columns.
     - [x] Freeze the exact ordered 38-field `stimulus_step_summary` schema and
           correct its grain/key to recording × fish × stimulus step.
+    - [x] Freeze the exact ordered 129-field
+          `stimulus_response_per_fish_step` nullable mode union. Arbitrary
+          source attributes no longer expand the schema; only the two named
+          OMR method-version attributes are projected.
+    - [x] Freeze the exact ordered 70-field `swim_bout_metrics` schema with
+          candidate/signal identity, exact primary-key enforcement, and
+          explicit legacy source compatibility.
+    - [x] Freeze the exact ordered 150-field `bout_kinematics_metrics` schema.
+          Its grain and primary key now include measurement level, storage-only
+          fixed-text suffixes are removed from the query representation, and
+          unknown measurement families fail closed.
     - [ ] Replace inferred schemas only after producer semantics and nullability
-          are frozen. The canonical envelope currently has nine exact and 21
-          inferred tables: three core analytics and 18 chaser tables. Both
-          group-statistics tables now use exact schemas. Baseline strategy
+          are frozen. The canonical envelope currently has 12 exact and 18
+          inferred tables; the remaining inferred tables are the chaser
+          exports. Both group-statistics tables use exact schemas. Baseline strategy
           consumes exact canonical baseline inputs but still writes four
           separately inferred output tables; training response likewise has
           three inferred output tables.

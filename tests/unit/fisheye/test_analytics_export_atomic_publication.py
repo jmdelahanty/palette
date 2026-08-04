@@ -7,25 +7,16 @@ import hashlib
 from pathlib import Path
 import threading
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-from fisheye.analytics_exports.capabilities import resolve_capabilities
-from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
 from fisheye.analytics_exports.contracts import (
-    EXPORT_SCHEMA_ID,
-    EXPORT_SCHEMA_VERSION,
     RECORDING_SUMMARY_TABLE,
     STATISTICS_TABLE,
-    TABLE_CONTRACTS,
     canonicalize_export_row,
-    contract_snapshot,
 )
 from fisheye.analytics_exports.publication import (
     load_export_manifest,
     manifest_selected_part_files,
-    sha256_file,
 )
 from fisheye.analytics_exports.validation import ExportValidationError, validate_export_run
 from fisheye.group_analytics_viewer.query import (
@@ -497,88 +488,42 @@ def test_statistics_latest_skips_newer_legacy_manifest(
 ) -> None:
     root = tmp_path / "exports"
     base = _publish(monkeypatch, root, [tmp_path / "a.zarr"])
-    generation = (
-        Path("v1")
-        / ".generations"
-        / "export_run_id=stats_old"
-        / "generation=test"
-    )
-    stats_part = root / generation / "tables" / STATISTICS_TABLE / "part.parquet"
-    stats_part.parent.mkdir(parents=True)
-    stats_table = pa.Table.from_pylist(
-        [
-            canonicalize_export_row(
-                STATISTICS_TABLE,
-                {
-                    "stat_result_id": "stats_old:test",
-                    "stats_run_id": "stats_old",
-                    "source_export_run_id": "atomic_test",
-                    "source_table": RECORDING_SUMMARY_TABLE,
-                    "metric_name": "test_metric",
-                    "status": "computed",
-                },
-            )
-        ]
-    ).replace_schema_metadata(
+    source_manifest_sha256 = hashlib.sha256(
+        Path(base["manifest_path"]).read_bytes()
+    ).hexdigest()
+    valid = write_goodcopbadcop_statistics(
+        [],
         {
-            b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
-            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
-            b"palette.table_contract": json.dumps(
-                TABLE_CONTRACTS[STATISTICS_TABLE].to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode(),
-            b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
-        }
-    )
-    pq.write_table(stats_table, stats_part)
-    relative_part = (
-        generation / "tables" / STATISTICS_TABLE / stats_part.name
-    ).as_posix()
-    valid = {
-        "export_run_id": "stats_old",
-        "schema_id": base["schema_id"],
-        "schema_version": base["schema_version"],
-        "created_at_utc": "2026-01-01T00:00:00+00:00",
-        "source_export_run_id": "atomic_test",
-        "source_export_manifest_sha256": hashlib.sha256(
-            Path(base["manifest_path"]).read_bytes()
-        ).hexdigest(),
-        "output_tables": [STATISTICS_TABLE],
-        "table_contracts": contract_snapshot([STATISTICS_TABLE]),
-        "arrow_schema_contracts": arrow_contract_envelope([STATISTICS_TABLE]),
-        "row_counts_by_table": {STATISTICS_TABLE: 1},
-        "part_files_by_table": {STATISTICS_TABLE: [relative_part]},
-        "capabilities": [
-            item.capability_id
-            for item in resolve_capabilities(
-                {STATISTICS_TABLE: tuple(stats_table.schema.names)}
-            )
-            if item.available
-        ],
-        "publication": {
-            "schema_id": "palette.analytics_export.publication",
-            "schema_version": 1,
-            "state": "complete",
-            "generation_id": "test",
-            "generation_path": generation.as_posix(),
-            "parts_by_table": {
-                STATISTICS_TABLE: [
-                    {
-                        "path": relative_part,
-                        "sha256": sha256_file(stats_part),
-                        "size_bytes": stats_part.stat().st_size,
-                        "row_count": 1,
-                    }
-                ]
+            "export_run_id": "stats_old",
+            "schema_id": base["schema_id"],
+            "schema_version": base["schema_version"],
+            "created_at_utc": "2026-01-01T00:00:00+00:00",
+            "source_export_run_id": "atomic_test",
+            "source_export_manifest_path": str(base["manifest_path"]),
+            "source_export_manifest_sha256": source_manifest_sha256,
+            "source_collection_manifest": base.get("collection_manifest"),
+            "input_tables": [],
+            "source_row_counts_by_table": base["row_counts_by_table"],
+            "output_tables": [STATISTICS_TABLE],
+            "row_counts_by_table": {STATISTICS_TABLE: 0},
+            "status_counts": {},
+            "metrics": [],
+            "contrasts": [],
+            "parameters": {
+                "allow_legacy_export_layout": False,
+                "bootstrap_iterations": 0,
+                "confidence_level": 0.95,
+                "fdr_method": "benjamini_hochberg",
+                "minimum_recordings": 1,
+                "permutation_iterations": 0,
+                "random_seed": 0,
+                "role_mapping_table": None,
             },
         },
-    }
-    manifest_dir = root / "v1" / "manifests"
-    (manifest_dir / "export_run_id=stats_old.json").write_text(
-        json.dumps(valid),
-        encoding="utf-8",
+        export_root=root,
+        stats_run_id="stats_old",
     )
+    manifest_dir = root / "v1" / "manifests"
     legacy = {
         "export_run_id": "zz_stats_legacy",
         "schema_id": base["schema_id"],

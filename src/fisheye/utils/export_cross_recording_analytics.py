@@ -32,6 +32,7 @@ from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
+    BOUT_KINEMATICS_METRICS_TABLE,
     CHASER_BOUT_EVENTS_TABLE,
     CHASER_BOUT_HISTOGRAM_TABLE,
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
@@ -54,6 +55,8 @@ from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
+    STIMULUS_RESPONSE_TABLE,
+    SWIM_BOUT_METRICS_TABLE,
     TABLE_CONTRACTS,
     canonicalize_export_row,
     contract_snapshot,
@@ -96,6 +99,14 @@ from fisheye.analysis.chaser_quadrant_occupancy import (
     quadrant_code_for_xy,
 )
 from fisheye.shared.zarr.columnar import load_structured_dataset
+from fisheye.shared.zarr.stimulus_response_schema import (
+    CONCENTRIC_PER_FISH,
+    GRATING_PER_FISH,
+    MOVING_OMR_PER_FISH,
+    RADIAL_PER_FISH,
+    STEP_BOUT_SUMMARY,
+    STEP_PER_FISH_BASE,
+)
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     load_default_swim_bout_tables,
@@ -1037,6 +1048,33 @@ def _load_stimulus_response_tables(
         idx = step.step_index
         if not step.per_fish:
             continue
+        _validate_logical_mapping_fields(
+            step.per_fish,
+            allowed={name for name, _field in (*STEP_PER_FISH_BASE, *STEP_BOUT_SUMMARY)},
+            context=f"stimulus-response step {idx} per_fish",
+        )
+        _validate_logical_mapping_fields(
+            step.grating_per_fish,
+            allowed={name for name, _field in GRATING_PER_FISH},
+            context=f"stimulus-response step {idx} grating_per_fish",
+        )
+        _validate_logical_mapping_fields(
+            step.concentric_per_fish,
+            allowed={name for name, _field in CONCENTRIC_PER_FISH},
+            context=f"stimulus-response step {idx} concentric_per_fish",
+        )
+        if step.moving_grating_omr is not None:
+            _validate_logical_mapping_fields(
+                step.moving_grating_omr.per_fish,
+                allowed={name for name, _field in MOVING_OMR_PER_FISH},
+                context=f"stimulus-response step {idx} moving OMR per_fish",
+            )
+        if step.concentric_radial_omr is not None:
+            _validate_logical_mapping_fields(
+                step.concentric_radial_omr.per_fish,
+                allowed={name for name, _field in RADIAL_PER_FISH},
+                context=f"stimulus-response step {idx} radial OMR per_fish",
+            )
         attrs = dict(step.attrs)
         base_rows = _array_mapping_rows(step.per_fish)
         for base in base_rows:
@@ -1096,27 +1134,64 @@ def _load_stimulus_response_tables(
 
             if step.grating_per_fish:
                 grating_rows = _array_mapping_rows(step.grating_per_fish)
-                _merge_matching_fish_row(row, grating_rows, fish_id, prefix="grating_")
+                _merge_matching_fish_row(
+                    row,
+                    grating_rows,
+                    fish_id,
+                    prefix="grating_",
+                    table=STIMULUS_RESPONSE_TABLE,
+                )
             if step.moving_grating_omr is not None:
                 row["omr_family"] = "moving_grating_omr"
-                for key, value in step.moving_grating_omr.attrs.items():
-                    row[f"omr_attr_{key}"] = value
+                row["omr_attr_method_version"] = _scalar_for_parquet(
+                    step.moving_grating_omr.attrs.get("method_version")
+                )
                 omr_rows = _array_mapping_rows(step.moving_grating_omr.per_fish)
-                _merge_matching_fish_row(row, omr_rows, fish_id, prefix="")
+                _merge_matching_fish_row(
+                    row,
+                    omr_rows,
+                    fish_id,
+                    prefix="",
+                    table=STIMULUS_RESPONSE_TABLE,
+                )
 
             if step.concentric_per_fish:
                 conc_rows = _array_mapping_rows(step.concentric_per_fish)
-                _merge_matching_fish_row(row, conc_rows, fish_id, prefix="concentric_")
+                _merge_matching_fish_row(
+                    row,
+                    conc_rows,
+                    fish_id,
+                    prefix="concentric_",
+                    table=STIMULUS_RESPONSE_TABLE,
+                )
             if step.concentric_radial_omr is not None:
                 row["omr_family"] = "concentric_radial_omr"
-                for key, value in step.concentric_radial_omr.attrs.items():
-                    row[f"radial_omr_attr_{key}"] = value
+                row["radial_omr_attr_method_version"] = _scalar_for_parquet(
+                    step.concentric_radial_omr.attrs.get("method_version")
+                )
                 radial_rows = _array_mapping_rows(step.concentric_radial_omr.per_fish)
-                _merge_matching_fish_row(row, radial_rows, fish_id, prefix="")
+                _merge_matching_fish_row(
+                    row,
+                    radial_rows,
+                    fish_id,
+                    prefix="",
+                    table=STIMULUS_RESPONSE_TABLE,
+                )
 
             response_rows.append(row)
 
     return step_summary_rows, response_rows
+
+
+def _validate_logical_mapping_fields(
+    mapping: Mapping[str, np.ndarray],
+    *,
+    allowed: set[str],
+    context: str,
+) -> None:
+    unexpected = sorted(set(str(name) for name in mapping) - allowed)
+    if unexpected:
+        raise ValueError(f"{context} has undeclared logical fields: {unexpected}")
 
 
 def _merge_matching_fish_row(
@@ -1125,16 +1200,34 @@ def _merge_matching_fish_row(
     fish_id: int | None,
     *,
     prefix: str,
+    table: str,
 ) -> None:
-    for candidate in candidate_rows:
-        if _safe_int(candidate.get("fish_id")) != fish_id:
-            continue
+    exact_names = {field.name for field in ARROW_TABLE_CONTRACTS[table].fields}
+    matches = [
+        candidate
+        for candidate in candidate_rows
+        if _safe_int(candidate.get("fish_id")) == fish_id
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"{table}: fish_id {fish_id!r} has multiple matching rows")
+    for candidate in matches:
         for key, value in candidate.items():
             if key == "fish_id":
                 continue
             out_key = f"{prefix}{key}" if prefix else str(key)
-            if out_key in row and row[out_key] == value:
-                continue
+            if out_key not in exact_names:
+                raise ValueError(
+                    f"{table}: source field {key!r} projects to undeclared field "
+                    f"{out_key!r}"
+                )
+            if out_key in row:
+                if row[out_key] == value:
+                    continue
+                if row[out_key] is not None and value is not None:
+                    raise ValueError(
+                        f"{table}: conflicting projected field {out_key!r}: "
+                        f"{row[out_key]!r} != {value!r}"
+                    )
             row[out_key] = value
         return
 
@@ -1150,6 +1243,7 @@ def _load_swim_bout_metrics(
     steps: Sequence[StepSpan],
     tables: set[str],
     diagnostics: list[dict[str, Any]],
+    legacy_compatibility: bool = False,
 ) -> list[dict[str, Any]]:
     if "swim_bout_metrics" not in tables:
         return []
@@ -1169,6 +1263,7 @@ def _load_swim_bout_metrics(
         swim_payload = load_default_swim_bout_tables(
             root,
             run_name=selected_swim_run,
+            legacy_compatibility=legacy_compatibility,
         )
     except SwimBoutIOError as exc:
         diagnostics.append({
@@ -1191,7 +1286,12 @@ def _load_swim_bout_metrics(
     default_level = swim_payload.signal.speed_level
     bout_rows = structured_records_to_dicts(swim_payload.bouts)
     rows: list[dict[str, Any]] = []
-    for bout in bout_rows:
+    for raw_bout in bout_rows:
+        bout = _closed_metric_record(
+            raw_bout,
+            table=SWIM_BOUT_METRICS_TABLE,
+            context="swim-bout payload",
+        )
         bout_id = _safe_int(bout.get("bout_id"))
         start_frame = _safe_int(bout.get("start_frame"))
         end_frame = _safe_int(bout.get("end_frame"))
@@ -1235,9 +1335,47 @@ def _load_swim_bout_metrics(
             "stimulus_mode": step.stimulus_mode if step else None,
         })
         row.update(_protocol_signature_row(protocol_signature))
-        row.update(bout)
+        _merge_identity_checked(row, bout, context="swim-bout payload")
         rows.append(row)
     return rows
+
+
+def _closed_metric_record(
+    record: Mapping[str, Any],
+    *,
+    table: str,
+    context: str,
+    semantic_fixed_text_names: bool = False,
+) -> dict[str, Any]:
+    """Normalize one metric record without permitting schema-by-observation."""
+
+    exact_names = {field.name for field in ARROW_TABLE_CONTRACTS[table].fields}
+    out: dict[str, Any] = {}
+    for raw_name, raw_value in record.items():
+        name = str(raw_name)
+        if semantic_fixed_text_names and name.endswith("_bytes"):
+            name = name[: -len("_bytes")]
+        if name in out:
+            raise ValueError(f"{context} maps multiple fields to {name!r}")
+        if name not in exact_names:
+            raise ValueError(f"{context} has undeclared logical field {raw_name!r}")
+        out[name] = _scalar_for_parquet(raw_value)
+    return out
+
+
+def _merge_identity_checked(
+    row: dict[str, Any],
+    values: Mapping[str, Any],
+    *,
+    context: str,
+) -> None:
+    for name, value in values.items():
+        if name in row and row[name] is not None and value is not None and row[name] != value:
+            raise ValueError(
+                f"{context} conflicts with projected {name!r}: "
+                f"{row[name]!r} != {value!r}"
+            )
+        row[name] = value
 
 
 def _measurement_family_for_level(level_name: str) -> str:
@@ -1261,6 +1399,7 @@ def _load_bout_kinematics_metrics(
     steps: Sequence[StepSpan],
     tables: set[str],
     diagnostics: list[dict[str, Any]],
+    legacy_compatibility: bool = False,
 ) -> list[dict[str, Any]]:
     if "bout_kinematics_metrics" not in tables:
         return []
@@ -1289,7 +1428,8 @@ def _load_bout_kinematics_metrics(
     track_id = _safe_int(source_track_id)
     default_heading_level = run_attrs.get("default_heading_level")
     records_by_level, level_attrs_by_level, metrics_attrs_by_level = resolve_bout_kinematics_tables(
-        bout_kin_group
+        bout_kin_group,
+        legacy_compatibility=legacy_compatibility,
     )
 
     if not records_by_level:
@@ -1317,7 +1457,17 @@ def _load_bout_kinematics_metrics(
 
         level_attrs = level_attrs_by_level.get(level_name, {})
         measurement_family = _measurement_family_for_level(level_name)
-        for metric in metric_rows:
+        if measurement_family == "unknown":
+            raise ValueError(
+                f"bout-kinematics level {level_name!r} has no declared measurement family"
+            )
+        for raw_metric in metric_rows:
+            metric = _closed_metric_record(
+                raw_metric,
+                table=BOUT_KINEMATICS_METRICS_TABLE,
+                context=f"bout-kinematics {level_name!r} payload",
+                semantic_fixed_text_names=True,
+            )
             bout_id = _safe_int(metric.get("bout_id"))
             start_frame = _safe_int(metric.get("source_start_frame"))
             end_frame = _safe_int(metric.get("source_end_frame"))
@@ -1365,7 +1515,11 @@ def _load_bout_kinematics_metrics(
                 "stimulus_mode": step.stimulus_mode if step else None,
             })
             row.update(_protocol_signature_row(protocol_signature))
-            row.update(metric)
+            _merge_identity_checked(
+                row,
+                metric,
+                context=f"bout-kinematics {level_name!r} payload",
+            )
             rows.append(row)
     return rows
 
@@ -4983,6 +5137,7 @@ def export_one_zarr(
     baseline_sample_rate_hz: float = 10.0,
     baseline_full_resolution_samples: bool = False,
     baseline_spatial_grid_size: int = 12,
+    legacy_compatibility: bool = False,
 ) -> SourceExportResult:
     zarr_path = Path(zarr_path).expanduser().resolve()
     recording_id = _recording_id_from_path(zarr_path)
@@ -5045,6 +5200,7 @@ def export_one_zarr(
         steps=steps,
         tables=table_set,
         diagnostics=result.diagnostics,
+        legacy_compatibility=legacy_compatibility,
     )
     if bout_rows:
         result.rows_by_table.setdefault("swim_bout_metrics", []).extend(bout_rows)
@@ -5059,6 +5215,7 @@ def export_one_zarr(
         steps=steps,
         tables=table_set,
         diagnostics=result.diagnostics,
+        legacy_compatibility=legacy_compatibility,
     )
     if bout_kinematics_rows:
         result.rows_by_table.setdefault("bout_kinematics_metrics", []).extend(bout_kinematics_rows)
@@ -5482,6 +5639,13 @@ def _write_table_parts(
     if not all_rows:
         return 0, []
 
+    if table in {
+        STIMULUS_RESPONSE_TABLE,
+        SWIM_BOUT_METRICS_TABLE,
+        BOUT_KINEMATICS_METRICS_TABLE,
+    }:
+        _validate_exact_primary_keys(table, all_rows)
+
     exact_contract = ARROW_TABLE_CONTRACTS.get(table)
     if exact_contract is not None:
         exact_names = {field.name for field in exact_contract.fields}
@@ -5523,6 +5687,27 @@ def _write_table_parts(
         part_index += 1
 
     return row_count, part_paths
+
+
+def _validate_exact_primary_keys(
+    table: str,
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    primary_key = TABLE_CONTRACTS[table].primary_key
+    seen: dict[tuple[Any, ...], int] = {}
+    for row_index, row in enumerate(rows):
+        key = tuple(row.get(name) for name in primary_key)
+        if any(value is None for value in key):
+            raise ValueError(
+                f"{table}: row {row_index} has a null/missing primary key {primary_key!r}"
+            )
+        previous = seen.get(key)
+        if previous is not None:
+            raise ValueError(
+                f"{table}: duplicate primary key {key!r} at rows "
+                f"{previous} and {row_index}"
+            )
+        seen[key] = row_index
 
 
 def _staged_part_inventory(
@@ -5575,6 +5760,7 @@ def export_sources(
     baseline_sample_rate_hz: float = 10.0,
     baseline_full_resolution_samples: bool = False,
     baseline_spatial_grid_size: int = 12,
+    legacy_compatibility: bool = False,
 ) -> dict[str, Any]:
     tables = _parse_tables(tables)
     output_root = Path(output_root).expanduser().resolve()
@@ -5620,6 +5806,7 @@ def export_sources(
                     baseline_sample_rate_hz=baseline_sample_rate_hz,
                     baseline_full_resolution_samples=baseline_full_resolution_samples,
                     baseline_spatial_grid_size=baseline_spatial_grid_size,
+                    legacy_compatibility=legacy_compatibility,
                 )
             )
     else:
@@ -5634,6 +5821,7 @@ def export_sources(
                     baseline_sample_rate_hz=baseline_sample_rate_hz,
                     baseline_full_resolution_samples=baseline_full_resolution_samples,
                     baseline_spatial_grid_size=baseline_spatial_grid_size,
+                    legacy_compatibility=legacy_compatibility,
                 )
                 for path in zarr_paths
             ]
@@ -5762,6 +5950,7 @@ def export_sources(
         "export_parameters": {
             "jobs": jobs,
             "overwrite": overwrite,
+            "legacy_compatibility": bool(legacy_compatibility),
             "collection_manifest_path": (
                 collection_summary.path if collection_summary is not None else None
             ),
@@ -5865,6 +6054,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, help="Limit discovered sources, useful for canaries.")
     parser.add_argument("--export-run-id", help="Explicit export run id. Defaults to current UTC timestamp.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing export_run_id directory/manifest.")
+    parser.add_argument(
+        "--legacy-compatibility",
+        action="store_true",
+        help=(
+            "Permit explicitly legacy/unmanifested swim-bout and bout-kinematics "
+            "sources. Current exact schemas remain required by default."
+        ),
+    )
     parser.add_argument("--registry", type=Path, help="Palette registry SQLite path for optional export indexing.")
     parser.add_argument(
         "--index-registry",
@@ -5891,6 +6088,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         baseline_sample_rate_hz=float(args.baseline_sample_rate_hz),
         baseline_full_resolution_samples=bool(args.baseline_full_resolution_samples),
         baseline_spatial_grid_size=int(args.baseline_spatial_grid_size),
+        legacy_compatibility=bool(args.legacy_compatibility),
     )
     print(f"export_run_id\t{manifest['export_run_id']}")
     print(f"manifest\t{manifest['manifest_path']}")

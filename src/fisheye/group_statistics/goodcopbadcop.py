@@ -2185,6 +2185,9 @@ def write_goodcopbadcop_statistics(
 
     output_root = Path(export_root).expanduser().resolve()
     stats_run_id = safe_component(stats_run_id, label="statistics run ID")
+    manifest_path = export_manifest_path(output_root, stats_run_id)
+    manifest_dir = manifest_path.parent
+    baseline_manifest_identity = manifest_identity(manifest_path)
     if manifest.get("export_run_id") != stats_run_id:
         raise ValueError(
             "Statistics manifest export_run_id does not match the requested run"
@@ -2203,9 +2206,6 @@ def write_goodcopbadcop_statistics(
         int(source_manifest_sha256, 16)
     except ValueError as exc:
         raise ValueError("Statistics manifest lacks a source manifest digest") from exc
-    manifest_path = export_manifest_path(output_root, stats_run_id)
-    manifest_dir = manifest_path.parent
-    baseline_manifest_identity = manifest_identity(manifest_path)
     if manifest_path.exists() and not overwrite:
         raise FileExistsError(f"Statistics manifest already exists: {manifest_path}")
     generation_id = uuid.uuid4().hex
