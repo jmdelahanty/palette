@@ -33,6 +33,7 @@ from .contracts import (
     KINEMATICS_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     STATISTICS_TABLE,
+    TAIL_TRACE_SAMPLES_TABLE,
     TABLE_CONTRACTS,
     validate_table_columns,
 )
@@ -79,6 +80,7 @@ CAPABILITY_DEFINITIONS = (
         (BASELINE_KINEMATIC_SAMPLES_TABLE,),
     ),
     CapabilityDefinition("core.eye.trace_samples", (EYE_TRACE_SAMPLES_TABLE,)),
+    CapabilityDefinition("core.tail.trace_samples", (TAIL_TRACE_SAMPLES_TABLE,)),
     CapabilityDefinition("core.kinematics.samples", (KINEMATICS_SAMPLES_TABLE,)),
     CapabilityDefinition(
         "core.activity_spatial.time_bins",

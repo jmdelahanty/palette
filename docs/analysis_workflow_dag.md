@@ -86,6 +86,7 @@ flowchart LR
   SS --> TKM[tail kinematics]
   SS --> TT[framewise tail traces]
   TKM --> TT
+  TK --> TT
 ```
 
 Targets select a dependency closure. For example, planning only
@@ -150,14 +151,18 @@ The executor supports these canonical analysis stages in the core profile:
 - `subject_shape`;
 - `tail_kinematics`.
 
-It also supports the opt-in `eye_traces`, `kinematics_samples`, and
-`activity_spatial_summaries` export nodes. These are not Zarr analysis stages:
-each projects explicit completed recording-local authorities into one immutable
-manifest-selected Parquet generation. `activity_spatial_summaries` binds the
-track-motion run plus an exact swim-bout run. Because the packaged DAG carries
-one swim-bout dependency, execution proves the track source contains exactly
-one track; multi-track publication requires the CLI's explicit per-track run
-map. The remaining `tail_traces` node stays planning-only and fails closed.
+It also supports the opt-in `eye_traces`, `kinematics_samples`,
+`activity_spatial_summaries`, and `tail_traces` export nodes. These are not Zarr
+analysis stages: each projects explicit completed recording-local authorities
+into one immutable manifest-selected Parquet generation.
+`activity_spatial_summaries` binds the track-motion run plus an exact swim-bout
+run. Because the packaged DAG carries one swim-bout dependency, execution
+proves the track source contains exactly one track; multi-track publication
+requires the CLI's explicit per-track run map. `tail_traces` binds its explicit
+tail-kinematics, subject-shape, and track-motion dependencies, joins every tail
+observation to exactly one `track_id` through unique `instance_key` plus camera
+frame, and emits bounded long-form body-normalized parts. `instance_key`
+remains an observation identity, never an animal or track identifier.
 
 Track identities are a required persisted prerequisite rather than an
 analysis-workflow output. Planning a new track-kinematics run therefore blocks
@@ -396,10 +401,11 @@ process on the same node-local scratch. The materializer is dry-run by default
 when invoked directly; the DAG adds `--apply` only inside the verified LSF
 allocation.
 
-The 10 Hz kinematic samples and framewise eye traces now have exact opt-in
-publishers and execution adapters. The 5-second activity/spatial table has a
-frozen exact schema but remains planning-only pending its multi-track
-track/bout binding and bounded publisher. Tail traces remain planning-only.
+The 10 Hz kinematic samples, 5-second activity/spatial summaries, framewise eye
+traces, and long-form framewise tail traces now have exact opt-in publishers
+and execution adapters. All remain immutable query projections rather than
+recording-local scientific authorities, and none activates a selector or
+registry authority.
 Tail kinematics itself is executable after its staged, chunk-safe materializer
 and million-frame canary validation.
 Registry updates remain serialized after successful artifact publication.

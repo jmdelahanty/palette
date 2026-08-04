@@ -142,7 +142,7 @@ nodes:
 
   - id: tail_traces
     kind: export
-    depends_on: [subject_shape, tail_kinematics]
+    depends_on: [subject_shape, tail_kinematics, track_kinematics]
     temporal_product: tail_traces
     execution_policy: streaming_immutable_framewise_export
     description: Framewise subject-shape spline points and Palette-native angle channels with validity.

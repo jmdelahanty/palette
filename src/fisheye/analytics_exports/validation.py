@@ -36,7 +36,9 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise ExportValidationError(f"Cannot read export manifest {path}: {exc}") from exc
+        raise ExportValidationError(
+            f"Cannot read export manifest {path}: {exc}"
+        ) from exc
     if not isinstance(payload, dict):
         raise ExportValidationError(f"Export manifest must contain an object: {path}")
     return payload
@@ -125,10 +127,13 @@ def validate_export_payload(
         errors.append("manifest table_contracts is missing or is not an object")
         declared_contracts = {}
     for table in tables:
-        if table in TABLE_CONTRACTS and declared_contracts.get(table) != TABLE_CONTRACTS[
-            table
-        ].to_dict():
-            errors.append(f"{table}: manifest table contract does not match installed V2")
+        if (
+            table in TABLE_CONTRACTS
+            and declared_contracts.get(table) != TABLE_CONTRACTS[table].to_dict()
+        ):
+            errors.append(
+                f"{table}: manifest table contract does not match installed V2"
+            )
 
     parts_by_table = payload.get("part_files_by_table")
     row_counts_by_table = payload.get("row_counts_by_table")
@@ -220,10 +225,7 @@ def validate_export_payload(
             publication = payload["publication"]
             assert isinstance(publication, Mapping)
             table_root = (
-                root
-                / str(publication.get("generation_path"))
-                / "tables"
-                / table
+                root / str(publication.get("generation_path")) / "tables" / table
             )
             actual_parts = {
                 path.relative_to(root).as_posix()
@@ -236,11 +238,15 @@ def validate_export_payload(
             if actual_parts != selected_parts:
                 errors.append(f"{table}: generation contains unlisted files")
         raw_inventory = inventory_by_table.get(table, [])
-        inventory_by_path = {
-            str(entry.get("path")): entry
-            for entry in raw_inventory
-            if isinstance(entry, Mapping)
-        } if isinstance(raw_inventory, list) else {}
+        inventory_by_path = (
+            {
+                str(entry.get("path")): entry
+                for entry in raw_inventory
+                if isinstance(entry, Mapping)
+            }
+            if isinstance(raw_inventory, list)
+            else {}
+        )
         if strict_publication and len(inventory_by_path) != len(resolved_parts):
             errors.append(f"{table}: publication inventory is incomplete or duplicated")
         table_rows = 0
@@ -271,11 +277,14 @@ def validate_export_payload(
             except Exception as exc:  # PyArrow exposes several format-specific errors.
                 errors.append(f"{table}: cannot read {part_name}: {exc}")
                 continue
-            if metadata.get(b"palette.export_schema_id", b"").decode("utf-8") != EXPORT_SCHEMA_ID:
-                errors.append(f"{table}/{part_name}: invalid footer schema ID")
-            if metadata.get(b"palette.export_schema_version", b"").decode("utf-8") != str(
-                EXPORT_SCHEMA_VERSION
+            if (
+                metadata.get(b"palette.export_schema_id", b"").decode("utf-8")
+                != EXPORT_SCHEMA_ID
             ):
+                errors.append(f"{table}/{part_name}: invalid footer schema ID")
+            if metadata.get(b"palette.export_schema_version", b"").decode(
+                "utf-8"
+            ) != str(EXPORT_SCHEMA_VERSION):
                 errors.append(f"{table}/{part_name}: invalid footer schema version")
             if footer_contract != TABLE_CONTRACTS[table].to_dict():
                 errors.append(f"{table}/{part_name}: invalid footer table contract")
@@ -287,15 +296,21 @@ def validate_export_payload(
             columns = tuple(field.name for field in schema)
             missing = validate_table_columns(table, columns)
             if missing:
-                errors.append(f"{table}/{part_name}: missing required columns {list(missing)}")
-            legacy_columns = sorted(column for column in columns if "benign" in column.lower())
+                errors.append(
+                    f"{table}/{part_name}: missing required columns {list(missing)}"
+                )
+            legacy_columns = sorted(
+                column for column in columns if "benign" in column.lower()
+            )
             if legacy_columns:
                 errors.append(f"{table}/{part_name}: legacy columns {legacy_columns}")
             if reference_columns is None:
                 reference_columns = columns
                 columns_by_table[table] = columns
             elif columns != reference_columns:
-                errors.append(f"{table}/{part_name}: schema differs from the first part")
+                errors.append(
+                    f"{table}/{part_name}: schema differs from the first part"
+                )
             part_rows = int(parquet_file.metadata.num_rows)
             if strict_publication and inventory_entry.get("row_count") != part_rows:
                 errors.append(f"{table}/{part_name}: row-count mismatch")
@@ -305,7 +320,9 @@ def validate_export_payload(
         try:
             expected_rows = int(row_counts_by_table.get(table, 0))
         except (TypeError, ValueError):
-            errors.append(f"{table}: invalid manifest row count {row_counts_by_table.get(table)!r}")
+            errors.append(
+                f"{table}: invalid manifest row count {row_counts_by_table.get(table)!r}"
+            )
         else:
             if table_rows != expected_rows:
                 errors.append(
@@ -348,6 +365,14 @@ def validate_export_payload(
             validate_activity_spatial_time_bins_export_payload(root, payload)
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(f"activity_spatial_time_bins: {exc}")
+
+    if "tail_trace_samples" in tables:
+        try:
+            from .tail_trace_samples import validate_tail_trace_export_payload
+
+            validate_tail_trace_export_payload(root, payload)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            errors.append(f"tail_trace_samples: {exc}")
 
     if errors:
         raise ExportValidationError(

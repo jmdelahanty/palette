@@ -483,6 +483,50 @@ def _eye_trace_export_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _tail_trace_export_command(context: StageCommandContext) -> tuple[str, ...]:
+    if context.export_root is None or context.scratch_root is None:
+        raise WorkflowExecutionError(
+            "tail-trace export requires explicit export and node-local scratch roots"
+        )
+    if context.node.temporal_policy != {
+        "resolution": "framewise",
+        "source_authority": "framewise_zarr",
+    }:
+        raise WorkflowExecutionError(
+            "tail-trace export supports only the exact framewise temporal policy"
+        )
+    command = _module_command(
+        context,
+        "fisheye.utils.export_tail_trace_samples",
+    )
+    command.extend(
+        (
+            "--tail-kinematics-run",
+            context.dependency_run("tail_kinematics"),
+            "--subject-shape-run",
+            context.dependency_run("subject_shape"),
+            "--track-kinematics-run",
+            context.dependency_run("track_kinematics"),
+            "--track-scope",
+            "offline",
+            "--output-root",
+            str(context.export_root),
+            "--export-run-id",
+            context.output_run,
+            "--scratch-root",
+            str(context.scratch_root),
+            "--source-window-rows",
+            "16384",
+            "--source-rows-per-part",
+            "131072",
+            "--row-group-rows",
+            "65536",
+            "--json",
+        )
+    )
+    return tuple(command)
+
+
 def _kinematics_samples_export_command(
     context: StageCommandContext,
 ) -> tuple[str, ...]:
@@ -615,6 +659,7 @@ EXPORT_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
         "kinematics_samples": _kinematics_samples_export_command,
         "activity_spatial_summaries": _activity_spatial_export_command,
         "eye_traces": _eye_trace_export_command,
+        "tail_traces": _tail_trace_export_command,
     }
 )
 

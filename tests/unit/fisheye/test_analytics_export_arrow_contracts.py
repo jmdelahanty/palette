@@ -37,6 +37,7 @@ from fisheye.analytics_exports.contracts import (
     STIMULUS_STEP_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
     SWIM_BOUT_METRICS_TABLE,
+    TAIL_TRACE_SAMPLES_TABLE,
     TABLE_CONTRACTS,
 )
 from fisheye.analytics_exports.publication import (
@@ -372,6 +373,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         KINEMATICS_SAMPLES_TABLE,
         ACTIVITY_SPATIAL_TIME_BINS_TABLE,
         EYE_TRACE_SAMPLES_TABLE,
+        TAIL_TRACE_SAMPLES_TABLE,
     )
     fields = ARROW_TABLE_CONTRACTS[RECORDING_SUMMARY_TABLE].fields
     assert tuple(field.name for field in fields) == (
@@ -572,6 +574,74 @@ def test_activity_spatial_time_bins_freeze_exact_geometry_honest_schema() -> Non
     assert "wall_fraction" not in names
     assert "arena_radius_mm" not in names
     assert "occupancy_grid" not in names
+
+
+def test_tail_trace_samples_freeze_exact_long_form_body_frame_schema() -> None:
+    fields = ARROW_TABLE_CONTRACTS[TAIL_TRACE_SAMPLES_TABLE].fields
+    assert len(fields) == 52
+    assert tuple((field.name, field.arrow_type, field.nullable) for field in fields) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("recording_id", "string", False),
+        ("zarr_path", "string", False),
+        ("source_lineage_hash", "string", False),
+        ("source_tail_kinematics_run", "string", False),
+        ("source_tail_kinematics_path", "string", False),
+        ("source_tail_kinematics_schema_id", "string", False),
+        ("source_tail_kinematics_schema_version", "int64", False),
+        ("source_tail_publication_manifest_sha256", "string", False),
+        ("source_subject_shape_run", "string", False),
+        ("source_subject_shape_path", "string", False),
+        ("source_subject_shape_schema_id", "string", False),
+        ("source_subject_shape_schema_version", "int64", False),
+        ("source_subject_shape_publication_manifest_sha256", "string", False),
+        ("source_track_kinematics_scope", "string", False),
+        ("source_track_kinematics_run", "string", False),
+        ("source_track_kinematics_path", "string", False),
+        ("source_track_motion_manifest_sha256", "string", False),
+        ("source_binding_sha256", "string", False),
+        ("projection_contract_sha256", "string", False),
+        ("source_sample_rate_hz", "float64", False),
+        ("source_tail_sample_count", "int32", False),
+        ("source_tail_sample_axis_sha256", "string", False),
+        ("body_frame_record_sha256", "string", False),
+        ("reference_length_kind", "string", False),
+        ("longitudinal_axis_convention", "string", False),
+        ("lateral_axis_convention", "string", False),
+        ("angle_convention", "string", False),
+        ("curvature_convention", "string", False),
+        ("source_tail_row_index", "int64", False),
+        ("track_id", "int64", False),
+        ("instance_key", "uint64", False),
+        ("source_crop_row_id", "int64", False),
+        ("source_acquisition_frame_index", "int64", False),
+        ("time_seconds", "float64", False),
+        ("tail_sample_index", "int32", False),
+        ("normalized_tail_position", "float32", False),
+        ("reference_length_px", "float32", False),
+        ("body_longitudinal_fraction", "float32", False),
+        ("body_lateral_fraction", "float32", False),
+        ("tangent_angle_rad", "float32", False),
+        ("body_curvature_dimensionless", "float32", False),
+        ("source_camera_x_px", "float32", False),
+        ("source_camera_y_px", "float32", False),
+        ("source_camera_curvature_px_inv", "float32", False),
+        ("source_lateral_deflection_px", "float32", False),
+        ("source_tail_row_valid", "bool", False),
+        ("reference_length_valid", "bool", False),
+        ("sample_valid", "bool", False),
+        ("sample_reason_code", "uint16", False),
+        ("source_failure_reason", "string", False),
+    )
+    assert TABLE_CONTRACTS[TAIL_TRACE_SAMPLES_TABLE].primary_key == (
+        "recording_id",
+        "source_tail_kinematics_run",
+        "source_tail_row_index",
+        "tail_sample_index",
+    )
+    names = {field.name for field in fields}
+    assert "camera_space_points" not in names
+    assert "variable_length_tail_samples" not in names
 
 
 def test_group_statistics_contract_freezes_all_45_fields_in_order() -> None:

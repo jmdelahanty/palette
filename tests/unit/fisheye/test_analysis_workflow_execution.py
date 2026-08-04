@@ -567,6 +567,76 @@ def test_execution_renders_exact_eye_trace_export_boundary(tmp_path: Path) -> No
     assert "--json" in command.argv
 
 
+def test_execution_renders_exact_tail_trace_export_boundary(tmp_path: Path) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    plan = plan_analysis_workflow(
+        workflow,
+        {
+            "subject_shape": _status(
+                "subject_shape", available=True, run_name="shape_v4"
+            ),
+            "tail_kinematics": _status(
+                "tail_kinematics", available=True, run_name="tail_v2"
+            ),
+            "track_kinematics": _status(
+                "track_kinematics", available=True, run_name="track_v1"
+            ),
+        },
+        targets=("tail_traces",),
+    )
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        execution_id="tail_export_01",
+        num_workers=2,
+        export_run_overrides={"tail_traces": "tail_trace_query_v1"},
+        export_root=tmp_path / "exports",
+        scratch_root=tmp_path / "node_scratch",
+        python_executable="/palette/python",
+    )
+
+    assert execution.output_runs == {}
+    assert execution.export_runs == {"tail_traces": "tail_trace_query_v1"}
+    assert len(execution.commands) == 1
+    command = execution.commands[0]
+    assert command.node_id == "tail_traces"
+    assert command.node_kind == "export"
+    assert command.output_kind == "parquet_export"
+    assert command.dependency_runs == {
+        "subject_shape": "shape_v4",
+        "tail_kinematics": "tail_v2",
+        "track_kinematics": "track_v1",
+    }
+    assert command.argv == (
+        "/palette/python",
+        "-m",
+        "fisheye.utils.export_tail_trace_samples",
+        str(tmp_path / "recording_analysis.zarr"),
+        "--tail-kinematics-run",
+        "tail_v2",
+        "--subject-shape-run",
+        "shape_v4",
+        "--track-kinematics-run",
+        "track_v1",
+        "--track-scope",
+        "offline",
+        "--output-root",
+        str((tmp_path / "exports").resolve()),
+        "--export-run-id",
+        "tail_trace_query_v1",
+        "--scratch-root",
+        str((tmp_path / "node_scratch").resolve()),
+        "--source-window-rows",
+        "16384",
+        "--source-rows-per-part",
+        "131072",
+        "--row-group-rows",
+        "65536",
+        "--json",
+    )
+
+
 def test_eye_trace_execution_requires_separate_export_and_scratch_roots(
     tmp_path: Path,
 ) -> None:

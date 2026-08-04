@@ -64,10 +64,11 @@ Options:
   --submit                     Render and submit; default reserves a render-only directory
   -h, --help                   Show this help
 
-The exact eye_traces export is implemented and remains opt-in. Other export
-targets fail closed until their immutable streaming adapters exist. Track,
-bout, subject-shape, tail, and eye kinematics use dedicated node-local,
-sharded, atomic-publication materializers.
+The exact kinematics_samples, activity_spatial_summaries, eye_traces, and
+tail_traces exports are implemented and remain opt-in. Other export targets
+fail closed until their immutable streaming adapters exist. Track, bout,
+subject-shape, tail, and eye kinematics use dedicated node-local, sharded,
+atomic-publication materializers.
 USAGE
 }
 
@@ -125,9 +126,11 @@ done
 [[ -z "$SCRATCH_ROOT" || "$SCRATCH_ROOT" == /* ]] || \
   fail "--scratch-root must be an absolute node-local path"
 for target in "${TARGETS[@]}"; do
-  if [[ ( "$target" == "eye_traces" || "$target" == "kinematics_samples" ) && -z "$EXPORT_ROOT" ]]; then
-    fail "the $target target requires --export-root"
-  fi
+  case "$target" in
+    kinematics_samples|activity_spatial_summaries|eye_traces|tail_traces)
+      [[ -n "$EXPORT_ROOT" ]] || fail "the $target target requires --export-root"
+      ;;
+  esac
 done
 [[ -f "$ZARR_PATH/zarr.json" ]] || fail "analysis Zarr metadata not found: $ZARR_PATH"
 [[ -e "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"

@@ -12,13 +12,17 @@ have explicit unpromoted physical candidates. No production profile,
 scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
-The 2026-08-04 coordination checkpoints add three exact query products:
+The 2026-08-04 coordination checkpoints add three implemented exact query products:
 bounded, source-manifest-bound `eye_trace_samples` and generic multi-track
 `kinematics_samples` Parquet exporters plus exact globally aligned
 `activity_spatial_time_bins`. All three remain non-default and
 selector/registry-ineligible. Their declared workflow nodes now execute only
 through dedicated source-specific streaming publishers and explicit node-local
 scratch.
+
+They also freeze the future `tail_trace_samples` query schema as a long-form
+observation-by-normalized-tail-position table. Tail publication is not yet
+implemented or executable.
 
 Benchmark coverage is now separately executable rather than inferred from
 candidate presence. All thirteen families have an executable source/candidate
@@ -149,8 +153,8 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes 15 exact schemas across writing, staging, and manifest-selected reads. The non-default eye and generic multi-track kinematic sample tables preserve source dtypes through bounded streaming, exact source-manifest binding, and full decoded-payload validation. The 70-field activity/spatial time-bin schema is frozen without falsely claiming arena occupancy from unbound geometry | Implement and benchmark the activity/spatial bounded publisher; freeze remaining inferred schemas only after producer semantics and nullability are resolved; benchmark all new streaming publishers before adoption |
-| Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces; eye traces and sampled kinematics now have exact non-default contracts, publishers, execution adapters, and node-local scratch boundaries | Implement activity/spatial-summary and tail-trace contracts and publishers |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes 16 exact schemas across writing, staging, and manifest-selected reads. The non-default eye, generic multi-track kinematic, activity/spatial, and long-form tail publishers preserve source dtypes through bounded streaming, exact source-manifest binding, and full decoded-payload validation | Freeze remaining inferred schemas only after producer semantics and nullability are resolved; benchmark all new streaming publishers before adoption |
+| Core workflow exports | Sampled kinematics, activity/spatial summaries, eye traces, and tail traces all have exact non-default contracts, publishers, execution adapters, manifest-selected validators, and node-local scratch boundaries | Run short/full writer/read/publication gates before enabling any default or authority |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
 ## Evidence And Known Disagreements
@@ -460,6 +464,20 @@ now implemented on the coordination branch:
   The final focused export/publication/workflow/registry matrix passed 307
   tests, including multi-track identity, unsampled source-byte tampering,
   nested/constant-column tampering, and failed replacement recovery.
+- long-form `tail_trace_samples` as the fourth exact opt-in workflow export.
+  Its binder independently proves explicit completed/eligible tail-kinematics,
+  subject-shape, and track-motion publications; validates the frozen tail array
+  schema; scans only the three track identity surfaces in bounded windows; and
+  requires a complete unique `instance_key` plus frame join. The pure projector
+  uses tail base, anatomical caudal/left axes, and tail-segment arclength to
+  produce body-normalized positions and dimensionless angle-gradient
+  curvature. The publisher writes contiguous source-row parts on node-local
+  scratch, rebinds every source before visibility, validates every decoded
+  dynamic and constant column, and commits through the shared manifest-only
+  compare-and-swap boundary. The CLI, workflow adapter, and generic LSF
+  scratch path remain opt-in. Focused publisher tests passed 9/9; a combined
+  231-test matrix found only the stale LSF export-root allowlist, which was
+  corrected and then passed for all four implemented export targets.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. A later independent adversarial review
@@ -666,8 +684,13 @@ a v3 storage-candidate regression.
           summaries, and exact validity/allocation semantics. It explicitly
           excludes arena-normalized occupancy because the workflow does not
           bind an experimental-area geometry authority.
+    - [x] Freeze the exact ordered 52-field `tail_trace_samples` schema. It is
+          long-form by observation and normalized tail position, requires an
+          exact instance-key-to-track join, exposes dimensionless body-frame
+          position/curvature for comparison, and retains camera-space geometry
+          only as diagnostics.
     - [ ] Replace inferred schemas only after producer semantics and nullability
-          are frozen. The canonical envelope currently has 15 exact and 16
+          are frozen. The canonical envelope currently has 16 exact and 16
           inferred tables; the remaining inferred tables are the chaser
           exports. Both group-statistics tables use exact schemas. Baseline strategy
           consumes exact canonical baseline inputs but still writes four
@@ -823,7 +846,7 @@ Recommended benchmark and promotion-review order:
 - [x] Add dependency-bound execution adapters for tail-posture view and bout
       classification. Workflow-profile adoption remains a separate policy
       choice; registering a command builder does not activate either stage.
-- [ ] Implement exact contracts and publishers for:
+- [x] Implement exact contracts and publishers for:
     - [x] sampled kinematic exports. The v1 publisher binds one explicit
           completed/eligible physical track-motion publication, validates the
           exact selected surface declarations, streams all tracks in bounded
@@ -845,8 +868,18 @@ Recommended benchmark and promotion-review order:
           Its execution adapter binds the exact source run and physical output
           boundary; the LSF wrapper supplies per-job node-local scratch.
           Short/full benchmarks remain a separate gate.
-    - [ ] tail traces.
-- [ ] Keep recording-local Zarr authorities separate from immutable
+    - [x] tail traces. The long-form grain, exact 52-field Arrow schema,
+          track-identity requirement, tail-length normalization, anatomical
+          axes, body-frame tangent angle, and dimensionless curvature
+          semantics are frozen. The fail-closed binder, bounded multi-part
+          publisher, decoded validator, CLI, workflow, and LSF path are
+          implemented without authority changes. Exact nested source-array
+          declarations reject recomputed-digest field, dtype, shape,
+          canonicalization, and reference tampering. The final combined
+          workflow/Arrow/LSF matrix passes 233/233 and the broader exact-export
+          and atomic-publication regression matrix passes 113/113. Short/full
+          benchmarks remain.
+- [x] Keep recording-local Zarr authorities separate from immutable
       cross-recording Parquet query products.
     - [x] `eye_trace_samples` is explicitly a query projection; its compact-v7
           Zarr source remains the only recording-local scientific authority.
@@ -855,7 +888,10 @@ Recommended benchmark and promotion-review order:
     - [x] `activity_spatial_time_bins` is explicitly a query projection; its
           selected track-motion and per-track swim-bout Zarr runs remain the
           scientific and rollback authorities.
-- [ ] Bind each export to exact selected recording-local manifests.
+    - [x] `tail_trace_samples` is explicitly a query projection; its selected
+          tail-kinematics, subject-shape, and track-motion Zarr publications
+          remain the scientific, identity, and rollback authorities.
+- [x] Bind each export to exact selected recording-local manifests.
     - [x] `eye_trace_samples` binds and rechecks the explicit completed/eligible
           compact-v7 run and all required semantic manifest digests.
     - [x] `kinematics_samples` binds and rechecks the explicit completed/eligible
@@ -864,6 +900,10 @@ Recommended benchmark and promotion-review order:
     - [x] `activity_spatial_time_bins` binds and rechecks the same exact
           track-motion authority plus one completed/eligible canonical
           frame-axis swim-bout run, candidate, and signal for every track.
+    - [x] `tail_trace_samples` binds and rechecks the explicit exact tail
+          coordinate/array publication, its named subject-shape publication,
+          body-frame and reference-length records, and the explicit track
+          publication plus a complete unique instance/frame membership index.
 
 ### Phase 9 — Benchmark and promote one family at a time
 
@@ -1262,14 +1302,14 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. benchmark the newly implemented generic sampled-kinematic writer, bounded
-   reads, scratch copy, validation, and manifest-selected consumer at
-   representative short and full duration;
-2. implement the now-frozen activity/spatial time-bin publisher and decide the
-   cross-recording tail-trace representation before implementing that
-   publisher;
-3. benchmark the eye-trace writer, bounded reads, scratch copy, validation,
-   publication, and manifest-selected consumer at representative short and
-   full duration; and
+1. benchmark all four exact opt-in workflow exports—generic kinematics,
+   activity/spatial time bins, eye traces, and tail traces—through bounded
+   writer, scratch-copy, validation, publication, and manifest-selected reader
+   phases at representative short and full duration;
+2. include tail-specific narrow normalized-position predicates, camera-frame
+   windows, complete scans, part/object counts, and peak RSS;
+3. obtain real consumer evidence where a maintained Palette or Crimson path
+   exists, without inventing a consumer solely to satisfy a promotion gate;
+   and
 4. retain each recording-local Zarr authority and current production profile
    as the rollback boundary until its complete promotion gate passes.

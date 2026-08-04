@@ -27,6 +27,7 @@ BASELINE_KINEMATIC_SAMPLES_TABLE = "baseline_kinematic_samples"
 KINEMATICS_SAMPLES_TABLE = "kinematics_samples"
 ACTIVITY_SPATIAL_TIME_BINS_TABLE = "activity_spatial_time_bins"
 EYE_TRACE_SAMPLES_TABLE = "eye_trace_samples"
+TAIL_TRACE_SAMPLES_TABLE = "tail_trace_samples"
 
 CHASER_SPATIAL_TABLE = "chaser_epoch_spatial_occupancy_zones"
 CHASER_DISTANCE_SUMMARY_TABLE = "chaser_epoch_distance_summary"
@@ -492,6 +493,62 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
             "mean_eye_vergence_gaze_deg_smoothed": "deg",
         },
     ),
+    TAIL_TRACE_SAMPLES_TABLE: _contract(
+        TAIL_TRACE_SAMPLES_TABLE,
+        "recording_x_tail_kinematics_run_x_observation_x_normalized_tail_position",
+        (
+            "recording_id",
+            "source_tail_kinematics_run",
+            "source_tail_row_index",
+            "tail_sample_index",
+        ),
+        (
+            "source_tail_kinematics_run",
+            "source_tail_kinematics_path",
+            "source_tail_publication_manifest_sha256",
+            "source_subject_shape_run",
+            "source_subject_shape_publication_manifest_sha256",
+            "source_track_kinematics_scope",
+            "source_track_kinematics_run",
+            "source_track_motion_manifest_sha256",
+            "source_binding_sha256",
+            "projection_contract_sha256",
+            "source_tail_row_index",
+            "track_id",
+            "instance_key",
+            "source_crop_row_id",
+            "source_acquisition_frame_index",
+            "time_seconds",
+            "tail_sample_index",
+            "normalized_tail_position",
+            "reference_length_px",
+            "body_longitudinal_fraction",
+            "body_lateral_fraction",
+            "tangent_angle_rad",
+            "body_curvature_dimensionless",
+            "source_camera_x_px",
+            "source_camera_y_px",
+            "source_camera_curvature_px_inv",
+            "source_tail_row_valid",
+            "reference_length_valid",
+            "sample_valid",
+            "sample_reason_code",
+            "source_failure_reason",
+        ),
+        {
+            "source_acquisition_frame_index": "camera_frame",
+            "time_seconds": "s",
+            "normalized_tail_position": "normalized_tail_arclength",
+            "reference_length_px": "px",
+            "body_longitudinal_fraction": "tail_lengths",
+            "body_lateral_fraction": "tail_lengths",
+            "tangent_angle_rad": "rad",
+            "body_curvature_dimensionless": "1",
+            "source_camera_x_px": "px",
+            "source_camera_y_px": "px",
+            "source_camera_curvature_px_inv": "px^-1",
+        },
+    ),
     CHASER_SPATIAL_TABLE: _contract(
         CHASER_SPATIAL_TABLE,
         "recording_x_chaser_epoch_x_spatial_zone",
@@ -723,7 +780,7 @@ BASELINE_TABLES = (
 # Framewise trace products are explicit opt-ins.  They are intentionally not
 # part of ``DEFAULT_TABLES`` because a full-duration export is much larger than
 # the compact summary tables and must bind one exact recording-local authority.
-TRACE_TABLES = (EYE_TRACE_SAMPLES_TABLE,)
+TRACE_TABLES = (EYE_TRACE_SAMPLES_TABLE, TAIL_TRACE_SAMPLES_TABLE)
 
 # Portable sample exports use dedicated bounded readers and must never be
 # routed through the generic compact-table exporter.

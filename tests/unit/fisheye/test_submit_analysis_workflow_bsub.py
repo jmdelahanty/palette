@@ -18,7 +18,7 @@ def _build_clean_palette_checkout(path: Path) -> None:
     scripts_dir.mkdir(parents=True)
     scripts_py = scripts_dir / "py"
     scripts_py.write_text(
-        "#!/usr/bin/env bash\n" f'exec {shlex.quote(sys.executable)} "$@"\n',
+        f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} "$@"\n',
         encoding="utf-8",
     )
     scripts_py.chmod(0o755)
@@ -380,7 +380,15 @@ def test_submit_analysis_workflow_forwards_eye_trace_export_to_node_local_scratc
     assert expected_scratch.is_dir()
 
 
-@pytest.mark.parametrize("target", ("eye_traces", "kinematics_samples"))
+@pytest.mark.parametrize(
+    "target",
+    (
+        "eye_traces",
+        "kinematics_samples",
+        "activity_spatial_summaries",
+        "tail_traces",
+    ),
+)
 def test_submit_analysis_workflow_rejects_export_target_without_export_root(
     tmp_path: Path,
     target: str,

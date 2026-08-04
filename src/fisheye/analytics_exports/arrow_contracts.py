@@ -29,6 +29,7 @@ from .contracts import (
     STIMULUS_STEP_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
     SWIM_BOUT_METRICS_TABLE,
+    TAIL_TRACE_SAMPLES_TABLE,
     TABLE_CONTRACTS,
 )
 
@@ -52,6 +53,7 @@ EXACT_ARROW_SCHEMA_TABLES = (
     KINEMATICS_SAMPLES_TABLE,
     ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
+    TAIL_TRACE_SAMPLES_TABLE,
 )
 
 _ENVELOPE_FIELDS = {
@@ -1234,6 +1236,66 @@ _EYE_TRACE_SAMPLES_FIELDS = (
 )
 
 
+# One row per observation and normalized tail-axis sample. Long form is
+# deliberate: the source sample cardinality is run-specific, while the exact
+# normalized ``s`` coordinate makes cross-run projections and predicate
+# pushdown explicit without embedding variable-length lists in each frame row.
+_TAIL_TRACE_SAMPLES_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("source_tail_kinematics_run", "string"),
+    _field("source_tail_kinematics_path", "string"),
+    _field("source_tail_kinematics_schema_id", "string"),
+    _field("source_tail_kinematics_schema_version", "int64"),
+    _field("source_tail_publication_manifest_sha256", "string"),
+    _field("source_subject_shape_run", "string"),
+    _field("source_subject_shape_path", "string"),
+    _field("source_subject_shape_schema_id", "string"),
+    _field("source_subject_shape_schema_version", "int64"),
+    _field("source_subject_shape_publication_manifest_sha256", "string"),
+    _field("source_track_kinematics_scope", "string"),
+    _field("source_track_kinematics_run", "string"),
+    _field("source_track_kinematics_path", "string"),
+    _field("source_track_motion_manifest_sha256", "string"),
+    _field("source_binding_sha256", "string"),
+    _field("projection_contract_sha256", "string"),
+    _field("source_sample_rate_hz", "float64"),
+    _field("source_tail_sample_count", "int32"),
+    _field("source_tail_sample_axis_sha256", "string"),
+    _field("body_frame_record_sha256", "string"),
+    _field("reference_length_kind", "string"),
+    _field("longitudinal_axis_convention", "string"),
+    _field("lateral_axis_convention", "string"),
+    _field("angle_convention", "string"),
+    _field("curvature_convention", "string"),
+    _field("source_tail_row_index", "int64"),
+    _field("track_id", "int64"),
+    _field("instance_key", "uint64"),
+    _field("source_crop_row_id", "int64"),
+    _field("source_acquisition_frame_index", "int64"),
+    _field("time_seconds", "float64"),
+    _field("tail_sample_index", "int32"),
+    _field("normalized_tail_position", "float32"),
+    _field("reference_length_px", "float32"),
+    _field("body_longitudinal_fraction", "float32"),
+    _field("body_lateral_fraction", "float32"),
+    _field("tangent_angle_rad", "float32"),
+    _field("body_curvature_dimensionless", "float32"),
+    _field("source_camera_x_px", "float32"),
+    _field("source_camera_y_px", "float32"),
+    _field("source_camera_curvature_px_inv", "float32"),
+    _field("source_lateral_deflection_px", "float32"),
+    _field("source_tail_row_valid", "bool"),
+    _field("reference_length_valid", "bool"),
+    _field("sample_valid", "bool"),
+    _field("sample_reason_code", "uint16"),
+    _field("source_failure_reason", "string"),
+)
+
+
 # Group statistics are published by one closed producer.  Statistical values
 # are nullable because insufficient complete recordings, disabled bootstrap
 # work, or an unavailable test legitimately produce nulls; status and
@@ -1387,6 +1449,10 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     EYE_TRACE_SAMPLES_TABLE: ArrowTableContract(
         table_name=EYE_TRACE_SAMPLES_TABLE,
         fields=_EYE_TRACE_SAMPLES_FIELDS,
+    ),
+    TAIL_TRACE_SAMPLES_TABLE: ArrowTableContract(
+        table_name=TAIL_TRACE_SAMPLES_TABLE,
+        fields=_TAIL_TRACE_SAMPLES_FIELDS,
     ),
 }
 

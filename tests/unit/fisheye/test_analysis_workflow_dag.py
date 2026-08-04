@@ -45,6 +45,7 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
     assert workflow.node_by_id["tail_traces"].depends_on == (
         "subject_shape",
         "tail_kinematics",
+        "track_kinematics",
     )
     assert workflow.node_by_id["track_kinematics"].depends_on == (
         "refined_keypoints",
@@ -69,6 +70,24 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
 def test_eye_plan_derives_keypoint_authority_only_through_subject_shape() -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
+        "refined_keypoints": StageAvailability(
+            stage_id="refined_keypoints",
+            available=True,
+            run_name="refined_keypoints_a",
+            reason="complete",
+        ),
+        "tracks": StageAvailability(
+            stage_id="tracks",
+            available=True,
+            run_name="tracks_a",
+            reason="complete",
+        ),
+        "track_kinematics": StageAvailability(
+            stage_id="track_kinematics",
+            available=True,
+            run_name="track_a",
+            reason="complete",
+        ),
         "refined_subject_masks": StageAvailability(
             stage_id="refined_subject_masks",
             available=True,
@@ -191,6 +210,23 @@ def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() 
 def test_tail_plan_uses_staged_process_shard_backend() -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
+        "refined_keypoints": StageAvailability(
+            stage_id="refined_keypoints",
+            available=True,
+            run_name="refined_keypoints_a",
+            reason="complete",
+        ),
+        "tracks": StageAvailability(
+            stage_id="tracks",
+            available=True,
+            run_name="tracks_a",
+            reason="complete",
+        ),
+        "track_kinematics": StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            reason="missing",
+        ),
         "refined_subject_masks": StageAvailability(
             stage_id="refined_subject_masks",
             available=True,
@@ -217,6 +253,7 @@ def test_tail_plan_uses_staged_process_shard_backend() -> None:
     assert plan.node_by_id["tail_kinematics"].execution_policy == (
         "node_local_staged_process_shards"
     )
+    assert plan.node_by_id["track_kinematics"].action == "run"
     assert plan.node_by_id["tail_traces"].action == "run"
 
 
