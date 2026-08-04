@@ -14,10 +14,12 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.registry.extractors.masks import _array_stored_bytes
+from fisheye.registry.extractors.masks import (
+    _array_stored_bytes,
+    _extract_eye_mask_performance_rows,
+)
 from fisheye.registry.db import (
     Registry,
-    _extract_eye_mask_performance_rows,
     _extract_subject_mask_component_quality_rows,
     _extract_subject_mask_performance_rows,
 )
@@ -62,7 +64,6 @@ from fisheye.registry.maintenance import (
     _normalize_run_ids,
     _recording_calibration_status,
     _resolve_detect_quality_group,
-    _extract_eye_mask_profile_rows_for_maintenance,
     _resolve_existing_run_ids,
     _reconcile_stale_in_progress_runs,
     _normalize_status_values,
@@ -7005,68 +7006,6 @@ def test_refresh_keypoint_profiles_deletes_stale_rows_and_is_deterministic(
     assert len(rows) == 1
     assert str(rows[0]["profile_run"]) == "keypoint_profile_001"
     registry.close()
-
-
-def test_extract_eye_mask_profile_rows_for_maintenance_prefers_profile_run_attrs_for_lineage(tmp_path: Path) -> None:
-    zarr_path = tmp_path / "recordings" / "rec_eye_profile_attrs" / "zarr" / "rec_eye_profile_attrs_training.zarr"
-    _create_fake_zarr_store(zarr_path)
-    root = _FakeGroup(attrs={"session_uuid": "eye_profile_attrs"})
-    analysis = root.add_group("analysis")
-    runs_parent = analysis.add_group("eye_mask_profile_runs", attrs={"latest": "eye_mask_profile_001"})
-    profile = runs_parent.add_group("eye_mask_profile_001")
-    profile.attrs["profile_summary"] = {
-        "created_at_utc": "2026-02-25T01:00:00+00:00",
-        "dataset": {"recording_id": "summary_recording", "zarr_use": "summary_use"},
-        "source": {
-            "stage_group": "summary_stage",
-            "eye_mask_path": "summary/eye_masks/path",
-            "eye_mask_run": "summary_eye_masks",
-            "eye_mask_method": "summary_method",
-            "source_keypoint_path": "summary/keypoints/path",
-            "source_keypoint_run": "summary_keypoints",
-            "source_crop_run": "summary_crop",
-        },
-        "quality": {"rows_total": 10, "rows_usable": 8, "usable_rate": 0.8},
-        "geometry": {},
-        "spatial": {},
-        "composition": {},
-    }
-    profile.attrs["created_at_utc"] = "2026-02-25T06:00:00+00:00"
-    profile.attrs["source_recording_id"] = "attrs_recording"
-    profile.attrs["source_zarr_use"] = "attrs_use"
-    profile.attrs["source_stage_group"] = "refined_eye_masks_runs"
-    profile.attrs["source_eye_mask_path"] = "refined_eye_masks_runs/refined_eye_masks_attrs"
-    profile.attrs["source_eye_mask_run"] = "refined_eye_masks_attrs"
-    profile.attrs["source_eye_masks_run"] = "refined_eye_masks_attrs"
-    profile.attrs["source_eye_mask_method"] = "traditional"
-    profile.attrs["source_keypoint_path"] = "refined_keypoints_runs/refined_keypoints_attrs"
-    profile.attrs["source_keypoints_run"] = "refined_keypoints_attrs"
-    profile.attrs["source_crop_run"] = "crop_attrs"
-
-    rows = _extract_eye_mask_profile_rows_for_maintenance(
-        root,
-        zarr_path=zarr_path,
-        dataset_id="dataset_eye_profile_attrs",
-        recording_id="fallback_recording",
-        zarr_use="fallback_use",
-        genotype=None,
-        dpf_at_acquisition=None,
-    )
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["recording_id"] == "attrs_recording"
-    assert row["zarr_use"] == "attrs_use"
-    assert row["stage_group"] == "refined_eye_masks_runs"
-    assert row["eye_mask_method"] == "traditional"
-    assert row["source_eye_mask_path"] == "refined_eye_masks_runs/refined_eye_masks_attrs"
-    assert row["source_eye_mask_run"] == "refined_eye_masks_attrs"
-    assert row["source_eye_masks_run"] == "refined_eye_masks_attrs"
-    assert row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_attrs"
-    assert row["source_keypoint_run"] == "refined_keypoints_attrs"
-    assert row["source_keypoints_run"] == "refined_keypoints_attrs"
-    assert row["source_crop_run"] == "crop_attrs"
-    assert row["profile_created_utc"] == "2026-02-25T06:00:00+00:00"
 
 
 def test_backfill_keypoint_performance_dry_run_and_apply(tmp_path: Path) -> None:
