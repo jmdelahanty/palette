@@ -29,7 +29,6 @@ from .analysis_candidate_invocation import (
     require_candidate_invocation_manifest,
 )
 
-
 ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_ID = (
     "palette.analysis_candidate_execution_request"
 )
@@ -41,7 +40,7 @@ ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION = 2
 ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_ID = (
     "palette.analysis_candidate_execution_adapter"
 )
-ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_VERSION = 1
+ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_VERSION = 2
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_.-]*$")
 _MODULE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
@@ -269,6 +268,7 @@ def require_candidate_execution_adapter_manifest(
         "stage_id",
         "adapter_id",
         "adapter_version",
+        "source_run_parent",
         "run_parent",
         "profile_id",
         "candidate_owner_module",
@@ -294,6 +294,9 @@ def require_candidate_execution_adapter_manifest(
     if type(payload["adapter_version"]) is not int or payload["adapter_version"] < 1:
         raise ValueError("adapter_version must be one positive exact integer")
     _require_relative_run_path(payload["run_parent"], label="adapter run_parent")
+    _require_relative_run_path(
+        payload["source_run_parent"], label="adapter source_run_parent"
+    )
     _require_identifier(payload["profile_id"], label="adapter profile_id")
     if payload["invocation_contract"] not in _KNOWN_INVOCATION_CONTRACTS:
         raise ValueError("adapter invocation_contract is unsupported")
@@ -562,15 +565,16 @@ def build_candidate_execution_request(
     )
     if source_path == candidate_path:
         raise ValueError("source and candidate run paths must differ")
-    run_parent = str(adapter["run_parent"])
+    source_run_parent = str(adapter["source_run_parent"])
+    candidate_run_parent = str(adapter["run_parent"])
     _require_immediate_run_child(
         source_path,
-        run_parent=run_parent,
+        run_parent=source_run_parent,
         label="source_run_path",
     )
     _require_immediate_run_child(
         candidate_path,
-        run_parent=run_parent,
+        run_parent=candidate_run_parent,
         label="candidate_run_path",
     )
     _require_identifier(execution_id, label="execution_id")
@@ -731,17 +735,18 @@ def require_candidate_execution_request(value: Mapping[str, Any]) -> None:
     candidate_path = _require_relative_run_path(
         payload["candidate_run_path"], label="candidate_run_path"
     )
-    run_parent = str(adapter["run_parent"])
+    source_run_parent = str(adapter["source_run_parent"])
+    candidate_run_parent = str(adapter["run_parent"])
     if source_path == candidate_path:
         raise ValueError("execution request run paths differ from adapter ownership")
     _require_immediate_run_child(
         source_path,
-        run_parent=run_parent,
+        run_parent=source_run_parent,
         label="source_run_path",
     )
     _require_immediate_run_child(
         candidate_path,
-        run_parent=run_parent,
+        run_parent=candidate_run_parent,
         label="candidate_run_path",
     )
     _require_sha256(payload["source_identity_sha256"], label="source_identity_sha256")

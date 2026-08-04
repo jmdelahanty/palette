@@ -6,6 +6,7 @@ import pytest
 
 from fisheye.analysis_workflows.analysis_candidate_invocation import (
     CandidateInvocationContract,
+    build_chaser_distance_base_invocation,
     build_exact_tabular_invocation,
     build_eye_angle_invocation,
     build_stimulus_epoch_invocation,
@@ -181,6 +182,32 @@ def test_stimulus_epoch_invocation_binds_migration_and_staged_source() -> None:
     _rehash(bypassed_staging)
     with pytest.raises(ValueError, match="source_staging_mode"):
         require_candidate_invocation_manifest(bypassed_staging)
+
+
+def test_chaser_distance_invocation_binds_authority_projection_and_staging() -> None:
+    invocation = build_chaser_distance_base_invocation(
+        source_authority_binding_sha256="c" * 64,
+        storage_profile_id="published_http_v1",
+        copy_backend="python",
+        keep_scratch=False,
+    )
+    require_candidate_invocation_manifest(
+        invocation,
+        expected_contract=CandidateInvocationContract.CHASER_DISTANCE_BASE_V1,
+        expected_profile_id="published_http_v1",
+    )
+
+    changed = deepcopy(invocation)
+    changed["payload"]["parameters"]["source_authority_binding_sha256"] = "not-a-digest"
+    _rehash(changed)
+    with pytest.raises(ValueError, match="source_authority_binding_sha256"):
+        require_candidate_invocation_manifest(changed)
+
+    expanded = deepcopy(invocation)
+    expanded["payload"]["parameters"]["projection_id"] = "all_live_arrays"
+    _rehash(expanded)
+    with pytest.raises(ValueError, match="projection_id"):
+        require_candidate_invocation_manifest(expanded)
 
 
 def test_invocation_contract_and_profile_bindings_fail_closed() -> None:

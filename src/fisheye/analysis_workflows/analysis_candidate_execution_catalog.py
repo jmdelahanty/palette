@@ -45,6 +45,7 @@ class AnalysisCandidateExecutionAdapter:
     coordinate_role: CoordinateContractRole
     coordinate_contract_status: CoordinateContractStatus
     logical_equality_contract: CandidateLogicalEqualityContract
+    source_run_parent: str | None = None
     runner_module: str | None = None
     runner_entrypoint: str | None = None
     suite_validator_module: str | None = None
@@ -119,6 +120,7 @@ class AnalysisCandidateExecutionAdapter:
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
             "run_parent": candidate.run_parent,
+            "source_run_parent": self.source_run_parent or candidate.run_parent,
             "profile_id": candidate.profile_id,
             "candidate_owner_module": candidate.owner_module,
             "candidate_owner_entrypoint": candidate.entrypoint_attr,
@@ -268,6 +270,27 @@ def _implemented_stimulus_epochs() -> AnalysisCandidateExecutionAdapter:
     )
 
 
+def _implemented_chaser_distance() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="chaser_distance",
+        invocation_contract=CandidateInvocationContract.CHASER_DISTANCE_BASE_V1,
+        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.CANONICAL_PRODUCER,
+        coordinate_contract_status=CoordinateContractStatus.SOURCE_PRESERVATION_ONLY,
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.CHASER_DISTANCE_SEALED_BASE_V2_ARRAYS_V1
+        ),
+        source_run_parent="analysis/chaser_distance_runs",
+        runner_module="fisheye.diagnostics.chaser_distance_candidate_execution",
+        runner_entrypoint="execute_chaser_distance_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.chaser_distance_candidate_execution"
+        ),
+        suite_validator_entrypoint="require_chaser_distance_execution_suite",
+    )
+
+
 def _coordinate_blocked(
     stage_id: str,
     logical_equality_contract: CandidateLogicalEqualityContract,
@@ -345,14 +368,7 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
         "session_occupancy",
         CandidateLogicalEqualityContract.SESSION_OCCUPANCY_DECLARED_ARRAYS_V1,
     ),
-    _contract_only(
-        "chaser_distance",
-        CandidateInvocationContract.CHASER_DISTANCE_BASE_V1,
-        CandidateComputationMode.LOGICAL_REMATERIALIZATION,
-        CoordinateContractRole.CANONICAL_PRODUCER,
-        CoordinateContractStatus.SOURCE_PRESERVATION_ONLY,
-        CandidateLogicalEqualityContract.CHASER_DISTANCE_SEALED_BASE_V2_ARRAYS_V1,
-    ),
+    _implemented_chaser_distance(),
     _direct_blocked(
         "tail_posture_view",
         CandidateInvocationContract.TAIL_POSTURE_DIRECT_V1,

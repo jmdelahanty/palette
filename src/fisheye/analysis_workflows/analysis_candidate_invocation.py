@@ -270,11 +270,58 @@ def _require_stimulus_epochs(parameters: object) -> Mapping[str, Any]:
     return parsed
 
 
+def _require_chaser_distance_base(parameters: object) -> Mapping[str, Any]:
+    parsed = _require_exact_fields(
+        parameters,
+        {
+            "source_schema_id",
+            "source_schema_version",
+            "candidate_schema_id",
+            "candidate_schema_version",
+            "source_authority_binding_sha256",
+            "projection_id",
+            "source_staging_mode",
+            "storage_profile_id",
+            "copy_backend",
+            "keep_scratch",
+        },
+        label="chaser-distance-base invocation parameters",
+    )
+    if (
+        parsed["source_schema_id"] != "palette.chaser_distance.v1"
+        or type(parsed["source_schema_version"]) is not int
+        or parsed["source_schema_version"] != 1
+    ):
+        raise ValueError("chaser-distance source schema identity differs")
+    if (
+        parsed["candidate_schema_id"]
+        != "palette.chaser_distance.sealed_base_storage_candidate.v2"
+        or type(parsed["candidate_schema_version"]) is not int
+        or parsed["candidate_schema_version"] != 2
+    ):
+        raise ValueError("chaser-distance candidate schema identity differs")
+    _require_sha256(
+        parsed["source_authority_binding_sha256"],
+        label="source_authority_binding_sha256",
+    )
+    if parsed["projection_id"] != "sealed_base_30_arrays_v1":
+        raise ValueError("chaser-distance projection_id differs")
+    if parsed["source_staging_mode"] != "sealed_base_logical_copy_v1":
+        raise ValueError("chaser-distance source_staging_mode differs")
+    _require_profile_id(parsed["storage_profile_id"])
+    _require_copy_backend(parsed["copy_backend"])
+    _require_bool(parsed["keep_scratch"], label="keep_scratch")
+    return parsed
+
+
 _PARAMETER_VALIDATORS = {
     CandidateInvocationContract.EXACT_TABULAR_V1: _require_exact_tabular,
     CandidateInvocationContract.TRACK_FLAT_V1: _require_track_flat,
     CandidateInvocationContract.EYE_ANGLES_V1: _require_eye_angles,
     CandidateInvocationContract.STIMULUS_EPOCHS_V1: _require_stimulus_epochs,
+    CandidateInvocationContract.CHASER_DISTANCE_BASE_V1: (
+        _require_chaser_distance_base
+    ),
 }
 
 
@@ -474,10 +521,37 @@ def build_stimulus_epoch_invocation(
     )
 
 
+def build_chaser_distance_base_invocation(
+    *,
+    source_authority_binding_sha256: str,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.CHASER_DISTANCE_BASE_V1,
+        {
+            "source_schema_id": "palette.chaser_distance.v1",
+            "source_schema_version": 1,
+            "candidate_schema_id": (
+                "palette.chaser_distance.sealed_base_storage_candidate.v2"
+            ),
+            "candidate_schema_version": 2,
+            "source_authority_binding_sha256": (source_authority_binding_sha256),
+            "projection_id": "sealed_base_30_arrays_v1",
+            "source_staging_mode": "sealed_base_logical_copy_v1",
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+        },
+    )
+
+
 __all__ = [
     "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID",
     "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION",
     "CandidateInvocationContract",
+    "build_chaser_distance_base_invocation",
     "build_exact_tabular_invocation",
     "build_eye_angle_invocation",
     "build_stimulus_epoch_invocation",

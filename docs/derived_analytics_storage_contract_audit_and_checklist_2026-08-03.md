@@ -858,7 +858,8 @@ Recommended benchmark and promotion-review order:
       receipt contract without authorizing production selection. All thirteen
       adapters bind a family-specific equality projection and coordinate role;
       requests require the live registered adapter, exact candidate profile,
-      exact live family-suite projection, a recognized node-local scratch root,
+      exact live family-suite projection, explicit source and candidate run
+      parents, a recognized node-local scratch root,
       immutable production pre-state probes, and a benchmark-only nonmutation
       policy.
       Receipt v2 represents completed publications only, requires all eleven
@@ -871,8 +872,9 @@ Recommended benchmark and promotion-review order:
       `fbbce911`. Request, receipt, and failed-attempt envelopes are now honest
       v2 contracts: each rejects legacy v1 and numeric schema-version aliases.
       The frozen parameter grammars now cover exact-tabular, eye-angle,
-      track-flat, and stimulus-epoch execution. Implemented adapters cannot select a contract that
-      still lacks an exact parameter grammar, and the exact-tabular child/CLI
+      track-flat, stimulus-epoch, and sealed chaser-distance-base execution.
+      Implemented adapters cannot select a contract that still lacks an exact
+      parameter grammar, and the exact-tabular child/CLI
       no longer accepts unsigned copy-backend or scratch-retention flags.
       Track-flat publication is explicitly scoped to the existing
       `analysis/track_kinematics_runs/offline` namespace; the broad family
@@ -893,8 +895,8 @@ Recommended benchmark and promotion-review order:
       tombstone the exact owned candidate. Independent re-review is ACCEPT.
       The complete 67-test post-fix execution, runner, materializer, telemetry,
       and atomic-publication suite passed.
-- [ ] Implement and independently review dedicated typed runners for the other
-      eleven catalog families. Do not infer executability from a contract-only
+- [ ] Implement and independently review dedicated typed runners for the
+      remaining catalog families. Do not infer executability from a contract-only
       catalog entry.
     - [x] Eye angles (`159742e6`) now execute the frozen request-v2 invocation,
           reconstruct and validate the exact 41-array compact-v7 suite, bind
@@ -931,7 +933,20 @@ Recommended benchmark and promotion-review order:
           failures tombstone only the execution-owned candidate. The complete
           schema, invocation, catalog, materializer, recovery, and real
           fresh-process gate passed 59 tests outside the sandbox.
-    - [ ] Implement the remaining eight typed family runners.
+    - [x] The sealed chaser-distance base now executes through an explicit
+          cross-parent adapter: its canonical v1 source remains under
+          `analysis/chaser_distance_runs`, while its primitive byte-planned v2
+          candidate is written only under
+          `analysis/chaser_distance_storage_candidates`. The source is copied
+          to node-local scratch, all 30 arrays and seven canonical authority
+          records are rebound before atomic acceptance, direct/consolidated
+          metadata and decoded equality are required, and the result remains
+          selector-ineligible, unpromoted, and nonminting. Wrong source-binding
+          digests fail before publication; execution-owned post-publication
+          failures can be tombstoned without changing canonical selectors. The
+          combined invocation, adapter-v2, materializer, suite, and real
+          fresh-process gate passed 54 tests outside the sandbox.
+    - [ ] Implement the remaining seven typed family runners.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,

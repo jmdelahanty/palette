@@ -21,10 +21,14 @@ from fisheye.analysis.chaser_distance_base_storage import (
     base_logical_hashes,
     validate_base_candidate,
 )
-from fisheye.analysis_workflows.materializers import chaser_distance_base as materializer
+from fisheye.analysis_workflows.materializers import (
+    chaser_distance_base as materializer,
+)
 from fisheye.analysis_workflows.materializers.chaser_distance_base import (
+    CHASER_DISTANCE_EXECUTION_PHASE_ORDER,
     build_chaser_distance_base_candidate_plan,
     materialize_chaser_distance_base_candidate,
+    tombstone_chaser_distance_execution_candidate,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
@@ -47,9 +51,7 @@ def _text(rows: list[str], width: int = 96) -> np.ndarray:
 
 
 def _archive(path: Path) -> zarr.Group:
-    root = zarr.open_group(
-        str(path), mode="w", zarr_format=3, use_consolidated=False
-    )
+    root = zarr.open_group(str(path), mode="w", zarr_format=3, use_consolidated=False)
     parent = root.require_group("analysis/chaser_distance_runs")
     parent.attrs.update(
         {
@@ -74,7 +76,9 @@ def _archive(path: Path) -> zarr.Group:
         "frames/camera_frame_id": frame_index,
         "frames/stimulus_frame_num": frame_index + 10,
         "frames/timestamp_ns": frame_index * 1_000,
-        "frames/stimulus_epoch_window_id": np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int32),
+        "frames/stimulus_epoch_window_id": np.asarray(
+            [0, 0, 0, 1, 1, 1], dtype=np.int32
+        ),
         "chasers/chaser_index": np.asarray([0, 1], dtype=np.int16),
         "chasers/stimulus_instance_id_bytes": _text(["chaser:0", "chaser:1"]),
         "chasers/source_track_key_bytes": _text(["chaser_index:0", "chaser_index:1"]),
@@ -98,15 +102,22 @@ def _archive(path: Path) -> zarr.Group:
         "epoch_summary/p50_distance_mm": np.ones((windows, chasers), dtype=np.float32),
         "epoch_summary/p95_distance_mm": np.ones((windows, chasers), dtype=np.float32),
         "epoch_distributions/bin_edges_mm": np.arange(bins + 1, dtype=np.float32),
-        "epoch_distributions/bin_centers_mm": np.arange(bins, dtype=np.float32) + np.float32(0.5),
-        "epoch_distributions/hist_density": np.ones((windows, chasers, bins), dtype=np.float32),
+        "epoch_distributions/bin_centers_mm": np.arange(bins, dtype=np.float32)
+        + np.float32(0.5),
+        "epoch_distributions/hist_density": np.ones(
+            (windows, chasers, bins), dtype=np.float32
+        ),
     }
     assert set(arrays) == set(SEALED_CHASER_DISTANCE_BASE_PATHS)
     for array_path, values in arrays.items():
         _write(run, array_path, values)
     # These are intentionally present but outside the sealed base projection.
     _write(run, "chasers/behavior_class_id", np.zeros(chasers, dtype=np.int8))
-    _write(run, "epoch_summary/valid_frame_count", np.ones((windows, chasers), dtype=np.int64))
+    _write(
+        run,
+        "epoch_summary/valid_frame_count",
+        np.ones((windows, chasers), dtype=np.int64),
+    )
     run.attrs.update(
         {
             "schema_id": "palette.chaser_distance.v1",
@@ -128,9 +139,8 @@ def _record(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         record_ref=f"/{node_path}@{attribute_name}",
-        record_sha256=(
-            attribute_name[0].encode().hex()[0] if attribute_name else "a"
-        ) * 64,
+        record_sha256=(attribute_name[0].encode().hex()[0] if attribute_name else "a")
+        * 64,
         record={} if record is None else record,
     )
 
@@ -159,7 +169,9 @@ def _bound() -> SimpleNamespace:
             "chasers/source_track_key_bytes",
         )
     }
-    epoch = {name: {} for name in ("window_id", "label_bytes", "start_frame", "end_frame")}
+    epoch = {
+        name: {} for name in ("window_id", "label_bytes", "start_frame", "end_frame")
+    }
     measurement_paths = (
         "distances/distance_px",
         "distances/distance_mm",
@@ -208,7 +220,9 @@ def _bound() -> SimpleNamespace:
 
 @pytest.fixture
 def patched_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(materializer, "load_bound_chaser_distance_run", lambda *_a, **_k: _bound())
+    monkeypatch.setattr(
+        materializer, "load_bound_chaser_distance_run", lambda *_a, **_k: _bound()
+    )
 
 
 def test_exact_declarations_freeze_all_sealed_semantics(tmp_path: Path) -> None:
@@ -217,15 +231,22 @@ def test_exact_declarations_freeze_all_sealed_semantics(tmp_path: Path) -> None:
     declarations = build_chaser_distance_base_declarations(run)
 
     assert len(declarations) == 30
-    assert tuple(item.path for item in declarations) == SEALED_CHASER_DISTANCE_BASE_PATHS
+    assert (
+        tuple(item.path for item in declarations) == SEALED_CHASER_DISTANCE_BASE_PATHS
+    )
     by_path = {item.path: item for item in declarations}
     assert by_path["distances/distance_mm"].contract.dtype.numpy_dtype == "float32"
     assert by_path["distances/distance_mm"].contract.units == "mm"
     assert by_path["distances/distance_mm"].contract.coordinate_space is None
     assert by_path["distances/distance_px"].contract.coordinate_space is None
     assert by_path["distances/nearest_distance_mm"].contract.coordinate_space is None
-    assert by_path["positions/source_detection_row_index"].fill_semantics.startswith("-1")
-    assert by_path["epoch_distributions/hist_density"].authority_role.value == "derived_cache"
+    assert by_path["positions/source_detection_row_index"].fill_semantics.startswith(
+        "-1"
+    )
+    assert (
+        by_path["epoch_distributions/hist_density"].authority_role.value
+        == "derived_cache"
+    )
     assert all(
         item.contract.coordinate_space == ARRAY_COORDINATE_SPACES[item.path]
         for item in declarations
@@ -265,9 +286,7 @@ def test_atomic_candidate_preserves_selectors_and_proves_metadata(
         "owner_generation_guarded_selectors_then_eligibility_v1"
     )
     assert source_parent.attrs["publication_generation"] == 7
-    assert source_parent.attrs["chaser_distance_publication_lease"] == {
-        "owner": "test"
-    }
+    assert source_parent.attrs["chaser_distance_publication_lease"] == {"owner": "test"}
     candidate = direct["analysis/chaser_distance_storage_candidates/candidate"]
     assert candidate.attrs["schema_id"] == CHASER_DISTANCE_BASE_CANDIDATE_SCHEMA_ID
     assert candidate.attrs["stage_selector_eligible"] is False
@@ -286,8 +305,121 @@ def test_atomic_candidate_preserves_selectors_and_proves_metadata(
     assert not (tmp_path / "scratch").exists()
 
 
-def _published(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, zarr.Group]:
-    monkeypatch.setattr(materializer, "load_bound_chaser_distance_run", lambda *_a, **_k: _bound())
+def test_typed_execution_stages_source_and_can_be_tombstoned_exactly(
+    tmp_path: Path,
+    patched_bound: None,
+) -> None:
+    archive = tmp_path / "typed_analysis.zarr"
+    root = _archive(archive)
+    source = root["analysis/chaser_distance_runs/source"]
+    expected_hashes = base_logical_hashes(source)
+    binding = {
+        "schema_id": "palette.analysis_candidate_execution_binding",
+        "schema_version": 1,
+        "request_payload_digest": "b" * 64,
+    }
+
+    def accept(_root, _parent, candidate):
+        assert candidate.attrs["analysis_candidate_execution_binding"] == binding
+        assert candidate.attrs["source_staging_mode"] == ("sealed_base_logical_copy_v1")
+        return {"accepted": True, "candidate_hashes": base_logical_hashes(candidate)}
+
+    result = materialize_chaser_distance_base_candidate(
+        archive,
+        source_run="source",
+        run_name="typed_candidate",
+        scratch_root=tmp_path / "typed-scratch",
+        copy_backend="python",
+        apply=True,
+        stage_source_to_scratch=True,
+        execution_binding=binding,
+        expected_source_logical_hashes=expected_hashes,
+        publication_acceptance_validator=accept,
+    )
+
+    assert result["caller_acceptance"] == {
+        "accepted": True,
+        "candidate_hashes": expected_hashes,
+    }
+    assert result["source_logical_manifest_sha256"] == canonical_json_sha256(
+        expected_hashes
+    )
+    assert result["published_logical_manifest_sha256"] == (
+        result["source_logical_manifest_sha256"]
+    )
+    assert [phase["name"] for phase in result["runtime_telemetry"]["phases"]] == list(
+        CHASER_DISTANCE_EXECUTION_PHASE_ORDER
+    )
+    assert result["output_storage"]["payload_file_count"] > 0
+    assert not (tmp_path / "typed-scratch").exists()
+
+    tombstone = tombstone_chaser_distance_execution_candidate(
+        archive,
+        run_name="typed_candidate",
+        expected_execution_binding=binding,
+        failure_phase="post_receipt_validation",
+        error_type="RuntimeError",
+        error_message="injected post-publication failure",
+    )
+    assert tombstone["tombstoned"] is True
+    for use_consolidated in (False, True):
+        candidate = zarr.open_group(
+            str(archive), mode="r", use_consolidated=use_consolidated
+        )["analysis/chaser_distance_storage_candidates/typed_candidate"]
+        assert candidate.attrs["palette_run_completion_status"] == "failed"
+        assert candidate.attrs["stage_selector_eligible"] is False
+        assert candidate.attrs["storage_candidate_profile_promoted"] is False
+        assert candidate.attrs["analysis_candidate_execution_binding"] == binding
+
+
+def test_typed_execution_acceptance_failure_is_atomic_and_ineligible(
+    tmp_path: Path,
+    patched_bound: None,
+) -> None:
+    archive = tmp_path / "acceptance_failure_analysis.zarr"
+    root = _archive(archive)
+    expected_hashes = base_logical_hashes(root["analysis/chaser_distance_runs/source"])
+    binding = {
+        "schema_id": "palette.analysis_candidate_execution_binding",
+        "schema_version": 1,
+        "request_payload_digest": "c" * 64,
+    }
+
+    def reject(_root, _parent, _candidate):
+        raise RuntimeError("injected caller acceptance failure")
+
+    with pytest.raises(
+        RuntimeError, match="injected caller acceptance failure"
+    ) as error:
+        materialize_chaser_distance_base_candidate(
+            archive,
+            source_run="source",
+            run_name="rejected_candidate",
+            scratch_root=tmp_path / "rejected-scratch",
+            copy_backend="python",
+            apply=True,
+            stage_source_to_scratch=True,
+            execution_binding=binding,
+            expected_source_logical_hashes=expected_hashes,
+            publication_acceptance_validator=reject,
+        )
+    assert hasattr(error.value, "palette_runtime_telemetry")
+    direct = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    candidate = direct["analysis/chaser_distance_storage_candidates/rejected_candidate"]
+    assert candidate.attrs["palette_run_completion_status"] == "failed"
+    assert candidate.attrs["stage_selector_eligible"] is False
+    assert candidate.attrs["storage_candidate_profile_promoted"] is False
+    source_parent = direct["analysis/chaser_distance_runs"]
+    assert source_parent.attrs["latest"] == "source"
+    assert source_parent.attrs["latest_complete"] == "source"
+
+
+def _published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, zarr.Group]:
+    monkeypatch.setattr(
+        materializer, "load_bound_chaser_distance_run", lambda *_a, **_k: _bound()
+    )
     archive = tmp_path / "tamper_analysis.zarr"
     _archive(archive)
     materialize_chaser_distance_base_candidate(
@@ -313,7 +445,9 @@ def test_rehashed_array_omission_still_fails_closed(
     manifest = copy.deepcopy(candidate.attrs[BASE_MANIFEST_ATTR])
     payload = manifest["payload"]
     payload["arrays"] = [
-        item for item in payload["arrays"] if item["path"] != "epoch_distributions/hist_density"
+        item
+        for item in payload["arrays"]
+        if item["path"] != "epoch_distributions/hist_density"
     ]
     payload["array_paths"].remove("epoch_distributions/hist_density")
     payload["source_logical_hashes"].pop("epoch_distributions/hist_density")
@@ -369,7 +503,9 @@ def test_rehashed_source_pointer_tampering_fails_external_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     archive, candidate = _published(tmp_path, monkeypatch)
-    source_binding = copy.deepcopy(candidate.attrs["chaser_distance_sealed_base_source_binding"])
+    source_binding = copy.deepcopy(
+        candidate.attrs["chaser_distance_sealed_base_source_binding"]
+    )
     source_binding["publication_seal"]["record_sha256"] = "f" * 64
     candidate.attrs["chaser_distance_sealed_base_source_binding"] = source_binding
     manifest = copy.deepcopy(candidate.attrs[BASE_MANIFEST_ATTR])
@@ -469,7 +605,9 @@ def test_copy_failure_leaves_source_pointers_unchanged(
 ) -> None:
     archive = tmp_path / "recording_analysis.zarr"
     _archive(archive)
-    monkeypatch.setattr(materializer, "load_bound_chaser_distance_run", lambda *_a, **_k: _bound())
+    monkeypatch.setattr(
+        materializer, "load_bound_chaser_distance_run", lambda *_a, **_k: _bound()
+    )
     from fisheye.analysis_workflows.materializers import atomic_run_publisher
 
     def fail_copy(*_args, **_kwargs):
@@ -491,9 +629,7 @@ def test_copy_failure_leaves_source_pointers_unchanged(
     assert parent.attrs["latest_complete"] == "source"
     assert parent.attrs["latest_pending"] == "pending-source"
     assert parent.attrs["authoritative_run"] == "source"
-    assert parent.attrs["authoritative_run_provenance"] == {
-        "manifest_sha256": "a" * 64
-    }
+    assert parent.attrs["authoritative_run_provenance"] == {"manifest_sha256": "a" * 64}
     assert parent.attrs["publication_policy"] == (
         "owner_generation_guarded_selectors_then_eligibility_v1"
     )
@@ -610,9 +746,9 @@ def test_zero_epoch_windows_remain_a_valid_sealed_base_shape(
     )
 
     assert result["status"] == "complete"
-    candidate = zarr.open_group(
-        str(archive), mode="r", use_consolidated=False
-    )["analysis/chaser_distance_storage_candidates/zero_window_candidate"]
+    candidate = zarr.open_group(str(archive), mode="r", use_consolidated=False)[
+        "analysis/chaser_distance_storage_candidates/zero_window_candidate"
+    ]
     assert candidate["epoch_summary/window_id"].shape == (0,)
     assert candidate["epoch_distributions/hist_density"].shape == (0, 2, 3)
 
