@@ -46,6 +46,8 @@ def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:
         expected_parent = (
             "analysis/chaser_distance_storage_candidates"
             if candidate.stage_id == "chaser_distance"
+            else "analysis/track_kinematics_runs/offline"
+            if candidate.stage_id == "track_kinematics"
             else DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[
                 candidate.stage_id
             ].run_parent
@@ -77,6 +79,17 @@ def test_resolved_candidate_records_are_stable_and_json_compatible() -> None:
         candidate.stage_id for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES
     ]
     assert all(isinstance(record["profile_id"], str) for record in records)
+
+
+def test_track_candidate_owns_the_existing_offline_scope_only() -> None:
+    contract = DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE["track_kinematics"]
+    candidate = DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE["track_kinematics"]
+
+    assert contract.run_parent == "analysis/track_kinematics_runs"
+    assert contract.availability_parents == (
+        "analysis/track_kinematics_runs/offline",
+    )
+    assert candidate.run_parent == "analysis/track_kinematics_runs/offline"
 
 
 @pytest.mark.parametrize(

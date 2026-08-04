@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,10 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
 from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
     ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE,
     ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS,
+)
+from fisheye.analysis_workflows.analysis_candidate_invocation import (
+    CandidateInvocationContract,
+    build_exact_tabular_invocation,
 )
 from fisheye.analysis_workflows.storage_candidate_catalog import (
     DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE,
@@ -197,6 +202,14 @@ def implemented_adapter():
     return ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["swim_bouts"].as_manifest()
 
 
+def _exact_invocation():
+    return build_exact_tabular_invocation(
+        storage_profile_id="published_http_v1",
+        copy_backend="python",
+        keep_scratch=False,
+    )
+
+
 def _request(
     adapter_manifest,
     *,
@@ -205,6 +218,7 @@ def _request(
     return build_candidate_execution_request(
         execution_id="swim_bouts_rows_2048_rep0",
         adapter_manifest=adapter_manifest,
+        invocation=_exact_invocation(),
         benchmark_suite=_suite(),
         archive_path="/tmp/.palette_benchmarks/execution/archive.zarr",
         source_run_path="analysis/swim_bout_runs/source_v1",
@@ -363,6 +377,13 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "bout_kinematics",
     }
 
+    implemented = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE["swim_bouts"]
+    with pytest.raises(ValueError, match="frozen invocation grammar"):
+        replace(
+            implemented,
+            invocation_contract=CandidateInvocationContract.SUBJECT_SHAPE_V1,
+        )
+
 
 def test_contract_only_adapter_cannot_mint_execution_request() -> None:
     adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
@@ -372,6 +393,7 @@ def test_contract_only_adapter_cannot_mint_execution_request() -> None:
         build_candidate_execution_request(
             execution_id="blocked_request",
             adapter_manifest=adapter,
+            invocation=_exact_invocation(),
             benchmark_suite=_suite(),
             archive_path="/tmp/.palette_benchmarks/execution/archive.zarr",
             source_run_path="analysis/swim_bout_runs/source_v1",
@@ -403,12 +425,68 @@ def test_execution_request_and_complete_receipt_are_strict_json(
     )
     assert receipt["payload"]["publication_gate_passed"] is True
 
+    adapter_numeric_alias = deepcopy(implemented_adapter)
+    adapter_numeric_alias["schema_version"] = 1.0
+    with pytest.raises(ValueError, match="schema identity"):
+        require_candidate_execution_adapter_manifest(adapter_numeric_alias)
+
+    receipt_numeric_alias = deepcopy(receipt)
+    receipt_numeric_alias["schema_version"] = 2.0
+    with pytest.raises(ValueError, match="schema identity"):
+        require_candidate_execution_receipt(
+            receipt_numeric_alias,
+            expected_request_payload_digest=request["payload_digest"],
+        )
+
+    legacy_receipt = deepcopy(receipt)
+    legacy_receipt["schema_version"] = 1
+    with pytest.raises(ValueError, match="schema identity"):
+        require_candidate_execution_receipt(
+            legacy_receipt,
+            expected_request_payload_digest=request["payload_digest"],
+        )
+
+
+def test_execution_request_requires_exact_bound_invocation(
+    implemented_adapter,
+) -> None:
+    request = _request(implemented_adapter)
+
+    missing = deepcopy(request)
+    missing["payload"].pop("invocation")
+    missing["payload_digest"] = canonical_json_sha256(missing["payload"])
+    with pytest.raises(ValueError, match="payload field set"):
+        require_candidate_execution_request(missing)
+
+    legacy_v1 = deepcopy(request)
+    legacy_v1["schema_version"] = 1
+    with pytest.raises(ValueError, match="schema identity"):
+        require_candidate_execution_request(legacy_v1)
+
+    numeric_alias = deepcopy(request)
+    numeric_alias["schema_version"] = 2.0
+    with pytest.raises(ValueError, match="schema identity"):
+        require_candidate_execution_request(numeric_alias)
+
+    changed_profile = deepcopy(request)
+    invocation = changed_profile["payload"]["invocation"]
+    invocation["payload"]["parameters"]["storage_profile_id"] = (
+        "scratch_compute_v1"
+    )
+    invocation["payload_digest"] = canonical_json_sha256(invocation["payload"])
+    changed_profile["payload_digest"] = canonical_json_sha256(
+        changed_profile["payload"]
+    )
+    with pytest.raises(ValueError, match="storage profile differs"):
+        require_candidate_execution_request(changed_profile)
+
 
 def test_execution_request_rejects_nonbenchmark_archive(implemented_adapter) -> None:
     with pytest.raises(ValueError, match=r"\.palette_benchmarks"):
         build_candidate_execution_request(
             execution_id="unsafe_request",
             adapter_manifest=implemented_adapter,
+            invocation=_exact_invocation(),
             benchmark_suite=_suite(),
             archive_path="/groups/recording_analysis.zarr",
             source_run_path="analysis/swim_bout_runs/source_v1",
@@ -512,6 +590,7 @@ def test_execution_request_rejects_nonlocal_scratch(implemented_adapter) -> None
         build_candidate_execution_request(
             execution_id="nonlocal_scratch",
             adapter_manifest=implemented_adapter,
+            invocation=_exact_invocation(),
             benchmark_suite=_suite(),
             archive_path="/groups/.palette_benchmarks/execution/archive.zarr",
             source_run_path="analysis/swim_bout_runs/source_v1",
@@ -537,6 +616,7 @@ def test_execution_request_rejects_storage_profile_mismatch(
         build_candidate_execution_request(
             execution_id="wrong_profile",
             adapter_manifest=implemented_adapter,
+            invocation=_exact_invocation(),
             benchmark_suite=_suite(profile=SCRATCH_COMPUTE_V1),
             archive_path="/tmp/.palette_benchmarks/execution/archive.zarr",
             source_run_path="analysis/swim_bout_runs/source_v1",
@@ -562,6 +642,7 @@ def test_execution_request_rejects_unrelated_family_labeled_suite(
         build_candidate_execution_request(
             execution_id="unrelated_suite",
             adapter_manifest=implemented_adapter,
+            invocation=_exact_invocation(),
             benchmark_suite=_unrelated_suite(),
             archive_path="/tmp/.palette_benchmarks/execution/archive.zarr",
             source_run_path="analysis/swim_bout_runs/source_v1",

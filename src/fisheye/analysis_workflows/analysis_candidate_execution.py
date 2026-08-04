@@ -24,15 +24,20 @@ from fisheye.shared.zarr.analysis_benchmark_suite import (
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
+from .analysis_candidate_invocation import (
+    CandidateInvocationContract,
+    require_candidate_invocation_manifest,
+)
+
 
 ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_ID = (
     "palette.analysis_candidate_execution_request"
 )
-ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_VERSION = 1
+ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_VERSION = 2
 ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_ID = (
     "palette.analysis_candidate_execution_receipt"
 )
-ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION = 1
+ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION = 2
 ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_ID = (
     "palette.analysis_candidate_execution_adapter"
 )
@@ -44,16 +49,7 @@ _CALLABLE = re.compile(r"^_?[a-z][a-z0-9_]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _KNOWN_INVOCATION_CONTRACTS = {
-    "track_flat_v1",
-    "exact_tabular_v1",
-    "eye_angles_v1",
-    "subject_shape_v1",
-    "tail_kinematics_v1",
-    "stimulus_response_v1",
-    "stimulus_epochs_v1",
-    "chaser_distance_base_v1",
-    "tail_posture_direct_v1",
-    "bout_classification_direct_v1",
+    contract.value for contract in CandidateInvocationContract
 }
 
 
@@ -263,6 +259,7 @@ def require_candidate_execution_adapter_manifest(
         raise ValueError("execution adapter envelope field set differs")
     if (
         value["schema_id"] != ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_ID
+        or type(value["schema_version"]) is not int
         or value["schema_version"]
         != ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_VERSION
     ):
@@ -509,6 +506,7 @@ def build_candidate_execution_request(
     *,
     execution_id: str,
     adapter_manifest: Mapping[str, Any],
+    invocation: Mapping[str, Any],
     benchmark_suite: Mapping[str, Any],
     archive_path: str | Path,
     source_run_path: str,
@@ -536,6 +534,11 @@ def build_candidate_execution_request(
         raise ValueError("execution requests require an implemented typed adapter")
     require_analysis_benchmark_suite_manifest(benchmark_suite)
     _require_suite_matches_adapter(adapter, benchmark_suite)
+    require_candidate_invocation_manifest(
+        invocation,
+        expected_contract=str(adapter["invocation_contract"]),
+        expected_profile_id=str(adapter["profile_id"]),
+    )
     suite_payload = benchmark_suite["payload"]
     if suite_payload["family_id"] != adapter["stage_id"]:
         raise ValueError("benchmark suite and execution adapter families differ")
@@ -606,6 +609,7 @@ def build_candidate_execution_request(
     payload: dict[str, object] = {
         "execution_id": execution_id,
         "adapter_manifest": _json_copy(adapter_manifest),
+        "invocation": _json_copy(invocation),
         "benchmark_suite": _json_copy(benchmark_suite),
         "archive_path": str(archive),
         "source_run_path": source_path,
@@ -658,6 +662,7 @@ def require_candidate_execution_request(value: Mapping[str, Any]) -> None:
         raise ValueError("execution request envelope field set differs")
     if (
         value["schema_id"] != ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_ID
+        or type(value["schema_version"]) is not int
         or value["schema_version"]
         != ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_VERSION
     ):
@@ -666,6 +671,7 @@ def require_candidate_execution_request(value: Mapping[str, Any]) -> None:
     expected = {
         "execution_id",
         "adapter_manifest",
+        "invocation",
         "benchmark_suite",
         "archive_path",
         "source_run_path",
@@ -692,6 +698,11 @@ def require_candidate_execution_request(value: Mapping[str, Any]) -> None:
         is not CandidateRunnerStatus.IMPLEMENTED
     ):
         raise ValueError("execution request adapter is not implemented")
+    require_candidate_invocation_manifest(
+        payload["invocation"],
+        expected_contract=str(adapter["invocation_contract"]),
+        expected_profile_id=str(adapter["profile_id"]),
+    )
     suite = payload["benchmark_suite"]
     require_analysis_benchmark_suite_manifest(suite)
     _require_suite_matches_adapter(adapter, suite)
@@ -960,6 +971,7 @@ def require_candidate_execution_receipt(
         raise ValueError("execution receipt envelope field set differs")
     if (
         value["schema_id"] != ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_ID
+        or type(value["schema_version"]) is not int
         or value["schema_version"]
         != ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION
     ):
@@ -1395,7 +1407,7 @@ def require_candidate_execution_receipt(
     status = payload["status"]
     if status != "complete":
         raise ValueError(
-            "execution receipt v1 represents completed publications only; "
+            "execution receipts represent completed publications only; "
             "failed attempts require a separate attempt record"
         )
     if any(outcome is not PhaseOutcome.SUCCEEDED for outcome in outcomes):
@@ -1427,7 +1439,7 @@ def build_candidate_execution_receipt(
 
     require_candidate_execution_request(request)
     if status != "complete":
-        raise ValueError("execution receipt v1 represents completed publications only")
+        raise ValueError("execution receipts represent completed publications only")
     payload: dict[str, object] = {
         "status": status,
         "request": _json_copy(request),

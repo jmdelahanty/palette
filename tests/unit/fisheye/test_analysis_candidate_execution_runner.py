@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import inspect
 import json
 from pathlib import Path
 import shutil
@@ -31,6 +32,9 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
 from fisheye.analysis_workflows.materializers.runtime_telemetry import PhaseTelemetry
 from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
     ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE,
+)
+from fisheye.analysis_workflows.analysis_candidate_invocation import (
+    build_exact_tabular_invocation,
 )
 from fisheye.analysis_workflows.materializers.exact_tabular_candidate import (
     compute_exact_tabular_logical_hashes,
@@ -287,6 +291,11 @@ def _request(
         adapter_manifest=ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
             family
         ].as_manifest(),
+        invocation=build_exact_tabular_invocation(
+            storage_profile_id="published_http_v1",
+            copy_backend="python",
+            keep_scratch=False,
+        ),
         benchmark_suite=suite,
         archive_path=archive,
         source_run_path=f"{parent_path}/source",
@@ -306,6 +315,14 @@ def _request(
         registry_probe_path=registry_probe,
         production_profiles_probe_path=profiles_probe,
     )
+
+
+def test_fresh_process_runner_has_no_unbound_execution_knobs() -> None:
+    parameters = inspect.signature(
+        run_exact_tabular_candidate_fresh_process
+    ).parameters
+    assert "copy_backend" not in parameters
+    assert "keep_scratch" not in parameters
 
 
 @pytest.mark.parametrize("family", ["swim_bouts", "bout_kinematics"])
@@ -331,7 +348,6 @@ def test_exact_tabular_typed_runner_emits_complete_nonpromoting_receipt(
         request_path,
         receipt_path=receipt_path,
         attempt_path=attempt_path,
-        copy_backend="python",
     )
 
     require_candidate_execution_receipt(
@@ -387,7 +403,6 @@ def test_exact_tabular_typed_runner_writes_attempt_for_coordinate_tampering(
             request_path,
             receipt_path=receipt_path,
             attempt_path=attempt_path,
-            copy_backend="python",
         )
 
     assert not receipt_path.exists()
@@ -397,6 +412,20 @@ def test_exact_tabular_typed_runner_writes_attempt_for_coordinate_tampering(
         attempt,
         expected_request_payload_digest=str(request["payload_digest"]),
     )
+    legacy_attempt = deepcopy(attempt)
+    legacy_attempt["schema_version"] = 1
+    with pytest.raises(ValueError, match="schema identity"):
+        require_exact_tabular_execution_attempt(
+            legacy_attempt,
+            expected_request_payload_digest=str(request["payload_digest"]),
+        )
+    numeric_alias = deepcopy(attempt)
+    numeric_alias["schema_version"] = 2.0
+    with pytest.raises(ValueError, match="schema identity"):
+        require_exact_tabular_execution_attempt(
+            numeric_alias,
+            expected_request_payload_digest=str(request["payload_digest"]),
+        )
     assert caught.value.attempt == attempt
     assert attempt["payload"]["failure_phase"] == "runner_preflight"
     assert attempt["payload"]["target_state"]["exists"] is False
@@ -507,7 +536,6 @@ def test_driver_tombstones_candidate_when_protected_state_changes(
             request_path,
             receipt_path=receipt_path,
             attempt_path=attempt_path,
-            copy_backend="python",
         )
     mutator.join(timeout=1.0)
     assert mutation_finished.is_set()
@@ -555,7 +583,6 @@ def test_receipt_write_failure_tombstones_published_candidate(
             request_path,
             receipt_path=receipt_path,
             attempt_path=attempt_path,
-            copy_backend="python",
         )
     assert caught.value.attempt["payload"]["failure_phase"] == (
         "driver_receipt_publication"

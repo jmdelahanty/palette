@@ -1,0 +1,409 @@
+"""Closed, digest-bound invocation contracts for analysis candidates.
+
+The execution-adapter catalog names one invocation contract per maintained
+family.  This module owns the corresponding call payloads.  Runner-affecting
+values must be present here rather than supplied as unauthenticated Python or
+command-line arguments after an execution request has been signed.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+import json
+import math
+import re
+from typing import Any, Mapping
+
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+
+
+ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID = "palette.analysis_candidate_invocation"
+ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION = 1
+
+_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_PROFILE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COPY_BACKENDS = frozenset({"python", "rsync"})
+_EYE_SCHEDULERS = frozenset(
+    {"single-threaded", "threads", "processes", "distributed"}
+)
+
+
+class CandidateInvocationContract(str, Enum):
+    """Closed typed call shapes; none permits an open kwargs payload."""
+
+    TRACK_FLAT_V1 = "track_flat_v1"
+    EXACT_TABULAR_V1 = "exact_tabular_v1"
+    EYE_ANGLES_V1 = "eye_angles_v1"
+    SUBJECT_SHAPE_V1 = "subject_shape_v1"
+    TAIL_KINEMATICS_V1 = "tail_kinematics_v1"
+    STIMULUS_RESPONSE_V1 = "stimulus_response_v1"
+    STIMULUS_EPOCHS_V1 = "stimulus_epochs_v1"
+    CHASER_DISTANCE_BASE_V1 = "chaser_distance_base_v1"
+    TAIL_POSTURE_DIRECT_V1 = "tail_posture_direct_v1"
+    BOUT_CLASSIFICATION_DIRECT_V1 = "bout_classification_direct_v1"
+
+
+def _json_copy(value: object) -> Any:
+    try:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("candidate invocation must be strict JSON") from exc
+    return json.loads(encoded)
+
+
+def _require_exact_fields(
+    value: object,
+    fields: set[str],
+    *,
+    label: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError(f"{label} field set differs")
+    return value
+
+
+def _require_bool(value: object, *, label: str) -> bool:
+    if type(value) is not bool:
+        raise TypeError(f"{label} must be an exact bool")
+    return value
+
+
+def _require_positive_int(value: object, *, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} must be one positive exact integer")
+    return value
+
+
+def _require_copy_backend(value: object) -> str:
+    if type(value) is not str or value not in _COPY_BACKENDS:
+        raise ValueError("copy_backend must be python or rsync")
+    return value
+
+
+def _require_profile_id(value: object) -> str:
+    if type(value) is not str or not _PROFILE_ID.fullmatch(value):
+        raise ValueError("storage_profile_id must be one canonical profile ID")
+    return value
+
+
+def _require_run_name(value: object, *, label: str) -> str:
+    if (
+        type(value) is not str
+        or value in {".", ".."}
+        or not _RUN_NAME.fullmatch(value)
+    ):
+        raise ValueError(f"{label} must be one exact run name, not a path")
+    return value
+
+
+def _require_exact_tabular(parameters: object) -> Mapping[str, Any]:
+    parsed = _require_exact_fields(
+        parameters,
+        {"storage_profile_id", "copy_backend", "keep_scratch"},
+        label="exact-tabular invocation parameters",
+    )
+    _require_profile_id(parsed["storage_profile_id"])
+    _require_copy_backend(parsed["copy_backend"])
+    _require_bool(parsed["keep_scratch"], label="keep_scratch")
+    return parsed
+
+
+def _require_track_flat(parameters: object) -> Mapping[str, Any]:
+    parsed = _require_exact_fields(
+        parameters,
+        {
+            "source_schema_id",
+            "source_schema_version",
+            "source_run_type",
+            "source_motion_authority_sha256",
+            "storage_profile_id",
+            "physical_bundle_mode",
+            "copy_backend",
+            "keep_scratch",
+        },
+        label="track-flat invocation parameters",
+    )
+    if parsed["source_schema_id"] != "analysis.track_kinematics_runs":
+        raise ValueError("track-flat source_schema_id differs")
+    if (
+        type(parsed["source_schema_version"]) is not int
+        or parsed["source_schema_version"] != 1
+    ):
+        raise ValueError("track-flat source_schema_version differs")
+    if parsed["source_run_type"] != "offline":
+        raise ValueError("track-flat source_run_type must be offline")
+    digest = parsed["source_motion_authority_sha256"]
+    if type(digest) is not str or not _SHA256.fullmatch(digest):
+        raise ValueError("source_motion_authority_sha256 must be one SHA-256")
+    _require_profile_id(parsed["storage_profile_id"])
+    if parsed["physical_bundle_mode"] != "excluded_from_flat_candidate_v1":
+        raise ValueError("track-flat physical_bundle_mode differs")
+    _require_copy_backend(parsed["copy_backend"])
+    _require_bool(parsed["keep_scratch"], label="keep_scratch")
+    return parsed
+
+
+def _require_eye_angles(parameters: object) -> Mapping[str, Any]:
+    parsed = _require_exact_fields(
+        parameters,
+        {
+            "subject_shape_run",
+            "keypoint_run",
+            "storage_profile_id",
+            "chunk_rows",
+            "angle_chunk_rows",
+            "angle_chunk_columns",
+            "output_shard_rows",
+            "angle_shard_columns",
+            "execution_backend",
+            "scheduler",
+            "num_workers",
+            "shard_workers",
+            "native_threads",
+            "fps_source",
+            "fps",
+            "smoothing_window",
+            "copy_backend",
+            "keep_scratch",
+            "check_capacity",
+        },
+        label="eye-angle invocation parameters",
+    )
+    _require_run_name(parsed["subject_shape_run"], label="subject_shape_run")
+    _require_run_name(parsed["keypoint_run"], label="keypoint_run")
+    _require_profile_id(parsed["storage_profile_id"])
+    for field in (
+        "chunk_rows",
+        "angle_chunk_rows",
+        "angle_chunk_columns",
+        "output_shard_rows",
+        "angle_shard_columns",
+        "num_workers",
+        "shard_workers",
+        "native_threads",
+    ):
+        _require_positive_int(parsed[field], label=field)
+    if parsed["angle_chunk_columns"] < 3:
+        raise ValueError("angle_chunk_columns must preserve all three angle bundles")
+    if parsed["execution_backend"] != "serial_driver":
+        raise ValueError("eye-angle candidate execution_backend must be serial_driver")
+    if (
+        type(parsed["scheduler"]) is not str
+        or parsed["scheduler"] not in _EYE_SCHEDULERS
+    ):
+        raise ValueError("eye-angle scheduler is unsupported")
+    fps_source = parsed["fps_source"]
+    fps = parsed["fps"]
+    if fps_source == "authoritative_recording_metadata":
+        if fps is not None:
+            raise ValueError("metadata FPS selection requires fps=null")
+    elif fps_source == "explicit_override":
+        if (
+            type(fps) not in {int, float}
+            or not math.isfinite(float(fps))
+            or float(fps) <= 0
+        ):
+            raise ValueError("explicit FPS must be finite and positive")
+    else:
+        raise ValueError("eye-angle fps_source is unsupported")
+    smoothing = parsed["smoothing_window"]
+    if smoothing is not None:
+        _require_positive_int(smoothing, label="smoothing_window")
+    _require_copy_backend(parsed["copy_backend"])
+    _require_bool(parsed["keep_scratch"], label="keep_scratch")
+    _require_bool(parsed["check_capacity"], label="check_capacity")
+    return parsed
+
+
+_PARAMETER_VALIDATORS = {
+    CandidateInvocationContract.EXACT_TABULAR_V1: _require_exact_tabular,
+    CandidateInvocationContract.TRACK_FLAT_V1: _require_track_flat,
+    CandidateInvocationContract.EYE_ANGLES_V1: _require_eye_angles,
+}
+
+
+def candidate_invocation_contract_is_frozen(
+    value: CandidateInvocationContract | str,
+) -> bool:
+    """Return whether an executable exact parameter grammar exists."""
+
+    try:
+        contract = CandidateInvocationContract(value)
+    except (TypeError, ValueError):
+        return False
+    return contract in _PARAMETER_VALIDATORS
+
+
+def require_candidate_invocation_manifest(
+    value: Mapping[str, Any],
+    *,
+    expected_contract: CandidateInvocationContract | str | None = None,
+    expected_profile_id: str | None = None,
+) -> None:
+    """Deeply validate one invocation and optional adapter bindings."""
+
+    envelope = _require_exact_fields(
+        value,
+        {"schema_id", "schema_version", "payload", "payload_digest"},
+        label="candidate invocation envelope",
+    )
+    if (
+        envelope["schema_id"] != ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID
+        or type(envelope["schema_version"]) is not int
+        or envelope["schema_version"]
+        != ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION
+    ):
+        raise ValueError("candidate invocation schema identity differs")
+    payload = _require_exact_fields(
+        envelope["payload"],
+        {"contract_id", "parameters"},
+        label="candidate invocation payload",
+    )
+    _json_copy(value)
+    if envelope["payload_digest"] != canonical_json_sha256(payload):
+        raise ValueError("candidate invocation payload digest differs")
+    try:
+        contract = CandidateInvocationContract(payload["contract_id"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("candidate invocation contract is unsupported") from exc
+    validator = _PARAMETER_VALIDATORS.get(contract)
+    if validator is None:
+        raise ValueError("candidate invocation parameters are not yet frozen")
+    parameters = validator(payload["parameters"])
+    if expected_contract is not None:
+        try:
+            expected = CandidateInvocationContract(expected_contract)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected invocation contract is unsupported") from exc
+        if contract is not expected:
+            raise ValueError("candidate invocation contract differs from adapter")
+    if (
+        expected_profile_id is not None
+        and parameters["storage_profile_id"] != expected_profile_id
+    ):
+        raise ValueError("candidate invocation storage profile differs from adapter")
+
+
+def _build_invocation(
+    contract: CandidateInvocationContract,
+    parameters: Mapping[str, Any],
+) -> dict[str, object]:
+    payload = {
+        "contract_id": contract.value,
+        "parameters": _json_copy(parameters),
+    }
+    result = {
+        "schema_id": ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID,
+        "schema_version": ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION,
+        "payload": payload,
+        "payload_digest": canonical_json_sha256(payload),
+    }
+    require_candidate_invocation_manifest(result, expected_contract=contract)
+    return result
+
+
+def build_exact_tabular_invocation(
+    *,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.EXACT_TABULAR_V1,
+        {
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+        },
+    )
+
+
+def build_track_flat_invocation(
+    *,
+    source_motion_authority_sha256: str,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.TRACK_FLAT_V1,
+        {
+            "source_schema_id": "analysis.track_kinematics_runs",
+            "source_schema_version": 1,
+            "source_run_type": "offline",
+            "source_motion_authority_sha256": source_motion_authority_sha256,
+            "storage_profile_id": storage_profile_id,
+            "physical_bundle_mode": "excluded_from_flat_candidate_v1",
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+        },
+    )
+
+
+def build_eye_angle_invocation(
+    *,
+    subject_shape_run: str,
+    keypoint_run: str,
+    storage_profile_id: str,
+    chunk_rows: int,
+    angle_chunk_rows: int,
+    angle_chunk_columns: int,
+    output_shard_rows: int,
+    angle_shard_columns: int,
+    execution_backend: str,
+    scheduler: str,
+    num_workers: int,
+    shard_workers: int,
+    native_threads: int,
+    fps: float | None,
+    smoothing_window: int | None,
+    copy_backend: str,
+    keep_scratch: bool,
+    check_capacity: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.EYE_ANGLES_V1,
+        {
+            "subject_shape_run": subject_shape_run,
+            "keypoint_run": keypoint_run,
+            "storage_profile_id": storage_profile_id,
+            "chunk_rows": chunk_rows,
+            "angle_chunk_rows": angle_chunk_rows,
+            "angle_chunk_columns": angle_chunk_columns,
+            "output_shard_rows": output_shard_rows,
+            "angle_shard_columns": angle_shard_columns,
+            "execution_backend": execution_backend,
+            "scheduler": scheduler,
+            "num_workers": num_workers,
+            "shard_workers": shard_workers,
+            "native_threads": native_threads,
+            "fps_source": (
+                "authoritative_recording_metadata"
+                if fps is None
+                else "explicit_override"
+            ),
+            "fps": fps,
+            "smoothing_window": smoothing_window,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+            "check_capacity": check_capacity,
+        },
+    )
+
+
+__all__ = [
+    "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID",
+    "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION",
+    "CandidateInvocationContract",
+    "build_exact_tabular_invocation",
+    "build_eye_angle_invocation",
+    "build_track_flat_invocation",
+    "candidate_invocation_contract_is_frozen",
+    "require_candidate_invocation_manifest",
+]

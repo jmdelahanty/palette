@@ -100,6 +100,8 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         == (
             "analysis/chaser_distance_storage_candidates"
             if stage_id == "chaser_distance"
+            else "analysis/track_kinematics_runs/offline"
+            if stage_id == "track_kinematics"
             else contracts[stage_id]["run_parent"]
         )
         for stage_id, record in candidates.items()

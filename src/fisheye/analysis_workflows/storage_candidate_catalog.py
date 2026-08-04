@@ -168,6 +168,7 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
 ] = (
     _atomic_candidate(
         "track_kinematics",
+        run_parent="analysis/track_kinematics_runs/offline",
         profile_id="published_http_v1",
         owner_module=(
             "fisheye.analysis_workflows.materializers.track_kinematics_candidate"

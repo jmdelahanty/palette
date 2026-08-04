@@ -9,7 +9,6 @@ arguments.  Until a dedicated typed runner is installed, the descriptor stays
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from importlib import import_module
 from typing import Any
 
@@ -25,25 +24,14 @@ from .analysis_candidate_execution import (
     CoordinateContractStatus,
     require_candidate_execution_adapter_manifest,
 )
+from .analysis_candidate_invocation import (
+    CandidateInvocationContract,
+    candidate_invocation_contract_is_frozen,
+)
 from .storage_candidate_catalog import (
     DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE,
     StorageCandidatePublicationMode,
 )
-
-
-class CandidateInvocationContract(str, Enum):
-    """Closed typed call shapes; none permits an open kwargs payload."""
-
-    TRACK_FLAT_V1 = "track_flat_v1"
-    EXACT_TABULAR_V1 = "exact_tabular_v1"
-    EYE_ANGLES_V1 = "eye_angles_v1"
-    SUBJECT_SHAPE_V1 = "subject_shape_v1"
-    TAIL_KINEMATICS_V1 = "tail_kinematics_v1"
-    STIMULUS_RESPONSE_V1 = "stimulus_response_v1"
-    STIMULUS_EPOCHS_V1 = "stimulus_epochs_v1"
-    CHASER_DISTANCE_BASE_V1 = "chaser_distance_base_v1"
-    TAIL_POSTURE_DIRECT_V1 = "tail_posture_direct_v1"
-    BOUT_CLASSIFICATION_DIRECT_V1 = "bout_classification_direct_v1"
 
 
 @dataclass(frozen=True)
@@ -79,6 +67,12 @@ class AnalysisCandidateExecutionAdapter:
         if type(self.adapter_version) is not int or self.adapter_version < 1:
             raise ValueError("adapter_version must be one positive exact integer")
         if self.runner_status is CandidateRunnerStatus.IMPLEMENTED:
+            if not candidate_invocation_contract_is_frozen(
+                self.invocation_contract
+            ):
+                raise ValueError(
+                    "implemented adapters require one frozen invocation grammar"
+                )
             if (
                 not self.runner_module
                 or not self.runner_entrypoint

@@ -77,7 +77,7 @@ from fisheye.shared.zarr_io import open_zarr_root
 
 
 ATTEMPT_SCHEMA_ID = "palette.analysis_candidate_execution_attempt"
-ATTEMPT_SCHEMA_VERSION = 1
+ATTEMPT_SCHEMA_VERSION = 2
 RUNNER_REF = (
     "fisheye.diagnostics.analysis_candidate_execution:execute_exact_tabular_candidate"
 )
@@ -766,6 +766,7 @@ def require_exact_tabular_execution_attempt(
         raise ValueError("Execution-attempt envelope field set differs.")
     if (
         value["schema_id"] != ATTEMPT_SCHEMA_ID
+        or type(value["schema_version"]) is not int
         or value["schema_version"] != ATTEMPT_SCHEMA_VERSION
     ):
         raise ValueError("Execution-attempt schema identity differs.")
@@ -941,8 +942,6 @@ def execute_exact_tabular_candidate(
     request: Mapping[str, Any],
     *,
     driver_pid: int,
-    copy_backend: str = "python",
-    keep_scratch: bool = False,
 ) -> dict[str, Any]:
     """Execute scientific publication in one direct child.
 
@@ -954,6 +953,13 @@ def execute_exact_tabular_candidate(
     require_candidate_execution_request(request)
     payload = request["payload"]
     adapter = payload["adapter_manifest"]["payload"]
+    invocation = payload["invocation"]["payload"]
+    if invocation["contract_id"] != "exact_tabular_v1":
+        raise ValueError("Exact-tabular runner requires exact_tabular_v1 invocation.")
+    invocation_parameters = invocation["parameters"]
+    storage_profile_id = str(invocation_parameters["storage_profile_id"])
+    copy_backend = str(invocation_parameters["copy_backend"])
+    keep_scratch = bool(invocation_parameters["keep_scratch"])
     family = _family(str(adapter["stage_id"]))
     if adapter["computation_mode"] != "logical_rematerialization":
         raise ValueError("Exact-tabular runner requires logical rematerialization.")
@@ -1019,7 +1025,7 @@ def execute_exact_tabular_candidate(
         actual_receipt = build_exact_tabular_storage_receipt(
             source_group,
             declarations=candidate_declarations,
-            profile=get_storage_profile(str(adapter["profile_id"])),
+            profile=get_storage_profile(storage_profile_id),
         ).as_manifest()
         planned_receipt = payload["benchmark_suite"]["payload"]["storage_plan_receipt"]
         if actual_receipt != planned_receipt:
@@ -1080,7 +1086,7 @@ def execute_exact_tabular_candidate(
             source_run=source_name,
             run_name=candidate_name,
             scratch_root=payload["scratch_root"],
-            profile_id=str(adapter["profile_id"]),
+            profile_id=storage_profile_id,
             copy_backend=copy_backend,
             apply=True,
             keep_scratch=keep_scratch,
@@ -1250,8 +1256,6 @@ def run_exact_tabular_candidate_fresh_process(
     *,
     receipt_path: str | Path,
     attempt_path: str | Path,
-    copy_backend: str = "python",
-    keep_scratch: bool = False,
 ) -> dict[str, Any]:
     """Launch once, then observe protected after-state before exposing evidence."""
 
@@ -1308,11 +1312,7 @@ def run_exact_tabular_candidate_fresh_process(
         str(hidden_attempt),
         "--driver-pid",
         str(os.getpid()),
-        "--copy-backend",
-        copy_backend,
     ]
-    if keep_scratch:
-        command.append("--keep-scratch")
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
@@ -1505,8 +1505,6 @@ def _build_parser() -> argparse.ArgumentParser:
     child.add_argument("--receipt", type=Path, required=True)
     child.add_argument("--attempt", type=Path, required=True)
     child.add_argument("--driver-pid", type=int, required=True)
-    child.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
-    child.add_argument("--keep-scratch", action="store_true")
     return parser
 
 
@@ -1517,8 +1515,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         receipt = execute_exact_tabular_candidate(
             request,
             driver_pid=args.driver_pid,
-            copy_backend=args.copy_backend,
-            keep_scratch=args.keep_scratch,
         )
     except ExactTabularCandidateExecutionFailed as exc:
         _write_json_exclusive(args.attempt.resolve(), exc.attempt)
