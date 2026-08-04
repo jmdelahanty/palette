@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from .import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from .json_safety import json_attr_safe_mapping, strict_json_dumps
@@ -194,6 +194,10 @@ def build_experiment_setup_record(
             raise ExperimentSetupError("Experiment setup source requires kind")
         if not str(source_record.get("count_field") or "").strip():
             raise ExperimentSetupError("Experiment setup source requires count_field")
+        if source_h5_path is not None:
+            raise ExperimentSetupError(
+                "source_h5_path cannot be combined with an explicit setup source"
+            )
 
     population = _positive_int(
         metadata.get("source_dish_population_count", metadata.get("fish_count")),
@@ -227,11 +231,12 @@ def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> di
         )
     if _coerce_int(canonical.get("schema_version")) != EXPERIMENT_SETUP_SCHEMA_VERSION:
         raise ValueError("Experiment setup has unsupported schema_version")
-    _positive_int(
+    expected = _positive_int(
         canonical.get("expected_subject_count"),
         field="expected_subject_count",
         required=True,
     )
+    assert expected is not None
     subject_ref = str(canonical.get("subject_metadata_ref") or "")
     if not subject_ref.startswith("analysis/subject_metadata_runs/"):
         raise ExperimentSetupError("Experiment setup has no canonical subject-metadata reference")
@@ -240,19 +245,41 @@ def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> di
         character not in "0123456789abcdef" for character in subject_digest.lower()
     ):
         raise ExperimentSetupError("Experiment setup has no valid subject-metadata digest")
-    for field in (
-        "expected_arena_count",
-        "expected_subjects_per_arena",
-        "assigned_subject_count",
-        "source_dish_population_count",
-    ):
-        _positive_int(canonical.get(field), field=field, required=False)
     actual = experiment_setup_sha256(canonical)
     if digest is not None and str(digest) != actual:
         raise ValueError(
             "Experiment setup digest mismatch: "
             f"stored={digest!r}, computed={actual!r}"
         )
+    normalized_counts: dict[str, int | None] = {}
+    for field in (
+        "expected_arena_count",
+        "expected_subjects_per_arena",
+        "assigned_subject_count",
+        "source_dish_population_count",
+    ):
+        normalized_counts[field] = _positive_int(
+            canonical.get(field), field=field, required=False
+        )
+    assigned = normalized_counts["assigned_subject_count"]
+    if assigned is not None and assigned > expected:
+        raise ExperimentSetupError(
+            "assigned_subject_count cannot exceed expected_subject_count"
+        )
+    expected_status = (
+        "explicit"
+        if assigned == expected
+        else ("partial" if assigned is not None else "count_only")
+    )
+    if canonical.get("subject_assignment_status") != expected_status:
+        raise ExperimentSetupError(
+            "subject_assignment_status is inconsistent with assigned and expected counts"
+        )
+    source_record = canonical.get("source")
+    if not isinstance(source_record, Mapping) or not str(
+        source_record.get("kind") or ""
+    ).strip():
+        raise ExperimentSetupError("Experiment setup source.kind is required")
     return canonical
 
 
@@ -262,7 +289,9 @@ def publish_experiment_setup(
     *,
     source_h5_path: str | Path | None = None,
     source_artifact: Mapping[str, Any] | None = None,
-    provenance_command: str = "import_recording_analysis:publish_experiment_setup",
+    provenance_command: str | None = None,
+    provenance_params: Mapping[str, Any] | None = None,
+    provenance_input_artifacts: Sequence[Mapping[str, Any]] | None = None,
 ) -> ResolvedExperimentSetup:
     """Idempotently publish and select one immutable setup run."""
 
@@ -315,32 +344,38 @@ def publish_experiment_setup(
     if validated != canonical:
         raise ValueError("Experiment setup did not round-trip through Zarr attrs")
     run.attrs["stage_selector_eligible"] = True
-    if source_artifact is not None:
-        input_artifacts = [json_attr_safe_mapping(source_artifact)]
-    else:
-        source_fingerprint = None
-        if source_h5_path is not None:
-            source_fingerprint = optional_source_stat_fingerprint_attrs(
-                source_h5_path,
-                attr_prefix="source_h5",
-            ).get("source_h5_fingerprint")
-        input_artifacts = [
+    source_fingerprint = None
+    if source_h5_path is not None:
+        source_fingerprint = optional_source_stat_fingerprint_attrs(
+            source_h5_path,
+            attr_prefix="source_h5",
+        ).get("source_h5_fingerprint")
+    input_artifacts = list(provenance_input_artifacts or [])
+    if source_h5_path is not None:
+        input_artifacts.append(
             {
                 "kind": "source_h5",
-                "path": str(source_h5_path) if source_h5_path is not None else None,
+                "path": str(source_h5_path),
                 "stat_fingerprint": source_fingerprint,
             }
-        ]
+        )
+    if source_artifact is not None:
+        input_artifacts.append(json_attr_safe_mapping(source_artifact))
+    params = {
+        "schema_id": EXPERIMENT_SETUP_SCHEMA_ID,
+        "record_sha256": digest,
+        **dict(provenance_params or {}),
+    }
     mark_run_complete(
         run,
         parent_group=parent,
         run_name=run_name,
         run_provenance=build_writer_run_provenance(
-            command=provenance_command,
-            params={
-                "schema_id": EXPERIMENT_SETUP_SCHEMA_ID,
-                "record_sha256": digest,
-            },
+            command=(
+                provenance_command
+                or "import_recording_analysis:publish_experiment_setup"
+            ),
+            params=params,
             input_run_ids={},
             input_artifacts=input_artifacts,
         ),

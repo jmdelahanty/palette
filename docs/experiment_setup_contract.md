@@ -65,6 +65,30 @@ second import of identical metadata is idempotent. Changed source metadata is
 published as a new immutable version; an existing digest-addressed run whose
 stored content does not match its digest fails closed.
 
+## Count-only recordings
+
+A recording can have a known expected subject count without any known
+biological subject identities. This is a first-class state, including when the
+expected count is greater than one:
+
+- the subject metadata record has normalized `subject_ids=[]`,
+  `subject_identity_kind="none"`, and no `fish_id`/`subject_id` fields;
+- the setup has `expected_subject_count=N`, `assigned_subject_count=null`, and
+  `subject_assignment_status="count_only"`;
+- no `subjects` or `recording_subjects` rows are manufactured; and
+- instances and run-local `track_id` values remain observations and temporal
+  associations. They do not fill the missing biological identity.
+
+Species, DPF, genotype, and similar cohort facts may still be asserted as
+recording context. `dataset_context_current` exposes those values through the
+`*_effective` columns and labels the identity state `count_only`, while the
+explicit identity columns remain null. Cohort filtering may use effective DPF;
+identity-coverage checks must continue to require explicit subject membership.
+
+For a manual assertion, the selected immutable record contains the reviewer,
+reason, assertion kind, and digest-bound evidence. The setup source is
+`manual_operator_assertion`, never a fictitious H5 source.
+
 ## Stimulus runs
 
 Stimulus runs own protocol definitions, stimulus/chaser timing, frame metadata,
@@ -125,6 +149,46 @@ scripts/py -m fisheye.utils.backfill_subject_experiment_setup \
   --backup /path/to/palette_registry.pre-subject-setup.sqlite \
   --output /tmp/batman-subject-setup-apply.json
 ```
+
+This H5 command deliberately skips missing explicit identity. A missing
+`/subject_metadata` group is not silently converted to manual evidence.
+
+## Recording-local placeholder migration
+
+The retired `backfill_subject_context` command historically converted a count
+into names such as `<recording_id>:subject_0`. Those values have
+`identity_scope=recording_local_placeholder`; they are not biological subjects.
+Its CLI no longer permits apply.
+
+`fisheye.utils.migrate_count_only_subject_context` converts that exact legacy
+case. It compares the scientific fields across all active source-recording
+analysis/training siblings, blocks disagreement, and produces a digest-bound
+dry-run plan. Apply requires the unchanged plan and a new registry backup. It
+publishes the identity-free authority on the canonical analysis Zarr, refreshes
+all sibling registry projections, and deletes only placeholder rows whose
+metadata digests still match the reviewed plan. A failure after the first
+publication is recoverable by replaying the same plan; the tool never edits a
+completed run.
+
+```bash
+scripts/py -m fisheye.utils.migrate_count_only_subject_context \
+  --registry /path/to/palette_registry.sqlite \
+  --all-placeholders \
+  --reviewer jeremy \
+  --reason "Known recording count; biological identities were never captured" \
+  --output /tmp/count-only-plan.json
+
+scripts/py -m fisheye.utils.migrate_count_only_subject_context \
+  --registry /path/to/palette_registry.sqlite \
+  --apply-plan /tmp/count-only-plan.json \
+  --backup /path/to/palette_registry.pre-count-only.sqlite \
+  --output /tmp/count-only-apply.json
+```
+
+This workflow is not a biological-ID correction. It removes an identity claim
+that was never supported. Replacing one known subject UUID with another remains
+governed by `subject_metadata_identity_corrections.md` and its stricter paired
+activation boundary.
 
 ## Production gates
 

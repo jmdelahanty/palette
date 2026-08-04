@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from uuid import UUID
 
 import h5py
@@ -167,7 +167,9 @@ def publish_subject_metadata(
     *,
     source_h5_path: str | Path | None = None,
     source_artifact: Mapping[str, Any] | None = None,
-    provenance_command: str = "import_recording_analysis:publish_subject_metadata",
+    provenance_command: str | None = None,
+    provenance_params: Mapping[str, Any] | None = None,
+    provenance_input_artifacts: Sequence[Mapping[str, Any]] | None = None,
 ) -> ResolvedSubjectMetadata:
     """Idempotently publish and select an immutable subject snapshot."""
 
@@ -215,29 +217,38 @@ def publish_subject_metadata(
         str(run.attrs[SUBJECT_METADATA_SHA256_ATTR]),
     )
     run.attrs["stage_selector_eligible"] = True
-    if source_artifact is not None:
-        input_artifacts = [json_attr_safe_mapping(source_artifact)]
-    else:
-        fingerprint = None
-        if source_h5_path is not None:
-            fingerprint = optional_source_stat_fingerprint_attrs(
-                source_h5_path,
-                attr_prefix="source_h5",
-            ).get("source_h5_fingerprint")
-        input_artifacts = [
+    fingerprint = None
+    if source_h5_path is not None:
+        fingerprint = optional_source_stat_fingerprint_attrs(
+            source_h5_path,
+            attr_prefix="source_h5",
+        ).get("source_h5_fingerprint")
+    input_artifacts = list(provenance_input_artifacts or [])
+    if source_h5_path is not None:
+        input_artifacts.append(
             {
                 "kind": "source_h5",
-                "path": str(source_h5_path) if source_h5_path is not None else None,
+                "path": str(source_h5_path),
                 "stat_fingerprint": fingerprint,
             }
-        ]
+        )
+    if source_artifact is not None:
+        input_artifacts.append(json_attr_safe_mapping(source_artifact))
+    params = {
+        "schema_id": SUBJECT_METADATA_SCHEMA_ID,
+        "record_sha256": digest,
+        **dict(provenance_params or {}),
+    }
     mark_run_complete(
         run,
         parent_group=parent,
         run_name=run_name,
         run_provenance=build_writer_run_provenance(
-            command=provenance_command,
-            params={"schema_id": SUBJECT_METADATA_SCHEMA_ID, "record_sha256": digest},
+            command=(
+                provenance_command
+                or "import_recording_analysis:publish_subject_metadata"
+            ),
+            params=params,
             input_run_ids={},
             input_artifacts=input_artifacts,
         ),

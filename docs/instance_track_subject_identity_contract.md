@@ -174,6 +174,14 @@ tracking method or rematerializing against a changed rowset creates a new run.
 
 ## Subject And Appearance Boundary
 
+An expected subject count is not an identity namespace. A recording with
+`expected_subject_count=N` and no known biological IDs remains valid
+`count_only` context: detections receive `instance_key`, tracking may produce up
+to N or more run-local `track_id` hypotheses, and `recording_subjects` remains
+empty. Neither row count nor a stable track is permission to synthesize
+`subject_id`. This is the intended starting point for future multi-subject
+recordings whose animals were not individually identified at acquisition.
+
 The future authoritative biological linkage should be a revisioned
 `subject_identity_runs/<run>` mapping track segments to optional subjects, with
 status, confidence, reviewer, and evidence. The registry projects that surface.

@@ -1,8 +1,9 @@
-"""Backfill recording subject context into Zarr metadata and the registry.
+"""Historical recording-local placeholder subject-context backfill.
 
-This utility is intentionally narrow. It repairs archives where the biological
-subject context is known after import by writing the Zarr metadata mirror and
-the normalized registry subject rows in one apply-gated operation.
+The apply CLI is retired because a known count is not evidence of biological
+identity. The module remains importable to characterize historical archives
+and support migration tests; use ``migrate_count_only_subject_context`` to
+replace existing placeholders with identity-free authority.
 """
 
 from __future__ import annotations
@@ -938,6 +939,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.apply:
+        parser.error(
+            "--apply is retired because recording-local placeholder IDs are not "
+            "biological identity; use fisheye.utils.migrate_count_only_subject_context"
+        )
     if args.subject_count < 1:
         parser.error("--subject-count must be >= 1")
     targets = load_targets_from_registry(

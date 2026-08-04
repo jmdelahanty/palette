@@ -2,9 +2,27 @@ import json
 from pathlib import Path
 
 import h5py
+import pytest
 
 from fisheye.registry.db import Registry
 from fisheye.utils import backfill_subject_context as backfill
+
+
+def test_legacy_placeholder_cli_refuses_new_apply(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        backfill.main(
+            [
+                "--registry",
+                str(tmp_path / "registry.sqlite"),
+                "--species",
+                "Danionella cerebrum",
+                "--apply",
+            ]
+        )
+    assert exc_info.value.code == 2
+    assert "--apply is retired" in capsys.readouterr().err
 
 
 def _write_group(path: Path, attrs: dict | None = None) -> None:

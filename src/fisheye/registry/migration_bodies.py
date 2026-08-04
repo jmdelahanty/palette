@@ -6392,6 +6392,9 @@ class RegistryMigrationMixin:
                 COALESCE(rss.subject_count_recorded, p.subject_count) AS subject_count_effective,
                 CASE
                     WHEN rss.recording_id IS NOT NULL THEN 'normalized'
+                    WHEN p.subject_count IS NOT NULL
+                         AND NULLIF(TRIM(p.fish_id), '') IS NULL
+                    THEN 'count_only'
                     WHEN (
                         NULLIF(TRIM(p.fish_id), '') IS NOT NULL
                         OR NULLIF(TRIM(p.dish_id), '') IS NOT NULL
@@ -6402,6 +6405,16 @@ class RegistryMigrationMixin:
                     ) THEN 'legacy_provenance'
                     ELSE 'missing'
                 END AS subject_context_source,
+                CASE
+                    WHEN rss.recording_id IS NOT NULL
+                         AND p.subject_count IS NOT NULL
+                         AND rss.subject_count_recorded < p.subject_count
+                    THEN 'partial'
+                    WHEN rss.recording_id IS NOT NULL THEN 'explicit'
+                    WHEN NULLIF(TRIM(p.fish_id), '') IS NOT NULL THEN 'legacy_explicit'
+                    WHEN p.subject_count IS NOT NULL THEN 'count_only'
+                    ELSE 'missing'
+                END AS subject_identity_status,
                 NULLIF(TRIM(p.fish_id), '') AS legacy_fish_id,
                 NULLIF(TRIM(p.dish_id), '') AS legacy_dish_id,
                 NULLIF(TRIM(p.cross_id), '') AS legacy_cross_id,
@@ -6418,6 +6431,41 @@ class RegistryMigrationMixin:
                 rss.species AS species,
                 rss.sex AS sex,
                 rss.dpf_at_acquisition AS dpf_at_acquisition,
+                CASE
+                    WHEN rss.recording_id IS NOT NULL THEN rss.genotype
+                    WHEN p.subject_count IS NOT NULL
+                         AND NULLIF(TRIM(p.fish_id), '') IS NULL
+                    THEN NULLIF(TRIM(p.genotype), '')
+                    ELSE NULL
+                END AS genotype_effective,
+                CASE
+                    WHEN rss.recording_id IS NOT NULL THEN rss.line_strain
+                    WHEN p.subject_count IS NOT NULL
+                         AND NULLIF(TRIM(p.fish_id), '') IS NULL
+                    THEN NULLIF(TRIM(p.line_strain), '')
+                    ELSE NULL
+                END AS line_strain_effective,
+                CASE
+                    WHEN rss.recording_id IS NOT NULL THEN rss.species
+                    WHEN p.subject_count IS NOT NULL
+                         AND NULLIF(TRIM(p.fish_id), '') IS NULL
+                    THEN NULLIF(TRIM(p.species), '')
+                    ELSE NULL
+                END AS species_effective,
+                CASE
+                    WHEN rss.recording_id IS NOT NULL THEN rss.sex
+                    WHEN p.subject_count IS NOT NULL
+                         AND NULLIF(TRIM(p.fish_id), '') IS NULL
+                    THEN NULLIF(TRIM(p.sex), '')
+                    ELSE NULL
+                END AS sex_effective,
+                CASE
+                    WHEN rss.recording_id IS NOT NULL THEN rss.dpf_at_acquisition
+                    WHEN p.subject_count IS NOT NULL
+                         AND NULLIF(TRIM(p.fish_id), '') IS NULL
+                    THEN p.dpf_at_acquisition
+                    ELSE NULL
+                END AS dpf_at_acquisition_effective,
                 rss.subject_ids_json AS subject_ids_json,
                 rss.dish_ids_json AS dish_ids_json,
                 rss.cross_ids_json AS cross_ids_json,
@@ -8137,3 +8185,8 @@ class RegistryMigrationMixin:
         self.conn.execute("DROP VIEW IF EXISTS recording_subject_trait_resolved;")
         self._migration_063_recording_subject_traits()
         self._migration_064_strain_trait_expectations()
+
+    def _migration_066_count_only_subject_context(self) -> None:
+        """Expose anonymous subject counts without implying biological identity."""
+
+        self._migration_034_dataset_context_current_view()

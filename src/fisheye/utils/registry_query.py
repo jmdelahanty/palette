@@ -926,7 +926,8 @@ def _query_dataset_ids_by_subject_lineage(
     sql = [
         "SELECT DISTINCT d.dataset_id",
         "FROM datasets d",
-        "JOIN recording_subject_overview rso ON rso.recording_id = d.recording_id",
+        "LEFT JOIN recording_subject_overview rso ON rso.recording_id = d.recording_id",
+        "JOIN dataset_context_current dcc ON dcc.dataset_id = d.dataset_id",
         "WHERE 1=1",
     ]
     params: list[object] = []
@@ -937,14 +938,23 @@ def _query_dataset_ids_by_subject_lineage(
         sql.append("AND rso.genotype = ?")
         params.append(str(genotype))
     if dpf is not None:
-        sql.append("AND rso.dpf_at_acquisition = ?")
-        params.append(int(dpf))
+        sql.append(
+            "AND (rso.dpf_at_acquisition = ? OR "
+            "(rso.recording_id IS NULL AND dcc.dpf_at_acquisition_effective = ?))"
+        )
+        params.extend([int(dpf), int(dpf)])
     if dpf_min is not None:
-        sql.append("AND rso.dpf_at_acquisition >= ?")
-        params.append(int(dpf_min))
+        sql.append(
+            "AND (rso.dpf_at_acquisition >= ? OR "
+            "(rso.recording_id IS NULL AND dcc.dpf_at_acquisition_effective >= ?))"
+        )
+        params.extend([int(dpf_min), int(dpf_min)])
     if dpf_max is not None:
-        sql.append("AND rso.dpf_at_acquisition <= ?")
-        params.append(int(dpf_max))
+        sql.append(
+            "AND (rso.dpf_at_acquisition <= ? OR "
+            "(rso.recording_id IS NULL AND dcc.dpf_at_acquisition_effective <= ?))"
+        )
+        params.extend([int(dpf_max), int(dpf_max)])
     rows = registry.conn.execute(" ".join(sql), params).fetchall()
     return {
         str(row["dataset_id"])
@@ -2064,8 +2074,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             except Exception as exc:
                 raise SystemExit(
-                    "Subject-lineage filters (--cross-id/--genotype/--dpf/--dpf-min/--dpf-max) require "
-                    f"`recording_subject_overview` to be queryable: {exc}"
+                    "Subject context/lineage filters "
+                    "(--cross-id/--genotype/--dpf/--dpf-min/--dpf-max) require "
+                    "`recording_subject_overview` and `dataset_context_current` "
+                    f"to be queryable: {exc}"
                 ) from exc
             rows = [
                 row

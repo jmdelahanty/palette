@@ -180,3 +180,41 @@ def test_registry_query_fish_id_uses_legacy_provenance_alias_when_normalized_sub
     assert rows[0]["cross_id"] is None
     assert rows[0]["genotype"] is None
     assert rows[0]["dpf_at_acquisition"] is None
+
+
+def test_registry_query_dpf_uses_identity_free_count_only_context(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        registry.upsert_dataset(
+            dataset_id="dataset_count_only",
+            session_uuid="session_count_only",
+            zarr_path=tmp_path / "dataset_count_only.zarr",
+            recording_id="recording_count_only",
+            artifact_kind="source_recording",
+        )
+        registry.upsert_provenance(
+            "dataset_count_only",
+            provenance={
+                "subject_count": 2,
+                "dpf_at_acquisition": 7,
+                "species": "Danionella cerebrum",
+            },
+            context={},
+            protocol_name=None,
+            protocol_hash=None,
+            acquisition={},
+            zarr_purpose="analysis",
+        )
+        registry.conn.commit()
+
+        args = _parse_args(["--dpf", "7", "--limit", "0"])
+        query, params = _build_query(args)
+        rows = registry.conn.execute(query, params).fetchall()
+    finally:
+        registry.close()
+
+    assert [str(row["dataset_id"]) for row in rows] == ["dataset_count_only"]
+    assert rows[0]["fish_id"] is None
+    assert int(rows[0]["dpf_at_acquisition"]) == 7

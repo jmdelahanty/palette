@@ -131,7 +131,7 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         "COALESCE(dcc.subject_id, dcc.legacy_fish_id) AS fish_id",
         "dcc.line_strain",
         "dcc.genotype",
-        "dcc.dpf_at_acquisition",
+        "dcc.dpf_at_acquisition_effective AS dpf_at_acquisition",
         "dcc.protocol_name",
         "dcc.protocol_hash",
         "dcc.experiment_context_status",
@@ -256,21 +256,21 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
 
     if args.dpf is not None:
         add_exact_or_json_membership(
-            scalar_column="dcc.dpf_at_acquisition",
+            scalar_column="dcc.dpf_at_acquisition_effective",
             json_column="dcc.dpf_values_json",
             value=args.dpf,
             cast_type="INTEGER",
         )
     if args.dpf_min is not None:
         add_numeric_or_json_range(
-            scalar_column="dcc.dpf_at_acquisition",
+            scalar_column="dcc.dpf_at_acquisition_effective",
             json_column="dcc.dpf_values_json",
             operator=">=",
             value=args.dpf_min,
         )
     if args.dpf_max is not None:
         add_numeric_or_json_range(
-            scalar_column="dcc.dpf_at_acquisition",
+            scalar_column="dcc.dpf_at_acquisition_effective",
             json_column="dcc.dpf_values_json",
             operator="<=",
             value=args.dpf_max,
@@ -282,13 +282,14 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
     if provenance_mode == "complete":
         sql.append("AND dcc.snapshot_status = 'complete'")
         sql.append("AND dcc.protocol_hash IS NOT NULL AND dcc.protocol_hash != ''")
-        sql.append("AND dcc.dpf_at_acquisition IS NOT NULL")
+        sql.append("AND dcc.dpf_at_acquisition_effective IS NOT NULL")
     elif provenance_mode == "partial":
         sql.append("AND dcc.snapshot_status = 'partial'")
     elif provenance_mode == "missing":
         sql.append(
             "AND (p.dataset_id IS NULL OR dcc.snapshot_status IS NULL OR dcc.snapshot_status = '' "
-            "OR dcc.protocol_hash IS NULL OR dcc.protocol_hash = '' OR dcc.dpf_at_acquisition IS NULL)"
+            "OR dcc.protocol_hash IS NULL OR dcc.protocol_hash = '' "
+            "OR dcc.dpf_at_acquisition_effective IS NULL)"
         )
 
     if args.rig_id:

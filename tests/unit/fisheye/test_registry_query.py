@@ -1976,6 +1976,52 @@ def test_registry_query_filters_by_dpf_range(tmp_path: Path, capsys) -> None:
     assert dataset_ids == {"dataset_b"}
 
 
+def test_registry_query_dpf_filter_includes_count_only_recording_context(
+    tmp_path: Path, capsys
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry = Registry(registry_path)
+    registry.upsert_dataset(
+        "dataset_count_only",
+        session_uuid="session_count_only",
+        zarr_path=tmp_path / "count_only.zarr",
+        recording_id="recording_count_only",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_count_only",
+        provenance={
+            "subject_count": 3,
+            "dpf_at_acquisition": 7,
+            "species": "Danionella cerebrum",
+        },
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    registry.close()
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--dpf",
+            "7",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["dataset_id"] for row in payload] == ["dataset_count_only"]
+    assert payload[0]["subject_identity_status"] == "count_only"
+    assert int(payload[0]["dpf_at_acquisition"]) == 7
+    assert payload[0]["species"] == "Danionella cerebrum"
+
+
 def test_registry_query_rejects_invalid_dpf_range(tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry_for_subject_filters(registry_path)

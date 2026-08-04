@@ -80,6 +80,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
     (63, "recording_subject_traits", "_migration_063_recording_subject_traits"),
     (64, "strain_trait_expectations", "_migration_064_strain_trait_expectations"),
     (65, "subject_trait_schema_reconcile", "_migration_065_subject_trait_schema_reconcile"),
+    (66, "count_only_subject_context", "_migration_066_count_only_subject_context"),
 )
 
 

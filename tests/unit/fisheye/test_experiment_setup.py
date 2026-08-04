@@ -70,6 +70,24 @@ def test_setup_separates_recording_count_from_source_dish_population() -> None:
     assert record["setup_type"] == "single_subject_single_arena"
 
 
+def test_setup_models_multiple_anonymous_subjects_as_count_only() -> None:
+    record = build_experiment_setup_record(
+        {"subject_count": 3, "species": "Danionella cerebrum"},
+        source={
+            "kind": "manual_operator_assertion",
+            "count_field": "subject_count",
+        },
+        subject_metadata_ref="analysis/subject_metadata_runs/subject_metadata_test",
+        subject_metadata_sha256="a" * 64,
+    )
+
+    assert record["expected_subject_count"] == 3
+    assert record["assigned_subject_count"] is None
+    assert record["subject_assignment_status"] == "count_only"
+    assert record["setup_type"] == "multi_subject_single_arena"
+    assert record["source"]["kind"] == "manual_operator_assertion"
+
+
 def test_publish_resolve_is_idempotent_and_rejects_explicit_contradiction(
     tmp_path: Path,
 ) -> None:

@@ -1083,8 +1083,12 @@ def _extract_provenance(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {}
     dish = snapshot.get("dish") or snapshot
     cross = snapshot.get("cross") or {}
+    identity_is_placeholder = (
+        str(snapshot.get("identity_scope") or "").strip().casefold()
+        == "recording_local_placeholder"
+    )
     return {
-        "fish_id": snapshot.get("fish_id"),
+        "fish_id": None if identity_is_placeholder else snapshot.get("fish_id"),
         "subject_count": snapshot.get("subject_count"),
         "dish_id": snapshot.get("dish_id") or dish.get("dish_id"),
         "cross_id": dish.get("cross_id") or cross.get("cross_id"),
@@ -3140,6 +3144,11 @@ class Registry(RegistryAnalyticsReportMixin, RegistryMigrationMixin):
 
         if not recording_id or not snapshot:
             return
+        if (
+            str(snapshot.get("identity_scope") or "").strip().casefold()
+            == "recording_local_placeholder"
+        ):
+            return
         raw_ids = snapshot.get("subject_ids") or snapshot.get("fish_ids")
         if isinstance(raw_ids, (list, tuple)):
             subject_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
@@ -3149,6 +3158,12 @@ class Registry(RegistryAnalyticsReportMixin, RegistryMigrationMixin):
         subject_ids = list(dict.fromkeys(subject_ids))
         if not subject_ids:
             return
+        recording_row = self.conn.execute(
+            "SELECT 1 FROM recordings WHERE recording_id = ? LIMIT 1",
+            (recording_id,),
+        ).fetchone()
+        if recording_row is None:
+            self.upsert_recording(recording_id=recording_id)
         subject_count = _as_int(snapshot.get("subject_count"))
         if subject_count is not None and len(subject_ids) > subject_count:
             raise ValueError(
@@ -8929,8 +8944,11 @@ class Registry(RegistryAnalyticsReportMixin, RegistryMigrationMixin):
             "dcc.dish_design, COALESCE(dcc.subject_id, dcc.legacy_fish_id) AS fish_id, dcc.subject_id AS subject_id,",
             "dcc.subject_count_effective AS subject_count,",
             "dcc.subject_count_snapshot, dcc.subject_count_recorded, dcc.subject_context_source,",
+            "dcc.subject_identity_status,",
             "dcc.fps, dcc.exposure, dcc.exposure_unit, dcc.frame_rate, dcc.gain,",
-            "dcc.cross_id, dcc.genotype, dcc.line_strain, dcc.species, dcc.sex, dcc.dpf_at_acquisition,",
+            "dcc.cross_id, dcc.genotype_effective AS genotype,",
+            "dcc.line_strain_effective AS line_strain, dcc.species_effective AS species,",
+            "dcc.sex_effective AS sex, dcc.dpf_at_acquisition_effective AS dpf_at_acquisition,",
             "dcc.protocol_name, dcc.protocol_hash,",
             "dcc.video_codec, dcc.video_pix_fmt, p.format_title, p.format_comment, p.format_encoder,",
             "p.encoder_name, p.encoder_codec, p.encoder_preset, p.encoder_tuning, p.encoder_rc,",
