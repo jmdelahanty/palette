@@ -455,7 +455,15 @@ def _require_suite_matches_adapter(
     validator = getattr(import_module(module_name), entrypoint, None)
     if not callable(validator):
         raise ValueError("execution adapter suite validator is not callable")
-    validator(str(adapter["stage_id"]), benchmark_suite)
+    stage_id = str(adapter["stage_id"])
+    validator(stage_id, benchmark_suite)
+
+    # Family validation proves the live logical inventory.  The shared audit
+    # then proves that every observed array uses the byte planner, registered
+    # Zarr-v3 codec policy, complete access units, and explicit object estimates.
+    from .analysis_array_policy_audit import require_analysis_array_policy_suite
+
+    require_analysis_array_policy_suite(stage_id, benchmark_suite)
 
 
 def _require_immediate_run_child(

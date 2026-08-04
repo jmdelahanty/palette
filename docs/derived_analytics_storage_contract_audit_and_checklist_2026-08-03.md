@@ -136,7 +136,7 @@ true.
 
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
-| Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract; the v2 candidate flattens the two structured lineage records into five exact primitive arrays while retaining float64 position authority. A hardened fresh-process v1-source/v2-candidate matrix exercises the complete no-physical logical surface through the public v1 reader and an explicit diagnostic-only v2 adapter, with live workload replay and hard nonpromotion | Run representative short/full matrices with physical-I/O tracing and real consumers; benchmark the optional 35-array physical bundle separately before any writer/profile promotion |
+| Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract; the v2 candidate flattens the two structured lineage records into five exact primitive arrays while retaining canonical float32 position authority. Explicit legacy float64 coordinate sources remain compatibility-only and fail the maintained candidate binder. A hardened fresh-process v1-source/v2-candidate matrix exercises the complete no-physical logical surface through the public v1 reader and an explicit diagnostic-only v2 adapter, with live workload replay and hard nonpromotion | Run representative short/full matrices with physical-I/O tracing and real consumers; benchmark the optional 35-array physical bundle separately before any writer/profile promotion |
 | Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, producer-sealed source binding, lineage, atomic publication, strict reload, serialized registry projection, an explicit selector-ineligible byte-planned candidate, a hardened source/candidate read matrix, and a real fresh-process typed execution gate that recomputes from its bound refined-mask authority and emits one immutable receipt or failed attempt | Run representative publication, physical-I/O, Palette-consumer, and Crimson-consumer gates before any profile promotion |
 | Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, an explicit selector-ineligible byte-planned candidate, and a real fresh-process typed execution gate that binds both source coordinate manifests and preserves the complete optional revision bundle atomically | Run full-duration producer/reader benchmarks before profile promotion; replace the pathological two-row-chunk 20,000-row regression fixture with a bounded representation of the same invariant |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an atomic selector-ineligible byte-planned candidate with exact failure-visibility repair. Its hardened fresh-process source/candidate read matrix now binds all logical-input roles to exact nested authorities, validates all 41 arrays and physical declarations, and leaves the private candidate adapter explicitly non-authoritative | Run the five-repetition full-duration matrix, add physical-I/O tracing if required, and gate real Palette/Crimson consumers before profile promotion |
@@ -478,6 +478,16 @@ now implemented on the coordination branch:
   scratch path remain opt-in. Focused publisher tests passed 9/9; a combined
   231-test matrix found only the stale LSF export-root allowlist, which was
   corrected and then passed for all four implemented export targets.
+- a shared executable array-policy audit behind every maintained candidate
+  adapter. Each family validator first proves its exact live inventory; the
+  common gate then requires fixed-width logical declarations, byte-planner
+  adoption, complete access units, the exact Zarr-v3/Zstd/CRC32C codec profile,
+  valid inner-chunk/shard geometry, whole-shard ownership, object estimates,
+  and one full-scan workload per array. The focused shared matrix passed 52/52.
+  A broader family matrix passed 68/70; its two failures are one pre-existing
+  legacy canonical-v2 float64 track fixture that the maintained float32 schema
+  correctly rejects before candidate execution. No compatibility contract was
+  weakened. See `docs/analytics_array_policy_audit_2026-08-04.md`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. A later independent adversarial review
@@ -589,8 +599,11 @@ a v3 storage-candidate regression.
 
 - [x] Introduce or reuse one exact analytics stage-schema representation that
       binds concrete paths to versioned `ArrayContract` identities.
-- [ ] Require exact dtype, axes, shape, units, coordinates, null/fill semantics,
+- [x] Require exact dtype, axes, shape, units, coordinates, null/fill semantics,
       access class, mutability, and authority role for every array.
+      Family validators own exact inventory and family semantics; the shared
+      execution audit rebuilds and checks these fields for every observed
+      candidate array before execution.
 - [x] Freeze a new opt-in compact stimulus-response v3 schema with 19 exact
       tables, up to 310 unique arrays, fixed dtypes/string widths, and closed
       required/all-or-none optional bundles.
@@ -751,17 +764,24 @@ are frozen in `docs/chaser_component_publication_contract_v1.md`.
       to the declared growth axis, and emits a digest-bound plan and object
       estimate. This is infrastructure only; no production profile or writer
       is promoted by its existence.
-- [ ] Define an `ArrayIntent` for every maintained analytics array.
-- [ ] Classify access as eager, windowed, per-row, indexed, bulk-scan, or
+- [x] Define an `ArrayIntent` for every maintained analytics array.
+- [x] Classify access as eager, windowed, per-row, indexed, bulk-scan, or
       artifact-byte-stream.
-- [ ] Classify write mode as immutable, append/whole-shard-owned, or editable.
-- [ ] Derive chunks from dtype and per-row/per-unit shape, not a universal row
+      The executable Zarr classes are eager, windowed, per-row, and indexed;
+      bulk scan is a required workload for every array, while artifact byte
+      streams remain explicitly outside the Zarr `ArrayIntent` surface.
+- [x] Classify write mode as immutable, append/whole-shard-owned, or editable.
+- [x] Derive chunks from dtype and per-row/per-unit shape, not a universal row
       count.
-- [ ] Derive shards from target bytes and immutable whole-shard ownership.
-- [ ] Pin Zarr v3 and the exact bytes/compression/checksum/index codec chain in
+- [x] Derive shards from target bytes and immutable whole-shard ownership.
+- [x] Pin Zarr v3 and the exact bytes/compression/checksum/index codec chain in
       the storage profile and manifest.
-- [ ] Preserve independently readable inner chunks inside shards.
-- [ ] Record requested/effective chunks and shards plus object estimates.
+- [x] Preserve independently readable inner chunks inside shards.
+- [x] Record requested/effective chunks and shards plus object estimates.
+      The storage-profile manifest records requested byte/object budgets; each
+      exact array plan records effective shapes, bytes, ownership, and object
+      estimates. `analysis_array_policy_audit` rebuilds this evidence after the
+      family-specific live-inventory gate and before candidate execution.
 - [x] Add planner parity tests for short recordings, million-frame recordings,
       empty tables, wide matrices, and fixed-width text arrays.
 
