@@ -798,6 +798,15 @@ Recommended benchmark and promotion-review order:
       `passed`/`failed`/`unavailable`/`not_recorded` states. One real-Zarr
       fresh-process exact-tabular matrix passes through this catalog-owned
       reader; absent external evidence remains a hard gap.
+- [x] Implement the Linux process-tree file-I/O evidence boundary. It traces
+      only successful read-family syscalls attributed by `strace -ff -yy` to
+      explicit target Zarr roots, retains digest-bound raw traces, records GNU
+      time CPU/RSS, and can bind the result to one deeply validated normalized
+      family matrix. Its scope is explicitly file-syscall bytes—not
+      filesystem/network transfer—and traced latency is excluded because
+      strace overhead would make that comparison dishonest. The receipt is
+      always nonpromoting; representative execution and Crimson/macOS metrics
+      remain pending.
 - [x] Add a deterministic suite planner that binds every array workload and
       the whole-run publication workload to the exact logical declaration,
       storage-plan receipt, logical dimensions, seed, and safety policy. It

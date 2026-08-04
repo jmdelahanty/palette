@@ -37,6 +37,31 @@ and 1,000,000 rows. Event/table families should supply dimensions representative
 of both a small real recording and a full-duration Sleepyfish-style recording;
 they must not fake one row per frame when their actual cardinality differs.
 
+## Physical-I/O tracing
+
+`fisheye.diagnostics.trace_storage_io` now provides the Linux process-tree
+physical-read evidence boundary. It runs one existing benchmark command under
+`strace -ff -yy` and GNU `time -v`, attributes successful `read`, `pread64`,
+`readv`, `preadv`, and `preadv2` calls only to explicit target Zarr roots, and
+retains digest-bound raw traces. When given `--stage-id` and
+`--matrix-result`, the receipt deeply validates the family matrix through the
+catalog and binds its normalized source/candidate identity and matrix digest.
+
+The measurement scope is deliberately named `process_tree_file_syscalls`:
+
+- measured bytes are the compressed file bytes requested by the traced
+  process tree, not proven filesystem, SMB, HTTP, or network transfer bytes;
+- memory-mapped page-fault I/O is not counted;
+- strace overhead invalidates the traced command's latency as comparative
+  performance evidence; use the normal balanced fresh-process matrix for
+  latency and the traced execution for read counts/bytes/object attribution;
+- GNU time supplies CPU and peak-RSS observations for the wrapped benchmark;
+  and
+- the trace receipt always remains nonpromoting.
+
+Crimson/macOS still requires its own TensorStore/file metrics and mounted-path
+consumer evidence. The Linux trace cannot substitute for that gate.
+
 Next steps per family:
 
 - [ ] Connect the scientific writer to the exact plan receipt behind an opt-in
@@ -47,6 +72,9 @@ Next steps per family:
 - [ ] Add the real Palette reader workload.
 - [ ] Add the Crimson consumer workload when the family is user-facing there.
 - [ ] Compare exact decoded values and direct/consolidated metadata.
-- [ ] Record object counts, apparent/allocated bytes, phase timing, and RSS.
+- [x] Implement process-tree file-read, CPU, RSS, raw-trace, and exact matrix
+      binding for Linux benchmark commands.
+- [ ] Run that tracer on representative candidate matrices and record object
+      counts, apparent/allocated bytes, phase timing, and RSS.
 - [ ] Make a separate versioned promotion decision; a passing benchmark never
       mutates a selector by itself.
