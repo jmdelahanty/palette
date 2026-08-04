@@ -114,6 +114,8 @@ def _egocentric_fixture(
             source_authorities={"fixture": "sealed"},
         ),
     )
+    component.attrs["palette_run_completion_status"] = "complete"
+    component.attrs["stage_selector_eligible"] = False
     parent.attrs.update({"latest": "sealed_ego", "latest_complete": "sealed_ego"})
     return zarr_path, build_chaser_component_handle(
         component,

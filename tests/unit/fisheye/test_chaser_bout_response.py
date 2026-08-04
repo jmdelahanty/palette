@@ -152,6 +152,8 @@ def _build_archive(
             source_authorities={"fixture": "sealed_test_egocentric"},
         ),
     )
+    ego.attrs["palette_run_completion_status"] = "complete"
+    ego.attrs["stage_selector_eligible"] = False
 
     bouts = root.require_group("analysis/swim_bout_runs/bouts_1/tables/bouts")
     k = len(bout_start)

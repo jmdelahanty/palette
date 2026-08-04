@@ -191,6 +191,8 @@ def _build(tmp_path: Path, *, name: str = "escape.zarr",
             source_authorities={"fixture": "sealed_test_egocentric"},
         ),
     )
+    ego.attrs["palette_run_completion_status"] = "complete"
+    ego.attrs["stage_selector_eligible"] = False
 
     if with_trials:
         _write_chase_trials(root, n)

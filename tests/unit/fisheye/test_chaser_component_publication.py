@@ -93,7 +93,11 @@ def _snapshot(*, digest_byte: str = "a"):
 
 def _component():
     return _Group(
-        attrs={"coordinate_space": "arena_relative_canvas_px"},
+        attrs={
+            "coordinate_space": "arena_relative_canvas_px",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
         arrays={
             "frame_index": _Array(np.asarray([2, 7], dtype=np.int64)),
         },
@@ -326,7 +330,6 @@ def test_selector_rejects_rehashed_manifest_replacement() -> None:
         snapshot=snapshot,
         relative_path="chaser_escape_events/escape_v2",
     )
-
     tampered = copy.deepcopy(component.attrs[COMPONENT_MANIFEST_ATTR])
     tampered["parameters"]["threshold_mm"] = 6.0
     component.attrs[COMPONENT_MANIFEST_ATTR] = tampered
@@ -405,6 +408,7 @@ def test_selected_reader_returns_detached_exact_payload_without_latest_fallback(
         snapshot=snapshot,
         relative_path="chaser_escape_events/escape_v2",
     )
+    component.attrs["stage_selector_eligible"] = True
     root = _Group(
         groups={
             "analysis": _Group(
@@ -433,6 +437,51 @@ def test_selected_reader_returns_detached_exact_payload_without_latest_fallback(
     assert selected.group_attributes["events"]["row_axis"] == "event"
     with pytest.raises(TypeError):
         selected.manifest["publication_state"] = "tampered"
+
+
+def test_selected_reader_rejects_selector_committed_before_eligibility() -> None:
+    component = _component()
+    snapshot = _snapshot()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    parent = _Group(groups={"escape_v2": component})
+    persist_chaser_component_selector(
+        parent,
+        component=component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+    )
+    root = _Group(
+        groups={
+            "analysis": _Group(
+                groups={
+                    "chaser_distance_runs": _Group(
+                        groups={
+                            "canonical": _Group(
+                                groups={"chaser_escape_events": parent}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+    with pytest.raises(
+        ChaserComponentPublicationError,
+        match="not selector eligible",
+    ):
+        load_selected_chaser_component(
+            root,
+            snapshot=snapshot,
+            component_family="chaser_escape_events",
+            expected_semantic_schema_id="palette.chaser_escape_events",
+            expected_semantic_schema_version=2,
+        )
 
 
 def test_explicit_handle_loads_ineligible_component_without_selector() -> None:
@@ -492,6 +541,60 @@ def test_explicit_handle_loads_ineligible_component_without_selector() -> None:
     assert opened.group is component
     assert opened.manifest_sha256 == selected.manifest_sha256
     assert opened.dependency_handle["record_sha256"] == handle["record_sha256"]
+
+
+def test_explicit_handle_rejects_incomplete_and_tombstoned_components() -> None:
+    component = _component()
+    snapshot = _snapshot()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    component.attrs["palette_run_completion_status"] = "failed"
+    with pytest.raises(ChaserComponentPublicationError, match="runtime-complete"):
+        build_chaser_component_handle(
+            component,
+            snapshot=snapshot,
+            relative_path="chaser_escape_events/escape_v2",
+        )
+
+    component.attrs["palette_run_completion_status"] = "complete"
+    handle = build_chaser_component_handle(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+    )
+    component.attrs["atomic_publication_tombstone"] = {"failed": True}
+    root = _Group(
+        groups={
+            "analysis": _Group(
+                groups={
+                    "chaser_distance_runs": _Group(
+                        groups={
+                            "canonical": _Group(
+                                groups={
+                                    "chaser_escape_events": _Group(
+                                        groups={"escape_v2": component}
+                                    )
+                                }
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+    with pytest.raises(ChaserComponentPublicationError, match="tombstone"):
+        open_explicit_chaser_component_group(
+            root,
+            snapshot=snapshot,
+            handle=handle,
+            expected_semantic_schema_id="palette.chaser_escape_events",
+            expected_semantic_schema_version=2,
+        )
 
 
 def test_explicit_handle_rejects_rehashed_unknown_field_and_base_change() -> None:
@@ -606,6 +709,7 @@ def test_selected_reader_rejects_schema_mismatch() -> None:
         snapshot=snapshot,
         relative_path="chaser_escape_events/escape_v2",
     )
+    component.attrs["stage_selector_eligible"] = True
     root = _Group(
         groups={
             "analysis": _Group(

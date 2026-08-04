@@ -114,6 +114,8 @@ def _write_sources(zarr_path: Path) -> str:
             source_authorities={"fixture": "sealed"},
         ),
     )
+    root[str(component_path)].attrs["palette_run_completion_status"] = "complete"
+    root[str(component_path)].attrs["stage_selector_eligible"] = True
     return str(component_path)
 
 

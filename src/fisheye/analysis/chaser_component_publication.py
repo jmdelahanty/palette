@@ -225,6 +225,25 @@ def _sha256(value: Any, *, label: str) -> str:
     return value
 
 
+def _require_runtime_publication_state(
+    component: Any,
+    *,
+    require_selector_eligible: bool,
+) -> None:
+    """Reject incomplete, tombstoned, or improperly eligible components."""
+
+    attrs = component.attrs
+    if attrs.get("palette_run_completion_status") != "complete":
+        _fail("Chaser component is not runtime-complete.")
+    if "atomic_publication_tombstone" in attrs:
+        _fail("Chaser component is an immutable failed-publication tombstone.")
+    eligibility = attrs.get("stage_selector_eligible")
+    if type(eligibility) is not bool:
+        _fail("Chaser component lacks a literal runtime eligibility state.")
+    if require_selector_eligible and eligibility is not True:
+        _fail("Selected chaser component is not selector eligible.")
+
+
 def _canonical_value(value: Any, *, path: str = "$") -> Any:
     if isinstance(value, np.generic):
         return _canonical_value(value.item(), path=path)
@@ -695,6 +714,10 @@ def build_chaser_component_handle(
     """
 
     path = _relative_path(relative_path, label="component dependency path")
+    _require_runtime_publication_state(
+        component,
+        require_selector_eligible=False,
+    )
     manifest = validate_chaser_component_manifest(
         component,
         snapshot=snapshot,
@@ -910,6 +933,10 @@ def open_explicit_chaser_component_group(
         _fail(
             f"Explicit component {record['component_path']!r} is unavailable: {exc}."
         )
+    _require_runtime_publication_state(
+        component,
+        require_selector_eligible=False,
+    )
     relative_path = f"{record['component_family']}/{record['component_name']}"
     manifest = validate_chaser_component_manifest(
         component,
@@ -976,6 +1003,10 @@ def load_selected_chaser_component(
         component=component,
         snapshot=snapshot,
         expected_family=family,
+    )
+    _require_runtime_publication_state(
+        component,
+        require_selector_eligible=True,
     )
     return _copy_verified_chaser_component(
         component,
