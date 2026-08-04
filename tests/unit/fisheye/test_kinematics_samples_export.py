@@ -15,6 +15,9 @@ from fisheye.analytics_exports.validation import (
     validate_export_run,
 )
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.runtime_telemetry import (
+    validate_export_runtime_telemetry,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye.test_track_motion_publication import (
@@ -120,6 +123,10 @@ def test_kinematics_export_is_bounded_and_batch_boundary_independent(
     second_envelope = second["kinematics_samples_export"]
     assert first_envelope["projected_payload"] == second_envelope["projected_payload"]
     assert first["kinematics_samples_validation"]["valid"] is True
+    validate_export_runtime_telemetry(first["runtime_telemetry"])
+    assert "runtime_telemetry" not in json.loads(
+        Path(first["manifest_path"]).read_text(encoding="utf-8")
+    )
     assert first["row_counts_by_table"] == {KINEMATICS_SAMPLES_TABLE: 1}
     report = validate_export_run(tmp_path / "exports_a", "kinematics_a")
     assert report["status"] == "valid"

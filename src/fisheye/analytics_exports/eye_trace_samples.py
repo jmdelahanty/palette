@@ -58,6 +58,7 @@ from fisheye.analytics_exports.publication import (
     safe_component,
     sha256_file,
 )
+from fisheye.analytics_exports.runtime_telemetry import ExportRuntimePhaseRecorder
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_bytes,
@@ -743,13 +744,15 @@ def export_eye_trace_samples(
     if baseline_identity is not None and not overwrite:
         raise FileExistsError(f"Export manifest already exists: {manifest_path}")
 
-    root = open_zarr_root(source_path, mode="r")
-    before = _source_binding(
-        root,
-        zarr_path=source_path,
-        recording_id=recording_id,
-        run_name=source_run,
-    )
+    runtime = ExportRuntimePhaseRecorder()
+    with runtime.measure("source_binding_before"):
+        root = open_zarr_root(source_path, mode="r")
+        before = _source_binding(
+            root,
+            zarr_path=source_path,
+            recording_id=recording_id,
+            run_name=source_run,
+        )
     projection = eye_trace_projection_contract()
     generation_id = uuid.uuid4().hex
     final_generation_path = generation_relative_path(run_id, generation_id)
@@ -769,34 +772,40 @@ def export_eye_trace_samples(
     part_name = f"part-00000-{source_hash}.parquet"
     scratch_part = scratch_generation / "tables" / EYE_TRACE_SAMPLES_TABLE / part_name
     try:
-        projected_payload = _write_streaming_part(
-            root,
-            part_path=scratch_part,
-            zarr_path=source_path,
-            recording_id=recording_id,
-            source_binding=before,
-            projection=projection,
-            row_group_rows=row_group_rows,
-        )
+        with runtime.measure("scratch_parquet_write"):
+            projected_payload = _write_streaming_part(
+                root,
+                part_path=scratch_part,
+                zarr_path=source_path,
+                recording_id=recording_id,
+                source_binding=before,
+                projection=projection,
+                row_group_rows=row_group_rows,
+            )
         # Reopen direct metadata so the after-snapshot cannot be satisfied by
         # cached group attributes from the pre-extraction handle.
-        after_root = open_zarr_root(source_path, mode="r")
-        after = _source_binding(
-            after_root,
-            zarr_path=source_path,
-            recording_id=recording_id,
-            run_name=source_run,
-        )
-        if after != before:
-            raise RuntimeError(
-                "Eye-angle source selection, completion, or manifest binding changed "
-                "during extraction."
+        with runtime.measure("source_binding_after"):
+            after_root = open_zarr_root(source_path, mode="r")
+            after = _source_binding(
+                after_root,
+                zarr_path=source_path,
+                recording_id=recording_id,
+                run_name=source_run,
             )
+            if after != before:
+                raise RuntimeError(
+                    "Eye-angle source selection, completion, or manifest binding "
+                    "changed during extraction."
+                )
         staged_part = staging / "tables" / EYE_TRACE_SAMPLES_TABLE / part_name
-        staged_part.parent.mkdir(parents=True, exist_ok=False)
-        shutil.copy2(scratch_part, staged_part)
-        if sha256_file(staged_part) != sha256_file(scratch_part):
-            raise RuntimeError("Eye-trace scratch-to-publication copy digest mismatch.")
+        with runtime.measure("scratch_to_staging_copy"):
+            staged_part.parent.mkdir(parents=True, exist_ok=False)
+            shutil.copy2(scratch_part, staged_part)
+            staged_sha256 = sha256_file(staged_part)
+            if staged_sha256 != sha256_file(scratch_part):
+                raise RuntimeError(
+                    "Eye-trace scratch-to-publication copy digest mismatch."
+                )
 
         relative_part = (
             final_generation_path / "tables" / EYE_TRACE_SAMPLES_TABLE / part_name
@@ -806,7 +815,7 @@ def export_eye_trace_samples(
             EYE_TRACE_SAMPLES_TABLE: [
                 {
                     "path": relative_part,
-                    "sha256": sha256_file(staged_part),
+                    "sha256": staged_sha256,
                     "size_bytes": int(staged_part.stat().st_size),
                     "row_count": row_count,
                 }
@@ -871,34 +880,41 @@ def export_eye_trace_samples(
             },
             "eye_trace_export": eye_envelope,
         }
-        _validate_eye_trace_envelope(manifest)
         # Re-read staged bytes, not the scratch source, before visibility.
-        staged_projection = _ProjectedPayloadHasher()
-        import pyarrow.parquet as pq
+        with runtime.measure("staged_decoded_validation"):
+            staged_projection = _ProjectedPayloadHasher()
+            import pyarrow.parquet as pq
 
-        staged_file = pq.ParquetFile(staged_part)
-        for batch in staged_file.iter_batches():
-            values = batch.to_pydict()
-            staged_projection.update(
-                {
-                    name: np.asarray(values[name], dtype=_NUMPY_DTYPES[dtype_name])
-                    for name, dtype_name in EYE_TRACE_SCIENTIFIC_DTYPES.items()
-                }
-            )
-        if staged_projection.finish() != projected_payload:
-            raise RuntimeError("Eye-trace staged decoded payload differs from scratch.")
+            staged_file = pq.ParquetFile(staged_part)
+            for batch in staged_file.iter_batches():
+                values = batch.to_pydict()
+                staged_projection.update(
+                    {
+                        name: np.asarray(values[name], dtype=_NUMPY_DTYPES[dtype_name])
+                        for name, dtype_name in EYE_TRACE_SCIENTIFIC_DTYPES.items()
+                    }
+                )
+            if staged_projection.finish() != projected_payload:
+                raise RuntimeError(
+                    "Eye-trace staged decoded payload differs from scratch."
+                )
+        with runtime.measure("manifest_validation"):
+            _validate_eye_trace_envelope(manifest)
         committed = commit_staged_publication(
             destination,
             staging,
             manifest,
             baseline_manifest_identity=baseline_identity,
+            runtime_recorder=runtime,
         )
-        published = json.loads(committed.read_text(encoding="utf-8"))
-        validation = validate_eye_trace_export_payload(destination, published)
+        with runtime.measure("published_payload_validation"):
+            published = json.loads(committed.read_text(encoding="utf-8"))
+            validation = validate_eye_trace_export_payload(destination, published)
         return {
             **published,
             "manifest_path": str(committed),
             "eye_trace_validation": validation,
+            "runtime_telemetry": runtime.snapshot(),
         }
     except Exception:
         if staging.exists():

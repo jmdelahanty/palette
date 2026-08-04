@@ -26,6 +26,9 @@ from fisheye.analytics_exports.eye_trace_samples import (
     eye_trace_projection_contract,
 )
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.runtime_telemetry import (
+    validate_export_runtime_telemetry,
+)
 from fisheye.analytics_exports.validation import (
     ExportValidationError,
     validate_export_payload,
@@ -265,6 +268,10 @@ def test_eye_trace_export_streams_batches_and_is_batch_boundary_independent(
     assert run.attrs == source_attrs_before
     assert first["row_counts_by_table"] == {EYE_TRACE_SAMPLES_TABLE: 7}
     assert first["eye_trace_validation"]["valid"] is True
+    validate_export_runtime_telemetry(first["runtime_telemetry"])
+    assert "runtime_telemetry" not in json.loads(
+        Path(first["manifest_path"]).read_text(encoding="utf-8")
+    )
     assert (
         first["eye_trace_export"]["projected_payload"]["payload_sha256"]
         == second["eye_trace_export"]["projected_payload"]["payload_sha256"]

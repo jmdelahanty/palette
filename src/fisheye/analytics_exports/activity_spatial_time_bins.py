@@ -69,6 +69,7 @@ from fisheye.analytics_exports.publication import (
     safe_component,
     sha256_file,
 )
+from fisheye.analytics_exports.runtime_telemetry import ExportRuntimePhaseRecorder
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -1526,46 +1527,48 @@ def export_activity_spatial_time_bins(
     if baseline_identity is not None and not overwrite:
         raise FileExistsError(f"Export manifest already exists: {manifest_path}")
 
-    root = open_zarr_root(source_path, mode="r")
-    if (swim_bout_runs_by_track is None) == (single_track_swim_bout_run is None):
-        raise ValueError(
-            "Provide exactly one of a per-track swim-bout map or one explicit "
-            "single-track swim-bout run."
-        )
-    if single_track_swim_bout_run is not None:
-        prebound_track = track_export._source_binding(
+    runtime = ExportRuntimePhaseRecorder()
+    with runtime.measure("source_binding_before"):
+        root = open_zarr_root(source_path, mode="r")
+        if (swim_bout_runs_by_track is None) == (single_track_swim_bout_run is None):
+            raise ValueError(
+                "Provide exactly one of a per-track swim-bout map or one explicit "
+                "single-track swim-bout run."
+            )
+        if single_track_swim_bout_run is not None:
+            prebound_track = track_export._source_binding(
+                root,
+                zarr_path=source_path,
+                recording_id=recording_id,
+                run_name=source_run,
+                scope=track_scope,
+            )
+            track_records = prebound_track.binding["tracks"]
+            if len(track_records) != 1:
+                raise ValueError(
+                    "The workflow's single swim-bout dependency is valid only for an "
+                    "exactly one-track source; use the explicit per-track run map."
+                )
+            resolved_bout_runs = {
+                int(track_records[0]["track_id"]): single_track_swim_bout_run
+            }
+        else:
+            assert swim_bout_runs_by_track is not None
+            resolved_bout_runs = dict(swim_bout_runs_by_track)
+        before = bind_activity_spatial_sources(
             root,
             zarr_path=source_path,
             recording_id=recording_id,
-            run_name=source_run,
-            scope=track_scope,
+            track_kinematics_run=source_run,
+            track_scope=track_scope,
+            swim_bout_runs_by_track=resolved_bout_runs,
         )
-        track_records = prebound_track.binding["tracks"]
-        if len(track_records) != 1:
-            raise ValueError(
-                "The workflow's single swim-bout dependency is valid only for an "
-                "exactly one-track source; use the explicit per-track run map."
-            )
-        resolved_bout_runs = {
-            int(track_records[0]["track_id"]): single_track_swim_bout_run
-        }
-    else:
-        assert swim_bout_runs_by_track is not None
-        resolved_bout_runs = dict(swim_bout_runs_by_track)
-    before = bind_activity_spatial_sources(
-        root,
-        zarr_path=source_path,
-        recording_id=recording_id,
-        track_kinematics_run=source_run,
-        track_scope=track_scope,
-        swim_bout_runs_by_track=resolved_bout_runs,
-    )
-    binning = activity_spatial_binning_contract(
-        source_sample_rate_hz=float(
-            before.binding["track_source_binding"]["source_sample_rate_hz"]
-        ),
-        requested_bin_size_s=requested_bin_size_s,
-    )
+        binning = activity_spatial_binning_contract(
+            source_sample_rate_hz=float(
+                before.binding["track_source_binding"]["source_sample_rate_hz"]
+            ),
+            requested_bin_size_s=requested_bin_size_s,
+        )
     generation_id = uuid.uuid4().hex
     final_generation_path = generation_relative_path(run_id, generation_id)
     staging = publication_staging_root(destination, run_id, generation_id)
@@ -1585,34 +1588,39 @@ def export_activity_spatial_time_bins(
         scratch_generation / "tables" / ACTIVITY_SPATIAL_TIME_BINS_TABLE / part_name
     )
     try:
-        decoded_payload = _write_streaming_part(
-            before,
-            part_path=scratch_part,
-            binning_contract=binning,
-            row_group_rows=row_group_rows,
-        )
-        after_root = open_zarr_root(source_path, mode="r")
-        after = bind_activity_spatial_sources(
-            after_root,
-            zarr_path=source_path,
-            recording_id=recording_id,
-            track_kinematics_run=source_run,
-            track_scope=track_scope,
-            swim_bout_runs_by_track=resolved_bout_runs,
-        )
-        if after.binding != before.binding:
-            raise RuntimeError(
-                "Activity/spatial source selection, completion, or manifests changed "
-                "during extraction."
+        with runtime.measure("scratch_parquet_write"):
+            decoded_payload = _write_streaming_part(
+                before,
+                part_path=scratch_part,
+                binning_contract=binning,
+                row_group_rows=row_group_rows,
             )
+        with runtime.measure("source_binding_after"):
+            after_root = open_zarr_root(source_path, mode="r")
+            after = bind_activity_spatial_sources(
+                after_root,
+                zarr_path=source_path,
+                recording_id=recording_id,
+                track_kinematics_run=source_run,
+                track_scope=track_scope,
+                swim_bout_runs_by_track=resolved_bout_runs,
+            )
+            if after.binding != before.binding:
+                raise RuntimeError(
+                    "Activity/spatial source selection, completion, or manifests "
+                    "changed during extraction."
+                )
         staged_part = staging / "tables" / ACTIVITY_SPATIAL_TIME_BINS_TABLE / part_name
-        staged_part.parent.mkdir(parents=True, exist_ok=False)
-        shutil.copy2(scratch_part, staged_part)
-        if sha256_file(staged_part) != sha256_file(scratch_part):
-            raise RuntimeError("Activity/spatial scratch copy digest mismatch.")
-        staged_payload, _ = _decoded_part_payload(staged_part)
-        if staged_payload != decoded_payload:
-            raise RuntimeError("Activity/spatial staged decoded payload differs.")
+        with runtime.measure("scratch_to_staging_copy"):
+            staged_part.parent.mkdir(parents=True, exist_ok=False)
+            shutil.copy2(scratch_part, staged_part)
+            staged_sha256 = sha256_file(staged_part)
+            if staged_sha256 != sha256_file(scratch_part):
+                raise RuntimeError("Activity/spatial scratch copy digest mismatch.")
+        with runtime.measure("staged_decoded_validation"):
+            staged_payload, _ = _decoded_part_payload(staged_part)
+            if staged_payload != decoded_payload:
+                raise RuntimeError("Activity/spatial staged decoded payload differs.")
 
         relative_part = (
             final_generation_path
@@ -1625,7 +1633,7 @@ def export_activity_spatial_time_bins(
             ACTIVITY_SPATIAL_TIME_BINS_TABLE: [
                 {
                     "path": relative_part,
-                    "sha256": sha256_file(staged_part),
+                    "sha256": staged_sha256,
                     "size_bytes": int(staged_part.stat().st_size),
                     "row_count": row_count,
                 }
@@ -1693,22 +1701,26 @@ def export_activity_spatial_time_bins(
             },
             "activity_spatial_time_bins_export": export_envelope,
         }
-        _validate_export_envelope(manifest)
+        with runtime.measure("manifest_validation"):
+            _validate_export_envelope(manifest)
         committed = commit_staged_publication(
             destination,
             staging,
             manifest,
             baseline_manifest_identity=baseline_identity,
+            runtime_recorder=runtime,
         )
-        published = json.loads(committed.read_text(encoding="utf-8"))
-        validation = validate_activity_spatial_time_bins_export_payload(
-            destination,
-            published,
-        )
+        with runtime.measure("published_payload_validation"):
+            published = json.loads(committed.read_text(encoding="utf-8"))
+            validation = validate_activity_spatial_time_bins_export_payload(
+                destination,
+                published,
+            )
         return {
             **published,
             "manifest_path": str(committed),
             "activity_spatial_time_bins_validation": validation,
+            "runtime_telemetry": runtime.snapshot(),
         }
     except Exception:
         if staging.exists():

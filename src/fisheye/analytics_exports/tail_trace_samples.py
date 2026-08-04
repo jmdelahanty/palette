@@ -59,6 +59,7 @@ from fisheye.analytics_exports.publication import (
     safe_component,
     sha256_file,
 )
+from fisheye.analytics_exports.runtime_telemetry import ExportRuntimePhaseRecorder
 from fisheye.shared.coordinate_frame_record import (
     ARRAY_PAYLOAD_CANONICALIZATION,
     array_values_sha256,
@@ -1730,16 +1731,18 @@ def export_tail_trace_samples(
         raise FileExistsError(
             f"Export manifest already exists: {export_manifest_path(destination, run_id)}"
         )
-    root = open_zarr_root(source_path, mode="r")
-    before = bind_tail_trace_sources(
-        root,
-        zarr_path=source_path,
-        tail_kinematics_run=tail_run,
-        subject_shape_run=shape_run,
-        track_kinematics_run=track_run,
-        track_scope=track_scope,
-        source_window_rows=source_window_rows,
-    )
+    runtime = ExportRuntimePhaseRecorder()
+    with runtime.measure("source_binding_before"):
+        root = open_zarr_root(source_path, mode="r")
+        before = bind_tail_trace_sources(
+            root,
+            zarr_path=source_path,
+            tail_kinematics_run=tail_run,
+            subject_shape_run=shape_run,
+            track_kinematics_run=track_run,
+            track_scope=track_scope,
+            source_window_rows=source_window_rows,
+        )
     projection = tail_trace_projection_contract()
     generation_id = uuid.uuid4().hex
     final_generation_path = generation_relative_path(run_id, generation_id)
@@ -1749,52 +1752,59 @@ def export_tail_trace_samples(
     if staging.exists() or final_generation.exists() or scratch_generation.exists():
         raise FileExistsError("Tail export generation identity already exists.")
     try:
-        projected, scratch_receipts = _write_streaming_parts(
-            before,
-            table_root=scratch_generation / "tables" / TAIL_TRACE_SAMPLES_TABLE,
-            projection=projection,
-            policy=policy,
-        )
-        after = bind_tail_trace_sources(
-            open_zarr_root(source_path, mode="r"),
-            zarr_path=source_path,
-            tail_kinematics_run=tail_run,
-            subject_shape_run=shape_run,
-            track_kinematics_run=track_run,
-            track_scope=track_scope,
-            source_window_rows=source_window_rows,
-        )
-        if after.binding != before.binding:
-            raise RuntimeError(
-                "Tail, subject-shape, or track source binding changed during extraction."
+        with runtime.measure("scratch_parquet_write"):
+            projected, scratch_receipts = _write_streaming_parts(
+                before,
+                table_root=scratch_generation / "tables" / TAIL_TRACE_SAMPLES_TABLE,
+                projection=projection,
+                policy=policy,
             )
+        with runtime.measure("source_binding_after"):
+            after = bind_tail_trace_sources(
+                open_zarr_root(source_path, mode="r"),
+                zarr_path=source_path,
+                tail_kinematics_run=tail_run,
+                subject_shape_run=shape_run,
+                track_kinematics_run=track_run,
+                track_scope=track_scope,
+                source_window_rows=source_window_rows,
+            )
+            if after.binding != before.binding:
+                raise RuntimeError(
+                    "Tail, subject-shape, or track source binding changed during "
+                    "extraction."
+                )
         staged_table = staging / "tables" / TAIL_TRACE_SAMPLES_TABLE
-        staged_table.mkdir(parents=True, exist_ok=False)
         inventory_entries: list[dict[str, Any]] = []
         relative_parts: list[str] = []
         staged_parts: list[Path] = []
-        for receipt in scratch_receipts:
-            scratch_part = Path(receipt["scratch_path"])
-            staged_part = staged_table / scratch_part.name
-            shutil.copy2(scratch_part, staged_part)
-            if sha256_file(staged_part) != sha256_file(scratch_part):
-                raise RuntimeError("Tail scratch-to-publication copy digest mismatch.")
-            relative = (
-                final_generation_path
-                / "tables"
-                / TAIL_TRACE_SAMPLES_TABLE
-                / staged_part.name
-            ).as_posix()
-            relative_parts.append(relative)
-            staged_parts.append(staged_part)
-            inventory_entries.append(
-                {
-                    "path": relative,
-                    "sha256": sha256_file(staged_part),
-                    "size_bytes": int(staged_part.stat().st_size),
-                    "row_count": int(receipt["row_count"]),
-                }
-            )
+        with runtime.measure("scratch_to_staging_copy"):
+            staged_table.mkdir(parents=True, exist_ok=False)
+            for receipt in scratch_receipts:
+                scratch_part = Path(receipt["scratch_path"])
+                staged_part = staged_table / scratch_part.name
+                shutil.copy2(scratch_part, staged_part)
+                staged_sha256 = sha256_file(staged_part)
+                if staged_sha256 != sha256_file(scratch_part):
+                    raise RuntimeError(
+                        "Tail scratch-to-publication copy digest mismatch."
+                    )
+                relative = (
+                    final_generation_path
+                    / "tables"
+                    / TAIL_TRACE_SAMPLES_TABLE
+                    / staged_part.name
+                ).as_posix()
+                relative_parts.append(relative)
+                staged_parts.append(staged_part)
+                inventory_entries.append(
+                    {
+                        "path": relative,
+                        "sha256": staged_sha256,
+                        "size_bytes": int(staged_part.stat().st_size),
+                        "row_count": int(receipt["row_count"]),
+                    }
+                )
         columns = tuple(
             field.name
             for field in ARROW_TABLE_CONTRACTS[TAIL_TRACE_SAMPLES_TABLE].fields
@@ -1856,25 +1866,30 @@ def export_tail_trace_samples(
             },
             "tail_trace_export": envelope,
         }
-        _validate_tail_envelope(manifest)
-        _decoded_part_validation(
-            staged_parts,
-            source=before.binding,
-            projection=projection,
-            expected_payload=projected,
-        )
+        with runtime.measure("staged_decoded_validation"):
+            _decoded_part_validation(
+                staged_parts,
+                source=before.binding,
+                projection=projection,
+                expected_payload=projected,
+            )
+        with runtime.measure("manifest_validation"):
+            _validate_tail_envelope(manifest)
         committed = commit_staged_publication(
             destination,
             staging,
             manifest,
             baseline_manifest_identity=baseline,
+            runtime_recorder=runtime,
         )
-        published = json.loads(committed.read_text(encoding="utf-8"))
-        validation = validate_tail_trace_export_payload(destination, published)
+        with runtime.measure("published_payload_validation"):
+            published = json.loads(committed.read_text(encoding="utf-8"))
+            validation = validate_tail_trace_export_payload(destination, published)
         return {
             **published,
             "manifest_path": str(committed),
             "tail_trace_validation": validation,
+            "runtime_telemetry": runtime.snapshot(),
         }
     except Exception:
         if staging.exists():

@@ -64,6 +64,7 @@ from fisheye.analytics_exports.publication import (
     safe_component,
     sha256_file,
 )
+from fisheye.analytics_exports.runtime_telemetry import ExportRuntimePhaseRecorder
 from fisheye.shared.coordinate_identity import (
     TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE,
 )
@@ -1440,14 +1441,16 @@ def export_kinematics_samples(
     if baseline_identity is not None and not overwrite:
         raise FileExistsError(f"Export manifest already exists: {manifest_path}")
 
-    root = open_zarr_root(source_path, mode="r")
-    before = _source_binding(
-        root,
-        zarr_path=source_path,
-        recording_id=recording_id,
-        run_name=source_run,
-        scope=track_scope,
-    )
+    runtime = ExportRuntimePhaseRecorder()
+    with runtime.measure("source_binding_before"):
+        root = open_zarr_root(source_path, mode="r")
+        before = _source_binding(
+            root,
+            zarr_path=source_path,
+            recording_id=recording_id,
+            run_name=source_run,
+            scope=track_scope,
+        )
     projection = kinematics_projection_contract(
         source_sample_rate_hz=float(before.binding["source_sample_rate_hz"]),
         requested_sample_rate_hz=float(requested_sample_rate_hz),
@@ -1469,31 +1472,37 @@ def export_kinematics_samples(
     part_name = f"part-00000-{source_hash}.parquet"
     scratch_part = scratch_generation / "tables" / KINEMATICS_SAMPLES_TABLE / part_name
     try:
-        projected_payload = _write_streaming_part(
-            before,
-            part_path=scratch_part,
-            projection=projection,
-            source_window_rows=source_window_rows,
-            row_group_rows=row_group_rows,
-        )
-        after_root = open_zarr_root(source_path, mode="r")
-        after = _source_binding(
-            after_root,
-            zarr_path=source_path,
-            recording_id=recording_id,
-            run_name=source_run,
-            scope=track_scope,
-        )
-        if after.binding != before.binding:
-            raise RuntimeError(
-                "Track-kinematics selection, completion, or manifest binding changed "
-                "during extraction."
+        with runtime.measure("scratch_parquet_write"):
+            projected_payload = _write_streaming_part(
+                before,
+                part_path=scratch_part,
+                projection=projection,
+                source_window_rows=source_window_rows,
+                row_group_rows=row_group_rows,
             )
+        with runtime.measure("source_binding_after"):
+            after_root = open_zarr_root(source_path, mode="r")
+            after = _source_binding(
+                after_root,
+                zarr_path=source_path,
+                recording_id=recording_id,
+                run_name=source_run,
+                scope=track_scope,
+            )
+            if after.binding != before.binding:
+                raise RuntimeError(
+                    "Track-kinematics selection, completion, or manifest binding "
+                    "changed during extraction."
+                )
         staged_part = staging / "tables" / KINEMATICS_SAMPLES_TABLE / part_name
-        staged_part.parent.mkdir(parents=True, exist_ok=False)
-        shutil.copy2(scratch_part, staged_part)
-        if sha256_file(staged_part) != sha256_file(scratch_part):
-            raise RuntimeError("Kinematic scratch-to-publication copy digest mismatch.")
+        with runtime.measure("scratch_to_staging_copy"):
+            staged_part.parent.mkdir(parents=True, exist_ok=False)
+            shutil.copy2(scratch_part, staged_part)
+            staged_sha256 = sha256_file(staged_part)
+            if staged_sha256 != sha256_file(scratch_part):
+                raise RuntimeError(
+                    "Kinematic scratch-to-publication copy digest mismatch."
+                )
 
         relative_part = (
             final_generation_path / "tables" / KINEMATICS_SAMPLES_TABLE / part_name
@@ -1503,7 +1512,7 @@ def export_kinematics_samples(
             KINEMATICS_SAMPLES_TABLE: [
                 {
                     "path": relative_part,
-                    "sha256": sha256_file(staged_part),
+                    "sha256": staged_sha256,
                     "size_bytes": int(staged_part.stat().st_size),
                     "row_count": row_count,
                 }
@@ -1569,34 +1578,42 @@ def export_kinematics_samples(
             },
             "kinematics_samples_export": kinematics_envelope,
         }
-        _validate_kinematics_envelope(manifest)
+        with runtime.measure("staged_decoded_validation"):
+            staged_hasher = _ProjectedPayloadHasher()
+            import pyarrow.parquet as pq
 
-        staged_hasher = _ProjectedPayloadHasher()
-        import pyarrow.parquet as pq
-
-        staged_file = pq.ParquetFile(staged_part)
-        for batch in staged_file.iter_batches():
-            values = batch.to_pydict()
-            staged_hasher.update(
-                {
-                    name: np.asarray(values[name], dtype=_NUMPY_DTYPES[dtype_name])
-                    for name, dtype_name in KINEMATICS_SCIENTIFIC_DTYPES.items()
-                }
-            )
-        if staged_hasher.finish() != projected_payload:
-            raise RuntimeError("Kinematic staged decoded payload differs from scratch.")
+            staged_file = pq.ParquetFile(staged_part)
+            for batch in staged_file.iter_batches():
+                values = batch.to_pydict()
+                staged_hasher.update(
+                    {
+                        name: np.asarray(values[name], dtype=_NUMPY_DTYPES[dtype_name])
+                        for name, dtype_name in KINEMATICS_SCIENTIFIC_DTYPES.items()
+                    }
+                )
+            if staged_hasher.finish() != projected_payload:
+                raise RuntimeError(
+                    "Kinematic staged decoded payload differs from scratch."
+                )
+        with runtime.measure("manifest_validation"):
+            _validate_kinematics_envelope(manifest)
         committed = commit_staged_publication(
             destination,
             staging,
             manifest,
             baseline_manifest_identity=baseline_identity,
+            runtime_recorder=runtime,
         )
-        published = json.loads(committed.read_text(encoding="utf-8"))
-        validation = validate_kinematics_samples_export_payload(destination, published)
+        with runtime.measure("published_payload_validation"):
+            published = json.loads(committed.read_text(encoding="utf-8"))
+            validation = validate_kinematics_samples_export_payload(
+                destination, published
+            )
         return {
             **published,
             "manifest_path": str(committed),
             "kinematics_samples_validation": validation,
+            "runtime_telemetry": runtime.snapshot(),
         }
     except Exception:
         if staging.exists():

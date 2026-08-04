@@ -28,6 +28,9 @@ from fisheye.analysis.swim_bout_schema import (
 from fisheye.analytics_exports import activity_spatial_time_bins as mod
 from fisheye.analytics_exports.contracts import ACTIVITY_SPATIAL_TIME_BINS_TABLE
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.runtime_telemetry import (
+    validate_export_runtime_telemetry,
+)
 from fisheye.analytics_exports.validation import (
     ExportValidationError,
     validate_export_run,
@@ -510,6 +513,10 @@ def test_activity_spatial_publisher_writes_exact_manifest_selected_part(
     result = _publish(monkeypatch, tmp_path, export_run_id="activity")
 
     assert result["activity_spatial_time_bins_validation"]["valid"] is True
+    validate_export_runtime_telemetry(result["runtime_telemetry"])
+    assert "runtime_telemetry" not in json.loads(
+        Path(result["manifest_path"]).read_text(encoding="utf-8")
+    )
     assert result["row_counts_by_table"] == {ACTIVITY_SPATIAL_TIME_BINS_TABLE: 2}
     assert validate_export_run(tmp_path / "exports", "activity")["status"] == "valid"
     assert not list((tmp_path / "scratch_exports").glob("palette_activity_spatial_*"))

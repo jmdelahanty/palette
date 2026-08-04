@@ -17,6 +17,8 @@ import re
 import shutil
 from typing import Any, Iterator, Mapping
 
+from .runtime_telemetry import ExportRuntimePhaseRecorder
+
 
 PUBLICATION_SCHEMA_ID = "palette.analytics_export.publication"
 PUBLICATION_SCHEMA_VERSION = 1
@@ -30,9 +32,7 @@ _PUBLICATION_FIELDS = {
 }
 _INVENTORY_FIELDS = {"path", "sha256", "size_bytes", "row_count"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_PORTABLE_COMPONENT_RE = re.compile(
-    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-)
+_PORTABLE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
 def safe_component(value: object, *, label: str) -> str:
@@ -180,7 +180,9 @@ def manifest_commit_lock(manifest_path: Path) -> Iterator[None]:
     try:
         lock_path.resolve(strict=False).relative_to(export_root.resolve())
     except ValueError as exc:
-        raise ValueError(f"Analytics export lock escapes its root: {lock_path}") from exc
+        raise ValueError(
+            f"Analytics export lock escapes its root: {lock_path}"
+        ) from exc
     with lock_path.open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
@@ -267,15 +269,20 @@ def validate_publication_envelope(
         raise ValueError("Export publication envelope is missing or invalid")
     if set(publication) != _PUBLICATION_FIELDS:
         raise ValueError("Export publication envelope has an unexpected field set")
-    if not isinstance(publication.get("schema_id"), str) or publication.get(
-        "schema_id"
-    ) != PUBLICATION_SCHEMA_ID:
+    if (
+        not isinstance(publication.get("schema_id"), str)
+        or publication.get("schema_id") != PUBLICATION_SCHEMA_ID
+    ):
         raise ValueError("Export publication schema ID is invalid")
-    if type(publication.get("schema_version")) is not int or publication.get(
-        "schema_version"
-    ) != PUBLICATION_SCHEMA_VERSION:
+    if (
+        type(publication.get("schema_version")) is not int
+        or publication.get("schema_version") != PUBLICATION_SCHEMA_VERSION
+    ):
         raise ValueError("Export publication schema version is invalid")
-    if not isinstance(publication.get("state"), str) or publication.get("state") != "complete":
+    if (
+        not isinstance(publication.get("state"), str)
+        or publication.get("state") != "complete"
+    ):
         raise ValueError("Export publication state must be 'complete'")
     raw_run_id = payload.get("export_run_id")
     if not isinstance(raw_run_id, str):
@@ -284,15 +291,15 @@ def validate_publication_envelope(
     raw_generation_id = publication.get("generation_id")
     if not isinstance(raw_generation_id, str):
         raise ValueError("Export generation ID must be a string")
-    generation_id = safe_component(
-        raw_generation_id, label="generation ID"
-    )
+    generation_id = safe_component(raw_generation_id, label="generation ID")
     expected_path = generation_relative_path(run_id, generation_id)
     raw_generation_path = publication.get("generation_path")
     if not isinstance(raw_generation_path, str):
         raise ValueError("Export generation path must be a string")
     if raw_generation_path != expected_path.as_posix():
-        raise ValueError("Export publication generation path/identity binding is invalid")
+        raise ValueError(
+            "Export publication generation path/identity binding is invalid"
+        )
     inventory = publication.get("parts_by_table")
     if not isinstance(inventory, Mapping):
         raise ValueError("Export publication part inventory is missing or invalid")
@@ -305,7 +312,10 @@ def validate_publication_envelope(
             raise ValueError(f"{table}: publication inventory is not an array")
         expected_parent = expected_path / "tables" / table
         for raw_entry in raw_entries:
-            if not isinstance(raw_entry, Mapping) or set(raw_entry) != _INVENTORY_FIELDS:
+            if (
+                not isinstance(raw_entry, Mapping)
+                or set(raw_entry) != _INVENTORY_FIELDS
+            ):
                 raise ValueError(f"{table}: invalid publication inventory entry fields")
             path_value = raw_entry.get("path")
             if not isinstance(path_value, str):
@@ -400,7 +410,9 @@ def validate_staged_publication(
         declared_paths = part_files.get(table)
         inventory_paths = [str(entry["path"]) for entry in raw_entries]
         if declared_paths != inventory_paths:
-            raise ValueError(f"{table}: staged logical part list differs from inventory")
+            raise ValueError(
+                f"{table}: staged logical part list differs from inventory"
+            )
         table_rows = 0
         reference_columns: tuple[str, ...] | None = None
         for entry in raw_entries:
@@ -434,7 +446,10 @@ def validate_staged_publication(
                 raise ValueError(f"{table}: staged part row-count mismatch")
             schema = parquet_file.schema_arrow
             metadata = schema.metadata or {}
-            if metadata.get(b"palette.export_schema_id", b"").decode() != EXPORT_SCHEMA_ID:
+            if (
+                metadata.get(b"palette.export_schema_id", b"").decode()
+                != EXPORT_SCHEMA_ID
+            ):
                 raise ValueError(f"{table}: staged footer schema ID is invalid")
             if metadata.get(b"palette.export_schema_version", b"").decode() != str(
                 EXPORT_SCHEMA_VERSION
@@ -483,6 +498,7 @@ def commit_staged_publication(
     payload: Mapping[str, Any],
     *,
     baseline_manifest_identity: str | None,
+    runtime_recorder: ExportRuntimePhaseRecorder | None = None,
 ) -> Path:
     """Validate and atomically commit one immutable analytics generation.
 
@@ -507,11 +523,13 @@ def commit_staged_publication(
     )
     expected_stage = publication_staging_root(root, run_id, generation_id)
     if stage != expected_stage:
-        raise ValueError("Staged publication path does not match its generation identity")
+        raise ValueError(
+            "Staged publication path does not match its generation identity"
+        )
     manifest_path = export_manifest_path(root, run_id)
     final_generation = publication_generation_root(root, run_id, generation_id)
 
-    try:
+    def validate_stage() -> None:
         # Cleanup is authorized only after the supplied path has been proven to
         # be this payload's canonical hidden staging generation.
         validate_publication_envelope(payload)
@@ -520,6 +538,13 @@ def commit_staged_publication(
                 f"Analytics export generation already exists: {final_generation}"
             )
         validate_staged_publication(stage, payload)
+
+    try:
+        if runtime_recorder is None:
+            validate_stage()
+        else:
+            with runtime_recorder.measure("publication_staged_validation"):
+                validate_stage()
     except Exception:
         if stage.exists():
             shutil.rmtree(stage)
@@ -530,8 +555,13 @@ def commit_staged_publication(
     tmp_manifest = manifest_path.parent / (
         f".export_run_id={run_id}.generation={generation_id}.json.tmp"
     )
-    os.replace(stage, final_generation)
-    try:
+    if runtime_recorder is None:
+        os.replace(stage, final_generation)
+    else:
+        with runtime_recorder.measure("publication_generation_rename"):
+            os.replace(stage, final_generation)
+
+    def commit_manifest() -> None:
         tmp_manifest.write_text(
             json.dumps(
                 dict(payload),
@@ -550,6 +580,13 @@ def commit_staged_publication(
                     "the staged generation was not committed"
                 )
             os.replace(tmp_manifest, manifest_path)
+
+    try:
+        if runtime_recorder is None:
+            commit_manifest()
+        else:
+            with runtime_recorder.measure("publication_manifest_commit"):
+                commit_manifest()
     except Exception:
         tmp_manifest.unlink(missing_ok=True)
         if final_generation.exists():
@@ -611,7 +648,9 @@ def manifest_selected_part_files_from_payload(
 
         declared = payload.get("part_files_by_table")
         if not isinstance(declared, Mapping):
-            raise ValueError("Export manifest part_files_by_table is missing or invalid")
+            raise ValueError(
+                "Export manifest part_files_by_table is missing or invalid"
+            )
         declared_parts = declared.get(table, [])
         if declared_parts != [str(entry.get("path")) for entry in raw_entries]:
             raise ValueError(

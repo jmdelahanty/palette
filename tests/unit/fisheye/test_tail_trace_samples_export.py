@@ -17,6 +17,9 @@ from fisheye.shared.detect_reason_codec import encode_reason_bytes
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.analytics_exports.contracts import TAIL_TRACE_SAMPLES_TABLE
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.runtime_telemetry import (
+    validate_export_runtime_telemetry,
+)
 from fisheye.analytics_exports.validation import (
     ExportValidationError,
     validate_export_run,
@@ -645,6 +648,10 @@ def test_tail_publisher_is_batch_independent_and_manifest_exclusive(
         == second["tail_trace_export"]["projected_payload"]
     )
     assert first["tail_trace_validation"]["valid"] is True
+    validate_export_runtime_telemetry(first["runtime_telemetry"])
+    assert "runtime_telemetry" not in json.loads(
+        Path(first["manifest_path"]).read_text(encoding="utf-8")
+    )
     assert (
         len(first["part_files_by_table"][TAIL_TRACE_SAMPLES_TABLE])
         == first["tail_trace_export"]["source_binding"]["tail_row_count"]

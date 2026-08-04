@@ -1256,6 +1256,16 @@ Recommended benchmark and promotion-review order:
       current receipt validator passed. This is process-I/O benchmark evidence,
       not transfer or profile-promotion evidence; see
       `docs/diagnostics/swim_bout_full_duration_writer_telemetry_v4_2026-08-04.md`.
+- [x] Add exact process-local phase telemetry to all four immutable query
+      exporters. The shared recorder rejects nested, duplicate, omitted, and
+      reordered phases and separates source binding, node-local Parquet write,
+      source recheck, scratch copy, staged decoded validation, manifest
+      validation, staged-publication validation, generation rename, manifest
+      compare-and-swap, and published decoded validation. The record is
+      returned to the benchmark process but is absent from immutable manifests
+      and scientific identity. The focused four-export and atomic-publication
+      matrix passes 110/110; see
+      `docs/analytics_export_runtime_telemetry_v1_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,
