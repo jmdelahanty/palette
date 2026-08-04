@@ -166,6 +166,51 @@ def test_time_bins_emit_empty_internal_gap_and_union_overlapping_bouts() -> None
     assert rows[1]["bout_occupied_frame_count"] == 1
 
 
+def test_time_bins_preserve_nan_bout_path_as_explicit_invalid_metric() -> None:
+    bouts = _bout_rows([(1, 1, 2)])
+    bouts["path_length_mm"][0] = np.nan
+    rows = mod.summarize_activity_spatial_track(
+        track_id=7,
+        source_acquisition_frame_index=np.asarray([0, 1, 2], dtype=np.int64),
+        source_observed=np.ones(3, dtype=bool),
+        sample_valid=np.ones(3, dtype=bool),
+        position_finite=np.ones(3, dtype=bool),
+        transition_valid=np.asarray([0, 1, 1], dtype=bool),
+        positions_mm=np.asarray([[0, 0], [1, 1], [2, 2]], dtype=np.float64),
+        filtered_speed_mm_s=np.asarray([np.nan, 1, 1], dtype=np.float32),
+        filtered_path_distance_mm=np.asarray([np.nan, 1, 1], dtype=np.float32),
+        bouts=bouts,
+        source_sample_rate_hz=2.0,
+        requested_bin_size_s=2.0,
+    )
+
+    assert rows[0]["bout_count_started"] == 1
+    assert rows[0]["bout_duration_s_started_sum"] == pytest.approx(1.0)
+    assert math.isnan(rows[0]["bout_path_length_mm_started_sum"])
+    assert rows[0]["bout_metrics_valid"] is False
+
+
+@pytest.mark.parametrize("value", (-1.0, float("inf"), float("-inf")))
+def test_time_bins_reject_invalid_non_nan_bout_paths(value: float) -> None:
+    bouts = _bout_rows([(1, 0, 1)])
+    bouts["path_length_mm"][0] = value
+    with pytest.raises(ValueError, match="invalid physical values"):
+        mod.summarize_activity_spatial_track(
+            track_id=7,
+            source_acquisition_frame_index=np.asarray([0, 1], dtype=np.int64),
+            source_observed=np.ones(2, dtype=bool),
+            sample_valid=np.ones(2, dtype=bool),
+            position_finite=np.ones(2, dtype=bool),
+            transition_valid=np.asarray([0, 1], dtype=bool),
+            positions_mm=np.asarray([[0, 0], [1, 1]], dtype=np.float64),
+            filtered_speed_mm_s=np.asarray([np.nan, 1], dtype=np.float32),
+            filtered_path_distance_mm=np.asarray([np.nan, 1], dtype=np.float32),
+            bouts=bouts,
+            source_sample_rate_hz=2.0,
+            requested_bin_size_s=2.0,
+        )
+
+
 def test_bounded_bin_aggregation_equals_full_track_aggregation() -> None:
     frames = np.asarray([0, 1, 2, 6, 7, 9], dtype=np.int64)
     source_observed = np.asarray([1, 1, 0, 1, 1, 1], dtype=bool)
@@ -356,6 +401,7 @@ def test_source_binding_requires_exact_per_track_run_map(
     assert binding["candidate_id"] == 0
     assert binding["signal_id"] == 5
     assert binding["bout_count"] == 1
+    assert binding["bout_path_length_nan_count"] == 0
     assert bound.binding["payload_sha256"] == canonical_json_sha256(
         {key: value for key, value in bound.binding.items() if key != "payload_sha256"}
     )
@@ -409,7 +455,7 @@ def _publisher_bound_source(
     bouts = _bout_rows([])
     bout_body: dict[str, Any] = {
         "schema_id": mod.ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID,
-        "schema_version": 1,
+        "schema_version": mod.ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_VERSION,
         "stage_id": "swim_bouts",
         "track_id": 7,
         "run_name": "bouts_track_7",
@@ -433,6 +479,7 @@ def _publisher_bound_source(
         "frame_axis_first_frame": int(frames[0]),
         "frame_axis_last_frame": int(frames[-1]),
         "bout_count": 0,
+        "bout_path_length_nan_count": 0,
         "bout_dtype": bouts.dtype.descr,
         "bout_content_sha256": array_values_sha256(bouts),
         "selection_snapshot": {
@@ -453,7 +500,7 @@ def _publisher_bound_source(
     }
     source_body: dict[str, Any] = {
         "schema_id": mod.ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID,
-        "schema_version": 1,
+        "schema_version": mod.ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_VERSION,
         "recording_id": "recording",
         "zarr_path": str(source_path),
         "track_source_binding": track_source.binding,

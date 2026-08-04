@@ -1299,6 +1299,20 @@ Recommended benchmark and promotion-review order:
       incomplete immutable v1 attempt is retained as failure evidence and is
       not a matrix or promotion result. See
       `docs/analytics_query_export_benchmark_execution_2026-08-04.md`.
+- [x] Close the historical source boundary for the full-duration
+      `activity_spatial_time_bins` benchmark without claiming numerical
+      recomputation. The fixture builder copies the exact selected track and
+      dependency closure, copies the unmanifested compact-v8 swim-bout source,
+      applies only three source-prefix/zero-padding fixed-text widenings plus
+      one logical-only dtype normalization, installs the executable manifest on
+      the isolated copy, and proves source nonmutation and direct/consolidated
+      equivalence. The real preflight passed for 132 bout arrays and exposed
+      three legitimate NaN path lengths among 26,565 selected bouts. Source,
+      binning, and export envelopes are now revision 2: NaN path length is
+      retained, makes the affected bin sum NaN, and sets
+      `bout_metrics_valid=false`; infinities and negative values still fail.
+      The disposable preflight is not clean-revision benchmark evidence. See
+      `docs/diagnostics/activity_spatial_source_fixture_preflight_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,

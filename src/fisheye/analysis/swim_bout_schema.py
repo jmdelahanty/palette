@@ -19,7 +19,6 @@ from ._exact_tabular_run_schema import (
     validate_exact_manifest,
 )
 
-
 SWIM_BOUT_RUN_SCHEMA_ID = "palette.swim_bout_runs"
 SWIM_BOUT_RUN_SCHEMA_VERSION = 8
 SWIM_BOUT_LAYOUT = "compact_tabular_v2"
@@ -37,7 +36,9 @@ _COLUMNAR_TABLE_PATHS = (
 
 
 def _prepend(dtype: np.dtype, fields: list[tuple[str, str]]) -> np.dtype:
-    return np.dtype([*fields, *[(name, dtype.fields[name][0]) for name in dtype.names or ()]])
+    return np.dtype(
+        [*fields, *[(name, dtype.fields[name][0]) for name in dtype.names or ()]]
+    )
 
 
 def _required_specs() -> dict[str, ColumnSpec]:
@@ -155,14 +156,54 @@ def _required_specs() -> dict[str, ColumnSpec]:
     )
     specs: dict[str, ColumnSpec] = {}
     for prefix, dtype, authority, access in (
-        ("indexes/candidates", candidate_dtype, AnalysisAuthorityRole.SEMANTIC_METADATA, AccessPattern.EAGER),
-        ("indexes/signal_variants", signal_dtype, AnalysisAuthorityRole.SEMANTIC_METADATA, AccessPattern.EAGER),
-        ("tables/bouts", bout_dtype, AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY, AccessPattern.INDEXED),
-        ("tables/peak_events", peak_dtype, AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY, AccessPattern.INDEXED),
-        ("tables/inter_bout_intervals", interval_dtype, AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY, AccessPattern.INDEXED),
-        ("tables/summary_metrics", summary_dtype, AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY, AccessPattern.EAGER),
-        ("tables/histograms", histogram_dtype, AnalysisAuthorityRole.DERIVED_CACHE, AccessPattern.EAGER),
-        ("tables/bout_points", point_dtype, AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY, AccessPattern.INDEXED),
+        (
+            "indexes/candidates",
+            candidate_dtype,
+            AnalysisAuthorityRole.SEMANTIC_METADATA,
+            AccessPattern.EAGER,
+        ),
+        (
+            "indexes/signal_variants",
+            signal_dtype,
+            AnalysisAuthorityRole.SEMANTIC_METADATA,
+            AccessPattern.EAGER,
+        ),
+        (
+            "tables/bouts",
+            bout_dtype,
+            AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY,
+            AccessPattern.INDEXED,
+        ),
+        (
+            "tables/peak_events",
+            peak_dtype,
+            AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY,
+            AccessPattern.INDEXED,
+        ),
+        (
+            "tables/inter_bout_intervals",
+            interval_dtype,
+            AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY,
+            AccessPattern.INDEXED,
+        ),
+        (
+            "tables/summary_metrics",
+            summary_dtype,
+            AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY,
+            AccessPattern.EAGER,
+        ),
+        (
+            "tables/histograms",
+            histogram_dtype,
+            AnalysisAuthorityRole.DERIVED_CACHE,
+            AccessPattern.EAGER,
+        ),
+        (
+            "tables/bout_points",
+            point_dtype,
+            AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY,
+            AccessPattern.INDEXED,
+        ),
     ):
         specs.update(prefixed_specs(prefix, dtype, access=access, authority=authority))
 
@@ -218,6 +259,25 @@ def build_swim_bout_array_declarations(
     )
 
 
+def build_swim_bout_columnar_field_dtypes() -> dict[str, dict[str, str]]:
+    """Return the frozen logical dtype map for every compact columnar table."""
+
+    specs = _required_specs()
+    result: dict[str, dict[str, str]] = {}
+    for table_path in _COLUMNAR_TABLE_PATHS:
+        prefix = table_path + "/"
+        fields = {
+            path[len(prefix) :]: str(spec.logical_dtype)
+            for path, spec in specs.items()
+            if path.startswith(prefix)
+            and "/" not in path[len(prefix) :]
+            and spec.logical_dtype is not None
+        }
+        if fields:
+            result[table_path] = fields
+    return result
+
+
 def build_swim_bout_array_manifest(
     run_group: Any,
     *,
@@ -247,7 +307,10 @@ def validate_swim_bout_array_manifest(
     errors: list[str] = []
     if attrs.get("schema_id") != SWIM_BOUT_RUN_SCHEMA_ID:
         errors.append("swim-bout schema_id mismatch")
-    if type(attrs.get("schema_version")) is not int or attrs.get("schema_version") != SWIM_BOUT_RUN_SCHEMA_VERSION:
+    if (
+        type(attrs.get("schema_version")) is not int
+        or attrs.get("schema_version") != SWIM_BOUT_RUN_SCHEMA_VERSION
+    ):
         errors.append("swim-bout schema_version mismatch")
     if attrs.get("layout") != SWIM_BOUT_LAYOUT:
         errors.append("swim-bout layout mismatch")
@@ -295,6 +358,7 @@ __all__ = [
     "SWIM_BOUT_RUN_SCHEMA_ID",
     "SWIM_BOUT_RUN_SCHEMA_VERSION",
     "build_swim_bout_array_declarations",
+    "build_swim_bout_columnar_field_dtypes",
     "build_swim_bout_array_manifest",
     "validate_swim_bout_array_manifest",
     "write_swim_bout_array_manifest",

@@ -85,6 +85,14 @@ so a bout spanning two bins contributes occupancy to both without double
 counting overlapping frames. These two allocation rules are deliberately
 separate and named.
 
+The source-binding, binning, and export envelopes are revision 2. A finite
+nonnegative bout duration is mandatory. Bout path length may additionally be
+IEEE NaN when the source trajectory cannot support that measurement; infinity
+and negative finite values remain invalid. If any bout starting in a bin has an
+unavailable path length, the bin retains its event count, duration, and
+occupancy, publishes a NaN path-length sum, and sets `bout_metrics_valid=false`.
+It never drops the bout or silently sums only the finite subset.
+
 ## Source And Publication Boundary
 
 The publisher must fail closed unless it can prove and recheck:

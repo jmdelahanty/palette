@@ -13,13 +13,17 @@ from fisheye.analysis import swim_bout_schema as swim_schema
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
-def _create_array(group: zarr.Group, path: str, dtype: str | None, axes: tuple[str, ...]) -> None:
+def _create_array(
+    group: zarr.Group, path: str, dtype: str | None, axes: tuple[str, ...]
+) -> None:
     parent = group
     parts = path.split("/")
     for name in parts[:-1]:
         parent = parent.require_group(name)
     resolved = np.dtype("S64" if dtype is None else dtype)
-    first_extent = 2 if axes[0] == "detector_signal" else (7 if axes[0] == "frame" else 3)
+    first_extent = (
+        2 if axes[0] == "detector_signal" else (7 if axes[0] == "frame" else 3)
+    )
     shape = (first_extent,) if len(axes) == 1 else (first_extent, 7)
     parent.create_array(parts[-1], data=np.zeros(shape, dtype=resolved))
 
@@ -102,44 +106,77 @@ def test_swim_manifest_is_exact_and_supports_external_or_embedded_frame_axis() -
 
     assert swim_schema.validate_swim_bout_array_manifest(embedded) == ()
     assert swim_schema.validate_swim_bout_array_manifest(external) == ()
-    assert embedded.attrs[MANIFEST_ATTRIBUTE]["payload"]["enabled_optional_bundles"] == [
-        "embedded_frame_axis"
-    ]
-    assert external.attrs[MANIFEST_ATTRIBUTE]["payload"]["enabled_optional_bundles"] == []
+    assert embedded.attrs[MANIFEST_ATTRIBUTE]["payload"][
+        "enabled_optional_bundles"
+    ] == ["embedded_frame_axis"]
+    assert (
+        external.attrs[MANIFEST_ATTRIBUTE]["payload"]["enabled_optional_bundles"] == []
+    )
+
+
+def test_swim_columnar_field_dtype_contract_is_public_and_exact() -> None:
+    fields = swim_schema.build_swim_bout_columnar_field_dtypes()
+
+    assert fields["indexes/candidates"]["candidate_name"] == "|S256"
+    assert fields["indexes/candidates"]["parameters_json"] == "|S8192"
+    assert fields["indexes/signal_variants"]["parameters_json"] == "|S8192"
+    assert fields["tables/summary_metrics"]["metric_name"] == "|S64"
 
 
 def test_swim_fixed_text_contract_rejects_silent_truncation() -> None:
-    assert swim_writer._fixed_utf8_bytes(
-        "candidate", width=16, label="candidate"
-    ) == b"candidate"
+    assert (
+        swim_writer._fixed_utf8_bytes("candidate", width=16, label="candidate")
+        == b"candidate"
+    )
     with np.testing.assert_raises_regex(ValueError, "fixed-width UTF-8"):
         swim_writer._fixed_utf8_bytes("x" * 16, width=16, label="candidate")
 
 
-def test_swim_manifest_rejects_missing_unexpected_wrong_dtype_and_partial_bundle() -> None:
+def test_swim_manifest_rejects_missing_unexpected_wrong_dtype_and_partial_bundle() -> (
+    None
+):
     missing = _swim_group()
     _delete_array(missing, "tables/bouts/bout_id")
-    assert any("Missing required" in error for error in swim_schema.validate_swim_bout_array_manifest(missing))
+    assert any(
+        "Missing required" in error
+        for error in swim_schema.validate_swim_bout_array_manifest(missing)
+    )
 
     unexpected = _swim_group()
-    unexpected["tables/bouts"].create_array("invented", data=np.zeros(3, dtype=np.int32))
-    assert any("Unexpected compact arrays" in error for error in swim_schema.validate_swim_bout_array_manifest(unexpected))
+    unexpected["tables/bouts"].create_array(
+        "invented", data=np.zeros(3, dtype=np.int32)
+    )
+    assert any(
+        "Unexpected compact arrays" in error
+        for error in swim_schema.validate_swim_bout_array_manifest(unexpected)
+    )
 
     wrong = _swim_group()
     _delete_array(wrong, "tables/bouts/bout_id")
     wrong["tables/bouts"].create_array("bout_id", data=np.zeros(3, dtype=np.float32))
-    assert any("dtype mismatch" in error for error in swim_schema.validate_swim_bout_array_manifest(wrong))
+    assert any(
+        "dtype mismatch" in error
+        for error in swim_schema.validate_swim_bout_array_manifest(wrong)
+    )
 
     wrong_shape = _swim_group()
     _delete_array(wrong_shape, "tables/bouts/bout_id")
     wrong_shape["tables/bouts"].create_array(
         "bout_id", data=np.zeros(4, dtype=np.int32)
     )
-    assert any("Shared dimension" in error for error in swim_schema.validate_swim_bout_array_manifest(wrong_shape))
+    assert any(
+        "Shared dimension" in error
+        for error in swim_schema.validate_swim_bout_array_manifest(wrong_shape)
+    )
 
     partial = _swim_group(embedded_axis=False)
-    partial["signals"].create_array("frame_indices", data=np.zeros((3, 2), dtype=np.int64))
-    assert any("rank mismatch" in error for error in swim_schema.validate_swim_bout_array_manifest(partial))
+    partial["signals"].create_array(
+        "frame_indices", data=np.zeros((3, 2), dtype=np.int64)
+    )
+    assert any(
+        "rank mismatch" in error
+        for error in swim_schema.validate_swim_bout_array_manifest(partial)
+    )
 
 
 def test_swim_manifest_rejects_recomputed_nested_tampering() -> None:
@@ -167,9 +204,9 @@ def test_bout_kinematics_manifest_is_exact_with_optional_eye_bundle() -> None:
 
     assert bout_schema.validate_bout_kinematics_array_manifest(with_eye) == ()
     assert bout_schema.validate_bout_kinematics_array_manifest(without_eye) == ()
-    assert with_eye.attrs[MANIFEST_ATTRIBUTE]["payload"]["enabled_optional_bundles"] == [
-        "eye_gaze_metrics"
-    ]
+    assert with_eye.attrs[MANIFEST_ATTRIBUTE]["payload"][
+        "enabled_optional_bundles"
+    ] == ["eye_gaze_metrics"]
 
 
 def test_exact_compact_manifests_bind_byte_planner_adoption_explicitly() -> None:
@@ -187,10 +224,13 @@ def test_exact_compact_manifests_bind_byte_planner_adoption_explicitly() -> None
         declaration["byte_planner_adopted"] is True
         for declaration in swim_manifest["payload"]["arrays"]
     )
-    assert swim_schema.validate_swim_bout_array_manifest(
-        swim,
-        byte_planner_adopted=True,
-    ) == ()
+    assert (
+        swim_schema.validate_swim_bout_array_manifest(
+            swim,
+            byte_planner_adopted=True,
+        )
+        == ()
+    )
     assert swim_schema.validate_swim_bout_array_manifest(swim)
 
     bout = _bout_group()
@@ -203,28 +243,42 @@ def test_exact_compact_manifests_bind_byte_planner_adoption_explicitly() -> None
         "analysis_storage_planning_v1"
     )
     assert bout_manifest["payload"]["byte_planner_adopted"] is True
-    assert bout_schema.validate_bout_kinematics_array_manifest(
-        bout,
-        byte_planner_adopted=True,
-    ) == ()
+    assert (
+        bout_schema.validate_bout_kinematics_array_manifest(
+            bout,
+            byte_planner_adopted=True,
+        )
+        == ()
+    )
     assert bout_schema.validate_bout_kinematics_array_manifest(bout)
 
 
-def test_bout_kinematics_manifest_rejects_missing_unexpected_wrong_dtype_and_tampering() -> None:
+def test_bout_kinematics_manifest_rejects_missing_unexpected_wrong_dtype_and_tampering() -> (
+    None
+):
     missing = _bout_group()
     _delete_array(missing, "movement_metrics/bout_id")
-    assert any("Missing required" in error for error in bout_schema.validate_bout_kinematics_array_manifest(missing))
+    assert any(
+        "Missing required" in error
+        for error in bout_schema.validate_bout_kinematics_array_manifest(missing)
+    )
 
     unexpected = _bout_group()
     unexpected.create_array("frame_counts", data=np.zeros(3, dtype=np.int32))
-    assert any("Unexpected compact arrays" in error for error in bout_schema.validate_bout_kinematics_array_manifest(unexpected))
+    assert any(
+        "Unexpected compact arrays" in error
+        for error in bout_schema.validate_bout_kinematics_array_manifest(unexpected)
+    )
 
     wrong = _bout_group()
     _delete_array(wrong, "heading_metrics/net_delta_heading_deg")
     wrong["heading_metrics"].create_array(
         "net_delta_heading_deg", data=np.zeros(3, dtype=np.float32)
     )
-    assert any("dtype mismatch" in error for error in bout_schema.validate_bout_kinematics_array_manifest(wrong))
+    assert any(
+        "dtype mismatch" in error
+        for error in bout_schema.validate_bout_kinematics_array_manifest(wrong)
+    )
 
     tampered = _bout_group()
     manifest = deepcopy(tampered.attrs[MANIFEST_ATTRIBUTE])
@@ -269,9 +323,7 @@ def test_bout_kinematics_compact_writer_emits_the_exact_manifest() -> None:
     ):
         bout_writer.resolve_bout_kinematics_tables(group)
     legacy_records, _legacy_attrs, _legacy_table_attrs = (
-        bout_writer.resolve_bout_kinematics_tables(
-            group, legacy_compatibility=True
-        )
+        bout_writer.resolve_bout_kinematics_tables(group, legacy_compatibility=True)
     )
     assert set(legacy_records) == {"movement", "heading_smoothed", "eye_gaze"}
 

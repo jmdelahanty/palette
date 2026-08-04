@@ -80,13 +80,12 @@ from fisheye.shared.zarr_run_completion import (
     is_run_selector_eligible,
 )
 
-
 ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID = (
     "palette.activity_spatial_time_bins.source_binding"
 )
-ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_VERSION = 1
+ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_VERSION = 2
 ACTIVITY_SPATIAL_BINNING_SCHEMA_ID = "palette.activity_spatial_time_bins.binning"
-ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION = 1
+ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION = 2
 ACTIVITY_SPATIAL_SOURCE_SPEED_LEVEL = "filtered"
 ACTIVITY_SPATIAL_BINNING_POLICY = (
     "global_acquisition_frame_fixed_width_round_half_up_v1"
@@ -94,7 +93,7 @@ ACTIVITY_SPATIAL_BINNING_POLICY = (
 ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID = (
     "palette.analytics_export.activity_spatial_time_bins"
 )
-ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION = 1
+ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION = 2
 ACTIVITY_SPATIAL_DECODED_PAYLOAD_SCHEMA_ID = (
     "palette.activity_spatial_time_bins.decoded_payload"
 )
@@ -152,6 +151,7 @@ _BOUT_BINDING_FIELDS = frozenset(
         "frame_axis_first_frame",
         "frame_axis_last_frame",
         "bout_count",
+        "bout_path_length_nan_count",
         "bout_dtype",
         "bout_content_sha256",
         "selection_snapshot",
@@ -217,6 +217,12 @@ def activity_spatial_binning_contract(
         "bout_count_policy": "assign_whole_bout_by_start_frame",
         "bout_occupancy_policy": (
             "union_inclusive_bout_frame_intervals_clipped_to_bin"
+        ),
+        "bout_path_policy": (
+            "finite_nonnegative_or_nan; any started NaN propagates to the bin sum"
+        ),
+        "bout_metrics_valid_policy": (
+            "true exactly when every bout starting in the bin has finite path length"
         ),
         "invalid_float_semantics": "ieee_nan_not_arrow_null",
     }
@@ -350,8 +356,8 @@ def _bind_swim_bout_source(
             or np.any(ends < starts)
             or np.any(~np.isfinite(durations))
             or np.any(durations < 0)
-            or np.any(~np.isfinite(paths))
-            or np.any(paths < 0)
+            or np.any(np.isinf(paths))
+            or np.any(paths[np.isfinite(paths)] < 0)
         ):
             raise ValueError(
                 f"Swim-bout run {run_name!r} has invalid physical event values."
@@ -420,6 +426,7 @@ def _bind_swim_bout_source(
         "frame_axis_first_frame": (int(frame_axis[0]) if frame_axis.size else None),
         "frame_axis_last_frame": (int(frame_axis[-1]) if frame_axis.size else None),
         "bout_count": int(bouts.shape[0]),
+        "bout_path_length_nan_count": int(np.count_nonzero(np.isnan(paths))),
         "bout_dtype": bouts.dtype.descr,
         "bout_content_sha256": array_values_sha256(bouts),
         "selection_snapshot": {
@@ -600,6 +607,15 @@ def summarize_activity_spatial_track(
     bout_ends = np.asarray(events["end_frame"], dtype=np.int64)
     bout_durations = np.asarray(events["duration_s"], dtype=np.float64)
     bout_paths = np.asarray(events["path_length_mm"], dtype=np.float64)
+    if (
+        np.any(bout_starts < 0)
+        or np.any(bout_ends < bout_starts)
+        or np.any(~np.isfinite(bout_durations))
+        or np.any(bout_durations < 0)
+        or np.any(np.isinf(bout_paths))
+        or np.any(bout_paths[np.isfinite(bout_paths)] < 0)
+    ):
+        raise ValueError("Bout events contain invalid physical values.")
 
     bin_frames = int(policy["bin_size_frames"])
     if track_frame_span is None:
@@ -702,7 +718,13 @@ def summarize_activity_spatial_track(
         started = (bout_starts >= full_start) & (bout_starts < full_end)
         bout_count = int(np.count_nonzero(started))
         duration_sum = float(np.sum(bout_durations[started], dtype=np.float64))
-        bout_path_sum = float(np.sum(bout_paths[started], dtype=np.float64))
+        started_paths = bout_paths[started]
+        bout_metrics_valid = bool(np.all(np.isfinite(started_paths)))
+        bout_path_sum = (
+            float(np.sum(started_paths, dtype=np.float64))
+            if bout_metrics_valid
+            else float("nan")
+        )
         occupied = _interval_union_count(
             bout_starts,
             bout_ends,
@@ -751,7 +773,7 @@ def summarize_activity_spatial_track(
                 "bout_occupancy_fraction": _fraction(occupied, expected),
                 "position_metrics_valid": position_metrics_valid,
                 "speed_metrics_valid": speed_metrics_valid,
-                "bout_metrics_valid": True,
+                "bout_metrics_valid": bout_metrics_valid,
                 "bin_valid": bin_valid,
                 "bin_reason_code": reason_code,
             }
@@ -1142,6 +1164,18 @@ def _validate_source_binding_payload(value: object) -> Mapping[str, Any]:
             or bout.get("source_sample_rate_hz") != track.get("source_sample_rate_hz")
         ):
             raise ValueError(f"Track {track_text} swim-bout lineage is invalid.")
+        bout_count = bout.get("bout_count")
+        nan_count = bout.get("bout_path_length_nan_count")
+        if (
+            type(bout_count) is not int
+            or bout_count < 0
+            or type(nan_count) is not int
+            or nan_count < 0
+            or nan_count > bout_count
+        ):
+            raise ValueError(
+                f"Track {track_text} swim-bout path-validity counts are invalid."
+            )
         for digest_name in (
             "source_array_manifest_sha256",
             "source_track_motion_manifest_sha256",
@@ -1342,10 +1376,25 @@ def _validate_decoded_rows(
             if source_count > 0 and position_valid
             else (1 if source_count == 0 else 2)
         )
+        bout_count = columns["bout_count_started"][index]
+        duration_sum = columns["bout_duration_s_started_sum"][index]
+        bout_path_sum = columns["bout_path_length_mm_started_sum"][index]
+        bout_metrics_valid = columns["bout_metrics_valid"][index]
+        if type(bout_count) is not int or bout_count < 0:
+            raise ValueError("Activity/spatial started-bout count is invalid.")
+        if not math.isfinite(duration_sum) or duration_sum < 0:
+            raise ValueError("Activity/spatial bout-duration sum is invalid.")
+        if bout_metrics_valid is True:
+            if not math.isfinite(bout_path_sum) or bout_path_sum < 0:
+                raise ValueError("Valid activity/spatial bout-path sum is invalid.")
+        elif bout_metrics_valid is False:
+            if bout_count == 0 or not math.isnan(bout_path_sum):
+                raise ValueError("Invalid activity/spatial bout-path semantics differ.")
+        else:
+            raise ValueError("Activity/spatial bout validity must be exact bool.")
         if (
             columns["bin_valid"][index] != (expected_reason == 0)
             or columns["bin_reason_code"][index] != expected_reason
-            or columns["bout_metrics_valid"][index] is not True
         ):
             raise ValueError("Activity/spatial validity/reason semantics are invalid.")
     if keys != sorted(keys) or len(keys) != len(set(keys)):
