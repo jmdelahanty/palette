@@ -87,6 +87,17 @@ EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
 EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
 RUN_PARENT = "analysis/tail_posture_view_runs"
 DEFAULT_CAPACITY_MARGIN_BYTES = 64 * 1024 * 1024
+_NODE_LOCAL_SCRATCH_ROOTS = tuple(
+    Path(value)
+    for value in (
+        "/tmp",
+        "/var/tmp",
+        "/scratch",
+        "/dev/shm",
+        "/local",
+        "/lscratch",
+    )
+)
 PublicationAcceptanceValidator = Callable[
     [zarr.Group, zarr.Group, zarr.Group], Mapping[str, Any]
 ]
@@ -116,6 +127,10 @@ class TailPostureMaterializationPlan:
     @property
     def local_run_path(self) -> Path:
         return self.local_zarr / RUN_PARENT / self.run_name
+
+    @property
+    def staged_source_zarr(self) -> Path:
+        return self.scratch_root / "staged-subject-shape.zarr"
 
     def as_manifest(self) -> dict[str, object]:
         return {
@@ -150,8 +165,7 @@ class TailPostureMaterializationPlan:
 
 @dataclass(frozen=True)
 class TailPostureSourceSnapshot:
-    shape_group: zarr.Group
-    shape_tables: Any
+    staged_shape_group: zarr.Group
     source_arrays: Mapping[str, np.ndarray]
     lineage_arrays: Mapping[str, np.ndarray]
     source_bytes: int
@@ -202,6 +216,13 @@ def build_tail_posture_materialization_plan(
         pass
     else:
         raise ValueError("Tail-posture scratch must be outside the source archive")
+    if not any(
+        scratch == root or scratch.is_relative_to(root)
+        for root in _NODE_LOCAL_SCRATCH_ROOTS
+    ):
+        raise ValueError(
+            "Tail-posture scratch must be below a recognized node-local filesystem"
+        )
     source_name = _safe_name(source_run_name, label="source run name")
     target_name = _safe_name(run_name, label="candidate run name")
     shape_name = _safe_name(subject_shape_run, label="subject-shape run name")
@@ -313,12 +334,28 @@ def snapshot_tail_posture_sources(
     frozen_lineage = {
         name: np.asarray(values).copy() for name, values in lineage.items()
     }
+    staged_root = open_zarr_root(plan.staged_source_zarr, mode="a")
+    staged_shape = (
+        staged_root.require_group("analysis")
+        .require_group("subject_shape_runs")
+        .create_group(plan.subject_shape_run)
+    )
+    staged_shape.attrs.update(
+        {
+            "source_refined_subject_masks_run": shape_group.attrs.get(
+                "source_refined_subject_masks_run"
+            ),
+            "source_subject_shape_publication_manifest_sha256": shape_manifest,
+            "staging_contract_id": SOURCE_STAGING_SCHEMA_ID,
+        }
+    )
+    for name, values in frozen_lineage.items():
+        staged_shape.create_array(name, data=values)
     source_bytes = sum(value.nbytes for value in frozen_sources.values()) + sum(
         value.nbytes for value in frozen_lineage.values()
     )
     return TailPostureSourceSnapshot(
-        shape_group=shape_group,
-        shape_tables=shape_tables,
+        staged_shape_group=staged_shape,
         source_arrays=frozen_sources,
         lineage_arrays=frozen_lineage,
         source_bytes=int(source_bytes),
@@ -361,7 +398,7 @@ def write_local_tail_posture_candidate(
         local_root,
         target_run=plan.run_name,
         shape_run_name=plan.subject_shape_run,
-        shape_group=snapshot.shape_group,
+        shape_group=snapshot.staged_shape_group,
         source_subject_shape_publication_manifest_sha256=(
             snapshot.source_subject_shape_manifest_sha256
         ),

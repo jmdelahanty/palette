@@ -10,8 +10,11 @@ import zarr
 from fisheye.analysis import tail_posture_view_runs as tail_writer
 from fisheye.analysis_workflows.materializers.tail_posture import (
     TAIL_POSTURE_EXECUTION_PHASE_ORDER,
+    build_tail_posture_materialization_plan,
     materialize_tail_posture_candidate,
+    snapshot_tail_posture_sources,
     tombstone_tail_posture_execution_candidate,
+    write_local_tail_posture_candidate,
 )
 from fisheye.analysis_workflows.tail_posture_candidate_execution import (
     TAIL_POSTURE_EXECUTION_FAMILY_ID,
@@ -157,6 +160,83 @@ def test_suite_and_invocation_parameter_grammar_are_closed(
     parameters["unexpected"] = True
     with pytest.raises(ValueError, match="field set"):
         require_tail_posture_invocation_parameters(parameters)
+
+
+def test_materializer_rejects_non_node_local_scratch(
+    tail_posture_execution_archive: Path,
+) -> None:
+    _source_hashes, publication = _source_facts(tail_posture_execution_archive)
+    with pytest.raises(ValueError, match="recognized node-local"):
+        build_tail_posture_materialization_plan(
+            tail_posture_execution_archive,
+            scratch_root=Path("/opt/palette-tail-posture-not-node-local"),
+            source_run_name=SOURCE_RUN,
+            run_name="invalid_scratch_candidate",
+            subject_shape_run="shape_profile_attack",
+            source_subject_shape_manifest_sha256=(
+                publication.source.manifest.record_sha256
+            ),
+            source_tail_posture_manifest_sha256=(publication.manifest.record_sha256),
+            source_tail_kinematics_run=None,
+            source_tail_kinematics_manifest_sha256=None,
+            view_family="megabouts_compatible",
+            head_source="head_endpoint_xy",
+            keypoint_count=11,
+            storage_profile=PUBLISHED_HTTP_V1,
+        )
+
+
+def test_scientific_compute_uses_only_staged_subject_shape(
+    tail_posture_execution_archive: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source_hashes, publication = _source_facts(tail_posture_execution_archive)
+    plan = build_tail_posture_materialization_plan(
+        tail_posture_execution_archive,
+        scratch_root=tmp_path / "staged-source-proof",
+        source_run_name=SOURCE_RUN,
+        run_name="staged_source_candidate",
+        subject_shape_run="shape_profile_attack",
+        source_subject_shape_manifest_sha256=(
+            publication.source.manifest.record_sha256
+        ),
+        source_tail_posture_manifest_sha256=publication.manifest.record_sha256,
+        source_tail_kinematics_run=None,
+        source_tail_kinematics_manifest_sha256=None,
+        view_family="megabouts_compatible",
+        head_source="head_endpoint_xy",
+        keypoint_count=11,
+        storage_profile=PUBLISHED_HTTP_V1,
+    )
+    snapshot = snapshot_tail_posture_sources(plan, check_capacity=False)
+    assert Path(snapshot.staged_shape_group.store_path.store.root).resolve() == (
+        plan.staged_source_zarr
+    )
+    original_prepare = tail_writer._prepare_run_group
+
+    def require_staged_shape(*args, **kwargs):
+        shape_group = kwargs["shape_group"]
+        if Path(shape_group.store_path.store.root).resolve() != plan.staged_source_zarr:
+            raise AssertionError("scientific compute reread live subject-shape state")
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(tail_writer, "_prepare_run_group", require_staged_shape)
+    batch = tail_writer.compute_tail_posture_view_from_subject_shape_arrays(
+        **snapshot.source_arrays,
+        keypoint_count=plan.keypoint_count,
+    )
+    local, _receipt = write_local_tail_posture_candidate(
+        plan,
+        snapshot,
+        batch=batch,
+        storage_profile=PUBLISHED_HTTP_V1,
+        execution_binding={"request_payload_digest": "b" * 64},
+        stage_command="staged source proof",
+    )
+    assert local.attrs["source_refined_subject_masks_run"] == (
+        snapshot.staged_shape_group.attrs["source_refined_subject_masks_run"]
+    )
 
 
 def test_atomic_candidate_recomputes_exact_arrays_without_selector_mutation(
