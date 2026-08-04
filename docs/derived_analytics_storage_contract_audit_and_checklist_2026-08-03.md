@@ -1266,6 +1266,19 @@ Recommended benchmark and promotion-review order:
       and scientific identity. The focused four-export and atomic-publication
       matrix passes 110/110; see
       `docs/analytics_export_runtime_telemetry_v1_2026-08-04.md`.
+- [x] Implement one closed fresh-process benchmark runner for all four exact
+      immutable query exporters. It invokes the maintained publishers, binds
+      their ten-phase result-only telemetry, wraps publication and reads with
+      process-tree CPU/RSS evidence, validates only manifest-selected Parquet
+      parts, runs deterministic random-frame/window/full-scan workloads,
+      records apparent/allocated bytes and object counts, and hashes selected
+      source metadata before/after. Missing network-transfer telemetry remains
+      explicitly null and `promotion_authorized` is always false. The real
+      full-duration preflight also caught the honest source-fixture blocker:
+      selected eye/tail are v5/v1 and full-duration `positions_mm` remains
+      float32 while the frozen exact track/query contract requires float64.
+      No live source was cast or restamped. See
+      `docs/analytics_query_export_benchmark_contract_v1_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,
