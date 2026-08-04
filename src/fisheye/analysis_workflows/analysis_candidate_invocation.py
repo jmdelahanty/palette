@@ -31,6 +31,7 @@ class CandidateInvocationContract(str, Enum):
 
     TRACK_FLAT_V1 = "track_flat_v1"
     EXACT_TABULAR_V1 = "exact_tabular_v1"
+    OCCUPANCY_V1 = "occupancy_v1"
     EYE_ANGLES_V1 = "eye_angles_v1"
     SUBJECT_SHAPE_V1 = "subject_shape_v1"
     TAIL_KINEMATICS_V1 = "tail_kinematics_v1"
@@ -111,6 +112,14 @@ def _require_exact_tabular(parameters: object) -> Mapping[str, Any]:
     _require_copy_backend(parsed["copy_backend"])
     _require_bool(parsed["keep_scratch"], label="keep_scratch")
     return parsed
+
+
+def _require_occupancy(parameters: object) -> Mapping[str, Any]:
+    from .occupancy_candidate_execution import (
+        require_occupancy_invocation_parameters,
+    )
+
+    return require_occupancy_invocation_parameters(parameters)
 
 
 def _require_track_flat(parameters: object) -> Mapping[str, Any]:
@@ -474,6 +483,7 @@ def _require_bout_classification(parameters: object) -> Mapping[str, Any]:
 
 _PARAMETER_VALIDATORS = {
     CandidateInvocationContract.EXACT_TABULAR_V1: _require_exact_tabular,
+    CandidateInvocationContract.OCCUPANCY_V1: _require_occupancy,
     CandidateInvocationContract.TRACK_FLAT_V1: _require_track_flat,
     CandidateInvocationContract.EYE_ANGLES_V1: _require_eye_angles,
     CandidateInvocationContract.SUBJECT_SHAPE_V1: _require_subject_shape,
@@ -576,6 +586,26 @@ def build_exact_tabular_invocation(
     return _build_invocation(
         CandidateInvocationContract.EXACT_TABULAR_V1,
         {
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+        },
+    )
+
+
+def build_occupancy_invocation(
+    *,
+    source_spatiotemporal_identity_sha256: str,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.OCCUPANCY_V1,
+        {
+            "source_spatiotemporal_identity_sha256": (
+                source_spatiotemporal_identity_sha256
+            ),
             "storage_profile_id": storage_profile_id,
             "copy_backend": copy_backend,
             "keep_scratch": keep_scratch,
@@ -927,6 +957,7 @@ __all__ = [
     "build_bout_classification_invocation",
     "build_chaser_distance_base_invocation",
     "build_exact_tabular_invocation",
+    "build_occupancy_invocation",
     "build_eye_angle_invocation",
     "build_stimulus_response_invocation",
     "build_subject_shape_invocation",

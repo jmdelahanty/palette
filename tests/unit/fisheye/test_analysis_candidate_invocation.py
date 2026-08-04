@@ -10,6 +10,7 @@ from fisheye.analysis_workflows.analysis_candidate_invocation import (
     build_chaser_distance_base_invocation,
     build_exact_tabular_invocation,
     build_eye_angle_invocation,
+    build_occupancy_invocation,
     build_subject_shape_invocation,
     build_stimulus_epoch_invocation,
     build_tail_kinematics_invocation,
@@ -52,6 +53,34 @@ def test_exact_tabular_invocation_is_closed_and_digest_bound() -> None:
     _rehash(wrong_bool)
     with pytest.raises(TypeError, match="exact bool"):
         require_candidate_invocation_manifest(wrong_bool)
+
+
+def test_occupancy_invocation_binds_spatiotemporal_source_identity() -> None:
+    invocation = build_occupancy_invocation(
+        source_spatiotemporal_identity_sha256="a" * 64,
+        storage_profile_id="published_http_v1",
+        copy_backend="python",
+        keep_scratch=False,
+    )
+    require_candidate_invocation_manifest(
+        invocation,
+        expected_contract=CandidateInvocationContract.OCCUPANCY_V1,
+        expected_profile_id="published_http_v1",
+    )
+
+    changed_identity = deepcopy(invocation)
+    changed_identity["payload"]["parameters"][
+        "source_spatiotemporal_identity_sha256"
+    ] = "not-a-digest"
+    _rehash(changed_identity)
+    with pytest.raises(ValueError, match="source_spatiotemporal_identity_sha256"):
+        require_candidate_invocation_manifest(changed_identity)
+
+    unexpected = deepcopy(invocation)
+    unexpected["payload"]["parameters"]["detection_path"] = "detect_runs/latest"
+    _rehash(unexpected)
+    with pytest.raises(ValueError, match="field set"):
+        require_candidate_invocation_manifest(unexpected)
 
 
 def test_track_flat_invocation_binds_authority_and_flat_projection() -> None:

@@ -189,6 +189,29 @@ def _implemented_exact_tabular(
     )
 
 
+def _implemented_occupancy(
+    stage_id: str,
+    logical_equality_contract: CandidateLogicalEqualityContract,
+) -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id=stage_id,
+        invocation_contract=CandidateInvocationContract.OCCUPANCY_V1,
+        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.BOUND_DERIVATIVE,
+        coordinate_contract_status=(
+            CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED
+        ),
+        logical_equality_contract=logical_equality_contract,
+        runner_module="fisheye.diagnostics.analysis_candidate_execution",
+        runner_entrypoint="execute_exact_tabular_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.analysis_candidate_suite_validation"
+        ),
+        suite_validator_entrypoint="require_exact_tabular_execution_suite",
+    )
+
+
 def _implemented_track_flat() -> AnalysisCandidateExecutionAdapter:
     return AnalysisCandidateExecutionAdapter(
         stage_id="track_kinematics",
@@ -382,21 +405,6 @@ def _implemented_tail_posture() -> AnalysisCandidateExecutionAdapter:
     )
 
 
-def _coordinate_blocked(
-    stage_id: str,
-    logical_equality_contract: CandidateLogicalEqualityContract,
-) -> AnalysisCandidateExecutionAdapter:
-    return AnalysisCandidateExecutionAdapter(
-        stage_id=stage_id,
-        invocation_contract=CandidateInvocationContract.EXACT_TABULAR_V1,
-        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
-        runner_status=CandidateRunnerStatus.BLOCKED_COORDINATE_AUTHORITY,
-        coordinate_role=CoordinateContractRole.CANONICAL_BINDING_REQUIRED,
-        coordinate_contract_status=CoordinateContractStatus.BLOCKED_CANONICAL_BINDING,
-        logical_equality_contract=logical_equality_contract,
-    )
-
-
 ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, ...] = (
     _implemented_track_flat(),
     _implemented_exact_tabular(
@@ -412,11 +420,11 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
     _implemented_subject_shape(),
     _implemented_tail_kinematics(),
     _implemented_stimulus_response(),
-    _coordinate_blocked(
+    _implemented_occupancy(
         "detection_occupancy",
         CandidateLogicalEqualityContract.DETECTION_OCCUPANCY_DECLARED_ARRAYS_V1,
     ),
-    _coordinate_blocked(
+    _implemented_occupancy(
         "session_occupancy",
         CandidateLogicalEqualityContract.SESSION_OCCUPANCY_DECLARED_ARRAYS_V1,
     ),

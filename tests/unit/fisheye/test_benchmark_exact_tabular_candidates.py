@@ -145,27 +145,75 @@ def _occupancy_archive(path: Path, *, family: str) -> Path:
     )
     frames = np.asarray([0, 1, 2, 4, 5, 7], dtype=np.int64)
     centers = np.asarray(
-        [[10.0, 10.0], [75.0, 10.0], [10.0, 60.0], [75.0, 60.0], [50.0, 10.0], [10.0, 40.0]],
+        [
+            [10.0, 10.0],
+            [75.0, 10.0],
+            [10.0, 60.0],
+            [75.0, 60.0],
+            [50.0, 10.0],
+            [10.0, 40.0],
+        ],
         dtype=np.float32,
     )
     boxes = np.column_stack(
-        [centers[:, 0] - 1, centers[:, 1] - 1, centers[:, 0] + 1, centers[:, 1] + 1]
+        [
+            centers[:, 0] / np.float32(100.0),
+            centers[:, 1] / np.float32(80.0),
+            np.full(centers.shape[0], 0.02, dtype=np.float32),
+            np.full(centers.shape[0], 0.025, dtype=np.float32),
+        ]
     ).astype(np.float32)
     instances.create_array("frame_indices", data=frames)
-    instances.create_array("bbox_img_xyxy", data=boxes)
+    instances.create_array("bbox_norm_coords", data=boxes)
     instances.create_array(
         "confidence_scores",
         data=np.linspace(0.5, 1.0, frames.size, dtype=np.float32),
     )
     if family == "detection_occupancy":
+        epoch_windows = (
+            OccupancyWindow(0, "first", 0, 3, 0.0, 0.4, 0.4),
+            OccupancyWindow(1, "second", 4, 7, 0.4, 0.8, 0.4),
+        )
+        epoch_parent = root.require_group("analysis").require_group(
+            "stimulus_epoch_runs"
+        )
+        epoch_parent.attrs.update(
+            {"latest": "epoch_source", "latest_complete": "epoch_source"}
+        )
+        epoch_run = epoch_parent.create_group("epoch_source")
+        epoch_run.attrs.update(
+            {
+                "schema_id": "palette.stimulus_epoch_run.v2",
+                "schema_version": 2,
+                "palette_run_completion_status": "complete",
+                "stage_selector_eligible": True,
+            }
+        )
+        epoch_arrays = epoch_run.create_group("windows")
+        labels = np.zeros((2, 96), dtype=np.uint8)
+        for index, label in enumerate(("first", "second")):
+            encoded = label.encode("utf-8")
+            labels[index, : len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
+        epoch_arrays.create_array("window_id", data=np.asarray([0, 1], dtype=np.int32))
+        epoch_arrays.create_array("label_bytes", data=labels)
+        epoch_arrays.create_array(
+            "start_frame", data=np.asarray([0, 4], dtype=np.int64)
+        )
+        epoch_arrays.create_array("end_frame", data=np.asarray([3, 7], dtype=np.int64))
+        epoch_arrays.create_array(
+            "start_time_s", data=np.asarray([0.0, 0.4], dtype=np.float64)
+        )
+        epoch_arrays.create_array(
+            "end_time_s", data=np.asarray([0.4, 0.8], dtype=np.float64)
+        )
+        epoch_arrays.create_array(
+            "duration_s", data=np.asarray([0.4, 0.4], dtype=np.float64)
+        )
         result = build_detection_occupancy_result(
             path,
             run_name="source",
             stimulus_epoch_run="epoch_source",
-            epoch_windows=(
-                OccupancyWindow(0, "first", 0, 3, 0.0, 0.4, 0.4),
-                OccupancyWindow(1, "second", 4, 7, 0.4, 0.8, 0.4),
-            ),
+            epoch_windows=epoch_windows,
             detection_path="refined_detect_runs/refined_1/instances",
             bin_size=50,
             smooth_sigma=0.0,
@@ -330,9 +378,7 @@ def test_trial_rejects_stale_consolidated_candidate_metadata(tmp_path: Path) -> 
         "post_consolidation_tamper"
     ] = True
 
-    with pytest.raises(
-        RuntimeError, match="Direct/consolidated declaration differs"
-    ):
+    with pytest.raises(RuntimeError, match="Direct/consolidated declaration differs"):
         benchmark.run_single_trial(
             archive,
             family_id="bout_kinematics",

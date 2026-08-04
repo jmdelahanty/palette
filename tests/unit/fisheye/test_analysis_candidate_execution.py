@@ -349,7 +349,7 @@ def _receipt(
     )
 
 
-def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
+def test_execution_adapter_catalog_is_exact_and_fully_typed() -> None:
     assert len(ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS) == 13
     assert set(ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE) == set(
         DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE
@@ -364,69 +364,13 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         manifest["payload"]["stage_id"]: manifest["payload"]["runner_status"]
         for manifest in manifests
     }
-    assert status["tail_posture_view"] == "implemented"
-    assert status["stimulus_response"] == "implemented"
-    assert status["bout_classification"] == "implemented"
-    assert status["detection_occupancy"] == "blocked_coordinate_authority"
-    assert status["session_occupancy"] == "blocked_coordinate_authority"
-    assert {stage for stage, value in status.items() if value == "implemented"} == {
-        "track_kinematics",
-        "swim_bouts",
-        "bout_kinematics",
-        "eye_angles",
-        "stimulus_epochs",
-        "chaser_distance",
-        "tail_kinematics",
-        "subject_shape",
-        "stimulus_response",
-        "tail_posture_view",
-        "bout_classification",
-    }
+    assert set(status.values()) == {"implemented"}
 
-    for stage in (
-        "track_kinematics",
-        "swim_bouts",
-        "bout_kinematics",
-        "eye_angles",
-        "stimulus_epochs",
-        "chaser_distance",
-        "tail_kinematics",
-        "subject_shape",
-        "stimulus_response",
-        "tail_posture_view",
-        "bout_classification",
-    ):
+    for stage in status:
         adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[stage]
         assert adapter.resolves_candidate_owner() is True
         assert adapter.resolves_runner() is True
         assert adapter.resolves_suite_validator() is True
-
-
-def test_blocked_adapter_cannot_mint_execution_request() -> None:
-    adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
-        "detection_occupancy"
-    ].as_manifest()
-    with pytest.raises(ValueError, match="implemented typed adapter"):
-        build_candidate_execution_request(
-            execution_id="blocked_request",
-            adapter_manifest=adapter,
-            invocation=_exact_invocation(),
-            benchmark_suite=_suite(),
-            archive_path="/tmp/.palette_benchmarks/execution/archive.zarr",
-            source_run_path="analysis/swim_bout_runs/source_v1",
-            candidate_run_path="analysis/swim_bout_runs/candidate_v1",
-            scratch_root="/tmp/palette-candidate-execution-scratch",
-            source_identity_sha256="b" * 64,
-            palette_commit="a" * 40,
-            repetition_index=0,
-            candidate_order_index=0,
-            candidate_order_count=1,
-            cache_state="fresh_process_os_cache_uncontrolled",
-            physical_io_scope=PhysicalIOScope.UNAVAILABLE,
-            selector_before_sha256="f" * 64,
-            registry_probe_path=Path(__file__).resolve(),
-            production_profiles_probe_path=Path(__file__).resolve(),
-        )
 
 
 def test_execution_request_and_complete_receipt_are_strict_json(

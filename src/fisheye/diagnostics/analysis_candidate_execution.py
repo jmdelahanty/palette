@@ -35,6 +35,10 @@ from fisheye.analysis.exact_tabular_storage import (
     ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
     build_exact_tabular_storage_receipt,
 )
+from fisheye.analysis.detection_occupancy_schema import (
+    build_occupancy_array_declarations,
+    validate_occupancy_array_manifest,
+)
 from fisheye.analysis.swim_bout_frame_axis import (
     FRAME_AXIS_CONTRACT_ATTR,
     FRAME_AXIS_CONTRACT_SHA256_ATTR,
@@ -71,10 +75,14 @@ from fisheye.analysis_workflows.materializers.exact_tabular_candidate import (
 from fisheye.analysis_workflows.materializers.runtime_telemetry import (
     require_runtime_telemetry,
 )
+from fisheye.analysis_workflows.occupancy_candidate_execution import (
+    build_occupancy_coordinate_evidence,
+    build_occupancy_source_identity,
+    occupancy_source_identity_sha256,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_profiles import get_storage_profile
 from fisheye.shared.zarr_io import open_zarr_root
-
 
 ATTEMPT_SCHEMA_ID = "palette.analysis_candidate_execution_attempt"
 ATTEMPT_SCHEMA_VERSION = 2
@@ -106,6 +114,26 @@ _FAMILIES = {
         run_parent="analysis/bout_kinematics_runs",
         declarations=build_bout_kinematics_array_declarations,
         validate=validate_bout_kinematics_array_manifest,
+    ),
+    "detection_occupancy": _Family(
+        stage_id="detection_occupancy",
+        run_parent="analysis/detection_occupancy_runs",
+        declarations=lambda group, **kwargs: build_occupancy_array_declarations(
+            group, session=False, **kwargs
+        ),
+        validate=lambda group, **kwargs: validate_occupancy_array_manifest(
+            group, session=False, **kwargs
+        ),
+    ),
+    "session_occupancy": _Family(
+        stage_id="session_occupancy",
+        run_parent="analysis/session_occupancy_runs",
+        declarations=lambda group, **kwargs: build_occupancy_array_declarations(
+            group, session=True, **kwargs
+        ),
+        validate=lambda group, **kwargs: validate_occupancy_array_manifest(
+            group, session=True, **kwargs
+        ),
     ),
 }
 
@@ -415,7 +443,23 @@ def _validate_exact_tabular_coordinate_binding(
     run_group: Any,
     *,
     stage_id: str,
+    logical_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    if stage_id in {"detection_occupancy", "session_occupancy"}:
+        if logical_hashes is None:
+            declarations = _FAMILIES[stage_id].declarations(run_group)
+            logical_hashes = compute_exact_tabular_logical_hashes(
+                run_group,
+                declarations,
+            )
+        identity = build_occupancy_source_identity(
+            root,
+            run_group,
+            stage_id=stage_id,
+            logical_hashes=logical_hashes,
+        )
+        return build_occupancy_coordinate_evidence(identity)
+
     attrs = _group_attrs(run_group)
     if stage_id == "swim_bouts":
         authority = _require_track_motion_authority(
@@ -954,13 +998,21 @@ def execute_exact_tabular_candidate(
     payload = request["payload"]
     adapter = payload["adapter_manifest"]["payload"]
     invocation = payload["invocation"]["payload"]
-    if invocation["contract_id"] != "exact_tabular_v1":
-        raise ValueError("Exact-tabular runner requires exact_tabular_v1 invocation.")
+    family = _family(str(adapter["stage_id"]))
+    expected_invocation = (
+        "occupancy_v1"
+        if family.stage_id in {"detection_occupancy", "session_occupancy"}
+        else "exact_tabular_v1"
+    )
+    if invocation["contract_id"] != expected_invocation:
+        raise ValueError(
+            f"Exact-tabular stage {family.stage_id!r} requires "
+            f"{expected_invocation} invocation."
+        )
     invocation_parameters = invocation["parameters"]
     storage_profile_id = str(invocation_parameters["storage_profile_id"])
     copy_backend = str(invocation_parameters["copy_backend"])
     keep_scratch = bool(invocation_parameters["keep_scratch"])
-    family = _family(str(adapter["stage_id"]))
     if adapter["computation_mode"] != "logical_rematerialization":
         raise ValueError("Exact-tabular runner requires logical rematerialization.")
     if type(driver_pid) is not int or driver_pid <= 0 or driver_pid != os.getppid():
@@ -1015,6 +1067,25 @@ def execute_exact_tabular_candidate(
             source_group,
             source_declarations,
         )
+        occupancy_identity: Mapping[str, Any] | None = None
+        if family.stage_id in {"detection_occupancy", "session_occupancy"}:
+            occupancy_identity = build_occupancy_source_identity(
+                root,
+                source_group,
+                stage_id=family.stage_id,
+                logical_hashes=source_hashes,
+            )
+            spatiotemporal_identity = occupancy_source_identity_sha256(
+                occupancy_identity
+            )
+            if (
+                invocation_parameters["source_spatiotemporal_identity_sha256"]
+                != spatiotemporal_identity
+            ):
+                raise ValueError(
+                    "Occupancy invocation source identity differs from the live "
+                    "spatiotemporal authority."
+                )
         source_identity = canonical_json_sha256(source_hashes)
         if source_identity != payload["source_identity_sha256"]:
             raise ValueError("Source logical identity differs from the request.")
@@ -1032,10 +1103,15 @@ def execute_exact_tabular_candidate(
             raise ValueError(
                 "Live exact-tabular storage plan differs from the benchmark suite."
             )
-        source_coordinate = _validate_exact_tabular_coordinate_binding(
-            root,
-            source_group,
-            stage_id=family.stage_id,
+        source_coordinate = (
+            build_occupancy_coordinate_evidence(occupancy_identity)
+            if occupancy_identity is not None
+            else _validate_exact_tabular_coordinate_binding(
+                root,
+                source_group,
+                stage_id=family.stage_id,
+                logical_hashes=source_hashes,
+            )
         )
 
         def accept_published_candidate(
@@ -1047,11 +1123,32 @@ def execute_exact_tabular_candidate(
                 raise ValueError(
                     "Published execution binding differs from its request."
                 )
-            candidate_coordinate = _validate_exact_tabular_coordinate_binding(
-                published_root,
+            candidate_hashes = compute_exact_tabular_logical_hashes(
                 candidate_group,
-                stage_id=family.stage_id,
+                family.declarations(candidate_group, byte_planner_adopted=True),
             )
+            if occupancy_identity is not None:
+                candidate_identity = build_occupancy_source_identity(
+                    published_root,
+                    candidate_group,
+                    stage_id=family.stage_id,
+                    logical_hashes=candidate_hashes,
+                )
+                if candidate_identity != occupancy_identity:
+                    raise ValueError(
+                        "Published occupancy source identity differs from its "
+                        "validated source."
+                    )
+                candidate_coordinate = build_occupancy_coordinate_evidence(
+                    candidate_identity
+                )
+            else:
+                candidate_coordinate = _validate_exact_tabular_coordinate_binding(
+                    published_root,
+                    candidate_group,
+                    stage_id=family.stage_id,
+                    logical_hashes=candidate_hashes,
+                )
             if candidate_coordinate != source_coordinate:
                 raise ValueError(
                     "Published coordinate binding differs from its validated source."
