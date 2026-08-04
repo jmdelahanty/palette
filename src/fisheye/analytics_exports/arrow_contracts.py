@@ -14,6 +14,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .contracts import (
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -49,6 +50,7 @@ EXACT_ARROW_SCHEMA_TABLES = (
     STATISTICS_TABLE,
     DESCRIPTIVE_TABLE,
     KINEMATICS_SAMPLES_TABLE,
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
 )
 
@@ -1114,6 +1116,84 @@ _KINEMATICS_SAMPLES_FIELDS = (
 )
 
 
+# One row per track and global acquisition-frame-aligned time bin. This table
+# reports physical position distributions and motion/bout summaries only. It
+# deliberately does not claim arena-normalized occupancy without a bound
+# experimental-area geometry authority.
+_ACTIVITY_SPATIAL_TIME_BIN_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("source_track_kinematics_scope", "string"),
+    _field("source_track_kinematics_run", "string"),
+    _field("source_track_kinematics_path", "string"),
+    _field("source_track_motion_manifest_schema_id", "string"),
+    _field("source_track_motion_manifest_schema_version", "int64"),
+    _field("source_track_motion_manifest_sha256", "string"),
+    _field("source_track_binding_sha256", "string"),
+    _field("source_swim_bout_run", "string"),
+    _field("source_swim_bout_path", "string"),
+    _field("source_swim_bout_schema_id", "string"),
+    _field("source_swim_bout_schema_version", "int64"),
+    _field("source_swim_bout_manifest_sha256", "string"),
+    _field("source_swim_bout_binding_sha256", "string"),
+    _field("source_swim_bout_candidate_id", "int32"),
+    _field("source_swim_bout_signal_id", "int32"),
+    _field("source_speed_level", "string"),
+    _field("source_sample_rate_hz", "float64"),
+    _field("requested_bin_size_s", "float64"),
+    _field("bin_size_frames", "int64"),
+    _field("effective_bin_size_s", "float64"),
+    _field("binning_policy", "string"),
+    _field("position_coordinate_space", "string"),
+    _field("position_coordinate_descriptor_sha256", "string"),
+    _field("physical_authority_sha256", "string"),
+    _field("track_id", "int64"),
+    _field("time_bin_index", "int64"),
+    _field("start_acquisition_frame_index", "int64"),
+    _field("end_acquisition_frame_index_exclusive", "int64"),
+    _field("start_time_seconds", "float64"),
+    _field("end_time_seconds", "float64"),
+    _field("bin_duration_seconds", "float64"),
+    _field("expected_track_frame_count", "int64"),
+    _field("source_sample_count", "int64"),
+    _field("source_observed_count", "int64"),
+    _field("source_observed_fraction", "float64"),
+    _field("sample_valid_count", "int64"),
+    _field("sample_valid_fraction", "float64"),
+    _field("position_valid_count", "int64"),
+    _field("position_valid_fraction", "float64"),
+    _field("transition_valid_count", "int64"),
+    _field("transition_valid_fraction", "float64"),
+    _field("mean_position_x_mm", "float64"),
+    _field("mean_position_y_mm", "float64"),
+    _field("std_position_x_mm", "float64"),
+    _field("std_position_y_mm", "float64"),
+    _field("covariance_xy_mm2", "float64"),
+    _field("min_position_x_mm", "float64"),
+    _field("max_position_x_mm", "float64"),
+    _field("min_position_y_mm", "float64"),
+    _field("max_position_y_mm", "float64"),
+    _field("net_displacement_mm", "float64"),
+    _field("mean_speed_mm_s", "float64"),
+    _field("median_speed_mm_s", "float64"),
+    _field("p95_speed_mm_s", "float64"),
+    _field("path_distance_mm_sum", "float64"),
+    _field("bout_count_started", "int64"),
+    _field("bout_duration_s_started_sum", "float64"),
+    _field("bout_path_length_mm_started_sum", "float64"),
+    _field("bout_occupied_frame_count", "int64"),
+    _field("bout_occupancy_fraction", "float64"),
+    _field("position_metrics_valid", "bool"),
+    _field("speed_metrics_valid", "bool"),
+    _field("bout_metrics_valid", "bool"),
+    _field("bin_valid", "bool"),
+    _field("bin_reason_code", "int16"),
+)
+
+
 # One row per camera frame from the exact compact-v7 frame axis.  Floating
 # values deliberately remain float32 so the query product preserves the
 # recording-local authority's decoded representation instead of silently
@@ -1291,6 +1371,10 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     KINEMATICS_SAMPLES_TABLE: ArrowTableContract(
         table_name=KINEMATICS_SAMPLES_TABLE,
         fields=_KINEMATICS_SAMPLES_FIELDS,
+    ),
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE: ArrowTableContract(
+        table_name=ACTIVITY_SPATIAL_TIME_BINS_TABLE,
+        fields=_ACTIVITY_SPATIAL_TIME_BIN_FIELDS,
     ),
     STATISTICS_TABLE: ArrowTableContract(
         table_name=STATISTICS_TABLE,

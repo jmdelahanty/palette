@@ -25,6 +25,7 @@ BASELINE_BEHAVIOR_SUMMARY_TABLE = "baseline_behavior_summary"
 BASELINE_BEHAVIOR_TIME_BINS_TABLE = "baseline_behavior_time_bins"
 BASELINE_KINEMATIC_SAMPLES_TABLE = "baseline_kinematic_samples"
 KINEMATICS_SAMPLES_TABLE = "kinematics_samples"
+ACTIVITY_SPATIAL_TIME_BINS_TABLE = "activity_spatial_time_bins"
 EYE_TRACE_SAMPLES_TABLE = "eye_trace_samples"
 
 CHASER_SPATIAL_TABLE = "chaser_epoch_spatial_occupancy_zones"
@@ -351,6 +352,98 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
             "smoothed_angular_velocity_deg_s": "deg/s",
         },
     ),
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE: _contract(
+        ACTIVITY_SPATIAL_TIME_BINS_TABLE,
+        "recording_x_track_motion_run_x_swim_bout_run_x_track_x_global_time_bin",
+        (
+            "recording_id",
+            "source_track_kinematics_scope",
+            "source_track_kinematics_run",
+            "source_swim_bout_run",
+            "track_id",
+            "time_bin_index",
+        ),
+        (
+            "source_track_motion_manifest_sha256",
+            "source_track_binding_sha256",
+            "source_swim_bout_manifest_sha256",
+            "source_swim_bout_binding_sha256",
+            "source_swim_bout_candidate_id",
+            "source_swim_bout_signal_id",
+            "source_speed_level",
+            "source_sample_rate_hz",
+            "requested_bin_size_s",
+            "bin_size_frames",
+            "effective_bin_size_s",
+            "binning_policy",
+            "position_coordinate_space",
+            "position_coordinate_descriptor_sha256",
+            "physical_authority_sha256",
+            "start_acquisition_frame_index",
+            "end_acquisition_frame_index_exclusive",
+            "start_time_seconds",
+            "end_time_seconds",
+            "bin_duration_seconds",
+            "expected_track_frame_count",
+            "source_sample_count",
+            "source_observed_count",
+            "source_observed_fraction",
+            "sample_valid_count",
+            "sample_valid_fraction",
+            "position_valid_count",
+            "position_valid_fraction",
+            "transition_valid_count",
+            "transition_valid_fraction",
+            "mean_position_x_mm",
+            "mean_position_y_mm",
+            "std_position_x_mm",
+            "std_position_y_mm",
+            "covariance_xy_mm2",
+            "min_position_x_mm",
+            "max_position_x_mm",
+            "min_position_y_mm",
+            "max_position_y_mm",
+            "net_displacement_mm",
+            "mean_speed_mm_s",
+            "median_speed_mm_s",
+            "p95_speed_mm_s",
+            "path_distance_mm_sum",
+            "bout_count_started",
+            "bout_duration_s_started_sum",
+            "bout_path_length_mm_started_sum",
+            "bout_occupied_frame_count",
+            "bout_occupancy_fraction",
+            "position_metrics_valid",
+            "speed_metrics_valid",
+            "bout_metrics_valid",
+            "bin_valid",
+            "bin_reason_code",
+        ),
+        {
+            "source_sample_rate_hz": "Hz",
+            "requested_bin_size_s": "s",
+            "effective_bin_size_s": "s",
+            "start_time_seconds": "s",
+            "end_time_seconds": "s",
+            "bin_duration_seconds": "s",
+            "mean_position_x_mm": "mm",
+            "mean_position_y_mm": "mm",
+            "std_position_x_mm": "mm",
+            "std_position_y_mm": "mm",
+            "covariance_xy_mm2": "mm2",
+            "min_position_x_mm": "mm",
+            "max_position_x_mm": "mm",
+            "min_position_y_mm": "mm",
+            "max_position_y_mm": "mm",
+            "net_displacement_mm": "mm",
+            "mean_speed_mm_s": "mm/s",
+            "median_speed_mm_s": "mm/s",
+            "p95_speed_mm_s": "mm/s",
+            "path_distance_mm_sum": "mm",
+            "bout_duration_s_started_sum": "s",
+            "bout_path_length_mm_started_sum": "mm",
+        },
+    ),
     EYE_TRACE_SAMPLES_TABLE: _contract(
         EYE_TRACE_SAMPLES_TABLE,
         "recording_x_eye_angle_run_x_camera_frame",
@@ -635,7 +728,10 @@ TRACE_TABLES = (EYE_TRACE_SAMPLES_TABLE,)
 # Portable sample exports use dedicated bounded readers and must never be
 # routed through the generic compact-table exporter.
 PORTABLE_SAMPLE_TABLES = (KINEMATICS_SAMPLES_TABLE,)
-DEDICATED_STREAMING_TABLES = TRACE_TABLES + PORTABLE_SAMPLE_TABLES
+PORTABLE_SUMMARY_TABLES = (ACTIVITY_SPATIAL_TIME_BINS_TABLE,)
+DEDICATED_STREAMING_TABLES = (
+    TRACE_TABLES + PORTABLE_SAMPLE_TABLES + PORTABLE_SUMMARY_TABLES
+)
 
 CHASER_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
@@ -665,6 +761,7 @@ ALL_TABLES = (
     + CHASER_TABLES
     + TRACE_TABLES
     + PORTABLE_SAMPLE_TABLES
+    + PORTABLE_SUMMARY_TABLES
 )
 
 

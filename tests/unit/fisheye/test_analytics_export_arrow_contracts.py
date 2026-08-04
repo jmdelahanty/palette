@@ -21,6 +21,7 @@ from fisheye.analytics_exports.arrow_contracts import (
     validate_arrow_schema,
 )
 from fisheye.analytics_exports.contracts import (
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -369,6 +370,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         STATISTICS_TABLE,
         DESCRIPTIVE_TABLE,
         KINEMATICS_SAMPLES_TABLE,
+        ACTIVITY_SPATIAL_TIME_BINS_TABLE,
         EYE_TRACE_SAMPLES_TABLE,
     )
     fields = ARROW_TABLE_CONTRACTS[RECORDING_SUMMARY_TABLE].fields
@@ -479,6 +481,97 @@ def test_generic_kinematics_samples_contract_freezes_exact_multi_track_schema() 
     field_names = {field.name for field in fields}
     assert "baseline_window_id" not in field_names
     assert "chaser_distance_run" not in field_names
+
+
+def test_activity_spatial_time_bins_freeze_exact_geometry_honest_schema() -> None:
+    fields = ARROW_TABLE_CONTRACTS[ACTIVITY_SPATIAL_TIME_BINS_TABLE].fields
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("recording_id", "string", False),
+        ("zarr_path", "string", False),
+        ("source_lineage_hash", "string", False),
+        ("source_track_kinematics_scope", "string", False),
+        ("source_track_kinematics_run", "string", False),
+        ("source_track_kinematics_path", "string", False),
+        ("source_track_motion_manifest_schema_id", "string", False),
+        ("source_track_motion_manifest_schema_version", "int64", False),
+        ("source_track_motion_manifest_sha256", "string", False),
+        ("source_track_binding_sha256", "string", False),
+        ("source_swim_bout_run", "string", False),
+        ("source_swim_bout_path", "string", False),
+        ("source_swim_bout_schema_id", "string", False),
+        ("source_swim_bout_schema_version", "int64", False),
+        ("source_swim_bout_manifest_sha256", "string", False),
+        ("source_swim_bout_binding_sha256", "string", False),
+        ("source_swim_bout_candidate_id", "int32", False),
+        ("source_swim_bout_signal_id", "int32", False),
+        ("source_speed_level", "string", False),
+        ("source_sample_rate_hz", "float64", False),
+        ("requested_bin_size_s", "float64", False),
+        ("bin_size_frames", "int64", False),
+        ("effective_bin_size_s", "float64", False),
+        ("binning_policy", "string", False),
+        ("position_coordinate_space", "string", False),
+        ("position_coordinate_descriptor_sha256", "string", False),
+        ("physical_authority_sha256", "string", False),
+        ("track_id", "int64", False),
+        ("time_bin_index", "int64", False),
+        ("start_acquisition_frame_index", "int64", False),
+        ("end_acquisition_frame_index_exclusive", "int64", False),
+        ("start_time_seconds", "float64", False),
+        ("end_time_seconds", "float64", False),
+        ("bin_duration_seconds", "float64", False),
+        ("expected_track_frame_count", "int64", False),
+        ("source_sample_count", "int64", False),
+        ("source_observed_count", "int64", False),
+        ("source_observed_fraction", "float64", False),
+        ("sample_valid_count", "int64", False),
+        ("sample_valid_fraction", "float64", False),
+        ("position_valid_count", "int64", False),
+        ("position_valid_fraction", "float64", False),
+        ("transition_valid_count", "int64", False),
+        ("transition_valid_fraction", "float64", False),
+        ("mean_position_x_mm", "float64", False),
+        ("mean_position_y_mm", "float64", False),
+        ("std_position_x_mm", "float64", False),
+        ("std_position_y_mm", "float64", False),
+        ("covariance_xy_mm2", "float64", False),
+        ("min_position_x_mm", "float64", False),
+        ("max_position_x_mm", "float64", False),
+        ("min_position_y_mm", "float64", False),
+        ("max_position_y_mm", "float64", False),
+        ("net_displacement_mm", "float64", False),
+        ("mean_speed_mm_s", "float64", False),
+        ("median_speed_mm_s", "float64", False),
+        ("p95_speed_mm_s", "float64", False),
+        ("path_distance_mm_sum", "float64", False),
+        ("bout_count_started", "int64", False),
+        ("bout_duration_s_started_sum", "float64", False),
+        ("bout_path_length_mm_started_sum", "float64", False),
+        ("bout_occupied_frame_count", "int64", False),
+        ("bout_occupancy_fraction", "float64", False),
+        ("position_metrics_valid", "bool", False),
+        ("speed_metrics_valid", "bool", False),
+        ("bout_metrics_valid", "bool", False),
+        ("bin_valid", "bool", False),
+        ("bin_reason_code", "int16", False),
+    )
+    contract = TABLE_CONTRACTS[ACTIVITY_SPATIAL_TIME_BINS_TABLE]
+    assert contract.primary_key == (
+        "recording_id",
+        "source_track_kinematics_scope",
+        "source_track_kinematics_run",
+        "source_swim_bout_run",
+        "track_id",
+        "time_bin_index",
+    )
+    names = {field.name for field in fields}
+    assert "wall_fraction" not in names
+    assert "arena_radius_mm" not in names
+    assert "occupancy_grid" not in names
 
 
 def test_group_statistics_contract_freezes_all_45_fields_in_order() -> None:
@@ -1045,6 +1138,7 @@ def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
         STATISTICS_TABLE,
         DESCRIPTIVE_TABLE,
         KINEMATICS_SAMPLES_TABLE,
+        ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     ),
 )
 @pytest.mark.parametrize(

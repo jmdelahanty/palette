@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .contracts import (
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -79,6 +80,10 @@ CAPABILITY_DEFINITIONS = (
     ),
     CapabilityDefinition("core.eye.trace_samples", (EYE_TRACE_SAMPLES_TABLE,)),
     CapabilityDefinition("core.kinematics.samples", (KINEMATICS_SAMPLES_TABLE,)),
+    CapabilityDefinition(
+        "core.activity_spatial.time_bins",
+        (ACTIVITY_SPATIAL_TIME_BINS_TABLE,),
+    ),
     CapabilityDefinition(
         "position.epoch.occupancy_histogram_2d",
         (POSITION_OCCUPANCY_HISTOGRAM_TABLE,),

@@ -148,7 +148,7 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes 14 exact schemas across writing, staging, and manifest-selected reads. The non-default eye and generic multi-track kinematic sample tables preserve source dtypes through bounded streaming, exact source-manifest binding, and full decoded-payload validation | Freeze the canonical envelope's remaining 16 inferred chaser tables plus baseline-strategy's four inferred outputs and training-response's three inferred outputs only after producer semantics and nullability are resolved; benchmark both new streaming publishers before adoption |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes 15 exact schemas across writing, staging, and manifest-selected reads. The non-default eye and generic multi-track kinematic sample tables preserve source dtypes through bounded streaming, exact source-manifest binding, and full decoded-payload validation. The 70-field activity/spatial time-bin schema is frozen without falsely claiming arena occupancy from unbound geometry | Implement and benchmark the activity/spatial bounded publisher; freeze remaining inferred schemas only after producer semantics and nullability are resolved; benchmark all new streaming publishers before adoption |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces; eye traces and sampled kinematics now have exact non-default contracts, publishers, execution adapters, and node-local scratch boundaries | Implement activity/spatial-summary and tail-trace contracts and publishers |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
@@ -659,8 +659,14 @@ a v3 storage-candidate regression.
           a generic multi-track acquisition-frame projection with exact
           physical-mm, motion-heading, validity, reason, and source-instance
           lineage types; it is not the chaser-specific 71-field baseline table.
+    - [x] Freeze the exact ordered 70-field `activity_spatial_time_bins`
+          schema. It uses global acquisition-frame bins, independent
+          track/bout source identities, physical-mm distribution and movement
+          summaries, and exact validity/allocation semantics. It explicitly
+          excludes arena-normalized occupancy because the workflow does not
+          bind an experimental-area geometry authority.
     - [ ] Replace inferred schemas only after producer semantics and nullability
-          are frozen. The canonical envelope currently has 14 exact and 16
+          are frozen. The canonical envelope currently has 15 exact and 16
           inferred tables; the remaining inferred tables are the chaser
           exports. Both group-statistics tables use exact schemas. Baseline strategy
           consumes exact canonical baseline inputs but still writes four
@@ -823,7 +829,9 @@ Recommended benchmark and promotion-review order:
           windows, samples on the global acquisition-frame grid, publishes one
           manifest-selected immutable Parquet part, and performs full decoded
           validation. It remains opt-in pending short/full benchmarks.
-    - [ ] activity/spatial summaries;
+    - [ ] activity/spatial summaries. The exact 70-field logical/Arrow schema
+          and geometry boundary are frozen; the multi-track swim-bout binding,
+          bounded aggregator, validator, and publisher remain to implement;
     - [x] eye traces. The v1 publisher reads exact bounded compact-v7 frame
           intervals, produces one immutable manifest-selected Parquet part,
           validates complete decoded payload hashes, and remains non-default.
@@ -1244,8 +1252,9 @@ Continue workflow-output closure without promoting defaults:
 1. benchmark the newly implemented generic sampled-kinematic writer, bounded
    reads, scratch copy, validation, and manifest-selected consumer at
    representative short and full duration;
-2. freeze activity/spatial-summary semantics and decide the cross-recording
-   tail-trace representation before implementing those publishers;
+2. implement the now-frozen activity/spatial time-bin publisher and decide the
+   cross-recording tail-trace representation before implementing that
+   publisher;
 3. benchmark the eye-trace writer, bounded reads, scratch copy, validation,
    publication, and manifest-selected consumer at representative short and
    full duration; and

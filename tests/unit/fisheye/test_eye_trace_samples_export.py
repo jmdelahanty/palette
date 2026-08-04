@@ -15,6 +15,7 @@ from fisheye.analytics_exports.arrow_contracts import (
     exact_arrow_schema,
 )
 from fisheye.analytics_exports.contracts import (
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
     KINEMATICS_SAMPLES_TABLE,
 )
@@ -158,7 +159,11 @@ def test_eye_trace_projection_is_closed_and_digest_bound() -> None:
 
 @pytest.mark.parametrize(
     "table_name",
-    (EYE_TRACE_SAMPLES_TABLE, KINEMATICS_SAMPLES_TABLE),
+    (
+        EYE_TRACE_SAMPLES_TABLE,
+        KINEMATICS_SAMPLES_TABLE,
+        ACTIVITY_SPATIAL_TIME_BINS_TABLE,
+    ),
 )
 def test_compact_exporter_rejects_dedicated_streaming_table(table_name: str) -> None:
     with pytest.raises(ValueError, match="Dedicated streaming table"):

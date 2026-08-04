@@ -23,7 +23,7 @@ The core profile has these defaults:
 | Product | Default | Configurable? | Source authority |
 |---|---:|---|---|
 | portable kinematic samples | 10 Hz | yes, positive finite rate | framewise Zarr kinematics |
-| activity/spatial summaries | 5-second bins | yes, positive finite width | framewise Zarr kinematics and bouts |
+| activity/spatial summaries | 5-second bins | yes, positive finite width | framewise Zarr kinematics and bouts; no arena-normalized occupancy without a geometry authority |
 | eye angles and convergence | framewise | no downsampling in this contract | framewise eye-angle analysis |
 | tail splines, angles, and curvature | framewise | no downsampling in this contract | framewise subject shape and tail kinematics |
 
@@ -378,10 +378,12 @@ process on the same node-local scratch. The materializer is dry-run by default
 when invoked directly; the DAG adds `--apply` only inside the verified LSF
 allocation.
 
-The 10 Hz kinematic samples, 5-second activity/spatial summaries, and framewise
-trace exports remain planning-only nodes. The executor rejects them instead of
-pretending an adapter exists. Tail kinematics is executable after its staged,
-chunk-safe materializer and million-frame canary validation.
+The 10 Hz kinematic samples and framewise eye traces now have exact opt-in
+publishers and execution adapters. The 5-second activity/spatial table has a
+frozen exact schema but remains planning-only pending its multi-track
+track/bout binding and bounded publisher. Tail traces remain planning-only.
+Tail kinematics itself is executable after its staged, chunk-safe materializer
+and million-frame canary validation.
 Registry updates remain serialized after successful artifact publication.
 
 ## Adding another workflow

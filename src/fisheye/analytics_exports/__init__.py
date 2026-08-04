@@ -11,6 +11,7 @@ from .arrow_contracts import (
 )
 from .capabilities import CapabilityStatus, resolve_capabilities
 from .contracts import (
+    ACTIVITY_SPATIAL_TIME_BINS_TABLE,
     ALL_TABLES,
     BASELINE_TABLES,
     CHASER_TABLES,
@@ -30,6 +31,7 @@ __all__ = [
     "ARROW_CONTRACT_ENVELOPE_SCHEMA_ID",
     "ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION",
     "ARROW_TABLE_CONTRACTS",
+    "ACTIVITY_SPATIAL_TIME_BINS_TABLE",
     "ALL_TABLES",
     "BASELINE_TABLES",
     "CHASER_TABLES",

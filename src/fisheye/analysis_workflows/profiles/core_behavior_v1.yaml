@@ -128,7 +128,10 @@ nodes:
     depends_on: [track_kinematics, swim_bouts]
     temporal_product: activity_spatial
     execution_policy: immutable_parquet_export
-    description: Fixed-bin activity, occupancy, distance, and bout summaries.
+    description: >-
+      Fixed-bin track coverage, physical-position distribution, distance, and
+      bout summaries. Arena occupancy remains a separate geometry-bound
+      authority.
 
   - id: eye_traces
     kind: export
