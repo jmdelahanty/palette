@@ -6,11 +6,8 @@ import shlex
 import subprocess
 import sys
 
-
 SCRIPT = (
-    Path(__file__).resolve().parents[3]
-    / "scripts"
-    / "submit_analysis_workflow_bsub.sh"
+    Path(__file__).resolve().parents[3] / "scripts" / "submit_analysis_workflow_bsub.sh"
 )
 
 
@@ -19,8 +16,7 @@ def _build_clean_palette_checkout(path: Path) -> None:
     scripts_dir.mkdir(parents=True)
     scripts_py = scripts_dir / "py"
     scripts_py.write_text(
-        "#!/usr/bin/env bash\n"
-        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        "#!/usr/bin/env bash\n" f'exec {shlex.quote(sys.executable)} "$@"\n',
         encoding="utf-8",
     )
     scripts_py.chmod(0o755)
@@ -31,20 +27,12 @@ def _build_clean_palette_checkout(path: Path) -> None:
     module.parent.mkdir(parents=True)
     module.write_text("# fixture\n", encoding="utf-8")
     finalizer_module = (
-        path
-        / "src"
-        / "fisheye"
-        / "analysis_workflows"
-        / "registry_finalize.py"
+        path / "src" / "fisheye" / "analysis_workflows" / "registry_finalize.py"
     )
     finalizer_module.parent.mkdir(parents=True)
     finalizer_module.write_text("# fixture\n", encoding="utf-8")
     telemetry_module = (
-        path
-        / "src"
-        / "fisheye"
-        / "diagnostics"
-        / "run_with_resource_telemetry.py"
+        path / "src" / "fisheye" / "diagnostics" / "run_with_resource_telemetry.py"
     )
     telemetry_module.parent.mkdir(parents=True)
     telemetry_module.write_text(
@@ -308,3 +296,114 @@ def test_submit_analysis_workflow_accepts_git_worktree_checkout(
         / "run_analysis_workflow.sh"
     ).read_text(encoding="utf-8")
     assert f"PALETTE_REPO={palette_worktree}" in job_script
+
+
+def test_submit_analysis_workflow_forwards_eye_trace_export_to_node_local_scratch(
+    tmp_path: Path,
+) -> None:
+    palette_repo = tmp_path / "palette-checkout"
+    _build_clean_palette_checkout(palette_repo)
+    zarr_path = tmp_path / "recording" / "zarr" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    (zarr_path / "zarr.json").write_text("{}\n", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    export_root = tmp_path / "query products"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--zarr",
+            str(zarr_path),
+            "--execution-id",
+            "eye_trace_export_test",
+            "--target",
+            "eye_traces",
+            "--stage-run",
+            "eye_angles=eye_compact_v7",
+            "--export-run",
+            "eye_traces=eye_trace_query_v1",
+            "--export-root",
+            str(export_root),
+            "--palette-repo",
+            str(palette_repo),
+            "--log-dir",
+            str(log_dir),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert f"export_root={export_root}" in result.stdout
+    assert "scratch_root_request=<lsf-tmpdir-default>" in result.stdout
+    run_dir = log_dir / "eye_trace_export_test_analysis.zarr_"
+    job_script = run_dir / "run_analysis_workflow.sh"
+    rendered = job_script.read_text(encoding="utf-8")
+    export_assignment = next(
+        line for line in rendered.splitlines() if line.startswith("EXPORT_ROOT=")
+    )
+    assert shlex.split(export_assignment.removeprefix("EXPORT_ROOT=")) == [
+        str(export_root)
+    ]
+    assert "REQUESTED_SCRATCH_ROOT=''" in rendered
+    assert "EXPORT_RUNS=(eye_traces=eye_trace_query_v1 )" in rendered
+    assert '--export-run "${value}"' in rendered
+    assert '--export-root "${EXPORT_ROOT}" --scratch-root "${SCRATCH_ROOT}"' in rendered
+    assert (
+        'SCRATCH_ROOT="${TASK_SCRATCH_BASE%/}/palette_analysis_exports/${EXECUTION_ID}"'
+        in rendered
+    )
+    subprocess.run(["bash", "-n", str(job_script)], check=True)
+
+    node_tmp = tmp_path / "lsf-node-tmp"
+    node_tmp.mkdir()
+    job_env = dict(os.environ)
+    job_env.update(
+        {
+            "LSB_JOBID": "987654",
+            "LSB_QUEUE": "short",
+            "LSB_DJOB_NUMPROC": "4",
+            "TMPDIR": str(node_tmp),
+        }
+    )
+    subprocess.run(["bash", str(job_script)], check=True, env=job_env)
+    expected_scratch = node_tmp / "palette_analysis_exports" / "eye_trace_export_test"
+    runtime = (run_dir / "runtime_environment.txt").read_text(encoding="utf-8")
+    assert f"export_root={export_root}" in runtime
+    assert f"scratch_root={expected_scratch}" in runtime
+    assert "scratch_root_source=lsf_tmpdir_default" in runtime
+    status = (run_dir / "status.txt").read_text(encoding="utf-8")
+    assert f"scratch_root={expected_scratch}" in status
+    assert expected_scratch.is_dir()
+
+
+def test_submit_analysis_workflow_rejects_eye_trace_without_export_root(
+    tmp_path: Path,
+) -> None:
+    palette_repo = tmp_path / "palette-checkout"
+    _build_clean_palette_checkout(palette_repo)
+    zarr_path = tmp_path / "recording" / "zarr" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    (zarr_path / "zarr.json").write_text("{}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--zarr",
+            str(zarr_path),
+            "--execution-id",
+            "missing_export_root",
+            "--target",
+            "eye_traces",
+            "--palette-repo",
+            str(palette_repo),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "the eye_traces target requires --export-root" in result.stderr

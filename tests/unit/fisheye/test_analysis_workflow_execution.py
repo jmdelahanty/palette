@@ -380,6 +380,191 @@ def test_execution_refuses_export_target_without_materializer(tmp_path: Path) ->
         )
 
 
+def _eye_trace_execution_plan(tmp_path: Path):
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "eye_angles": _status(
+            "eye_angles",
+            available=True,
+            run_name="eye_angles_v7",
+        ),
+    }
+    plan = plan_analysis_workflow(workflow, availability, targets=("eye_traces",))
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        execution_id="eye_export_01",
+        num_workers=2,
+        export_run_overrides={"eye_traces": "eye_trace_query_v1"},
+        export_root=tmp_path / "exports",
+        scratch_root=tmp_path / "node_scratch",
+        python_executable="/palette/python",
+    )
+    return workflow, execution
+
+
+def test_execution_renders_exact_eye_trace_export_boundary(tmp_path: Path) -> None:
+    _workflow, execution = _eye_trace_execution_plan(tmp_path)
+
+    assert execution.output_runs == {}
+    assert execution.export_runs == {"eye_traces": "eye_trace_query_v1"}
+    assert len(execution.commands) == 1
+    command = execution.commands[0]
+    assert command.node_id == "eye_traces"
+    assert command.node_kind == "export"
+    assert command.stage_id is None
+    assert command.output_kind == "parquet_export"
+    assert command.output_root == str((tmp_path / "exports").resolve())
+    assert command.dependency_runs == {"eye_angles": "eye_angles_v7"}
+    assert command.argv[:4] == (
+        "/palette/python",
+        "-m",
+        "fisheye.utils.export_eye_trace_samples",
+        str(tmp_path / "recording_analysis.zarr"),
+    )
+    assert command.argv[command.argv.index("--eye-angle-run") + 1] == "eye_angles_v7"
+    assert command.argv[command.argv.index("--export-run-id") + 1] == (
+        "eye_trace_query_v1"
+    )
+    assert command.argv[command.argv.index("--row-group-rows") + 1] == "65536"
+    assert "--json" in command.argv
+
+
+def test_eye_trace_execution_requires_separate_export_and_scratch_roots(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    plan = plan_analysis_workflow(
+        workflow,
+        {"eye_angles": _status("eye_angles", available=True, run_name="eye_v7")},
+        targets=("eye_traces",),
+    )
+    with pytest.raises(WorkflowExecutionError, match="explicit export_root"):
+        build_workflow_execution_plan(
+            workflow,
+            plan,
+            zarr_path=tmp_path / "recording_analysis.zarr",
+            execution_id="missing_roots",
+            num_workers=1,
+            python_executable="python",
+        )
+    with pytest.raises(
+        WorkflowExecutionError, match="outside the immutable export root"
+    ):
+        build_workflow_execution_plan(
+            workflow,
+            plan,
+            zarr_path=tmp_path / "recording_analysis.zarr",
+            execution_id="nested_scratch",
+            num_workers=1,
+            export_root=tmp_path / "exports",
+            scratch_root=tmp_path / "exports" / "scratch",
+            python_executable="python",
+        )
+    with pytest.raises(WorkflowExecutionError, match="outside node-local scratch"):
+        build_workflow_execution_plan(
+            workflow,
+            plan,
+            zarr_path=tmp_path / "recording_analysis.zarr",
+            execution_id="nested_export",
+            num_workers=1,
+            export_root=tmp_path / "scratch" / "exports",
+            scratch_root=tmp_path / "scratch",
+            python_executable="python",
+        )
+
+
+def test_apply_validates_manifest_selected_eye_trace_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, execution = _eye_trace_execution_plan(tmp_path)
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _write_group(zarr_path)
+    observed: list[tuple[Path, str]] = []
+
+    monkeypatch.setenv("LSB_JOBID", "12345")
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.subprocess.run",
+        lambda argv, *, check, env: subprocess.CompletedProcess(argv, 0),
+    )
+
+    def validate(root: Path, run_id: str) -> dict[str, object]:
+        observed.append((root, run_id))
+        return {"status": "valid", "row_count": 1_188_000}
+
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.validate_export_run",
+        validate,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.discover_stage_availability",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Parquet exports must not enter Zarr stage discovery"
+        ),
+    )
+
+    payload = execute_workflow_plan(
+        zarr_path,
+        execution,
+        workflow_payload=workflow.to_dict(),
+        apply=True,
+        report_path=tmp_path / "eye_export_execution.json",
+    )
+
+    assert payload["status"] == "complete"
+    assert observed == [((tmp_path / "exports").resolve(), "eye_trace_query_v1")]
+    result = next(
+        row for row in payload["node_results"] if row["node_id"] == "eye_traces"
+    )
+    assert result["status"] == "complete"
+    assert result["verification"]["available"] is True
+
+
+def test_cli_renders_opt_in_eye_trace_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _write_group(zarr_path)
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.build_availability",
+        lambda *_args, **_kwargs: {
+            "eye_angles": _status(
+                "eye_angles",
+                available=True,
+                run_name="eye_angles_v7",
+            )
+        },
+    )
+
+    exit_code = main(
+        [
+            str(zarr_path),
+            "--target",
+            "eye_traces",
+            "--execution-id",
+            "eye_cli_01",
+            "--export-run",
+            "eye_traces=eye_trace_query_cli",
+            "--export-root",
+            str(tmp_path / "exports"),
+            "--scratch-root",
+            str(tmp_path / "node_scratch"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, (captured.out, captured.err)
+    assert "status=planned" in captured.out
+    assert "fisheye.utils.export_eye_trace_samples" in captured.out
+    assert "--eye-angle-run eye_angles_v7" in captured.out
+    assert "--export-run-id eye_trace_query_cli" in captured.out
+    assert captured.err == ""
+
+
 def test_execution_renders_staged_tail_materializer(tmp_path: Path) -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {

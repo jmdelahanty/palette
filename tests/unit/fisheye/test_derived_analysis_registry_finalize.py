@@ -10,7 +10,6 @@ import zarr
 from fisheye.analysis_workflows import registry_finalize as mod
 from fisheye.registry.db import Registry
 
-
 GENERIC_STAGE_RUNS = {
     "swim_bouts": ("analysis/swim_bout_runs", "bouts_1"),
     "bout_kinematics": ("analysis/bout_kinematics_runs", "bout_kin_1"),
@@ -186,6 +185,91 @@ def test_execution_receipt_finalizer_uses_exact_selected_runs(
     assert {row["receipt_sha256"] for row in report["publications"]} == {
         mod.hashlib.sha256(receipt.read_bytes()).hexdigest()
     }
+
+
+def test_execution_v2_receipt_excludes_parquet_exports_from_stage_registry(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    receipt = tmp_path / "execution-v2.json"
+    payload = {
+        "schema_id": "palette.analysis_workflow_execution",
+        "schema_version": 2,
+        "mode": "apply",
+        "status": "complete",
+        "registry_write_mode": "deferred_to_serial_finalizer",
+        "zarr_path": str(zarr_path),
+        "execution_plan": {
+            "commands": [
+                {
+                    "node_id": "eye_traces",
+                    "node_kind": "export",
+                    "stage_id": None,
+                    "output_run": "eye_trace_query_v1",
+                    "output_kind": "parquet_export",
+                    "output_root": str(tmp_path / "exports"),
+                }
+            ]
+        },
+        "node_results": [
+            {
+                "node_id": "eye_traces",
+                "status": "complete",
+                "run_name": "eye_trace_query_v1",
+            }
+        ],
+    }
+    receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    assert mod._execution_report_requests(receipt) == []
+
+
+def test_execution_v2_export_receipt_fails_closed_before_registry_skip(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "execution-v2-invalid.json"
+    payload = {
+        "schema_id": "palette.analysis_workflow_execution",
+        "schema_version": 2,
+        "mode": "apply",
+        "status": "complete",
+        "registry_write_mode": "deferred_to_serial_finalizer",
+        "zarr_path": str(tmp_path / "analysis.zarr"),
+        "execution_plan": {
+            "commands": [
+                {
+                    "node_id": "eye_traces",
+                    "node_kind": "export",
+                    "stage_id": None,
+                    "output_run": "eye_trace_query_v1",
+                    "output_kind": "parquet_export",
+                    "output_root": str(tmp_path / "exports"),
+                }
+            ]
+        },
+        "node_results": [
+            {
+                "node_id": "eye_traces",
+                "status": "failed_verification",
+                "run_name": "eye_trace_query_v1",
+            }
+        ],
+    }
+    receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="is not complete"):
+        mod._execution_report_requests(receipt)
+
+    payload["node_results"][0]["status"] = "complete"
+    payload["execution_plan"]["commands"][0]["output_root"] = ""
+    receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="output_root is required"):
+        mod._execution_report_requests(receipt)
+
+    payload["execution_plan"]["commands"][0]["output_root"] = str(tmp_path / "exports")
+    payload["node_results"].append(dict(payload["node_results"][0]))
+    receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="repeats a node result"):
+        mod._execution_report_requests(receipt)
 
 
 def test_finalizer_rejects_receipt_for_nonselected_run(tmp_path: Path) -> None:
@@ -416,26 +500,22 @@ def test_finalizer_retry_is_exactly_idempotent_for_one_receipt(tmp_path: Path) -
     assert first["publications"][0]["metadata_equivalence"]["node_count"] == 1
     registry = Registry(registry_path)
     try:
-        row = registry.conn.execute(
-            """
+        row = registry.conn.execute("""
             SELECT status, run_name, details_json
             FROM recording_step_status
             WHERE step_name = 'swim_bouts';
-            """
-        ).fetchone()
+            """).fetchone()
         assert row["status"] == "ok"
         assert row["run_name"] == "bouts_1"
         details = json.loads(row["details_json"])
         assert details["serialized_registry_finalization"] == (
             first["publications"][0]["registry_finalization_evidence"]
         )
-        history_count = registry.conn.execute(
-            """
+        history_count = registry.conn.execute("""
             SELECT COUNT(*)
             FROM recording_step_status_history
             WHERE step_name = 'swim_bouts';
-            """
-        ).fetchone()[0]
+            """).fetchone()[0]
         assert history_count == 1
     finally:
         registry.close()
@@ -485,12 +565,10 @@ def test_partial_finalizer_retry_skips_already_committed_stage(
     ]
     registry = Registry(registry_path)
     try:
-        swim_history = registry.conn.execute(
-            """
+        swim_history = registry.conn.execute("""
             SELECT COUNT(*) FROM recording_step_status_history
             WHERE step_name = 'swim_bouts';
-            """
-        ).fetchone()[0]
+            """).fetchone()[0]
         assert swim_history == 1
     finally:
         registry.close()
@@ -556,7 +634,9 @@ def test_finalizer_rejects_stale_consolidated_selected_run(tmp_path: Path) -> No
         zarr_format=3,
         use_consolidated=False,
     )
-    direct["analysis/swim_bout_runs/bouts_1"].attrs["tampered_after_consolidation"] = True
+    direct["analysis/swim_bout_runs/bouts_1"].attrs[
+        "tampered_after_consolidation"
+    ] = True
     receipt_path = tmp_path / "receipt.json"
     receipt_path.write_text("{}\n", encoding="utf-8")
     request = mod.RequestedPublication(

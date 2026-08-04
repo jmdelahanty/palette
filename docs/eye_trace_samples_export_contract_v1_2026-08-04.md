@@ -107,17 +107,27 @@ the bounded streaming implementation.
 - `src/fisheye/analytics_exports/arrow_contracts.py`
 - `src/fisheye/analytics_exports/publication.py`
 - `src/fisheye/analytics_exports/validation.py`
+- `src/fisheye/analysis_workflows/execution.py`
+- `src/fisheye/utils/execute_analysis_workflow.py`
+- `scripts/submit_analysis_workflow_bsub.sh`
 
 ## Remaining Gates
 
-- Add an execution adapter for the declared `eye_traces` workflow node.
 - Run representative short- and full-duration writer/read/publication
   benchmarks, including node-local scratch, copy, validation, bytes, row-group
   count, CPU, RSS, and manifest-commit timing.
 - Exercise the manifest-selected query product through its intended
   cross-recording consumer.
 - Keep the exporter opt-in until those gates pass. No production selector or
-  registry activation is implied by this contract.
+registry activation is implied by this contract.
+
+The declared workflow node now has an opt-in execution adapter. It binds the
+exact selected eye-angle run, fixed framewise policy, immutable export-run ID,
+65,536-row policy, publication root, and node-local scratch root. The LSF
+wrapper defaults scratch to an execution-specific child of `${TMPDIR}` and
+records the effective path. A successful subprocess is accepted only after
+full manifest-selected export validation. Parquet exports remain outside Zarr
+stage discovery and derived-stage registry projection.
 
 ## Validation Evidence
 
@@ -128,3 +138,9 @@ compilation, and `git diff --check` also passed. Black reformatted the two new
 Python implementation/test files successfully; its worker pool did not exit
 before the bounded 30-second command timeout, matching the known formatter
 behavior in this environment.
+
+The follow-up execution matrix passed 67 tests covering planner/CLI rendering,
+LSF `${TMPDIR}` scratch resolution, shell syntax, manifest-selected export
+verification, Zarr/export output separation, registry exclusion, malformed
+receipt rejection, DAG behavior, and the exporter itself. Ruff, Python
+compilation, shell syntax, and `git diff --check` passed for that checkpoint.

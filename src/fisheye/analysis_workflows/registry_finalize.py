@@ -37,7 +37,6 @@ from .storage_contract_catalog import (
     SERIALIZED_REGISTRY_STAGE_IDS,
 )
 
-
 REPORT_SCHEMA = "palette.derived_analysis_registry_finalizer.v2"
 TARGET_RECEIPT_SCHEMA = "palette.chaser_analytics_target_receipt.v1"
 REGISTRY_FINALIZATION_EVIDENCE_SCHEMA = (
@@ -111,7 +110,8 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
     payload, digest = _read_json_object(path)
     if payload.get("schema_id") != "palette.analysis_workflow_execution":
         raise ValueError(f"Unsupported analysis execution receipt: {path}")
-    if payload.get("schema_version") != 1:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {1, 2}:
         raise ValueError(f"Unsupported analysis execution receipt version: {path}")
     if payload.get("mode") != "apply" or payload.get("status") != "complete":
         raise RuntimeError(f"Analysis execution receipt is not complete: {path}")
@@ -128,19 +128,17 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
     results = payload.get("node_results")
     if not isinstance(commands, list) or not isinstance(results, list):
         raise ValueError(f"Execution receipt lacks commands or node_results: {path}")
-    result_by_node = {
-        str(item.get("node_id")): item
-        for item in results
-        if isinstance(item, Mapping) and item.get("node_id")
-    }
+    result_rows = [
+        item for item in results if isinstance(item, Mapping) and item.get("node_id")
+    ]
+    result_by_node = {str(item.get("node_id")): item for item in result_rows}
+    if len(result_by_node) != len(result_rows):
+        raise ValueError(f"Execution receipt repeats a node result: {path}")
 
     requests: list[RequestedPublication] = []
     for command in commands:
         if not isinstance(command, Mapping):
             raise ValueError(f"Execution command is not an object: {path}")
-        stage_id = _require_text(command.get("stage_id"), field="stage_id")
-        if stage_id not in _SUPPORTED_STAGES:
-            continue
         node_id = _require_text(command.get("node_id"), field="node_id")
         run_name = _require_text(command.get("output_run"), field="output_run")
         result = result_by_node.get(node_id)
@@ -152,6 +150,39 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
             raise RuntimeError(
                 f"Execution node {node_id!r} run identity differs from its command"
             )
+        if schema_version == 2:
+            output_kind = command.get("output_kind")
+            if output_kind == "parquet_export":
+                if (
+                    command.get("node_kind") != "export"
+                    or command.get("stage_id") is not None
+                ):
+                    raise ValueError(
+                        f"Execution export command has an invalid stage boundary: {path}"
+                    )
+                _require_text(command.get("output_root"), field="output_root")
+                # Cross-recording query products are validated by the workflow
+                # runner but are not scientific Zarr stages and must never be
+                # projected into the derived-stage registry.
+                continue
+            if output_kind != "zarr_stage":
+                raise ValueError(
+                    f"Execution command has an invalid output kind: {path}"
+                )
+            if command.get("node_kind") not in {"analysis", "visualization"}:
+                raise ValueError(
+                    f"Execution Zarr command has an invalid node boundary: {path}"
+                )
+            output_root = Path(
+                _require_text(command.get("output_root"), field="output_root")
+            )
+            if output_root.expanduser().resolve() != zarr_path.expanduser().resolve():
+                raise ValueError(
+                    f"Execution Zarr command output root differs from its receipt: {path}"
+                )
+        stage_id = _require_text(command.get("stage_id"), field="stage_id")
+        if stage_id not in _SUPPORTED_STAGES:
+            continue
         requests.append(
             RequestedPublication(
                 zarr_path=zarr_path,
@@ -203,7 +234,10 @@ def _target_receipt_requests(
         payload, digest = _read_json_object(receipt_path)
         if payload.get("schema_id") != TARGET_RECEIPT_SCHEMA:
             continue
-        if payload.get("schema_version") not in {1, 2} or payload.get("status") != "complete":
+        if (
+            payload.get("schema_version") not in {1, 2}
+            or payload.get("status") != "complete"
+        ):
             raise RuntimeError(f"Target receipt is not complete: {receipt_path}")
         if payload.get("registry_write_mode") != "deferred_to_serial_finalizer":
             raise RuntimeError(
@@ -584,11 +618,14 @@ def finalize_registry(
                         f"Registry publication returned false for "
                         f"{item.request.stage_id} {item.registry_run_name}"
                     )
-                if _registry_projection_state(
-                    registry,
-                    item,
-                    evidence=evidence,
-                ) != "current":
+                if (
+                    _registry_projection_state(
+                        registry,
+                        item,
+                        evidence=evidence,
+                    )
+                    != "current"
+                ):
                     raise RuntimeError(
                         "Registry publication did not persist its exact finalization "
                         f"evidence for {item.request.stage_id} "
@@ -606,9 +643,11 @@ def finalize_registry(
                     "status": (
                         "published"
                         if wrote
-                        else "already_published"
-                        if apply and projection_state == "current"
-                        else "validated"
+                        else (
+                            "already_published"
+                            if apply and projection_state == "current"
+                            else "validated"
+                        )
                     ),
                 }
             )

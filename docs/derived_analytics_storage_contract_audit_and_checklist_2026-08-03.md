@@ -434,9 +434,16 @@ now implemented on the coordination branch:
   source binding checked before and after extraction, and the shared immutable
   generation/manifest compare-and-swap publication boundary. The generic
   compact exporter rejects this full-duration table so callers cannot
-  accidentally materialize it in memory. Workflow execution and performance
+  accidentally materialize it in memory. Performance and intended-consumer
   gates remain open. The final focused eye/export/publication matrix passed 247
   tests; Ruff, Python compilation, and `git diff --check` also passed.
+- opt-in `eye_traces` workflow execution through the exact publisher, with a
+  separate Parquet output kind/root, manifest-selected post-command
+  validation, no Zarr-stage discovery or derived-stage registry projection,
+  explicit export-run identity, and LSF `${TMPDIR}` scratch selection recorded
+  in runtime sidecars. The remaining export nodes still fail closed; no default
+  profile or authority was activated. The combined executor, DAG, registry,
+  LSF-wrapper, and eye-export matrix passed 67 tests.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. A later independent adversarial review
@@ -795,8 +802,10 @@ Recommended benchmark and promotion-review order:
     - [ ] activity/spatial summaries;
     - [x] eye traces. The v1 publisher reads exact bounded compact-v7 frame
           intervals, produces one immutable manifest-selected Parquet part,
-          validates complete decoded payload hashes, and remains non-default;
-          workflow execution wiring and benchmarks remain separate gates.
+          validates complete decoded payload hashes, and remains non-default.
+          Its execution adapter binds the exact source run and physical output
+          boundary; the LSF wrapper supplies per-job node-local scratch.
+          Short/full benchmarks remain a separate gate.
     - [ ] tail traces.
 - [ ] Keep recording-local Zarr authorities separate from immutable
       cross-recording Parquet query products.
@@ -1203,14 +1212,12 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. wire the exact eye-trace publisher into the declared workflow execution
-   boundary without changing any default profile;
-2. freeze the generic sampled-kinematic table independently of the existing
+1. freeze the generic sampled-kinematic table independently of the existing
    chaser-specific baseline sample representation;
-3. freeze activity/spatial-summary semantics and decide the cross-recording
+2. freeze activity/spatial-summary semantics and decide the cross-recording
    tail-trace representation before implementing those publishers;
-4. benchmark the eye-trace writer, bounded reads, scratch copy, validation,
+3. benchmark the eye-trace writer, bounded reads, scratch copy, validation,
    publication, and manifest-selected consumer at representative short and
    full duration; and
-5. retain each recording-local Zarr authority and current production profile
+4. retain each recording-local Zarr authority and current production profile
    as the rollback boundary until its complete promotion gate passes.

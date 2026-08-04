@@ -150,6 +150,12 @@ The executor supports these canonical analysis stages in the core profile:
 - `subject_shape`;
 - `tail_kinematics`.
 
+It also supports the opt-in `eye_traces` export node. This node is not a Zarr
+analysis stage: it projects one explicit compact-v7 eye-angle authority into an
+immutable manifest-selected Parquet generation. The other declared export
+nodes remain planning-only and fail closed during execution until their exact
+publishers are implemented.
+
 Track identities are a required persisted prerequisite rather than an
 analysis-workflow output. Planning a new track-kinematics run therefore blocks
 when no `tracking_runs` authority is present. Create lineage-matched tracking
@@ -167,8 +173,8 @@ Bout kinematics also depends on the exact eye-angle node: eye-gaze summaries
 are part of the default contract, and the rendered command pins that completed
 run rather than resolving a mutable `latest` pointer at execution time.
 
-Execution requires one or more explicit analysis targets. The default remains
-a read-only command render:
+Execution requires one or more explicit analysis or implemented export
+targets. The default remains a read-only command render:
 
 ```bash
 scripts/execute_analysis_workflow /path/to/recording_analysis.zarr \
@@ -189,6 +195,24 @@ downstream command receives the exact reused or newly generated dependency run n
 `--force-stage STAGE` when a completed stage should intentionally be recomputed
 as a new immutable run.
 
+An eye-trace export additionally requires an immutable publication root and an
+explicit node-local scratch root when the executor is invoked directly:
+
+```bash
+scripts/execute_analysis_workflow /path/to/recording_analysis.zarr \
+  --target eye_traces \
+  --stage-run eye_angles=eye_compact_v7 \
+  --export-run eye_traces=eye_trace_query_v1 \
+  --export-root /shared/query-products \
+  --scratch-root /node-local/palette-eye-export \
+  --execution-id eye_trace_canary_01
+```
+
+The execution receipt distinguishes `parquet_export` outputs from
+`zarr_stage` outputs. Successful exports are reopened through their exclusive
+manifest and fully validated; they are never passed to Zarr-stage discovery or
+projected into the derived-stage registry.
+
 `--apply` is rejected unless `LSB_JOBID` is present. Do not invoke it on a
 login node. Render a cluster job first:
 
@@ -201,6 +225,25 @@ scripts/submit_analysis_workflow_bsub.sh \
   --target subject_shape \
   --stage-run track_kinematics=my_calibrated_track_run
 ```
+
+For the opt-in eye export, the LSF wrapper derives a per-execution scratch root
+below the worker's `${TMPDIR}` unless `--scratch-root` explicitly supplies a
+different node-local path:
+
+```bash
+scripts/submit_analysis_workflow_bsub.sh \
+  --zarr /groups/path/to/recording_analysis.zarr \
+  --execution-id eye_trace_canary_01 \
+  --target eye_traces \
+  --stage-run eye_angles=eye_compact_v7 \
+  --export-run eye_traces=eye_trace_query_v1 \
+  --export-root /groups/path/to/immutable-query-products
+```
+
+The effective scratch path and its explicit/default origin are recorded in the
+runtime and status sidecars. The publisher deletes its generation-specific
+scratch child after success or failure; the immutable Parquet generation and
+manifest remain under `--export-root`.
 
 Render-only mode reserves its immutable execution directory. After inspection,
 submit the printed `bsub_command` through the poller, or use a fresh execution

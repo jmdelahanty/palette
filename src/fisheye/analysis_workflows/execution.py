@@ -18,9 +18,9 @@ from fisheye.registry.stage_catalog import canonical_stage_id
 from .contracts import AnalysisWorkflow
 from .dag import NodePlan, WorkflowPlan
 
-
 EXECUTION_SCHEMA_ID = "palette.analysis_workflow_execution"
-EXECUTION_SCHEMA_VERSION = 1
+EXECUTION_LEGACY_SCHEMA_VERSION = 1
+EXECUTION_SCHEMA_VERSION = 2
 SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -36,6 +36,8 @@ class StageCommandContext:
     dependency_runs: Mapping[str, str]
     python_executable: str
     num_workers: int
+    export_root: Path | None = None
+    scratch_root: Path | None = None
 
     def dependency_run(self, node_id: str) -> str:
         try:
@@ -50,16 +52,22 @@ class StageCommandContext:
 @dataclass(frozen=True)
 class StageCommand:
     node_id: str
-    stage_id: str
+    node_kind: str
+    stage_id: str | None
     output_run: str
+    output_kind: str
+    output_root: str
     dependency_runs: Mapping[str, str]
     argv: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
             "node_id": self.node_id,
+            "node_kind": self.node_kind,
             "stage_id": self.stage_id,
             "output_run": self.output_run,
+            "output_kind": self.output_kind,
+            "output_root": self.output_root,
             "dependency_runs": dict(self.dependency_runs),
             "argv": list(self.argv),
         }
@@ -70,6 +78,7 @@ class WorkflowExecutionPlan:
     execution_id: str
     workflow_plan: WorkflowPlan
     output_runs: Mapping[str, str]
+    export_runs: Mapping[str, str]
     commands: tuple[StageCommand, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -79,6 +88,7 @@ class WorkflowExecutionPlan:
             "execution_id": self.execution_id,
             "workflow_plan": self.workflow_plan.to_dict(),
             "output_runs": dict(self.output_runs),
+            "export_runs": dict(self.export_runs),
             "commands": [command.to_dict() for command in self.commands],
         }
 
@@ -438,6 +448,40 @@ def _stimulus_response_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _eye_trace_export_command(context: StageCommandContext) -> tuple[str, ...]:
+    if context.export_root is None or context.scratch_root is None:
+        raise WorkflowExecutionError(
+            "eye-trace export requires explicit export and node-local scratch roots"
+        )
+    if context.node.temporal_policy != {
+        "resolution": "framewise",
+        "source_authority": "framewise_zarr",
+    }:
+        raise WorkflowExecutionError(
+            "eye-trace export supports only the exact framewise temporal policy"
+        )
+    command = _module_command(
+        context,
+        "fisheye.utils.export_eye_trace_samples",
+    )
+    command.extend(
+        (
+            "--eye-angle-run",
+            context.dependency_run("eye_angles"),
+            "--output-root",
+            str(context.export_root),
+            "--export-run-id",
+            context.output_run,
+            "--scratch-root",
+            str(context.scratch_root),
+            "--row-group-rows",
+            "65536",
+            "--json",
+        )
+    )
+    return tuple(command)
+
+
 STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "track_kinematics": _track_kinematics_command,
@@ -453,12 +497,26 @@ STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     }
 )
 
+EXPORT_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
+    {
+        "eye_traces": _eye_trace_export_command,
+    }
+)
+
 
 def _safe_name(value: str, *, label: str) -> str:
     name = str(value).strip()
     if not SAFE_RUN_NAME.fullmatch(name):
         raise WorkflowExecutionError(f"unsafe {label}: {value!r}")
     return name
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def default_output_run_name(*, execution_id: str, node_id: str) -> str:
@@ -473,6 +531,9 @@ def build_workflow_execution_plan(
     execution_id: str,
     num_workers: int,
     output_run_overrides: Mapping[str, str] | None = None,
+    export_run_overrides: Mapping[str, str] | None = None,
+    export_root: str | Path | None = None,
+    scratch_root: str | Path | None = None,
     python_executable: str,
 ) -> WorkflowExecutionPlan:
     """Render exact commands for runnable analysis nodes in topological order."""
@@ -508,7 +569,71 @@ def build_workflow_execution_plan(
             + ", ".join(unused_overrides)
         )
 
+    export_overrides: dict[str, str] = {}
+    for raw_node_id, run_name in dict(export_run_overrides or {}).items():
+        node_id = str(raw_node_id).strip()
+        workflow_node = workflow_nodes.get(node_id)
+        if workflow_node is None or workflow_node.kind != "export":
+            raise WorkflowExecutionError(
+                f"export-run override does not name an export node: {node_id!r}"
+            )
+        if node_id in export_overrides:
+            raise WorkflowExecutionError(
+                f"export-run override repeats node {node_id!r}"
+            )
+        export_overrides[node_id] = _safe_name(
+            run_name,
+            label=f"export run for {node_id}",
+        )
+    run_export_node_ids = {node.node_id for node in run_nodes if node.kind == "export"}
+    unimplemented_export_nodes = sorted(
+        run_export_node_ids - set(EXPORT_COMMAND_BUILDERS)
+    )
+    if unimplemented_export_nodes:
+        raise WorkflowExecutionError(
+            "export node(s) require an execution adapter that is not implemented: "
+            + ", ".join(unimplemented_export_nodes)
+        )
+    unused_export_overrides = sorted(set(export_overrides) - run_export_node_ids)
+    if unused_export_overrides:
+        raise WorkflowExecutionError(
+            "export-run override does not select a runnable export: "
+            + ", ".join(unused_export_overrides)
+        )
+    resolved_export_root = (
+        Path(export_root).expanduser().resolve() if export_root is not None else None
+    )
+    resolved_scratch_root = (
+        Path(scratch_root).expanduser().resolve() if scratch_root is not None else None
+    )
+    if run_export_node_ids and (
+        resolved_export_root is None or resolved_scratch_root is None
+    ):
+        raise WorkflowExecutionError(
+            "runnable export nodes require explicit export_root and scratch_root"
+        )
+    if run_export_node_ids:
+        assert resolved_export_root is not None and resolved_scratch_root is not None
+        source_root = Path(zarr_path).expanduser().resolve()
+        if _path_is_within(resolved_export_root, source_root):
+            raise WorkflowExecutionError(
+                "export_root must remain outside the analysis Zarr"
+            )
+        if _path_is_within(resolved_scratch_root, source_root):
+            raise WorkflowExecutionError(
+                "scratch_root must remain outside the analysis Zarr"
+            )
+        if _path_is_within(resolved_scratch_root, resolved_export_root):
+            raise WorkflowExecutionError(
+                "scratch_root must remain outside the immutable export root"
+            )
+        if _path_is_within(resolved_export_root, resolved_scratch_root):
+            raise WorkflowExecutionError(
+                "export_root must remain outside node-local scratch"
+            )
+
     output_runs: dict[str, str] = {}
+    export_runs: dict[str, str] = {}
     resolved_runs: dict[str, str] = {}
     for node in workflow_plan.nodes:
         if node.action == "reuse" and node.stage_id is not None:
@@ -517,6 +642,13 @@ def build_workflow_execution_plan(
                     f"reused node {node.node_id!r} has no selected run"
                 )
             resolved_runs[node.node_id] = node.selected_run
+        elif node.action == "run" and node.kind == "export":
+            output_run = export_overrides.get(node.node_id) or default_output_run_name(
+                execution_id=execution_id,
+                node_id=node.node_id,
+            )
+            export_runs[node.node_id] = output_run
+            resolved_runs[node.node_id] = output_run
         elif node.action == "run" and node.stage_id is not None:
             workflow_node = workflow_nodes[node.node_id]
             if workflow_node.output_run_from is not None:
@@ -543,16 +675,29 @@ def build_workflow_execution_plan(
     commands: list[StageCommand] = []
     for node_id in workflow_plan.execution_order:
         node = planned_by_id[node_id]
-        if node.kind not in {"analysis", "visualization"} or node.stage_id is None:
+        if node.kind == "export":
+            builder = EXPORT_COMMAND_BUILDERS.get(node.node_id)
+            if builder is None:
+                raise WorkflowExecutionError(
+                    f"export node {node_id!r} requires an execution adapter that is not implemented"
+                )
+            output_run = export_runs[node.node_id]
+            output_kind = "parquet_export"
+            assert resolved_export_root is not None
+            output_root = str(resolved_export_root)
+        elif node.kind in {"analysis", "visualization"} and node.stage_id is not None:
+            builder = STAGE_COMMAND_BUILDERS.get(node.stage_id)
+            if builder is None:
+                raise WorkflowExecutionError(
+                    f"stage {node.stage_id!r} has no command adapter"
+                )
+            output_run = output_runs[node.stage_id]
+            output_kind = "zarr_stage"
+            output_root = str(Path(zarr_path).expanduser().resolve())
+        else:
             raise WorkflowExecutionError(
                 f"node {node_id!r} requires an execution adapter that is not implemented"
             )
-        builder = STAGE_COMMAND_BUILDERS.get(node.stage_id)
-        if builder is None:
-            raise WorkflowExecutionError(
-                f"stage {node.stage_id!r} has no command adapter"
-            )
-        output_run = output_runs[node.stage_id]
         dependency_runs = {
             dependency: resolved_runs[dependency]
             for dependency in workflow_nodes[node_id].depends_on
@@ -565,12 +710,17 @@ def build_workflow_execution_plan(
             dependency_runs=MappingProxyType(dependency_runs),
             python_executable=str(python_executable),
             num_workers=int(num_workers),
+            export_root=resolved_export_root,
+            scratch_root=resolved_scratch_root,
         )
         commands.append(
             StageCommand(
                 node_id=node.node_id,
+                node_kind=node.kind,
                 stage_id=node.stage_id,
                 output_run=output_run,
+                output_kind=output_kind,
+                output_root=output_root,
                 dependency_runs=MappingProxyType(dependency_runs),
                 argv=builder(context),
             )
@@ -580,13 +730,16 @@ def build_workflow_execution_plan(
         execution_id=execution_id,
         workflow_plan=workflow_plan,
         output_runs=MappingProxyType(output_runs),
+        export_runs=MappingProxyType(export_runs),
         commands=tuple(commands),
     )
 
 
 __all__ = [
     "EXECUTION_SCHEMA_ID",
+    "EXECUTION_LEGACY_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_VERSION",
+    "EXPORT_COMMAND_BUILDERS",
     "STAGE_COMMAND_BUILDERS",
     "StageCommand",
     "WorkflowExecutionError",

@@ -18,6 +18,7 @@ import sys
 from typing import Iterable, Mapping, Sequence
 
 from fisheye.analysis_workflows import (
+    AnalysisWorkflow,
     EXECUTION_SCHEMA_ID,
     EXECUTION_SCHEMA_VERSION,
     WorkflowExecutionError,
@@ -28,6 +29,11 @@ from fisheye.analysis_workflows import (
     load_analysis_workflow,
     plan_analysis_workflow,
     stage_run_relative_path,
+)
+from fisheye.analytics_exports.publication import export_manifest_path
+from fisheye.analytics_exports.validation import (
+    ExportValidationError,
+    validate_export_run,
 )
 from fisheye.registry.stage_catalog import canonical_stage_id
 from fisheye.shared.json_safety import write_json_atomic
@@ -52,6 +58,27 @@ def _stage_mapping(values: Iterable[str], *, label: str) -> dict[str, str]:
     return parsed
 
 
+def _export_mapping(
+    values: Iterable[str],
+    *,
+    workflow: AnalysisWorkflow,
+) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw in values:
+        node_id, separator, value = str(raw).partition("=")
+        node_id = node_id.strip()
+        value = value.strip()
+        node = workflow.node_by_id.get(node_id)
+        if not separator or node is None or node.kind != "export" or not value:
+            raise WorkflowExecutionError(
+                f"--export-run must use EXPORT_NODE=RUN for a declared export: {raw!r}"
+            )
+        if node_id in parsed:
+            raise WorkflowExecutionError(f"--export-run repeats node {node_id!r}")
+        parsed[node_id] = value
+    return parsed
+
+
 def _path_is_within(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -64,13 +91,27 @@ def _preflight_new_outputs(
     zarr_path: Path,
     execution_plan: WorkflowExecutionPlan,
 ) -> None:
-    for stage_id, run_name in execution_plan.output_runs.items():
+    for command in execution_plan.commands:
+        if command.output_kind == "parquet_export":
+            manifest = export_manifest_path(
+                Path(command.output_root), command.output_run
+            )
+            if manifest.exists():
+                raise WorkflowExecutionError(
+                    f"refusing existing export run for {command.node_id}: {manifest}"
+                )
+            continue
+        stage_id = command.stage_id
+        if stage_id is None:
+            raise WorkflowExecutionError(
+                f"Zarr-stage command {command.node_id!r} has no canonical stage ID"
+            )
         if stage_id == "track_kinematics_visualization":
             # The visualization publisher owns a unique immutable render child
             # below the source-run-specific sibling parent. Existing renders
             # therefore do not collide with a new requested render.
             continue
-        relative = stage_run_relative_path(stage_id, run_name)
+        relative = stage_run_relative_path(stage_id, command.output_run)
         if (zarr_path / relative / "zarr.json").exists():
             raise WorkflowExecutionError(
                 f"refusing existing output run for {stage_id}: {relative}"
@@ -134,10 +175,14 @@ def execute_workflow_plan(
             "--apply is allowed only inside an LSF allocation (LSB_JOBID is unset)"
         )
     if apply and report_path is None:
-        raise WorkflowExecutionError("--apply requires --report outside the analysis Zarr")
+        raise WorkflowExecutionError(
+            "--apply requires --report outside the analysis Zarr"
+        )
     if report_path is not None:
         if _path_is_within(report_path, zarr_path):
-            raise WorkflowExecutionError("execution report must be outside the analysis Zarr")
+            raise WorkflowExecutionError(
+                "execution report must be outside the analysis Zarr"
+            )
         if report_path.exists():
             raise WorkflowExecutionError(
                 f"refusing to overwrite existing execution report: {report_path}"
@@ -218,19 +263,58 @@ def execute_workflow_plan(
             _write_report(report_path, payload)
             return payload
 
-        availability = discover_stage_availability(
-            zarr_path,
-            command.stage_id,
-            requested_run=command.output_run,
-            dependency_runs=command.dependency_runs,
-        )
-        result["verification"] = availability.to_dict()
-        if not availability.available:
+        if command.output_kind == "parquet_export":
+            try:
+                export_validation = validate_export_run(
+                    Path(command.output_root),
+                    command.output_run,
+                )
+            except (
+                ExportValidationError,
+                FileNotFoundError,
+                OSError,
+                ValueError,
+            ) as exc:
+                result["status"] = "failed_verification"
+                result["verification"] = {
+                    "available": False,
+                    "status": "invalid",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                payload["status"] = "failed"
+                payload["error"] = (
+                    f"node {command.node_id} returned successfully but its export "
+                    f"manifest failed validation: {exc}"
+                )
+                payload["completed_at_utc"] = _utc_now()
+                _write_report(report_path, payload)
+                return payload
+            result["verification"] = {
+                **export_validation,
+                "available": export_validation.get("status") == "valid",
+            }
+            output_available = export_validation.get("status") == "valid"
+            unavailable_reason = "manifest-selected export is not valid"
+        else:
+            if command.stage_id is None:
+                raise WorkflowExecutionError(
+                    f"Zarr-stage command {command.node_id!r} has no canonical stage ID"
+                )
+            availability = discover_stage_availability(
+                zarr_path,
+                command.stage_id,
+                requested_run=command.output_run,
+                dependency_runs=command.dependency_runs,
+            )
+            result["verification"] = availability.to_dict()
+            output_available = availability.available
+            unavailable_reason = availability.reason
+        if not output_available:
             result["status"] = "failed_verification"
             payload["status"] = "failed"
             payload["error"] = (
                 f"node {command.node_id} returned successfully but output run is not "
-                f"complete: {availability.reason}"
+                f"complete: {unavailable_reason}"
             )
             payload["completed_at_utc"] = _utc_now()
             _write_report(report_path, payload)
@@ -264,10 +348,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target",
         action="append",
         required=True,
-        help="Executable analysis target; repeatable. Export targets are not yet supported.",
+        help="Executable analysis or implemented export target; repeatable.",
     )
     parser.add_argument("--stage-run", action="append", default=[], metavar="STAGE=RUN")
-    parser.add_argument("--output-run", action="append", default=[], metavar="STAGE=RUN")
+    parser.add_argument(
+        "--output-run", action="append", default=[], metavar="STAGE=RUN"
+    )
+    parser.add_argument(
+        "--export-run",
+        action="append",
+        default=[],
+        metavar="EXPORT_NODE=RUN",
+        help="Override the immutable export-run ID for one runnable export node.",
+    )
+    parser.add_argument(
+        "--export-root",
+        type=Path,
+        help="Destination root for immutable manifest-selected Parquet exports.",
+    )
+    parser.add_argument(
+        "--scratch-root",
+        type=Path,
+        help="Explicit node-local scratch root required by runnable export nodes.",
+    )
     parser.add_argument(
         "--force-stage",
         action="append",
@@ -302,7 +405,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         zarr_path = args.zarr_path.expanduser()
         if not (zarr_path / "zarr.json").is_file():
-            raise WorkflowExecutionError(f"analysis Zarr metadata is missing: {zarr_path}")
+            raise WorkflowExecutionError(
+                f"analysis Zarr metadata is missing: {zarr_path}"
+            )
         workflow = load_analysis_workflow(args.config)
         stage_runs = _stage_mapping(args.stage_run, label="--stage-run")
         if stage_runs:
@@ -331,6 +436,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_run,
                 label="--output-run",
             ),
+            export_run_overrides=_export_mapping(
+                args.export_run,
+                workflow=workflow,
+            ),
+            export_root=args.export_root,
+            scratch_root=args.scratch_root,
             python_executable=sys.executable,
         )
         payload = execute_workflow_plan(

@@ -5,6 +5,8 @@ umask 0002
 ZARR_PATH=""
 EXECUTION_ID=""
 CONFIG=""
+EXPORT_ROOT=""
+SCRATCH_ROOT=""
 PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/palette}"
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
@@ -22,6 +24,7 @@ ACTIVITY_SPATIAL_BIN_SIZE_S=""
 TARGETS=()
 STAGE_RUNS=()
 OUTPUT_RUNS=()
+EXPORT_RUNS=()
 FORCE_STAGES=()
 
 usage() {
@@ -35,11 +38,14 @@ serially in dependency order, and verifies each run complete before advancing.
 Required:
   --zarr PATH                   Palette analysis Zarr on shared storage
   --execution-id ID            Safe immutable execution identifier
-  --target NODE                Executable analysis target; repeatable
+  --target NODE                Executable analysis or implemented export target; repeatable
 
 Options:
   --stage-run STAGE=RUN        Pin an existing dependency run; repeatable
   --output-run STAGE=RUN       Override a generated output run; repeatable
+  --export-run NODE=RUN        Override an immutable export run; repeatable
+  --export-root PATH           Immutable Parquet publication root for export targets
+  --scratch-root PATH          Node-local export scratch override; defaults below TMPDIR
   --force-stage STAGE          Recompute an otherwise reusable stage; repeatable
   --config PATH                Shared custom workflow profile; packaged core profile by default
   --kinematics-sample-rate-hz HZ
@@ -58,9 +64,10 @@ Options:
   --submit                     Render and submit; default reserves a render-only directory
   -h, --help                   Show this help
 
-Export-product targets remain unsupported until their immutable streaming
-execution adapters are implemented. Track, bout, subject-shape, tail, and eye
-kinematics use dedicated node-local, sharded, atomic-publication materializers.
+The exact eye_traces export is implemented and remains opt-in. Other export
+targets fail closed until their immutable streaming adapters exist. Track,
+bout, subject-shape, tail, and eye kinematics use dedicated node-local,
+sharded, atomic-publication materializers.
 USAGE
 }
 
@@ -76,6 +83,9 @@ while [[ $# -gt 0 ]]; do
     --target) TARGETS+=("$2"); shift 2;;
     --stage-run) STAGE_RUNS+=("$2"); shift 2;;
     --output-run) OUTPUT_RUNS+=("$2"); shift 2;;
+    --export-run) EXPORT_RUNS+=("$2"); shift 2;;
+    --export-root) EXPORT_ROOT="$2"; shift 2;;
+    --scratch-root) SCRATCH_ROOT="$2"; shift 2;;
     --force-stage) FORCE_STAGES+=("$2"); shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --kinematics-sample-rate-hz) KINEMATICS_SAMPLE_RATE_HZ="$2"; shift 2;;
@@ -106,6 +116,19 @@ done
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be a positive integer"
 [[ "$REGISTRY_FINALIZER_MEM_GB" =~ ^[1-9][0-9]*$ ]] || \
   fail "--registry-finalizer-mem-gb must be a positive integer"
+[[ -z "$SCRATCH_ROOT" || -n "$EXPORT_ROOT" ]] || \
+  fail "--scratch-root requires --export-root"
+(( ${#EXPORT_RUNS[@]} == 0 )) || [[ -n "$EXPORT_ROOT" ]] || \
+  fail "--export-run requires --export-root"
+[[ -z "$EXPORT_ROOT" || "$EXPORT_ROOT" == /* ]] || \
+  fail "--export-root must be an absolute cluster-visible path"
+[[ -z "$SCRATCH_ROOT" || "$SCRATCH_ROOT" == /* ]] || \
+  fail "--scratch-root must be an absolute node-local path"
+for target in "${TARGETS[@]}"; do
+  if [[ "$target" == "eye_traces" && -z "$EXPORT_ROOT" ]]; then
+    fail "the eye_traces target requires --export-root"
+  fi
+done
 [[ -f "$ZARR_PATH/zarr.json" ]] || fail "analysis Zarr metadata not found: $ZARR_PATH"
 [[ -e "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable"
@@ -123,6 +146,10 @@ ZARR_PARENT="$(dirname -- "$ZARR_PATH")"
 RECORDING_DIR="$(dirname -- "$ZARR_PARENT")"
 if [[ -z "$LOG_DIR" ]]; then
   LOG_DIR="${RECORDING_DIR}/.processing_logs/analysis_workflows"
+fi
+SCRATCH_ROOT_REQUEST_DISPLAY="not_requested"
+if [[ -n "$EXPORT_ROOT" ]]; then
+  SCRATCH_ROOT_REQUEST_DISPLAY="${SCRATCH_ROOT:-<lsf-tmpdir-default>}"
 fi
 SAFE_ZARR_NAME="$(basename -- "$ZARR_PATH" | tr -c 'A-Za-z0-9_.-' '_')"
 RUN_DIR="${LOG_DIR}/${EXECUTION_ID}_${SAFE_ZARR_NAME}"
@@ -154,6 +181,8 @@ q_resource_stdout="$(printf '%q' "$RESOURCE_STDOUT_FILE")"
 q_registry="$(printf '%q' "$REGISTRY")"
 q_registry_finalizer_report="$(printf '%q' "$REGISTRY_FINALIZER_REPORT")"
 q_requested_queue="$(printf '%q' "${QUEUE:-<cluster-default>}")"
+q_export_root="$(printf '%q' "$EXPORT_ROOT")"
+q_scratch_root="$(printf '%q' "$SCRATCH_ROOT")"
 quote_array() {
   local rendered="" value quoted
   for value in "$@"; do
@@ -165,6 +194,7 @@ quote_array() {
 q_targets="$(quote_array "${TARGETS[@]}")"
 q_stage_runs="$(quote_array "${STAGE_RUNS[@]}")"
 q_output_runs="$(quote_array "${OUTPUT_RUNS[@]}")"
+q_export_runs="$(quote_array "${EXPORT_RUNS[@]}")"
 q_force_stages="$(quote_array "${FORCE_STAGES[@]}")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
@@ -186,9 +216,12 @@ REQUESTED_QUEUE=${q_requested_queue}
 NCORES=${NCORES}
 REQUESTED_MEM_GB_PER_SLOT=${MEM_GB}
 REQUESTED_WALLTIME=${WALLTIME}
+EXPORT_ROOT=${q_export_root}
+REQUESTED_SCRATCH_ROOT=${q_scratch_root}
 TARGETS=(${q_targets})
 STAGE_RUNS=(${q_stage_runs})
 OUTPUT_RUNS=(${q_output_runs})
+EXPORT_RUNS=(${q_export_runs})
 FORCE_STAGES=(${q_force_stages})
 
 cd "\${PALETTE_REPO}"
@@ -226,6 +259,20 @@ esac
   printf 'Refusing analysis execution outside an LSF allocation.\n' >&2
   exit 2
 }
+
+SCRATCH_ROOT=""
+SCRATCH_ROOT_SOURCE="not_requested"
+if [[ -n "\${EXPORT_ROOT}" ]]; then
+  if [[ -n "\${REQUESTED_SCRATCH_ROOT}" ]]; then
+    SCRATCH_ROOT="\${REQUESTED_SCRATCH_ROOT}"
+    SCRATCH_ROOT_SOURCE="explicit"
+  else
+    TASK_SCRATCH_BASE="\${TMPDIR:-/tmp}"
+    SCRATCH_ROOT="\${TASK_SCRATCH_BASE%/}/palette_analysis_exports/\${EXECUTION_ID}"
+    SCRATCH_ROOT_SOURCE="lsf_tmpdir_default"
+  fi
+  mkdir -p "\${SCRATCH_ROOT}"
+fi
 
 EXECUTION_HOST="\$(hostname)"
 EXECUTION_HOST_FQDN="\$(hostname -f 2>/dev/null || hostname)"
@@ -276,6 +323,9 @@ runtime_environment_tmp="\${RUNTIME_ENVIRONMENT_FILE}.tmp.\$\$"
   printf 'cpu_logical_count=%s\n' "\${CPU_LOGICAL_COUNT}"
   printf 'kernel_release=%s\n' "\$(uname -r)"
   printf 'fisheye_source_file=%s\n' "\${ACTUAL_FISHEYE_FILE}"
+  printf 'export_root=%s\n' "\${EXPORT_ROOT:-not_requested}"
+  printf 'scratch_root=%s\n' "\${SCRATCH_ROOT:-not_requested}"
+  printf 'scratch_root_source=%s\n' "\${SCRATCH_ROOT_SOURCE}"
 } >"\${runtime_environment_tmp}"
 mv "\${runtime_environment_tmp}" "\${RUNTIME_ENVIRONMENT_FILE}"
 
@@ -300,7 +350,11 @@ cmd=(
 for value in "\${TARGETS[@]}"; do cmd+=(--target "\${value}"); done
 for value in "\${STAGE_RUNS[@]}"; do cmd+=(--stage-run "\${value}"); done
 for value in "\${OUTPUT_RUNS[@]}"; do cmd+=(--output-run "\${value}"); done
+for value in "\${EXPORT_RUNS[@]}"; do cmd+=(--export-run "\${value}"); done
 for value in "\${FORCE_STAGES[@]}"; do cmd+=(--force-stage "\${value}"); done
+if [[ -n "\${EXPORT_ROOT}" ]]; then
+  cmd+=(--export-root "\${EXPORT_ROOT}" --scratch-root "\${SCRATCH_ROOT}")
+fi
 JOBSCRIPT
 
 if [[ -n "$CONFIG" ]]; then
@@ -349,6 +403,9 @@ status_tmp="${STATUS_FILE}.tmp.$$"
   printf 'palette_commit=%s\n' "${ACTUAL_COMMIT}"
   printf 'zarr_path=%s\n' "${ZARR_PATH}"
   printf 'execution_id=%s\n' "${EXECUTION_ID}"
+  printf 'export_root=%s\n' "${EXPORT_ROOT:-not_requested}"
+  printf 'scratch_root=%s\n' "${SCRATCH_ROOT:-not_requested}"
+  printf 'scratch_root_source=%s\n' "${SCRATCH_ROOT_SOURCE}"
   printf 'payload_returncode=%s\n' "${payload_rc}"
   printf 'execution_report=%s\n' "${REPORT_PATH}"
   printf 'runtime_environment=%s\n' "${RUNTIME_ENVIRONMENT_FILE}"
@@ -414,6 +471,8 @@ printf 'runtime_environment=%s\n' "$RUNTIME_ENVIRONMENT_FILE"
 printf 'resource_telemetry_summary=%s\n' "$RESOURCE_SUMMARY_FILE"
 printf 'resource_telemetry_samples=%s\n' "$RESOURCE_SAMPLES_FILE"
 printf 'workflow_stdout=%s\n' "$RESOURCE_STDOUT_FILE"
+printf 'export_root=%s\n' "${EXPORT_ROOT:-not_requested}"
+printf 'scratch_root_request=%s\n' "$SCRATCH_ROOT_REQUEST_DISPLAY"
 printf 'registry_write_mode=deferred_to_serial_finalizer\n'
 printf 'registry=%s\n' "$REGISTRY"
 printf 'registry_finalizer=%s\n' \
@@ -447,6 +506,8 @@ if [[ "$SUBMIT" == "1" ]]; then
     printf 'requested_ncores=%s\n' "$NCORES"
     printf 'requested_mem_gb_per_slot=%s\n' "$MEM_GB"
     printf 'requested_walltime=%s\n' "$WALLTIME"
+    printf 'export_root=%s\n' "${EXPORT_ROOT:-not_requested}"
+    printf 'scratch_root_request=%s\n' "$SCRATCH_ROOT_REQUEST_DISPLAY"
     printf 'job_id=%s\n' "$job_id"
     printf 'job_script=%s\n' "$JOB_SCRIPT"
     printf 'lsf_stdout=%s\n' "${RUN_DIR}/${job_id}.out"

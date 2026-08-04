@@ -16,6 +16,7 @@ from .contracts import (
 )
 from .dag import NodePlan, WorkflowPlan, plan_analysis_workflow
 from .execution import (
+    EXECUTION_LEGACY_SCHEMA_VERSION,
     EXECUTION_SCHEMA_ID,
     EXECUTION_SCHEMA_VERSION,
     StageCommand,
@@ -28,6 +29,7 @@ __all__ = [
     "ANALYSIS_WORKFLOW_SCHEMA_ID",
     "ANALYSIS_WORKFLOW_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_ID",
+    "EXECUTION_LEGACY_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_VERSION",
     "AnalysisWorkflow",
     "NodePlan",
