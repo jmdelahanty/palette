@@ -137,7 +137,7 @@ true.
 | Tail-posture view | Exact typed arrays, guarded lifecycle, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate and decide whether to migrate to the atomic materializer |
 | Bout classification | Exact compact-v2 manifest, guarded activation, serialized registry projection, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate through its real consumer |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
-| Stimulus epochs | Current v1 direct authority is centrally cataloged; an exact 12-array v2, candidate-owned lineage/manifest, shared byte plan, atomic publication, failure repair, and a strict named-run v2 consumer are implemented without changing selection | Run real source/candidate archive benchmarks before any writer/default promotion |
+| Stimulus epochs | Current v1 direct authority is centrally cataloged; an exact primitive 12-array v2, candidate-owned lineage/manifest, shared byte plan, atomic publication, failure repair, strict named-run v2 consumer, and fresh-process typed execution boundary are implemented without changing selection. The runner independently binds decoded values, source-epoch lineage, the complete stimulus logical tree, and temporal-axis evidence while requiring node-local staging and direct/consolidated equivalence | Run representative short/full publication and real-consumer gates with externally traced physical I/O before any writer/default promotion; retain v1 only as an explicit migration input |
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
@@ -870,8 +870,8 @@ Recommended benchmark and promotion-review order:
 - [x] Bind every runner-affecting argument in a closed invocation envelope as
       `fbbce911`. Request, receipt, and failed-attempt envelopes are now honest
       v2 contracts: each rejects legacy v1 and numeric schema-version aliases.
-      The first frozen parameter grammars cover exact-tabular, eye-angle, and
-      track-flat execution. Implemented adapters cannot select a contract that
+      The frozen parameter grammars now cover exact-tabular, eye-angle,
+      track-flat, and stimulus-epoch execution. Implemented adapters cannot select a contract that
       still lacks an exact parameter grammar, and the exact-tabular child/CLI
       no longer accepts unsigned copy-backend or scratch-retention flags.
       Track-flat publication is explicitly scoped to the existing
@@ -919,7 +919,19 @@ Recommended benchmark and promotion-review order:
           dirty-worktree unit receipt correctly remains nonpromoting. The
           combined shared/eye/track execution, materializer, recovery, and read
           matrix gate passed 136 tests outside the sandbox.
-    - [ ] Implement the remaining nine typed family runners.
+    - [x] Stimulus epochs now execute through the real catalog and parent-owned
+          fresh-process driver. The request separately binds the exact decoded
+          12-array identity, canonical source-epoch lineage, complete stimulus
+          logical-tree fingerprint, primitive-v2 storage plan, and temporal
+          axis. The materializer copies both source groups to node-local
+          scratch, measures all eleven phases, requires direct/consolidated
+          metadata equivalence, keeps acceptance inside atomic publication,
+          and leaves the candidate selector-ineligible. Invalid stimulus or
+          lineage identities fail before publication; later driver/evidence
+          failures tombstone only the execution-owned candidate. The complete
+          schema, invocation, catalog, materializer, recovery, and real
+          fresh-process gate passed 59 tests outside the sandbox.
+    - [ ] Implement the remaining eight typed family runners.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,

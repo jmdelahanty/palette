@@ -375,9 +375,16 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
+        "stimulus_epochs",
     }
 
-    for stage in ("track_kinematics", "swim_bouts", "bout_kinematics", "eye_angles"):
+    for stage in (
+        "track_kinematics",
+        "swim_bouts",
+        "bout_kinematics",
+        "eye_angles",
+        "stimulus_epochs",
+    ):
         adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[stage]
         assert adapter.resolves_candidate_owner() is True
         assert adapter.resolves_runner() is True

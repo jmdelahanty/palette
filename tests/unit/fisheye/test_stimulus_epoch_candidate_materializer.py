@@ -20,8 +20,12 @@ from fisheye.analysis.stimulus_epoch_schema import (
 )
 from fisheye.analysis_workflows.materializers import stimulus_epochs as materializer
 from fisheye.analysis_workflows.materializers.stimulus_epochs import (
+    EXECUTION_BINDING_ATTR,
+    EXECUTION_FAILURE_TOMBSTONE_ATTR,
+    STIMULUS_EPOCH_EXECUTION_PHASE_ORDER,
     build_stimulus_epoch_candidate_plan,
     materialize_stimulus_epoch_candidate,
+    tombstone_stimulus_epoch_execution_candidate,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -65,9 +69,10 @@ def test_candidate_is_exact_byte_planned_and_selector_ineligible(
     assert result["local_validation"]["array_count"] == 12
     assert result["local_direct_consolidated_array_count"] == 12
     assert result["archive_direct_consolidated_array_count"] == 12
-    assert result["local_validation"]["logical_hashes"] == result["publication"][
-        "source_logical_hashes"
-    ]
+    assert (
+        result["local_validation"]["logical_hashes"]
+        == result["publication"]["source_logical_hashes"]
+    )
     assert not (tmp_path / "scratch").exists()
 
     direct = zarr.open_group(str(archive), mode="r", use_consolidated=False)
@@ -80,9 +85,10 @@ def test_candidate_is_exact_byte_planned_and_selector_ineligible(
     assert candidate.attrs["stage_selector_eligible"] is False
     assert candidate.attrs["storage_candidate_profile_promoted"] is False
     assert candidate.attrs["palette_run_completion_status"] == "complete"
-    assert validate_stimulus_epoch_array_manifest(
-        candidate, byte_planner_adopted=True
-    ) == ()
+    assert (
+        validate_stimulus_epoch_array_manifest(candidate, byte_planner_adopted=True)
+        == ()
+    )
     assert validate_stimulus_epoch_candidate_lineage(candidate) == ()
     assert validate_stimulus_epoch_run_manifest(candidate) == ()
     source = parent["source"]
@@ -97,17 +103,146 @@ def test_candidate_is_exact_byte_planned_and_selector_ineligible(
         "schema_version": 2,
     }
     assert candidate_lineage["source_refs"]["source_stimulus_epoch_run"] == "source"
-    assert candidate_lineage["source_fingerprints"][
-        "source_stimulus_epoch_lineage_hash"
-    ] == source.attrs["lineage_hash"]
+    assert (
+        candidate_lineage["source_fingerprints"]["source_stimulus_epoch_lineage_hash"]
+        == source.attrs["lineage_hash"]
+    )
     receipt = candidate.attrs[ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR]
     assert receipt["payload"]["storage_profile"]["profile_id"] == "published_http_v1"
     assert receipt["payload"]["storage_profile"]["codec_profile_id"] == "zstd_fast_v1"
     assert receipt["payload"]["object_estimate"]["payload_objects"] == 12
     assert len(receipt["payload"]["arrays"]) == 12
-    assert all(array.metadata.zarr_format == 3 for _path, array in _walk_arrays(candidate))
+    assert all(
+        array.metadata.zarr_format == 3 for _path, array in _walk_arrays(candidate)
+    )
     consolidated_candidate = consolidated["analysis/stimulus_epoch_runs/candidate"]
     assert dict(consolidated_candidate.attrs) == dict(candidate.attrs)
+
+
+def test_execution_candidate_stages_sources_measures_and_binds_acceptance(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    root = create_legacy_stimulus_epoch_archive(archive)
+    source = root["analysis/stimulus_epoch_runs/source"]
+    declarations = materializer.build_stimulus_epoch_array_declarations(
+        source,
+        byte_planner_adopted=False,
+    )
+    source_hashes = materializer._logical_hashes(source, declarations)
+    binding = {
+        "schema_id": "palette.analysis_candidate_execution_binding",
+        "schema_version": 1,
+        "execution_id": "stimulus_epoch_unit",
+        "request_payload_digest": "a" * 64,
+        "candidate_run_path": "analysis/stimulus_epoch_runs/candidate",
+    }
+    accepted: list[str] = []
+
+    def accept(_root, _parent, candidate):  # type: ignore[no-untyped-def]
+        assert candidate.attrs[EXECUTION_BINDING_ATTR] == binding
+        accepted.append("called")
+        return {"accepted": True, "execution_binding": binding}
+
+    result = materialize_stimulus_epoch_candidate(
+        archive,
+        source_run="source",
+        run_name="candidate",
+        scratch_root=tmp_path / "scratch",
+        copy_backend="python",
+        apply=True,
+        stage_source_to_scratch=True,
+        execution_binding=binding,
+        expected_source_logical_hashes=source_hashes,
+        publication_acceptance_validator=accept,
+    )
+
+    assert accepted == ["called"]
+    assert result["caller_acceptance"] == {
+        "accepted": True,
+        "execution_binding": binding,
+    }
+    assert [phase["name"] for phase in result["runtime_telemetry"]["phases"]] == list(
+        STIMULUS_EPOCH_EXECUTION_PHASE_ORDER
+    )
+    assert (
+        result["source_logical_manifest_sha256"]
+        == result["published_logical_manifest_sha256"]
+    )
+    assert result["output_storage"]["file_count"] > 0
+    assert not (tmp_path / "scratch").exists()
+    candidate = zarr.open_group(str(archive), mode="r", use_consolidated=False)[
+        "analysis/stimulus_epoch_runs/candidate"
+    ]
+    assert candidate.attrs[EXECUTION_BINDING_ATTR] == binding
+    assert candidate.attrs["source_staging_mode"] == (
+        "epoch_and_stimulus_logical_copy_v1"
+    )
+
+    tombstone_stimulus_epoch_execution_candidate(
+        archive,
+        run_name="candidate",
+        expected_execution_binding=binding,
+        failure_phase="driver_receipt_publication",
+        error_type="OSError",
+        error_message="injected receipt publication failure",
+    )
+    for consolidated in (False, True):
+        failed = zarr.open_group(str(archive), mode="r", use_consolidated=consolidated)[
+            "analysis/stimulus_epoch_runs/candidate"
+        ]
+        assert failed.attrs["palette_run_completion_status"] == "failed"
+        assert failed.attrs["stage_selector_eligible"] is False
+        assert (
+            failed.attrs[EXECUTION_FAILURE_TOMBSTONE_ATTR]["execution_binding"]
+            == binding
+        )
+
+
+def test_execution_acceptance_failure_stays_failed_and_ineligible(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    create_legacy_stimulus_epoch_archive(archive)
+    binding = {
+        "schema_id": "palette.analysis_candidate_execution_binding",
+        "schema_version": 1,
+        "execution_id": "stimulus_epoch_reject",
+        "request_payload_digest": "b" * 64,
+        "candidate_run_path": "analysis/stimulus_epoch_runs/candidate",
+    }
+
+    def reject(_root, _parent, _candidate):  # type: ignore[no-untyped-def]
+        raise ValueError("injected stimulus-epoch acceptance failure")
+
+    with pytest.raises(
+        ValueError,
+        match="injected stimulus-epoch acceptance failure",
+    ) as raised:
+        materialize_stimulus_epoch_candidate(
+            archive,
+            source_run="source",
+            run_name="candidate",
+            scratch_root=tmp_path / "scratch",
+            copy_backend="python",
+            apply=True,
+            stage_source_to_scratch=True,
+            execution_binding=binding,
+            publication_acceptance_validator=reject,
+        )
+
+    telemetry = getattr(raised.value, "palette_runtime_telemetry")
+    atomic_phase = next(
+        phase for phase in telemetry["phases"] if phase["name"] == "atomic_publication"
+    )
+    assert atomic_phase["outcome"] == "error"
+    for consolidated in (False, True):
+        failed = zarr.open_group(str(archive), mode="r", use_consolidated=consolidated)[
+            "analysis/stimulus_epoch_runs/candidate"
+        ]
+        assert failed.attrs["palette_run_completion_status"] == "failed"
+        assert failed.attrs["stage_selector_eligible"] is False
+        assert failed.attrs[EXECUTION_BINDING_ATTR] == binding
 
 
 def _publish_candidate(tmp_path: Path, *, suffix: str) -> tuple[Path, zarr.Group]:
@@ -245,7 +380,9 @@ def _walk_arrays(group: zarr.Group, prefix: str = ""):
         yield from _walk_arrays(child, child_prefix)
 
 
-@pytest.mark.parametrize("name", ["latest", "latest_complete", "../candidate", "bad name"])
+@pytest.mark.parametrize(
+    "name", ["latest", "latest_complete", "../candidate", "bad name"]
+)
 def test_plan_refuses_alias_or_unsafe_names(tmp_path: Path, name: str) -> None:
     archive = tmp_path / "recording_analysis.zarr"
     create_legacy_stimulus_epoch_archive(archive)
@@ -329,9 +466,7 @@ def test_post_consolidation_failure_repairs_failed_consolidated_visibility(
     direct = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     consolidated = zarr.open_group(str(archive), mode="r", use_consolidated=True)
     direct_run = direct["analysis/stimulus_epoch_runs/failed_candidate"]
-    consolidated_run = consolidated[
-        "analysis/stimulus_epoch_runs/failed_candidate"
-    ]
+    consolidated_run = consolidated["analysis/stimulus_epoch_runs/failed_candidate"]
     assert direct_run.attrs["palette_run_completion_status"] == "failed"
     assert direct_run.attrs["stage_selector_eligible"] is False
     assert "atomic_publication_tombstone" in direct_run.attrs

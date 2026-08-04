@@ -16,7 +16,6 @@ from typing import Any, Mapping
 
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
-
 ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID = "palette.analysis_candidate_invocation"
 ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION = 1
 
@@ -24,9 +23,7 @@ _RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _PROFILE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COPY_BACKENDS = frozenset({"python", "rsync"})
-_EYE_SCHEDULERS = frozenset(
-    {"single-threaded", "threads", "processes", "distributed"}
-)
+_EYE_SCHEDULERS = frozenset({"single-threaded", "threads", "processes", "distributed"})
 
 
 class CandidateInvocationContract(str, Enum):
@@ -93,12 +90,14 @@ def _require_profile_id(value: object) -> str:
 
 
 def _require_run_name(value: object, *, label: str) -> str:
-    if (
-        type(value) is not str
-        or value in {".", ".."}
-        or not _RUN_NAME.fullmatch(value)
-    ):
+    if type(value) is not str or value in {".", ".."} or not _RUN_NAME.fullmatch(value):
         raise ValueError(f"{label} must be one exact run name, not a path")
+    return value
+
+
+def _require_sha256(value: object, *, label: str) -> str:
+    if type(value) is not str or not _SHA256.fullmatch(value):
+        raise ValueError(f"{label} must be one lowercase SHA-256")
     return value
 
 
@@ -221,10 +220,61 @@ def _require_eye_angles(parameters: object) -> Mapping[str, Any]:
     return parsed
 
 
+def _require_stimulus_epochs(parameters: object) -> Mapping[str, Any]:
+    parsed = _require_exact_fields(
+        parameters,
+        {
+            "source_schema_id",
+            "source_schema_version",
+            "candidate_schema_id",
+            "candidate_schema_version",
+            "source_stimulus_fingerprint_algorithm",
+            "source_stimulus_fingerprint",
+            "source_epoch_lineage_hash",
+            "source_staging_mode",
+            "storage_profile_id",
+            "copy_backend",
+            "keep_scratch",
+        },
+        label="stimulus-epoch invocation parameters",
+    )
+    if (
+        parsed["source_schema_id"] != "palette.stimulus_epoch_windows.v1"
+        or type(parsed["source_schema_version"]) is not int
+        or parsed["source_schema_version"] != 1
+    ):
+        raise ValueError("stimulus-epoch source schema identity differs")
+    if (
+        parsed["candidate_schema_id"] != "palette.stimulus_epoch_windows.v2"
+        or type(parsed["candidate_schema_version"]) is not int
+        or parsed["candidate_schema_version"] != 2
+    ):
+        raise ValueError("stimulus-epoch candidate schema identity differs")
+    if parsed["source_stimulus_fingerprint_algorithm"] != (
+        "sha256_canonical_stimulus_group_logical_tree_v1"
+    ):
+        raise ValueError("stimulus-epoch source fingerprint algorithm differs")
+    _require_sha256(
+        parsed["source_stimulus_fingerprint"],
+        label="source_stimulus_fingerprint",
+    )
+    _require_sha256(
+        parsed["source_epoch_lineage_hash"],
+        label="source_epoch_lineage_hash",
+    )
+    if parsed["source_staging_mode"] != "epoch_and_stimulus_logical_copy_v1":
+        raise ValueError("stimulus-epoch source_staging_mode differs")
+    _require_profile_id(parsed["storage_profile_id"])
+    _require_copy_backend(parsed["copy_backend"])
+    _require_bool(parsed["keep_scratch"], label="keep_scratch")
+    return parsed
+
+
 _PARAMETER_VALIDATORS = {
     CandidateInvocationContract.EXACT_TABULAR_V1: _require_exact_tabular,
     CandidateInvocationContract.TRACK_FLAT_V1: _require_track_flat,
     CandidateInvocationContract.EYE_ANGLES_V1: _require_eye_angles,
+    CandidateInvocationContract.STIMULUS_EPOCHS_V1: _require_stimulus_epochs,
 }
 
 
@@ -256,8 +306,7 @@ def require_candidate_invocation_manifest(
     if (
         envelope["schema_id"] != ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID
         or type(envelope["schema_version"]) is not int
-        or envelope["schema_version"]
-        != ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION
+        or envelope["schema_version"] != ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION
     ):
         raise ValueError("candidate invocation schema identity differs")
     payload = _require_exact_fields(
@@ -397,12 +446,41 @@ def build_eye_angle_invocation(
     )
 
 
+def build_stimulus_epoch_invocation(
+    *,
+    source_stimulus_fingerprint: str,
+    source_epoch_lineage_hash: str,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.STIMULUS_EPOCHS_V1,
+        {
+            "source_schema_id": "palette.stimulus_epoch_windows.v1",
+            "source_schema_version": 1,
+            "candidate_schema_id": "palette.stimulus_epoch_windows.v2",
+            "candidate_schema_version": 2,
+            "source_stimulus_fingerprint_algorithm": (
+                "sha256_canonical_stimulus_group_logical_tree_v1"
+            ),
+            "source_stimulus_fingerprint": source_stimulus_fingerprint,
+            "source_epoch_lineage_hash": source_epoch_lineage_hash,
+            "source_staging_mode": "epoch_and_stimulus_logical_copy_v1",
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+        },
+    )
+
+
 __all__ = [
     "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID",
     "ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION",
     "CandidateInvocationContract",
     "build_exact_tabular_invocation",
     "build_eye_angle_invocation",
+    "build_stimulus_epoch_invocation",
     "build_track_flat_invocation",
     "candidate_invocation_contract_is_frozen",
     "require_candidate_invocation_manifest",

@@ -16,6 +16,7 @@ from fisheye.shared.run_lineage_fingerprint import (
     build_run_lineage_payload,
     canonical_lineage_json,
     compute_run_lineage_hash,
+    normalize_lineage_value,
 )
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -34,7 +35,6 @@ from ._exact_tabular_run_schema import (
     validate_exact_manifest,
 )
 
-
 LEGACY_STIMULUS_EPOCH_SCHEMA_ID = "palette.stimulus_epoch_windows.v1"
 LEGACY_STIMULUS_EPOCH_SCHEMA_VERSION = 1
 STIMULUS_EPOCH_RUN_SCHEMA_ID = "palette.stimulus_epoch_windows.v2"
@@ -50,9 +50,7 @@ SOURCE_POLICY_WIDTH = 160
 STIMULUS_EPOCH_RUN_MANIFEST_ATTR = "stimulus_epoch_run_manifest"
 STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_ID = "palette.stimulus_epoch_run_manifest"
 STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_VERSION = 1
-STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_ID = (
-    "palette.stimulus_epoch_logical_content"
-)
+STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_ID = "palette.stimulus_epoch_logical_content"
 STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_VERSION = 1
 STIMULUS_SOURCE_FINGERPRINT_ALGORITHM = (
     "sha256_canonical_stimulus_group_logical_tree_v1"
@@ -183,9 +181,7 @@ def _specs() -> dict[str, ColumnSpec]:
     }
 
 
-STIMULUS_EPOCH_FIELD_NAMES = tuple(
-    path.split("/", 1)[1] for path in _specs()
-)
+STIMULUS_EPOCH_FIELD_NAMES = tuple(path.split("/", 1)[1] for path in _specs())
 
 
 def _array(run_group: Any, path: str) -> Any:
@@ -249,9 +245,7 @@ def validate_stimulus_epoch_semantics(run_group: Any) -> tuple[str, ...]:
                 observed,
                 dimensions=dimensions,
             )
-            errors.extend(
-                f"{declaration.path}: {error}" for error in contract_errors
-            )
+            errors.extend(f"{declaration.path}: {error}" for error in contract_errors)
         if errors:
             return tuple(errors)
 
@@ -309,7 +303,9 @@ def validate_stimulus_epoch_semantics(run_group: Any) -> tuple[str, ...]:
         duration = np.asarray(arrays["windows/duration_s"][:], dtype=np.float64)
 
         if np.any(ids < 0) or np.any(np.diff(ids.astype(np.int64)) <= 0):
-            errors.append("window_id must be nonnegative, unique, and strictly increasing")
+            errors.append(
+                "window_id must be nonnegative, unique, and strictly increasing"
+            )
         total_frames = run_group.attrs.get("total_frames")
         fps = run_group.attrs.get("fps")
         if run_group.attrs.get("window_count") != n_rows:
@@ -327,7 +323,11 @@ def validate_stimulus_epoch_semantics(run_group: Any) -> tuple[str, ...]:
                 errors.append(f"{attr_name} must be one nonempty exact string")
         if type(total_frames) is not int or total_frames <= 0:
             errors.append("total_frames must be a positive exact integer")
-        if isinstance(fps, bool) or not isinstance(fps, (int, float)) or float(fps) <= 0:
+        if (
+            isinstance(fps, bool)
+            or not isinstance(fps, (int, float))
+            or float(fps) <= 0
+        ):
             errors.append("fps must be a positive finite number")
         elif not np.isfinite(float(fps)):
             errors.append("fps must be a positive finite number")
@@ -337,7 +337,9 @@ def validate_stimulus_epoch_semantics(run_group: Any) -> tuple[str, ...]:
         assert type(total_frames) is int
         fps_value = float(fps)
         if np.any(starts < 0) or np.any(ends < starts) or np.any(ends >= total_frames):
-            errors.append("window frame intervals must be nonempty and inside total_frames")
+            errors.append(
+                "window frame intervals must be nonempty and inside total_frames"
+            )
         if n_rows > 1 and np.any(starts[1:] <= ends[:-1]):
             errors.append("window rows must be chronological and non-overlapping")
         if (
@@ -347,7 +349,9 @@ def validate_stimulus_epoch_semantics(run_group: Any) -> tuple[str, ...]:
             or np.any(source_ends > total_frames)
             or np.any(source_ends <= source_starts)
         ):
-            errors.append("source event boundaries must be ordered inside [0, total_frames]")
+            errors.append(
+                "source event boundaries must be ordered inside [0, total_frames]"
+            )
         else:
             expected_starts = source_starts
             expected_ends = np.minimum(
@@ -395,9 +399,7 @@ def validate_legacy_stimulus_epoch_source(run_group: Any) -> tuple[str, ...]:
         return tuple(errors)
     if windows.attrs.get("storage_layout") != "columnar":
         errors.append("legacy windows storage_layout must be columnar")
-    if list(windows.attrs.get("field_names", [])) != list(
-        STIMULUS_EPOCH_FIELD_NAMES
-    ):
+    if list(windows.attrs.get("field_names", [])) != list(STIMULUS_EPOCH_FIELD_NAMES):
         errors.append("legacy windows field_names differ from the frozen inventory")
     errors.extend(validate_stimulus_epoch_semantics(run_group))
     return tuple(errors)
@@ -433,6 +435,39 @@ def stimulus_epoch_logical_content_document(run_group: Any) -> dict[str, object]
 
 def stimulus_epoch_logical_content_sha256(run_group: Any) -> str:
     return canonical_json_sha256(stimulus_epoch_logical_content_document(run_group))
+
+
+def _iter_group_tree(group: Any, prefix: str = ""):
+    yield prefix, group
+    for name, child in sorted(group.groups(), key=lambda item: item[0]):
+        child_path = f"{prefix}/{name}" if prefix else str(name)
+        yield from _iter_group_tree(child, child_path)
+
+
+def stimulus_group_logical_fingerprint(group: Any) -> str:
+    """Hash one complete stimulus-group logical tree and its attributes."""
+
+    groups: dict[str, object] = {}
+    arrays: dict[str, object] = {}
+    for group_path, node in _iter_group_tree(group):
+        groups[group_path] = normalize_lineage_value(dict(node.attrs))
+        for name, array in sorted(node.arrays(), key=lambda item: item[0]):
+            path = f"{group_path}/{name}" if group_path else str(name)
+            values = np.ascontiguousarray(array[...])
+            arrays[path] = {
+                "dtype": str(np.dtype(array.dtype)),
+                "shape": [int(value) for value in array.shape],
+                "attributes": normalize_lineage_value(dict(array.attrs)),
+                "sha256": hashlib.sha256(values.tobytes(order="C")).hexdigest(),
+            }
+    document = {
+        "schema_id": "palette.stimulus_group_logical_tree",
+        "schema_version": 1,
+        "groups": groups,
+        "arrays": arrays,
+    }
+    canonical_json_bytes(document)
+    return canonical_json_sha256(document)
 
 
 def _required_text_attr(run_group: Any, name: str) -> str:
@@ -481,7 +516,9 @@ def _require_protocol_profile_identity(value: Mapping[str, Any]) -> None:
     ):
         item = value.get(name)
         if type(item) is not int or item <= 0:
-            raise ValueError(f"protocol_profile.{name} must be a positive exact integer.")
+            raise ValueError(
+                f"protocol_profile.{name} must be a positive exact integer."
+            )
     digest = value["profile_sha256"]
     if len(digest) != 64 or any(
         character not in "0123456789abcdef" for character in digest
@@ -511,12 +548,8 @@ def build_stimulus_epoch_candidate_lineage_payload(run_group: Any) -> dict[str, 
     source_stimulus_path = _required_text_attr(run_group, "source_stimulus_path")
     if source_stimulus_path != f"analysis/stimulus_runs/{source_stimulus_run}":
         raise ValueError("source_stimulus_path does not bind source_stimulus_run.")
-    source_epoch_run = _required_text_attr(
-        run_group, "source_stimulus_epoch_run"
-    )
-    source_epoch_path = _required_text_attr(
-        run_group, "source_stimulus_epoch_path"
-    )
+    source_epoch_run = _required_text_attr(run_group, "source_stimulus_epoch_run")
+    source_epoch_path = _required_text_attr(run_group, "source_stimulus_epoch_path")
     if source_epoch_path != f"analysis/stimulus_epoch_runs/{source_epoch_run}":
         raise ValueError(
             "source_stimulus_epoch_path does not bind source_stimulus_epoch_run."
@@ -550,7 +583,9 @@ def build_stimulus_epoch_candidate_lineage_payload(run_group: Any) -> dict[str, 
             source_epoch_content_sha256,
         ),
     ):
-        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
             raise ValueError(f"{name} must be one lowercase SHA-256 digest.")
     epoch_policy = _required_text_attr(run_group, "epoch_policy")
     epoch_policy_version = _required_exact_int_attr(
@@ -560,7 +595,12 @@ def build_stimulus_epoch_candidate_lineage_payload(run_group: Any) -> dict[str, 
     method_version = _required_text_attr(run_group, "method_version")
     total_frames = _required_exact_int_attr(run_group, "total_frames", positive=True)
     fps = run_group.attrs.get("fps")
-    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not np.isfinite(float(fps)) or float(fps) <= 0:
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not np.isfinite(float(fps))
+        or float(fps) <= 0
+    ):
         raise ValueError("fps must be one positive finite number.")
     materializer_commit = _required_text_attr(
         run_group, "candidate_materializer_git_commit"
@@ -630,11 +670,20 @@ def validate_stimulus_epoch_candidate_lineage(run_group: Any) -> tuple[str, ...]
                 errors.append(f"{attr_name} differs from candidate lineage payload")
         if run_group.attrs.get("fingerprint_status") != "complete":
             errors.append("candidate fingerprint_status must be complete")
-        if run_group.attrs.get("lineage_fingerprint_schema_id") != LINEAGE_ATTR_SCHEMA_ID:
+        if (
+            run_group.attrs.get("lineage_fingerprint_schema_id")
+            != LINEAGE_ATTR_SCHEMA_ID
+        ):
             errors.append("candidate lineage attribute schema_id mismatch")
-        if run_group.attrs.get("lineage_fingerprint_schema_version") != LINEAGE_ATTR_SCHEMA_VERSION:
+        if (
+            run_group.attrs.get("lineage_fingerprint_schema_version")
+            != LINEAGE_ATTR_SCHEMA_VERSION
+        ):
             errors.append("candidate lineage attribute schema_version mismatch")
-        if run_group.attrs.get("lineage_fingerprint_canonicalization") != LINEAGE_CANONICALIZATION:
+        if (
+            run_group.attrs.get("lineage_fingerprint_canonicalization")
+            != LINEAGE_CANONICALIZATION
+        ):
             errors.append("candidate lineage canonicalization mismatch")
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         errors.append(str(exc))
@@ -757,11 +806,12 @@ def build_stimulus_epoch_run_manifest(run_group: Any) -> dict[str, object]:
         "triggering_camera_frame_id",
     ]:
         raise ValueError("source_event_schema frame fields mismatch.")
-    if _required_text_attr(
-        run_group, "storage_candidate_source_run"
-    ) != source_epoch_run or _required_text_attr(
-        run_group, "storage_candidate_source_run_path"
-    ) != source_epoch_path:
+    if (
+        _required_text_attr(run_group, "storage_candidate_source_run")
+        != source_epoch_run
+        or _required_text_attr(run_group, "storage_candidate_source_run_path")
+        != source_epoch_path
+    ):
         raise ValueError("storage candidate source identity differs from source epoch.")
     payload: dict[str, object] = {
         "run_identity": {
@@ -1009,6 +1059,7 @@ __all__ = [
     "build_stimulus_epoch_run_manifest",
     "stimulus_epoch_logical_content_document",
     "stimulus_epoch_logical_content_sha256",
+    "stimulus_group_logical_fingerprint",
     "validate_legacy_stimulus_epoch_source",
     "validate_stimulus_epoch_array_manifest",
     "validate_stimulus_epoch_candidate_lineage",

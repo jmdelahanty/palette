@@ -248,6 +248,26 @@ def _implemented_eye_angles() -> AnalysisCandidateExecutionAdapter:
     )
 
 
+def _implemented_stimulus_epochs() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="stimulus_epochs",
+        invocation_contract=CandidateInvocationContract.STIMULUS_EPOCHS_V1,
+        computation_mode=CandidateComputationMode.LOGICAL_REMATERIALIZATION,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.TEMPORAL_AXIS_ONLY,
+        coordinate_contract_status=CoordinateContractStatus.TEMPORAL_AXIS_IMPLEMENTED,
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.STIMULUS_EPOCH_V2_ARRAYS_V1
+        ),
+        runner_module=("fisheye.diagnostics.stimulus_epoch_candidate_execution"),
+        runner_entrypoint="execute_stimulus_epoch_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.stimulus_epoch_candidate_execution"
+        ),
+        suite_validator_entrypoint="require_stimulus_epoch_execution_suite",
+    )
+
+
 def _coordinate_blocked(
     stage_id: str,
     logical_equality_contract: CandidateLogicalEqualityContract,
@@ -292,6 +312,7 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
         CandidateLogicalEqualityContract.BOUT_KINEMATICS_DECLARED_ARRAYS_V1,
     ),
     _implemented_eye_angles(),
+    _implemented_stimulus_epochs(),
     _contract_only(
         "subject_shape",
         CandidateInvocationContract.SUBJECT_SHAPE_V1,
@@ -315,14 +336,6 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
         CoordinateContractRole.BOUND_DERIVATIVE,
         CoordinateContractStatus.BOUND_SOURCE_VALIDATION_IMPLEMENTED,
         CandidateLogicalEqualityContract.STIMULUS_RESPONSE_V3_ARRAYS_V1,
-    ),
-    _contract_only(
-        "stimulus_epochs",
-        CandidateInvocationContract.STIMULUS_EPOCHS_V1,
-        CandidateComputationMode.LOGICAL_REMATERIALIZATION,
-        CoordinateContractRole.TEMPORAL_AXIS_ONLY,
-        CoordinateContractStatus.TEMPORAL_AXIS_IMPLEMENTED,
-        CandidateLogicalEqualityContract.STIMULUS_EPOCH_V2_ARRAYS_V1,
     ),
     _coordinate_blocked(
         "detection_occupancy",

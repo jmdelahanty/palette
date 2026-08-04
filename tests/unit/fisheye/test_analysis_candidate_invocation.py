@@ -8,6 +8,7 @@ from fisheye.analysis_workflows.analysis_candidate_invocation import (
     CandidateInvocationContract,
     build_exact_tabular_invocation,
     build_eye_angle_invocation,
+    build_stimulus_epoch_invocation,
     build_track_flat_invocation,
     require_candidate_invocation_manifest,
 )
@@ -120,17 +121,13 @@ def test_eye_angle_invocation_binds_sources_compute_and_transfer() -> None:
     )
 
     descendant = deepcopy(invocation)
-    descendant["payload"]["parameters"]["subject_shape_run"] = (
-        "subject_shape_v4/arrays"
-    )
+    descendant["payload"]["parameters"]["subject_shape_run"] = "subject_shape_v4/arrays"
     _rehash(descendant)
     with pytest.raises(ValueError, match="run name"):
         require_candidate_invocation_manifest(descendant)
 
     wrong_backend = deepcopy(invocation)
-    wrong_backend["payload"]["parameters"]["execution_backend"] = (
-        "dask_worker_chunks"
-    )
+    wrong_backend["payload"]["parameters"]["execution_backend"] = "dask_worker_chunks"
     _rehash(wrong_backend)
     with pytest.raises(ValueError, match="serial_driver"):
         require_candidate_invocation_manifest(wrong_backend)
@@ -141,6 +138,49 @@ def test_eye_angle_invocation_binds_sources_compute_and_transfer() -> None:
     wrong_fps["payload_digest"] = "0" * 64
     with pytest.raises(ValueError, match="strict JSON|payload digest"):
         require_candidate_invocation_manifest(wrong_fps)
+
+
+def test_stimulus_epoch_invocation_binds_migration_and_staged_source() -> None:
+    invocation = build_stimulus_epoch_invocation(
+        source_stimulus_fingerprint="a" * 64,
+        source_epoch_lineage_hash="b" * 64,
+        storage_profile_id="published_http_v1",
+        copy_backend="python",
+        keep_scratch=False,
+    )
+    require_candidate_invocation_manifest(
+        invocation,
+        expected_contract=CandidateInvocationContract.STIMULUS_EPOCHS_V1,
+        expected_profile_id="published_http_v1",
+    )
+
+    changed_source = deepcopy(invocation)
+    changed_source["payload"]["parameters"]["source_schema_version"] = True
+    _rehash(changed_source)
+    with pytest.raises(ValueError, match="source schema identity"):
+        require_candidate_invocation_manifest(changed_source)
+
+    changed_fingerprint = deepcopy(invocation)
+    changed_fingerprint["payload"]["parameters"][
+        "source_stimulus_fingerprint"
+    ] = "not-a-digest"
+    _rehash(changed_fingerprint)
+    with pytest.raises(ValueError, match="source_stimulus_fingerprint"):
+        require_candidate_invocation_manifest(changed_fingerprint)
+
+    changed_lineage = deepcopy(invocation)
+    changed_lineage["payload"]["parameters"][
+        "source_epoch_lineage_hash"
+    ] = "not-a-digest"
+    _rehash(changed_lineage)
+    with pytest.raises(ValueError, match="source_epoch_lineage_hash"):
+        require_candidate_invocation_manifest(changed_lineage)
+
+    bypassed_staging = deepcopy(invocation)
+    bypassed_staging["payload"]["parameters"]["source_staging_mode"] = "direct"
+    _rehash(bypassed_staging)
+    with pytest.raises(ValueError, match="source_staging_mode"):
+        require_candidate_invocation_manifest(bypassed_staging)
 
 
 def test_invocation_contract_and_profile_bindings_fail_closed() -> None:
