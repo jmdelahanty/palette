@@ -247,13 +247,31 @@ def _request(
 
 
 def _phases() -> list[CandidatePhaseMeasurement]:
+    intervals = {
+        CandidateExecutionPhase.PLAN: (0, 1),
+        CandidateExecutionPhase.SOURCE_STAGING: (1, 2),
+        CandidateExecutionPhase.LOGICAL_REMATERIALIZATION: (2, 3),
+        CandidateExecutionPhase.LOCAL_VALIDATION: (3, 4),
+        CandidateExecutionPhase.LOCAL_CONSOLIDATION: (4, 5),
+        CandidateExecutionPhase.LOCAL_DIRECT_CONSOLIDATED_COMPARISON: (5, 6),
+        CandidateExecutionPhase.ATOMIC_PUBLICATION: (6, 13),
+        CandidateExecutionPhase.PUBLISHED_VALIDATION: (7, 8),
+        CandidateExecutionPhase.PUBLISHED_DIRECT_CONSOLIDATED_COMPARISON: (8, 9),
+        CandidateExecutionPhase.DECODED_EQUALITY: (9, 10),
+        CandidateExecutionPhase.PHYSICAL_INVENTORY: (10, 11),
+        CandidateExecutionPhase.PUBLICATION_ACCEPTANCE_VALIDATION: (11, 12),
+    }
     return [
         CandidatePhaseMeasurement(
             phase=phase,
             outcome=PhaseOutcome.SUCCEEDED,
-            started_at_utc="2026-08-03T12:00:00+00:00",
-            completed_at_utc="2026-08-03T12:00:01+00:00",
-            wall_seconds=1.0,
+            started_at_utc=(
+                f"2026-08-03T12:00:{intervals[phase][0]:02d}+00:00"
+            ),
+            completed_at_utc=(
+                f"2026-08-03T12:00:{intervals[phase][1]:02d}+00:00"
+            ),
+            wall_seconds=float(intervals[phase][1] - intervals[phase][0]),
             cpu_user_seconds=0.4,
             cpu_system_seconds=0.1,
             peak_process_tree_rss_bytes=1_024,
@@ -419,6 +437,74 @@ def test_execution_request_and_complete_receipt_are_strict_json(
             legacy_receipt,
             expected_request_payload_digest=request["payload_digest"],
         )
+
+
+def test_execution_receipt_rejects_overlapping_siblings_and_escaped_children(
+    implemented_adapter,
+) -> None:
+    receipt = _receipt(implemented_adapter)
+    request_digest = receipt["payload"]["request_payload_digest"]
+
+    overlapping = deepcopy(receipt)
+    overlapping["payload"]["phases"][1][
+        "started_at_utc"
+    ] = "2026-08-03T12:00:00.500000+00:00"
+    overlapping["payload_digest"] = canonical_json_sha256(overlapping["payload"])
+    with pytest.raises(ValueError, match="sibling phase intervals overlap"):
+        require_candidate_execution_receipt(
+            overlapping,
+            expected_request_payload_digest=request_digest,
+        )
+
+    escaped = deepcopy(receipt)
+    published = next(
+        phase
+        for phase in escaped["payload"]["phases"]
+        if phase["phase"] == "published_validation"
+    )
+    published["started_at_utc"] = "2026-08-03T12:00:05+00:00"
+    escaped["payload_digest"] = canonical_json_sha256(escaped["payload"])
+    with pytest.raises(ValueError, match="child phase escapes"):
+        require_candidate_execution_receipt(
+            escaped,
+            expected_request_payload_digest=request_digest,
+        )
+
+    missing_parent = deepcopy(receipt)
+    published = next(
+        phase
+        for phase in missing_parent["payload"]["phases"]
+        if phase["phase"] == "published_validation"
+    )
+    published["parent_phase"] = None
+    missing_parent["payload_digest"] = canonical_json_sha256(
+        missing_parent["payload"]
+    )
+    with pytest.raises(ValueError, match="canonical hierarchy"):
+        require_candidate_execution_receipt(
+            missing_parent,
+            expected_request_payload_digest=request_digest,
+        )
+
+
+def test_legacy_v2_receipt_remains_auditable_without_current_hierarchy(
+    implemented_adapter,
+) -> None:
+    receipt = _receipt(implemented_adapter)
+    receipt["schema_version"] = 2
+    receipt["payload"]["phases"] = [
+        phase
+        for phase in receipt["payload"]["phases"]
+        if phase["phase"] != "publication_acceptance_validation"
+    ]
+    for phase in receipt["payload"]["phases"]:
+        phase.pop("parent_phase")
+    receipt["payload_digest"] = canonical_json_sha256(receipt["payload"])
+
+    require_candidate_execution_receipt(
+        receipt,
+        expected_request_payload_digest=receipt["payload"]["request_payload_digest"],
+    )
 
 
 def test_execution_request_requires_exact_bound_invocation(

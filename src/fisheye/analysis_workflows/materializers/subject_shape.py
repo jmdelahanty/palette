@@ -110,6 +110,7 @@ SUBJECT_SHAPE_EXECUTION_PHASE_ORDER = (
     "published_direct_consolidated_comparison",
     "decoded_equality",
     "physical_inventory",
+    "publication_acceptance_validation",
 )
 SUBJECT_SHAPE_EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
 SUBJECT_SHAPE_EXECUTION_FAILURE_TOMBSTONE_ATTR = (
@@ -1487,9 +1488,10 @@ def materialize_subject_shape_execution_candidate(
                 output_storage=output_storage,
             )
             if publication_acceptance_validator is not None:
-                accepted["caller_acceptance"] = json_attr_safe(
-                    dict(publication_acceptance_validator(root, parent, run))
-                )
+                with telemetry.phase("publication_acceptance_validation"):
+                    accepted["caller_acceptance"] = json_attr_safe(
+                        dict(publication_acceptance_validator(root, parent, run))
+                    )
 
         def repair(_target: Path) -> None:
             consolidate_metadata_capture_expected_warnings(archive)

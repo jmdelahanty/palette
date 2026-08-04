@@ -36,7 +36,8 @@ ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_VERSION = 2
 ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_ID = (
     "palette.analysis_candidate_execution_receipt"
 )
-ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION = 2
+ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION = 3
+ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_LEGACY_SCHEMA_VERSION = 2
 ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_ID = (
     "palette.analysis_candidate_execution_adapter"
 )
@@ -135,6 +136,18 @@ class CandidateExecutionPhase(str, Enum):
     )
     DECODED_EQUALITY = "decoded_equality"
     PHYSICAL_INVENTORY = "physical_inventory"
+    PUBLICATION_ACCEPTANCE_VALIDATION = "publication_acceptance_validation"
+
+
+_ATOMIC_PUBLICATION_CHILD_PHASES = frozenset(
+    {
+        CandidateExecutionPhase.PUBLISHED_VALIDATION,
+        CandidateExecutionPhase.PUBLISHED_DIRECT_CONSOLIDATED_COMPARISON,
+        CandidateExecutionPhase.DECODED_EQUALITY,
+        CandidateExecutionPhase.PHYSICAL_INVENTORY,
+        CandidateExecutionPhase.PUBLICATION_ACCEPTANCE_VALIDATION,
+    }
+)
 
 
 class PhaseOutcome(str, Enum):
@@ -828,6 +841,7 @@ class CandidatePhaseMeasurement:
     cpu_user_seconds: float | None
     cpu_system_seconds: float | None
     peak_process_tree_rss_bytes: int | None
+    parent_phase: CandidateExecutionPhase | None = None
     not_applicable_reason: str | None = None
     error_type: str | None = None
     error_message: str | None = None
@@ -837,6 +851,18 @@ class CandidatePhaseMeasurement:
             raise TypeError("phase must use CandidateExecutionPhase")
         if not isinstance(self.outcome, PhaseOutcome):
             raise TypeError("outcome must use PhaseOutcome")
+        if self.parent_phase is None and self.phase in _ATOMIC_PUBLICATION_CHILD_PHASES:
+            object.__setattr__(
+                self,
+                "parent_phase",
+                CandidateExecutionPhase.ATOMIC_PUBLICATION,
+            )
+        if self.parent_phase is not None and not isinstance(
+            self.parent_phase, CandidateExecutionPhase
+        ):
+            raise TypeError("parent_phase must use CandidateExecutionPhase or None")
+        if self.parent_phase is self.phase:
+            raise ValueError("a phase cannot be its own parent")
         timing = (
             self.started_at_utc,
             self.completed_at_utc,
@@ -902,6 +928,9 @@ class CandidatePhaseMeasurement:
             "cpu_user_seconds": self.cpu_user_seconds,
             "cpu_system_seconds": self.cpu_system_seconds,
             "peak_process_tree_rss_bytes": self.peak_process_tree_rss_bytes,
+            "parent_phase": (
+                None if self.parent_phase is None else self.parent_phase.value
+            ),
             "not_applicable_reason": self.not_applicable_reason,
             "error_type": self.error_type,
             "error_message": self.error_message,
@@ -934,6 +963,7 @@ def required_execution_phases(
         CandidateExecutionPhase.PUBLISHED_DIRECT_CONSOLIDATED_COMPARISON,
         CandidateExecutionPhase.DECODED_EQUALITY,
         CandidateExecutionPhase.PHYSICAL_INVENTORY,
+        CandidateExecutionPhase.PUBLICATION_ACCEPTANCE_VALIDATION,
     )
 
 
@@ -960,6 +990,78 @@ def _require_nonnegative_number(value: object, *, label: str) -> float:
     return float(value)
 
 
+def _require_current_phase_chronology(
+    phases: Sequence[CandidatePhaseMeasurement],
+) -> None:
+    """Require a nonoverlapping sibling timeline with contained child phases."""
+
+    by_phase = {phase.phase: phase for phase in phases}
+    if len(by_phase) != len(phases):
+        raise ValueError("execution receipt phase identities are duplicated")
+    children_by_parent: dict[
+        CandidateExecutionPhase, list[CandidatePhaseMeasurement]
+    ] = {}
+    top_level: list[CandidatePhaseMeasurement] = []
+    for phase in phases:
+        if phase.parent_phase is None:
+            top_level.append(phase)
+        else:
+            if phase.parent_phase not in by_phase:
+                raise ValueError("execution receipt phase parent is absent")
+            children_by_parent.setdefault(phase.parent_phase, []).append(phase)
+
+    def executed_interval(
+        phase: CandidatePhaseMeasurement,
+    ) -> tuple[datetime, datetime] | None:
+        if phase.outcome is PhaseOutcome.NOT_APPLICABLE:
+            return None
+        return (
+            _require_utc_timestamp(
+                phase.started_at_utc,
+                label=f"{phase.phase.value} started_at_utc",
+            ),
+            _require_utc_timestamp(
+                phase.completed_at_utc,
+                label=f"{phase.phase.value} completed_at_utc",
+            ),
+        )
+
+    def require_nonoverlapping_siblings(
+        siblings: Sequence[CandidatePhaseMeasurement],
+    ) -> None:
+        prior_finished: datetime | None = None
+        for phase in siblings:
+            interval = executed_interval(phase)
+            if interval is None:
+                continue
+            started, finished = interval
+            if prior_finished is not None and started < prior_finished:
+                raise ValueError("execution receipt sibling phase intervals overlap")
+            prior_finished = finished
+
+    require_nonoverlapping_siblings(top_level)
+    for parent_phase, children in children_by_parent.items():
+        parent = by_phase[parent_phase]
+        parent_interval = executed_interval(parent)
+        if parent_interval is None:
+            raise ValueError("executed child phase has a non-applicable parent")
+        parent_started, parent_finished = parent_interval
+        require_nonoverlapping_siblings(children)
+        child_wall_sum = 0.0
+        for child in children:
+            interval = executed_interval(child)
+            if interval is None:
+                continue
+            child_started, child_finished = interval
+            if child_started < parent_started or child_finished > parent_finished:
+                raise ValueError("execution receipt child phase escapes its parent")
+            assert child.wall_seconds is not None
+            child_wall_sum += float(child.wall_seconds)
+        assert parent.wall_seconds is not None
+        if child_wall_sum > float(parent.wall_seconds) + 1e-9:
+            raise ValueError("execution receipt child wall time exceeds its parent")
+
+
 def require_candidate_execution_receipt(
     value: Mapping[str, Any],
     *,
@@ -974,11 +1076,15 @@ def require_candidate_execution_receipt(
         "payload_digest",
     }:
         raise ValueError("execution receipt envelope field set differs")
+    schema_version = value["schema_version"]
     if (
         value["schema_id"] != ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_ID
-        or type(value["schema_version"]) is not int
-        or value["schema_version"]
-        != ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION
+        or type(schema_version) is not int
+        or schema_version
+        not in {
+            ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_LEGACY_SCHEMA_VERSION,
+            ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION,
+        }
     ):
         raise ValueError("execution receipt schema identity differs")
     payload = _require_exact_fields(
@@ -1022,27 +1128,38 @@ def require_candidate_execution_receipt(
     planned_array_count = len(planned_arrays)
     mode = CandidateComputationMode(adapter["computation_mode"])
     required_phases = required_execution_phases(mode)
+    if schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_LEGACY_SCHEMA_VERSION:
+        required_phases = tuple(
+            phase
+            for phase in required_phases
+            if phase is not CandidateExecutionPhase.PUBLICATION_ACCEPTANCE_VALIDATION
+        )
     phases = payload["phases"]
     if not isinstance(phases, list) or len(phases) != len(required_phases):
         raise ValueError("execution receipt phase count differs")
     outcomes: list[PhaseOutcome] = []
+    measurements: list[CandidatePhaseMeasurement] = []
     for expected_phase, record in zip(required_phases, phases, strict=True):
+        current_fields = set(
+            CandidatePhaseMeasurement(
+                phase=expected_phase,
+                outcome=PhaseOutcome.NOT_APPLICABLE,
+                started_at_utc=None,
+                completed_at_utc=None,
+                wall_seconds=None,
+                cpu_user_seconds=None,
+                cpu_system_seconds=None,
+                peak_process_tree_rss_bytes=None,
+                not_applicable_reason="schema probe",
+            ).as_manifest()
+        )
+        expected_fields = (
+            current_fields
+            if schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION
+            else current_fields - {"parent_phase"}
+        )
         phase_record = _require_exact_fields(
-            record,
-            set(
-                CandidatePhaseMeasurement(
-                    phase=expected_phase,
-                    outcome=PhaseOutcome.NOT_APPLICABLE,
-                    started_at_utc=None,
-                    completed_at_utc=None,
-                    wall_seconds=None,
-                    cpu_user_seconds=None,
-                    cpu_system_seconds=None,
-                    peak_process_tree_rss_bytes=None,
-                    not_applicable_reason="schema probe",
-                ).as_manifest()
-            ),
-            label="execution phase",
+            record, expected_fields, label="execution phase"
         )
         try:
             observed_phase = CandidateExecutionPhase(phase_record["phase"])
@@ -1051,7 +1168,16 @@ def require_candidate_execution_receipt(
             raise ValueError("execution phase enum differs") from exc
         if observed_phase is not expected_phase:
             raise ValueError("execution receipt phase order differs")
-        CandidatePhaseMeasurement(
+        parent_value = phase_record.get("parent_phase")
+        try:
+            parent_phase = (
+                None
+                if parent_value is None
+                else CandidateExecutionPhase(parent_value)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("execution phase parent enum differs") from exc
+        measurement = CandidatePhaseMeasurement(
             phase=observed_phase,
             outcome=outcome,
             started_at_utc=phase_record["started_at_utc"],
@@ -1060,11 +1186,22 @@ def require_candidate_execution_receipt(
             cpu_user_seconds=phase_record["cpu_user_seconds"],
             cpu_system_seconds=phase_record["cpu_system_seconds"],
             peak_process_tree_rss_bytes=phase_record["peak_process_tree_rss_bytes"],
+            parent_phase=parent_phase,
             not_applicable_reason=phase_record["not_applicable_reason"],
             error_type=phase_record["error_type"],
             error_message=phase_record["error_message"],
         )
+        if (
+            schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION
+            and phase_record["parent_phase"]
+            != measurement.as_manifest()["parent_phase"]
+        ):
+            raise ValueError("execution phase parent differs from the canonical hierarchy")
+        measurements.append(measurement)
         outcomes.append(outcome)
+
+    if schema_version == ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION:
+        _require_current_phase_chronology(measurements)
 
     fresh = _require_exact_fields(
         payload["fresh_process"],
@@ -1485,6 +1622,7 @@ __all__ = [
     "ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_ID",
     "ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_SCHEMA_VERSION",
     "ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_ID",
+    "ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_LEGACY_SCHEMA_VERSION",
     "ANALYSIS_CANDIDATE_EXECUTION_RECEIPT_SCHEMA_VERSION",
     "ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_ID",
     "ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_VERSION",

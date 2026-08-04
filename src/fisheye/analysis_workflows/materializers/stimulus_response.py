@@ -91,6 +91,7 @@ STIMULUS_RESPONSE_EXECUTION_PHASE_ORDER = (
     "published_direct_consolidated_comparison",
     "decoded_equality",
     "physical_inventory",
+    "publication_acceptance_validation",
 )
 
 
@@ -1012,13 +1013,14 @@ def materialize_stimulus_response_execution_candidate(
                 }
             )
             if publication_acceptance_validator is not None:
-                accepted["caller_acceptance"] = json_attr_safe(
-                    dict(
-                        publication_acceptance_validator(
-                            public_root, public_parent, run
+                with telemetry.phase("publication_acceptance_validation"):
+                    accepted["caller_acceptance"] = json_attr_safe(
+                        dict(
+                            publication_acceptance_validator(
+                                public_root, public_parent, run
+                            )
                         )
                     )
-                )
 
         def repair(_target: Path) -> None:
             consolidate_metadata_capture_expected_warnings(archive)

@@ -163,6 +163,7 @@ def test_fresh_process_publishes_receipt_and_terminal_failure_attempt(
         "published_direct_consolidated_comparison",
         "decoded_equality",
         "physical_inventory",
+        "publication_acceptance_validation",
     ]
     final = zarr.open_group(
         tail_posture_execution_archive,

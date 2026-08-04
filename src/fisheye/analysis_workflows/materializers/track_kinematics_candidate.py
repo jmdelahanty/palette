@@ -70,6 +70,7 @@ TRACK_FLAT_EXECUTION_PHASE_ORDER = (
     "published_direct_consolidated_comparison",
     "decoded_equality",
     "physical_inventory",
+    "publication_acceptance_validation",
 )
 EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
 EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
@@ -706,9 +707,10 @@ def materialize_track_kinematics_flat_candidate(
                 output_storage=published_storage,
             )
             if publication_acceptance_validator is not None:
-                caller_acceptance = dict(
-                    publication_acceptance_validator(root, _parent, run_group)
-                )
+                with telemetry.phase("publication_acceptance_validation"):
+                    caller_acceptance = dict(
+                        publication_acceptance_validator(root, _parent, run_group)
+                    )
                 publication_acceptance["caller_acceptance"] = json_attr_safe(
                     caller_acceptance
                 )

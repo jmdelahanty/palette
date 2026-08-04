@@ -99,6 +99,7 @@ STIMULUS_EPOCH_EXECUTION_PHASE_ORDER = (
     "published_direct_consolidated_comparison",
     "decoded_equality",
     "physical_inventory",
+    "publication_acceptance_validation",
 )
 EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
 EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
@@ -1071,9 +1072,10 @@ def materialize_stimulus_epoch_candidate(
                 output_storage=published_storage,
             )
             if publication_acceptance_validator is not None:
-                publication_acceptance["caller_acceptance"] = json_attr_safe(
-                    dict(publication_acceptance_validator(root, parent, run_group))
-                )
+                with telemetry.phase("publication_acceptance_validation"):
+                    publication_acceptance["caller_acceptance"] = json_attr_safe(
+                        dict(publication_acceptance_validator(root, parent, run_group))
+                    )
 
         def repair_failed_visibility(_target_path: Path) -> None:
             consolidate_metadata_capture_expected_warnings(plan.source_zarr)

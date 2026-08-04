@@ -18,7 +18,8 @@ from typing import Any
 
 
 RUNTIME_TELEMETRY_SCHEMA_ID = "palette.materializer_phase_telemetry"
-RUNTIME_TELEMETRY_SCHEMA_VERSION = 1
+RUNTIME_TELEMETRY_SCHEMA_VERSION = 2
+RUNTIME_TELEMETRY_LEGACY_SCHEMA_VERSION = 1
 RUNTIME_TELEMETRY_IDENTITY_POLICY = (
     "report_only_excluded_from_scientific_identity_and_payload_digests"
 )
@@ -29,7 +30,7 @@ _CPU_FIELDS = (
     "child_user_cpu_seconds",
     "child_system_cpu_seconds",
 )
-_ROOT_FIELDS = frozenset(
+_ROOT_FIELDS_V1 = frozenset(
     {
         "schema_id",
         "schema_version",
@@ -47,6 +48,7 @@ _ROOT_FIELDS = frozenset(
         "execution",
     }
 )
+_ROOT_FIELDS_V2 = _ROOT_FIELDS_V1 | {"phase_parent_by_name"}
 _PHASE_BASE_FIELDS = frozenset(
     {
         "name",
@@ -173,6 +175,7 @@ def require_runtime_telemetry(
     expected_materializer: str | None = None,
     allowed_phase_order: tuple[str, ...] | None = None,
     require_error_phase: bool = False,
+    require_current: bool = False,
 ) -> None:
     """Deeply validate report-only materializer telemetry.
 
@@ -180,14 +183,28 @@ def require_runtime_telemetry(
     rejecting duplicate, unknown, or reordered phase claims.
     """
 
-    if not isinstance(value, Mapping) or set(value) != _ROOT_FIELDS:
+    if not isinstance(value, Mapping):
+        raise ValueError("Runtime telemetry root field set differs.")
+    schema_version = value.get("schema_version")
+    expected_root_fields = (
+        _ROOT_FIELDS_V1
+        if schema_version == RUNTIME_TELEMETRY_LEGACY_SCHEMA_VERSION
+        else _ROOT_FIELDS_V2
+    )
+    if set(value) != expected_root_fields:
         raise ValueError("Runtime telemetry root field set differs.")
     if (
         value["schema_id"] != RUNTIME_TELEMETRY_SCHEMA_ID
-        or value["schema_version"] != RUNTIME_TELEMETRY_SCHEMA_VERSION
+        or schema_version
+        not in {
+            RUNTIME_TELEMETRY_LEGACY_SCHEMA_VERSION,
+            RUNTIME_TELEMETRY_SCHEMA_VERSION,
+        }
         or value["identity_policy"] != RUNTIME_TELEMETRY_IDENTITY_POLICY
     ):
         raise ValueError("Runtime telemetry contract identity differs.")
+    if require_current and schema_version != RUNTIME_TELEMETRY_SCHEMA_VERSION:
+        raise ValueError("Legacy runtime telemetry is timing-ineligible.")
     if type(value["materializer"]) is not str or not value["materializer"]:
         raise ValueError("Runtime telemetry materializer is invalid.")
     if expected_materializer is not None and value["materializer"] != expected_materializer:
@@ -219,7 +236,9 @@ def require_runtime_telemetry(
     )
     prior_index = -1
     observed_names: set[str] = set()
-    observed_phase_wall = 0.0
+    phase_by_name: dict[str, Mapping[str, Any]] = {}
+    interval_by_name: dict[str, tuple[datetime, datetime]] = {}
+    wall_by_name: dict[str, float] = {}
     saw_error = False
     for index, phase in enumerate(phases):
         if not isinstance(phase, Mapping):
@@ -247,7 +266,9 @@ def require_runtime_telemetry(
         phase_wall = _require_nonnegative_number(
             phase["wall_seconds"], label=f"runtime phase {name} wall_seconds"
         )
-        observed_phase_wall += phase_wall
+        phase_by_name[name] = phase
+        interval_by_name[name] = (phase_started, phase_finished)
+        wall_by_name[name] = phase_wall
         phase_cpu = _require_cpu_record(phase["cpu_seconds"], label=f"runtime phase {name}")
         _require_average_cpu(
             phase["average_effective_cpu_cores"],
@@ -273,6 +294,54 @@ def require_runtime_telemetry(
             saw_error = True
             if type(phase["error_type"]) is not str or not phase["error_type"]:
                 raise ValueError("Runtime telemetry error phase lacks an error type.")
+    if schema_version == RUNTIME_TELEMETRY_LEGACY_SCHEMA_VERSION:
+        parent_by_name = {name: None for name in observed_names}
+    else:
+        raw_parents = value["phase_parent_by_name"]
+        if not isinstance(raw_parents, Mapping) or set(raw_parents) != observed_names:
+            raise ValueError("Runtime telemetry phase-parent map differs.")
+        parent_by_name: dict[str, str | None] = {}
+        for name, parent in raw_parents.items():
+            if parent is not None and (
+                type(parent) is not str or parent not in observed_names or parent == name
+            ):
+                raise ValueError("Runtime telemetry phase parent is invalid.")
+            parent_by_name[str(name)] = parent
+        for name in observed_names:
+            visited = {name}
+            parent = parent_by_name[name]
+            while parent is not None:
+                if parent in visited:
+                    raise ValueError("Runtime telemetry phase hierarchy contains a cycle.")
+                visited.add(parent)
+                parent = parent_by_name[parent]
+
+        siblings_by_parent: dict[str | None, list[str]] = {}
+        for phase in phases:
+            name = str(phase["name"])
+            siblings_by_parent.setdefault(parent_by_name[name], []).append(name)
+        for parent, siblings in siblings_by_parent.items():
+            prior_finished: datetime | None = None
+            for name in siblings:
+                phase_started, phase_finished = interval_by_name[name]
+                if prior_finished is not None and phase_started < prior_finished:
+                    raise ValueError("Runtime telemetry sibling phase intervals overlap.")
+                prior_finished = phase_finished
+                if parent is not None:
+                    parent_started, parent_finished = interval_by_name[parent]
+                    if (
+                        phase_started < parent_started
+                        or phase_finished > parent_finished
+                    ):
+                        raise ValueError(
+                            "Runtime telemetry child phase escapes its parent."
+                        )
+
+    observed_phase_wall = sum(
+        wall_by_name[name]
+        for name in observed_names
+        if parent_by_name[name] is None
+    )
     if not math.isclose(phase_sum, observed_phase_wall, rel_tol=1e-9, abs_tol=1e-9):
         raise ValueError("Runtime telemetry phase-wall sum differs.")
     if require_error_phase and not saw_error:
@@ -307,9 +376,18 @@ class PhaseTelemetry:
         self.started_at_utc = _utc_now()
         self._started = _snapshot()
         self._phases: list[dict[str, Any]] = []
+        self._phase_stack: list[str] = []
+        self._phase_parent_by_name: dict[str, str | None] = {}
 
     @contextmanager
     def phase(self, name: str) -> Iterator[None]:
+        normalized_name = str(name)
+        if normalized_name in self._phase_parent_by_name:
+            raise ValueError(f"Runtime telemetry phase {normalized_name!r} is duplicated.")
+        self._phase_parent_by_name[normalized_name] = (
+            self._phase_stack[-1] if self._phase_stack else None
+        )
+        self._phase_stack.append(normalized_name)
         started_at_utc = _utc_now()
         before = _snapshot()
         outcome = "ok"
@@ -321,6 +399,9 @@ class PhaseTelemetry:
             error_type = type(exc).__name__
             raise
         finally:
+            popped = self._phase_stack.pop()
+            if popped != normalized_name:  # pragma: no cover - contextmanager invariant
+                raise RuntimeError("Runtime telemetry phase stack is corrupted.")
             after = _snapshot()
             wall_seconds = _nonnegative_delta(
                 after["perf_counter"], before["perf_counter"]
@@ -343,7 +424,7 @@ class PhaseTelemetry:
                 if key in io_before
             }
             record: dict[str, Any] = {
-                "name": str(name),
+                "name": normalized_name,
                 "started_at_utc": started_at_utc,
                 "finished_at_utc": _utc_now(),
                 "outcome": outcome,
@@ -388,7 +469,7 @@ class PhaseTelemetry:
             )
         }
         total_cpu_seconds = float(sum(cpu.values()))
-        return {
+        result = {
             "schema_id": RUNTIME_TELEMETRY_SCHEMA_ID,
             "schema_version": RUNTIME_TELEMETRY_SCHEMA_VERSION,
             "identity_policy": RUNTIME_TELEMETRY_IDENTITY_POLICY,
@@ -403,9 +484,16 @@ class PhaseTelemetry:
             "process_peak_rss_bytes": int(finished["own_peak_rss_bytes"]),
             "children_peak_rss_bytes": int(finished["child_peak_rss_bytes"]),
             "phase_wall_seconds_sum": float(
-                sum(float(item["wall_seconds"]) for item in self._phases)
+                sum(
+                    float(item["wall_seconds"])
+                    for item in self._phases
+                    if self._phase_parent_by_name[item["name"]] is None
+                )
             ),
             "phases": list(self._phases),
+            "phase_parent_by_name": dict(
+                sorted(self._phase_parent_by_name.items())
+            ),
             "execution": {
                 "host": socket.gethostname(),
                 "pid": int(os.getpid()),
@@ -416,11 +504,14 @@ class PhaseTelemetry:
                 **self.context,
             },
         }
+        require_runtime_telemetry(result, require_current=True)
+        return result
 
 
 __all__ = [
     "PhaseTelemetry",
     "RUNTIME_TELEMETRY_IDENTITY_POLICY",
+    "RUNTIME_TELEMETRY_LEGACY_SCHEMA_VERSION",
     "RUNTIME_TELEMETRY_SCHEMA_ID",
     "RUNTIME_TELEMETRY_SCHEMA_VERSION",
     "require_runtime_telemetry",

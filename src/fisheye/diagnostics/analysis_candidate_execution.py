@@ -606,6 +606,7 @@ def _translate_phases(runtime: Mapping[str, Any]) -> list[CandidatePhaseMeasurem
         expected_materializer="exact_tabular_candidate",
         allowed_phase_order=EXACT_TABULAR_EXECUTION_PHASE_ORDER,
         require_error_phase=False,
+        require_current=True,
     )
     records = runtime.get("phases")
     if not isinstance(records, list):

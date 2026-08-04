@@ -462,7 +462,7 @@ def test_exact_tabular_typed_runner_emits_complete_nonpromoting_receipt(
     assert receipt["payload"]["coordinate_evidence"]["status"] == (
         "verified_bound_source"
     )
-    assert len(receipt["payload"]["phases"]) == 11
+    assert len(receipt["payload"]["phases"]) == 12
     assert all(
         phase["outcome"] == "succeeded" for phase in receipt["payload"]["phases"]
     )

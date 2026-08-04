@@ -185,6 +185,7 @@ def test_fresh_process_publishes_exact_tail_candidate_and_receipt(
         "published_direct_consolidated_comparison",
         "decoded_equality",
         "physical_inventory",
+        "publication_acceptance_validation",
     ]
     final = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     parent = final["analysis/tail_kinematics_runs"]

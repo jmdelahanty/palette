@@ -82,6 +82,7 @@ TAIL_POSTURE_EXECUTION_PHASE_ORDER = (
     "published_direct_consolidated_comparison",
     "decoded_equality",
     "physical_inventory",
+    "publication_acceptance_validation",
 )
 EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
 EXECUTION_FAILURE_TOMBSTONE_ATTR = "analysis_candidate_execution_tombstone"
@@ -704,11 +705,12 @@ def publish_tail_posture_candidate(
                 "published_logical_hashes": hashes,
                 "published_logical_manifest_sha256": canonical_json_sha256(hashes),
                 "output_storage": physical,
-                "caller_acceptance": json_attr_safe(
-                    dict(publication_acceptance_validator(root, parent, run))
-                ),
             }
         )
+        with phase("publication_acceptance_validation"):
+            acceptance["caller_acceptance"] = json_attr_safe(
+                dict(publication_acceptance_validator(root, parent, run))
+            )
 
     def repair(_target: Path) -> None:
         consolidate_metadata_capture_expected_warnings(plan.source_zarr)
