@@ -64,6 +64,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
     )
+    parser.add_argument("--source-frame-start", type=int)
+    parser.add_argument("--source-frame-stop-exclusive", type=int)
     parser.add_argument("--row-group-rows", type=int, default=65_536)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -91,6 +93,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         single_track_swim_bout_run=args.single_track_swim_bout_run,
         source_window_rows=args.source_window_rows,
         row_group_rows=args.row_group_rows,
+        source_frame_start=args.source_frame_start,
+        source_frame_stop_exclusive=args.source_frame_stop_exclusive,
         overwrite=bool(args.overwrite),
     )
     if args.json:

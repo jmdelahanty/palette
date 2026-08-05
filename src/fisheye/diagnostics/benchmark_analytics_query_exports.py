@@ -161,6 +161,9 @@ _FAMILIES = {
             "bin_valid",
         ),
         publisher=export_activity_spatial_time_bins,
+        optional_publisher_field_sets=(
+            ("source_frame_start", "source_frame_stop_exclusive"),
+        ),
     ),
     "tail_trace_samples": _Family(
         family_id="tail_trace_samples",
@@ -414,12 +417,13 @@ def require_request(
             _safe_positive_int(value, label=name)
         else:
             _safe_positive_float(value, label=name)
-    if family.family_id == "kinematics_samples":
+    if family.family_id in {"kinematics_samples", "activity_spatial_time_bins"}:
         has_frame_range = "source_frame_start" in parameters
         if payload["scale_id"] == "representative_short":
             if not has_frame_range:
                 raise ValueError(
-                    "Representative-short kinematics requires an explicit frame range."
+                    f"Representative-short {family.family_id} requires an explicit "
+                    "frame range."
                 )
             if (
                 int(parameters["source_frame_stop_exclusive"])
@@ -427,11 +431,13 @@ def require_request(
                 != 200_000
             ):
                 raise ValueError(
-                    "Representative-short kinematics must span exactly 200000 frames."
+                    f"Representative-short {family.family_id} must span exactly "
+                    "200000 frames."
                 )
         elif has_frame_range:
             raise ValueError(
-                "Full-duration kinematics cannot declare a bounded source frame range."
+                f"Full-duration {family.family_id} cannot declare a bounded source "
+                "frame range."
             )
     workload = payload.get("workload")
     if not isinstance(workload, Mapping) or set(workload) != {
@@ -1442,6 +1448,20 @@ def _request_from_args(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "row_group_rows": args.row_group_rows,
         }
+        if (args.source_frame_start is None) != (
+            args.source_frame_stop_exclusive is None
+        ):
+            raise ValueError(
+                "--source-frame-start and --source-frame-stop-exclusive must be "
+                "provided together."
+            )
+        if args.source_frame_start is not None:
+            parameters.update(
+                {
+                    "source_frame_start": args.source_frame_start,
+                    "source_frame_stop_exclusive": args.source_frame_stop_exclusive,
+                }
+            )
     else:
         source_runs = {
             "tail_kinematics_run": _required_cli_value(

@@ -86,14 +86,19 @@ ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID = (
 ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_VERSION = 2
 ACTIVITY_SPATIAL_BINNING_SCHEMA_ID = "palette.activity_spatial_time_bins.binning"
 ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION = 2
+ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3 = 3
 ACTIVITY_SPATIAL_SOURCE_SPEED_LEVEL = "filtered"
 ACTIVITY_SPATIAL_BINNING_POLICY = (
     "global_acquisition_frame_fixed_width_round_half_up_v1"
+)
+ACTIVITY_SPATIAL_FRAME_SELECTION_POLICY = (
+    "half_open_acquisition_frame_interval_intersect_track_span_v1"
 )
 ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID = (
     "palette.analytics_export.activity_spatial_time_bins"
 )
 ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION = 3
+ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION_V4 = 4
 ACTIVITY_SPATIAL_DECODED_PAYLOAD_SCHEMA_ID = (
     "palette.activity_spatial_time_bins.decoded_payload"
 )
@@ -188,6 +193,8 @@ def activity_spatial_binning_contract(
     *,
     source_sample_rate_hz: float,
     requested_bin_size_s: float,
+    source_frame_start: int | None = None,
+    source_frame_stop_exclusive: int | None = None,
 ) -> dict[str, Any]:
     """Return the deterministic global acquisition-frame binning policy."""
 
@@ -205,9 +212,32 @@ def activity_spatial_binning_contract(
     source_rate = float(source_sample_rate_hz)
     requested = float(requested_bin_size_s)
     bin_frames = max(1, int(math.floor(source_rate * requested + 0.5)))
+    if (source_frame_start is None) != (source_frame_stop_exclusive is None):
+        raise ValueError(
+            "source frame start and stop must either both be omitted or both be set."
+        )
+    frame_range: tuple[int, int] | None = None
+    if source_frame_start is not None and source_frame_stop_exclusive is not None:
+        if (
+            isinstance(source_frame_start, bool)
+            or type(source_frame_start) is not int
+            or source_frame_start < 0
+            or isinstance(source_frame_stop_exclusive, bool)
+            or type(source_frame_stop_exclusive) is not int
+            or source_frame_stop_exclusive <= source_frame_start
+        ):
+            raise ValueError(
+                "source frame range must be one nonempty half-open interval of "
+                "nonnegative exact integers."
+            )
+        frame_range = (source_frame_start, source_frame_stop_exclusive)
     body: dict[str, Any] = {
         "schema_id": ACTIVITY_SPATIAL_BINNING_SCHEMA_ID,
-        "schema_version": ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION,
+        "schema_version": (
+            ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION
+            if frame_range is None
+            else ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3
+        ),
         "source_sample_rate_hz": source_rate,
         "requested_bin_size_s": requested,
         "bin_size_frames": bin_frames,
@@ -231,6 +261,39 @@ def activity_spatial_binning_contract(
         ),
         "invalid_float_semantics": "ieee_nan_not_arrow_null",
     }
+    if frame_range is not None:
+        body.update(
+            {
+                "frame_selection_policy": ACTIVITY_SPATIAL_FRAME_SELECTION_POLICY,
+                "source_frame_start": frame_range[0],
+                "source_frame_stop_exclusive": frame_range[1],
+                "selection_expression": (
+                    "source_frame_start <= source_acquisition_frame_index < "
+                    "source_frame_stop_exclusive"
+                ),
+                "selected_bin_policy": (
+                    "emit_global_bins_intersecting_selected_track_frame_span"
+                ),
+                "edge_policy": (
+                    "clip_expected_denominator_to_track_and_selected_frame_span"
+                ),
+                "bout_count_policy": (
+                    "assign_whole_bout_by_start_frame_within_selected_bin_span"
+                ),
+                "bout_occupancy_policy": (
+                    "union_inclusive_bout_frame_intervals_clipped_to_bin_track_"
+                    "and_selected_frame_span"
+                ),
+                "bout_metrics_valid_policy": (
+                    "true exactly when every bout starting within the selected "
+                    "bin span has finite path length"
+                ),
+                "row_bounds_policy": (
+                    "start_end_and_duration_describe_the_global_bin; expected_"
+                    "denominator_and_fractions_clip_to_track_and_selection"
+                ),
+            }
+        )
     return {**body, "payload_sha256": canonical_json_sha256(body)}
 
 
@@ -720,7 +783,7 @@ def summarize_activity_spatial_track(
             else float("nan")
         )
 
-        started = (bout_starts >= full_start) & (bout_starts < full_end)
+        started = (bout_starts >= span_start) & (bout_starts < span_end)
         bout_count = int(np.count_nonzero(started))
         duration_sum = float(np.sum(bout_durations[started], dtype=np.float64))
         started_paths = bout_paths[started]
@@ -1027,6 +1090,15 @@ def _write_streaming_part(
     decoded_hasher = _DecodedPayloadHasher()
     track_source = bound.binding["track_source_binding"]
     bin_frames = int(binning_contract["bin_size_frames"])
+    binning_version = binning_contract.get("schema_version")
+    if binning_version == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION:
+        selected_frame_start = None
+        selected_frame_stop = None
+    elif binning_version == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3:
+        selected_frame_start = int(binning_contract["source_frame_start"])
+        selected_frame_stop = int(binning_contract["source_frame_stop_exclusive"])
+    else:
+        raise ValueError("Activity/spatial binning schema version is unsupported.")
     extraction = activity_spatial_extraction_policy(
         source_window_rows=source_window_rows,
         bin_size_frames=bin_frames,
@@ -1048,6 +1120,24 @@ def _write_streaming_part(
             last_frame = int(frame_axis[-1])
             first_bin = first_frame // bin_frames
             last_bin = last_frame // bin_frames
+            effective_first_frame = max(
+                first_frame,
+                selected_frame_start
+                if selected_frame_start is not None
+                else first_frame,
+            )
+            effective_stop_frame = min(
+                last_frame + 1,
+                selected_frame_stop
+                if selected_frame_stop is not None
+                else last_frame + 1,
+            )
+            if effective_first_frame < effective_stop_frame:
+                selected_first_bin = effective_first_frame // bin_frames
+                selected_last_bin = (effective_stop_frame - 1) // bin_frames
+            else:
+                selected_first_bin = None
+                selected_last_bin = None
             static = _static_row_values(
                 source_binding=bound.binding,
                 bout_binding=bout_source.binding,
@@ -1096,12 +1186,23 @@ def _write_streaming_part(
                     source_frames = np.empty(0, dtype=np.int64)
                     window_positions = np.empty((0, 2), dtype=np.float64)
                 for bin_index in range(window_first_bin, window_last_bin + 1):
+                    if (
+                        selected_first_bin is None
+                        or selected_last_bin is None
+                        or bin_index < selected_first_bin
+                        or bin_index > selected_last_bin
+                    ):
+                        continue
                     lower = bin_index * bin_frames
                     upper = lower + bin_frames
+                    metric_lower = max(lower, effective_first_frame)
+                    metric_upper = min(upper, effective_stop_frame)
                     local_start = int(
-                        np.searchsorted(source_frames, lower, side="left")
+                        np.searchsorted(source_frames, metric_lower, side="left")
                     )
-                    local_stop = int(np.searchsorted(source_frames, upper, side="left"))
+                    local_stop = int(
+                        np.searchsorted(source_frames, metric_upper, side="left")
+                    )
                     metric_rows = summarize_activity_spatial_track(
                         track_id=track_id,
                         source_acquisition_frame_index=source_frames[
@@ -1131,7 +1232,10 @@ def _write_streaming_part(
                         requested_bin_size_s=float(
                             binning_contract["requested_bin_size_s"]
                         ),
-                        track_frame_span=(first_frame, last_frame),
+                        track_frame_span=(
+                            effective_first_frame,
+                            effective_stop_frame - 1,
+                        ),
                         time_bin_range=(bin_index, bin_index),
                     )
                     if len(metric_rows) != 1:
@@ -1305,19 +1409,36 @@ def _validate_export_envelope(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     digest = body.pop("payload_sha256")
     if digest != canonical_json_sha256(body):
         raise ValueError("Activity/spatial export-envelope digest is invalid.")
-    if (
-        body.get("schema_id") != ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID
-        or body.get("schema_version") != ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION
-    ):
+    if body.get("schema_id") != ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID:
         raise ValueError("Activity/spatial export-envelope schema is invalid.")
     _validate_source_binding_payload(body.get("source_binding"))
     binning = _validate_payload_digest(
         body.get("binning_contract"),
         label="activity/spatial binning contract",
     )
+    binning_version = binning.get("schema_version")
+    if binning_version == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION:
+        source_frame_start = None
+        source_frame_stop_exclusive = None
+    elif binning_version == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3:
+        source_frame_start = binning.get("source_frame_start")
+        source_frame_stop_exclusive = binning.get("source_frame_stop_exclusive")
+    else:
+        raise ValueError("Activity/spatial binning schema version is unsupported.")
+    expected_export_version = (
+        ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION
+        if binning_version == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION
+        else ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION_V4
+    )
+    if body.get("schema_version") != expected_export_version:
+        raise ValueError(
+            "Activity/spatial export and binning schema versions are incompatible."
+        )
     expected_binning = activity_spatial_binning_contract(
         source_sample_rate_hz=binning.get("source_sample_rate_hz"),
         requested_bin_size_s=binning.get("requested_bin_size_s"),
+        source_frame_start=source_frame_start,
+        source_frame_stop_exclusive=source_frame_stop_exclusive,
     )
     if dict(binning) != expected_binning:
         raise ValueError("Activity/spatial binning contract differs from policy.")
@@ -1372,6 +1493,41 @@ def _validate_decoded_rows(
     row_count = len(columns["track_id"])
     track_source = source_binding["track_source_binding"]
     bout_sources = source_binding["swim_bout_runs_by_track"]
+    track_records = {
+        int(record["track_id"]): record for record in track_source["tracks"]
+    }
+    binning_version = binning.get("schema_version")
+    if binning_version == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION:
+        selected_frame_start = None
+        selected_frame_stop = None
+    elif binning_version == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3:
+        selected_frame_start = int(binning["source_frame_start"])
+        selected_frame_stop = int(binning["source_frame_stop_exclusive"])
+    else:
+        raise ValueError("Activity/spatial binning schema version is unsupported.")
+    effective_spans: dict[int, tuple[int, int] | None] = {}
+    for track_id in track_records:
+        bout = bout_sources[str(track_id)]
+        first = bout["frame_axis_first_frame"]
+        last = bout["frame_axis_last_frame"]
+        if first is None:
+            effective_spans[track_id] = None
+            continue
+        effective_start = max(
+            int(first),
+            selected_frame_start if selected_frame_start is not None else int(first),
+        )
+        effective_stop = min(
+            int(last) + 1,
+            selected_frame_stop
+            if selected_frame_stop is not None
+            else int(last) + 1,
+        )
+        effective_spans[track_id] = (
+            (effective_start, effective_stop)
+            if effective_start < effective_stop
+            else None
+        )
     static_by_track = {
         int(track_text): _static_row_values(
             source_binding=source_binding,
@@ -1419,7 +1575,18 @@ def _validate_decoded_rows(
             if not _same_float(columns[name][index], expected):
                 raise ValueError(f"Activity/spatial row field {name!r} is invalid.")
         expected_count = columns["expected_track_frame_count"][index]
-        if type(expected_count) is not int or expected_count <= 0:
+        effective_span = effective_spans[track_id]
+        if effective_span is None:
+            raise ValueError("Activity/spatial row lies outside its selected track span.")
+        expected_from_contract = max(
+            0,
+            min(end, effective_span[1]) - max(start, effective_span[0]),
+        )
+        if (
+            type(expected_count) is not int
+            or expected_count <= 0
+            or expected_count != expected_from_contract
+        ):
             raise ValueError("Activity/spatial expected frame count is invalid.")
         for count_name in (
             "source_sample_count",
@@ -1477,23 +1644,22 @@ def _validate_decoded_rows(
         raise ValueError(
             "Activity/spatial primary keys are not strictly sorted and unique."
         )
-    track_records = {
-        int(record["track_id"]): record for record in track_source["tracks"]
-    }
     bin_frames = int(binning["bin_size_frames"])
     for track_id, track_record in track_records.items():
-        bout = bout_sources[str(track_id)]
-        first = bout["frame_axis_first_frame"]
-        last = bout["frame_axis_last_frame"]
-        expected_bins = (
-            []
-            if first is None
-            else list(range(first // bin_frames, last // bin_frames + 1))
-        )
+        effective_span = effective_spans[track_id]
+        expected_bins = []
+        if effective_span is not None:
+            expected_bins = list(
+                range(
+                    effective_span[0] // bin_frames,
+                    (effective_span[1] - 1) // bin_frames + 1,
+                )
+            )
         if observed_bins[track_id] != expected_bins:
             raise ValueError(
                 f"Track {track_id} exported time-bin coverage is incomplete."
             )
+        first = bout_sources[str(track_id)]["frame_axis_first_frame"]
         if (first is None) != (int(track_record["sample_count"]) == 0):
             raise ValueError(f"Track {track_id} frame span/sample count disagree.")
 
@@ -1566,6 +1732,11 @@ def validate_activity_spatial_time_bins_export_payload(
         row_group = parquet_file.metadata.row_group(row_group_index)
         if row_group.num_rows > maximum_rows:
             raise ValueError("Activity/spatial Parquet row group exceeds its bound.")
+        if row_group.num_rows == 0:
+            # Parquet cannot exhibit dictionary/compression encodings for an
+            # empty data page. The exact Arrow schema, footer contract, and
+            # persisted policy still bind the zero-row representation.
+            continue
         for column_index in range(row_group.num_columns):
             column = row_group.column(column_index)
             if column.compression.upper() != "ZSTD":
@@ -1620,6 +1791,8 @@ def export_activity_spatial_time_bins(
     single_track_swim_bout_run: str | None = None,
     source_window_rows: int = DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
     row_group_rows: int = 65_536,
+    source_frame_start: int | None = None,
+    source_frame_stop_exclusive: int | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Publish one bounded, exact, selector-ineligible activity summary."""
@@ -1694,6 +1867,8 @@ def export_activity_spatial_time_bins(
                 before.binding["track_source_binding"]["source_sample_rate_hz"]
             ),
             requested_bin_size_s=requested_bin_size_s,
+            source_frame_start=source_frame_start,
+            source_frame_stop_exclusive=source_frame_stop_exclusive,
         )
         extraction = activity_spatial_extraction_policy(
             source_window_rows=source_window_rows,
@@ -1779,7 +1954,12 @@ def export_activity_spatial_time_bins(
         )
         envelope_body: dict[str, Any] = {
             "schema_id": ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID,
-            "schema_version": ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION,
+            "schema_version": (
+                ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION
+                if binning["schema_version"]
+                == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION
+                else ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION_V4
+            ),
             "source_binding": before.binding,
             "binning_contract": binning,
             "extraction_policy": extraction,
@@ -1830,6 +2010,8 @@ def export_activity_spatial_time_bins(
                 "scratch_root": str(scratch),
                 "requested_bin_size_s": float(requested_bin_size_s),
                 "source_window_rows": source_window_rows,
+                "source_frame_start": source_frame_start,
+                "source_frame_stop_exclusive": source_frame_stop_exclusive,
                 "overwrite": bool(overwrite),
             },
             "activity_spatial_time_bins_export": export_envelope,

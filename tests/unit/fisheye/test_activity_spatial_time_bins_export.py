@@ -101,6 +101,44 @@ def test_binning_contract_rounds_once_and_uses_global_frames() -> None:
     )
 
 
+def test_binning_contract_versions_exact_half_open_frame_selection() -> None:
+    policy = mod.activity_spatial_binning_contract(
+        source_sample_rate_hz=30.0,
+        requested_bin_size_s=5.0,
+        source_frame_start=3,
+        source_frame_stop_exclusive=200_003,
+    )
+
+    assert policy["schema_version"] == (
+        mod.ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3
+    )
+    assert policy["frame_selection_policy"] == (
+        mod.ACTIVITY_SPATIAL_FRAME_SELECTION_POLICY
+    )
+    assert policy["source_frame_start"] == 3
+    assert policy["source_frame_stop_exclusive"] == 200_003
+    assert policy["selected_bin_policy"] == (
+        "emit_global_bins_intersecting_selected_track_frame_span"
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "stop"),
+    ((None, 10), (0, None), (-1, 10), (10, 10), (True, 10)),
+)
+def test_binning_contract_rejects_invalid_frame_selection(
+    start: int | None,
+    stop: int | None,
+) -> None:
+    with pytest.raises(ValueError, match="source frame"):
+        mod.activity_spatial_binning_contract(
+            source_sample_rate_hz=30.0,
+            requested_bin_size_s=5.0,
+            source_frame_start=start,
+            source_frame_stop_exclusive=stop,
+        )
+
+
 @pytest.mark.parametrize("value", (0, -1, float("inf"), float("nan"), True))
 def test_binning_contract_rejects_invalid_widths(value: object) -> None:
     with pytest.raises(ValueError, match="requested bin size"):
@@ -214,6 +252,41 @@ def test_time_bins_preserve_nan_bout_path_as_explicit_invalid_metric() -> None:
     assert rows[0]["bout_duration_s_started_sum"] == pytest.approx(1.0)
     assert math.isnan(rows[0]["bout_path_length_mm_started_sum"])
     assert rows[0]["bout_metrics_valid"] is False
+
+
+def test_selected_track_span_clips_edges_and_started_bout_assignment() -> None:
+    frames = np.arange(3, 8, dtype=np.int64)
+    bouts = _bout_rows(
+        [
+            (1, 2, 4),  # overlaps selection, but starts before it
+            (2, 3, 6),  # starts in the one-frame leading partial bin
+            (3, 5, 9),  # starts in the trailing selected bin
+            (4, 8, 8),  # starts exactly at the exclusive stop
+        ]
+    )
+    rows = mod.summarize_activity_spatial_track(
+        track_id=7,
+        source_acquisition_frame_index=frames,
+        source_observed=np.ones(5, dtype=bool),
+        sample_valid=np.ones(5, dtype=bool),
+        position_finite=np.ones(5, dtype=bool),
+        transition_valid=np.ones(5, dtype=bool),
+        positions_mm=np.column_stack((frames, frames)).astype(np.float64),
+        filtered_speed_mm_s=np.ones(5, dtype=np.float32),
+        filtered_path_distance_mm=np.ones(5, dtype=np.float32),
+        bouts=bouts,
+        source_sample_rate_hz=2.0,
+        requested_bin_size_s=2.0,
+        track_frame_span=(3, 7),
+    )
+
+    assert [row["time_bin_index"] for row in rows] == [0, 1]
+    assert [row["expected_track_frame_count"] for row in rows] == [1, 4]
+    assert [row["source_sample_count"] for row in rows] == [1, 4]
+    assert [row["bout_count_started"] for row in rows] == [1, 1]
+    assert [row["bout_occupied_frame_count"] for row in rows] == [1, 4]
+    assert rows[0]["bout_duration_s_started_sum"] == bouts["duration_s"][1]
+    assert rows[1]["bout_duration_s_started_sum"] == bouts["duration_s"][2]
 
 
 @pytest.mark.parametrize("value", (-1.0, float("inf"), float("-inf")))
@@ -556,6 +629,8 @@ def _publish(
     export_run_id: str,
     output_name: str = "exports",
     source_window_rows: int = mod.DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
+    source_frame_start: int | None = None,
+    source_frame_stop_exclusive: int | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     bound = _publisher_bound_source(monkeypatch, tmp_path)
@@ -577,6 +652,8 @@ def _publish(
         scratch_root=tmp_path / f"scratch_{output_name}",
         source_window_rows=source_window_rows,
         row_group_rows=1,
+        source_frame_start=source_frame_start,
+        source_frame_stop_exclusive=source_frame_stop_exclusive,
         overwrite=overwrite,
     )
 
@@ -608,6 +685,94 @@ def test_activity_spatial_publisher_writes_exact_manifest_selected_part(
     assert extraction["requested_source_window_rows"] == (
         mod.DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS
     )
+
+
+def test_activity_spatial_publisher_versions_and_validates_bounded_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _publish(
+        monkeypatch,
+        tmp_path,
+        export_run_id="bounded_activity",
+        source_frame_start=1,
+        source_frame_stop_exclusive=2,
+    )
+
+    assert result["activity_spatial_time_bins_validation"]["valid"] is True
+    envelope = result["activity_spatial_time_bins_export"]
+    assert envelope["schema_version"] == mod.ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION_V4
+    assert envelope["binning_contract"]["schema_version"] == (
+        mod.ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3
+    )
+    assert envelope["binning_contract"]["source_frame_start"] == 1
+    assert envelope["binning_contract"]["source_frame_stop_exclusive"] == 2
+    assert result["export_parameters"]["source_frame_start"] == 1
+    assert result["export_parameters"]["source_frame_stop_exclusive"] == 2
+
+    import pyarrow.parquet as pq
+
+    part = next((tmp_path / "exports").rglob("*.parquet"))
+    table = pq.read_table(part).to_pydict()
+    assert table["expected_track_frame_count"] == [1]
+    assert table["source_sample_count"] == [1]
+
+    tampered = copy.deepcopy(result)
+    tampered_envelope = tampered["activity_spatial_time_bins_export"]
+    tampered_envelope["schema_version"] = mod.ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION
+    tampered_envelope["payload_sha256"] = canonical_json_sha256(
+        {
+            key: value
+            for key, value in tampered_envelope.items()
+            if key != "payload_sha256"
+        }
+    )
+    with pytest.raises(ValueError, match="versions are incompatible"):
+        mod._validate_export_envelope(tampered)
+
+
+def test_activity_spatial_disjoint_selection_is_a_valid_zero_row_export(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _publish(
+        monkeypatch,
+        tmp_path,
+        export_run_id="disjoint_activity",
+        source_frame_start=10,
+        source_frame_stop_exclusive=11,
+    )
+
+    assert result["row_counts_by_table"] == {ACTIVITY_SPATIAL_TIME_BINS_TABLE: 0}
+    assert result["activity_spatial_time_bins_validation"]["valid"] is True
+
+
+def test_activity_spatial_validator_rejects_rehashed_selection_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _publish(
+        monkeypatch,
+        tmp_path,
+        export_run_id="bounded_tamper",
+        source_frame_start=1,
+        source_frame_stop_exclusive=2,
+    )
+    manifest_path = Path(result["manifest_path"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    envelope = payload["activity_spatial_time_bins_export"]
+    binning = envelope["binning_contract"]
+    binning["source_frame_start"] = 0
+    binning["payload_sha256"] = canonical_json_sha256(
+        {key: value for key, value in binning.items() if key != "payload_sha256"}
+    )
+    envelope["payload_sha256"] = canonical_json_sha256(
+        {key: value for key, value in envelope.items() if key != "payload_sha256"}
+    )
+    manifest_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ExportValidationError, match="source_lineage_hash"):
+        validate_export_run(tmp_path / "exports", "bounded_tamper")
 
 
 def test_multi_bin_source_windows_preserve_exact_rows_and_reduce_reads(

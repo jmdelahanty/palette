@@ -167,6 +167,74 @@ def test_full_duration_kinematics_rejects_frame_window(tmp_path: Path) -> None:
         require_request(request)
 
 
+def test_representative_short_activity_requires_exact_200k_frame_window(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    archive.mkdir()
+    (archive / "zarr.json").write_text("{}\n", encoding="utf-8")
+    common = {
+        "family_id": "activity_spatial_time_bins",
+        "scale_id": "representative_short",
+        "zarr_path": archive,
+        "export_root": tmp_path / "palette_benchmarks" / "exports",
+        "scratch_root": tmp_path / "node_benchmarks" / "scratch",
+        "benchmark_output_dir": tmp_path / "palette_benchmarks" / "evidence",
+        "export_run_id": "activity_short_01",
+        "source_runs": {
+            "track_kinematics_run": "track_v1",
+            "track_scope": "offline",
+            "swim_bout_runs_by_track": {"0": "bout_v8"},
+        },
+    }
+    base_parameters = {
+        "requested_bin_size_s": 5.0,
+        "source_window_rows": 131_072,
+        "row_group_rows": 65_536,
+    }
+
+    with pytest.raises(ValueError, match="requires an explicit frame range"):
+        build_request(**common, publisher_parameters=base_parameters)
+    with pytest.raises(ValueError, match="exactly 200000 frames"):
+        build_request(
+            **common,
+            publisher_parameters={
+                **base_parameters,
+                "source_frame_start": 0,
+                "source_frame_stop_exclusive": 199_999,
+            },
+        )
+
+    request = build_request(
+        **common,
+        publisher_parameters={
+            **base_parameters,
+            "source_frame_start": 0,
+            "source_frame_stop_exclusive": 200_000,
+        },
+    )
+    assert require_request(request)["publisher_parameters"] == {
+        **base_parameters,
+        "source_frame_start": 0,
+        "source_frame_stop_exclusive": 200_000,
+    }
+
+
+def test_full_duration_activity_rejects_frame_window(tmp_path: Path) -> None:
+    request = _request(tmp_path, family_id="activity_spatial_time_bins")
+    request["payload"]["publisher_parameters"].update(
+        {
+            "source_frame_start": 0,
+            "source_frame_stop_exclusive": 200_000,
+        }
+    )
+    from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+
+    request["payload_digest"] = canonical_json_sha256(request["payload"])
+    with pytest.raises(ValueError, match="Full-duration activity_spatial_time_bins"):
+        require_request(request)
+
+
 def test_request_rejects_nonbenchmark_publication_path(tmp_path: Path) -> None:
     archive = tmp_path / "recording_analysis.zarr"
     archive.mkdir()
@@ -234,6 +302,63 @@ def test_build_request_cli_writes_closed_kinematics_request(
         json.loads(capsys.readouterr().out)["payload_digest"]
         == request["payload_digest"]
     )
+
+
+def test_build_request_cli_transports_activity_frame_selection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    archive.mkdir()
+    (archive / "zarr.json").write_text("{}\n", encoding="utf-8")
+    request_path = tmp_path / "activity_request.json"
+
+    assert (
+        main(
+            [
+                "build-request",
+                "--family",
+                "activity_spatial_time_bins",
+                "--scale",
+                "representative_short",
+                "--zarr",
+                str(archive),
+                "--export-root",
+                str(tmp_path / "palette_benchmarks" / "exports"),
+                "--scratch-root",
+                str(tmp_path / "node_benchmarks" / "scratch"),
+                "--benchmark-output-dir",
+                str(tmp_path / "palette_benchmarks" / "evidence"),
+                "--export-run-id",
+                "activity_short_01",
+                "--track-kinematics-run",
+                "track_v1",
+                "--track-scope",
+                "offline",
+                "--track-swim-bout-run",
+                "0=bout_v8",
+                "--requested-bin-size-s",
+                "5",
+                "--source-window-rows",
+                "131072",
+                "--source-frame-start",
+                "100",
+                "--source-frame-stop-exclusive",
+                "200100",
+                "--output",
+                str(request_path),
+            ]
+        )
+        == 0
+    )
+
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    parameters = require_request(request)["publisher_parameters"]
+    assert parameters["source_frame_start"] == 100
+    assert parameters["source_frame_stop_exclusive"] == 200_100
+    assert json.loads(capsys.readouterr().out)["payload_digest"] == request[
+        "payload_digest"
+    ]
 
 
 def _eye_table(start: int, stop: int) -> pa.Table:

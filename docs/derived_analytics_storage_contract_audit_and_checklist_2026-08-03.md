@@ -1400,6 +1400,15 @@ Recommended benchmark and promotion-review order:
       and 43.7x lower. Both remain selector-ineligible and
       `promotion_authorized=false`; see
       `docs/diagnostics/activity_spatial_full_duration_optimized_2026-08-04.md`.
+- [x] Freeze the honest representative-short activity/spatial boundary. A
+      `representative_short` request now requires an exact 200,000-frame
+      half-open acquisition interval, while `full_duration` rejects bounded
+      requests. Binning v3 and export v4 bind the interval and edge-bin,
+      clipped-denominator, union-occupancy, started-bout, validity, and row
+      policies without weakening full-source identity. Unbounded binning v2
+      and export v3 remain readable. Focused exporter/controller validation
+      passes 51/51; the clean real matrix remains open. See
+      `docs/activity_spatial_representative_short_contract_2026-08-04.md`.
 - [x] Freeze the honest representative-short query-export boundary. A
       `representative_short` kinematics request now requires exactly one
       explicit 200,000-frame half-open acquisition interval; full-duration
@@ -1476,10 +1485,10 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. benchmark all four exact opt-in workflow exports—generic kinematics,
-   activity/spatial time bins, eye traces, and tail traces—through bounded
-   writer, scratch-copy, validation, publication, and manifest-selected reader
-   phases at representative short and full duration;
+1. run the clean five-process representative-short activity/spatial matrix
+   through bounded writer, scratch-copy, validation, publication, and
+   manifest-selected reader phases; then resume eye and tail export matrices
+   only after their canonical coordinate-source prerequisite is repaired;
 2. include tail-specific narrow normalized-position predicates, camera-frame
    windows, complete scans, part/object counts, and peak RSS;
 3. obtain real consumer evidence where a maintained Palette or Crimson path
