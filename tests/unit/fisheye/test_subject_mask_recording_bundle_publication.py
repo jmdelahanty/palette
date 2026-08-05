@@ -412,6 +412,15 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
     assert inactive.active is False
     assert inactive.crop_run_path == "crop_runs/crop_001"
     assert inactive.refined_run.path == "refined_subject_masks_runs/refined_coordinate_v3"
+    assert inactive.camera_identity == "cam2010095"
+    assert inactive.source_total_frames == 4
+    assert (inactive.source_width, inactive.source_height) == (100, 80)
+    assert (inactive.n_rois, inactive.roi_height, inactive.roi_width) == (4, 8, 8)
+    assert inactive.assignment_keypoint_collection["mode"] == "not_used"
+    np.testing.assert_array_equal(
+        inactive.require_translation_only_offsets(),
+        np.asarray(inactive.source_crop_xywh_node[:, :2], dtype=np.float64),
+    )
 
     activate_subject_mask_bundle(
         analysis_zarr=analysis,

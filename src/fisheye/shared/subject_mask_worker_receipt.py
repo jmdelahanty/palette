@@ -64,6 +64,10 @@ SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_ID = (
     "palette.subject_mask.recording_common_scientific_authority"
 )
 SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_VERSION = 1
+SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_ID = (
+    "palette.subject_mask.assignment_keypoint_collection"
+)
+SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_VERSION = 1
 
 
 def _strict_copy(value: Any, *, name: str) -> Any:
@@ -133,6 +137,14 @@ def _recording_common_scientific_authority(
                     "assignment_keypoint_group",
                     "assignment_keypoints_run",
                     "assignment_keypoint_run",
+                    "assignment_keypoint_row_identity",
+                    "assignment_keypoint_coordinate_run_path",
+                    "assignment_keypoint_roi_descriptor_ref",
+                    "assignment_keypoint_roi_descriptor_sha256",
+                    "assignment_keypoint_coordinate_derivation_ref",
+                    "assignment_keypoint_coordinate_derivation_sha256",
+                    "assignment_keypoint_row_identity_ref",
+                    "assignment_keypoint_row_identity_sha256",
                 },
             )
         normalized_inference = dict(inference)
@@ -512,6 +524,166 @@ def validate_recording_subject_mask_assembly_identity(
     return canonical
 
 
+def build_recording_assignment_keypoint_collection(
+    producer_evidence: Mapping[str, Any],
+    *,
+    source_run_path: str,
+    n_rois: int,
+) -> dict[str, object]:
+    """Retain the exact ordered keypoint-assignment inputs of refinement."""
+
+    evidence = validate_recording_subject_mask_assembly_identity(
+        producer_evidence,
+        kind="refined_dense_core",
+        stage_kind="refined_subject_mask",
+        source_run_path=source_run_path,
+        n_rois=n_rois,
+    )
+    workers: list[dict[str, object]] = []
+    modes: set[str] = set()
+    required = {
+        "assignment_keypoints_run",
+        "assignment_keypoint_group",
+        "assignment_keypoint_contract",
+        "assignment_keypoint_role",
+        "assignment_keypoint_selection",
+        "assignment_keypoint_success_dataset",
+        "assignment_keypoint_row_identity",
+        "assignment_keypoint_row_identity_check",
+    }
+    coordinate_fields = {
+        "assignment_keypoint_coordinate_contract",
+        "assignment_keypoint_coordinate_run_path",
+        "assignment_keypoint_roi_descriptor_ref",
+        "assignment_keypoint_roi_descriptor_sha256",
+        "assignment_keypoint_coordinate_derivation_ref",
+        "assignment_keypoint_coordinate_derivation_sha256",
+        "assignment_keypoint_row_identity_ref",
+        "assignment_keypoint_row_identity_sha256",
+        "assignment_keypoint_eye_indices",
+    }
+    for worker in evidence["workers"]:
+        interval = worker["global_row_interval"]
+        start = int(interval["start_row"])
+        stop = int(interval["stop_row"])
+        inference = worker["scientific_identity"]["payload"]["inference_contract"]
+        assignment = inference.get("eye_assignment_contract")
+        if assignment is None:
+            modes.add("not_used")
+            workers.append(
+                {
+                    "global_row_interval": dict(interval),
+                    "assignment": None,
+                }
+            )
+            continue
+        if not isinstance(assignment, Mapping):
+            raise ValueError("Worker eye-assignment contract must be an object.")
+        fields = set(assignment)
+        if fields != required and fields != required | coordinate_fields:
+            raise ValueError("Worker eye-assignment contract fields are not exact.")
+        modes.add("exact_worker_partition")
+        group = assignment.get("assignment_keypoint_group")
+        run = assignment.get("assignment_keypoints_run")
+        success = assignment.get("assignment_keypoint_success_dataset")
+        selection = assignment.get("assignment_keypoint_selection")
+        if any(
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or "/" in value
+            for value in (group, run, success)
+        ) or not isinstance(selection, str) or not selection.strip():
+            raise ValueError("Worker assignment keypoint path fields are invalid.")
+        if (
+            assignment.get("assignment_keypoint_contract")
+            != "subject_eyes_union_assignment_keypoints_v1"
+            or assignment.get("assignment_keypoint_role")
+            != "eyes_union_lr_assignment"
+            or assignment.get("assignment_keypoint_row_identity_check")
+            != "source_crop_row_ids_subset"
+        ):
+            raise ValueError("Worker assignment keypoint semantics changed.")
+        row_identity = assignment.get("assignment_keypoint_row_identity")
+        if not isinstance(row_identity, Mapping) or set(row_identity) != {
+            "row_identity_check",
+            "rows_checked",
+            "keypoint_has_source_crop_row_ids",
+            "mask_has_source_crop_row_ids",
+            "keypoint_rows_available",
+            "keypoint_rows_selected",
+            "keypoint_selection_min_row",
+            "keypoint_selection_max_row",
+        }:
+            raise ValueError("Worker assignment keypoint row identity is invalid.")
+        if (
+            row_identity.get("row_identity_check")
+            != "source_crop_row_ids_subset"
+            or row_identity.get("keypoint_has_source_crop_row_ids") is not True
+            or row_identity.get("mask_has_source_crop_row_ids") is not True
+            or row_identity.get("rows_checked") != stop - start
+            or row_identity.get("keypoint_rows_selected") != stop - start
+            or row_identity.get("keypoint_selection_min_row") != start
+            or row_identity.get("keypoint_selection_max_row") != stop - 1
+            or type(row_identity.get("keypoint_rows_available")) is not int
+            or row_identity["keypoint_rows_available"] < stop
+        ):
+            raise ValueError("Worker assignment keypoint row coverage changed.")
+        if coordinate_fields <= fields:
+            if (
+                assignment.get("assignment_keypoint_coordinate_contract")
+                != "canonical_v2_exact"
+                or assignment.get("assignment_keypoint_coordinate_run_path")
+                != f"{group}/{run}"
+            ):
+                raise ValueError("Worker assignment coordinate source changed.")
+            for name in (
+                "assignment_keypoint_roi_descriptor_sha256",
+                "assignment_keypoint_coordinate_derivation_sha256",
+                "assignment_keypoint_row_identity_sha256",
+            ):
+                if not _valid_sha256(assignment.get(name)):
+                    raise ValueError(f"Worker {name} is not a SHA-256 digest.")
+            for name in (
+                "assignment_keypoint_roi_descriptor_ref",
+                "assignment_keypoint_coordinate_derivation_ref",
+                "assignment_keypoint_row_identity_ref",
+            ):
+                value = assignment.get(name)
+                if not isinstance(value, str) or not value.startswith("/"):
+                    raise ValueError(f"Worker {name} is not an absolute record ref.")
+            eye_indices = assignment.get("assignment_keypoint_eye_indices")
+            if (
+                not isinstance(eye_indices, Mapping)
+                or set(eye_indices) != {"eye_left", "eye_right"}
+                or any(type(value) is not int or value < 0 for value in eye_indices.values())
+                or eye_indices["eye_left"] == eye_indices["eye_right"]
+            ):
+                raise ValueError("Worker assignment eye indices are invalid.")
+        workers.append(
+            {
+                "global_row_interval": dict(interval),
+                "assignment": _strict_copy(
+                    assignment,
+                    name="assignment keypoint contract",
+                ),
+            }
+        )
+    if len(modes) != 1:
+        raise ValueError(
+            "Refined recording workers cannot mix keypoint-assigned and "
+            "unassigned eye semantics."
+        )
+    return {
+        "schema_id": SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_ID,
+        "schema_version": SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_VERSION,
+        "mode": next(iter(modes)),
+        "row_policy": "ordered_contiguous_recording_crop_rows_v1",
+        "n_rois": int(n_rois),
+        "workers": workers,
+    }
+
+
 def build_recording_subject_mask_source_receipt(
     *,
     kind: str,
@@ -751,6 +923,9 @@ __all__ = [
     "SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION",
     "SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_ID",
     "SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_VERSION",
+    "SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_ID",
+    "SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_VERSION",
+    "build_recording_assignment_keypoint_collection",
     "build_subject_mask_worker_semantic_receipt",
     "build_recording_subject_mask_source_receipt",
     "validate_subject_mask_worker_semantic_receipt",

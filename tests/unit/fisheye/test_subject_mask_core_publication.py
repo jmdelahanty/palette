@@ -410,6 +410,9 @@ def test_coordinate_core_v3_binds_crop_raw_refined_and_worker_evidence(
     assert refined_payload["coordinate_dependencies"]["document"]["raw_core"][
         "manifest_payload_digest"
     ] == raw_publication.manifest["payload_digest"]
+    assert refined_payload["coordinate_dependencies"]["document"][
+        "assignment_keypoints"
+    ]["mode"] == "not_used"
     assert validate_subject_mask_core_run_manifest(refined_publication.manifest) == ()
 
     tampered = deepcopy(refined_publication.manifest)

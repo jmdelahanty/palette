@@ -85,6 +85,22 @@ and their digest chain before returning a sealed authority object. It never
 uses family `latest` pointers and never treats an unselected run as implicit
 authority.
 
+The sealed object also exposes only the subject-shape inputs that can be
+proved from this contract: exact `instance_key`, crop-row, acquisition-frame,
+frame-offset, and placement nodes; recording/camera/source-frame dimensions;
+and the dense ROI raster dimensions. Its translation-only accessor rejects a
+crop whose source width/height differs from the dense ROI extent. That makes
+the current ROI-to-camera translation safe without granting authority for a
+future resize, pad, affine, or projective transform.
+
+Refined core dependencies additionally retain an ordered recording-level
+assignment-keypoint collection. Each worker interval binds its exact keypoint
+group/run, success surface, crop-row selection proof, and optional canonical
+coordinate records. Recording-wide semantic comparison deliberately removes
+those worker-local identifiers, but the collection keeps them under the core
+digest. This supports either one shared recording keypoint authority or exact
+clip-local authorities without silently pretending they are the same run.
+
 ## Validation
 
 The focused outside-sandbox real-Zarr matrix passed 41 tests covering the
@@ -102,7 +118,10 @@ integration gate covering:
 - inactive recording-level bundle import, cross-binding, activation, and
   recovery behavior;
 - explicit inactive authorization, default rejection of unselected bundles,
-  and exact activated-root-authority resolution.
+  exact activated-root-authority resolution, and exact translation-only
+  subject-shape source geometry;
+- distinct clip-local keypoint-assignment authorities with complete ordered
+  crop-row coverage.
 
 Static validation also passed Ruff, Python compilation, and `git diff --check`.
 

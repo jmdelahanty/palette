@@ -8,12 +8,16 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
+
 from fisheye.shared.subject_mask_worker_receipt import (
+    build_recording_assignment_keypoint_collection,
     validate_recording_subject_mask_assembly_identity,
 )
 from fisheye.shared.zarr.crop_manifest import (
     CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CROP_RUN_MANIFEST_ATTRIBUTE,
+    crop_pixel_authority_from_manifest,
     validate_crop_run_manifest,
 )
 from fisheye.shared.zarr.manifest_digest import (
@@ -58,12 +62,20 @@ class BoundRecordingSubjectMaskCoordinateAuthority:
     crop_run_path: str
     raw_run_path: str
     refined_run_path: str
+    camera_identity: str
+    source_total_frames: int
+    source_width: int
+    source_height: int
+    n_rois: int
+    roi_height: int
+    roi_width: int
     bundle_manifest: Mapping[str, Any] = field(repr=False)
     crop_manifest: Mapping[str, Any] = field(repr=False)
     raw_manifest: Mapping[str, Any] = field(repr=False)
     refined_manifest: Mapping[str, Any] = field(repr=False)
     raw_producer_evidence: Mapping[str, Any] = field(repr=False)
     refined_producer_evidence: Mapping[str, Any] = field(repr=False)
+    assignment_keypoint_collection: Mapping[str, Any] = field(repr=False)
     coordinate_binding: Mapping[str, Any] = field(repr=False)
     authority_digest: str
     active: bool
@@ -96,6 +108,55 @@ class BoundRecordingSubjectMaskCoordinateAuthority:
     @property
     def crop_run(self) -> Any:
         return self._root[self.crop_run_path]
+
+    @property
+    def instance_key_node(self) -> Any:
+        return self.refined_run["instance_key"]
+
+    @property
+    def source_crop_row_ids_node(self) -> Any:
+        return self.refined_run["source_crop_row_ids"]
+
+    @property
+    def source_acquisition_frame_index_node(self) -> Any:
+        return self.refined_run["source_acquisition_frame_index"]
+
+    @property
+    def frame_row_offsets_node(self) -> Any:
+        return self.refined_run["frame_row_offsets"]
+
+    @property
+    def source_crop_xywh_node(self) -> Any:
+        return self.refined_run["source_crop_xywh"]
+
+    def require_translation_only_offsets(self) -> np.ndarray:
+        """Return exact ROI origins after rejecting resized crop placement."""
+
+        placement = np.asarray(self.source_crop_xywh_node[:])
+        if placement.dtype != np.dtype("float32") or placement.shape != (
+            self.n_rois,
+            4,
+        ):
+            raise SubjectMaskBundleCoordinateAuthorityError(
+                "Bundle source_crop_xywh is not exact float32[N,4]."
+            )
+        if not np.isfinite(placement).all():
+            raise SubjectMaskBundleCoordinateAuthorityError(
+                "Bundle source_crop_xywh contains non-finite placement."
+            )
+        expected_size = np.asarray(
+            [self.roi_width, self.roi_height],
+            dtype=np.float32,
+        )
+        if not np.array_equal(
+            placement[:, 2:4],
+            np.broadcast_to(expected_size, (self.n_rois, 2)),
+        ):
+            raise SubjectMaskBundleCoordinateAuthorityError(
+                "Subject-shape translation requires source crop width/height "
+                "to equal the dense ROI raster extent exactly."
+            )
+        return np.asarray(placement[:, :2], dtype=np.float64)
 
 
 def _require_bundle_id(value: object) -> str:
@@ -289,6 +350,13 @@ def load_recording_subject_mask_coordinate_authority(
         )
 
     payload = manifest["payload"]
+    recording_identity = str(payload.get("recording_identity") or "")
+    if not recording_identity or recording_identity != str(
+        root.attrs.get("recording_id") or ""
+    ):
+        raise SubjectMaskBundleCoordinateAuthorityError(
+            "Bundle recording identity differs from the archive."
+        )
     cross = payload["cross_binding"]
     coordinate = cross.get("coordinate_contract")
     if not isinstance(coordinate, Mapping):
@@ -331,6 +399,38 @@ def load_recording_subject_mask_coordinate_authority(
         raise SubjectMaskBundleCoordinateAuthorityError(
             "Bound crop-v2 coordinate authority is invalid or stale."
         )
+    pixel_authority = crop_pixel_authority_from_manifest(
+        crop_manifest["payload"]["source_pixel_authority"]
+    )
+    dimensions = refined_manifest["payload"]["logical_schema"]["dimensions"]
+    expected_dimensions = {
+        "n_frames": pixel_authority.n_frames,
+        "n_rois": int(crop_run["instance_key"].shape[0]),
+    }
+    if any(
+        type(dimensions.get(name)) is not int
+        or dimensions[name] != expected
+        for name, expected in expected_dimensions.items()
+    ):
+        raise SubjectMaskBundleCoordinateAuthorityError(
+            "Refined core dimensions differ from the bound crop authority."
+        )
+    for name in ("roi_height", "roi_width"):
+        if type(dimensions.get(name)) is not int or dimensions[name] <= 0:
+            raise SubjectMaskBundleCoordinateAuthorityError(
+                f"Refined core {name} is not a positive exact integer."
+            )
+    if (
+        pixel_authority.recording_identity != recording_identity
+        or pixel_authority.recording_identity
+        != crop_manifest["payload"]["source_refined_snapshot"][
+            "recording_identity"
+        ]
+    ):
+        raise SubjectMaskBundleCoordinateAuthorityError(
+            "Crop pixel, refined-detection, bundle, and archive recording "
+            "identities disagree."
+        )
 
     raw_evidence = _load_core_producer_evidence(
         archive,
@@ -346,12 +446,17 @@ def load_recording_subject_mask_coordinate_authority(
         manifest=refined_manifest,
         kind="refined_dense_core",
     )
-    recording_identity = str(payload.get("recording_identity") or "")
-    if not recording_identity or recording_identity != str(
-        root.attrs.get("recording_id") or ""
-    ):
+    assignment_keypoints = build_recording_assignment_keypoint_collection(
+        refined_evidence,
+        source_run_path=refined_manifest["payload"]["source"]["run_path"],
+        n_rois=dimensions["n_rois"],
+    )
+    persisted_assignment = refined_manifest["payload"]["coordinate_dependencies"][
+        "document"
+    ]["assignment_keypoints"]
+    if assignment_keypoints != persisted_assignment:
         raise SubjectMaskBundleCoordinateAuthorityError(
-            "Bundle recording identity differs from the archive."
+            "Refined assignment-keypoint collection differs from retained workers."
         )
     authority_document = {
         "recording_identity": recording_identity,
@@ -363,6 +468,9 @@ def load_recording_subject_mask_coordinate_authority(
         "refined_producer_evidence_digest": canonical_json_sha256(
             refined_evidence
         ),
+        "assignment_keypoint_collection_digest": canonical_json_sha256(
+            assignment_keypoints
+        ),
         "coordinate_cross_binding_digest": canonical_json_sha256(coordinate),
     }
     return BoundRecordingSubjectMaskCoordinateAuthority(
@@ -372,12 +480,20 @@ def load_recording_subject_mask_coordinate_authority(
         crop_run_path=crop_path,
         raw_run_path=raw_path,
         refined_run_path=refined_path,
+        camera_identity=pixel_authority.camera_identity,
+        source_total_frames=pixel_authority.n_frames,
+        source_width=pixel_authority.source_width,
+        source_height=pixel_authority.source_height,
+        n_rois=dimensions["n_rois"],
+        roi_height=dimensions["roi_height"],
+        roi_width=dimensions["roi_width"],
         bundle_manifest=dict(manifest),
         crop_manifest=dict(crop_manifest),
         raw_manifest=dict(raw_manifest),
         refined_manifest=dict(refined_manifest),
         raw_producer_evidence=raw_evidence,
         refined_producer_evidence=refined_evidence,
+        assignment_keypoint_collection=assignment_keypoints,
         coordinate_binding=dict(coordinate),
         authority_digest=canonical_json_sha256(authority_document),
         active=active,

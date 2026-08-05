@@ -16,6 +16,7 @@ from fisheye.shared.subject_mask_attempt import (
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    build_recording_assignment_keypoint_collection,
     build_recording_subject_mask_source_receipt,
     build_subject_mask_worker_semantic_receipt,
     validate_recording_subject_mask_assembly_identity,
@@ -250,13 +251,39 @@ def test_recording_receipt_concatenates_real_worker_intervals() -> None:
     workers = []
     for worker_index, start in enumerate((0, 2), start=1):
         stop = start + 2
+        assignment = {
+            "assignment_keypoints_run": f"keypoints_clip_{worker_index}",
+            "assignment_keypoint_group": "refined_keypoints_runs",
+            "assignment_keypoint_contract": (
+                "subject_eyes_union_assignment_keypoints_v1"
+            ),
+            "assignment_keypoint_role": "eyes_union_lr_assignment",
+            "assignment_keypoint_selection": "explicit_fixture",
+            "assignment_keypoint_success_dataset": "usable_keypoints",
+            "assignment_keypoint_row_identity": {
+                "row_identity_check": "source_crop_row_ids_subset",
+                "rows_checked": 2,
+                "keypoint_has_source_crop_row_ids": True,
+                "mask_has_source_crop_row_ids": True,
+                "keypoint_rows_available": n_rows,
+                "keypoint_rows_selected": 2,
+                "keypoint_selection_min_row": start,
+                "keypoint_selection_max_row": stop - 1,
+            },
+            "assignment_keypoint_row_identity_check": (
+                "source_crop_row_ids_subset"
+            ),
+        }
         science = build_subject_mask_scientific_identity(
             stage_kind="refined_subject_mask",
             model={"policy": "v1"},
             crop={"clip": worker_index},
             pixels={"source": "raw_masks"},
             row_identity={"rows": 2},
-            inference_contract={"components": ["body", "eye"]},
+            inference_contract={
+                "components": ["body", "eye"],
+                "eye_assignment_contract": assignment,
+            },
         )
         attempt = build_subject_mask_attempt(
             scientific_identity=science,
@@ -329,6 +356,16 @@ def test_recording_receipt_concatenates_real_worker_intervals() -> None:
         )
         == producer_evidence
     )
+    assignment_collection = build_recording_assignment_keypoint_collection(
+        producer_evidence,
+        source_run_path="refined_subject_masks_runs/recording",
+        n_rois=4,
+    )
+    assert assignment_collection["mode"] == "exact_worker_partition"
+    assert [
+        worker["assignment"]["assignment_keypoints_run"]
+        for worker in assignment_collection["workers"]
+    ] == ["keypoints_clip_1", "keypoints_clip_2"]
     assert (
         validate_subject_mask_source_validation_receipt(
             source_receipt,

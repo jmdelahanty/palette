@@ -22,8 +22,11 @@ import zarr
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.subject_mask_worker_receipt import (
+    SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_ID,
+    SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_VERSION,
     SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID,
     SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION,
+    build_recording_assignment_keypoint_collection,
     validate_recording_subject_mask_assembly_identity,
 )
 from fisheye.shared.zarr.coordinate_manifest import (
@@ -101,7 +104,7 @@ SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE = float(np.finfo(np.float32).eps)
 SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_ID = (
     "palette.subject_mask_core.coordinate_dependencies"
 )
-SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION = 1
+SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION = 2
 
 
 class SubjectMaskCoreValidationMode(str, Enum):
@@ -252,6 +255,7 @@ def build_subject_mask_core_coordinate_dependencies(
     )
 
     raw_binding: dict[str, object] | None = None
+    assignment_keypoints: dict[str, object] | None = None
     if kind == "refined_dense_core":
         if not isinstance(raw_core_manifest, Mapping):
             raise ValueError("Refined coordinate cores require the exact raw core.")
@@ -296,6 +300,11 @@ def build_subject_mask_core_coordinate_dependencies(
             "manifest_payload_digest": raw_core_manifest.get("payload_digest"),
             "coordinate_catalog_digest": raw_coordinate.get("digest"),
         }
+        assignment_keypoints = build_recording_assignment_keypoint_collection(
+            validated_evidence,
+            source_run_path=source_run_path,
+            n_rois=int(n_rois),
+        )
     elif raw_core_manifest is not None:
         raise ValueError("Raw coordinate cores cannot bind another raw core.")
 
@@ -321,6 +330,7 @@ def build_subject_mask_core_coordinate_dependencies(
                 ),
             },
             "raw_core": raw_binding,
+            "assignment_keypoints": assignment_keypoints,
         }
     )
 
@@ -350,11 +360,17 @@ def _validate_core_coordinate_dependencies(
         or value.get("digest") != canonical_json_sha256(document)
     ):
         return ("subject-mask coordinate dependency envelope is stale",)
-    if set(document) != {"crop", "recording_assembly", "raw_core"}:
+    if set(document) != {
+        "crop",
+        "recording_assembly",
+        "raw_core",
+        "assignment_keypoints",
+    }:
         return ("subject-mask coordinate dependency document is not exact",)
     crop = document.get("crop")
     assembly = document.get("recording_assembly")
     raw = document.get("raw_core")
+    assignment_keypoints = document.get("assignment_keypoints")
     if not isinstance(crop, Mapping) or set(crop) != {
         "run_path",
         "manifest_payload_digest",
@@ -397,6 +413,8 @@ def _validate_core_coordinate_dependencies(
         errors.append("subject-mask assembly evidence identity mismatch")
     if kind == "raw_probability_uint8" and raw is not None:
         errors.append("raw coordinate core unexpectedly binds another raw core")
+    if kind == "raw_probability_uint8" and assignment_keypoints is not None:
+        errors.append("raw coordinate core unexpectedly binds assignment keypoints")
     if kind == "refined_dense_core":
         if not isinstance(raw, Mapping) or set(raw) != {
             "run_id",
@@ -413,6 +431,23 @@ def _validate_core_coordinate_dependencies(
                     _require_sha256(raw.get(field_name), name=f"raw {field_name}")
                 except ValueError as exc:
                     errors.append(str(exc))
+        if (
+            not isinstance(assignment_keypoints, Mapping)
+            or assignment_keypoints.get("schema_id")
+            != SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_ID
+            or assignment_keypoints.get("schema_version")
+            != SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_VERSION
+            or assignment_keypoints.get("mode")
+            not in {"not_used", "exact_worker_partition"}
+            or assignment_keypoints.get("row_policy")
+            != "ordered_contiguous_recording_crop_rows_v1"
+            or type(assignment_keypoints.get("n_rois")) is not int
+            or not isinstance(assignment_keypoints.get("workers"), list)
+            or not assignment_keypoints["workers"]
+        ):
+            errors.append(
+                "refined coordinate core assignment-keypoint dependency is invalid"
+            )
     return tuple(errors)
 
 
