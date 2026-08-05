@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import importlib.metadata
 import json
 from pathlib import Path
 import re
@@ -40,6 +41,9 @@ SCALE_MATCHED_RUNTIME_CLASSIFICATION = (
     "scale_matched_diagnostic_not_training_context"
 )
 ULTRALYTICS_NUMPY_LIST_ADAPTER = "ultralytics_numpy_list_predict_v1"
+POSE_PREPROCESSING_PROBE_SCHEMA_ID = "palette.pose_preprocessing_probe"
+POSE_PREPROCESSING_PROBE_SCHEMA_VERSION = 1
+POSE_PREPROCESSING_PROBE_PATTERN = "uint8_luma_mod_251_x3_y5_repeated_three_channels"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -238,6 +242,8 @@ class PoseModelInputContractBinding:
     model_stride: int
     input_mode: str
     ultralytics_version: str
+    runtime_ultralytics_versions: tuple[str, ...]
+    preprocessing_probe: Mapping[str, Any]
     runtime_profile: Mapping[str, Any]
     document: Mapping[str, Any]
 
@@ -292,16 +298,143 @@ class PoseModelInputContractBinding:
             "network_shape_hw": list(self.network_shape_hw),
             "model_stride": self.model_stride,
             "input_mode": self.input_mode,
-            "ultralytics_version": self.ultralytics_version,
+            "training_ultralytics_version": self.ultralytics_version,
+            "runtime_ultralytics_versions": list(
+                self.runtime_ultralytics_versions
+            ),
+            "preprocessing_probe": dict(self.preprocessing_probe),
             "runtime_profile": dict(self.runtime_profile),
         }
+
+
+def _runtime_versions(value: Any) -> tuple[str, ...]:
+    if type(value) is not list or not value:
+        _fail("Runtime Ultralytics versions must be one nonempty ordered list.")
+    versions = tuple(
+        _required_text(item, field="runtime Ultralytics version") for item in value
+    )
+    if versions != tuple(sorted(set(versions))):
+        _fail("Runtime Ultralytics versions must be unique and sorted.")
+    return versions
+
+
+def _validate_preprocessing_probe(
+    value: Any,
+    *,
+    source_shape_hw: tuple[int, int],
+    network_shape_hw: tuple[int, int],
+    model_stride: int,
+) -> dict[str, Any]:
+    probe = _exact_fields(
+        value,
+        fields={
+            "schema_id",
+            "schema_version",
+            "input_pattern",
+            "source_shape_hw",
+            "network_shape_hw",
+            "model_stride",
+            "output_shape_nchw",
+            "output_dtype",
+            "output_sha256",
+        },
+        field="runtime preprocessing probe",
+    )
+    expected = {
+        "schema_id": POSE_PREPROCESSING_PROBE_SCHEMA_ID,
+        "schema_version": POSE_PREPROCESSING_PROBE_SCHEMA_VERSION,
+        "input_pattern": POSE_PREPROCESSING_PROBE_PATTERN,
+        "source_shape_hw": list(source_shape_hw),
+        "network_shape_hw": list(network_shape_hw),
+        "model_stride": model_stride,
+        "output_shape_nchw": [1, 3, *network_shape_hw],
+        "output_dtype": "float32_little_endian",
+    }
+    if {key: probe[key] for key in expected} != expected:
+        _fail("Runtime preprocessing probe geometry or dtype is unsupported.")
+    _required_sha256(probe["output_sha256"], field="preprocessing probe digest")
+    return probe
+
+
+def build_pose_preprocessing_equivalence_probe(
+    *,
+    source_shape_hw: tuple[int, int],
+    network_shape_hw: tuple[int, int],
+    model_stride: int,
+) -> dict[str, Any]:
+    """Execute the maintained Ultralytics numpy-list preprocessing probe."""
+
+    import numpy as np
+    import torch
+    from types import SimpleNamespace
+    from ultralytics.engine.predictor import BasePredictor
+
+    source_height, source_width = source_shape_hw
+    network_height, network_width = network_shape_hw
+    y, x = np.indices((source_height, source_width))
+    luma = ((x * 3 + y * 5) % 251).astype(np.uint8)
+    image = np.repeat(luma[..., None], 3, axis=2)
+    predictor = BasePredictor(
+        overrides={"imgsz": max(network_shape_hw), "rect": False}
+    )
+    predictor.imgsz = (network_height, network_width)
+    predictor.model = SimpleNamespace(
+        stride=model_stride,
+        pt=True,
+        dynamic=False,
+        imx=False,
+        device=torch.device("cpu"),
+        fp16=False,
+    )
+    output = predictor.preprocess([image])
+    canonical = np.asarray(output.detach().cpu().numpy(), dtype="<f4")
+    return {
+        "schema_id": POSE_PREPROCESSING_PROBE_SCHEMA_ID,
+        "schema_version": POSE_PREPROCESSING_PROBE_SCHEMA_VERSION,
+        "input_pattern": POSE_PREPROCESSING_PROBE_PATTERN,
+        "source_shape_hw": [source_height, source_width],
+        "network_shape_hw": [network_height, network_width],
+        "model_stride": model_stride,
+        "output_shape_nchw": list(canonical.shape),
+        "output_dtype": "float32_little_endian",
+        "output_sha256": hashlib.sha256(canonical.tobytes(order="C")).hexdigest(),
+    }
+
+
+def validate_pose_runtime_compatibility(
+    binding: PoseModelInputContractBinding,
+) -> dict[str, Any]:
+    """Fail unless this runtime reproduces an explicitly reviewed adapter."""
+
+    runtime_version = importlib.metadata.version("ultralytics")
+    if runtime_version not in binding.runtime_ultralytics_versions:
+        _fail(
+            "Installed Ultralytics version is not an approved runtime: "
+            f"runtime={runtime_version!r}, "
+            f"approved={binding.runtime_ultralytics_versions!r}."
+        )
+    observed = build_pose_preprocessing_equivalence_probe(
+        source_shape_hw=binding.training_source_shape_hw,
+        network_shape_hw=binding.network_shape_hw,
+        model_stride=binding.model_stride,
+    )
+    if observed != dict(binding.preprocessing_probe):
+        _fail("Installed Ultralytics runtime failed the preprocessing equivalence probe.")
+    return {
+        "runtime_ultralytics_version": runtime_version,
+        "approved_runtime_ultralytics_versions": list(
+            binding.runtime_ultralytics_versions
+        ),
+        "preprocessing_probe": observed,
+    }
 
 
 def _validate_runtime_profile(
     value: Any,
     *,
+    source_shape_hw: tuple[int, int],
     network_shape_hw: tuple[int, int],
-    ultralytics_version: str,
+    model_stride: int,
 ) -> dict[str, Any]:
     profile = _exact_fields(
         value,
@@ -336,7 +469,8 @@ def _validate_runtime_profile(
         profile["submitted_to_network"],
         fields={
             "adapter",
-            "ultralytics_version",
+            "runtime_ultralytics_versions",
+            "preprocessing_probe",
             "imgsz_hw",
             "rect",
             "letterbox_interpolation",
@@ -346,16 +480,25 @@ def _validate_runtime_profile(
         },
         field="runtime_profile.submitted_to_network",
     )
-    if second != {
+    runtime_versions = _runtime_versions(second["runtime_ultralytics_versions"])
+    preprocessing_probe = _validate_preprocessing_probe(
+        second["preprocessing_probe"],
+        source_shape_hw=source_shape_hw,
+        network_shape_hw=network_shape_hw,
+        model_stride=model_stride,
+    )
+    expected_second = {
         "adapter": ULTRALYTICS_NUMPY_LIST_ADAPTER,
-        "ultralytics_version": ultralytics_version,
+        "runtime_ultralytics_versions": list(runtime_versions),
+        "preprocessing_probe": preprocessing_probe,
         "imgsz_hw": list(network_shape_hw),
         "rect": False,
         "letterbox_interpolation": "opencv_inter_linear",
         "letterbox_padding_value_uint8": 114,
         "luma_channel_policy": "uint8_luma_repeated_bgr_then_equivalent_rgb",
         "normalization": "uint8_divide_255_to_float",
-    }:
+    }
+    if second != expected_second:
         _fail("Runtime submitted-to-network preprocessing policy is unsupported.")
     if profile["result_coordinates"] != (
         "ultralytics_results_original_submitted_pixel_coordinates"
@@ -545,8 +688,19 @@ def load_pose_model_input_contract(
 
     runtime_profile = _validate_runtime_profile(
         payload["runtime_profile"],
+        source_shape_hw=source_shape,
         network_shape_hw=network_shape,
-        ultralytics_version=ultralytics_version,
+        model_stride=int(stride),
+    )
+    submitted = runtime_profile["submitted_to_network"]
+    runtime_versions = _runtime_versions(
+        submitted["runtime_ultralytics_versions"]
+    )
+    preprocessing_probe = _validate_preprocessing_probe(
+        submitted["preprocessing_probe"],
+        source_shape_hw=source_shape,
+        network_shape_hw=network_shape,
+        model_stride=int(stride),
     )
     return PoseModelInputContractBinding(
         path=path,
@@ -560,6 +714,8 @@ def load_pose_model_input_contract(
         model_stride=int(stride),
         input_mode=str(runtime_profile["input_mode"]),
         ultralytics_version=ultralytics_version,
+        runtime_ultralytics_versions=runtime_versions,
+        preprocessing_probe=preprocessing_probe,
         runtime_profile=runtime_profile,
         document=document,
     )
@@ -575,6 +731,7 @@ def build_historical_pose_model_input_contract(
     training_report_relative_path: Path,
     training_args_relative_path: Path,
     model_stride: int,
+    runtime_ultralytics_versions: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build a contract from audited immutable historical model artifacts."""
 
@@ -620,6 +777,28 @@ def build_historical_pose_model_input_contract(
     history = report.get("training_history")
     version = history.get("ultralytics_version") if isinstance(history, Mapping) else None
     version = _required_text(version, field="training report ultralytics_version")
+    builder_version = importlib.metadata.version("ultralytics")
+    if builder_version != version:
+        _fail(
+            "Historical preprocessing reference must be built under the training "
+            f"Ultralytics version: builder={builder_version!r}, training={version!r}."
+        )
+    approved_runtime_versions = tuple(
+        sorted(
+            {
+                version,
+                *(
+                    _required_text(item, field="runtime Ultralytics version")
+                    for item in runtime_ultralytics_versions
+                ),
+            }
+        )
+    )
+    preprocessing_probe = build_pose_preprocessing_equivalence_probe(
+        source_shape_hw=source_shape,
+        network_shape_hw=manifest_imgsz,
+        model_stride=model_stride,
+    )
     if type(model_stride) is not int or model_stride <= 0:
         _fail("model_stride must be a positive exact integer assertion.")
 
@@ -665,7 +844,8 @@ def build_historical_pose_model_input_contract(
             },
             "submitted_to_network": {
                 "adapter": ULTRALYTICS_NUMPY_LIST_ADAPTER,
-                "ultralytics_version": version,
+                "runtime_ultralytics_versions": list(approved_runtime_versions),
+                "preprocessing_probe": preprocessing_probe,
                 "imgsz_hw": list(manifest_imgsz),
                 "rect": False,
                 "letterbox_interpolation": "opencv_inter_linear",
@@ -693,11 +873,15 @@ __all__ = [
     "POSE_MODEL_INPUT_CONTRACT_FILENAME",
     "POSE_MODEL_INPUT_CONTRACT_SCHEMA_ID",
     "POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION",
+    "POSE_PREPROCESSING_PROBE_SCHEMA_ID",
+    "POSE_PREPROCESSING_PROBE_SCHEMA_VERSION",
     "PoseModelInputContractBinding",
     "PoseModelInputContractError",
     "PoseModelInputRuntimePlan",
     "SCALE_MATCHED_RUNTIME_CLASSIFICATION",
     "SCALE_MATCHED_RUNTIME_PROFILE_ID",
     "build_historical_pose_model_input_contract",
+    "build_pose_preprocessing_equivalence_probe",
     "load_pose_model_input_contract",
+    "validate_pose_runtime_compatibility",
 ]

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -26,7 +25,10 @@ from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.model_input_transform import (
     MODEL_INPUT_TRANSFORM_CHOICES,
 )
-from fisheye.shared.pose_model_input_contract import load_pose_model_input_contract
+from fisheye.shared.pose_model_input_contract import (
+    load_pose_model_input_contract,
+    validate_pose_runtime_compatibility,
+)
 from fisheye.shared.pose_inference_failure import (
     POSE_INFERENCE_FAILURE_SCHEMA_ID,
     POSE_INFERENCE_FAILURE_SCHEMA_VERSION,
@@ -240,13 +242,10 @@ def run_whole_recording_keypoint_terminal(
         raise ValueError(
             "Worker arguments disagree with the digest-bound model-input runtime plan."
         )
-    runtime_ultralytics_version = importlib.metadata.version("ultralytics")
-    if runtime_ultralytics_version != model_contract.ultralytics_version:
-        raise ValueError(
-            "Installed Ultralytics version disagrees with the model-input contract: "
-            f"runtime={runtime_ultralytics_version!r}, "
-            f"contract={model_contract.ultralytics_version!r}."
-        )
+    runtime_compatibility = validate_pose_runtime_compatibility(model_contract)
+    runtime_ultralytics_version = str(
+        runtime_compatibility["runtime_ultralytics_version"]
+    )
     scratch = _require_node_scratch(scratch_root) / f"keypoint_{uuid.uuid4().hex}"
     scratch.mkdir(parents=True, exist_ok=False)
     try:
@@ -319,7 +318,7 @@ def run_whole_recording_keypoint_terminal(
             or parameters.get("model_input_size") != int(model_input_size)
             or parameters.get("model_predict_rect") is not False
             or run.attrs.get("ultralytics_version")
-            != model_contract.ultralytics_version
+            != runtime_ultralytics_version
         ):
             raise RuntimeError(
                 "Terminal model-side preprocessing differs from its input contract."
@@ -385,6 +384,7 @@ def run_whole_recording_keypoint_terminal(
                 "model_input_stride": run.attrs.get("model_input_stride"),
                 "model_input_contract": model_contract.to_json(),
                 "model_input_runtime": runtime_plan.to_json(),
+                "runtime_compatibility": runtime_compatibility,
                 "confidence_threshold": run.attrs.get("confidence_threshold"),
                 "iou_threshold": run.attrs.get("iou_threshold"),
                 "max_detections_per_roi": run.attrs.get("max_detections"),
@@ -437,6 +437,7 @@ def run_whole_recording_keypoint_terminal(
                 "pose_model_schema_binding_digest": canonical_json_sha256(pose_binding),
                 "input_contract": model_contract.to_json(),
                 "input_runtime": runtime_plan.to_json(),
+                "runtime_compatibility": runtime_compatibility,
             },
             "preprocessing": preprocessing,
             "row_terminal_semantics": (

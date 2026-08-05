@@ -73,7 +73,15 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
     monkeypatch.setattr(
         mod, "load_pose_model_input_contract", lambda *_args, **_kwargs: contract
     )
-    monkeypatch.setattr(mod.importlib.metadata, "version", lambda _name: "8.3.214")
+    monkeypatch.setattr(
+        mod,
+        "validate_pose_runtime_compatibility",
+        lambda _binding: {
+            "runtime_ultralytics_version": "8.3.214",
+            "approved_runtime_ultralytics_versions": ["8.3.169", "8.3.214"],
+            "preprocessing_probe": {"output_sha256": "a" * 64},
+        },
+    )
 
     def fake_inference(**kwargs):
         assert kwargs["output"] != analysis

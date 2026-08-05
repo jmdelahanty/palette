@@ -43,8 +43,33 @@
         "letterbox_padding_value_uint8": 114,
         "luma_channel_policy": "uint8_luma_repeated_bgr_then_equivalent_rgb",
         "normalization": "uint8_divide_255_to_float",
+        "preprocessing_probe": {
+          "input_pattern": "uint8_luma_mod_251_x3_y5_repeated_three_channels",
+          "model_stride": 32,
+          "network_shape_hw": [
+            256,
+            256
+          ],
+          "output_dtype": "float32_little_endian",
+          "output_sha256": "d141f8e12a791d6b4b0c99ae3dfc24c6d6c11b63f9739df755d1d7bbe4b1d35a",
+          "output_shape_nchw": [
+            1,
+            3,
+            256,
+            256
+          ],
+          "schema_id": "palette.pose_preprocessing_probe",
+          "schema_version": 1,
+          "source_shape_hw": [
+            512,
+            512
+          ]
+        },
         "rect": false,
-        "ultralytics_version": "8.3.214"
+        "runtime_ultralytics_versions": [
+          "8.3.169",
+          "8.3.214"
+        ]
       }
     },
     "status": "complete",
@@ -66,7 +91,7 @@
       "ultralytics_version": "8.3.214"
     }
   },
-  "payload_digest": "96c23419266b0a8aef78f8303a746c85fbe32a12b31d443e127d97cdc0c1f2cb",
+  "payload_digest": "e0eac62db3ede00668103a3f12b496da1b56c85dcf772d11558a76da97d31a78",
   "schema_id": "palette.pose_model_input_contract",
   "schema_version": 1
 }

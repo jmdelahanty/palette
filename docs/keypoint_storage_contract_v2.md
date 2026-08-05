@@ -123,7 +123,9 @@ network `imgsz`, pixel contract, Ultralytics version, maximum model stride,
 training-time rectangular/multi-scale settings, runtime adapter,
 channel/normalization behavior, and result-coordinate space.
 Planner and worker both validate it; the worker also verifies the actual model
-selected through the registry and the installed Ultralytics version.
+selected through the registry. Runtime versions are separately allowlisted and
+must reproduce a digest-bound deterministic preprocessing tensor before pixels
+are staged; matching a version string alone is not sufficient.
 
 Historical model backfill uses
 `fisheye.utils.build_pose_model_input_contract`. It reconstructs only claims
@@ -135,7 +137,8 @@ For the first Batman diagnostic, the contract derives two distinct stages:
 
 1. center-pad the native 348x348 cache row with constant zero to the 512x512
    training source extent;
-2. submit that 512x512 luma-repeated image through Ultralytics `8.3.214` at
+2. submit that 512x512 luma-repeated image through the reviewed Ultralytics
+   runtime adapter at
    `imgsz=256`, `rect=false`, OpenCV linear letterbox preprocessing, and
    uint8-to-float `/255` normalization.
 
@@ -149,7 +152,10 @@ camera pixels.
 
 The raw-keypoint-v2 array schema is unchanged. The terminal receipt binds the
 input-contract file digest, payload digest, derived runtime plan, and observed
-runtime attributes before strict v2 finalization.
+runtime attributes and probe result before strict v2 finalization. The current
+historical model was trained with Ultralytics `8.3.214`; runtime versions
+`8.3.169` and `8.3.214` produce the exact reviewed probe SHA-256
+`d141f8e12a791d6b4b0c99ae3dfc24c6d6c11b63f9739df755d1d7bbe4b1d35a`.
 
 ### Terminal inference failure evidence
 

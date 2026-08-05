@@ -292,22 +292,34 @@ The audited current-model contract is
 `docs/diagnostics/batman_keypoint_v2_candidate_20260805/pose_model_input_contract.json`:
 
 - contract SHA-256:
-  `0321d6f258c36c01f785156eb86faa7012de295b0a7d61f0414ff7e71be4ec0c`;
+  `ce7159a95afd16c35054e08fd5a7978e147148419b2b502dc457869958d8f0c4`;
 - payload digest:
-  `96c23419266b0a8aef78f8303a746c85fbe32a12b31d443e127d97cdc0c1f2cb`;
+  `e0eac62db3ede00668103a3f12b496da1b56c85dcf772d11558a76da97d31a78`;
 - training source extent: 512x512;
 - network `imgsz`: 256x256;
 - loaded-model stride assertion: 32;
 - runtime input mode: `numpy-list`;
 - native submitted transform for Batman: 348x348 center-zero-pad to
   512x512, 82 pixels per side; and
-- model-side preprocessing: Ultralytics `8.3.214`, `rect=false`, OpenCV
+- training Ultralytics version: `8.3.214`;
+- reviewed runtime versions: `8.3.169` and `8.3.214`;
+- model-side preprocessing: `rect=false`, OpenCV
   linear resize, luma-repeated channels, and `/255` normalization.
 
 The contract also verifies the package's training-time `rect=false` and
 `multi_scale=false` settings. Runtime records the submitted extent separately
 from network `imgsz`; the Batman worker therefore passes `model_input_size=512`
 and `imgsz=256` rather than overloading one value with both meanings.
+
+The first `v006` submission failed closed before cache staging because the L4
+environment provides Ultralytics `8.3.169`, not training version `8.3.214`.
+Direct deterministic probes then showed both versions produce the identical
+reviewed float32 preprocessing tensor with SHA-256
+`d141f8e12a791d6b4b0c99ae3dfc24c6d6c11b63f9739df755d1d7bbe4b1d35a`.
+The contract now preserves the training version separately, explicitly
+allowlists both reviewed runtime versions, and requires that exact probe at the
+worker boundary. No package installation or unverified version fallback is
+used.
 
 This design avoids a public coordinate-schema change. Ultralytics returns
 coordinates in the submitted 512x512 extent after its internal resize, and the

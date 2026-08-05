@@ -52,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--training-args-relative-path", type=Path, default=Path("args.yaml")
     )
     parser.add_argument("--model-stride", type=int, required=True)
+    parser.add_argument(
+        "--runtime-ultralytics-version",
+        action="append",
+        default=[],
+        help=(
+            "Explicitly reviewed runtime version whose maintained preprocessing "
+            "must match the digest-bound reference; may be repeated."
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
@@ -71,6 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         training_report_relative_path=args.training_report_relative_path,
         training_args_relative_path=args.training_args_relative_path,
         model_stride=int(args.model_stride),
+        runtime_ultralytics_versions=tuple(args.runtime_ultralytics_version),
     )
     output = args.output.expanduser().resolve()
     if args.dry_run:

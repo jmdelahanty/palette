@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from fisheye.shared import pose_model_input_contract as mod
 from fisheye.shared.pose_model_input_contract import (
     PoseModelInputContractError,
     build_historical_pose_model_input_contract,
     load_pose_model_input_contract,
+    validate_pose_runtime_compatibility,
 )
 
 
@@ -94,6 +96,11 @@ def test_historical_contract_derives_scale_matched_runtime_plan(tmp_path: Path) 
     assert plan.network_imgsz == 256
     assert plan.input_mode == "numpy-list"
     assert plan.model_stride == 32
+    assert binding.runtime_ultralytics_versions == ("8.3.214",)
+    assert (
+        binding.preprocessing_probe["output_sha256"]
+        == "d141f8e12a791d6b4b0c99ae3dfc24c6d6c11b63f9739df755d1d7bbe4b1d35a"
+    )
     assert plan.classification == "scale_matched_diagnostic_not_training_context"
     assert plan.transform.to_attrs() == {
         "name": "pad_to_size",
@@ -156,3 +163,38 @@ def test_scale_matched_plan_rejects_native_roi_larger_than_training_source(
 
     with pytest.raises(PoseModelInputContractError, match="cannot shrink"):
         binding.plan_for_native_shape((640, 640))
+
+
+def test_runtime_requires_approved_version_and_exact_preprocessing_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, weights = _package(tmp_path)
+    document = build_historical_pose_model_input_contract(
+        set_id=SET_ID,
+        run_id=RUN_ID,
+        model_package_root=root,
+        weights_relative_path=Path("weights/best.pt"),
+        training_manifest_relative_path=Path("inputs/training.manifest.json"),
+        training_report_relative_path=Path("training_report.yaml"),
+        training_args_relative_path=Path("args.yaml"),
+        model_stride=32,
+        runtime_ultralytics_versions=("8.3.169",),
+    )
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps(document), encoding="utf-8")
+    binding = load_pose_model_input_contract(
+        contract,
+        model_path=weights,
+        expected_set_id=SET_ID,
+        expected_run_id=RUN_ID,
+        expected_model_sha256=document["payload"]["model"]["weights"]["sha256"],
+    )
+    assert binding.runtime_ultralytics_versions == ("8.3.169", "8.3.214")
+    assert validate_pose_runtime_compatibility(binding)[
+        "runtime_ultralytics_version"
+    ] == "8.3.214"
+
+    monkeypatch.setattr(mod.importlib.metadata, "version", lambda _name: "8.3.168")
+    with pytest.raises(PoseModelInputContractError, match="not an approved runtime"):
+        validate_pose_runtime_compatibility(binding)
