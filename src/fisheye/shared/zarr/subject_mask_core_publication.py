@@ -82,7 +82,7 @@ from fisheye.shared.zarr_run_completion import (
 
 SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID = "palette.subject_mask_core.run_manifest"
 SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION = 2
-SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 3
+SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 4
 SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR = "source_validation_receipt.json"
 SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_ID = "palette.subject_mask_core.shadow_publication"
@@ -104,7 +104,7 @@ SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE = float(np.finfo(np.float32).eps)
 SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_ID = (
     "palette.subject_mask_core.coordinate_dependencies"
 )
-SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION = 2
+SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION = 3
 
 
 class SubjectMaskCoreValidationMode(str, Enum):
@@ -161,6 +161,129 @@ def _coordinate_dependency_envelope(
     }
 
 
+def _worker_array_reference_matches(
+    record: Any,
+    value: Any,
+) -> bool:
+    if not isinstance(record, Mapping) or set(record) != {
+        "shape",
+        "dtype",
+        "sha256",
+    }:
+        return False
+    array = np.ascontiguousarray(np.asarray(value))
+    return (
+        record.get("shape") == [int(item) for item in array.shape]
+        and record.get("dtype") == str(array.dtype)
+        and record.get("sha256") == hashlib.sha256(array.view(np.uint8)).hexdigest()
+    )
+
+
+def _validate_worker_crop_coordinate_bindings(
+    producer_evidence: Mapping[str, Any],
+    *,
+    crop_run_path: str,
+    crop_manifest: Mapping[str, Any],
+    source_crop_arrays: Mapping[str, Any],
+) -> None:
+    """Join every worker's narrow row claims to the exact crop-v2 authority."""
+
+    crop_payload = crop_manifest["payload"]
+    crop_run_id = str(crop_payload["run_id"])
+    normalized_path = str(crop_run_path).strip().strip("/")
+    coverage = producer_evidence.get("work_unit_coverage")
+    units = coverage.get("units") if isinstance(coverage, Mapping) else None
+    if not isinstance(units, list):
+        raise ValueError("Worker crop joins require authoritative work-unit coverage.")
+    nonempty_units = [
+        unit
+        for unit in units
+        if isinstance(unit, Mapping) and unit.get("row_stop") != unit.get("row_start")
+    ]
+    workers = producer_evidence["workers"]
+    if len(nonempty_units) != len(workers):
+        raise ValueError("Worker crop joins do not match the nonempty work units.")
+    offsets = np.asarray(source_crop_arrays["frame_row_offsets"][:], dtype=np.int64)
+    for worker, unit in zip(workers, nonempty_units, strict=True):
+        interval = worker["global_row_interval"]
+        start = int(interval["start_row"])
+        stop = int(interval["stop_row"])
+        frame_start = int(unit["frame_start"])
+        frame_stop = int(unit["frame_stop"])
+        if int(offsets[frame_start]) != start or int(offsets[frame_stop]) != stop:
+            raise ValueError(
+                "Worker frame/row interval differs from crop-v2 frame offsets."
+            )
+        science_payload = worker["scientific_identity"]["payload"]
+        stage = science_payload["stage_kind"]
+        row_identity = science_payload["row_identity"]
+        row_arrays = row_identity["arrays"]
+        expected_rows = np.arange(start, stop, dtype=np.int64)
+        expected_values = {
+            "source_crop_row_ids": expected_rows,
+            "instance_key": np.ascontiguousarray(
+                np.asarray(source_crop_arrays["instance_key"][start:stop])
+            ),
+            "source_acquisition_frame_index": np.ascontiguousarray(
+                np.asarray(
+                    source_crop_arrays["source_acquisition_frame_index"][start:stop]
+                )
+            ),
+        }
+        acquisition_frames = expected_values["source_acquisition_frame_index"]
+        if np.any(acquisition_frames < frame_start) or np.any(
+            acquisition_frames >= frame_stop
+        ):
+            raise ValueError(
+                "Worker acquisition frames fall outside its authoritative window."
+            )
+        if stage == "refined_subject_mask":
+            expected_values["source_crop_xywh"] = np.ascontiguousarray(
+                np.asarray(source_crop_arrays["source_crop_xywh"][start:stop])
+            )
+        for name, expected in expected_values.items():
+            if not _worker_array_reference_matches(row_arrays.get(name), expected):
+                raise ValueError(
+                    f"Worker {name!r} evidence differs from its exact crop-v2 slice."
+                )
+
+        crop = science_payload["crop"]
+        if crop.get("run_id") != crop_run_id:
+            raise ValueError("Worker crop run differs from the crop-v2 authority.")
+        xywh = np.ascontiguousarray(
+            np.asarray(source_crop_arrays["source_crop_xywh"][start:stop])
+        )
+        if stage == "raw_subject_mask":
+            manifest_ref = crop.get("run_manifest")
+            expected_ref = {
+                "schema_id": crop_manifest.get("schema_id"),
+                "schema_version": crop_manifest.get("schema_version"),
+                "payload_digest": crop_manifest.get("payload_digest"),
+            }
+            if (
+                crop.get("run_group_path") != normalized_path
+                or manifest_ref != expected_ref
+            ):
+                raise ValueError(
+                    "Raw worker does not bind the exact crop-v2 manifest and path."
+                )
+            coordinates = np.ascontiguousarray(xywh[:, :2].astype(np.int32))
+            if not _worker_array_reference_matches(
+                crop.get("roi_coordinates_full"), coordinates
+            ):
+                raise ValueError(
+                    "Raw worker ROI placement differs from its crop-v2 slice."
+                )
+        roi_shape = crop.get("roi_shape_hw")
+        if (
+            not isinstance(roi_shape, list)
+            or len(roi_shape) != 2
+            or np.any(xywh[:, 2] != roi_shape[1])
+            or np.any(xywh[:, 3] != roi_shape[0])
+        ):
+            raise ValueError("Worker ROI shape differs from crop-v2 placement.")
+
+
 def build_subject_mask_core_coordinate_dependencies(
     *,
     kind: str,
@@ -187,10 +310,19 @@ def build_subject_mask_core_coordinate_dependencies(
         raise ValueError("Subject-mask recording cores require crop manifest v2.")
     crop_coordinate = crop_payload.get("coordinate_contract")
     crop_logical = crop_payload.get("logical_content")
-    if not isinstance(crop_coordinate, Mapping) or not isinstance(
-        crop_logical, Mapping
+    crop_schema = crop_payload.get("logical_schema")
+    crop_dimensions = (
+        crop_schema.get("dimensions") if isinstance(crop_schema, Mapping) else None
+    )
+    if (
+        not isinstance(crop_coordinate, Mapping)
+        or not isinstance(crop_logical, Mapping)
+        or not isinstance(crop_dimensions, Mapping)
     ):
         raise ValueError("Crop coordinate or logical-content authority is absent.")
+    crop_n_frames = crop_dimensions.get("n_frames")
+    if type(crop_n_frames) is not int or crop_n_frames <= 0:
+        raise ValueError("Crop coordinate authority has an invalid frame domain.")
     crop_content_document = crop_logical.get("document")
     crop_content_arrays = (
         crop_content_document.get("arrays")
@@ -233,6 +365,9 @@ def build_subject_mask_core_coordinate_dependencies(
     if (
         source_validation_receipt.get("schema_version")
         != SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION
+        or not isinstance(receipt_payload, Mapping)
+        or source_validation_receipt.get("payload_digest")
+        != canonical_json_sha256(receipt_payload)
         or not isinstance(producer_evidence, Mapping)
     ):
         raise ValueError(
@@ -242,9 +377,7 @@ def build_subject_mask_core_coordinate_dependencies(
     stage_kind = (
         "raw_subject_mask"
         if kind == "raw_probability_uint8"
-        else "refined_subject_mask"
-        if kind == "refined_dense_core"
-        else ""
+        else "refined_subject_mask" if kind == "refined_dense_core" else ""
     )
     validated_evidence = validate_recording_subject_mask_assembly_identity(
         producer_evidence,
@@ -252,6 +385,19 @@ def build_subject_mask_core_coordinate_dependencies(
         stage_kind=stage_kind,
         source_run_path=source_run_path,
         n_rois=int(n_rois),
+        n_frames=crop_n_frames,
+    )
+    if validated_evidence.get("schema_version") != (
+        SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "Coordinate-aware subject-mask cores require recording assembly v3."
+        )
+    _validate_worker_crop_coordinate_bindings(
+        validated_evidence,
+        crop_run_path=crop_path,
+        crop_manifest=crop_manifest,
+        source_crop_arrays=source_crop_arrays,
     )
 
     raw_binding: dict[str, object] | None = None
@@ -280,6 +426,12 @@ def build_subject_mask_core_coordinate_dependencies(
             if isinstance(raw_dependency_document, Mapping)
             else None
         )
+        raw_recording_assembly = (
+            raw_dependency_document.get("recording_assembly")
+            if isinstance(raw_dependency_document, Mapping)
+            else None
+        )
+        refined_raw_source = validated_evidence.get("source_producer_binding")
         if (
             raw_core_manifest.get("schema_id")
             != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID
@@ -291,8 +443,14 @@ def build_subject_mask_core_coordinate_dependencies(
             != canonical_json_sha256(raw_payload)
             or not isinstance(raw_coordinate, Mapping)
             or not isinstance(raw_crop, Mapping)
+            or not isinstance(raw_recording_assembly, Mapping)
+            or not isinstance(refined_raw_source, Mapping)
             or raw_crop.get("manifest_payload_digest")
             != crop_manifest.get("payload_digest")
+            or refined_raw_source.get("digest")
+            != raw_recording_assembly.get("producer_evidence_digest")
+            or refined_raw_source.get("source_run_path")
+            != raw_payload.get("source", {}).get("run_path")
         ):
             raise ValueError("Refined coordinate core binds an invalid raw core.")
         raw_binding = {
@@ -304,6 +462,7 @@ def build_subject_mask_core_coordinate_dependencies(
             validated_evidence,
             source_run_path=source_run_path,
             n_rois=int(n_rois),
+            n_frames=crop_n_frames,
         )
     elif raw_core_manifest is not None:
         raise ValueError("Raw coordinate cores cannot bind another raw core.")
@@ -325,9 +484,7 @@ def build_subject_mask_core_coordinate_dependencies(
                 "producer_evidence_schema_version": validated_evidence.get(
                     "schema_version"
                 ),
-                "producer_evidence_digest": canonical_json_sha256(
-                    validated_evidence
-                ),
+                "producer_evidence_digest": canonical_json_sha256(validated_evidence),
             },
             "raw_core": raw_binding,
             "assignment_keypoints": assignment_keypoints,
@@ -1049,7 +1206,10 @@ def validate_subject_mask_core_run_manifest(
         "write_receipt",
         "logical_content",
     }
-    if manifest_schema_version == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+    if (
+        manifest_schema_version
+        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
         expected_payload.update({"coordinate_contract", "coordinate_dependencies"})
     if set(payload) != expected_payload:
         errors.append("subject-mask core manifest payload has unexpected fields")
@@ -1146,7 +1306,10 @@ def validate_subject_mask_core_run_manifest(
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
 
-    if manifest_schema_version == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+    if (
+        manifest_schema_version
+        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
         if schema is None:
             errors.append("subject-mask coordinate catalog lacks a resolved schema")
         else:
@@ -1672,13 +1835,14 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "document": content,
         },
     }
-    if manifest_schema_version == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+    if (
+        manifest_schema_version
+        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
         assert coordinate_contract is not None
         assert normalized_coordinate_dependencies is not None
         manifest_payload["coordinate_contract"] = coordinate_contract
-        manifest_payload["coordinate_dependencies"] = (
-            normalized_coordinate_dependencies
-        )
+        manifest_payload["coordinate_dependencies"] = normalized_coordinate_dependencies
     manifest = {
         "schema_id": SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID,
         "schema_version": manifest_schema_version,

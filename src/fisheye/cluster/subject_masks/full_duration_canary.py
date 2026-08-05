@@ -1303,6 +1303,19 @@ def finalize_canary(
             local_output_root=work / "snapshots",
             quality_scratch_root=work / "quality_scratch",
             activate=False,
+            expected_work_units=[
+                {
+                    "work_unit_id": (f"{plan['workflow_id']}:{window['window_id']}"),
+                    "work_unit_index": int(window["window_index"]),
+                    "source_clip_id": str(window["window_id"]),
+                    "source_clip_index": int(window["window_index"]),
+                    "frame_start": int(window["start_frame"]),
+                    "frame_stop": int(window["end_frame"]),
+                    "row_start": int(window["row_start"]),
+                    "row_stop": int(window["row_stop"]),
+                }
+                for window in plan["windows"]
+            ],
         )
         target = open_zarr_root(Path(plan["references"]["analysis_zarr"]), mode="r")
         if "subject_mask_authority" in target.attrs:

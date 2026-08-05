@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
@@ -114,7 +115,7 @@ def _fixture() -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         "source_acquisition_frame_index": frames,
         "frame_row_offsets": derive_subject_mask_frame_row_offsets(frames, n_frames=4),
         "source_crop_xywh": np.asarray(
-            [[0, 0, 8, 8], [1, 0, 8, 8], [0, 1, 8, 8], [1, 1, 8, 8]],
+            [[16, 12, 8, 8], [66, 12, 8, 8], [46, 52, 8, 8], [21, 56, 8, 8]],
             dtype=np.float32,
         ),
         "available_channels": np.ones((4,), dtype=bool),
@@ -164,17 +165,65 @@ def _coordinate_crop_manifest() -> dict[str, object]:
     )
 
 
+def _collection_partition_contract() -> dict[str, object]:
+    payload = {
+        "role": "complete_collection_partition",
+        "coverage_semantics": (
+            "exact_complete_crop_rows_for_acquisition_frame_window_v1"
+        ),
+        "work_package_id": "d" * 64,
+        "collection": {
+            "source_collection_id": "pytest_collection",
+            "source_collection_path": "/pytest/collection.json",
+            "source_clip_id": "whole_recording",
+            "source_clip_index": 0,
+            "source_work_unit_id": "pytest_collection:whole_recording",
+            "source_shard_id": "whole_recording",
+        },
+        "frame_window": {
+            "schema_id": "palette.acquisition_video_frame_window",
+            "schema_version": 1,
+            "recording_identity": "crop_manifest_test",
+            "camera_identity": "cam2010095",
+            "clip_id": "whole_recording",
+            "actual_start_frame": 0,
+            "end_frame_exclusive": 4,
+            "frame_count": 4,
+            "clip_index_document_sha256": "e" * 64,
+            "clip_video_sha256": "f" * 64,
+        },
+        "crop_rows": {
+            "start": 0,
+            "stop": 4,
+            "count": 4,
+            "source_crop_total_rows": 4,
+        },
+        "validation": {
+            "work_package_opened_and_content_verified": True,
+            "row_interval_contiguous": True,
+            "frame_offset_coverage_exact": True,
+            "acquisition_frames_within_window": True,
+        },
+    }
+    return {
+        "schema_id": "palette.subject_mask.complete_collection_partition",
+        "schema_version": 1,
+        "payload": payload,
+        "payload_digest": canonical_json_sha256(payload),
+    }
+
+
 def _recording_documents(
     *,
     kind: str,
     arrays: dict[str, np.ndarray],
+    source_producer_evidence: dict[str, object] | None = None,
+    source_producer_run_path: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object], str]:
     raw = kind == "raw_probability_uint8"
     stage = "raw_subject_mask" if raw else "refined_subject_mask"
     schema = (
-        RAW_SUBJECT_MASK_UINT8_SCHEMA_V1
-        if raw
-        else REFINED_SUBJECT_MASK_CORE_SCHEMA_V1
+        RAW_SUBJECT_MASK_UINT8_SCHEMA_V1 if raw else REFINED_SUBJECT_MASK_CORE_SCHEMA_V1
     )
     worker_paths = (
         RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS
@@ -191,14 +240,158 @@ def _recording_documents(
         if raw
         else "refined_subject_mask_shard_collections/recording_001"
     )
-    science = build_subject_mask_scientific_identity(
-        stage_kind=stage,
-        model={"artifact_sha256": "a" * 64},
-        crop={"roi_shape_hw": [8, 8], "storage_mode": "geometry_only"},
-        pixels={"profile": "crop_pixels_v1"},
-        row_identity={"rows": 4},
-        inference_contract={"components": list(_components().labels)},
-    )
+
+    def array_reference(value: np.ndarray) -> dict[str, object]:
+        return {
+            "shape": [int(item) for item in value.shape],
+            "dtype": str(value.dtype),
+            "sha256": hashlib.sha256(
+                np.ascontiguousarray(value).view(np.uint8)
+            ).hexdigest(),
+        }
+
+    crop_manifest = _coordinate_crop_manifest()
+    if raw:
+        science = build_subject_mask_scientific_identity(
+            stage_kind=stage,
+            model={
+                "artifact_role": "subject_mask_checkpoint",
+                "artifact_sha256": "a" * 64,
+                "artifact_size_bytes": 1024,
+                "registry_set_id": "pytest_models",
+                "registry_run_id": "pytest_raw",
+                "label_schema_id": "pytest_subject_masks",
+            },
+            crop={
+                "run_id": "crop_coordinate_shadow",
+                "run_group_path": "crop_runs/crop_coordinate_shadow",
+                "run_manifest": {
+                    "schema_id": crop_manifest["schema_id"],
+                    "schema_version": crop_manifest["schema_version"],
+                    "payload_digest": crop_manifest["payload_digest"],
+                },
+                "storage_mode": "geometry_only",
+                "roi_shape_hw": [8, 8],
+                "roi_coordinates_full": array_reference(
+                    arrays["source_crop_xywh"][:, :2].astype(np.int32)
+                ),
+                "source_collection_id": "pytest_collection",
+                "source_clip_id": "whole_recording",
+                "source_clip_index": 0,
+                "source_work_unit_id": "pytest_collection:whole_recording",
+                "source_shard_id": "whole_recording",
+                "collection_partition_contract": _collection_partition_contract(),
+            },
+            pixels={
+                "profile": "pytest_pixels",
+                "decoded_shape": [4, 8, 8],
+                "decoded_dtype": "uint8",
+                "decoded_order": "C",
+                "decoded_pixels_sha256": "b" * 64,
+                "declared_pixels_sha256": "b" * 64,
+                "cache_key": "pytest_cache",
+                "pixel_materialization_id": "pytest_pixels",
+                "pixel_contract": {"schema": "palette_roi_pixel_contract_v1"},
+                "work_package_role": "complete_collection_partition",
+            },
+            row_identity={
+                "row_count": 4,
+                "arrays": {
+                    name: array_reference(arrays[name])
+                    for name in (
+                        "source_crop_row_ids",
+                        "instance_key",
+                        "source_acquisition_frame_index",
+                    )
+                },
+            },
+            inference_contract={
+                "segmenter": "unet",
+                "label_schema_id": "pytest_subject_masks",
+                "mask_labels": list(_components().labels),
+                "model_input_transform": {
+                    "name": "identity",
+                    "native_shape_hw": [8, 8],
+                    "model_shape_hw": [8, 8],
+                    "pad_top": 0,
+                    "pad_bottom": 0,
+                    "pad_left": 0,
+                    "pad_right": 0,
+                    "coordinate_mapping": (
+                        "native_xy = model_xy - [pad_left, pad_top]"
+                    ),
+                },
+                "probability_semantics": "sigmoid_multilabel_logits",
+                "probability_dtype": "uint8",
+                "probability_encoding": "linear_uint8_0_255",
+                "mask_probability_threshold": 0.5,
+                "overlap_policy": "independent_sigmoid",
+            },
+        )
+    else:
+        assert source_producer_evidence is not None
+        raw_worker = source_producer_evidence["workers"][0]
+        raw_receipt = raw_worker["worker_receipt"]
+        input_binding = {
+            "run_path": raw_worker["run_path"],
+            "run_manifest": None,
+            "scientific_identity_digest": raw_worker["scientific_identity_digest"],
+            "worker_semantic_receipt_binding": {
+                "schema_id": raw_receipt["schema_id"],
+                "schema_version": raw_receipt["schema_version"],
+                "payload_digest": raw_receipt["payload_digest"],
+                "relative_path": "pytest/raw_worker_semantic_receipt.json",
+                "document_sha256": canonical_json_sha256(raw_receipt),
+                "storage": "strict_json_sidecar_v1",
+            },
+        }
+        method = "smart_finalize_subject_masks_v1"
+        science = build_subject_mask_scientific_identity(
+            stage_kind=stage,
+            model={
+                "role": "deterministic_refinement_policy",
+                "method": method,
+                "source_input_binding": input_binding,
+            },
+            crop={
+                "run_id": "crop_coordinate_shadow",
+                "source_crop_snapshot": {},
+                "roi_shape_hw": [8, 8],
+            },
+            pixels={
+                "semantic_input": "raw_subject_mask_surface",
+                "surface_kind": "probability",
+                "surface_path": "mask_probs_roi",
+                "probability_encoding": "linear_uint8_0_255",
+                "source_input_binding": input_binding,
+            },
+            row_identity={
+                "row_count": 4,
+                "arrays": {
+                    name: array_reference(arrays[name])
+                    for name in (
+                        "source_crop_row_ids",
+                        "instance_key",
+                        "source_acquisition_frame_index",
+                        "source_crop_xywh",
+                        "available_channels",
+                    )
+                },
+            },
+            inference_contract={
+                "method": method,
+                "finalization_semantics": ("smart_probability_to_refined_candidate"),
+                "output_component_order": list(_components().labels),
+                "component_sources_and_policies": {
+                    label: {"source": "pytest"} for label in _components().labels
+                },
+                "eye_assignment_contract": None,
+                "authoritative_output": "dense_uint8_masks_roi",
+                "derived_cache_policy": (
+                    "bitpacked_rle_metrics_contours_non_authoritative"
+                ),
+            },
+        )
     attempt = build_subject_mask_attempt(
         scientific_identity=science,
         run_path=worker_path,
@@ -240,6 +433,20 @@ def _recording_documents(
             },
         ),
         identity_unit_rows=2,
+        expected_work_units=(
+            {
+                "work_unit_id": "pytest_collection:whole_recording",
+                "work_unit_index": 0,
+                "source_clip_id": "whole_recording",
+                "source_clip_index": 0,
+                "frame_start": 0,
+                "frame_stop": 4,
+                "row_start": 0,
+                "row_stop": 4,
+            },
+        ),
+        source_producer_evidence=source_producer_evidence,
+        source_producer_run_path=source_producer_run_path,
     )
     return manifest, source_receipt, source_path
 
@@ -335,7 +542,7 @@ def test_subject_mask_core_publication_round_trip(
         assert parent.attrs.get(selector) is None
 
 
-def test_coordinate_core_v3_binds_crop_raw_refined_and_worker_evidence(
+def test_coordinate_core_v4_binds_crop_raw_refined_and_worker_evidence(
     tmp_path: object,
 ) -> None:
     raw, refined_with_crop = _fixture()
@@ -354,14 +561,56 @@ def test_coordinate_core_v3_binds_crop_raw_refined_and_worker_evidence(
         source_validation_receipt=raw_receipt,
         n_rois=4,
     )
+    tampered_raw_receipt = deepcopy(raw_receipt)
+    tampered_worker = tampered_raw_receipt["payload"]["producer_evidence"]["workers"][0]
+    tampered_science = tampered_worker["scientific_identity"]
+    tampered_science["payload"]["row_identity"]["arrays"]["instance_key"]["sha256"] = (
+        "0" * 64
+    )
+    tampered_science["digest"] = canonical_json_sha256(tampered_science["payload"])
+    tampered_attempt = tampered_worker["attempt"]
+    tampered_attempt["payload"]["scientific_identity_digest"] = tampered_science[
+        "digest"
+    ]
+    tampered_attempt["payload_digest"] = canonical_json_sha256(
+        tampered_attempt["payload"]
+    )
+    tampered_semantic_receipt = tampered_worker["worker_receipt"]
+    tampered_semantic_receipt["payload"]["scientific_identity_digest"] = (
+        tampered_science["digest"]
+    )
+    tampered_semantic_receipt["payload"]["attempt_payload_digest"] = tampered_attempt[
+        "payload_digest"
+    ]
+    tampered_semantic_receipt["payload_digest"] = canonical_json_sha256(
+        tampered_semantic_receipt["payload"]
+    )
+    tampered_worker["scientific_identity_digest"] = tampered_science["digest"]
+    tampered_worker["attempt_payload_digest"] = tampered_attempt["payload_digest"]
+    tampered_worker["worker_receipt_payload_digest"] = tampered_semantic_receipt[
+        "payload_digest"
+    ]
+    tampered_raw_receipt["payload_digest"] = canonical_json_sha256(
+        tampered_raw_receipt["payload"]
+    )
+    with pytest.raises(ValueError, match="exact crop-v2 slice"):
+        build_subject_mask_core_coordinate_dependencies(
+            kind="raw_probability_uint8",
+            crop_run_path="crop_runs/crop_coordinate_shadow",
+            crop_manifest=crop_manifest,
+            source_crop_arrays=_crop_manifest_arrays(),
+            source_run_path=raw_source_path,
+            source_validation_receipt=tampered_raw_receipt,
+            n_rois=4,
+        )
     raw_publication = publish_selector_ineligible_subject_mask_core_snapshot(
         raw,
         source_crop_arrays=crop_arrays,  # type: ignore[arg-type]
         source_manifest=raw_source,
         n_frames=4,
         components=_components(),
-        destination=tmp_path / "raw_coordinate_v3.zarr",  # type: ignore[operator]
-        run_id="raw_coordinate_v3",
+        destination=tmp_path / "raw_coordinate_v4.zarr",  # type: ignore[operator]
+        run_id="raw_coordinate_v4",
         kind="raw_probability_uint8",
         source_run_path=raw_source_path,
         threshold=0.5,
@@ -374,11 +623,36 @@ def test_coordinate_core_v3_binds_crop_raw_refined_and_worker_evidence(
         == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
     )
     assert validate_subject_mask_core_run_manifest(raw_publication.manifest) == ()
+    stale_v3 = deepcopy(raw_publication.manifest)
+    stale_v3["schema_version"] = 3
+    assert "subject-mask core manifest envelope identity mismatch" in (
+        validate_subject_mask_core_run_manifest(stale_v3)
+    )
 
     refined_source, refined_receipt, refined_source_path = _recording_documents(
         kind="refined_dense_core",
         arrays=refined_with_crop,
+        source_producer_evidence=raw_receipt["payload"]["producer_evidence"],
+        source_producer_run_path=raw_source_path,
     )
+    tampered_refined_receipt = deepcopy(refined_receipt)
+    tampered_refined_receipt["payload"]["producer_evidence"]["source_producer_binding"][
+        "digest"
+    ] = ("0" * 64)
+    tampered_refined_receipt["payload_digest"] = canonical_json_sha256(
+        tampered_refined_receipt["payload"]
+    )
+    with pytest.raises(ValueError, match="invalid raw core"):
+        build_subject_mask_core_coordinate_dependencies(
+            kind="refined_dense_core",
+            crop_run_path="crop_runs/crop_coordinate_shadow",
+            crop_manifest=crop_manifest,
+            source_crop_arrays=_crop_manifest_arrays(),
+            source_run_path=refined_source_path,
+            source_validation_receipt=tampered_refined_receipt,
+            n_rois=4,
+            raw_core_manifest=raw_publication.manifest,
+        )
     refined_dependencies = build_subject_mask_core_coordinate_dependencies(
         kind="refined_dense_core",
         crop_run_path="crop_runs/crop_coordinate_shadow",
@@ -395,8 +669,8 @@ def test_coordinate_core_v3_binds_crop_raw_refined_and_worker_evidence(
         source_manifest=refined_source,
         n_frames=4,
         components=_components(),
-        destination=tmp_path / "refined_coordinate_v3.zarr",  # type: ignore[operator]
-        run_id="refined_coordinate_v3",
+        destination=tmp_path / "refined_coordinate_v4.zarr",  # type: ignore[operator]
+        run_id="refined_coordinate_v4",
         kind="refined_dense_core",
         source_run_path=refined_source_path,
         validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
@@ -407,12 +681,18 @@ def test_coordinate_core_v3_binds_crop_raw_refined_and_worker_evidence(
     assert refined_payload["coordinate_contract"]["document"] == (
         REFINED_SUBJECT_MASK_CORE_SCHEMA_V1.coordinate_contract_manifest()
     )
-    assert refined_payload["coordinate_dependencies"]["document"]["raw_core"][
-        "manifest_payload_digest"
-    ] == raw_publication.manifest["payload_digest"]
-    assert refined_payload["coordinate_dependencies"]["document"][
-        "assignment_keypoints"
-    ]["mode"] == "not_used"
+    assert (
+        refined_payload["coordinate_dependencies"]["document"]["raw_core"][
+            "manifest_payload_digest"
+        ]
+        == raw_publication.manifest["payload_digest"]
+    )
+    assert (
+        refined_payload["coordinate_dependencies"]["document"]["assignment_keypoints"][
+            "mode"
+        ]
+        == "not_used"
+    )
     assert validate_subject_mask_core_run_manifest(refined_publication.manifest) == ()
 
     tampered = deepcopy(refined_publication.manifest)

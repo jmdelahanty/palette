@@ -1514,6 +1514,9 @@ def _subject_mask_scientific_documents(
         "source_clip_index": args.source_clip_index,
         "source_work_unit_id": args.source_work_unit_id,
         "source_shard_id": args.source_shard_id,
+        "collection_partition_contract": work_package_attrs.get(
+            "collection_partition_contract"
+        ),
     }
     pixels = {
         "profile": (

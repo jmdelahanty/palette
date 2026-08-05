@@ -3045,6 +3045,7 @@ def test_production_proof_finalizer_binds_draft_audit_and_stays_inactive(
         pixels={"source": "synthetic"},
         row_identity={"row_count": 2},
         inference_contract={"method": "pytest"},
+        schema_version=1,
     )
     monkeypatch.setattr(
         mod,

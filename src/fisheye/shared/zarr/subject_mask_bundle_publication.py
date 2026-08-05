@@ -10,6 +10,7 @@ that bundle through a single root authority envelope.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -22,6 +23,9 @@ import zarr
 from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
+)
+from fisheye.shared.subject_mask_worker_receipt import (
+    validate_recording_subject_mask_refined_source_join,
 )
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.manifest_digest import (
@@ -404,9 +408,7 @@ def _bundle_cross_binding(
             {
                 "raw_dimensions": raw_dimensions,
                 "raw_components": raw_components,
-                "raw_component_registry_digest": canonical_json_sha256(
-                    raw_components
-                ),
+                "raw_component_registry_digest": canonical_json_sha256(raw_components),
                 "component_registry_policy": "raw_and_refined_bound_independently_v1",
             }
         )
@@ -420,7 +422,7 @@ def _bundle_cross_binding(
     )
     if raw_coordinate is not refined_coordinate:
         raise ValueError(
-            "Raw and refined bundle members must both carry coordinate-v3 or "
+            "Raw and refined bundle members must both carry coordinate-v4 or "
             "both remain legacy."
         )
     if raw_coordinate:
@@ -444,14 +446,12 @@ def _bundle_cross_binding(
             "crop": dict(raw_dependencies["crop"]),
             "raw_coordinate_catalog_digest": raw_catalog["digest"],
             "refined_coordinate_catalog_digest": refined_catalog["digest"],
-            "raw_recording_assembly": dict(
-                raw_dependencies["recording_assembly"]
-            ),
+            "raw_recording_assembly": dict(raw_dependencies["recording_assembly"]),
             "refined_recording_assembly": dict(
                 refined_dependencies["recording_assembly"]
             ),
             "refined_raw_core_binding": dict(raw_core_binding),
-            "binding_policy": "crop_v2_raw_core_v3_refined_core_v3_exact_v1",
+            "binding_policy": "crop_v2_raw_core_v4_refined_core_v4_exact_v1",
         }
     if version >= 3:
         if not isinstance(cache_manifest, Mapping):
@@ -491,21 +491,15 @@ def _bundle_cross_binding(
             raise ValueError("Presentation cache lacks its closed-world extension.")
         cross_binding["presentation_cache"] = {
             "source_refined_run_id": refined_run_id,
-            "source_refined_manifest_digest": canonical_json_sha256(
-                refined_manifest
-            ),
-            "source_dense_array_values_sha256": refined_arrays["masks_roi"][
-                "sha256"
-            ],
+            "source_refined_manifest_digest": canonical_json_sha256(refined_manifest),
+            "source_dense_array_values_sha256": refined_arrays["masks_roi"]["sha256"],
             "source_component_registry_digest": canonical_json_sha256(
                 refined_components
             ),
             "source_row_identity_array_values_sha256": {
                 path: refined_arrays[path]["sha256"] for path in _IDENTITY_PATHS
             },
-            "cache_extension_receipts_digest": cache_extension.get(
-                "receipts_digest"
-            ),
+            "cache_extension_receipts_digest": cache_extension.get("receipts_digest"),
             "binding_policy": "exact_dense_authority_and_row_identity_v1",
         }
     return cross_binding
@@ -828,6 +822,58 @@ def _persisted_manifests(
     return result
 
 
+def _persisted_core_producer_evidence(
+    archive: Path,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = manifest.get("payload")
+    source = payload.get("source") if isinstance(payload, Mapping) else None
+    binding = source.get("validation_receipt") if isinstance(source, Mapping) else None
+    if not isinstance(binding, Mapping) or set(binding) != {
+        "schema_id",
+        "schema_version",
+        "payload_digest",
+        "relative_path",
+        "document_sha256",
+        "storage",
+        "semantic_unit_count",
+        "array_count",
+    }:
+        raise ValueError("Coordinate core source-receipt binding is invalid.")
+    relative = str(binding.get("relative_path") or "")
+    relative_path = Path(relative)
+    if (
+        binding.get("storage") != "strict_json_sidecar_v1"
+        or relative_path.is_absolute()
+        or ".." in relative_path.parts
+    ):
+        raise ValueError("Coordinate core source-receipt path is unsafe.")
+    receipt_bytes = (archive / relative_path).read_bytes()
+    if hashlib.sha256(receipt_bytes).hexdigest() != binding.get("document_sha256"):
+        raise ValueError("Coordinate core source-receipt document changed.")
+    receipt = json.loads(receipt_bytes)
+    receipt_payload = receipt.get("payload") if isinstance(receipt, Mapping) else None
+    if (
+        not isinstance(receipt_payload, Mapping)
+        or receipt.get("payload_digest") != binding.get("payload_digest")
+        or receipt.get("payload_digest") != canonical_json_sha256(receipt_payload)
+    ):
+        raise ValueError("Coordinate core source-receipt payload changed.")
+    semantic_coverage = receipt_payload.get("semantic_coverage")
+    arrays = receipt_payload.get("arrays")
+    if (
+        not isinstance(semantic_coverage, Mapping)
+        or binding.get("semantic_unit_count") != semantic_coverage.get("unit_count")
+        or not isinstance(arrays, Mapping)
+        or binding.get("array_count") != len(arrays)
+    ):
+        raise ValueError("Coordinate core source-receipt summary changed.")
+    evidence = receipt_payload.get("producer_evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError("Coordinate core producer evidence is absent.")
+    return evidence
+
+
 def _validate_persisted_members(
     archive: Path,
     *,
@@ -910,11 +956,49 @@ def _validate_persisted_members(
             run_id=cache_run_id,
             source_manifest=refined_manifest,
         )
-    if raw_errors or refined_errors or quality_errors or cache_errors:
+    producer_join_errors: tuple[str, ...] = ()
+    if (
+        not raw_errors
+        and not refined_errors
+        and refined_manifest.get("schema_version")
+        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        try:
+            root = open_zarr_root(archive, mode="r")
+            raw_manifest = root[f"subject_mask_runs/{raw_run_id}"].attrs.get(
+                SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE
+            )
+            if not isinstance(raw_manifest, Mapping):
+                raise ValueError("Raw coordinate core manifest is absent.")
+            raw_evidence = _persisted_core_producer_evidence(archive, raw_manifest)
+            refined_evidence = _persisted_core_producer_evidence(
+                archive, refined_manifest
+            )
+            dimensions = refined_manifest["payload"]["logical_schema"]["dimensions"]
+            validate_recording_subject_mask_refined_source_join(
+                raw_producer_evidence=raw_evidence,
+                refined_producer_evidence=refined_evidence,
+                raw_source_run_path=raw_manifest["payload"]["source"]["run_path"],
+                refined_source_run_path=refined_manifest["payload"]["source"][
+                    "run_path"
+                ],
+                n_frames=dimensions["n_frames"],
+                n_rois=dimensions["n_rois"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            producer_join_errors = (str(exc),)
+    if (
+        raw_errors
+        or refined_errors
+        or quality_errors
+        or cache_errors
+        or producer_join_errors
+    ):
         raise RuntimeError(
             "Persisted subject-mask bundle member validation failed: "
             f"raw={list(raw_errors)}, refined={list(refined_errors)}, "
-            f"quality={list(quality_errors)}, cache={list(cache_errors)}"
+            f"quality={list(quality_errors)}, cache={list(cache_errors)}, "
+            f"producer_join={list(producer_join_errors)}"
         )
 
 
@@ -964,9 +1048,7 @@ def publish_subject_mask_bundle_candidate(
         "quality": _require_run_id(quality_run_id, name="quality_run_id"),
     }
     if cache_run_id is not None:
-        ids["presentation_cache"] = _require_run_id(
-            cache_run_id, name="cache_run_id"
-        )
+        ids["presentation_cache"] = _require_run_id(cache_run_id, name="cache_run_id")
     resolved_bundle = _require_run_id(bundle_id, name="bundle_id")
     local_paths = {
         "raw": raw_snapshot_root.expanduser().resolve()
@@ -1393,9 +1475,7 @@ def activate_subject_mask_bundle(
     owner = str(uuid4())
     with archive_metadata_publication_lock(archive):
         _recover_stale_activation_lease(archive)
-        manifest, _manifests = _validate_live_bundle(
-            archive, bundle_id=resolved_bundle
-        )
+        manifest, _manifests = _validate_live_bundle(archive, bundle_id=resolved_bundle)
         root = open_zarr_root(archive, mode="a")
         if root.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR) is not None:
             raise RuntimeError("Another subject-mask bundle activation owns the lease.")
@@ -1525,8 +1605,7 @@ def activate_subject_mask_bundle(
                         SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR
                     )
                     == next_generation
-                    and SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR
-                    not in observed.attrs
+                    and SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR not in observed.attrs
                 ):
                     consolidate_metadata_capture_expected_warnings(archive)
                     require_exact_committed_authority(committed_authority)
@@ -1537,9 +1616,9 @@ def activate_subject_mask_bundle(
                     for path, (present, value) in prior_ready.items():
                         group = rollback[path]
                         if present:
-                            group.attrs[
-                                SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR
-                            ] = value
+                            group.attrs[SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR] = (
+                                value
+                            )
                         elif SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR in group.attrs:
                             del group.attrs[SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR]
                     rollback.attrs.put(root_attrs_before)

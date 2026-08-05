@@ -1448,13 +1448,15 @@ Recommended benchmark and promotion-review order:
       `docs/diagnostics/eye_tail_query_export_source_prerequisite_2026-08-04.md`.
 - [x] Implement the recording-level subject-mask coordinate aggregation
       foundation. Validation receipt v2 now retains every worker scientific
-      identity, attempt, and semantic receipt; core manifest v3 binds the live
-      crop-v2 identity arrays and coordinate catalog; refined v3 binds the exact
-      raw core; and bundle cross-validation binds the complete crop/raw/refined
-      chain. Missing crop-v2 fails closed by default, while historical v2/v1
-      artifacts remain explicit compatibility inputs. The strict downstream
+      identity, attempt, and semantic receipt. The 2026-08-05 hardening adds
+      scientific identity v2, complete work-unit coverage including zero-row
+      windows, recording assembly v3, coordinate dependencies v3, and core
+      manifest v4. Raw workers are joined to crop-v2 frame offsets and row
+      hashes; refined workers and cores bind the exact raw producer. Missing
+      crop-v2 fails closed by default, while older evidence remains explicit
+      selector-ineligible compatibility input. The strict downstream
       reader accepts only the activated root authority or a named inactive
-      canary with explicit authorization, then revalidates both core-v3
+      canary with explicit authorization, then revalidates both core-v4
       members, crop-v2, the source receipts, and every retained worker record.
       The 41-test real-Zarr core/bundle matrix and the active/inactive reader
       integration gate pass. A newly published recording-scale canary and the
@@ -1462,7 +1464,8 @@ Recommended benchmark and promotion-review order:
       subject-shape bundle-source bridge now proves row/frame/camera/placement
       geometry and the ordered per-worker keypoint-assignment collection
       without impersonating the historical rich-coordinate source; see
-      `docs/subject_mask_recording_coordinate_aggregation_2026-08-04.md`.
+      `docs/subject_mask_recording_coordinate_aggregation_2026-08-04.md` and
+      `docs/subject_mask_provenance_contract_hardening_2026-08-05.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,

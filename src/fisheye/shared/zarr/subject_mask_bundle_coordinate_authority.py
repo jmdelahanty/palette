@@ -1,4 +1,4 @@
-"""Strict reader for recording-level subject-mask coordinate-v3 bundles."""
+"""Strict reader for recording-level subject-mask coordinate-v4 cores."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import numpy as np
 from fisheye.shared.subject_mask_worker_receipt import (
     build_recording_assignment_keypoint_collection,
     validate_recording_subject_mask_assembly_identity,
+    validate_recording_subject_mask_refined_source_join,
 )
 from fisheye.shared.zarr.crop_manifest import (
     CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
@@ -217,11 +218,9 @@ def _load_core_producer_evidence(
     receipt_path = archive / str(binding.get("relative_path") or "")
     receipt = _strict_sidecar(receipt_path)
     receipt_bytes = canonical_json_bytes(receipt)
-    if (
-        receipt.get("payload_digest") != binding.get("payload_digest")
-        or hashlib.sha256(receipt_bytes).hexdigest()
-        != binding.get("document_sha256")
-    ):
+    if receipt.get("payload_digest") != binding.get("payload_digest") or hashlib.sha256(
+        receipt_bytes
+    ).hexdigest() != binding.get("document_sha256"):
         raise SubjectMaskBundleCoordinateAuthorityError(
             f"Coordinate core {run_path!r} source receipt changed."
         )
@@ -262,15 +261,14 @@ def _load_core_producer_evidence(
         if kind == "raw_probability_uint8"
         else "refined_subject_mask"
     )
-    dependency = payload["coordinate_dependencies"]["document"][
-        "recording_assembly"
-    ]
+    dependency = payload["coordinate_dependencies"]["document"]["recording_assembly"]
     evidence = validate_recording_subject_mask_assembly_identity(
         evidence,
         kind=kind,
         stage_kind=stage,
         source_run_path=source["run_path"],
         n_rois=dimensions.n_rois,
+        n_frames=dimensions.n_frames,
     )
     if canonical_json_sha256(evidence) != dependency["producer_evidence_digest"]:
         raise SubjectMaskBundleCoordinateAuthorityError(
@@ -361,7 +359,7 @@ def load_recording_subject_mask_coordinate_authority(
     coordinate = cross.get("coordinate_contract")
     if not isinstance(coordinate, Mapping):
         raise SubjectMaskBundleCoordinateAuthorityError(
-            "Bundle lacks coordinate-v3 cross-binding."
+            "Bundle lacks coordinate-v4 cross-binding."
         )
     members = payload["members"]
     raw_path = str(members["raw"]["run_path"])
@@ -379,7 +377,7 @@ def load_recording_subject_mask_coordinate_authority(
         != SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
     ):
         raise SubjectMaskBundleCoordinateAuthorityError(
-            "Bundle members are not coordinate-core-v3 publications."
+            "Bundle members are not coordinate-core-v4 publications."
         )
     crop_path = str(coordinate["crop"]["run_path"])
     crop_run = root[crop_path]
@@ -408,8 +406,7 @@ def load_recording_subject_mask_coordinate_authority(
         "n_rois": int(crop_run["instance_key"].shape[0]),
     }
     if any(
-        type(dimensions.get(name)) is not int
-        or dimensions[name] != expected
+        type(dimensions.get(name)) is not int or dimensions[name] != expected
         for name, expected in expected_dimensions.items()
     ):
         raise SubjectMaskBundleCoordinateAuthorityError(
@@ -423,9 +420,7 @@ def load_recording_subject_mask_coordinate_authority(
     if (
         pixel_authority.recording_identity != recording_identity
         or pixel_authority.recording_identity
-        != crop_manifest["payload"]["source_refined_snapshot"][
-            "recording_identity"
-        ]
+        != crop_manifest["payload"]["source_refined_snapshot"]["recording_identity"]
     ):
         raise SubjectMaskBundleCoordinateAuthorityError(
             "Crop pixel, refined-detection, bundle, and archive recording "
@@ -446,10 +441,22 @@ def load_recording_subject_mask_coordinate_authority(
         manifest=refined_manifest,
         kind="refined_dense_core",
     )
+    try:
+        validate_recording_subject_mask_refined_source_join(
+            raw_producer_evidence=raw_evidence,
+            refined_producer_evidence=refined_evidence,
+            raw_source_run_path=raw_manifest["payload"]["source"]["run_path"],
+            refined_source_run_path=refined_manifest["payload"]["source"]["run_path"],
+            n_frames=dimensions["n_frames"],
+            n_rois=dimensions["n_rois"],
+        )
+    except ValueError as exc:
+        raise SubjectMaskBundleCoordinateAuthorityError(str(exc)) from exc
     assignment_keypoints = build_recording_assignment_keypoint_collection(
         refined_evidence,
         source_run_path=refined_manifest["payload"]["source"]["run_path"],
         n_rois=dimensions["n_rois"],
+        n_frames=dimensions["n_frames"],
     )
     persisted_assignment = refined_manifest["payload"]["coordinate_dependencies"][
         "document"
@@ -465,9 +472,7 @@ def load_recording_subject_mask_coordinate_authority(
         "raw_manifest_payload_digest": raw_manifest["payload_digest"],
         "refined_manifest_payload_digest": refined_manifest["payload_digest"],
         "raw_producer_evidence_digest": canonical_json_sha256(raw_evidence),
-        "refined_producer_evidence_digest": canonical_json_sha256(
-            refined_evidence
-        ),
+        "refined_producer_evidence_digest": canonical_json_sha256(refined_evidence),
         "assignment_keypoint_collection_digest": canonical_json_sha256(
             assignment_keypoints
         ),

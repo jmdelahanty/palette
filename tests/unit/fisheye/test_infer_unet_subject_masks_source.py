@@ -208,7 +208,8 @@ class _FakeArray:
 
 
 class _FakeGroup:
-    def __init__(self) -> None:
+    def __init__(self, path: str = "") -> None:
+        self.path = path
         self.attrs: dict[str, object] = {}
         self._children: dict[str, object] = {}
 
@@ -218,7 +219,7 @@ class _FakeGroup:
         *,
         attributes: dict[str, object] | None = None,
     ) -> "_FakeGroup":
-        group = _FakeGroup()
+        group = _FakeGroup(f"{self.path}/{name}".strip("/"))
         if attributes is not None:
             group.attrs.update(attributes)
         self._children[name] = group
@@ -228,7 +229,7 @@ class _FakeGroup:
         existing = self._children.get(name)
         if isinstance(existing, _FakeGroup):
             return existing
-        group = _FakeGroup()
+        group = _FakeGroup(f"{self.path}/{name}".strip("/"))
         self._children[name] = group
         return group
 
@@ -901,7 +902,7 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
 ) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     checkpoint_path = tmp_path / "subject_unet.pt"
-    checkpoint_path.write_text("", encoding="utf-8")
+    checkpoint_path.write_text("fixture checkpoint", encoding="utf-8")
 
     seen: dict[str, object] = {}
     fake_root = _build_fake_root()
@@ -920,6 +921,7 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
             self.roi_cache_policy = "always"
             self.roi_cache_used = True
             self.roi_cache_key = "cache-key-001"
+            self.roi_pixel_contract = {"schema": "palette_roi_pixel_contract_v1"}
             self.roi_cache_path = str(cache_dir)
             self.roi_cache_canonical_path = (
                 "/groups/cache/fake-cache.flat_roi_cache.json"
@@ -1160,7 +1162,7 @@ def test_canonical_writer_omits_legacy_detection_source_through_publication(
 
     zarr_path = tmp_path / "recording_analysis.zarr"
     checkpoint_path = tmp_path / "subject_unet.pt"
-    checkpoint_path.write_text("", encoding="utf-8")
+    checkpoint_path.write_text("fixture checkpoint", encoding="utf-8")
     fake_root = _build_fake_root()
     crop_group = fake_root["crop_runs"]["crop_geometry"]
     crop_group.path = "crop_runs/crop_geometry"
@@ -1231,7 +1233,7 @@ def test_canonical_writer_omits_legacy_detection_source_through_publication(
             self.roi_live_gpu_chunk_frames = 256
             self.pixel_materialization_id = None
             self.pixel_materialization_manifest = None
-            self.roi_pixel_contract = None
+            self.roi_pixel_contract = {"schema": "palette_roi_pixel_contract_v1"}
             self.roi_image_representation = "grayscale_uint8"
 
         def read_slice(self, start: int, stop: int) -> np.ndarray:
@@ -1421,7 +1423,7 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
 ) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     checkpoint_path = tmp_path / "subject_unet_lr.pt"
-    checkpoint_path.write_text("", encoding="utf-8")
+    checkpoint_path.write_text("fixture checkpoint", encoding="utf-8")
 
     seen: dict[str, object] = {}
     fake_root = _build_fake_root()
@@ -1439,6 +1441,7 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
             self.roi_cache_used = False
             self.roi_cache_key = None
             self.roi_cache_path = None
+            self.roi_pixel_contract = {"schema": "palette_roi_pixel_contract_v1"}
             self.roi_live_acceleration_requested = "cpu"
             self.roi_live_acceleration_effective = "cpu"
             self.roi_live_acceleration_fallback_reason = None
@@ -1611,6 +1614,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
             self.roi_cache_used = False
             self.roi_cache_key = None
             self.roi_cache_path = None
+            self.roi_pixel_contract = {"schema": "palette_roi_pixel_contract_v1"}
             self.roi_live_acceleration_requested = "cpu"
             self.roi_live_acceleration_effective = "cpu"
             self.roi_live_acceleration_fallback_reason = None

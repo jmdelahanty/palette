@@ -7,6 +7,11 @@ implemented; no production archive, selector, registry authority, physical
 profile, or canonical data was changed. A future recording-level canary and
 downstream subject-shape adapter remain required.
 
+The provenance envelope described here as coordinate core v3 is superseded by
+coordinate core v4 in
+`subject_mask_provenance_contract_hardening_2026-08-05.md`. Core v3 remains
+historical selector-ineligible evidence and must not be promoted as v4.
+
 ## Decision
 
 Canonical coordinate ownership belongs to recording-level subject-mask bundle

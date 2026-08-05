@@ -203,6 +203,7 @@ def _write_package(
             pixels={"digest": hashlib.sha256(package_name.encode()).hexdigest()},
             row_identity={"source_crop_row_ids": list(crop_row_ids)},
             inference_contract={"components": list(labels)},
+            schema_version=1,
         )
         attempt = build_subject_mask_attempt(
             scientific_identity=science,

@@ -509,6 +509,7 @@ def publish_recording_subject_mask_bundle(
     cache_source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     cache_compute_workers: int = 1,
     coordinate_contract_policy: str = "require_crop_v2",
+    expected_work_units: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
     target = analysis_zarr.expanduser().resolve()
     draft_path = draft_zarr.expanduser().resolve()
@@ -535,6 +536,11 @@ def publish_recording_subject_mask_bundle(
         raise ValueError(
             "Recording subject-mask publication requires a persisted crop-v2 "
             "coordinate manifest."
+        )
+    if crop_manifest is not None and expected_work_units is None:
+        raise ValueError(
+            "Coordinate-aware recording publication requires the authoritative "
+            "work-unit plan, including zero-row windows."
         )
     if raw_draft_parent not in {"subject_mask_runs", "subject_mask_shard_runs"}:
         raise ValueError("raw_draft_parent must name a canonical or shard raw parent.")
@@ -652,6 +658,7 @@ def publish_recording_subject_mask_bundle(
             components=raw_components,
             threshold=threshold,
             workers=raw_workers,
+            expected_work_units=expected_work_units,
         )
     )
     raw_coordinate_dependencies = (
@@ -732,6 +739,9 @@ def publish_recording_subject_mask_bundle(
                     raw_publication.manifest["payload_digest"]
                 )
             },
+            expected_work_units=expected_work_units,
+            source_producer_evidence=raw_receipt["payload"]["producer_evidence"],
+            source_producer_run_path=raw_source_path,
         )
     )
     refined_coordinate_dependencies = (
@@ -891,6 +901,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-output-root", required=True, type=Path)
     parser.add_argument("--quality-scratch-root", required=True, type=Path)
     parser.add_argument(
+        "--expected-work-units-manifest",
+        type=Path,
+        help=(
+            "Strict JSON document containing the authoritative recording work-unit "
+            "table, including zero-row windows. Required for crop-v2 publication."
+        ),
+    )
+    parser.add_argument(
         "--cache-source-compute-block-bytes",
         type=int,
         default=DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
@@ -911,6 +929,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    expected_work_units = None
+    if args.expected_work_units_manifest is not None:
+        document = json.loads(
+            args.expected_work_units_manifest.expanduser().read_text(encoding="utf-8")
+        )
+        if not isinstance(document, Mapping) or set(document) != {
+            "schema_id",
+            "schema_version",
+            "units",
+            "units_digest",
+        }:
+            raise ValueError("Expected-work-unit manifest fields are not exact.")
+        units = document.get("units")
+        if (
+            document.get("schema_id") != "palette.subject_mask.expected_work_units"
+            or document.get("schema_version") != 1
+            or not isinstance(units, list)
+            or document.get("units_digest") != canonical_json_sha256(units)
+        ):
+            raise ValueError("Expected-work-unit manifest is unsupported or stale.")
+        expected_work_units = units
     result = publish_recording_subject_mask_bundle(
         analysis_zarr=args.analysis_zarr,
         draft_zarr=args.draft_zarr,
@@ -930,6 +969,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cache_source_compute_block_bytes=args.cache_source_compute_block_bytes,
         cache_compute_workers=args.cache_compute_workers,
         activate=bool(args.activate),
+        expected_work_units=expected_work_units,
     )
     print(json.dumps(result, indent=None if args.json else 2, sort_keys=True))
     return 0

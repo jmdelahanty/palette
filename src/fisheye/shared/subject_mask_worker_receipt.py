@@ -9,6 +9,7 @@ import hashlib
 import numpy as np
 
 from fisheye.shared.subject_mask_attempt import (
+    SUBJECT_MASK_SCIENTIFIC_IDENTITY_SCHEMA_VERSION,
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
 )
@@ -59,7 +60,8 @@ REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS = (
 SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID = (
     "palette.subject_mask.recording_assembly_identity"
 )
-SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION = 2
+SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_LEGACY_SCHEMA_VERSION = 2
+SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION = 3
 SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_ID = (
     "palette.subject_mask.recording_common_scientific_authority"
 )
@@ -89,6 +91,195 @@ def _without_fields(value: Any, names: set[str]) -> Any:
     if not isinstance(value, Mapping):
         return value
     return {str(key): item for key, item in value.items() if str(key) not in names}
+
+
+def _normalize_expected_work_units(
+    value: Sequence[Mapping[str, Any]],
+    *,
+    n_frames: int,
+    n_rois: int,
+) -> list[dict[str, object]]:
+    expected_fields = {
+        "work_unit_id",
+        "work_unit_index",
+        "source_clip_id",
+        "source_clip_index",
+        "frame_start",
+        "frame_stop",
+        "row_start",
+        "row_stop",
+    }
+    canonical = _strict_copy(list(value), name="expected subject-mask work units")
+    if not isinstance(canonical, list) or not canonical:
+        raise ValueError("Expected subject-mask work units are absent.")
+    frame_cursor = 0
+    row_cursor = 0
+    seen_ids: set[str] = set()
+    clip_ids_by_index: dict[int, str] = {}
+    previous_clip_index = -1
+    result: list[dict[str, object]] = []
+    for ordinal, unit in enumerate(canonical):
+        if not isinstance(unit, dict) or set(unit) != expected_fields:
+            raise ValueError("Expected subject-mask work-unit fields are not exact.")
+        work_unit_id = unit.get("work_unit_id")
+        clip_id = unit.get("source_clip_id")
+        clip_index = unit.get("source_clip_index")
+        frame_start = unit.get("frame_start")
+        frame_stop = unit.get("frame_stop")
+        row_start = unit.get("row_start")
+        row_stop = unit.get("row_stop")
+        if (
+            type(work_unit_id) is not str
+            or not work_unit_id.strip()
+            or work_unit_id != work_unit_id.strip()
+            or work_unit_id in seen_ids
+            or unit.get("work_unit_index") != ordinal
+            or type(clip_id) is not str
+            or not clip_id.strip()
+            or clip_id != clip_id.strip()
+            or type(clip_index) is not int
+            or clip_index < 0
+            or clip_index < previous_clip_index
+            or type(frame_start) is not int
+            or type(frame_stop) is not int
+            or frame_start != frame_cursor
+            or frame_stop <= frame_start
+            or frame_stop > int(n_frames)
+            or type(row_start) is not int
+            or type(row_stop) is not int
+            or row_start != row_cursor
+            or not (row_start <= row_stop <= int(n_rois))
+        ):
+            raise ValueError(
+                "Expected subject-mask work units must exactly and contiguously "
+                "cover the frame and row domains."
+            )
+        seen_ids.add(work_unit_id)
+        existing_clip_id = clip_ids_by_index.setdefault(clip_index, clip_id)
+        if existing_clip_id != clip_id:
+            raise ValueError(
+                "One subject-mask source_clip_index maps to multiple clip IDs."
+            )
+        previous_clip_index = clip_index
+        frame_cursor = frame_stop
+        row_cursor = row_stop
+        result.append(dict(unit))
+    if frame_cursor != int(n_frames) or row_cursor != int(n_rois):
+        raise ValueError(
+            "Expected subject-mask work units do not cover the complete recording."
+        )
+    return result
+
+
+def _refined_source_binding(
+    scientific_identity: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    payload = scientific_identity.get("payload")
+    model = payload.get("model") if isinstance(payload, Mapping) else None
+    binding = model.get("source_input_binding") if isinstance(model, Mapping) else None
+    if not isinstance(binding, Mapping):
+        raise ValueError("Refined worker lacks its exact raw source-input binding.")
+    return binding
+
+
+def _validate_refined_worker_source_join(
+    refined_worker: Mapping[str, Any],
+    raw_worker: Mapping[str, Any],
+) -> None:
+    if refined_worker.get("global_row_interval") != raw_worker.get(
+        "global_row_interval"
+    ):
+        raise ValueError("Refined and raw worker row intervals differ.")
+    science = refined_worker.get("scientific_identity")
+    raw_science = raw_worker.get("scientific_identity")
+    raw_receipt = raw_worker.get("worker_receipt")
+    if not isinstance(science, Mapping) or not isinstance(raw_science, Mapping):
+        raise ValueError("Refined/raw worker scientific identity is absent.")
+    binding = _refined_source_binding(science)
+    receipt_binding = binding.get("worker_semantic_receipt_binding")
+    expected_receipt_binding = {
+        "schema_id": (
+            raw_receipt.get("schema_id") if isinstance(raw_receipt, Mapping) else None
+        ),
+        "schema_version": (
+            raw_receipt.get("schema_version")
+            if isinstance(raw_receipt, Mapping)
+            else None
+        ),
+        "payload_digest": (
+            raw_receipt.get("payload_digest")
+            if isinstance(raw_receipt, Mapping)
+            else None
+        ),
+        "document_sha256": (
+            canonical_json_sha256(raw_receipt)
+            if isinstance(raw_receipt, Mapping)
+            else None
+        ),
+        "storage": "strict_json_sidecar_v1",
+    }
+    if (
+        binding.get("run_path") != raw_worker.get("run_path")
+        or binding.get("scientific_identity_digest") != raw_science.get("digest")
+        or not isinstance(receipt_binding, Mapping)
+        or not isinstance(raw_receipt, Mapping)
+        or any(
+            receipt_binding.get(name) != expected
+            for name, expected in expected_receipt_binding.items()
+        )
+    ):
+        raise ValueError(
+            "Refined worker does not bind the exact corresponding raw worker."
+        )
+
+
+def validate_recording_subject_mask_refined_source_join(
+    *,
+    raw_producer_evidence: Mapping[str, Any],
+    refined_producer_evidence: Mapping[str, Any],
+    raw_source_run_path: str,
+    refined_source_run_path: str,
+    n_frames: int,
+    n_rois: int,
+) -> None:
+    """Prove the persisted refined assembly was derived from these raw workers."""
+
+    raw = validate_recording_subject_mask_assembly_identity(
+        raw_producer_evidence,
+        kind="raw_probability_uint8",
+        stage_kind="raw_subject_mask",
+        source_run_path=raw_source_run_path,
+        n_frames=n_frames,
+        n_rois=n_rois,
+    )
+    refined = validate_recording_subject_mask_assembly_identity(
+        refined_producer_evidence,
+        kind="refined_dense_core",
+        stage_kind="refined_subject_mask",
+        source_run_path=refined_source_run_path,
+        n_frames=n_frames,
+        n_rois=n_rois,
+    )
+    source_binding = refined.get("source_producer_binding")
+    if (
+        not isinstance(source_binding, Mapping)
+        or source_binding.get("schema_id") != raw.get("schema_id")
+        or source_binding.get("schema_version") != raw.get("schema_version")
+        or source_binding.get("kind") != raw.get("kind")
+        or source_binding.get("source_run_path") != raw.get("source_run_path")
+        or source_binding.get("digest") != canonical_json_sha256(raw)
+    ):
+        raise ValueError("Refined recording assembly binds another raw producer.")
+    raw_workers = raw["workers"]
+    refined_workers = refined["workers"]
+    if len(raw_workers) != len(refined_workers):
+        raise ValueError("Refined/raw recording worker counts differ.")
+    for refined_worker, raw_worker in zip(
+        refined_workers,
+        raw_workers,
+        strict=True,
+    ):
+        _validate_refined_worker_source_join(refined_worker, raw_worker)
 
 
 def _recording_common_scientific_authority(
@@ -393,11 +584,15 @@ def validate_recording_subject_mask_assembly_identity(
     stage_kind: str,
     source_run_path: str,
     n_rois: int,
+    n_frames: int | None = None,
 ) -> dict[str, object]:
     """Deeply validate retained recording-assembly producer evidence."""
 
     canonical = _strict_copy(value, name="recording assembly identity")
-    if not isinstance(canonical, dict) or set(canonical) != {
+    schema_version = (
+        canonical.get("schema_version") if isinstance(canonical, dict) else None
+    )
+    legacy_fields = {
         "schema_id",
         "schema_version",
         "kind",
@@ -406,18 +601,28 @@ def validate_recording_subject_mask_assembly_identity(
         "context",
         "common_scientific_authority",
         "workers",
-    }:
+    }
+    current_fields = legacy_fields | {
+        "work_unit_coverage",
+        "source_producer_binding",
+    }
+    expected_fields = (
+        current_fields
+        if schema_version == SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+        else legacy_fields
+    )
+    if not isinstance(canonical, dict) or set(canonical) != expected_fields:
         raise ValueError("Recording assembly identity fields are not exact.")
     if (
-        canonical.get("schema_id")
-        != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID
+        canonical.get("schema_id") != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID
         or canonical.get("schema_version")
-        != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+        not in {
+            SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_LEGACY_SCHEMA_VERSION,
+            SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION,
+        }
         or canonical.get("kind") != str(kind)
-        or canonical.get("source_run_path")
-        != str(source_run_path).strip().strip("/")
-        or canonical.get("row_policy")
-        != "ordered_contiguous_real_work_units_v1"
+        or canonical.get("source_run_path") != str(source_run_path).strip().strip("/")
+        or canonical.get("row_policy") != "ordered_contiguous_real_work_units_v1"
         or not isinstance(canonical.get("context"), dict)
     ):
         raise ValueError("Recording assembly identity header changed.")
@@ -425,9 +630,11 @@ def validate_recording_subject_mask_assembly_identity(
     required_paths = (
         RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS
         if stage == "raw_subject_mask"
-        else REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
-        if stage == "refined_subject_mask"
-        else ()
+        else (
+            REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+            if stage == "refined_subject_mask"
+            else ()
+        )
     )
     if not required_paths:
         raise ValueError(f"Unsupported recording assembly stage {stage!r}.")
@@ -437,8 +644,70 @@ def validate_recording_subject_mask_assembly_identity(
         raise ValueError("Recording common scientific authority is absent.")
     if not isinstance(workers, list) or not workers:
         raise ValueError("Recording assembly workers are absent.")
+    current = schema_version == SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+    work_unit_coverage = canonical.get("work_unit_coverage")
+    source_binding = canonical.get("source_producer_binding")
+    expected_nonempty: list[dict[str, object]] = []
+    if current:
+        if not isinstance(work_unit_coverage, dict) or set(work_unit_coverage) != {
+            "policy",
+            "n_frames",
+            "n_rois",
+            "unit_count",
+            "units_digest",
+            "units",
+        }:
+            raise ValueError("Recording expected work-unit coverage is invalid.")
+        declared_frames = work_unit_coverage.get("n_frames")
+        if type(declared_frames) is not int or declared_frames <= 0:
+            raise ValueError("Recording expected frame domain is invalid.")
+        if n_frames is not None and declared_frames != int(n_frames):
+            raise ValueError("Recording expected frame domain changed.")
+        units = work_unit_coverage.get("units")
+        normalized_units = _normalize_expected_work_units(
+            units if isinstance(units, list) else [],
+            n_frames=declared_frames,
+            n_rois=int(n_rois),
+        )
+        if (
+            work_unit_coverage.get("policy")
+            != "authoritative_recording_plan_including_empty_windows_v1"
+            or work_unit_coverage.get("n_rois") != int(n_rois)
+            or work_unit_coverage.get("unit_count") != len(normalized_units)
+            or work_unit_coverage.get("units_digest")
+            != canonical_json_sha256(normalized_units)
+        ):
+            raise ValueError("Recording expected work-unit coverage changed.")
+        expected_nonempty = [
+            unit for unit in normalized_units if unit["row_stop"] > unit["row_start"]
+        ]
+        if len(expected_nonempty) != len(workers):
+            raise ValueError(
+                "Recording workers do not match the nonempty authoritative work units."
+            )
+        if stage == "raw_subject_mask" and source_binding is not None:
+            raise ValueError("Raw recording assembly cannot bind another producer.")
+        if stage == "refined_subject_mask":
+            if not isinstance(source_binding, dict) or set(source_binding) != {
+                "schema_id",
+                "schema_version",
+                "kind",
+                "source_run_path",
+                "digest",
+            }:
+                raise ValueError("Refined raw-producer binding is invalid.")
+            if (
+                source_binding.get("schema_id")
+                != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID
+                or source_binding.get("schema_version")
+                != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+                or source_binding.get("kind") != "raw_probability_uint8"
+                or type(source_binding.get("source_run_path")) is not str
+                or not _valid_sha256(source_binding.get("digest"))
+            ):
+                raise ValueError("Refined raw-producer binding changed.")
     cursor = 0
-    for worker in workers:
+    for worker_index, worker in enumerate(workers):
         if not isinstance(worker, dict) or set(worker) != {
             "global_row_interval",
             "run_path",
@@ -474,6 +743,12 @@ def validate_recording_subject_mask_assembly_identity(
             science
         ):
             raise ValueError("Recording worker scientific identity is invalid.")
+        if current and science.get("schema_version") != (
+            SUBJECT_MASK_SCIENTIFIC_IDENTITY_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Current recording assembly requires scientific identity v2."
+            )
         if science["payload"].get("stage_kind") != stage:
             raise ValueError("Recording worker scientific stage differs.")
         if (
@@ -496,9 +771,7 @@ def validate_recording_subject_mask_assembly_identity(
         )
         allowed_paths = [list(required_paths)]
         if stage == "raw_subject_mask":
-            allowed_paths.append(
-                [required_paths[0], "masks_roi", *required_paths[1:]]
-            )
+            allowed_paths.append([required_paths[0], "masks_roi", *required_paths[1:]])
         if receipt_paths not in allowed_paths:
             raise ValueError("Recording worker output inventory is unsupported.")
         validated_receipt = validate_subject_mask_worker_semantic_receipt(
@@ -514,10 +787,66 @@ def validate_recording_subject_mask_assembly_identity(
             or worker.get("attempt_payload_digest") != attempt.get("payload_digest")
             or worker.get("worker_receipt_payload_digest")
             != receipt.get("payload_digest")
-            or int(receipt_payload["local_row_interval"]["stop_row"])
-            != stop - start
+            or int(receipt_payload["local_row_interval"]["stop_row"]) != stop - start
         ):
             raise ValueError("Recording worker retained bindings changed.")
+        if current:
+            expected_unit = expected_nonempty[worker_index]
+            if start != expected_unit["row_start"] or stop != expected_unit["row_stop"]:
+                raise ValueError(
+                    "Recording worker interval differs from its authoritative work unit."
+                )
+            if stage == "raw_subject_mask":
+                crop = science["payload"]["crop"]
+                partition = crop.get("collection_partition_contract")
+                partition_payload = (
+                    partition.get("payload") if isinstance(partition, Mapping) else None
+                )
+                partition_collection = (
+                    partition_payload.get("collection")
+                    if isinstance(partition_payload, Mapping)
+                    else None
+                )
+                partition_window = (
+                    partition_payload.get("frame_window")
+                    if isinstance(partition_payload, Mapping)
+                    else None
+                )
+                partition_rows = (
+                    partition_payload.get("crop_rows")
+                    if isinstance(partition_payload, Mapping)
+                    else None
+                )
+                if (
+                    crop.get("source_work_unit_id") != expected_unit["work_unit_id"]
+                    or crop.get("source_clip_id") != expected_unit["source_clip_id"]
+                    or crop.get("source_clip_index")
+                    != expected_unit["source_clip_index"]
+                ):
+                    raise ValueError(
+                        "Raw worker identity differs from its authoritative work unit."
+                    )
+                if (
+                    not isinstance(partition_collection, Mapping)
+                    or not isinstance(partition_window, Mapping)
+                    or not isinstance(partition_rows, Mapping)
+                    or partition_collection.get("source_work_unit_id")
+                    != expected_unit["work_unit_id"]
+                    or partition_collection.get("source_clip_id")
+                    != expected_unit["source_clip_id"]
+                    or partition_collection.get("source_clip_index")
+                    != expected_unit["source_clip_index"]
+                    or partition_window.get("actual_start_frame")
+                    != expected_unit["frame_start"]
+                    or partition_window.get("end_frame_exclusive")
+                    != expected_unit["frame_stop"]
+                    or partition_rows.get("start") != expected_unit["row_start"]
+                    or partition_rows.get("stop") != expected_unit["row_stop"]
+                ):
+                    raise ValueError(
+                        "Raw worker partition proof differs from its authoritative "
+                        "work unit."
+                    )
         cursor = int(stop)
     if cursor != int(n_rois):
         raise ValueError("Recording assembly does not cover every ROI row.")
@@ -529,6 +858,7 @@ def build_recording_assignment_keypoint_collection(
     *,
     source_run_path: str,
     n_rois: int,
+    n_frames: int | None = None,
 ) -> dict[str, object]:
     """Retain the exact ordered keypoint-assignment inputs of refinement."""
 
@@ -538,6 +868,7 @@ def build_recording_assignment_keypoint_collection(
         stage_kind="refined_subject_mask",
         source_run_path=source_run_path,
         n_rois=n_rois,
+        n_frames=n_frames,
     )
     workers: list[dict[str, object]] = []
     modes: set[str] = set()
@@ -587,19 +918,22 @@ def build_recording_assignment_keypoint_collection(
         run = assignment.get("assignment_keypoints_run")
         success = assignment.get("assignment_keypoint_success_dataset")
         selection = assignment.get("assignment_keypoint_selection")
-        if any(
-            not isinstance(value, str)
-            or not value
-            or value != value.strip()
-            or "/" in value
-            for value in (group, run, success)
-        ) or not isinstance(selection, str) or not selection.strip():
+        if (
+            any(
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or "/" in value
+                for value in (group, run, success)
+            )
+            or not isinstance(selection, str)
+            or not selection.strip()
+        ):
             raise ValueError("Worker assignment keypoint path fields are invalid.")
         if (
             assignment.get("assignment_keypoint_contract")
             != "subject_eyes_union_assignment_keypoints_v1"
-            or assignment.get("assignment_keypoint_role")
-            != "eyes_union_lr_assignment"
+            or assignment.get("assignment_keypoint_role") != "eyes_union_lr_assignment"
             or assignment.get("assignment_keypoint_row_identity_check")
             != "source_crop_row_ids_subset"
         ):
@@ -617,8 +951,7 @@ def build_recording_assignment_keypoint_collection(
         }:
             raise ValueError("Worker assignment keypoint row identity is invalid.")
         if (
-            row_identity.get("row_identity_check")
-            != "source_crop_row_ids_subset"
+            row_identity.get("row_identity_check") != "source_crop_row_ids_subset"
             or row_identity.get("keypoint_has_source_crop_row_ids") is not True
             or row_identity.get("mask_has_source_crop_row_ids") is not True
             or row_identity.get("rows_checked") != stop - start
@@ -656,7 +989,10 @@ def build_recording_assignment_keypoint_collection(
             if (
                 not isinstance(eye_indices, Mapping)
                 or set(eye_indices) != {"eye_left", "eye_right"}
-                or any(type(value) is not int or value < 0 for value in eye_indices.values())
+                or any(
+                    type(value) is not int or value < 0
+                    for value in eye_indices.values()
+                )
                 or eye_indices["eye_left"] == eye_indices["eye_right"]
             ):
                 raise ValueError("Worker assignment eye indices are invalid.")
@@ -697,6 +1033,9 @@ def build_recording_subject_mask_source_receipt(
     workers: Sequence[Mapping[str, Any]],
     identity_unit_rows: int = 131_072,
     assembly_context: Mapping[str, Any] | None = None,
+    expected_work_units: Sequence[Mapping[str, Any]] | None = None,
+    source_producer_evidence: Mapping[str, Any] | None = None,
+    source_producer_run_path: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Aggregate ordered whole/real-clip receipts into publication evidence.
 
@@ -739,6 +1078,45 @@ def build_recording_subject_mask_source_receipt(
     )
     if not ordered:
         raise ValueError("Recording source receipt requires worker evidence.")
+    current_contract = expected_work_units is not None
+    normalized_work_units: list[dict[str, object]] | None = None
+    if current_contract:
+        normalized_work_units = _normalize_expected_work_units(
+            expected_work_units,
+            n_frames=dimensions.n_frames,
+            n_rois=dimensions.n_rois,
+        )
+        nonempty_count = sum(
+            int(unit["row_stop"]) > int(unit["row_start"])
+            for unit in normalized_work_units
+        )
+        if nonempty_count != len(ordered):
+            raise ValueError(
+                "Worker count differs from the nonempty authoritative work units."
+            )
+    validated_source_evidence: dict[str, object] | None = None
+    if stage == "raw_subject_mask":
+        if source_producer_evidence is not None or source_producer_run_path is not None:
+            raise ValueError("Raw recording assembly cannot bind another producer.")
+    elif current_contract:
+        if source_producer_evidence is None or source_producer_run_path is None:
+            raise ValueError(
+                "Current refined recording assembly requires exact raw producer evidence."
+            )
+        validated_source_evidence = validate_recording_subject_mask_assembly_identity(
+            source_producer_evidence,
+            kind="raw_probability_uint8",
+            stage_kind="raw_subject_mask",
+            source_run_path=source_producer_run_path,
+            n_rois=dimensions.n_rois,
+            n_frames=dimensions.n_frames,
+        )
+        if validated_source_evidence.get("schema_version") != (
+            SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Current refined recording assembly requires current raw evidence."
+            )
     cursor = 0
     payload_units: dict[str, list[dict[str, object]]] = {
         path: [] for path in payload_paths
@@ -863,9 +1241,13 @@ def build_recording_subject_mask_source_receipt(
         worker_bindings[0]["scientific_identity"],
         stage_kind=stage,
     )
-    assembly_identity = {
+    assembly_identity: dict[str, object] = {
         "schema_id": SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID,
-        "schema_version": SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION,
+        "schema_version": (
+            SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+            if current_contract
+            else SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_LEGACY_SCHEMA_VERSION
+        ),
         "kind": str(kind),
         "source_run_path": str(source_run_path).strip().strip("/"),
         "row_policy": "ordered_contiguous_real_work_units_v1",
@@ -875,12 +1257,43 @@ def build_recording_subject_mask_source_receipt(
         "common_scientific_authority": common_authority,
         "workers": worker_bindings,
     }
+    if current_contract:
+        assert normalized_work_units is not None
+        assembly_identity["work_unit_coverage"] = {
+            "policy": "authoritative_recording_plan_including_empty_windows_v1",
+            "n_frames": int(dimensions.n_frames),
+            "n_rois": int(dimensions.n_rois),
+            "unit_count": len(normalized_work_units),
+            "units_digest": canonical_json_sha256(normalized_work_units),
+            "units": normalized_work_units,
+        }
+        if stage == "raw_subject_mask":
+            assembly_identity["source_producer_binding"] = None
+        else:
+            assert validated_source_evidence is not None
+            raw_workers = validated_source_evidence["workers"]
+            if len(raw_workers) != len(worker_bindings):
+                raise ValueError("Refined/raw worker counts differ.")
+            for refined_worker, raw_worker in zip(
+                worker_bindings,
+                raw_workers,
+                strict=True,
+            ):
+                _validate_refined_worker_source_join(refined_worker, raw_worker)
+            assembly_identity["source_producer_binding"] = {
+                "schema_id": validated_source_evidence["schema_id"],
+                "schema_version": validated_source_evidence["schema_version"],
+                "kind": validated_source_evidence["kind"],
+                "source_run_path": validated_source_evidence["source_run_path"],
+                "digest": canonical_json_sha256(validated_source_evidence),
+            }
     assembly_identity = validate_recording_subject_mask_assembly_identity(
         assembly_identity,
         kind=kind,
         stage_kind=stage,
         source_run_path=source_run_path,
         n_rois=dimensions.n_rois,
+        n_frames=dimensions.n_frames,
     )
     source_manifest = build_subject_mask_source_run_manifest(
         kind=kind,
@@ -930,4 +1343,5 @@ __all__ = [
     "build_recording_subject_mask_source_receipt",
     "validate_subject_mask_worker_semantic_receipt",
     "validate_recording_subject_mask_assembly_identity",
+    "validate_recording_subject_mask_refined_source_join",
 ]

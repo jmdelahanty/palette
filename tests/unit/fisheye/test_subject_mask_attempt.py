@@ -7,15 +7,18 @@ import pytest
 import zarr
 
 from fisheye.shared.subject_mask_attempt import (
+    SUBJECT_MASK_SCIENTIFIC_IDENTITY_SCHEMA_VERSION,
     build_subject_mask_attempt,
     build_subject_mask_scientific_identity,
     resolve_subject_mask_attempt_lineage,
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    _normalize_expected_work_units,
     build_recording_assignment_keypoint_collection,
     build_recording_subject_mask_source_receipt,
     build_subject_mask_worker_semantic_receipt,
@@ -41,6 +44,137 @@ def _science(*, pixels_sha256: str = "a" * 64) -> dict[str, object]:
         pixels={"decoded_pixels_sha256": pixels_sha256},
         row_identity={"instance_key_sha256": "c" * 64},
         inference_contract={"label_schema_id": "subject_v1_union"},
+        schema_version=1,
+    )
+
+
+def test_expected_work_units_retain_empty_frame_windows() -> None:
+    units = [
+        {
+            "work_unit_id": "collection:clip_0",
+            "work_unit_index": 0,
+            "source_clip_id": "clip_0",
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": 1,
+            "row_start": 0,
+            "row_stop": 2,
+        },
+        {
+            "work_unit_id": "collection:clip_empty",
+            "work_unit_index": 1,
+            "source_clip_id": "clip_empty",
+            "source_clip_index": 1,
+            "frame_start": 1,
+            "frame_stop": 2,
+            "row_start": 2,
+            "row_stop": 2,
+        },
+        {
+            "work_unit_id": "collection:clip_2",
+            "work_unit_index": 2,
+            "source_clip_id": "clip_2",
+            "source_clip_index": 2,
+            "frame_start": 2,
+            "frame_stop": 4,
+            "row_start": 2,
+            "row_stop": 4,
+        },
+    ]
+
+    assert _normalize_expected_work_units(units, n_frames=4, n_rois=4) == units
+    with pytest.raises(ValueError, match="exactly and contiguously cover"):
+        _normalize_expected_work_units(
+            [units[0], {**units[2], "work_unit_index": 1}],
+            n_frames=4,
+            n_rois=4,
+        )
+
+
+def _raw_science_v2() -> dict[str, object]:
+    rows = 2
+    row_arrays = {
+        "source_crop_row_ids": {
+            "shape": [rows],
+            "dtype": "int64",
+            "sha256": "1" * 64,
+        },
+        "instance_key": {
+            "shape": [rows],
+            "dtype": "uint64",
+            "sha256": "2" * 64,
+        },
+        "source_acquisition_frame_index": {
+            "shape": [rows],
+            "dtype": "int64",
+            "sha256": "3" * 64,
+        },
+    }
+    return build_subject_mask_scientific_identity(
+        stage_kind="raw_subject_mask",
+        model={
+            "artifact_role": "subject_mask_checkpoint",
+            "artifact_sha256": "4" * 64,
+            "artifact_size_bytes": 1024,
+            "registry_set_id": "models_v1",
+            "registry_run_id": "run_001",
+            "label_schema_id": "subject_masks_v1",
+        },
+        crop={
+            "run_id": "crop_v2",
+            "run_group_path": "crop_runs/crop_v2",
+            "run_manifest": {
+                "schema_id": "palette.crop.run_manifest",
+                "schema_version": 2,
+                "payload_digest": "5" * 64,
+            },
+            "storage_mode": "geometry_only",
+            "roi_shape_hw": [8, 8],
+            "roi_coordinates_full": {
+                "shape": [rows, 2],
+                "dtype": "int32",
+                "sha256": "6" * 64,
+            },
+            "source_collection_id": "collection_001",
+            "source_clip_id": "clip_000",
+            "source_clip_index": 0,
+            "source_work_unit_id": "collection_001:clip_000",
+            "source_shard_id": "clip_000",
+            "collection_partition_contract": None,
+        },
+        pixels={
+            "profile": "palette.crop_pixel_work_package",
+            "decoded_shape": [rows, 8, 8],
+            "decoded_dtype": "uint8",
+            "decoded_order": "C",
+            "decoded_pixels_sha256": "7" * 64,
+            "declared_pixels_sha256": "7" * 64,
+            "cache_key": "cache_001",
+            "pixel_materialization_id": "pixels_001",
+            "pixel_contract": {"schema": "palette_roi_pixel_contract_v1"},
+            "work_package_role": "complete_collection_partition",
+        },
+        row_identity={"row_count": rows, "arrays": row_arrays},
+        inference_contract={
+            "segmenter": "unet",
+            "label_schema_id": "subject_masks_v1",
+            "mask_labels": ["subject_body"],
+            "model_input_transform": {
+                "name": "identity",
+                "native_shape_hw": [8, 8],
+                "model_shape_hw": [8, 8],
+                "pad_top": 0,
+                "pad_bottom": 0,
+                "pad_left": 0,
+                "pad_right": 0,
+                "coordinate_mapping": ("native_xy = model_xy - [pad_left, pad_top]"),
+            },
+            "probability_semantics": "sigmoid_multilabel_logits",
+            "probability_dtype": "uint8",
+            "probability_encoding": "linear_uint8_0_255",
+            "mask_probability_threshold": 0.5,
+            "overlap_policy": "independent_sigmoid",
+        },
     )
 
 
@@ -58,6 +192,38 @@ def test_scientific_identity_is_exact_and_content_sensitive() -> None:
     assert "scientific identity digest mismatch" in (
         validate_subject_mask_scientific_identity(tampered)
     )
+
+
+def test_scientific_identity_v2_rejects_recomputed_nested_tampering() -> None:
+    science = _raw_science_v2()
+    assert science["schema_version"] == SUBJECT_MASK_SCIENTIFIC_IDENTITY_SCHEMA_VERSION
+    assert validate_subject_mask_scientific_identity(science) == ()
+
+    missing = deepcopy(science)
+    del missing["payload"]["model"]["artifact_sha256"]
+    missing["digest"] = canonical_json_sha256(missing["payload"])
+    assert "raw scientific model fields are not exact" in (
+        validate_subject_mask_scientific_identity(missing)
+    )
+
+    extra = deepcopy(science)
+    extra["payload"]["pixels"]["uncontracted_backend"] = "cuda"
+    extra["digest"] = canonical_json_sha256(extra["payload"])
+    assert "raw scientific pixels fields are not exact" in (
+        validate_subject_mask_scientific_identity(extra)
+    )
+
+
+def test_scientific_identity_v2_rejects_empty_nested_documents() -> None:
+    with pytest.raises(ValueError, match="raw scientific model fields"):
+        build_subject_mask_scientific_identity(
+            stage_kind="raw_subject_mask",
+            model={},
+            crop={},
+            pixels={},
+            row_identity={},
+            inference_contract={},
+        )
 
 
 def test_attempt_separates_execution_identity_from_scientific_identity() -> None:
@@ -270,9 +436,7 @@ def test_recording_receipt_concatenates_real_worker_intervals() -> None:
                 "keypoint_selection_min_row": start,
                 "keypoint_selection_max_row": stop - 1,
             },
-            "assignment_keypoint_row_identity_check": (
-                "source_crop_row_ids_subset"
-            ),
+            "assignment_keypoint_row_identity_check": ("source_crop_row_ids_subset"),
         }
         science = build_subject_mask_scientific_identity(
             stage_kind="refined_subject_mask",
@@ -284,6 +448,7 @@ def test_recording_receipt_concatenates_real_worker_intervals() -> None:
                 "components": ["body", "eye"],
                 "eye_assignment_contract": assignment,
             },
+            schema_version=1,
         )
         attempt = build_subject_mask_attempt(
             scientific_identity=science,
@@ -434,6 +599,7 @@ def test_recording_receipt_rejects_conflicting_worker_science() -> None:
             pixels={"source": "raw_masks"},
             row_identity={"rows": 1},
             inference_contract={"components": ["body", "eye"]},
+            schema_version=1,
         )
         run_path = f"refined_subject_masks_runs/clip_{index}"
         attempt = build_subject_mask_attempt(
@@ -442,9 +608,11 @@ def test_recording_receipt_rejects_conflicting_worker_science() -> None:
             attempt_id=f"00000000-0000-4000-8000-{index + 1:012d}",
         )
         local = {
-            path: arrays[path][index : index + 1]
-            if path != "available_channels"
-            else arrays[path]
+            path: (
+                arrays[path][index : index + 1]
+                if path != "available_channels"
+                else arrays[path]
+            )
             for path in REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
         }
         receipt = build_subject_mask_worker_semantic_receipt(

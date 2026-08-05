@@ -20,7 +20,10 @@ from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     build_subject_mask_worker_semantic_receipt,
 )
-from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
+from fisheye.shared.zarr.manifest_digest import (
+    canonical_json_bytes,
+    canonical_json_sha256,
+)
 from fisheye.shared.zarr.crop_manifest import build_coordinate_crop_run_manifest
 from fisheye.shared.zarr.subject_mask_bundle_publication import (
     SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
@@ -100,16 +103,18 @@ def _seal_worker(
     *,
     stage_kind: str,
     paths: tuple[str, ...],
+    scientific_identity: dict[str, object] | None = None,
 ) -> None:
     row_count = int(run["source_crop_row_ids"].shape[0])
     run_path = str(run.path).strip("/")
-    science = build_subject_mask_scientific_identity(
+    science = scientific_identity or build_subject_mask_scientific_identity(
         stage_kind=stage_kind,
         model={"artifact": "pytest"},
         crop={"run_id": "crop_001"},
         pixels={"digest": "a" * 64},
         row_identity={"rows": row_count, "run_path": run_path},
         inference_contract={"components": list(run.attrs["mask_labels"])},
+        schema_version=1,
     )
     attempt = build_subject_mask_attempt(
         scientific_identity=science,
@@ -192,10 +197,7 @@ def _draft(
                 np.max(raw_probabilities, axis=(2, 3)).astype(np.float32)
                 / np.float32(255.0)
             ),
-            **{
-                f"metrics/{name}": value
-                for name, value in raw_metrics.items()
-            },
+            **{f"metrics/{name}": value for name, value in raw_metrics.items()},
         }
     row_values = {
         "source_crop_row_ids": np.arange(4, dtype=np.int64),
@@ -214,9 +216,7 @@ def _draft(
         raw_slices or {"raw_draft": slice(0, len(frames))}
     ).items():
         raw = raw_parent_group.create_group(raw_name)
-        raw.attrs.update(
-            {"mask_labels": raw_labels, "mask_probability_threshold": 0.5}
-        )
+        raw.attrs.update({"mask_labels": raw_labels, "mask_probability_threshold": 0.5})
         for name, values in row_values.items():
             _create_array(raw, name, values[row_slice])
         for name, values in raw_values.items():
@@ -273,6 +273,241 @@ def _install_crop_v2(draft_path: Path) -> None:
         consolidated_metadata_declarations=consolidated,
         selector_eligible=False,
     )
+
+
+def _array_reference(value: np.ndarray) -> dict[str, object]:
+    array = np.ascontiguousarray(np.asarray(value))
+    return {
+        "shape": [int(item) for item in array.shape],
+        "dtype": str(array.dtype),
+        "sha256": hashlib.sha256(array.view(np.uint8)).hexdigest(),
+    }
+
+
+def _collection_partition_contract(start: int, stop: int) -> dict[str, object]:
+    clip_id = f"clip_{start}"
+    payload = {
+        "role": "complete_collection_partition",
+        "coverage_semantics": (
+            "exact_complete_crop_rows_for_acquisition_frame_window_v1"
+        ),
+        "work_package_id": hashlib.sha256(clip_id.encode("utf-8")).hexdigest(),
+        "collection": {
+            "source_collection_id": "pytest_collection",
+            "source_collection_path": "/pytest/collection.json",
+            "source_clip_id": clip_id,
+            "source_clip_index": start // 2,
+            "source_work_unit_id": f"pytest_collection:{clip_id}",
+            "source_shard_id": clip_id,
+        },
+        "frame_window": {
+            "schema_id": "palette.acquisition_video_frame_window",
+            "schema_version": 1,
+            "recording_identity": "crop_manifest_test",
+            "camera_identity": "cam2010095",
+            "clip_id": clip_id,
+            "actual_start_frame": start,
+            "end_frame_exclusive": stop,
+            "frame_count": stop - start,
+            "clip_index_document_sha256": "e" * 64,
+            "clip_video_sha256": "f" * 64,
+        },
+        "crop_rows": {
+            "start": start,
+            "stop": stop,
+            "count": stop - start,
+            "source_crop_total_rows": 4,
+        },
+        "validation": {
+            "work_package_opened_and_content_verified": True,
+            "row_interval_contiguous": True,
+            "frame_offset_coverage_exact": True,
+            "acquisition_frames_within_window": True,
+        },
+    }
+    return {
+        "schema_id": "palette.subject_mask.complete_collection_partition",
+        "schema_version": 1,
+        "payload": payload,
+        "payload_digest": canonical_json_sha256(payload),
+    }
+
+
+def _upgrade_workers_to_coordinate_science_v2(draft_path: Path) -> None:
+    root = zarr.open_group(str(draft_path), mode="a", use_consolidated=False)
+    crop = root["crop_runs/crop_001"]
+    crop_manifest = crop.attrs["run_manifest"]
+    raw_parent = root["subject_mask_shard_runs"]
+    raw_by_interval: dict[tuple[int, int], zarr.Group] = {}
+    for run_name in sorted(raw_parent.keys()):
+        run = raw_parent[run_name]
+        rows = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64)
+        start = int(rows[0])
+        stop = int(rows[-1]) + 1
+        raw_by_interval[(start, stop)] = run
+        coordinates = np.asarray(
+            crop["source_crop_xywh"][start:stop, :2], dtype=np.int32
+        )
+        labels = list(run.attrs["mask_labels"])
+        science = build_subject_mask_scientific_identity(
+            stage_kind="raw_subject_mask",
+            model={
+                "artifact_role": "subject_mask_checkpoint",
+                "artifact_sha256": "a" * 64,
+                "artifact_size_bytes": 1024,
+                "registry_set_id": "pytest_models",
+                "registry_run_id": "pytest_raw",
+                "label_schema_id": "pytest_subject_masks",
+            },
+            crop={
+                "run_id": "crop_001",
+                "run_group_path": "crop_runs/crop_001",
+                "run_manifest": {
+                    "schema_id": crop_manifest["schema_id"],
+                    "schema_version": crop_manifest["schema_version"],
+                    "payload_digest": crop_manifest["payload_digest"],
+                },
+                "storage_mode": "geometry_only",
+                "roi_shape_hw": [8, 8],
+                "roi_coordinates_full": _array_reference(coordinates),
+                "source_collection_id": "pytest_collection",
+                "source_clip_id": f"clip_{start}",
+                "source_clip_index": start // 2,
+                "source_work_unit_id": f"pytest_collection:clip_{start}",
+                "source_shard_id": f"clip_{start}",
+                "collection_partition_contract": _collection_partition_contract(
+                    start, stop
+                ),
+            },
+            pixels={
+                "profile": "pytest_pixels",
+                "decoded_shape": [stop - start, 8, 8],
+                "decoded_dtype": "uint8",
+                "decoded_order": "C",
+                "decoded_pixels_sha256": "b" * 64,
+                "declared_pixels_sha256": "b" * 64,
+                "cache_key": f"pytest_cache_{start}",
+                "pixel_materialization_id": f"pytest_pixels_{start}",
+                "pixel_contract": {"schema": "palette_roi_pixel_contract_v1"},
+                "work_package_role": "complete_collection_partition",
+            },
+            row_identity={
+                "row_count": stop - start,
+                "arrays": {
+                    name: _array_reference(np.asarray(run[name][:]))
+                    for name in (
+                        "source_crop_row_ids",
+                        "instance_key",
+                        "source_acquisition_frame_index",
+                    )
+                },
+            },
+            inference_contract={
+                "segmenter": "unet",
+                "label_schema_id": "pytest_subject_masks",
+                "mask_labels": labels,
+                "model_input_transform": {
+                    "name": "identity",
+                    "native_shape_hw": [8, 8],
+                    "model_shape_hw": [8, 8],
+                    "pad_top": 0,
+                    "pad_bottom": 0,
+                    "pad_left": 0,
+                    "pad_right": 0,
+                    "coordinate_mapping": (
+                        "native_xy = model_xy - [pad_left, pad_top]"
+                    ),
+                },
+                "probability_semantics": "sigmoid_multilabel_logits",
+                "probability_dtype": "uint8",
+                "probability_encoding": "linear_uint8_0_255",
+                "mask_probability_threshold": 0.5,
+                "overlap_policy": "independent_sigmoid",
+            },
+        )
+        _seal_worker(
+            draft_path,
+            run,
+            stage_kind="raw_subject_mask",
+            paths=RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+            scientific_identity=science,
+        )
+
+    refined_parent = root["refined_subject_masks_runs"]
+    for run_name in sorted(refined_parent.keys()):
+        run = refined_parent[run_name]
+        rows = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64)
+        start = int(rows[0])
+        stop = int(rows[-1]) + 1
+        raw = raw_by_interval[(start, stop)]
+        raw_science = raw.attrs["subject_mask_scientific_identity"]
+        raw_binding = raw.attrs["subject_mask_worker_semantic_receipt_binding"]
+        input_binding = {
+            "run_path": str(raw.path).strip("/"),
+            "run_manifest": None,
+            "scientific_identity_digest": raw_science["digest"],
+            "worker_semantic_receipt_binding": dict(raw_binding),
+        }
+        labels = list(run.attrs["mask_labels"])
+        method = "smart_finalize_subject_masks_v1"
+        science = build_subject_mask_scientific_identity(
+            stage_kind="refined_subject_mask",
+            model={
+                "role": "deterministic_refinement_policy",
+                "method": method,
+                "source_input_binding": input_binding,
+            },
+            crop={
+                "run_id": "crop_001",
+                "source_crop_snapshot": {},
+                "roi_shape_hw": [8, 8],
+            },
+            pixels={
+                "semantic_input": "raw_subject_mask_surface",
+                "surface_kind": "probability",
+                "surface_path": "mask_probs_roi",
+                "probability_encoding": "linear_uint8_0_255",
+                "source_input_binding": input_binding,
+            },
+            row_identity={
+                "row_count": stop - start,
+                "arrays": {
+                    "source_crop_row_ids": _array_reference(rows),
+                    "instance_key": _array_reference(
+                        np.asarray(crop["instance_key"][start:stop])
+                    ),
+                    "source_acquisition_frame_index": _array_reference(
+                        np.asarray(crop["source_acquisition_frame_index"][start:stop])
+                    ),
+                    "source_crop_xywh": _array_reference(
+                        np.asarray(crop["source_crop_xywh"][start:stop])
+                    ),
+                    "available_channels": _array_reference(
+                        np.asarray(run["available_channels"][:])
+                    ),
+                },
+            },
+            inference_contract={
+                "method": method,
+                "finalization_semantics": ("smart_probability_to_refined_candidate"),
+                "output_component_order": labels,
+                "component_sources_and_policies": {
+                    label: {"source": "pytest"} for label in labels
+                },
+                "eye_assignment_contract": None,
+                "authoritative_output": "dense_uint8_masks_roi",
+                "derived_cache_policy": (
+                    "bitpacked_rle_metrics_contours_non_authoritative"
+                ),
+            },
+        )
+        _seal_worker(
+            draft_path,
+            run,
+            stage_kind="refined_subject_mask",
+            paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+            scientific_identity=science,
+        )
 
 
 @pytest.mark.parametrize("raw_parent", ("subject_mask_runs", "subject_mask_shard_runs"))
@@ -341,7 +576,7 @@ def test_recording_bundle_requires_crop_v2_by_default(tmp_path: Path) -> None:
         )
 
 
-def test_recording_bundle_publishes_coordinate_bound_v3_members(
+def test_recording_bundle_publishes_coordinate_bound_v4_members(
     tmp_path: Path,
 ) -> None:
     draft = _draft(
@@ -354,7 +589,8 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
         },
     )
     _install_crop_v2(draft)
-    analysis = tmp_path / "analysis_coordinate_v3.zarr"
+    _upgrade_workers_to_coordinate_science_v2(draft)
+    analysis = tmp_path / "analysis_coordinate_v4.zarr"
     root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
     root.attrs["recording_id"] = "crop_manifest_test"
     _install_crop_v2(analysis)
@@ -368,37 +604,63 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
         raw_draft_runs=("raw_clip_b", "raw_clip_a"),
         refined_draft_run="refined_clip_a",
         refined_draft_runs=("refined_clip_b", "refined_clip_a"),
-        raw_run="raw_coordinate_v3",
-        refined_run="refined_coordinate_v3",
-        quality_run="quality_coordinate_v3",
-        bundle_id="bundle_coordinate_v3",
+        raw_run="raw_coordinate_v4",
+        refined_run="refined_coordinate_v4",
+        quality_run="quality_coordinate_v4",
+        bundle_id="bundle_coordinate_v4",
         local_output_root=tmp_path / "coordinate_outputs",
         quality_scratch_root=tmp_path / "coordinate_quality_scratch",
+        expected_work_units=(
+            {
+                "work_unit_id": "pytest_collection:clip_0",
+                "work_unit_index": 0,
+                "source_clip_id": "clip_0",
+                "source_clip_index": 0,
+                "frame_start": 0,
+                "frame_stop": 2,
+                "row_start": 0,
+                "row_stop": 2,
+            },
+            {
+                "work_unit_id": "pytest_collection:clip_2",
+                "work_unit_index": 1,
+                "source_clip_id": "clip_2",
+                "source_clip_index": 1,
+                "frame_start": 2,
+                "frame_stop": 4,
+                "row_start": 2,
+                "row_stop": 4,
+            },
+        ),
     )
 
     assert result["status"] == "complete"
     published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
-    raw_manifest = published["subject_mask_runs/raw_coordinate_v3"].attrs[
+    raw_manifest = published["subject_mask_runs/raw_coordinate_v4"].attrs[
         "run_manifest"
     ]
     refined_manifest = published[
-        "refined_subject_masks_runs/refined_coordinate_v3"
+        "refined_subject_masks_runs/refined_coordinate_v4"
     ].attrs["run_manifest"]
-    assert raw_manifest["schema_version"] == 3
-    assert refined_manifest["schema_version"] == 3
-    assert refined_manifest["payload"]["coordinate_dependencies"]["document"][
-        "raw_core"
-    ]["manifest_payload_digest"] == raw_manifest["payload_digest"]
-    bundle_manifest = published["subject_mask_bundle_runs/bundle_coordinate_v3"].attrs[
+    assert raw_manifest["schema_version"] == 4
+    assert refined_manifest["schema_version"] == 4
+    assert (
+        refined_manifest["payload"]["coordinate_dependencies"]["document"]["raw_core"][
+            "manifest_payload_digest"
+        ]
+        == raw_manifest["payload_digest"]
+    )
+    bundle_manifest = published["subject_mask_bundle_runs/bundle_coordinate_v4"].attrs[
         "run_manifest"
     ]
     coordinate_binding = bundle_manifest["payload"]["cross_binding"][
         "coordinate_contract"
     ]
     assert coordinate_binding["crop"]["run_path"] == "crop_runs/crop_001"
-    assert coordinate_binding["refined_raw_core_binding"][
-        "manifest_payload_digest"
-    ] == raw_manifest["payload_digest"]
+    assert (
+        coordinate_binding["refined_raw_core_binding"]["manifest_payload_digest"]
+        == raw_manifest["payload_digest"]
+    )
     assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
 
     with pytest.raises(
@@ -407,16 +669,18 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
     ):
         load_recording_subject_mask_coordinate_authority(
             analysis,
-            bundle_id="bundle_coordinate_v3",
+            bundle_id="bundle_coordinate_v4",
         )
     inactive = load_recording_subject_mask_coordinate_authority(
         analysis,
-        bundle_id="bundle_coordinate_v3",
+        bundle_id="bundle_coordinate_v4",
         allow_inactive=True,
     )
     assert inactive.active is False
     assert inactive.crop_run_path == "crop_runs/crop_001"
-    assert inactive.refined_run.path == "refined_subject_masks_runs/refined_coordinate_v3"
+    assert (
+        inactive.refined_run.path == "refined_subject_masks_runs/refined_coordinate_v4"
+    )
     assert inactive.camera_identity == "cam2010095"
     assert inactive.source_total_frames == 4
     assert (inactive.source_width, inactive.source_height) == (100, 80)
@@ -430,7 +694,7 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
         BoundSubjectShapeBundleSource()
     shape_source = load_subject_shape_bundle_source(
         analysis,
-        bundle_id="bundle_coordinate_v3",
+        bundle_id="bundle_coordinate_v4",
         allow_inactive=True,
     )
     assert shape_source.active is False
@@ -452,7 +716,7 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
 
     activate_subject_mask_bundle(
         analysis_zarr=analysis,
-        bundle_id="bundle_coordinate_v3",
+        bundle_id="bundle_coordinate_v4",
     )
     active = load_recording_subject_mask_coordinate_authority(analysis)
     assert active.active is True
@@ -601,12 +865,8 @@ def test_recording_bundle_binds_distinct_raw_and_refined_component_registries(
     assert result["status"] == "complete"
     published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
     raw = published["subject_mask_runs/raw_split_eye_001"]
-    refined = published[
-        "refined_subject_masks_runs/refined_split_eye_001"
-    ]
-    quality = published[
-        "subject_mask_quality_runs/quality_split_eye_001"
-    ]
+    refined = published["refined_subject_masks_runs/refined_split_eye_001"]
+    quality = published["subject_mask_quality_runs/quality_split_eye_001"]
     assert raw.attrs["mask_labels"] == [
         "subject_body",
         "eyes_union",
@@ -647,9 +907,10 @@ def test_recording_bundle_binds_distinct_raw_and_refined_component_registries(
         "eye_right",
         "swim_bladder",
     ]
-    assert "available_channels" not in cross_binding[
-        "raw_refined_identity_array_values_sha256"
-    ]
+    assert (
+        "available_channels"
+        not in cross_binding["raw_refined_identity_array_values_sha256"]
+    )
     assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
 
 

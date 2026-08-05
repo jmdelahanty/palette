@@ -817,10 +817,11 @@ def _validate_subject_mask_shard_partition_role(
     }
     if not isinstance(collection, Mapping) or set(collection) != collection_fields:
         raise ValueError(f"{path} collection identity fields are not exact.")
-    for field in collection_fields:
-        if collection.get(field) != group.attrs.get(field):
+    for field_name in collection_fields:
+        if collection.get(field_name) != group.attrs.get(field_name):
             raise ValueError(
-                f"{path} collection-partition {field} differs from the run attribute."
+                f"{path} collection-partition {field_name} differs from the run "
+                "attribute."
             )
 
     frame_window = payload.get("frame_window")
@@ -5635,22 +5636,45 @@ def _build_refined_subject_mask_scientific_identity(
         "finalization_semantics": "smart_probability_to_refined_candidate",
         "output_component_order": [str(name) for name in component_names],
         "component_sources_and_policies": dict(_json_safe(source_payloads)),
-        "eye_assignment_contract": dict(_json_safe(assignment_keypoint_attrs)),
+        "eye_assignment_contract": (
+            dict(_json_safe(assignment_keypoint_attrs))
+            if assignment_keypoint_attrs
+            else None
+        ),
         "authoritative_output": "dense_uint8_masks_roi",
         "derived_cache_policy": "bitpacked_rle_metrics_contours_non_authoritative",
     }
-    return build_subject_mask_scientific_identity(
-        stage_kind="refined_subject_mask",
-        model={
+    identity_kwargs = {
+        "stage_kind": "refined_subject_mask",
+        "model": {
             "role": "deterministic_refinement_policy",
             "method": SMART_FINALIZE_SUBJECT_MASKS_METHOD,
             "source_input_binding": input_binding,
         },
-        crop=crop,
-        pixels=pixels,
-        row_identity=row_identity,
-        inference_contract=inference_contract,
-    )
+        "crop": crop,
+        "pixels": pixels,
+        "row_identity": row_identity,
+        "inference_contract": inference_contract,
+    }
+    try:
+        return build_subject_mask_scientific_identity(**identity_kwargs)
+    except ValueError as exc:
+        validation_errors = str(exc).partition(": ")[2].split("; ")
+        lineage_only_failure = bool(validation_errors) and all(
+            error == "scientific row_identity array inventory is invalid"
+            or error.startswith("row_identity.")
+            for error in validation_errors
+        )
+        if require_production_proof or not lineage_only_failure:
+            raise
+        # Historical and test-only sources may lack the complete, exactly typed
+        # lineage inventory required by scientific-identity v2.  Keep them on
+        # the explicit v1 compatibility surface; new production-proof
+        # publication must satisfy v2 and remains fail-closed above.
+        return build_subject_mask_scientific_identity(
+            **identity_kwargs,
+            schema_version=1,
+        )
 
 
 def _seal_refined_worker_semantic_receipt(
