@@ -32,11 +32,14 @@ from fisheye.shared.zarr.canonical_detection_benchmark_input import (
     load_detection_benchmark_input,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     build_legacy_detection_source_evidence,
+    canonical_detection_dimensions_from_manifest,
     validate_canonical_detection_publication,
 )
 from fisheye.shared.zarr.canonical_detection_shadow import (
     CanonicalDetectionShadowPublication,
+    canonical_detection_metadata_declaration_maps,
     publish_legacy_canonical_detection_shadow,
     validate_canonical_detection_shadow_publication,
 )
@@ -61,6 +64,7 @@ from fisheye.shared.zarr.refined_detection_storage import (
     plan_refined_detection_storage,
 )
 from fisheye.shared.zarr.refined_detection_transition import (
+    build_accept_all_refined_detection_root,
     build_refined_detection_transition,
 )
 from fisheye.shared.zarr_helpers import (
@@ -86,6 +90,13 @@ CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_ID = (
 CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_VERSION = 1
 CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_POLICY = (
     "node_local_canonical_v3_then_atomic_selector_ineligible_import_v1"
+)
+ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID = (
+    "palette.accept_all_refined_detection.production_publication"
+)
+ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_VERSION = 1
+ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_POLICY = (
+    "node_local_accept_all_refined_v2_then_atomic_selector_ineligible_import_v1"
 )
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SELECTOR_ATTRS = (
@@ -263,11 +274,12 @@ def _require_unselected(root: Any, *, family_name: str, run_id: str) -> None:
         raise RuntimeError(f"Snapshot {run_id!r} became selector-eligible.")
 
 
-def _selector_snapshot(family: Any) -> dict[str, dict[str, object]]:
+def _selector_snapshot(family: Any | None) -> dict[str, dict[str, object]]:
+    attrs = {} if family is None else family.attrs
     return {
         name: {
-            "present": name in family.attrs,
-            "value": family.attrs.get(name),
+            "present": name in attrs,
+            "value": attrs.get(name),
         }
         for name in _SELECTOR_ATTRS
     }
@@ -284,6 +296,76 @@ def _require_selector_snapshot(
         raise RuntimeError(
             f"{family_name} selectors changed during successor publication."
         )
+
+
+def _load_persisted_canonical_v3(
+    archive: Path,
+    *,
+    run_id: str,
+) -> CanonicalDetectionShadowPublication:
+    """Open and completely validate one persisted canonical-v3 source."""
+
+    root = open_zarr_root(archive, mode="r")
+    family = root.get("detect_runs")
+    if family is None or run_id not in family:
+        raise FileNotFoundError(
+            f"Canonical detection source detect_runs/{run_id} does not exist."
+        )
+    run = family[run_id]
+    manifest_value = run.attrs.get("run_manifest")
+    if not isinstance(manifest_value, Mapping):
+        raise ValueError("Canonical detection source lacks its run_manifest.")
+    manifest = dict(manifest_value)
+    if (
+        manifest.get("schema_version")
+        != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "Accept-all refinement requires the canonical-v3 coordinate manifest."
+        )
+    dimensions = canonical_detection_dimensions_from_manifest(manifest)
+    plans = plan_canonical_detection_storage(dimensions)
+    if manifest["payload"]["storage_plan"] != plans.as_manifest():
+        raise ValueError(
+            "Canonical detection source does not use the current published profile."
+        )
+    arrays = _canonical_arrays(run)
+    direct, consolidated = canonical_detection_metadata_declaration_maps(
+        archive,
+        run_id=run_id,
+        plans=plans,
+    )
+    errors = list(
+        validate_canonical_detection_publication(
+            manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+        )
+    )
+    if run.attrs.get("status") != "complete":
+        errors.append("canonical source status is not complete")
+    if run.attrs.get("stage_selector_eligible") is not False:
+        errors.append("canonical source must remain selector-ineligible")
+    publication = CanonicalDetectionShadowPublication(
+        output_path=archive,
+        run_id=run_id,
+        dimensions=dimensions,
+        plans=plans,
+        manifest=manifest,
+        arrays=arrays,
+        receipt={
+            "source_kind": "persisted_canonical_v3",
+            "instance_key_policy": "preserved_from_source",
+        },
+    )
+    errors.extend(validate_canonical_detection_shadow_publication(publication))
+    if errors:
+        raise ValueError(
+            "Canonical-v3 source publication is invalid: "
+            + "; ".join(dict.fromkeys(errors))
+        )
+    return publication
 
 
 def _canonical_input_preserving_source_keys(
@@ -602,6 +684,367 @@ def publish_canonical_detection_successor(
             "storage_profile_id": canonical.plans.profile.profile_id,
             "coordinate_catalog": True,
             "instance_key_policy": "preserved_from_source",
+            "publication": publication,
+            "validation": postcopy,
+            "selectors_before": selectors_before,
+            "selectors_after": selectors_before,
+            "selector_eligible": False,
+            "selector_activation": "deferred_separate_reviewed_change",
+            "registry_updated": False,
+            "node_local_materialization": {
+                "session_path": str(session),
+                "retained_after_success": bool(keep_scratch),
+            },
+            "total_seconds": float(time.perf_counter() - started),
+        }
+        safe_result = json_attr_safe(result)
+        if result_json is not None:
+            write_json_atomic(result_json.expanduser().resolve(), safe_result)
+        success = True
+        return safe_result
+    finally:
+        if session.exists() and success and not keep_scratch:
+            shutil.rmtree(session)
+
+
+def inspect_accept_all_refined_detection_source(
+    *,
+    analysis_zarr: Path,
+    canonical_run_id: str,
+    recording_identity: str,
+    refined_run_id: str,
+) -> dict[str, object]:
+    """Validate one canonical-v3 source without writing its refined root."""
+
+    archive = analysis_zarr.expanduser().resolve()
+    if not archive.is_dir():
+        raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
+    canonical_id = _require_run_id(canonical_run_id, label="canonical_run_id")
+    refined_id = _require_run_id(refined_run_id, label="refined_run_id")
+    identity = str(recording_identity).strip()
+    if not identity:
+        raise ValueError("recording_identity cannot be empty.")
+
+    root = open_zarr_root(archive, mode="r")
+    observed_identity = str(root.attrs.get("recording_id") or "").strip()
+    if observed_identity != identity:
+        raise ValueError(
+            "Requested recording_identity differs from the archive recording_id."
+        )
+    target = archive / "refined_detect_runs" / refined_id
+    if target.exists():
+        raise FileExistsError(f"Immutable refined target exists: {target}")
+
+    canonical = _load_persisted_canonical_v3(archive, run_id=canonical_id)
+    transition = build_accept_all_refined_detection_root(
+        canonical.arrays,
+        dimensions=canonical.dimensions,
+        recording_identity=identity,
+    )
+    plans = plan_refined_detection_storage(transition.dimensions)
+    source_keys_hash = sha256_array(canonical.arrays["instances/instance_key"])
+    refined_keys_hash = sha256_array(transition.arrays["instances/instance_key"])
+    if source_keys_hash != refined_keys_hash:
+        raise RuntimeError("Accept-all transition changed canonical instance keys.")
+    source_offsets_hash = sha256_array(
+        canonical.arrays["instances/frame_row_offsets"]
+    )
+    refined_offsets_hash = sha256_array(
+        transition.arrays["instances/frame_row_offsets"]
+    )
+    if source_offsets_hash != refined_offsets_hash:
+        raise RuntimeError("Accept-all transition changed canonical frame offsets.")
+
+    refined_parent = root.get("refined_detect_runs")
+    return json_attr_safe(
+        {
+            "schema_id": "palette.accept_all_refined_detection.source_inspection",
+            "schema_version": 1,
+            "status": "ready",
+            "analysis_zarr": str(archive),
+            "recording_identity": identity,
+            "source": {
+                "run_id": canonical_id,
+                "group_path": f"detect_runs/{canonical_id}",
+                "manifest_digest": canonical.manifest["payload_digest"],
+                "logical_content_digest": canonical.manifest["payload"][
+                    "logical_content"
+                ]["digest"],
+                "instance_key_sha256": source_keys_hash,
+                "frame_row_offsets_sha256": source_offsets_hash,
+            },
+            "target": {
+                "run_id": refined_id,
+                "group_path": f"refined_detect_runs/{refined_id}",
+                "instance_key_sha256": refined_keys_hash,
+                "frame_row_offsets_sha256": refined_offsets_hash,
+            },
+            "dimensions": transition.dimensions.as_manifest(),
+            "storage_profile_id": plans.profile.profile_id,
+            "coordinate_catalog": True,
+            "transition_report": dict(transition.report),
+            "identity_policy": {
+                "instance_key": "preserved_from_canonical_v3",
+                "refined_row_id": "contiguous_root_snapshot_allocator_v1",
+                "source_detect_row_index": "canonical_row_position",
+            },
+            "decision_policy": "accept_every_canonical_source_row_exactly_once",
+            "selectors_before": _selector_snapshot(refined_parent),
+            "selector_eligible": False,
+            "registry_updated": False,
+        }
+    )
+
+
+def publish_accept_all_refined_detection_successor(
+    *,
+    analysis_zarr: Path,
+    canonical_run_id: str,
+    recording_identity: str,
+    refined_run_id: str,
+    scratch_root: Path,
+    copy_backend: str = "python",
+    keep_scratch: bool = False,
+    result_json: Path | None = None,
+) -> dict[str, object]:
+    """Publish one selector-ineligible all-accepted refined root snapshot."""
+
+    started = time.perf_counter()
+    inspection = inspect_accept_all_refined_detection_source(
+        analysis_zarr=analysis_zarr,
+        canonical_run_id=canonical_run_id,
+        recording_identity=recording_identity,
+        refined_run_id=refined_run_id,
+    )
+    archive = Path(str(inspection["analysis_zarr"]))
+    identity = str(inspection["recording_identity"])
+    canonical_id = str(inspection["source"]["run_id"])
+    refined_id = str(inspection["target"]["run_id"])
+    target = archive / "refined_detect_runs" / refined_id
+    if copy_backend not in {"python", "rsync"}:
+        raise ValueError("copy_backend must be 'python' or 'rsync'.")
+    scratch = _require_node_local_scratch(scratch_root)
+    selectors_before = dict(inspection["selectors_before"])
+
+    canonical = _load_persisted_canonical_v3(archive, run_id=canonical_id)
+    transition = build_accept_all_refined_detection_root(
+        canonical.arrays,
+        dimensions=canonical.dimensions,
+        recording_identity=identity,
+    )
+    refined_plans = plan_refined_detection_storage(transition.dimensions)
+    lineage = RefinedDetectionSnapshotLineage(
+        lineage_id=str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "palette:accept-all-refined-detection-lineage:"
+                f"{identity}:{canonical.manifest['payload_digest']}",
+            )
+        ),
+        snapshot_id=str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"palette:accept-all-refined-detection-snapshot:{identity}:{refined_id}",
+            )
+        ),
+        recording_identity=identity,
+        next_refined_row_id=transition.dimensions.n_instances,
+    )
+
+    session = scratch / f"palette_accept_all_refined_{uuid.uuid4().hex}"
+    local_root = session / ".palette_benchmarks" / "production_candidate"
+    local_root.mkdir(parents=True, exist_ok=False)
+    success = False
+    try:
+        refined = publish_refined_detection_shadow(
+            transition,
+            destination=local_root / "refined.zarr",
+            run_id=refined_id,
+            lineage=lineage,
+            canonical_source=canonical,
+            shadow_root=local_root,
+            coordinate_catalog=True,
+        )
+        local_run = refined.output_path / "refined_detect_runs" / refined_id
+        _mark_local_candidate(
+            zarr.open_group(str(local_run), mode="a", use_consolidated=False),
+            source_group_path=f"detect_runs/{canonical_id}",
+        )
+        local_validation = _validate_refined_run_path(
+            local_run,
+            transition=transition,
+            plans=refined_plans,
+        )
+        if not local_validation["valid"]:
+            raise RuntimeError(
+                f"All-accepted local refined snapshot is invalid: {local_validation}"
+            )
+
+        def validator(path: Path) -> Mapping[str, Any]:
+            return _validate_refined_run_path(
+                path,
+                transition=transition,
+                plans=refined_plans,
+            )
+
+        def complete_run(_root: Any, parent: Any, run: Any) -> None:
+            if (
+                run.attrs.get("status") != "complete"
+                or run.attrs.get("stage_selector_eligible") is not False
+            ):
+                raise RuntimeError(
+                    "Imported refined root is not complete and selector-ineligible."
+                )
+            mark_run_complete(
+                run,
+                parent_group=parent,
+                run_name=refined_id,
+                allow_missing_run_provenance=True,
+                missing_run_provenance_reason=(
+                    "refined_v2_manifest_binds_validated_canonical_v3_source"
+                ),
+            )
+
+        postcopy: dict[str, object] = {}
+
+        def finalize_visibility(_root: Any, _parent: Any, _run: Any) -> None:
+            consolidation = consolidate_metadata_capture_expected_warnings(archive)
+            published_root = open_zarr_root(archive, mode="r")
+            _require_unselected(
+                published_root,
+                family_name="refined_detect_runs",
+                run_id=refined_id,
+            )
+            _require_selector_snapshot(
+                published_root,
+                family_name="refined_detect_runs",
+                expected=selectors_before,
+            )
+            published_run = published_root[f"refined_detect_runs/{refined_id}"]
+            direct, consolidated = refined_detection_metadata_declaration_maps(
+                archive,
+                run_id=refined_id,
+                plans=refined_plans,
+            )
+            errors = validate_refined_detection_publication(
+                dict(published_run.attrs["run_manifest"]),
+                direct_metadata_declarations=direct,
+                consolidated_metadata_declarations=consolidated,
+                arrays=_refined_arrays(
+                    published_run,
+                    dimensions=transition.dimensions,
+                ),
+            )
+            if errors:
+                raise RuntimeError(
+                    "Published all-accepted refined validation failed: "
+                    + "; ".join(errors)
+                )
+            from fisheye.shared.zarr.refined_detection_crop_source import (
+                bind_refined_detection_crop_source,
+            )
+
+            bound = bind_refined_detection_crop_source(
+                archive,
+                run_id=refined_id,
+                allow_selector_ineligible_benchmark=True,
+            )
+            if (
+                bound.logical_content_digest
+                != refined.receipt["logical_content_digest"]
+            ):
+                raise RuntimeError(
+                    "Refined crop-source binding changed the logical digest."
+                )
+            postcopy.update(
+                {
+                    "consolidation": consolidation,
+                    "refined_errors": [],
+                    "direct_consolidated_metadata_equal": True,
+                    "canonical_source_binding_revalidated_after_copy": True,
+                    "crop_source_binding": dict(bound.handoff_manifest),
+                }
+            )
+
+        def repair_failed_visibility(_target: Path) -> None:
+            consolidate_metadata_capture_expected_warnings(archive)
+
+        publication = atomic_publish_run_group(
+            AtomicRunPublishSpec(
+                source_zarr=archive,
+                local_run_path=local_run,
+                target_run_path=target,
+                run_name=refined_id,
+                lock_suffix="accept_all_refined_detection_publication",
+                publish_schema_id=(
+                    ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID
+                ),
+                policy=ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_POLICY,
+                rollback_policy=DETECTION_SNAPSHOT_ROLLBACK_POLICY,
+                content_checksum=True,
+            ),
+            copy_backend=copy_backend,
+            validate_run=validator,
+            prepare_parents=lambda root: _prepare_parent(
+                root, "refined_detect_runs"
+            ),
+            complete_run=complete_run,
+            verify_pointers=lambda root: (
+                _require_unselected(
+                    root,
+                    family_name="refined_detect_runs",
+                    run_id=refined_id,
+                ),
+                _require_selector_snapshot(
+                    root,
+                    family_name="refined_detect_runs",
+                    expected=selectors_before,
+                ),
+            ),
+            payload_metadata={
+                "snapshot_role": "accept_all_refined_detection_v2_root",
+                "canonical_source_run_id": canonical_id,
+                "instance_key_policy": "preserved_from_canonical_v3",
+                "selector_activation": "deferred",
+            },
+            activate_run=finalize_visibility,
+            repair_failed_publication_visibility=repair_failed_visibility,
+        )
+        if not postcopy:
+            raise RuntimeError(
+                "All-accepted refined publication omitted final validation."
+            )
+
+        result: dict[str, object] = {
+            "schema_id": ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID,
+            "schema_version": (
+                ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_VERSION
+            ),
+            "status": "complete",
+            "published_at_utc": utc_now(),
+            "analysis_zarr": str(archive),
+            "recording_identity": identity,
+            "source": dict(inspection["source"]),
+            "snapshot": {
+                "run_id": refined_id,
+                "group_path": f"refined_detect_runs/{refined_id}",
+                "manifest_schema_version": refined.manifest["schema_version"],
+                "manifest_digest": refined.manifest["payload_digest"],
+                "logical_content_digest": refined.receipt[
+                    "logical_content_digest"
+                ],
+                "instance_key_sha256": sha256_array(
+                    transition.arrays["instances/instance_key"]
+                ),
+                "frame_row_offsets_sha256": sha256_array(
+                    transition.arrays["instances/frame_row_offsets"]
+                ),
+            },
+            "dimensions": transition.dimensions.as_manifest(),
+            "storage_profile_id": refined_plans.profile.profile_id,
+            "coordinate_catalog": True,
+            "identity_policy": dict(inspection["identity_policy"]),
+            "decision_policy": inspection["decision_policy"],
             "publication": publication,
             "validation": postcopy,
             "selectors_before": selectors_before,
@@ -956,11 +1399,15 @@ def publish_detection_snapshot_pair(
 
 
 __all__ = [
+    "ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID",
+    "ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_VERSION",
     "CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_ID",
     "CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_VERSION",
     "DETECTION_SNAPSHOT_PUBLICATION_SCHEMA_ID",
     "DETECTION_SNAPSHOT_PUBLICATION_SCHEMA_VERSION",
+    "inspect_accept_all_refined_detection_source",
     "inspect_canonical_detection_successor_source",
+    "publish_accept_all_refined_detection_successor",
     "publish_canonical_detection_successor",
     "publish_detection_snapshot_pair",
 ]

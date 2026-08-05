@@ -10,7 +10,9 @@ import zarr
 from fisheye.shared.detect_reason_codec import encode_reason_bytes
 from fisheye.shared.instance_keys import mint_detection_instance_keys
 from fisheye.shared.zarr.detection_snapshot_publication import (
+    inspect_accept_all_refined_detection_source,
     inspect_canonical_detection_successor_source,
+    publish_accept_all_refined_detection_successor,
     publish_canonical_detection_successor,
     publish_detection_snapshot_pair,
 )
@@ -346,6 +348,94 @@ def test_raw_successor_requires_existing_instance_keys_before_writing(
     assert not (archive / "detect_runs/detect_canonical_v3").exists()
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     assert root["detect_runs"].attrs["latest"] == "detect_source"
+
+
+def test_canonical_v3_publishes_accept_all_refined_root_without_selection(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _build_sources(archive)
+    source = zarr.open_group(
+        str(archive / "detect_runs/detect_source"),
+        mode="a",
+        use_consolidated=False,
+    )
+    custom_keys = np.asarray([111, 222], dtype=np.uint64)
+    source["instance_key"][:] = custom_keys
+    publish_canonical_detection_successor(
+        analysis_zarr=archive,
+        source_detect_group_path="detect_runs/detect_source",
+        recording_identity=RECORDING_IDENTITY,
+        successor_run_id="detect_canonical_v3",
+        scratch_root=scratch,
+    )
+
+    inspection = inspect_accept_all_refined_detection_source(
+        analysis_zarr=archive,
+        canonical_run_id="detect_canonical_v3",
+        recording_identity=RECORDING_IDENTITY,
+        refined_run_id="refined_accept_all_v2",
+    )
+    assert inspection["status"] == "ready"
+    assert inspection["decision_policy"] == (
+        "accept_every_canonical_source_row_exactly_once"
+    )
+    assert inspection["source"]["instance_key_sha256"] == (
+        inspection["target"]["instance_key_sha256"]
+    )
+    assert not (archive / "refined_detect_runs/refined_accept_all_v2").exists()
+
+    result = publish_accept_all_refined_detection_successor(
+        analysis_zarr=archive,
+        canonical_run_id="detect_canonical_v3",
+        recording_identity=RECORDING_IDENTITY,
+        refined_run_id="refined_accept_all_v2",
+        scratch_root=scratch,
+    )
+    assert result["status"] == "complete"
+    assert result["selector_eligible"] is False
+    assert result["registry_updated"] is False
+    assert result["selectors_before"] == result["selectors_after"]
+    assert result["source"]["instance_key_sha256"] == (
+        result["snapshot"]["instance_key_sha256"]
+    )
+    assert result["validation"]["refined_errors"] == []
+    assert result["validation"]["direct_consolidated_metadata_equal"] is True
+    assert result["validation"]["crop_source_binding"]["selection_mode"] == (
+        "explicit_selector_ineligible_benchmark"
+    )
+    assert list(scratch.iterdir()) == []
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    family = root["refined_detect_runs"]
+    assert family.attrs["authoritative_run"] == "refined_source"
+    run = family["refined_accept_all_v2"]
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs["immutable_snapshot"] is True
+    assert run.attrs["production_selector_activation"] == "deferred"
+    assert "shadow_only" not in run.attrs
+    np.testing.assert_array_equal(
+        run["instances/instance_key"][:],
+        custom_keys,
+    )
+    np.testing.assert_array_equal(
+        run["instances/refined_row_ids"][:],
+        np.asarray([0, 1], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        run["instances/source_detect_row_index"][:],
+        np.asarray([0, 1], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        run["source_detections/decision_codes"][:],
+        np.full(2, SOURCE_DECISION_CODE_MAP["accepted"], dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(
+        run["instances/frame_row_offsets"][:],
+        np.asarray([0, 0, 1, 1, 2], dtype=np.int64),
+    )
 
 
 def test_raw_successor_tombstones_postcopy_metadata_failure(
