@@ -795,6 +795,7 @@ def build_prediction_job(
     analysis_zarr: Path,
     registry_path: Path,
     repo: Path,
+    palette_commit: str,
     run_root: Path,
     run_names: KeypointRunNames,
     model: PoseModelBinding,
@@ -873,7 +874,11 @@ def build_prediction_job(
         job_key=job_key,
         stage="keypoint_prediction",
         cwd=repo,
-        environment_overrides={"PALETTE_DISABLE_REGISTRY_WRITES": "1"},
+        environment_overrides={
+            "PALETTE_DISABLE_REGISTRY_WRITES": "1",
+            "PALETTE_REPO": str(repo),
+            "PALETTE_COMMIT": palette_commit,
+        },
         cleanup_path_templates=(scratch_stage,),
         expected_output_templates=(
             str(terminal_output / "terminal_receipt.json"),
@@ -895,6 +900,8 @@ def build_prediction_job(
             "terminal_output": str(terminal_output),
             "model": model.to_json(),
             "cache": cache.to_json(),
+            "palette_repo": str(repo),
+            "palette_commit": palette_commit,
             "publication_boundary": "strict_v2_finalizer_only",
         },
     )
@@ -906,6 +913,7 @@ def build_refinement_job(
     target_id: str,
     analysis_zarr: Path,
     repo: Path,
+    palette_commit: str,
     run_root: Path,
     run_names: KeypointRunNames,
     resources: LsfResources,
@@ -979,7 +987,11 @@ def build_refinement_job(
         job_key=job_key,
         stage="keypoint_refinement",
         cwd=repo,
-        environment_overrides={"PALETTE_DISABLE_REGISTRY_WRITES": "1"},
+        environment_overrides={
+            "PALETTE_DISABLE_REGISTRY_WRITES": "1",
+            "PALETTE_REPO": str(repo),
+            "PALETTE_COMMIT": palette_commit,
+        },
         expected_output_templates=(
             str(analysis_zarr / "keypoints_runs" / run_names.keypoint_run),
             str(
@@ -1007,6 +1019,8 @@ def build_refinement_job(
             "refined_keypoint_run": run_names.refined_keypoint_run,
             "body_frame_run": run_names.body_frame_run,
             "terminal_output": str(terminal_output),
+            "palette_repo": str(repo),
+            "palette_commit": palette_commit,
             "selector_activation": False,
         },
     )

@@ -95,6 +95,7 @@ def _build_plan(
     keypoint_frame_shard_rows: int = common_mod.DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     planned_caches: bool = False,
     shared_cache_bundle: bool = False,
+    palette_commit: str = "a" * 40,
 ):
     manifest, repo, registry, model_path = _make_inputs(
         tmp_path,
@@ -105,6 +106,7 @@ def _build_plan(
         "validate_registered_analysis_zarr",
         lambda **_kwargs: None,
     )
+    monkeypatch.setattr(planner, "_repo_head_commit", lambda _repo: "a" * 40)
 
     def resolve_model(**kwargs):
         return PoseModelBinding(
@@ -186,6 +188,7 @@ def _build_plan(
         manifest_path=manifest,
         run_label="goodcopbadcop_20260710",
         repo=repo,
+        palette_commit=palette_commit,
         registry=registry,
         run_root=tmp_path / "run",
         model_set_id="pose_set",
@@ -215,6 +218,17 @@ def _build_plan(
         upstream_jobs=upstream_jobs,
     )
     return plan
+
+
+def test_whole_recording_plan_rejects_nonmatching_palette_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="does not match the exact HEAD",
+    ):
+        _build_plan(tmp_path, monkeypatch, palette_commit="b" * 40)
 
 
 def test_manifest_loader_requires_explicit_count_and_unique_targets(tmp_path: Path) -> None:
@@ -292,6 +306,7 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     plan = _build_plan(tmp_path, monkeypatch)
 
     assert plan.to_json()["schema"] == planner.PLAN_SCHEMA
+    assert plan.to_json()["palette_commit"] == "a" * 40
     assert len(plan.targets) == 2
     assert len(plan.targets[0].cache.manifest_sha256) == 64
     assert plan.targets[0].input_capability.selected_source == "flat_roi_cache"
@@ -341,6 +356,8 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
         "fisheye.cluster.lsf.runtime",
     )
     assert "PALETTE_DISABLE_REGISTRY_WRITES=1" in prediction_command
+    assert "PALETTE_COMMIT=" + ("a" * 40) in prediction_command
+    assert jobs["predict:target_0"].metadata["palette_commit"] == "a" * 40
     assert "fisheye.utils.run_whole_recording_keypoint_terminal" in prediction_command
     assert "--model-run-id" in prediction_command
     assert prediction_command[prediction_command.index("--model-run-id") + 1] == (

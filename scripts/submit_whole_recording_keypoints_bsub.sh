@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: submit_whole_recording_keypoints_bsub.sh --manifest PATH --run-label LABEL --run-root PATH --model-set-id ID --model-run-id ID (--dry-run | --apply) [options]
+Usage: submit_whole_recording_keypoints_bsub.sh --manifest PATH --run-label LABEL --run-root PATH --palette-repo PATH --palette-commit SHA --model-set-id ID --model-run-id ID (--dry-run | --apply) [options]
 
 Plan one terminal keypoint prediction job and one dependent strict-v2
 finalization job per manifest target, followed by one candidate validator. The
@@ -21,6 +21,8 @@ Required:
   --manifest PATH          Explicit reviewed target manifest
   --run-label LABEL        Deterministic suffix for keypoint/refined run names
   --run-root PATH          Durable plan, status, progress, and LSF log directory
+  --palette-repo PATH      Absolute commit-pinned Palette deployment
+  --palette-commit SHA     Full commit checked out at --palette-repo
   --model-set-id ID        Exact registered pose-model set
   --model-run-id ID        Exact successful pose training run
   --dry-run | --apply      Explicit execution mode
@@ -33,7 +35,7 @@ performed.
 
 Strict-v2 keypoint storage is derived from dtype, per-row shape, byte budgets,
 and access class. Historical row-count shard options are accepted only as
-no-effect compatibility inputs and are recorded as such in the v2 plan.
+no-effect compatibility inputs and are recorded as such in the v3 plan.
 
 All additional options are forwarded to
 fisheye.cluster.keypoints.whole_recording.

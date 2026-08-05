@@ -45,12 +45,22 @@ from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN, build_runtime_comm
 
 
 TARGET_MANIFEST_SCHEMA = "palette.whole_recording_keypoint_targets.v1"
-PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v2"
+PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v3"
 NORMALIZED_TARGETS_SCHEMA = "palette.whole_recording_keypoint_targets.normalized.v1"
 DEFAULT_GROUPS_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
 DEFAULT_REGISTRY = Path(
     "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
 )
+
+
+def _repo_head_commit(repo: Path) -> str:
+    result = subprocess.run(
+        ("git", "-C", str(repo), "rev-parse", "--verify", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip().lower()
 
 
 @dataclass(frozen=True)
@@ -113,6 +123,7 @@ class WholeRecordingWorkflowPlan:
     manifest_sha256: str
     run_label: str
     repo: Path
+    palette_commit: str
     registry: Path
     run_root: Path
     model_set_id: str
@@ -132,6 +143,7 @@ class WholeRecordingWorkflowPlan:
             "manifest_sha256": self.manifest_sha256,
             "run_label": self.run_label,
             "repo": str(self.repo),
+            "palette_commit": self.palette_commit,
             "registry": str(self.registry),
             "run_root": str(self.run_root),
             "model_set_id": self.model_set_id,
@@ -292,6 +304,7 @@ def build_plan(
     manifest_path: Path,
     run_label: str,
     repo: Path,
+    palette_commit: str,
     registry: Path,
     run_root: Path,
     model_set_id: str,
@@ -319,9 +332,22 @@ def build_plan(
     resolved_registry = registry.expanduser().resolve()
     resolved_run_root = run_root.expanduser().resolve()
     resolved_run_label = safe_component(run_label, default="keypoints")
+    normalized_palette_commit = str(palette_commit).strip().lower()
+    if (
+        len(normalized_palette_commit) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in normalized_palette_commit
+        )
+    ):
+        raise ValueError("palette_commit must be one full 40-character Git commit.")
     if not resolved_repo.is_dir() or not (resolved_repo / "scripts" / "py").is_file():
         raise FileNotFoundError(
             f"Palette repository or scripts/py not found: {resolved_repo}"
+        )
+    if _repo_head_commit(resolved_repo) != normalized_palette_commit:
+        raise ValueError(
+            "palette_commit does not match the exact HEAD at palette_repo."
         )
     if not resolved_registry.is_file():
         raise FileNotFoundError(f"Palette registry not found: {resolved_registry}")
@@ -438,6 +464,7 @@ def build_plan(
             analysis_zarr=target.analysis_zarr,
             registry_path=resolved_registry,
             repo=resolved_repo,
+            palette_commit=normalized_palette_commit,
             run_root=resolved_run_root,
             run_names=run_names,
             model=model,
@@ -459,6 +486,7 @@ def build_plan(
             target_id=target.target_id,
             analysis_zarr=target.analysis_zarr,
             repo=resolved_repo,
+            palette_commit=normalized_palette_commit,
             run_root=resolved_run_root,
             run_names=run_names,
             resources=refinement_resources,
@@ -521,6 +549,10 @@ def build_plan(
         job_key=finalizer_job_key,
         stage="candidate_validation",
         cwd=resolved_repo,
+        environment_overrides={
+            "PALETTE_REPO": str(resolved_repo),
+            "PALETTE_COMMIT": normalized_palette_commit,
+        },
         expected_output_templates=(
             str(
                 resolved_run_root
@@ -548,6 +580,8 @@ def build_plan(
                 "selector_activation": False,
                 "registry_mutation": False,
                 "registry": str(resolved_registry),
+                "palette_repo": str(resolved_repo),
+                "palette_commit": normalized_palette_commit,
             },
         )
     )
@@ -559,6 +593,8 @@ def build_plan(
             "plan_schema": PLAN_SCHEMA,
             "manifest_path": str(resolved_manifest),
             "manifest_sha256": manifest_sha256,
+            "palette_repo": str(resolved_repo),
+            "palette_commit": normalized_palette_commit,
             "target_count": len(planned_targets),
             "keypoint_storage": keypoint_storage,
             "finalization_execution": finalization_execution,
@@ -569,6 +605,7 @@ def build_plan(
         manifest_sha256=manifest_sha256,
         run_label=resolved_run_label,
         repo=resolved_repo,
+        palette_commit=normalized_palette_commit,
         registry=resolved_registry,
         run_root=resolved_run_root,
         model_set_id=str(model_set_id),
@@ -690,7 +727,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--run-label", required=True)
     parser.add_argument("--run-root", required=True, type=Path)
-    parser.add_argument("--repo", type=Path, default=DEFAULT_GROUPS_REPO)
+    parser.add_argument(
+        "--palette-repo",
+        "--repo",
+        dest="repo",
+        type=Path,
+        default=DEFAULT_GROUPS_REPO,
+        help="Absolute commit-pinned Palette deployment (legacy alias: --repo).",
+    )
+    parser.add_argument(
+        "--palette-commit",
+        required=True,
+        help="Full commit checked out at --palette-repo.",
+    )
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
@@ -790,6 +839,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest_path=args.manifest,
         run_label=args.run_label,
         repo=args.repo,
+        palette_commit=args.palette_commit,
         registry=args.registry,
         run_root=args.run_root,
         model_set_id=args.model_set_id,

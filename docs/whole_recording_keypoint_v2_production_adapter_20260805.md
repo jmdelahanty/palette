@@ -61,7 +61,7 @@ The canonical writers do not use one row constant for every dtype. Their inner
 chunks and outer shards are derived by the shared byte planner. The current
 finalizer writes whole, non-overlapping physical units serially. Historical
 `--keypoint-*-shard-rows` and Dask refinement controls remain accepted only so
-old command templates fail predictably; the v2 plan records that they have no
+old command templates fail predictably; the v3 execution plan records that they have no
 effect.
 
 The flat cache remains an ephemeral pixel-materialization input, not an
@@ -79,7 +79,7 @@ The initial canary uses the smallest Batman crop-v2 recording:
 - ROI shape: 348×348 `uint8`
 - cache manifest:
   `/nrs/johnson/palette_staging/flat_roi_cache/batman_crop_geometry_v2_348_20260805/roi_cache/2026-07-21T19-38-32Z_arena_2_Batman.flat_roi_cache.json`
-- next run label: `batman_kpt5_v2_canary_20260805_v003`
+- next run label: `batman_kpt5_v2_canary_20260805_v004`
 
 Exact model:
 
@@ -121,9 +121,10 @@ deployment before submission.
 - `v002` submitted from the Citrus poller and failed closed before inference
   because the registered `/nvme1` training-manifest path was unavailable on
   the cluster. Its dependent jobs exited without publication.
-- `v003` is reserved for the digest-verified packaged-manifest repair. It must
-  use the same exact `/groups` model path and digest and remain
-  selector-ineligible.
+- `v003` proved the digest-verified packaged-manifest repair from the cluster
+  and submitted no jobs. Its plan lacked an explicit full Palette commit.
+- `v004` is reserved for the exact deployment-commit binding. It must use the
+  same exact `/groups` model path and digest and remain selector-ineligible.
 
 ## Canary checklist
 
@@ -151,9 +152,10 @@ deployment before submission.
 ```bash
 "${PALETTE_GROUPS_REPO}/scripts/submit_whole_recording_keypoints_bsub.sh" \
   --manifest "${PALETTE_GROUPS_REPO}/docs/diagnostics/batman_keypoint_v2_candidate_20260805/targets.canary.json" \
-  --run-label batman_kpt5_v2_canary_20260805_v003 \
-  --run-root /groups/johnson/johnsonlab/jeremy/logs/whole_recording_keypoints/batman_kpt5_v2_canary_20260805_v003 \
-  --repo "${PALETTE_GROUPS_REPO}" \
+  --run-label batman_kpt5_v2_canary_20260805_v004 \
+  --run-root /groups/johnson/johnsonlab/jeremy/logs/whole_recording_keypoints/batman_kpt5_v2_canary_20260805_v004 \
+  --palette-repo "${PALETTE_GROUPS_REPO}" \
+  --palette-commit "${PALETTE_COMMIT}" \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --model-set-id pose_all_registry_reviewed_v2_keypoints_20260520_v001 \
   --model-run-id pose_all_registry_reviewed_v2_kpt5_warm_v2_20260520_retry2 \
