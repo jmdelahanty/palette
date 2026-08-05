@@ -135,8 +135,9 @@ def _measure_pass(
     window_rows: int,
     evict_cache: bool,
 ) -> dict[str, Any]:
+    run_path = archive / "crop_runs" / run_id
     eviction = (
-        _request_cache_eviction(archive)
+        _request_cache_eviction(run_path)
         if evict_cache
         else {
             "method": "none",
