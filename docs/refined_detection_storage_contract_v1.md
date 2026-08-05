@@ -413,6 +413,17 @@ to true as its literal final write. A selected run is valid only when both
 values are true; the temporary mismatch is permitted only inside the owned,
 still-invisible activation staging state.
 
+Because the eligibility attribute is the literal final write, the archive-root
+consolidated declaration intentionally retains the immediately preceding
+`stage_selector_eligible=false` value. No reconsolidation may follow the commit
+bit. Direct/consolidated equivalence therefore has one narrow, executable
+exception: the run-root direct declaration may contain eligibility `true` while
+the consolidated declaration contains `false` only when both declarations bind
+the same final-intent run manifest whose publication eligibility is `true`.
+`normalize_refined_detection_metadata_declarations()` enforces this exception;
+all other attribute or declaration drift remains invalid. Selection reads the
+authority, provenance, and eligibility attributes from direct metadata.
+
 ## Practical Physical-Profile Gate
 
 Before the candidate becomes a production default, publish one immutable

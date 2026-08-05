@@ -30,6 +30,10 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
 from fisheye.shared.zarr.refined_detection_manifest import (
     REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
 )
+from fisheye.shared.zarr.refined_detection_authority_activation import (
+    activate_refined_detection_authority,
+    inspect_refined_detection_authority_candidate,
+)
 from fisheye.shared.zarr.refined_detection_schema import (
     SOURCE_DECISION_CODE_MAP,
     SOURCE_KIND_CODE_MAP,
@@ -436,6 +440,142 @@ def test_canonical_v3_publishes_accept_all_refined_root_without_selection(
         run["instances/frame_row_offsets"][:],
         np.asarray([0, 0, 1, 1, 2], dtype=np.int64),
     )
+
+
+def test_accept_all_refined_root_activates_as_analysis_authority(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _build_sources(archive)
+    publish_canonical_detection_successor(
+        analysis_zarr=archive,
+        source_detect_group_path="detect_runs/detect_source",
+        recording_identity=RECORDING_IDENTITY,
+        successor_run_id="detect_canonical_v3",
+        scratch_root=scratch,
+    )
+    publish_accept_all_refined_detection_successor(
+        analysis_zarr=archive,
+        canonical_run_id="detect_canonical_v3",
+        recording_identity=RECORDING_IDENTITY,
+        refined_run_id="refined_accept_all_v2",
+        scratch_root=scratch,
+    )
+    direct = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
+    family = direct["refined_detect_runs"]
+    del family.attrs["authoritative_run"]
+    from fisheye.shared.zarr_helpers import (
+        consolidate_metadata_capture_expected_warnings,
+    )
+
+    consolidate_metadata_capture_expected_warnings(archive)
+    inspection = inspect_refined_detection_authority_candidate(
+        analysis_zarr=archive,
+        run_id="refined_accept_all_v2",
+    )
+
+    result = activate_refined_detection_authority(
+        analysis_zarr=archive,
+        run_id="refined_accept_all_v2",
+        approved_by="pytest",
+        approved_at_utc="2026-08-05T16:00:00+00:00",
+        review_method="identity_preserving_accept_all_test",
+        git_sha="1a520795",
+        expected_inspection=inspection,
+    )
+
+    assert result["status"] == "complete"
+    assert result["intended_use"] == "analysis"
+    assert result["selection_mode"] == "approved_authoritative_refined_v1"
+    assert result["post_commit_archive_writes"] == 0
+    reopened = zarr.open_group(
+        str(archive), mode="r", zarr_format=3, use_consolidated=False
+    )
+    family = reopened["refined_detect_runs"]
+    run = family["refined_accept_all_v2"]
+    assert family.attrs["authoritative_run"] == "refined_accept_all_v2"
+    assert family.attrs["authoritative_run_provenance"]["payload"][
+        "intended_use"
+    ] == "analysis"
+    assert run.attrs["run_manifest"]["payload"]["publication"][
+        "stage_selector_eligible"
+    ] is True
+    assert run.attrs["stage_selector_eligible"] is True
+
+
+def test_refined_authority_staging_rolls_back_before_visibility_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _build_sources(archive)
+    publish_canonical_detection_successor(
+        analysis_zarr=archive,
+        source_detect_group_path="detect_runs/detect_source",
+        recording_identity=RECORDING_IDENTITY,
+        successor_run_id="detect_canonical_v3",
+        scratch_root=scratch,
+    )
+    publish_accept_all_refined_detection_successor(
+        analysis_zarr=archive,
+        canonical_run_id="detect_canonical_v3",
+        recording_identity=RECORDING_IDENTITY,
+        refined_run_id="refined_accept_all_v2",
+        scratch_root=scratch,
+    )
+    direct = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
+    del direct["refined_detect_runs"].attrs["authoritative_run"]
+    from fisheye.shared.zarr_helpers import (
+        consolidate_metadata_capture_expected_warnings,
+    )
+
+    consolidate_metadata_capture_expected_warnings(archive)
+    inspection = inspect_refined_detection_authority_candidate(
+        analysis_zarr=archive,
+        run_id="refined_accept_all_v2",
+    )
+    from fisheye.shared.zarr import refined_detection_authority_activation as module
+
+    monkeypatch.setattr(
+        module,
+        "activate_selector_eligible_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected pre-commit failure")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="injected pre-commit failure"):
+        activate_refined_detection_authority(
+            analysis_zarr=archive,
+            run_id="refined_accept_all_v2",
+            approved_by="pytest",
+            approved_at_utc="2026-08-05T16:00:00+00:00",
+            review_method="injected_rollback_test",
+            git_sha="1a520795",
+            expected_inspection=inspection,
+        )
+
+    assert (
+        inspect_refined_detection_authority_candidate(
+            analysis_zarr=archive,
+            run_id="refined_accept_all_v2",
+        )
+        == inspection
+    )
+    reopened = zarr.open_group(
+        str(archive), mode="r", zarr_format=3, use_consolidated=False
+    )
+    family = reopened["refined_detect_runs"]
+    assert "authoritative_run" not in family.attrs
+    assert "authoritative_run_provenance" not in family.attrs
+    assert family["refined_accept_all_v2"].attrs["stage_selector_eligible"] is False
 
 
 def test_raw_successor_tombstones_postcopy_metadata_failure(

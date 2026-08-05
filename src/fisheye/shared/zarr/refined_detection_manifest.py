@@ -162,7 +162,10 @@ def normalize_refined_detection_metadata_declarations(
     subtree extracted from the archive root's inline consolidated metadata and
     rebased to the same path basis. Every direct/consolidated declaration is
     compared before attributes and consolidation envelopes are removed from
-    the digest surface.
+    the digest surface.  The sole permitted difference is the activation commit
+    bit: after a final-intent manifest has been consolidated with run eligibility
+    false, activation writes direct ``stage_selector_eligible=true`` as its
+    literal final metadata write.  No other attribute lag is accepted.
     """
 
     if not isinstance(direct_metadata_by_path, Mapping):
@@ -198,13 +201,57 @@ def normalize_refined_detection_metadata_declarations(
         if not isinstance(candidate, Mapping):
             raise TypeError(f"Consolidated declaration {path!r} must be an object.")
         canonical_json_bytes(candidate)
-        if metadata_without_empty_group_consolidation(
+        consolidated_declaration = metadata_without_empty_group_consolidation(
             candidate,
             path=path,
-        ) != metadata_without_empty_group_consolidation(
+        )
+        direct_declaration = metadata_without_empty_group_consolidation(
             direct[path],
             path=path,
-        ):
+        )
+        declarations_equal = consolidated_declaration == direct_declaration
+        if not declarations_equal and path == "":
+            direct_attrs = direct_declaration.get("attributes")
+            consolidated_attrs = consolidated_declaration.get("attributes")
+            if isinstance(direct_attrs, Mapping) and isinstance(
+                consolidated_attrs, Mapping
+            ):
+                normalized_direct = copy.deepcopy(direct_declaration)
+                normalized_direct_attrs = dict(direct_attrs)
+                direct_manifest = normalized_direct_attrs.get(
+                    REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE
+                )
+                consolidated_manifest = consolidated_attrs.get(
+                    REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE
+                )
+                direct_payload = (
+                    direct_manifest.get("payload")
+                    if isinstance(direct_manifest, Mapping)
+                    else None
+                )
+                direct_publication = (
+                    direct_payload.get("publication")
+                    if isinstance(direct_payload, Mapping)
+                    else None
+                )
+                final_intent = (
+                    isinstance(direct_manifest, Mapping)
+                    and direct_manifest == consolidated_manifest
+                    and isinstance(direct_publication, Mapping)
+                    and direct_publication.get("stage_selector_eligible") is True
+                )
+                if (
+                    final_intent
+                    and normalized_direct_attrs.get("stage_selector_eligible")
+                    is True
+                    and consolidated_attrs.get("stage_selector_eligible") is False
+                ):
+                    normalized_direct_attrs["stage_selector_eligible"] = False
+                    normalized_direct["attributes"] = normalized_direct_attrs
+                    declarations_equal = (
+                        normalized_direct == consolidated_declaration
+                    )
+        if not declarations_equal:
             raise ValueError(f"Direct and consolidated metadata differ at {path!r}.")
 
     normalized: dict[str, dict[str, Any]] = {}
