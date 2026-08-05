@@ -15,6 +15,8 @@ def test_build_crop_signature_preserves_geometry_lineage_fields() -> None:
             "source_refined_run": "refined_detect_001",
             "source_background_run": "background_001",
             "roi_size": [64, 64],
+            "crop_geometry_policy_digest": "a" * 64,
+            "crop_padding_mode": "zero_outside_source_frame",
             "crop_revision": 3,
             "parameter_source": "config",
             "parameters": {"roi_size": [64, 64]},
@@ -25,4 +27,6 @@ def test_build_crop_signature_preserves_geometry_lineage_fields() -> None:
     assert signature["detection_source_path"] == "refined_detect_runs/refined_detect_001/instances"
     assert signature["source_coords_path"] == "refined_detect_runs/refined_detect_001/instances"
     assert signature["source_background_run"] == "background_001"
+    assert signature["crop_geometry_policy_digest"] == "a" * 64
+    assert signature["crop_padding_mode"] == "zero_outside_source_frame"
     assert signature["crop_revision"] == 3

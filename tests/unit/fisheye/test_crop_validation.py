@@ -88,6 +88,43 @@ def test_crop_batch_cpu_from_top_left_decode_failure_raises_instead_of_black_cro
         )
 
 
+@pytest.mark.parametrize(
+    ("top_left", "expected"),
+    (
+        ((-1, 1), [[0, 4, 5], [0, 8, 9], [0, 0, 0]]),
+        ((2, 1), [[6, 7, 0], [10, 11, 0], [0, 0, 0]]),
+        ((1, -1), [[0, 0, 0], [1, 2, 3], [5, 6, 7]]),
+        ((1, 2), [[9, 10, 11], [0, 0, 0], [0, 0, 0]]),
+        ((-1, -1), [[0, 0, 0], [0, 0, 1], [0, 4, 5]]),
+    ),
+)
+def test_crop_batch_cpu_from_top_left_zero_pads_every_frame_edge(
+    monkeypatch,
+    top_left: tuple[int, int],
+    expected: list[list[int]],
+) -> None:
+    gray = np.arange(12, dtype=np.uint8).reshape(3, 4)
+    frame = np.repeat(gray[:, :, None], 3, axis=2)
+    monkeypatch.setattr(
+        crop_mod.cv2,
+        "VideoCapture",
+        lambda _path: _FakeVideoCapture({0: frame}),
+    )
+
+    crops, coordinates, _profile = crop_mod.crop_batch_cpu_from_top_left(
+        "video.mp4",
+        np.asarray([0], dtype=np.int64),
+        np.asarray([top_left], dtype=np.int32),
+        (3, 3),
+        (3, 4),
+        total_frames=1,
+        source_label="crop_runs/source",
+    )
+
+    np.testing.assert_array_equal(coordinates, np.asarray([top_left], dtype=np.int32))
+    np.testing.assert_array_equal(crops[0], np.asarray(expected, dtype=np.uint8))
+
+
 def test_materialized_zarr_worker_rejects_unsorted_source_rows(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")

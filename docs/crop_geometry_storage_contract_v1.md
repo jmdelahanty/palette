@@ -3,7 +3,7 @@
 Status: implemented for selector-ineligible refined-source production
 candidates and DAG consumption; not a production selector or writer default
 
-Date: 2026-07-29
+Date: 2026-07-29; workflow-default clarification 2026-08-04
 
 ## DAG Consumer Checkpoint
 
@@ -107,6 +107,11 @@ Every run binds a canonical-JSON/SHA-256 crop policy containing:
 
 The policy digest is part of crop identity and row signatures. It is never
 part of `instance_key` or the source refined-detection identity.
+
+The maintained zebrafish pose/subject-mask workflow currently defaults to a
+fixed 348x348 window with `zero_outside_source_frame`. This is only a workflow
+default: every run still persists its exact width, height, padding mode, and
+policy digest, and other scientific purposes may choose different dimensions.
 
 ## Refined and Pixel Authorities
 

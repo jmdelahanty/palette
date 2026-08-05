@@ -22,6 +22,27 @@ from fisheye.shared.roi_pixel_contract import (
 )
 
 
+@pytest.mark.parametrize(
+    ("top_left", "expected"),
+    (
+        ((-1, 1), [[0, 4, 5], [0, 8, 9], [0, 0, 0]]),
+        ((2, 1), [[6, 7, 0], [10, 11, 0], [0, 0, 0]]),
+        ((1, -1), [[0, 0, 0], [1, 2, 3], [5, 6, 7]]),
+        ((1, 2), [[9, 10, 11], [0, 0, 0], [0, 0, 0]]),
+        ((-1, -1), [[0, 0, 0], [0, 0, 1], [0, 4, 5]]),
+    ),
+)
+def test_crop_from_top_left_zero_pads_every_source_frame_edge(
+    top_left: tuple[int, int],
+    expected: list[list[int]],
+) -> None:
+    frame = np.arange(12, dtype=np.uint8).reshape(3, 4)
+
+    result = crop_mod._crop_from_top_left(frame, top_left, (3, 3))
+
+    np.testing.assert_array_equal(result, np.asarray(expected, dtype=np.uint8))
+
+
 class _FakeArray:
     def __init__(self, data: np.ndarray) -> None:
         self._data = np.asarray(data)

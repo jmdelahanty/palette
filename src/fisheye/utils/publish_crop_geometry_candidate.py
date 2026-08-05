@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.crop_schema import (
     CropGeometryPolicy,
@@ -24,8 +25,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-zarr", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--purpose", required=True)
-    parser.add_argument("--roi-width", type=int, required=True)
-    parser.add_argument("--roi-height", type=int, required=True)
+    parser.add_argument(
+        "--roi-width",
+        type=int,
+        default=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+    )
+    parser.add_argument(
+        "--roi-height",
+        type=int,
+        default=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+    )
     parser.add_argument(
         "--padding-mode",
         choices=tuple(mode.value for mode in CropPaddingMode),
