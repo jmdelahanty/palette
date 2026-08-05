@@ -383,6 +383,49 @@ def _binding_record(
     return {**record, "binding_sha256": _digest(record)}
 
 
+def _resolve_training_manifest_path(
+    *,
+    registered_path: Path,
+    model_path: Path,
+    expected_sha256: str,
+) -> tuple[Path, str]:
+    """Resolve a missing workstation path to its immutable model input copy.
+
+    Training runs retain their original registry path for historical identity,
+    but deployed models package the exact input manifest below
+    ``<run>/inputs``.  A present registered path always wins and must match its
+    digest.  Fallback is permitted only when that path is absent and the one
+    deterministic packaged copy has the same registered SHA-256.
+    """
+
+    if registered_path.is_file():
+        observed = _sha256_file(
+            registered_path,
+            role="pose training manifest",
+        )
+        if observed != expected_sha256:
+            _fail("Pose training manifest content disagrees with its registered digest.")
+        return registered_path, observed
+
+    packaged = model_path.expanduser().resolve().parent.parent / "inputs" / registered_path.name
+    if not packaged.is_file():
+        _fail(
+            "Registered pose training manifest is unavailable and its exact "
+            f"packaged model input copy is missing: registered={registered_path}, "
+            f"packaged={packaged}."
+        )
+    observed = _sha256_file(
+        packaged,
+        role="packaged pose training manifest",
+    )
+    if observed != expected_sha256:
+        _fail(
+            "Packaged pose training manifest content disagrees with the "
+            "registered digest."
+        )
+    return packaged, observed
+
+
 def resolve_registered_pose_model_schema_binding(
     registry: Any,
     *,
@@ -467,19 +510,18 @@ def resolve_registered_pose_model_schema_binding(
     )
     if actual_model_sha256 != model_sha256:
         _fail("Selected pose model content disagrees with its registered digest.")
-    manifest_path = Path(
+    registered_manifest_path = Path(
         _required_text(row_map.get("manifest_path"), field="registry manifest_path")
     ).expanduser()
     expected_manifest_sha256 = _required_sha256(
         row_map.get("manifest_sha256"),
         field="registry manifest_sha256",
     )
-    actual_manifest_sha256 = _sha256_file(
-        manifest_path,
-        role="pose training manifest",
+    manifest_path, actual_manifest_sha256 = _resolve_training_manifest_path(
+        registered_path=registered_manifest_path,
+        model_path=Path(expected_model_path),
+        expected_sha256=expected_manifest_sha256,
     )
-    if actual_manifest_sha256 != expected_manifest_sha256:
-        _fail("Pose training manifest content disagrees with its registered digest.")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

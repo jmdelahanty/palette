@@ -110,6 +110,117 @@ def test_registered_binding_uses_hash_verified_ordered_manifest_schema(
     assert binding["authority"]["training_manifest_sha256"]
 
 
+def test_registered_binding_uses_digest_identical_packaged_manifest_when_registry_path_is_missing(
+    tmp_path: Path,
+) -> None:
+    labels = ["swim_bladder", "eye_left", "eye_right"]
+    registry = Registry(tmp_path / "registry.sqlite")
+    model_path = tmp_path / "model_run" / "weights" / "best.pt"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"exact-pose-model")
+    packaged_manifest = model_path.parent.parent / "inputs" / "pose.manifest.json"
+    packaged_manifest.parent.mkdir()
+    packaged_manifest.write_text(
+        json.dumps(
+            {
+                "task": "pose",
+                "set_id": "pose_set",
+                "pose_schema": {
+                    "skeleton_id": "pose_skel_exact",
+                    "kpt_shape": [3, 3],
+                    "keypoint_labels": labels,
+                    "skeleton": [[0, 1], [0, 2], [1, 2]],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    missing_registered_path = tmp_path / "missing_workstation" / packaged_manifest.name
+    skeleton_id = registry.upsert_pose_skeleton_spec(
+        kpt_shape=[3, 3],
+        keypoint_labels=labels,
+        edges=[[0, 1], [0, 2], [1, 2]],
+        name="pose_schema",
+    )
+    registry.record_training_run(
+        run_id="pose_run",
+        set_id="pose_set",
+        task_type="pose",
+        config_path=None,
+        manifest_path=missing_registered_path,
+        skeleton_id=skeleton_id,
+        model_path=model_path,
+        metrics_path=None,
+        manifest_sha256=_sha(packaged_manifest),
+        model_sha256=_sha(model_path),
+        status="success",
+    )
+    try:
+        binding = resolve_registered_pose_model_schema_binding(
+            registry,
+            run_id="pose_run",
+            expected_set_id="pose_set",
+            expected_model_path=str(model_path),
+            expected_model_sha256=_sha(model_path),
+        )
+    finally:
+        registry.close()
+
+    assert binding["authority"]["training_manifest_path"] == str(
+        packaged_manifest.resolve()
+    )
+    assert binding["authority"]["training_manifest_sha256"] == _sha(
+        packaged_manifest
+    )
+
+
+def test_registered_binding_rejects_bad_packaged_manifest_digest(
+    tmp_path: Path,
+) -> None:
+    labels = ["swim_bladder", "eye_left", "eye_right"]
+    registry = Registry(tmp_path / "registry.sqlite")
+    model_path = tmp_path / "model_run" / "weights" / "best.pt"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"exact-pose-model")
+    packaged_manifest = model_path.parent.parent / "inputs" / "pose.manifest.json"
+    packaged_manifest.parent.mkdir()
+    packaged_manifest.write_text("{}", encoding="utf-8")
+    skeleton_id = registry.upsert_pose_skeleton_spec(
+        kpt_shape=[3, 3],
+        keypoint_labels=labels,
+        edges=[[0, 1], [0, 2], [1, 2]],
+        name="pose_schema",
+    )
+    registry.record_training_run(
+        run_id="pose_run",
+        set_id="pose_set",
+        task_type="pose",
+        config_path=None,
+        manifest_path=tmp_path / "missing_workstation" / packaged_manifest.name,
+        skeleton_id=skeleton_id,
+        model_path=model_path,
+        metrics_path=None,
+        manifest_sha256="f" * 64,
+        model_sha256=_sha(model_path),
+        status="success",
+    )
+    try:
+        with pytest.raises(
+            PoseModelSchemaBindingError,
+            match="Packaged pose training manifest content disagrees",
+        ):
+            resolve_registered_pose_model_schema_binding(
+                registry,
+                run_id="pose_run",
+                expected_set_id="pose_set",
+                expected_model_path=str(model_path),
+                expected_model_sha256=_sha(model_path),
+            )
+    finally:
+        registry.close()
+
+
 def test_registered_binding_rejects_same_cardinality_reordered_labels(
     tmp_path: Path,
 ) -> None:

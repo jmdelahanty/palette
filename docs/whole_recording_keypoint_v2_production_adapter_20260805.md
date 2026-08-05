@@ -79,7 +79,7 @@ The initial canary uses the smallest Batman crop-v2 recording:
 - ROI shape: 348×348 `uint8`
 - cache manifest:
   `/nrs/johnson/palette_staging/flat_roi_cache/batman_crop_geometry_v2_348_20260805/roi_cache/2026-07-21T19-38-32Z_arena_2_Batman.flat_roi_cache.json`
-- run label: `batman_kpt5_v2_canary_20260805_v001`
+- next run label: `batman_kpt5_v2_canary_20260805_v003`
 
 Exact model:
 
@@ -91,6 +91,19 @@ Exact model:
   `5cfe9cefdeb5adde2eb35e26e469c1898cd31b007274b259272a42a6c1cdc317`
 - labels: `swim_bladder`, `eye_left`, `eye_right`, `snout_tip`, `tail_tip`
 
+As of the 2026-08-05 registry census, this is the most recent successful pose
+training run with that exact ordered five-keypoint skeleton. The selected model
+is the immutable `/groups` copy at
+`models/pose/<set>/<run>/weights/best.pt`; inference must never resolve model
+weights from `/nvme1`.
+
+The registry's historical training-manifest path is workstation-local under
+`/nvme1` and is not visible to cluster jobs. The deployed model packages the
+same manifest at `models/pose/<set>/<run>/inputs/<manifest-name>`. Resolution
+may use that packaged manifest only when the registered path is absent and its
+SHA-256 exactly equals the registered training-manifest digest. This is a
+provenance-path repair, not a model fallback.
+
 The target manifest is
 `docs/diagnostics/batman_keypoint_v2_candidate_20260805/targets.canary.json`.
 
@@ -100,6 +113,17 @@ validated the real crop-v2 archive and NRS cache, confirmed 126,214 rows and a
 prediction, strict four-surface finalization, and candidate validation. It
 submitted no jobs. The same dry-run must be repeated from the immutable cluster
 deployment before submission.
+
+## Execution history
+
+- `v001` attempted submission from the workstation, where `bsub` is
+  unavailable. It submitted zero jobs and changed no Zarr.
+- `v002` submitted from the Citrus poller and failed closed before inference
+  because the registered `/nvme1` training-manifest path was unavailable on
+  the cluster. Its dependent jobs exited without publication.
+- `v003` is reserved for the digest-verified packaged-manifest repair. It must
+  use the same exact `/groups` model path and digest and remain
+  selector-ineligible.
 
 ## Canary checklist
 
@@ -127,8 +151,8 @@ deployment before submission.
 ```bash
 "${PALETTE_GROUPS_REPO}/scripts/submit_whole_recording_keypoints_bsub.sh" \
   --manifest "${PALETTE_GROUPS_REPO}/docs/diagnostics/batman_keypoint_v2_candidate_20260805/targets.canary.json" \
-  --run-label batman_kpt5_v2_canary_20260805_v001 \
-  --run-root /groups/johnson/johnsonlab/jeremy/logs/whole_recording_keypoints/batman_kpt5_v2_canary_20260805_v001 \
+  --run-label batman_kpt5_v2_canary_20260805_v003 \
+  --run-root /groups/johnson/johnsonlab/jeremy/logs/whole_recording_keypoints/batman_kpt5_v2_canary_20260805_v003 \
   --repo "${PALETTE_GROUPS_REPO}" \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --model-set-id pose_all_registry_reviewed_v2_keypoints_20260520_v001 \
