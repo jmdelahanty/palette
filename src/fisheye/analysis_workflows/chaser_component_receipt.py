@@ -155,6 +155,42 @@ def build_chaser_component_runner_receipt(
     return {**body, "record_sha256": component_record_sha256(body)}
 
 
+def build_named_chaser_component_dependency_handle(
+    zarr_path: Path | str,
+    *,
+    chaser_distance_run: str,
+    component_request: tuple[str, str],
+) -> dict[str, Any]:
+    """Build one exact portable input handle without consulting a selector."""
+
+    path = Path(zarr_path).expanduser().resolve()
+    requested_run = str(chaser_distance_run or "").strip()
+    if not requested_run:
+        raise ValueError("chaser_distance_run is required.")
+    family = _controlled_name(
+        component_request[0],
+        label="component family",
+    )
+    name = _controlled_name(component_request[1], label="component name")
+    root = open_zarr_root(path, mode="r")
+    snapshot = load_chaser_distance_run(root, run_name=requested_run)
+    relative_path = f"{family}/{name}"
+    component_path = f"{snapshot.run_path}/{relative_path}"
+    try:
+        component = root[component_path]
+    except Exception as exc:
+        raise ValueError(
+            f"Requested chaser component is unavailable: {component_path!r}."
+        ) from exc
+    handle = build_chaser_component_handle(
+        component,
+        snapshot=snapshot,
+        relative_path=relative_path,
+    )
+    validate_chaser_component_handle(handle, snapshot=snapshot)
+    return handle
+
+
 def validate_chaser_component_runner_receipt(
     receipt: Any,
     *,
@@ -225,12 +261,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="FAMILY=NAME",
         help="Exact component output to validate; may be repeated.",
     )
-    parser.add_argument("--output-json", type=Path, required=True)
+    parser.add_argument("--output-json", type=Path)
+    parser.add_argument(
+        "--handle-component",
+        metavar="FAMILY=NAME",
+        help=(
+            "Build one exact dependency handle for an existing complete component "
+            "without consulting a selector."
+        ),
+    )
+    parser.add_argument("--handle-output-json", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    if args.handle_component is not None:
+        if args.component or args.output_json is not None:
+            parser.error(
+                "--handle-component cannot be combined with receipt --component/"
+                "--output-json arguments."
+            )
+        if args.handle_output_json is None:
+            parser.error("--handle-component requires --handle-output-json.")
+        handle = build_named_chaser_component_dependency_handle(
+            args.zarr_path,
+            chaser_distance_run=args.chaser_distance_run,
+            component_request=parse_component_request(args.handle_component),
+        )
+        write_json_atomic(args.handle_output_json, handle)
+        return 0
+    if args.handle_output_json is not None:
+        parser.error("--handle-output-json requires --handle-component.")
+    if args.output_json is None:
+        parser.error("Receipt mode requires --output-json.")
     receipt = build_chaser_component_runner_receipt(
         args.zarr_path,
         chaser_distance_run=args.chaser_distance_run,
@@ -247,6 +312,7 @@ if __name__ == "__main__":
 __all__ = [
     "CHASER_COMPONENT_RUNNER_RECEIPT_SCHEMA_ID",
     "CHASER_COMPONENT_RUNNER_RECEIPT_SCHEMA_VERSION",
+    "build_named_chaser_component_dependency_handle",
     "build_chaser_component_runner_receipt",
     "parse_component_request",
     "validate_chaser_component_runner_receipt",

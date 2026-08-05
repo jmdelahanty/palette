@@ -945,6 +945,17 @@ run_log_step() {
   fi
 }
 
+write_component_dependency_handle() {
+  local family="$1"
+  local component_name="$2"
+  local output_json="$3"
+  "$py" -m fisheye.analysis_workflows.chaser_component_receipt \
+    "$zarr_path" \
+    --chaser-distance-run "$CHASER_DISTANCE_RUN" \
+    --handle-component "${family}=${component_name}" \
+    --handle-output-json "$output_json"
+}
+
 trap 'write_status failed' ERR
 write_status started
 published_component_args=()
@@ -1025,10 +1036,16 @@ if [[ "$RUN_QUADRANT_OCCUPANCY" == "1" ]]; then
 fi
 
 if [[ "$RUN_NEAR_FIELD_OCCUPANCY" == "1" ]]; then
+  quadrant_dependency_handle="$json_dir/quadrant_occupancy_dependency_handle.json"
+  write_component_dependency_handle \
+    chaser_quadrant_occupancy \
+    "$QUADRANT_OCCUPANCY_COMPONENT" \
+    "$quadrant_dependency_handle"
   run_json_step near_field_occupancy "$py" -m fisheye.analysis.chaser_near_field_occupancy \
     "$zarr_path" \
     --chaser-distance-run "$CHASER_DISTANCE_RUN" \
     --quadrant-occupancy-component "$QUADRANT_OCCUPANCY_COMPONENT" \
+    --quadrant-occupancy-dependency-handle-json "$quadrant_dependency_handle" \
     --component-name "$NEAR_FIELD_OCCUPANCY_COMPONENT" \
     --apply \
     "${overwrite_args[@]}" \
@@ -1081,10 +1098,16 @@ if [[ "$RUN_EGOCENTRIC" == "1" ]]; then
 fi
 
 if [[ "$RUN_CHASER_BOUT_RESPONSE" == "1" ]]; then
+  egocentric_bout_dependency_handle="$json_dir/egocentric_bout_dependency_handle.json"
+  write_component_dependency_handle \
+    egocentric_bearing \
+    "$EGOCENTRIC_COMPONENT" \
+    "$egocentric_bout_dependency_handle"
   run_json_step chaser_bout_response "$py" -m fisheye.analysis.chaser_bout_response \
     "$zarr_path" \
     --chaser-distance-run "$CHASER_DISTANCE_RUN" \
     --swim-bout-run "$SWIM_BOUT_RUN" \
+    --egocentric-dependency-handle-json "$egocentric_bout_dependency_handle" \
     --component-name "$CHASER_BOUT_RESPONSE_COMPONENT" \
     --apply \
     "${overwrite_args[@]}" \
@@ -1095,10 +1118,16 @@ if [[ "$RUN_CHASER_BOUT_RESPONSE" == "1" ]]; then
 fi
 
 if [[ "$RUN_CHASER_ESCAPE_EVENTS" == "1" ]]; then
+  bout_response_dependency_handle="$json_dir/bout_response_dependency_handle.json"
+  write_component_dependency_handle \
+    chaser_bout_response \
+    "$CHASER_BOUT_RESPONSE_COMPONENT" \
+    "$bout_response_dependency_handle"
   run_log_step chaser_escape_events "$py" -m fisheye.analysis.chaser_escape_events \
     "$zarr_path" \
     --chaser-distance-run "$CHASER_DISTANCE_RUN" \
     --bout-response-component "$CHASER_BOUT_RESPONSE_COMPONENT" \
+    --bout-response-dependency-handle-json "$bout_response_dependency_handle" \
     --component-name "$CHASER_ESCAPE_EVENTS_COMPONENT" \
     --apply \
     "${overwrite_args[@]}" \
@@ -1186,10 +1215,20 @@ if [[ "$RUN_GAZE_TRACKING" == "1" ]]; then
     --json-output "$json_dir/gaze_convention_validation.json" \
     --fail-on-error
 
+  gaze_egocentric_component="$GAZE_EGOCENTRIC_COMPONENT"
+  if [[ -z "$gaze_egocentric_component" || "$gaze_egocentric_component" == "latest" ]]; then
+    gaze_egocentric_component="$EGOCENTRIC_COMPONENT"
+  fi
+  gaze_egocentric_dependency_handle="$json_dir/gaze_egocentric_dependency_handle.json"
+  write_component_dependency_handle \
+    egocentric_bearing \
+    "$gaze_egocentric_component" \
+    "$gaze_egocentric_dependency_handle"
   run_json_step chaser_gaze_tracking "$py" -m fisheye.analysis.chaser_gaze_tracking \
     "$zarr_path" \
     --chaser-distance-run "$CHASER_DISTANCE_RUN" \
-    --egocentric-component "$GAZE_EGOCENTRIC_COMPONENT" \
+    --egocentric-component "$gaze_egocentric_component" \
+    --egocentric-dependency-handle-json "$gaze_egocentric_dependency_handle" \
     --eye-angle-run "$EYE_ANGLE_RUN" \
     --component-name "$GAZE_TRACKING_COMPONENT" \
     --apply \

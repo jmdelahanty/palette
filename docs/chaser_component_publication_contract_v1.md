@@ -144,21 +144,29 @@ authoritative archive. Rebuilding those compatibility dashboards is a separate
 post-activation maintenance concern, not part of scientific component
 authority.
 
-The first maintained chained consumers now use this boundary:
+The maintained production DAG chains now use this boundary:
 
-- `chaser_bout_response` accepts an exact egocentric-bearing handle; and
-- `chaser_escape_events` accepts an exact bout-response handle.
+- `chaser_bout_response` accepts an exact egocentric-bearing handle;
+- `chaser_escape_events` accepts an exact bout-response handle;
+- `gaze_tracking` accepts an exact egocentric-bearing handle; and
+- `chaser_near_field_occupancy` accepts an exact quadrant-occupancy handle.
 
-Both consumers remain fail closed when asked to rediscover a newly published,
-selector-ineligible candidate through `latest`. Their result and persisted
-run-lineage records bind the exact upstream component manifest digest. The
-historical swim-bout fixture path is available only through the explicit
+These consumers remain fail closed when asked to rediscover a newly published,
+selector-ineligible candidate through `latest`. Their results and persisted
+run-lineage records bind the exact upstream component manifest digest. The main
+LSF workflow writes strict JSON dependency handles from exact base and component
+names, then passes those handles across process boundaries. The same mechanism
+supports a selector-ineligible component created earlier in the job or an
+already eligible exact component without consulting a selector. The historical
+swim-bout fixture path is available only through the explicit
 `legacy_swim_bout_compatibility` policy; the default remains the exact current
 swim-bout contract.
 
-Other component-to-component consumers and exports still require migration.
-Candidate publication does not weaken their selection rules merely to preserve
-historical one-process chaining.
+The maintained cross-recording exporter is also exact-handle bound. Private
+historical visualization/inspection adapters remain compatibility surfaces;
+they are not silently enabled as scientific authorities. Candidate publication
+does not weaken their selection rules merely to preserve historical one-process
+chaining.
 
 ## Manifest Envelope
 
@@ -225,14 +233,16 @@ attributes. Maintained readers must consume only this authority envelope.
       selector-ineligible recovery tombstone.
 - [x] Give every maintained component an exact semantic schema declaration.
 - [x] Migrate all maintained component writers off direct visible mutation.
-- [ ] Migrate all readers to validated component handles. The cross-recording
-      exporter is complete for 15 authority-backed tables: one strict
+- [ ] Migrate all readers to validated component handles. The maintained
+      production DAG and cross-recording exporter are complete: one strict
       invocation document binds every exact base seal and required explicit
       component handle, and two tables without sealed semantics remain
       unavailable. The exact builder, validator, detached/group loaders, strict
       JSON boundary, and writer-receipt binding are implemented. Bout response
-      consumes egocentric bearing explicitly, and escape events consumes bout
-      response explicitly; remaining scientific reader chains are still open.
+      and gaze consume egocentric bearing explicitly, escape events consumes
+      bout response explicitly, and near-field occupancy consumes quadrant
+      occupancy explicitly. Private historical visualization/inspection
+      adapters remain quarantined compatibility surfaces.
 - [x] Return a digest-bound writer publication receipt for every component.
 - [x] Expand the cluster orchestration target receipt to bind every requested
       component manifest, explicit dependency handle, successful validation,
@@ -251,8 +261,9 @@ attributes. Maintained readers must consume only this authority envelope.
       completes that exact activation on retry, acknowledges an already
       committed activation, rolls back ordinary post-selector failures, and
       rejects a changed generation without parent mutation.
-- [x] Run the selector-ineligible egocentric -> bout-response -> escape-event
-      chain through explicit handles outside the sandbox.
+- [x] Run the selector-ineligible egocentric -> bout-response -> escape-event,
+      egocentric -> gaze, and quadrant -> near-field chains through explicit
+      handles outside the sandbox.
 - [ ] Run end-to-end activated component-family workflow tests outside the
       sandbox after separately reviewed selector activation is authorized.
 

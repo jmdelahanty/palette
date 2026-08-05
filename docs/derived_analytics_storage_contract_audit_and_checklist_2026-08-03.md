@@ -209,8 +209,10 @@ authority until a future version adds a strict refined-observation input.
 ## Correctness Blockers Before Physical Optimization
 
 The findings in this section are the audit baseline. Phases 1 and 2 above have
-closed the discovery, reader-fallback, and Parquet-generation blockers. The
-chaser component blocker remains open for Phase 5.
+closed the discovery, reader-fallback, and Parquet-generation blockers. Phase 5
+has now closed candidate publication and exact-handle transport for the
+maintained chaser production DAG; selector activation and private historical
+inspection adapters remain deliberately separate.
 
 ### Authoritative run discovery
 
@@ -255,13 +257,15 @@ Evidence:
 
 All ten maintained component writers now publish independently sealed,
 selector-ineligible immutable candidates, and writer plus runner receipts carry
-an explicit validated component handle. Bout response now consumes an exact
-egocentric-bearing handle, and escape events consumes an exact bout-response
-handle; both persist the upstream component-manifest digest in their lineage.
-The remaining correctness boundary is the rest of the chained consumers and
-exports. Candidates remain intentionally undiscoverable until each such
-consumer binds an exact component manifest digest or a separately reviewed
-selector activation.
+an explicit validated component handle. The maintained production DAG binds
+four exact chains: egocentric bearing to bout response, bout response to escape
+events, egocentric bearing to gaze tracking, and quadrant occupancy to
+near-field occupancy. Every downstream lineage persists the upstream component
+manifest digest. The LSF workflow creates strict handle JSON from exact base and
+component names and passes it across process boundaries, including for
+selector-ineligible same-job candidates. Candidates remain intentionally
+undiscoverable without an exact handle or separately reviewed selector
+activation. Private historical visualization adapters remain quarantined.
 
 Evidence:
 
@@ -296,8 +300,8 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Shared compact rematerialization | coordination lane | integrated as `5d7fb30c` | Exact declaration-bound replanning, frame-axis growth, whole-physical-unit writes, receipt and metadata validation | Infrastructure only; family adoption remains explicit and opt-in |
 | Shared compact candidate publication | coordination lane | integrated from `d82dcf41` | Immutable selector-ineligible swim-bout and bout-kinematics candidates, logical hashes, local and authoritative-root metadata equivalence, and selector non-mutation | Candidate evidence only; benchmark and promotion remain pending |
 | Chaser scientific writer adoption | historical isolated lane | integrated as `fc6a48c5` | All ten component writers, sealed staging capability, atomic component publisher, focused tests, and lifecycle doc | Integrated as candidate publication; explicit dependency handles and activation remain separate |
-| Chaser dependency/runner receipts | coordination lane | integrated as `34c067e5` and `21e115b3` | Self-digested explicit handles, detached exact reads, writer receipt v2, and cluster target receipt v2 | Integrated; scientific chained consumers and selector activation remain separate |
-| Chaser remaining exact consumers | `/tmp/palette-chaser-remaining-handles-20260803` / `agent/palette/chaser-remaining-handles-20260803` | integrated as `e179075d` | Exact egocentric/quadrant handles in gaze, near-field, batch orchestration, and explicit historical-wrapper compatibility | Reviewed and integrated; selector activation remains separate |
+| Chaser dependency/runner receipts | coordination lane | integrated as `34c067e5` and `21e115b3` | Self-digested explicit handles, detached exact reads, writer receipt v2, and cluster target receipt v2 | Integrated; maintained scientific consumer migration is completed by the exact-consumer and main-DAG transport checkpoints; selector activation remains separate |
+| Chaser remaining exact consumers | `/tmp/palette-chaser-remaining-handles-20260803` / `agent/palette/chaser-remaining-handles-20260803` | integrated as `e179075d`; main-DAG transport completed in this checkpoint | Exact egocentric/quadrant handles in gaze, near-field, bout-response, and escape-event orchestration, including strict cross-process handle JSON and explicit historical-wrapper compatibility | Reviewed and integrated; selector activation remains separate |
 | Archive metadata hardening | coordination lane | integrated as `0a4985fe` | Fork-safe archive lock, serialized direct consolidators/activations, exact failed-tombstone repair, bout rollback consolidation, and subject-mask unknown-ack recovery | Independently reviewed ACCEPT; arbitrary legacy/external mutators still require quiescence until migrated |
 | Eye-angle atomic candidate | `/tmp/palette-eye-angle-atomic-candidate-v2-20260803` / `agent/palette/eye-angle-atomic-candidate-v2-20260803` | integrated as `c658dfcc` and `10bf957e` | Direct byte-planned 41-array candidate, atomic non-promoting publication, exact consolidated metadata, containment guards, and failure repair | Reviewed and integrated; benchmark and promotion remain pending |
 | Physical candidate catalog | coordination lane | integrated and extended through this checkpoint | Executable separation of thirteen unpromoted candidate profiles from production logical contracts, including exact run parent, owner, atomic/direct mode, consolidation, and repair state | Never infer production adoption or promotion from candidate membership |
@@ -757,10 +761,15 @@ a v3 storage-candidate regression.
       explicit selector-ineligible dependency handles and bind upstream
       manifest digests into downstream lineage. Historical swim-bout input is
       permitted only through an explicit compatibility flag.
-- [ ] Migrate the remaining chained scientific consumers to exact component
-      handles. The cross-recording export portion is complete for the 15 tables
-      backed by sealed base/component semantics; other maintained consumer
-      chains remain separately tracked.
+- [x] Migrate the remaining maintained production-DAG scientific consumers to
+      exact component handles. The exact chains are egocentric bearing -> bout
+      response, bout response -> escape events, egocentric bearing -> gaze
+      tracking, and quadrant occupancy -> near-field occupancy. The main LSF
+      workflow serializes exact handles between processes without selectors or
+      `latest`. Cross-recording export is complete for the 15 tables backed by
+      sealed base/component semantics. Private historical visualization
+      adapters remain quarantined compatibility surfaces rather than scientific
+      authorities.
 - [x] Keep export of unsealed component tables fail closed. One strict
       `palette.chaser_export_authority_set.v1` input now binds every invocation
       source, base publication seal, and required component handle. Fifteen

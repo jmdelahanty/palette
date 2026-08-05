@@ -276,8 +276,8 @@ def _recover_completed_ineligible_component(
         )
         if existing_retry_sha256 != local_retry_sha256:
             raise FileExistsError(
-                "Existing chaser component scientific payload or semantics differ "
-                "from the local retry."
+                "Refusing to replace existing chaser component: scientific payload "
+                "or semantics differ from the local retry."
             )
         validation = {
             "valid": True,

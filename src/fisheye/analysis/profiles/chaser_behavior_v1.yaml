@@ -64,7 +64,7 @@ modules:
     implementation: fisheye.analysis.chaser_bout_response
     schema_id: palette.chaser_bout_response.v1
     schema_version: 1
-    depends_on: [chaser_distance]
+    depends_on: [chaser_egocentric_bearing]
     execution_cardinality: recording
     default_enabled: false
 

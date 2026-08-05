@@ -118,6 +118,9 @@ def test_skipped_producers_resolve_authoritative_inputs_per_recording(
     assert '"registry_write_mode": "deferred_to_serial_finalizer"' in job_script
     assert '"schema_version": 2' in job_script
     assert "fisheye.analysis_workflows.chaser_component_receipt" in job_script
+    assert "write_component_dependency_handle" in job_script
+    assert "--quadrant-occupancy-dependency-handle-json" in job_script
+    assert "--egocentric-dependency-handle-json" in job_script
     assert '"chaser_component_publications"' in job_script
     run_dir = tmp_path / "logs" / "chaser_analytics_authoritative_inputs"
     finalizer = (run_dir / "run_registry_finalizer.sh").read_text(encoding="utf-8")
@@ -191,6 +194,9 @@ def test_profile_enable_adds_dependency_and_renders_generic_steps(
         "chaser_escape_events"
     ]
     selected = profiles["analysis_selection"]["selected_module_ids"]
+    assert selected.index("chaser_egocentric_bearing") < selected.index(
+        "chaser_bout_response"
+    )
     assert selected.index("chaser_bout_response") < selected.index(
         "chaser_escape_events"
     )
@@ -202,6 +208,9 @@ def test_profile_enable_adds_dependency_and_renders_generic_steps(
     assert (
         'chaser_escape_events=$CHASER_ESCAPE_EVENTS_COMPONENT' in job_script
     )
+    assert '--handle-component "${family}=${component_name}"' in job_script
+    assert '--egocentric-dependency-handle-json "$egocentric_bout_dependency_handle"' in job_script
+    assert '--bout-response-dependency-handle-json "$bout_response_dependency_handle"' in job_script
     assert "fisheye.utils.run_goodcopbadcop" not in job_script
 
 

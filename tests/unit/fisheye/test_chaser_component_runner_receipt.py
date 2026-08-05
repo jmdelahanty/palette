@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 import copy
+import json
 
 import numpy as np
 import pytest
@@ -65,6 +66,7 @@ def _archive(tmp_path: Path) -> Path:
         ),
     )
     component.attrs["stage_selector_eligible"] = False
+    component.attrs["palette_run_completion_status"] = "complete"
     return path
 
 
@@ -118,6 +120,63 @@ def test_runner_receipt_rejects_duplicate_or_missing_component(
             chaser_distance_run="base",
             component_requests=(("egocentric_bearing", "missing"),),
         )
+
+
+def test_named_dependency_handle_supports_ineligible_and_eligible_components(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = _archive(tmp_path)
+    monkeypatch.setattr(mod, "load_chaser_distance_run", lambda *_a, **_k: _snapshot())
+
+    ineligible = mod.build_named_chaser_component_dependency_handle(
+        path,
+        chaser_distance_run="base",
+        component_request=("egocentric_bearing", "candidate"),
+    )
+    assert ineligible["component_name"] == "candidate"
+    assert ineligible["component_manifest_sha256"]
+
+    root = zarr.open_group(
+        str(path), mode="a", zarr_format=3, use_consolidated=False
+    )
+    root[
+        "analysis/chaser_distance_runs/base/egocentric_bearing/candidate"
+    ].attrs["stage_selector_eligible"] = True
+    eligible = mod.build_named_chaser_component_dependency_handle(
+        path,
+        chaser_distance_run="base",
+        component_request=("egocentric_bearing", "candidate"),
+    )
+    assert eligible == ineligible
+
+
+def test_handle_cli_mode_writes_only_the_exact_dependency_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = _archive(tmp_path)
+    output = tmp_path / "dependency_handle.json"
+    monkeypatch.setattr(mod, "load_chaser_distance_run", lambda *_a, **_k: _snapshot())
+
+    assert (
+        mod.main(
+            [
+                str(path),
+                "--chaser-distance-run",
+                "base",
+                "--handle-component",
+                "egocentric_bearing=candidate",
+                "--handle-output-json",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    handle = json.loads(output.read_text(encoding="utf-8"))
+    assert handle["component_family"] == "egocentric_bearing"
+    assert handle["component_name"] == "candidate"
+    assert handle["record_sha256"]
 
 
 def test_component_request_is_exact() -> None:
