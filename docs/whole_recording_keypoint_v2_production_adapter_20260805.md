@@ -408,6 +408,13 @@ review that separates:
   and body-frame authority chain, followed by final consolidated-metadata
   validation and registry update.
 
+The combined v005, v007, and bounded real-source-context evidence now supports
+a narrower machinery-only `PASS`, documented in
+`docs/diagnostics/batman_keypoint_v2_candidate_20260805/machinery_validation_verdict.md`.
+That verdict accepts orchestration, identity, terminal semantics, four-surface
+publication, validation, non-activation, and consumer interoperability while
+explicitly rejecting the current model/input pairing for scientific promotion.
+
 ## Canary checklist
 
 - [x] Commit this implementation with a clean worktree.
