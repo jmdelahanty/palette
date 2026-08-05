@@ -1,9 +1,8 @@
 # Whole-recording keypoint-v2 production adapter — 2026-08-05
 
-Status: the first selector-ineligible Batman attempt failed closed before
-inference because the 348x348 cache was not stride-aligned. The repaired
-padding and model-stride binding are implemented and validated; a new
-commit-pinned canary is pending.
+Status: implementation complete and first selector-ineligible Batman canary
+passed. Palette publication and candidate validation passed; Crimson review
+and any separate selector activation remain pending.
 
 ## Goal
 
@@ -145,23 +144,59 @@ deployment before submission.
 - `v005` retains the same exact cache, model, and publication boundary. Its only
   scientific-input change is enforcing the existing reversible preprocessing
   contract as derived 348x348 to 352x352 centered padding, bound to the stride
-  reported by the loaded model.
+  reported by the loaded model. It ran from Palette commit
+  `9598f402e27c18b5ff2dfc390811cc0472a5eaec` in the detached cluster worktree
+  `keypoint-whole-recording-production-20260805-9598f402`.
+
+## v005 result
+
+All jobs completed successfully on 2026-08-05:
+
+- prediction: `153273676`, L4 node `h08u02`;
+- strict four-surface finalization: `153273677`, node `h07u29`;
+- selector-ineligible candidate validation: `153273678`, node `h07u31`.
+
+Inference processed all 126,214 cache rows on `cuda:0` in 226.19 inference
+seconds. It produced 89,527 successful poses and 36,687 explicit failures
+(70.93% success), reporting 395.81 poses/s for the complete inference phase.
+The sealed terminal receipt records the exact model and training-manifest
+digests, cache manifest and payload digests, tensor input mode, maximum stride
+32, and the centered 348x348 to 352x352 padding transform. Job-local cache and
+terminal scratch were removed after the durable terminal artifact was sealed.
+
+The finalizer atomically published and independently validated:
+
+- `keypoints_runs/keypoints_batman_kpt5_v2_canary_20260805_v005`;
+- `keypoint_quality_runs/keypoint_quality_batman_kpt5_v2_canary_20260805_v005`;
+- `refined_keypoints_runs/refined_keypoints_batman_kpt5_v2_canary_20260805_v005`;
+- `analysis/body_frame_runs/body_frame_batman_kpt5_v2_canary_20260805_v005`.
+
+All four runs are complete and `stage_selector_eligible=false`. Direct parent
+metadata retains no `latest`, `latest_complete`, or `pending` value for these
+runs. The final candidate validator reported zero errors, registry integrity
+`ok` before and after, `activation_performed=false`, and no registry mutation.
+
+The only emitted warning was Zarr 3.1.6's standard notice that consolidated
+metadata is not yet part of the final Zarr v3 specification. Direct and public
+validation otherwise passed with no metadata errors. Updating the warning
+classifier for this library wording is a non-scientific follow-up; it does not
+authorize selector activation.
 
 ## Canary checklist
 
-- [ ] Commit this implementation with a clean worktree.
-- [ ] Deploy that exact commit with
+- [x] Commit this implementation with a clean worktree.
+- [x] Deploy that exact commit with
   `scripts/deploy_palette_cluster_worktree.sh` and retain the printed
   `PALETTE_GROUPS_REPO`.
-- [ ] Render the LSF plan using the commit-pinned deployment and `--dry-run`.
-- [ ] Verify the plan contains exactly prediction → strict finalization →
+- [x] Render the LSF plan using the commit-pinned deployment and `--dry-run`.
+- [x] Verify the plan contains exactly prediction → strict finalization →
   candidate validation, with no activation command.
-- [ ] Review requested queue, GPU, CPU, memory, batch size, and run paths.
-- [ ] Submit only the single canary after review.
-- [ ] Confirm cache SHA-256 staging proof and exact model binding.
-- [ ] Confirm all four candidate manifests, dtypes, logical hashes, storage
+- [x] Review requested queue, GPU, CPU, memory, batch size, and run paths.
+- [x] Submit only the single canary after review.
+- [x] Confirm cache SHA-256 staging proof and exact model binding.
+- [x] Confirm all four candidate manifests, dtypes, logical hashes, storage
   plans, direct/consolidated equivalence, and source-chain digests.
-- [ ] Confirm no production selector or registry row changed.
+- [x] Confirm no production selector or registry row changed.
 - [ ] Give Crimson the explicit refined-keypoint and crop run IDs for exact
   typed open, traversal, cancellation, identity, and rendering validation.
 - [ ] Activate selectors only through a later reviewed gate if both Palette and
