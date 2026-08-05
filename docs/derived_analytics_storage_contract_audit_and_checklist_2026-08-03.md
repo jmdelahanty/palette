@@ -715,11 +715,14 @@ a v3 storage-candidate regression.
     - [x] Replace all 18 inferred chaser schemas after tracing their exact
           producer vocabularies, types, nullability, and primary-key grains.
           The canonical 34-table envelope now has 34 exact tables and no
-          inferred member. Seventeen dormant chaser exports remain fail closed
-          until their independent component authorities are adopted; exact
-          schema installation does not reactivate legacy raw-group readers.
-          Near-field physical v1 freezes the maintained `[5, 10]` percentile
-          axis instead of generating columns by observation. See
+          inferred member. Fifteen previously dormant tables now require one
+          strict invocation-level authority set binding the exact sealed base
+          and explicit completed component handles. The two distance summary /
+          histogram tables without independently sealed semantics remain
+          unavailable. Exact schema installation does not reactivate legacy
+          raw-group readers. Near-field physical v1 freezes the maintained
+          `[5, 10]` percentile axis instead of generating columns by
+          observation. See
           `docs/cross_recording_chaser_arrow_contracts_2026-08-04.md`.
     - [x] Replace the four inferred baseline-strategy-v1 and three inferred
           whole-training-response-v1 outputs with distinct exact v2
@@ -754,12 +757,17 @@ a v3 storage-candidate regression.
       explicit selector-ineligible dependency handles and bind upstream
       manifest digests into downstream lineage. Historical swim-bout input is
       permitted only through an explicit compatibility flag.
-- [ ] Migrate the remaining chained scientific consumers and exports to exact
-      component handles.
-- [x] Keep export of unsealed component tables fail closed. Exact schemas are
-      now installed for future publication, but preflight still removes all 17
-      unadopted component tables before legacy raw-Zarr loaders run; the
-      cross-recording exporter/preflight matrix passes 77/77 tests.
+- [ ] Migrate the remaining chained scientific consumers to exact component
+      handles. The cross-recording export portion is complete for the 15 tables
+      backed by sealed base/component semantics; other maintained consumer
+      chains remain separately tracked.
+- [x] Keep export of unsealed component tables fail closed. One strict
+      `palette.chaser_export_authority_set.v1` input now binds every invocation
+      source, base publication seal, and required component handle. Fifteen
+      tables export without selectors or raw children; the two still-unsealed
+      distance summary/histogram tables remain explicitly unavailable. The
+      authority/export/publication matrix passes 182/182 tests, including 7/7
+      real sealed-base/component integration tests and process-pool transport.
 - [ ] Add recovery tests for interrupted component publication and stale
       pointers. Post-selector failure rollback is covered; add interruption
       points for each adopted component workflow.

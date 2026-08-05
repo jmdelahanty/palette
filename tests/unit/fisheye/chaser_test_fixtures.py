@@ -55,6 +55,11 @@ class LogicalChaserDistanceFixture:
         self.authority_status = "verified_test_fixture"
         self.behavior_authority_status = "verified_test_fixture"
         self.source_detection_path = str(attrs.get("source_detection_path") or "")
+        self.source_detection_kind = (
+            str(attrs["source_detection_kind"])
+            if attrs.get("source_detection_kind") is not None
+            else None
+        )
         self.source_stimulus_run = str(attrs.get("source_stimulus_run") or "")
         self.source_stimulus_path = str(attrs.get("source_stimulus_path") or "")
         self.source_stimulus_epoch_run = attrs.get("source_stimulus_epoch_run")
@@ -130,6 +135,18 @@ class LogicalChaserDistanceFixture:
         self.epoch_labels = _decode_rows(self.epoch_label_bytes)
         self.epoch_start_frame = _array(run, "epoch_summary/start_frame")
         self.epoch_end_frame = _array(run, "epoch_summary/end_frame")
+        self.epoch_distribution_bin_edges_mm = _array(
+            run,
+            "epoch_distributions/bin_edges_mm",
+        )
+        self.epoch_distribution_bin_centers_mm = _array(
+            run,
+            "epoch_distributions/bin_centers_mm",
+        )
+        self.epoch_distribution_hist_density = _array(
+            run,
+            "epoch_distributions/hist_density",
+        )
 
     def authority_record(self) -> dict[str, Any]:
         return {

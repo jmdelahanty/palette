@@ -3,6 +3,8 @@ set -euo pipefail
 umask 0002
 
 COLLECTION_MANIFEST=""
+CHASER_AUTHORITY_MANIFEST=""
+CHASER_AUTHORITY_SHA256=""
 EXPORT_RUN_ID=""
 STATS_RUN_ID=""
 OUTPUT_ROOT="${PALETTE_ANALYTICS_EXPORT_ROOT:-/groups/johnson/johnsonlab/palette_analytics}"
@@ -35,6 +37,8 @@ group statistics, and validates the statistics export.
 
 Required:
   --collection-manifest PATH   Virtual collection manifest on shared storage
+  --chaser-authority-manifest PATH
+                               Exact chaser export authority-set JSON
   --export-run-id ID           Immutable base-export run ID
 
 Options:
@@ -46,6 +50,8 @@ Options:
   --submit-host HOST           SSH host used when bsub is unavailable locally
                                (default: login1-citrus-poller)
   --tables CSV                 V2 tables (default: all chaser tables)
+  --chaser-authority-sha256 HEX
+                               Optional expected authority-manifest file digest
   --baseline-time-bin-s S      Baseline behavior bin width (default: 5)
   --include-baseline-samples   Add optional baseline_kinematic_samples table
   --baseline-sample-rate-hz HZ Requested baseline sample rate (default: 10)
@@ -80,6 +86,8 @@ fail() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --collection-manifest) COLLECTION_MANIFEST="$2"; shift 2;;
+    --chaser-authority-manifest) CHASER_AUTHORITY_MANIFEST="$2"; shift 2;;
+    --chaser-authority-sha256) CHASER_AUTHORITY_SHA256="$2"; shift 2;;
     --export-run-id) EXPORT_RUN_ID="$2"; shift 2;;
     --stats-run-id) STATS_RUN_ID="$2"; shift 2;;
     --output-root) OUTPUT_ROOT="$2"; shift 2;;
@@ -108,6 +116,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$COLLECTION_MANIFEST" ]] || fail "--collection-manifest is required"
+[[ -n "$CHASER_AUTHORITY_MANIFEST" ]] || \
+  fail "--chaser-authority-manifest is required"
 [[ -n "$EXPORT_RUN_ID" ]] || fail "--export-run-id is required"
 [[ "$EXPORT_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "Unsafe --export-run-id: $EXPORT_RUN_ID"
 if [[ -z "$STATS_RUN_ID" ]]; then STATS_RUN_ID="${EXPORT_RUN_ID}_stats"; fi
@@ -127,6 +137,14 @@ for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
 done
 if [[ "${#DEPENDENCY_DONE[@]}" == "0" ]]; then
   [[ -f "$COLLECTION_MANIFEST" ]] || fail "Collection manifest not found: $COLLECTION_MANIFEST"
+  [[ -f "$CHASER_AUTHORITY_MANIFEST" ]] || \
+    fail "Chaser authority manifest not found: $CHASER_AUTHORITY_MANIFEST"
+  if [[ -z "$CHASER_AUTHORITY_SHA256" ]]; then
+    CHASER_AUTHORITY_SHA256="$(sha256sum "$CHASER_AUTHORITY_MANIFEST" | awk '{print $1}')"
+  fi
+fi
+if [[ -n "$CHASER_AUTHORITY_SHA256" && ! "$CHASER_AUTHORITY_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  fail "--chaser-authority-sha256 must be one lowercase SHA-256"
 fi
 git -C "$PALETTE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
   fail "Palette checkout not found: $PALETTE_REPO"
@@ -154,6 +172,8 @@ SUBMISSION_FILE="${RUN_DIR}/submission.txt"
 
 q_repo="$(printf '%q' "$PALETTE_REPO")"
 q_collection="$(printf '%q' "$COLLECTION_MANIFEST")"
+q_chaser_authority="$(printf '%q' "$CHASER_AUTHORITY_MANIFEST")"
+q_chaser_authority_sha256="$(printf '%q' "$CHASER_AUTHORITY_SHA256")"
 q_output="$(printf '%q' "$OUTPUT_ROOT")"
 q_export_id="$(printf '%q' "$EXPORT_RUN_ID")"
 q_stats_id="$(printf '%q' "$STATS_RUN_ID")"
@@ -173,6 +193,8 @@ umask 0002
 
 PALETTE_REPO=${q_repo}
 COLLECTION_MANIFEST=${q_collection}
+CHASER_AUTHORITY_MANIFEST=${q_chaser_authority}
+CHASER_AUTHORITY_SHA256=${q_chaser_authority_sha256}
 OUTPUT_ROOT=${q_output}
 EXPORT_RUN_ID=${q_export_id}
 STATS_RUN_ID=${q_stats_id}
@@ -200,12 +222,18 @@ if [[ ! -f "\${COLLECTION_MANIFEST}" ]]; then
     "\${COLLECTION_MANIFEST}" >&2
   exit 2
 fi
+if [[ ! -f "\${CHASER_AUTHORITY_MANIFEST}" ]]; then
+  printf 'Chaser authority manifest is unavailable after dependencies completed: %s\n' \
+    "\${CHASER_AUTHORITY_MANIFEST}" >&2
+  exit 2
+fi
 mkdir -p "\${OUTPUT_ROOT}" "\$(dirname -- "\${VALIDATION_JSON}")"
 export MPLCONFIGDIR="\$(dirname -- "\${VALIDATION_JSON}")/matplotlib"
 
 export_cmd=(
   scripts/py -m fisheye.utils.export_cross_recording_analytics
   --collection-manifest "\${COLLECTION_MANIFEST}"
+  --chaser-authority-manifest "\${CHASER_AUTHORITY_MANIFEST}"
   --output-root "\${OUTPUT_ROOT}"
   --tables "\${TABLES}"
   --jobs "\${NCORES}"
@@ -214,6 +242,9 @@ export_cmd=(
   --baseline-sample-rate-hz "\${BASELINE_SAMPLE_RATE_HZ}"
   --baseline-spatial-grid-size "\${BASELINE_SPATIAL_GRID_SIZE}"
 )
+if [[ -n "\${CHASER_AUTHORITY_SHA256}" ]]; then
+  export_cmd+=(--chaser-authority-sha256 "\${CHASER_AUTHORITY_SHA256}")
+fi
 if [[ "\${BASELINE_FULL_RESOLUTION_SAMPLES}" == "1" ]]; then
   export_cmd+=(--baseline-full-resolution-samples)
 fi

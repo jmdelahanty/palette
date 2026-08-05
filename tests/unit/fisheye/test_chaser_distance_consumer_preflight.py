@@ -526,20 +526,10 @@ def test_export_latest_run_preflights_exact_reader_without_raw_fallback(
     assert calls == [(root, "exact_run")]
     assert group is None
     assert name == "exact_run"
-    assert "no independently verified sealed semantic authority" in str(reason)
+    assert "exact chaser export authority is required" in str(reason)
 
 
-def test_export_preflight_marks_each_unsealed_table_unavailable_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = _RawNavigationTrap()
-    calls: list[str] = []
-
-    def load(_root_node, *, run_name):
-        calls.append(run_name)
-        return _snapshot()
-
-    monkeypatch.setattr(export_module, "load_chaser_distance_run", load)
+def test_export_preflight_marks_each_unsealed_table_unavailable_once() -> None:
     derived = export_module._SOURCE_TABLE_BY_V2[
         export_module.CHASER_DISTANCE_SUMMARY_TABLE
     ]
@@ -548,25 +538,21 @@ def test_export_preflight_marks_each_unsealed_table_unavailable_once(
     ]
     diagnostics: list[dict[str, object]] = []
 
-    remaining = export_module._preflight_unsealed_chaser_exports(
-        root,
+    remaining = export_module._preflight_unavailable_chaser_exports(
+        None,
         tables={derived, independent},
         diagnostics=diagnostics,
     )
 
-    assert calls == ["latest"]
     assert remaining == {independent}
     assert diagnostics == [
         {
             "table": derived,
             "status": "unavailable",
             "reason": (
-                "requested chaser-distance summary/component has no independently "
-                "verified sealed semantic authority; raw Zarr export is unavailable "
-                "(analysis/chaser_distance_runs/canonical)"
+                "requested chaser-distance summary has no independently verified "
+                "sealed semantic authority; raw Zarr export is unavailable"
             ),
-            "chaser_distance_run": "canonical",
-            "chaser_distance_path": "analysis/chaser_distance_runs/canonical",
         }
     ]
 

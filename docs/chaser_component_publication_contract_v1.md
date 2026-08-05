@@ -182,11 +182,14 @@ attributes. Maintained readers must consume only this authority envelope.
       selector-ineligible recovery tombstone.
 - [x] Give every maintained component an exact semantic schema declaration.
 - [x] Migrate all maintained component writers off direct visible mutation.
-- [ ] Migrate all readers/exports to validated component handles. The exact
-      builder, validator, detached/group loaders, strict JSON boundary, and
-      writer-receipt binding are implemented. Bout response now consumes
-      egocentric bearing explicitly, and escape events consumes bout response
-      explicitly; remaining component chains and exports are still open.
+- [ ] Migrate all readers to validated component handles. The cross-recording
+      exporter is complete for 15 authority-backed tables: one strict
+      invocation document binds every exact base seal and required explicit
+      component handle, and two tables without sealed semantics remain
+      unavailable. The exact builder, validator, detached/group loaders, strict
+      JSON boundary, and writer-receipt binding are implemented. Bout response
+      consumes egocentric bearing explicitly, and escape events consumes bout
+      response explicitly; remaining scientific reader chains are still open.
 - [x] Return a digest-bound writer publication receipt for every component.
 - [x] Expand the cluster orchestration target receipt to bind every requested
       component manifest, explicit dependency handle, successful validation,

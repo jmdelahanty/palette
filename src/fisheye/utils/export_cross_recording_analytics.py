@@ -27,6 +27,15 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from fisheye.analytics_exports.capabilities import resolve_capabilities
+from fisheye.analytics_exports.chaser_authority import (
+    EGOCENTRIC_BEARING_FAMILY,
+    EPOCH_BEHAVIOR_FAMILY,
+    NEAR_FIELD_OCCUPANCY_FAMILY,
+    QUADRANT_OCCUPANCY_FAMILY,
+    LoadedChaserExportAuthoritySet,
+    load_chaser_export_authority_set,
+    validate_chaser_export_source_authority,
+)
 from fisheye.analytics_exports.contracts import (
     ALL_TABLES,
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
@@ -89,9 +98,17 @@ from fisheye.analytics_exports.baseline import (
     is_baseline_label,
 )
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
-from fisheye.analysis.chaser_behavior import canonical_behavior_label
+from fisheye.analysis.chaser_behavior import (
+    BEHAVIOR_CLASS_LABELS,
+    canonical_behavior_label,
+)
+from fisheye.analysis.chaser_component_publication import (
+    VerifiedChaserComponentGroup,
+    open_explicit_chaser_component_group,
+)
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
+    ChaserDistanceReadSnapshot,
     load_chaser_distance_run,
 )
 from fisheye.analysis.chaser_quadrant_occupancy import (
@@ -167,39 +184,54 @@ _V2_TABLE_BY_SOURCE = {source: target for target, source in _SOURCE_TABLE_BY_V2.
 # them unavailable instead of reopening the selected child as a raw Zarr group.
 # The spatial occupancy table is intentionally absent: it is sourced from the
 # separately selected detection-occupancy family, not chaser-distance data.
-_UNSEALED_CHASER_EXPORT_V2_TABLES = frozenset(
+_UNAVAILABLE_CHASER_EXPORT_V2_TABLES = frozenset(
     {
         CHASER_DISTANCE_SUMMARY_TABLE,
-        CHASER_EPOCH_BEHAVIOR_TABLE,
-        CHASER_BOUT_EVENTS_TABLE,
-        CHASER_BOUT_HISTOGRAM_TABLE,
-        CHASER_IBI_HISTOGRAM_TABLE,
-        CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
-        CHASER_SPEED_DISTANCE_TABLE,
         CHASER_DISTANCE_HISTOGRAM_TABLE,
-        CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
-        CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
-        CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
-        CHASER_EGOCENTRIC_SUMMARY_TABLE,
-        CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
     }
 )
-_UNSEALED_CHASER_EXPORT_SOURCE_TABLES = frozenset(
-    _SOURCE_TABLE_BY_V2[table] for table in _UNSEALED_CHASER_EXPORT_V2_TABLES
+_UNAVAILABLE_CHASER_EXPORT_SOURCE_TABLES = frozenset(
+    _SOURCE_TABLE_BY_V2[table] for table in _UNAVAILABLE_CHASER_EXPORT_V2_TABLES
 )
-_UNSEALED_CHASER_EXPORT_REASON = (
-    "requested chaser-distance summary/component has no independently verified "
+_UNAVAILABLE_CHASER_EXPORT_REASON = (
+    "requested chaser-distance summary has no independently verified "
     "sealed semantic authority; raw Zarr export is unavailable"
 )
 
+_CHASER_EXPORT_FAMILY_BY_SOURCE_TABLE = {
+    "goodcopbadcop_epoch_behavior_summary": EPOCH_BEHAVIOR_FAMILY,
+    "goodcopbadcop_epoch_bout_distribution": EPOCH_BEHAVIOR_FAMILY,
+    "goodcopbadcop_epoch_bout_histogram": EPOCH_BEHAVIOR_FAMILY,
+    "goodcopbadcop_epoch_inter_bout_interval_histogram": EPOCH_BEHAVIOR_FAMILY,
+    "goodcopbadcop_epoch_center_distance_histogram": EPOCH_BEHAVIOR_FAMILY,
+    "goodcopbadcop_cra_primary_endpoint_summary": QUADRANT_OCCUPANCY_FAMILY,
+    "goodcopbadcop_cra_primary_endpoint_object_phase": QUADRANT_OCCUPANCY_FAMILY,
+    "goodcopbadcop_cra_quadrant_occupancy": QUADRANT_OCCUPANCY_FAMILY,
+    "goodcopbadcop_cra_near_field_summary": NEAR_FIELD_OCCUPANCY_FAMILY,
+    "goodcopbadcop_cra_near_field_object_phase": NEAR_FIELD_OCCUPANCY_FAMILY,
+    "goodcopbadcop_cra_near_field_radial_density": NEAR_FIELD_OCCUPANCY_FAMILY,
+    "goodcopbadcop_cra_near_field_distance_cdf": NEAR_FIELD_OCCUPANCY_FAMILY,
+    "goodcopbadcop_egocentric_epoch_summary": EGOCENTRIC_BEARING_FAMILY,
+    "goodcopbadcop_egocentric_distance_bearing_histogram": (
+        EGOCENTRIC_BEARING_FAMILY
+    ),
+}
+_CHASER_EXPORT_BASE_ONLY_SOURCE_TABLES = frozenset(
+    {"goodcopbadcop_speed_distance_bins"}
+)
+_SUPPORTED_CHASER_EXPORT_SOURCE_TABLES = frozenset(
+    set(_CHASER_EXPORT_FAMILY_BY_SOURCE_TABLE)
+    | set(_CHASER_EXPORT_BASE_ONLY_SOURCE_TABLES)
+)
+_COMPONENT_SCHEMA_BY_FAMILY = {
+    EPOCH_BEHAVIOR_FAMILY: ("palette.chaser.epoch_behavior_summary.v1", 1),
+    QUADRANT_OCCUPANCY_FAMILY: ("palette.chaser.quadrant_occupancy.v1", 1),
+    NEAR_FIELD_OCCUPANCY_FAMILY: ("palette.chaser.near_field_occupancy.v1", 1),
+    EGOCENTRIC_BEARING_FAMILY: ("palette.chaser_egocentric_bearing.v1", 1),
+}
+
 CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT = "chaser_quadrant_occupancy"
-CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES = {"computed", "complete"}
 CRA_NEAR_FIELD_COMPONENT_PARENT = "chaser_near_field_occupancy"
-CRA_NEAR_FIELD_ALLOWED_STATUSES = {"computed", "complete"}
 EPOCH_BEHAVIOR_COMPONENT_PARENT = "epoch_behavior_summary"
 EPOCH_BEHAVIOR_SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v1"
 
@@ -228,6 +260,16 @@ class SourceExportResult:
     recording_id: str
     rows_by_table: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    chaser_authority_binding: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedChaserExportSource:
+    """Freshly opened exact base plus explicit component authorities."""
+
+    record: Mapping[str, Any]
+    snapshot: ChaserDistanceReadSnapshot
+    components: Mapping[str, VerifiedChaserComponentGroup]
 
 
 @dataclass(frozen=True)
@@ -249,6 +291,158 @@ def _recording_id_from_path(zarr_path: Path) -> str:
     if name.endswith("_analysis"):
         name = name[:-9]
     return name
+
+
+def _required_chaser_component_families(tables: set[str]) -> frozenset[str]:
+    return frozenset(
+        _CHASER_EXPORT_FAMILY_BY_SOURCE_TABLE[table]
+        for table in tables
+        if table in _CHASER_EXPORT_FAMILY_BY_SOURCE_TABLE
+    )
+
+
+def _open_verified_chaser_export_source(
+    root: Any,
+    *,
+    zarr_path: Path,
+    source_authority: Mapping[str, Any],
+    tables: set[str],
+) -> VerifiedChaserExportSource:
+    """Open every declared exact authority; never consult a selector."""
+
+    record = validate_chaser_export_source_authority(source_authority)
+    canonical_path = str(zarr_path.expanduser().resolve())
+    if record["zarr_path"] != canonical_path:
+        raise ValueError(
+            "Chaser export source authority belongs to a different Zarr path."
+        )
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(record["base_run_name"]),
+    )
+    if (
+        snapshot.run_path != record["base_run_path"]
+        or snapshot.recording_id != record["recording_id"]
+        or snapshot.publication_seal_sha256
+        != record["base_publication_seal_sha256"]
+    ):
+        raise ValueError(
+            "Chaser export source authority differs from the freshly verified base."
+        )
+
+    components: dict[str, VerifiedChaserComponentGroup] = {}
+    for family, handle in sorted(record["component_handles"].items()):
+        schema_id, schema_version = _COMPONENT_SCHEMA_BY_FAMILY[family]
+        components[family] = open_explicit_chaser_component_group(
+            root,
+            snapshot=snapshot,
+            handle=handle,
+            expected_semantic_schema_id=schema_id,
+            expected_semantic_schema_version=schema_version,
+        )
+    required = _required_chaser_component_families(tables)
+    missing = sorted(required - set(components))
+    if missing:
+        raise ValueError(
+            "Chaser export source authority lacks required component handle(s): "
+            f"{missing!r}."
+        )
+    return VerifiedChaserExportSource(
+        record=record,
+        snapshot=snapshot,
+        components=components,
+    )
+
+
+def _chaser_authority_binding(
+    authority: VerifiedChaserExportSource,
+) -> dict[str, Any]:
+    return {
+        "source_record_sha256": authority.record["record_sha256"],
+        "base_run_name": authority.snapshot.run_name,
+        "base_run_path": authority.snapshot.run_path,
+        "base_publication_seal_sha256": (
+            authority.snapshot.publication_seal_sha256
+        ),
+        "component_handles": {
+            family: {
+                "component_path": component.component_path,
+                "component_manifest_sha256": component.manifest_sha256,
+                "handle_record_sha256": component.dependency_handle[
+                    "record_sha256"
+                ],
+            }
+            for family, component in sorted(authority.components.items())
+        },
+    }
+
+
+def _chaser_snapshot_common_fields(
+    snapshot: ChaserDistanceReadSnapshot,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    source_refs = {
+        "source_detection_path": snapshot.source_detection_path,
+        "source_detection_kind": snapshot.source_detection_kind,
+        "source_stimulus_run": snapshot.source_stimulus_run,
+        "source_stimulus_path": snapshot.source_stimulus_path,
+        "source_stimulus_epoch_run": snapshot.source_stimulus_epoch_run,
+        "source_stimulus_epoch_path": snapshot.source_stimulus_epoch_path,
+    }
+    common = {
+        "chaser_distance_run": snapshot.run_name,
+        "chaser_distance_path": snapshot.run_path,
+        "chaser_distance_schema_id": "palette.chaser_distance.v1",
+        "chaser_distance_schema_version": 1,
+        "chaser_distance_method": "offline_detection_to_chaser_distance",
+        "chaser_distance_method_version": "1",
+        **source_refs,
+        "source_refs_json": _source_refs_json(source_refs),
+        "coordinate_frame": snapshot.coordinate_space_id,
+        "coordinate_origin": snapshot.coordinate_origin,
+        "fps": snapshot.fps,
+        "total_frames": snapshot.total_frames,
+        "pixels_per_mm_projector": snapshot.pixels_per_mm_projector,
+    }
+    return common, source_refs, {}
+
+
+def _chaser_snapshot_window_rows(
+    snapshot: ChaserDistanceReadSnapshot,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index in range(int(snapshot.epoch_window_id.shape[0])):
+        start = int(snapshot.epoch_start_frame[index])
+        end = int(snapshot.epoch_end_frame[index])
+        rows.append(
+            {
+                "window_index": index,
+                "window_id": int(snapshot.epoch_window_id[index]),
+                "window_label": snapshot.epoch_labels[index],
+                "start_frame": start,
+                "end_frame": end,
+                "start_time_s": float(start) / snapshot.fps,
+                "end_time_s": float(end + 1) / snapshot.fps,
+                "duration_s": float(max(0, end - start + 1)) / snapshot.fps,
+            }
+        )
+    return rows
+
+
+def _required_chaser_export_component(
+    authority: VerifiedChaserExportSource | None,
+    *,
+    family: str,
+) -> VerifiedChaserComponentGroup:
+    if authority is None:
+        raise ValueError(
+            "Requested chaser table requires an exact chaser export authority."
+        )
+    component = authority.components.get(family)
+    if component is None:
+        raise ValueError(
+            f"Chaser export authority lacks required component {family!r}."
+        )
+    return component
 
 
 def _safe_float(value: Any) -> float | None:
@@ -689,7 +883,8 @@ def _latest_run(root: Any, parent_path: str, requested: str | None = None) -> tu
         return (
             None,
             snapshot.run_name,
-            f"{_UNSEALED_CHASER_EXPORT_REASON} ({snapshot.run_path})",
+            "exact chaser export authority is required; raw canonical child "
+            f"navigation remains forbidden ({snapshot.run_path})",
         )
     try:
         group, name = resolve_zarr_run(
@@ -704,27 +899,22 @@ def _latest_run(root: Any, parent_path: str, requested: str | None = None) -> tu
         return None, None, str(exc)
 
 
-def _preflight_unsealed_chaser_exports(
-    root: Any,
+def _preflight_unavailable_chaser_exports(
+    authority: VerifiedChaserExportSource | None,
     *,
     tables: set[str],
     diagnostics: list[dict[str, Any]],
 ) -> set[str]:
-    """Remove unsupported chaser-derived exports after one exact preflight."""
+    """Remove the two summaries that still have no sealed semantics."""
 
-    requested = sorted(tables & _UNSEALED_CHASER_EXPORT_SOURCE_TABLES)
+    requested = sorted(tables & _UNAVAILABLE_CHASER_EXPORT_SOURCE_TABLES)
     if not requested:
         return tables
-    run_name: str | None = None
-    run_path: str | None = None
-    try:
-        snapshot = load_chaser_distance_run(root, run_name="latest")
-    except ChaserDistanceReadError as exc:
-        reason = f"canonical chaser-distance preflight failed closed: {exc}"
-    else:
-        run_name = snapshot.run_name
-        run_path = snapshot.run_path
-        reason = f"{_UNSEALED_CHASER_EXPORT_REASON} ({run_path})"
+    run_name = authority.snapshot.run_name if authority is not None else None
+    run_path = authority.snapshot.run_path if authority is not None else None
+    reason = _UNAVAILABLE_CHASER_EXPORT_REASON
+    if run_path is not None:
+        reason = f"{reason} ({run_path})"
     for table in requested:
         diagnostic: dict[str, Any] = {
             "table": table,
@@ -736,7 +926,7 @@ def _preflight_unsealed_chaser_exports(
         if run_path is not None:
             diagnostic["chaser_distance_path"] = run_path
         diagnostics.append(diagnostic)
-    return tables - _UNSEALED_CHASER_EXPORT_SOURCE_TABLES
+    return tables - _UNAVAILABLE_CHASER_EXPORT_SOURCE_TABLES
 
 
 def _common_row(
@@ -2544,6 +2734,7 @@ def _load_baseline_tables(
 def _load_goodcopbadcop_epoch_behavior_summary(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -2554,24 +2745,17 @@ def _load_goodcopbadcop_epoch_behavior_summary(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-
-    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
-        run_group,
-        run_name=run_name,
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=EPOCH_BEHAVIOR_FAMILY,
     )
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_path_or_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
-    component_path = str(component_path_or_error)
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
+    component_path = verified.component_path
     try:
         records, _records_attrs = load_structured_dataset(component, "per_epoch_fish")
     except Exception as exc:
@@ -2593,7 +2777,9 @@ def _load_goodcopbadcop_epoch_behavior_summary(
         })
         return []
 
-    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, source_refs, _run_parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     component_attrs = _attrs_dict(component)
     component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
     component_parameters = _json_mapping_attr(component_attrs, "parameters")
@@ -2652,6 +2838,7 @@ def _load_goodcopbadcop_epoch_behavior_summary(
 def _load_goodcopbadcop_epoch_bout_distribution(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -2662,24 +2849,17 @@ def _load_goodcopbadcop_epoch_bout_distribution(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-
-    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
-        run_group,
-        run_name=run_name,
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=EPOCH_BEHAVIOR_FAMILY,
     )
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_path_or_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
-    component_path = str(component_path_or_error)
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
+    component_path = verified.component_path
     try:
         records, _records_attrs = load_structured_dataset(component, "per_epoch_bouts")
     except Exception as exc:
@@ -2701,7 +2881,9 @@ def _load_goodcopbadcop_epoch_bout_distribution(
         })
         return []
 
-    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, source_refs, _run_parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     component_attrs = _attrs_dict(component)
     component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
     component_parameters = _json_mapping_attr(component_attrs, "parameters")
@@ -2762,6 +2944,7 @@ def _load_goodcopbadcop_epoch_bout_distribution(
 def _load_goodcopbadcop_epoch_center_distance_histogram(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -2772,24 +2955,17 @@ def _load_goodcopbadcop_epoch_center_distance_histogram(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-
-    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
-        run_group,
-        run_name=run_name,
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=EPOCH_BEHAVIOR_FAMILY,
     )
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_path_or_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
-    component_path = str(component_path_or_error)
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
+    component_path = verified.component_path
     try:
         records, _records_attrs = load_structured_dataset(component, "center_distance_histogram")
     except Exception as exc:
@@ -2811,7 +2987,9 @@ def _load_goodcopbadcop_epoch_center_distance_histogram(
         })
         return []
 
-    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, source_refs, _run_parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     component_attrs = _attrs_dict(component)
     component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
     component_parameters = _json_mapping_attr(component_attrs, "parameters")
@@ -2862,6 +3040,7 @@ def _load_goodcopbadcop_epoch_center_distance_histogram(
 def _load_goodcopbadcop_epoch_behavior_structured_histogram(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     table: str,
     dataset_name: str,
     export_run_id: str,
@@ -2873,24 +3052,17 @@ def _load_goodcopbadcop_epoch_behavior_structured_histogram(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-
-    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
-        run_group,
-        run_name=run_name,
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=EPOCH_BEHAVIOR_FAMILY,
     )
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_path_or_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
-    component_path = str(component_path_or_error)
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
+    component_path = verified.component_path
     try:
         records, records_attrs = load_structured_dataset(component, dataset_name)
     except Exception as exc:
@@ -2912,7 +3084,9 @@ def _load_goodcopbadcop_epoch_behavior_structured_histogram(
         })
         return []
 
-    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, source_refs, _run_parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     component_attrs = _attrs_dict(component)
     component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
     component_parameters = _json_mapping_attr(component_attrs, "parameters")
@@ -2973,156 +3147,6 @@ def _load_goodcopbadcop_epoch_behavior_structured_histogram(
     return rows
 
 
-def _epoch_speed_values_mm_s(
-    fish_xy: np.ndarray,
-    fish_valid: np.ndarray,
-    *,
-    start_frame: int | None,
-    end_frame: int | None,
-    fps: float | None,
-    pixels_per_mm: float | None,
-) -> np.ndarray:
-    if fps is None or fps <= 0 or pixels_per_mm is None or pixels_per_mm <= 0:
-        return np.asarray([], dtype=np.float64)
-    if start_frame is None or end_frame is None:
-        return np.asarray([], dtype=np.float64)
-    xy = np.asarray(fish_xy, dtype=np.float64)
-    valid = np.asarray(fish_valid, dtype=bool).reshape(-1)
-    if xy.ndim != 2 or xy.shape[1] != 2 or valid.shape[0] != xy.shape[0]:
-        return np.asarray([], dtype=np.float64)
-    start = max(0, int(start_frame))
-    end = min(int(end_frame), int(xy.shape[0]) - 1)
-    if end <= start:
-        return np.asarray([], dtype=np.float64)
-    segment = xy[start : end + 1]
-    segment_valid = valid[start : end + 1] & np.isfinite(segment).all(axis=1)
-    pair_valid = segment_valid[:-1] & segment_valid[1:]
-    if not np.any(pair_valid):
-        return np.asarray([], dtype=np.float64)
-    displacement_px = np.linalg.norm(np.diff(segment, axis=0), axis=1)
-    speeds = displacement_px[pair_valid] / float(pixels_per_mm) * float(fps)
-    return speeds[np.isfinite(speeds)]
-
-
-def _load_goodcopbadcop_epoch_speed_summary(
-    root: Any,
-    *,
-    export_run_id: str,
-    zarr_path: Path,
-    recording_id: str,
-    tables: set[str],
-    diagnostics: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    table = "goodcopbadcop_epoch_speed_summary"
-    if table not in tables:
-        return []
-
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    if not _has_child(run_group, "epoch_summary") or not _has_child(run_group, "positions"):
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "missing epoch_summary or positions group",
-            "chaser_distance_run": run_name,
-        })
-        return []
-
-    positions = run_group["positions"]
-    fish_xy = _read_array(positions, "fish_centroid_arena_xy")
-    fish_valid = _read_array(positions, "fish_valid")
-    if fish_xy is None or fish_valid is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "missing positions/fish_centroid_arena_xy or positions/fish_valid",
-            "chaser_distance_run": run_name,
-        })
-        return []
-
-    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
-    fps = _safe_float(run_common.get("fps"))
-    pixels_per_mm = _safe_float(run_common.get("pixels_per_mm_projector"))
-    windows = _epoch_summary_window_rows(run_group)
-    if not windows:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "no epoch_summary windows",
-            "chaser_distance_run": run_name,
-        })
-        return []
-
-    fish_xy = np.asarray(fish_xy)
-    fish_valid = np.asarray(fish_valid, dtype=bool).reshape(-1)
-    finite_position = np.isfinite(fish_xy).all(axis=1) if fish_xy.ndim == 2 else np.zeros(fish_valid.shape, dtype=bool)
-    usable_fish = fish_valid & finite_position
-    rows: list[dict[str, Any]] = []
-    for window_index, raw_window in enumerate(windows):
-        window = _fill_chaser_window_times(raw_window, fps=fps)
-        start_frame = _safe_int(window.get("start_frame"))
-        end_frame = _safe_int(window.get("end_frame"))
-        start = max(0, int(start_frame)) if start_frame is not None else 0
-        end = min(int(end_frame), int(fish_valid.shape[0]) - 1) if end_frame is not None else -1
-        total_span_frames = max(0, end - start + 1) if end >= start else 0
-        valid_frame_count = int(np.count_nonzero(usable_fish[start : end + 1])) if total_span_frames else 0
-        speeds = _epoch_speed_values_mm_s(
-            fish_xy,
-            fish_valid,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            fps=fps,
-            pixels_per_mm=pixels_per_mm,
-        )
-        lineage = {
-            "zarr_path": str(zarr_path),
-            "chaser_distance_run": run_name,
-            "source_detection_path": source_refs.get("source_detection_path"),
-            "source_stimulus_run": source_refs.get("source_stimulus_run"),
-            "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
-            "window_id": window.get("window_id"),
-        }
-        row = _common_row(
-            export_run_id=export_run_id,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            table=table,
-            lineage=lineage,
-        )
-        row.update(run_common)
-        row.update({
-            "window_index": _safe_int(window.get("window_index")),
-            "window_id": _safe_int(window.get("window_id")),
-            "window_label": window.get("window_label"),
-            "start_frame": start_frame,
-            "end_frame": end_frame,
-            "start_time_s": _safe_float(window.get("start_time_s")),
-            "end_time_s": _safe_float(window.get("end_time_s")),
-            "duration_s": _safe_float(window.get("duration_s")),
-            "source_position_path": f"analysis/chaser_distance_runs/{run_name}/positions/fish_centroid_arena_xy",
-            "speed_definition": "consecutive valid fish_centroid_arena_xy displacement / pixels_per_mm_projector * fps; pairs must remain within epoch",
-            "total_span_frames": total_span_frames,
-            "valid_frame_count": valid_frame_count,
-            "missing_frame_count": max(0, total_span_frames - valid_frame_count),
-            "tracking_dropout_fraction": (
-                float(max(0, total_span_frames - valid_frame_count)) / float(total_span_frames)
-                if total_span_frames > 0
-                else None
-            ),
-            "speed_sample_count": int(speeds.size),
-            "mean_speed_mm_s": float(np.mean(speeds)) if speeds.size else None,
-            "median_speed_mm_s": float(np.median(speeds)) if speeds.size else None,
-            "p05_speed_mm_s": float(np.percentile(speeds, 5)) if speeds.size else None,
-            "p95_speed_mm_s": float(np.percentile(speeds, 95)) if speeds.size else None,
-            "max_speed_mm_s": float(np.max(speeds)) if speeds.size else None,
-            "total_path_mm": float(np.sum(speeds) / float(fps)) if speeds.size and fps is not None and fps > 0 else None,
-        })
-        rows.append(row)
-    return rows
-
-
 def _frame_speed_mm_s(
     fish_xy: np.ndarray,
     fish_valid: np.ndarray,
@@ -3149,6 +3173,7 @@ def _frame_speed_mm_s(
 def _load_goodcopbadcop_speed_distance_bins(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -3159,34 +3184,16 @@ def _load_goodcopbadcop_speed_distance_bins(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    required = ("epoch_summary", "positions", "distances")
-    missing = [name for name in required if not _has_child(run_group, name)]
-    if missing:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": f"missing chaser-distance group(s): {missing}",
-            "chaser_distance_run": run_name,
-        })
-        return []
-
-    positions = run_group["positions"]
-    distances_group = run_group["distances"]
-    fish_xy = _read_array(positions, "fish_centroid_arena_xy")
-    fish_valid = _read_array(positions, "fish_valid")
-    distance_mm = _read_array(distances_group, "distance_mm")
-    if fish_xy is None or fish_valid is None or distance_mm is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "missing positions/fish_centroid_arena_xy, positions/fish_valid, or distances/distance_mm",
-            "chaser_distance_run": run_name,
-        })
-        return []
+    del root
+    if chaser_authority is None:
+        raise ValueError(
+            "Requested chaser speed-distance table requires an exact base authority."
+        )
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    fish_xy = snapshot.fish_centroid_arena_xy
+    fish_valid = snapshot.fish_valid
+    distance_mm = snapshot.distance_mm
 
     distance_mm = np.asarray(distance_mm, dtype=np.float64)
     if distance_mm.ndim != 2:
@@ -3198,11 +3205,11 @@ def _load_goodcopbadcop_speed_distance_bins(
         })
         return []
 
-    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, source_refs, _parameters = _chaser_snapshot_common_fields(snapshot)
     fps = _safe_float(run_common.get("fps"))
     pixels_per_mm = _safe_float(run_common.get("pixels_per_mm_projector"))
     frame_speed = _frame_speed_mm_s(fish_xy, fish_valid, fps=fps, pixels_per_mm=pixels_per_mm)
-    windows = _epoch_summary_window_rows(run_group)
+    windows = _chaser_snapshot_window_rows(snapshot)
     if not windows:
         diagnostics.append({
             "table": table,
@@ -3212,19 +3219,21 @@ def _load_goodcopbadcop_speed_distance_bins(
         })
         return []
 
-    bin_edges = None
-    if _has_child(run_group, "epoch_distributions"):
-        bin_edges = _read_1d_array(run_group["epoch_distributions"], "bin_edges_mm")
-    if bin_edges is None or np.asarray(bin_edges).size < 2:
-        finite = distance_mm[np.isfinite(distance_mm)]
-        max_distance = float(np.nanmax(finite)) if finite.size else 2.0
-        max_edge = max(2.0, float(math.ceil(max_distance / 2.0) * 2.0))
-        bin_edges = np.arange(0.0, max_edge + 1.0, 2.0, dtype=np.float32)
-    bin_edges = np.asarray(bin_edges, dtype=np.float64).reshape(-1)
+    bin_edges = np.asarray(
+        snapshot.epoch_distribution_bin_edges_mm,
+        dtype=np.float64,
+    ).reshape(-1)
     if bin_edges.size < 2:
-        return []
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-    chaser_indices = _chaser_indices_for_run(run_group, fallback_count=int(distance_mm.shape[1]))
+        raise ValueError("Sealed chaser distance-bin edge authority is empty.")
+    bin_centers = np.asarray(
+        snapshot.epoch_distribution_bin_centers_mm,
+        dtype=np.float64,
+    ).reshape(-1)
+    if bin_centers.shape != (bin_edges.size - 1,):
+        raise ValueError(
+            "Sealed chaser distance-bin centers disagree with the edge axis."
+        )
+    chaser_indices = [int(value) for value in snapshot.chaser_indices]
 
     rows: list[dict[str, Any]] = []
     for window_index, raw_window in enumerate(windows):
@@ -3450,30 +3459,6 @@ def _load_goodcopbadcop_chaser_distance_histogram(
     return rows
 
 
-def _latest_egocentric_component(
-    run_group: Any,
-) -> tuple[Any | None, str | None, str | None]:
-    if not _has_child(run_group, "egocentric_bearing"):
-        return None, None, "missing egocentric_bearing group"
-    parent = run_group["egocentric_bearing"]
-    parent_attrs = _attrs_dict(parent)
-    candidate = (
-        str(parent_attrs.get("latest_complete") or "").strip()
-        or str(parent_attrs.get("latest") or "").strip()
-    )
-    group_names = _group_names(parent)
-    if not candidate and group_names:
-        candidate = group_names[-1]
-    if not candidate or candidate not in group_names:
-        return None, None, "no egocentric_bearing component found"
-    component = parent[candidate]
-    component_attrs = _attrs_dict(component)
-    status = str(component_attrs.get("status") or "").strip().lower()
-    if status and status != "complete":
-        return None, None, f"egocentric_bearing component is not complete: {candidate}"
-    return component, candidate, None
-
-
 def _egocentric_chaser_indices(component: Any, *, fallback_count: int) -> list[int]:
     if _has_child(component, "per_chaser"):
         arr = _read_1d_array(component["per_chaser"], "chaser_index")
@@ -3484,6 +3469,33 @@ def _egocentric_chaser_indices(component: Any, *, fallback_count: int) -> list[i
         if arr is not None and arr.size:
             return [_safe_int(value) if _safe_int(value) is not None else int(idx) for idx, value in enumerate(arr)]
     return list(range(int(fallback_count)))
+
+
+def _egocentric_chaser_behaviors(
+    component: Any,
+    *,
+    fallback_count: int,
+) -> list[tuple[int, str]]:
+    labels: list[str | None] = []
+    if _has_child(component, "per_chaser"):
+        labels = _decode_text_column(
+            _read_array(
+                component["per_chaser"],
+                "behavior_class_label_bytes",
+            ),
+            fallback_count=fallback_count,
+        )
+    class_id_by_label = {
+        canonical_behavior_label(label): int(class_id)
+        for class_id, label in BEHAVIOR_CLASS_LABELS.items()
+    }
+    result: list[tuple[int, str]] = []
+    for index in range(fallback_count):
+        label = canonical_behavior_label(
+            labels[index] if index < len(labels) else "unknown"
+        )
+        result.append((class_id_by_label.get(label, 0), label))
+    return result
 
 
 def _egocentric_common_fields(
@@ -3519,74 +3531,6 @@ def _egocentric_common_fields(
         "bearing_bin_width_deg": _safe_float(parameters.get("bearing_bin_width_deg")),
     }
     return common, source_refs, parameters
-
-
-def _latest_cra_primary_endpoint_component(
-    run_group: Any,
-) -> tuple[Any | None, str | None, str | None]:
-    if not _has_child(run_group, CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT):
-        return None, None, f"missing {CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT} group"
-    parent = run_group[CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT]
-    parent_attrs = _attrs_dict(parent)
-    candidate = (
-        str(parent_attrs.get("latest_complete") or "").strip()
-        or str(parent_attrs.get("latest") or "").strip()
-    )
-    group_names = _group_names(parent)
-    if not candidate and group_names:
-        candidate = group_names[-1]
-    if not candidate or candidate not in group_names:
-        return None, None, "no chaser quadrant occupancy component found"
-    component = parent[candidate]
-    component_attrs = _attrs_dict(component)
-    status = str(component_attrs.get("status") or "").strip().lower()
-    if status and status not in CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES:
-        return (
-            None,
-            None,
-            f"chaser quadrant occupancy component is not computed: {candidate}",
-        )
-    if component_attrs.get("schema_id") != "palette.chaser.quadrant_occupancy.v1":
-        return (
-            None,
-            None,
-            "chaser quadrant occupancy component has an unsupported schema",
-        )
-    return component, candidate, None
-
-
-def _latest_cra_near_field_component(
-    run_group: Any,
-) -> tuple[Any | None, str | None, str | None]:
-    if not _has_child(run_group, CRA_NEAR_FIELD_COMPONENT_PARENT):
-        return None, None, f"missing {CRA_NEAR_FIELD_COMPONENT_PARENT} group"
-    parent = run_group[CRA_NEAR_FIELD_COMPONENT_PARENT]
-    parent_attrs = _attrs_dict(parent)
-    candidate = (
-        str(parent_attrs.get("latest_complete") or "").strip()
-        or str(parent_attrs.get("latest") or "").strip()
-    )
-    group_names = _group_names(parent)
-    if not candidate and group_names:
-        candidate = group_names[-1]
-    if not candidate or candidate not in group_names:
-        return None, None, "no chaser near-field occupancy component found"
-    component = parent[candidate]
-    component_attrs = _attrs_dict(component)
-    status = str(component_attrs.get("status") or "").strip().lower()
-    if status and status not in CRA_NEAR_FIELD_ALLOWED_STATUSES:
-        return (
-            None,
-            None,
-            f"chaser near-field occupancy component is not computed: {candidate}",
-        )
-    if component_attrs.get("schema_id") != "palette.chaser.near_field_occupancy.v1":
-        return (
-            None,
-            None,
-            "chaser near-field occupancy component has an unsupported schema",
-        )
-    return component, candidate, None
 
 
 def _cra_primary_endpoint_common_fields(
@@ -3741,6 +3685,7 @@ def _cra_summary_mapping_from_component(component: Any) -> dict[str, Any]:
 def _load_goodcopbadcop_cra_primary_endpoint_summary(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -3751,21 +3696,19 @@ def _load_goodcopbadcop_cra_primary_endpoint_summary(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_cra_primary_endpoint_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
-
-    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=QUADRANT_OCCUPANCY_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
+    run_common, _source_refs, _parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     run_path = str(run_common["chaser_distance_path"])
     component_common, cra_refs, _cra_parameters = _cra_primary_endpoint_common_fields(
         component=component,
@@ -3813,6 +3756,7 @@ def _load_goodcopbadcop_cra_primary_endpoint_summary(
 def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -3823,19 +3767,16 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_cra_primary_endpoint_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=QUADRANT_OCCUPANCY_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
     required = ("chasers", "phases", "chaser_phase", "per_chaser_phase")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
@@ -3848,7 +3789,9 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
         })
         return []
 
-    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, _source_refs, _parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     run_path = str(run_common["chaser_distance_path"])
     component_common, cra_refs, _cra_parameters = _cra_primary_endpoint_common_fields(
         component=component,
@@ -3995,6 +3938,7 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
 def _load_goodcopbadcop_cra_quadrant_occupancy(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -4005,45 +3949,33 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_cra_primary_endpoint_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
-    if not _has_child(run_group, "positions"):
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "chaser-distance run missing positions group",
-            "chaser_distance_run": run_name,
-            "cra_primary_endpoint_component": component_name,
-        })
-        return []
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=QUADRANT_OCCUPANCY_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
     required_component = ("chasers", "phases", "chaser_phase")
     missing_component = [
         name for name in required_component if not _has_child(component, name)
     ]
-    required_positions = ("fish_centroid_arena_xy", "fish_valid")
-    missing_positions = [name for name in required_positions if not _has_child(run_group["positions"], name)]
-    if missing_component or missing_positions:
+    if missing_component:
         diagnostics.append({
             "table": table,
             "status": "skipped",
-            "reason": f"missing group/array(s): component={missing_component}, positions={missing_positions}",
+            "reason": f"missing component group(s): {missing_component}",
             "chaser_distance_run": run_name,
             "cra_primary_endpoint_component": component_name,
         })
         return []
 
-    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, _source_refs, _parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     run_path = str(run_common["chaser_distance_path"])
     component_common, cra_refs, _cra_parameters = _cra_primary_endpoint_common_fields(
         component=component,
@@ -4066,7 +3998,6 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
     objects = component["chasers"]
     phases = component["phases"]
     object_phase = component["chaser_phase"]
-    positions = run_group["positions"]
 
     object_indices = _read_1d_array(objects, "chaser_index")
     object_roles = _read_canonical_behavior_labels(objects)
@@ -4106,18 +4037,8 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
         )
         return []
 
-    try:
-        fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64)
-        fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool).reshape(-1)
-    except Exception as exc:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": f"failed reading fish positions: {exc}",
-            "chaser_distance_run": run_name,
-            "cra_primary_endpoint_component": component_name,
-        })
-        return []
+    fish_xy = np.asarray(snapshot.fish_centroid_arena_xy, dtype=np.float64)
+    fish_valid = np.asarray(snapshot.fish_valid, dtype=bool).reshape(-1)
     if fish_xy.ndim != 2 or fish_xy.shape[1] != 2 or fish_xy.shape[0] != fish_valid.shape[0]:
         diagnostics.append({
             "table": table,
@@ -4268,6 +4189,7 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
 def _load_goodcopbadcop_cra_near_field_summary(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -4278,21 +4200,19 @@ def _load_goodcopbadcop_cra_near_field_summary(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_cra_near_field_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
-
-    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=NEAR_FIELD_OCCUPANCY_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
+    run_common, _source_refs, _parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     run_path = str(run_common["chaser_distance_path"])
     component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
         component=component,
@@ -4364,6 +4284,7 @@ def _near_field_percentile_columns(component: Any, approach: np.ndarray | None) 
 def _load_goodcopbadcop_cra_near_field_object_phase(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -4374,19 +4295,16 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_cra_near_field_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=NEAR_FIELD_OCCUPANCY_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
     required = ("chasers", "phases", "per_chaser_phase")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
@@ -4399,7 +4317,9 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
         })
         return []
 
-    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, _source_refs, _parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     run_path = str(run_common["chaser_distance_path"])
     component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
         component=component,
@@ -4518,6 +4438,7 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
 def _load_goodcopbadcop_cra_near_field_radial_density(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -4528,19 +4449,16 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_cra_near_field_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=NEAR_FIELD_OCCUPANCY_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
     required = ("chasers", "phases", "config", "radial_density")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
@@ -4553,7 +4471,9 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
         })
         return []
 
-    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, _source_refs, _parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     run_path = str(run_common["chaser_distance_path"])
     component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
         component=component,
@@ -4672,6 +4592,7 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
 def _load_goodcopbadcop_cra_near_field_distance_cdf(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -4682,19 +4603,16 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_cra_near_field_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=NEAR_FIELD_OCCUPANCY_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
     required = ("chasers", "phases", "config", "distance_cdf")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
@@ -4707,7 +4625,9 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
         })
         return []
 
-    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, _source_refs, _parameters = _chaser_snapshot_common_fields(
+        snapshot
+    )
     run_path = str(run_common["chaser_distance_path"])
     component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
         component=component,
@@ -4801,6 +4721,7 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
 def _load_goodcopbadcop_egocentric_epoch_summary(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -4811,19 +4732,16 @@ def _load_goodcopbadcop_egocentric_epoch_summary(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_egocentric_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=EGOCENTRIC_BEARING_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
     if not _has_child(component, "epoch_summary"):
         diagnostics.append({
             "table": table,
@@ -4834,7 +4752,7 @@ def _load_goodcopbadcop_egocentric_epoch_summary(
         })
         return []
 
-    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, source_refs, _parameters = _chaser_snapshot_common_fields(snapshot)
     run_path = str(run_common["chaser_distance_path"])
     component_common, egocentric_refs, _egocentric_parameters = _egocentric_common_fields(
         component=component,
@@ -4857,7 +4775,10 @@ def _load_goodcopbadcop_egocentric_epoch_summary(
     valid_frame_count = np.asarray(valid_frame_count)
     n_windows, n_chasers = int(valid_frame_count.shape[0]), int(valid_frame_count.shape[1])
     chaser_indices = _egocentric_chaser_indices(component, fallback_count=n_chasers)
-    chaser_behaviors = _chaser_behaviors_for_run(run_group, chaser_indices)
+    chaser_behaviors = _egocentric_chaser_behaviors(
+        component,
+        fallback_count=n_chasers,
+    )
     windows = _epoch_summary_window_rows(component)
     fps = _safe_float(run_common.get("fps"))
     circular_mean = _read_array(summary, "circular_mean_bearing_deg")
@@ -4947,6 +4868,7 @@ def _load_goodcopbadcop_egocentric_epoch_summary(
 def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
     root: Any,
     *,
+    chaser_authority: VerifiedChaserExportSource | None,
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
@@ -4957,19 +4879,16 @@ def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
     if table not in tables:
         return []
 
-    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
-    if run_group is None or run_name is None:
-        diagnostics.append({"table": table, "status": "skipped", "reason": error})
-        return []
-    component, component_name, component_error = _latest_egocentric_component(run_group)
-    if component is None or component_name is None:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": component_error,
-            "chaser_distance_run": run_name,
-        })
-        return []
+    del root
+    verified = _required_chaser_export_component(
+        chaser_authority,
+        family=EGOCENTRIC_BEARING_FAMILY,
+    )
+    assert chaser_authority is not None
+    snapshot = chaser_authority.snapshot
+    run_name = snapshot.run_name
+    component = verified.group
+    component_name = verified.component_name
     if not _has_child(component, "distance_bearing_histogram"):
         diagnostics.append({
             "table": table,
@@ -4980,7 +4899,7 @@ def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
         })
         return []
 
-    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_common, source_refs, _parameters = _chaser_snapshot_common_fields(snapshot)
     run_path = str(run_common["chaser_distance_path"])
     component_common, egocentric_refs, _egocentric_parameters = _egocentric_common_fields(
         component=component,
@@ -5012,7 +4931,10 @@ def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
     if _has_child(component, "epoch_summary"):
         valid_frame_count = _read_array(component["epoch_summary"], "valid_frame_count")
     chaser_indices = _egocentric_chaser_indices(component, fallback_count=n_chasers)
-    chaser_behaviors = _chaser_behaviors_for_run(run_group, chaser_indices)
+    chaser_behaviors = _egocentric_chaser_behaviors(
+        component,
+        fallback_count=n_chasers,
+    )
     windows = _epoch_summary_window_rows(component)
     fps = _safe_float(run_common.get("fps"))
     distance_edges = _read_1d_array(hist, "distance_bin_edges_mm")
@@ -5139,6 +5061,7 @@ def export_one_zarr(
     *,
     tables: Sequence[str],
     export_run_id: str,
+    chaser_source_authority: Mapping[str, Any] | None = None,
     baseline_time_bin_s: float = 5.0,
     baseline_sample_rate_hz: float = 10.0,
     baseline_full_resolution_samples: bool = False,
@@ -5150,12 +5073,38 @@ def export_one_zarr(
     result = SourceExportResult(zarr_path=str(zarr_path), recording_id=recording_id)
     requested_table_set = set(tables)
     table_set = {_SOURCE_TABLE_BY_V2.get(table, table) for table in requested_table_set}
+    requires_chaser_authority = bool(
+        table_set & _SUPPORTED_CHASER_EXPORT_SOURCE_TABLES
+    )
+    if requires_chaser_authority and chaser_source_authority is None:
+        raise ValueError(
+            "Supported chaser exports require --chaser-authority-manifest."
+        )
 
     try:
         root = open_zarr_root(zarr_path, mode="r")
     except Exception as exc:
+        if requires_chaser_authority:
+            raise ValueError(
+                f"Exact chaser export source could not be opened: {zarr_path}: {exc}"
+            ) from exc
         result.diagnostics.append({"table": "*", "status": "failed", "reason": f"open_failed: {exc}"})
         return result
+
+    chaser_authority: VerifiedChaserExportSource | None = None
+    if requires_chaser_authority:
+        assert chaser_source_authority is not None
+        chaser_authority = _open_verified_chaser_export_source(
+            root,
+            zarr_path=zarr_path,
+            source_authority=chaser_source_authority,
+            tables=table_set,
+        )
+        recording_id = chaser_authority.snapshot.recording_id
+        result.recording_id = recording_id
+        result.chaser_authority_binding = _chaser_authority_binding(
+            chaser_authority
+        )
 
     stimulus_run, steps, step_rows, protocol_signature = _load_stimulus_steps(
         root,
@@ -5261,8 +5210,8 @@ def export_one_zarr(
     # remove those requests before the legacy extraction helpers can navigate
     # the selected child as raw Zarr.  Each requested table receives an explicit
     # unavailable diagnostic above.
-    table_set = _preflight_unsealed_chaser_exports(
-        root,
+    table_set = _preflight_unavailable_chaser_exports(
+        chaser_authority,
         tables=table_set,
         diagnostics=result.diagnostics,
     )
@@ -5295,6 +5244,7 @@ def export_one_zarr(
 
     goodcopbadcop_epoch_behavior_rows = _load_goodcopbadcop_epoch_behavior_summary(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5308,6 +5258,7 @@ def export_one_zarr(
 
     goodcopbadcop_epoch_bout_distribution_rows = _load_goodcopbadcop_epoch_bout_distribution(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5321,6 +5272,7 @@ def export_one_zarr(
 
     goodcopbadcop_epoch_bout_histogram_rows = _load_goodcopbadcop_epoch_behavior_structured_histogram(
         root,
+        chaser_authority=chaser_authority,
         table="goodcopbadcop_epoch_bout_histogram",
         dataset_name="per_epoch_bout_histograms",
         export_run_id=export_run_id,
@@ -5337,6 +5289,7 @@ def export_one_zarr(
     goodcopbadcop_epoch_inter_bout_interval_histogram_rows = (
         _load_goodcopbadcop_epoch_behavior_structured_histogram(
             root,
+            chaser_authority=chaser_authority,
             table="goodcopbadcop_epoch_inter_bout_interval_histogram",
             dataset_name="per_epoch_inter_bout_interval_histograms",
             export_run_id=export_run_id,
@@ -5353,6 +5306,7 @@ def export_one_zarr(
 
     goodcopbadcop_epoch_center_distance_histogram_rows = _load_goodcopbadcop_epoch_center_distance_histogram(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5364,21 +5318,9 @@ def export_one_zarr(
             goodcopbadcop_epoch_center_distance_histogram_rows
         )
 
-    goodcopbadcop_epoch_speed_rows = _load_goodcopbadcop_epoch_speed_summary(
-        root,
-        export_run_id=export_run_id,
-        zarr_path=zarr_path,
-        recording_id=recording_id,
-        tables=table_set,
-        diagnostics=result.diagnostics,
-    )
-    if goodcopbadcop_epoch_speed_rows:
-        result.rows_by_table.setdefault("goodcopbadcop_epoch_speed_summary", []).extend(
-            goodcopbadcop_epoch_speed_rows
-        )
-
     goodcopbadcop_speed_distance_rows = _load_goodcopbadcop_speed_distance_bins(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5405,6 +5347,7 @@ def export_one_zarr(
 
     goodcopbadcop_cra_summary_rows = _load_goodcopbadcop_cra_primary_endpoint_summary(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5418,6 +5361,7 @@ def export_one_zarr(
 
     goodcopbadcop_cra_object_phase_rows = _load_goodcopbadcop_cra_primary_endpoint_object_phase(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5431,6 +5375,7 @@ def export_one_zarr(
 
     goodcopbadcop_cra_quadrant_rows = _load_goodcopbadcop_cra_quadrant_occupancy(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5444,6 +5389,7 @@ def export_one_zarr(
 
     goodcopbadcop_cra_near_field_summary_rows = _load_goodcopbadcop_cra_near_field_summary(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5457,6 +5403,7 @@ def export_one_zarr(
 
     goodcopbadcop_cra_near_field_object_phase_rows = _load_goodcopbadcop_cra_near_field_object_phase(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5470,6 +5417,7 @@ def export_one_zarr(
 
     goodcopbadcop_cra_near_field_radial_rows = _load_goodcopbadcop_cra_near_field_radial_density(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5483,6 +5431,7 @@ def export_one_zarr(
 
     goodcopbadcop_cra_near_field_cdf_rows = _load_goodcopbadcop_cra_near_field_distance_cdf(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5496,6 +5445,7 @@ def export_one_zarr(
 
     goodcopbadcop_egocentric_summary_rows = _load_goodcopbadcop_egocentric_epoch_summary(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5509,6 +5459,7 @@ def export_one_zarr(
 
     goodcopbadcop_egocentric_histogram_rows = _load_goodcopbadcop_egocentric_distance_bearing_histogram(
         root,
+        chaser_authority=chaser_authority,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
@@ -5778,6 +5729,8 @@ def export_sources(
     export_run_id: str | None = None,
     overwrite: bool = False,
     collection_manifest_path: Path | None = None,
+    chaser_authority_manifest_path: Path | None = None,
+    chaser_authority_sha256: str | None = None,
     baseline_time_bin_s: float = 5.0,
     baseline_sample_rate_hz: float = 10.0,
     baseline_full_resolution_samples: bool = False,
@@ -5785,6 +5738,10 @@ def export_sources(
     legacy_compatibility: bool = False,
 ) -> dict[str, Any]:
     tables = _parse_tables(tables)
+    source_table_set = {_SOURCE_TABLE_BY_V2.get(table, table) for table in tables}
+    requires_chaser_authority = bool(
+        source_table_set & _SUPPORTED_CHASER_EXPORT_SOURCE_TABLES
+    )
     output_root = Path(output_root).expanduser().resolve()
     export_run_id = safe_component(
         export_run_id or "run_" + utc_now_compact(),
@@ -5793,6 +5750,29 @@ def export_sources(
     zarr_paths = [Path(path).expanduser().resolve() for path in zarr_paths]
     if not zarr_paths:
         raise ValueError("No analysis Zarr sources were provided or discovered.")
+    chaser_authority_set: LoadedChaserExportAuthoritySet | None = None
+    if chaser_authority_manifest_path is not None:
+        chaser_authority_set = load_chaser_export_authority_set(
+            chaser_authority_manifest_path,
+            expected_file_sha256=chaser_authority_sha256,
+        )
+    elif chaser_authority_sha256 is not None:
+        raise ValueError(
+            "chaser_authority_sha256 requires chaser_authority_manifest_path."
+        )
+    if requires_chaser_authority and chaser_authority_set is None:
+        raise ValueError(
+            "Supported chaser tables require an exact chaser authority manifest."
+        )
+    if chaser_authority_set is not None:
+        requested_paths = {str(path) for path in zarr_paths}
+        authority_paths = set(chaser_authority_set.sources_by_path)
+        if authority_paths != requested_paths:
+            raise ValueError(
+                "Chaser export authority source set must exactly match the requested "
+                f"Zarr set: missing={sorted(requested_paths - authority_paths)!r}, "
+                f"unexpected={sorted(authority_paths - requested_paths)!r}."
+            )
     if not math.isfinite(float(baseline_time_bin_s)) or float(baseline_time_bin_s) <= 0:
         raise ValueError("baseline_time_bin_s must be positive and finite")
     if (
@@ -5823,6 +5803,11 @@ def export_sources(
                     path,
                     tables=tables,
                     export_run_id=export_run_id,
+                    chaser_source_authority=(
+                        chaser_authority_set.sources_by_path[str(path)]
+                        if chaser_authority_set is not None
+                        else None
+                    ),
                     baseline_time_bin_s=baseline_time_bin_s,
                     baseline_sample_rate_hz=baseline_sample_rate_hz,
                     baseline_full_resolution_samples=baseline_full_resolution_samples,
@@ -5838,6 +5823,11 @@ def export_sources(
                     path,
                     tables=tables,
                     export_run_id=export_run_id,
+                    chaser_source_authority=(
+                        chaser_authority_set.sources_by_path[str(path)]
+                        if chaser_authority_set is not None
+                        else None
+                    ),
                     baseline_time_bin_s=baseline_time_bin_s,
                     baseline_sample_rate_hz=baseline_sample_rate_hz,
                     baseline_full_resolution_samples=baseline_full_resolution_samples,
@@ -5854,7 +5844,12 @@ def export_sources(
         table: [] for table in tables
     }
     diagnostics: list[dict[str, Any]] = []
+    chaser_authority_bindings: dict[str, dict[str, Any]] = {}
     for result in results:
+        if result.chaser_authority_binding is not None:
+            chaser_authority_bindings[result.zarr_path] = (
+                result.chaser_authority_binding
+            )
         diagnostics.extend(
             {"zarr_path": result.zarr_path, "recording_id": result.recording_id, **diag}
             for diag in result.diagnostics
@@ -5954,6 +5949,17 @@ def export_sources(
             "parts_by_table": part_inventory,
         },
         "diagnostics": diagnostics,
+        "chaser_export_authority": (
+            {
+                "path": str(chaser_authority_set.path),
+                "file_sha256": chaser_authority_set.file_sha256,
+                "record_sha256": chaser_authority_set.record["record_sha256"],
+                "record": dict(chaser_authority_set.record),
+                "resolved_sources": chaser_authority_bindings,
+            }
+            if chaser_authority_set is not None
+            else None
+        ),
         "collection_manifest": (
             {
                 "path": collection_summary.path,
@@ -5974,6 +5980,16 @@ def export_sources(
             "legacy_compatibility": bool(legacy_compatibility),
             "collection_manifest_path": (
                 collection_summary.path if collection_summary is not None else None
+            ),
+            "chaser_authority_manifest_path": (
+                str(chaser_authority_set.path)
+                if chaser_authority_set is not None
+                else None
+            ),
+            "chaser_authority_file_sha256": (
+                chaser_authority_set.file_sha256
+                if chaser_authority_set is not None
+                else None
             ),
             "baseline": {
                 "time_bin_s": float(baseline_time_bin_s),
@@ -6015,6 +6031,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Virtual collection manifest. Included records provide the source Zarr list, "
             "and collection_id/manifest_sha256 are written to export metadata and rows."
         ),
+    )
+    parser.add_argument(
+        "--chaser-authority-manifest",
+        type=Path,
+        help=(
+            "Exact palette.chaser_export_authority_set.v1 document. Required "
+            "when any supported chaser component/base table is requested."
+        ),
+    )
+    parser.add_argument(
+        "--chaser-authority-sha256",
+        help="Optional expected SHA-256 of --chaser-authority-manifest bytes.",
     )
     parser.add_argument(
         "--output-root",
@@ -6087,6 +6115,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         export_run_id=args.export_run_id,
         overwrite=bool(args.overwrite),
         collection_manifest_path=args.collection_manifest,
+        chaser_authority_manifest_path=args.chaser_authority_manifest,
+        chaser_authority_sha256=args.chaser_authority_sha256,
         baseline_time_bin_s=float(args.baseline_time_bin_s),
         baseline_sample_rate_hz=float(args.baseline_sample_rate_hz),
         baseline_full_resolution_samples=bool(args.baseline_full_resolution_samples),

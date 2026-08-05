@@ -286,6 +286,7 @@ class ChaserDistanceReadSnapshot:
     authority_status: str
     archive_identity: ArchiveIdentity = field(repr=False, compare=False)
     source_detection_path: str
+    source_detection_kind: str | None
     source_stimulus_run: str
     source_stimulus_path: str
     source_stimulus_epoch_run: str | None
@@ -334,6 +335,18 @@ class ChaserDistanceReadSnapshot:
     epoch_labels: tuple[str, ...]
     epoch_start_frame: np.ndarray = field(repr=False, compare=False)
     epoch_end_frame: np.ndarray = field(repr=False, compare=False)
+    epoch_distribution_bin_edges_mm: np.ndarray = field(
+        repr=False,
+        compare=False,
+    )
+    epoch_distribution_bin_centers_mm: np.ndarray = field(
+        repr=False,
+        compare=False,
+    )
+    epoch_distribution_hist_density: np.ndarray = field(
+        repr=False,
+        compare=False,
+    )
     _authority_record_payload: Mapping[str, Any] = field(
         repr=False,
         compare=False,
@@ -523,6 +536,32 @@ def load_chaser_distance_run(
             payload=published_epoch[leaf],
         )
 
+    measurement_surfaces = _payload_mapping(
+        bound.surface_manifest.record,
+        "measurement_surfaces",
+    )
+    distribution_paths = {
+        "epoch_distribution_bin_edges_mm": "epoch_distributions/bin_edges_mm",
+        "epoch_distribution_bin_centers_mm": (
+            "epoch_distributions/bin_centers_mm"
+        ),
+        "epoch_distribution_hist_density": (
+            "epoch_distributions/hist_density"
+        ),
+    }
+    for name, relative_path in distribution_paths.items():
+        surface = measurement_surfaces.get(relative_path)
+        if not isinstance(surface, Mapping):
+            _fail(
+                f"Surface manifest does not protect {relative_path!r}."
+            )
+        arrays[name] = _copy_exact_payload(
+            run_group,
+            run_path=run_path,
+            relative_path=relative_path,
+            payload=_payload_mapping(surface, "payload"),
+        )
+
     arena = _validated_arena_descriptor(bound)
     camera = bound.coordinate_surfaces[
         "positions/fish_centroid_img_xy"
@@ -629,6 +668,11 @@ def load_chaser_distance_run(
         authority_status=VERIFIED_AUTHORITY_STATUS,
         archive_identity=bound.source_context.archive_identity,
         source_detection_path=str(input_authority["source_detection_path"]),
+        source_detection_kind=(
+            str(input_authority["source_detection_kind"])
+            if input_authority.get("source_detection_kind") is not None
+            else None
+        ),
         source_stimulus_run=bound.source_context.stimulus_run,
         source_stimulus_path=bound.source_context.stimulus_path,
         source_stimulus_epoch_run=source_epoch_run,

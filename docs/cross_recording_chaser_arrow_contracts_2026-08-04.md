@@ -6,13 +6,24 @@ All 34 tables in the canonical cross-recording analytics catalog now have an
 installed, ordered, digest-bound Arrow schema. The canonical envelope contains
 zero `inferred_v2_compatibility` tables.
 
-This checkpoint changes the immutable Parquet query representation only. It
-does not activate a chaser component, select a production run, modify a
-recording Zarr, or promote a storage profile. Seventeen chaser tables remain
-unavailable because their independent scientific component authorities are not
-yet adopted by the exporter. The existing preflight continues to remove those
-tables before any legacy raw-Zarr navigation occurs. Only
-`chaser_epoch_spatial_occupancy_zones` is currently reachable.
+This checkpoint does not activate a chaser component, select a production run,
+modify a recording Zarr, or promote a storage profile. Fifteen of the seventeen
+previously dormant chaser tables are now reachable only through one explicit
+`palette.chaser_export_authority_set.v1` document. Each source entry binds a
+canonical archive path, recording identity, exact chaser-distance base run and
+publication seal, plus the component handles required by the requested tables.
+The source set must exactly equal the invocation source set; there is no
+`latest`, sorted-child, raw-child, or selector fallback.
+
+The two tables whose legacy values still lack an independently sealed semantic
+authority remain unavailable:
+
+- `chaser_epoch_distance_summary`;
+- `chaser_epoch_distance_histogram`.
+
+`chaser_epoch_spatial_occupancy_zones` remains independently sourced from its
+selected detection-occupancy authority and does not use this chaser authority
+set.
 
 ## Exact schemas
 
@@ -61,6 +72,17 @@ primary-key fields are present and non-nullable.
   independently sealed component manifests remain required, so a dormant
   legacy reader cannot become publishable merely because the Arrow layer was
   frozen.
+- `chaser_speed_distance_bins` reads only the detached sealed base snapshot,
+  including the exact persisted distance-bin edges and centers. It no longer
+  infers a substitute bin axis from observed values.
+- Epoch behavior, quadrant occupancy, near-field occupancy, and egocentric
+  bearing exports open only explicit self-digested component handles. A
+  selector-ineligible completed candidate may be inspected/exported explicitly
+  without becoming selected or production-authoritative.
+- The authority file SHA-256, authority-set digest, complete source records,
+  freshly resolved base seals, component paths, component-manifest digests, and
+  handle digests are persisted in the immutable export manifest. The CLI and
+  LSF wrapper require the authority file for these 15 tables.
 
 ## Validation
 
@@ -79,12 +101,23 @@ primary-key fields are present and non-nullable.
   unexpected fields, missing required fields, and duplicate keys.
 - The export preflight still reports every unsealed chaser table unavailable
   and never falls through to legacy raw-group navigation.
+- The authority/export checkpoint passed `182/182` focused tests outside the
+  Codex sandbox. This includes strict authority JSON and digest tampering,
+  exact invocation/source-set equality, process-pool transport, real sealed
+  base and component opens, all 15 supported table projections, immutable
+  Parquet publication, manifest-selected validation, and atomic publication
+  recovery coverage.
+- The real integration subset passed `7/7`: five epoch tables, one sealed-base
+  speed table, three quadrant tables, four near-field tables, and two
+  egocentric tables. Every generated export passed the generic immutable export
+  validator.
 - Python compilation, Ruff, and `git diff --check` passed.
 
 ## Remaining boundary
 
-This does not complete all Arrow work in Palette. Baseline-strategy v1 still
-has four inferred tables and whole-training-response v1 still has three. They
-need their own closed envelopes and exact schemas. Chaser component consumers
-also still need to migrate to manifest-bound component handles before the 17
-dormant tables may be re-enabled.
+The two unsealed distance summary/histogram semantics need either their own
+component authority or an explicit extension of a versioned sealed authority;
+they must not be reconstructed from historical raw children. Some scientific
+chaser consumers outside the cross-recording exporter also still need to
+migrate to manifest-bound handles. Production component selection and selector
+activation remain separate, quarantined decisions.

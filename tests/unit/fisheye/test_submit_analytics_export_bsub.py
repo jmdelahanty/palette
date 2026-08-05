@@ -5,10 +5,17 @@ from pathlib import Path
 import subprocess
 
 
+def _authority_manifest(tmp_path: Path) -> Path:
+    path = tmp_path / "chaser_authority.json"
+    path.write_text("{}\n", encoding="utf-8")
+    return path
+
+
 def test_submit_analytics_export_bsub_renders_fail_closed_job(tmp_path: Path) -> None:
     repo = Path(__file__).resolve().parents[3]
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
+    authority = _authority_manifest(tmp_path)
     output_root = tmp_path / "shared" / "palette_analytics"
     log_dir = tmp_path / "logs"
     run_id = "chaser_v2_test_20260712T000000Z"
@@ -19,6 +26,8 @@ def test_submit_analytics_export_bsub_renders_fail_closed_job(tmp_path: Path) ->
             str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
             "--collection-manifest",
             str(collection),
+            "--chaser-authority-manifest",
+            str(authority),
             "--export-run-id",
             run_id,
             "--output-root",
@@ -55,6 +64,7 @@ def test_submit_analytics_export_bsub_rejects_unsafe_run_id(tmp_path: Path) -> N
     repo = Path(__file__).resolve().parents[3]
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
+    authority = _authority_manifest(tmp_path)
 
     result = subprocess.run(
         [
@@ -62,6 +72,8 @@ def test_submit_analytics_export_bsub_rejects_unsafe_run_id(tmp_path: Path) -> N
             str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
             "--collection-manifest",
             str(collection),
+            "--chaser-authority-manifest",
+            str(authority),
             "--export-run-id",
             "../unsafe",
             "--palette-repo",
@@ -82,6 +94,7 @@ def test_submit_analytics_export_bsub_uses_cluster_default_queue(tmp_path: Path)
     repo = Path(__file__).resolve().parents[3]
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
+    authority = _authority_manifest(tmp_path)
 
     result = subprocess.run(
         [
@@ -89,6 +102,8 @@ def test_submit_analytics_export_bsub_uses_cluster_default_queue(tmp_path: Path)
             str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
             "--collection-manifest",
             str(collection),
+            "--chaser-authority-manifest",
+            str(authority),
             "--export-run-id",
             "chaser_v2_default_queue_test",
             "--output-root",
@@ -114,6 +129,7 @@ def test_submit_analytics_export_accepts_future_manifest_with_dependency(
 ) -> None:
     repo = Path(__file__).resolve().parents[3]
     future_collection = tmp_path / "future_collection.manifest.json"
+    future_authority = tmp_path / "future_chaser_authority.json"
     output_root = tmp_path / "shared" / "palette_analytics"
     log_dir = tmp_path / "logs"
 
@@ -123,6 +139,8 @@ def test_submit_analytics_export_accepts_future_manifest_with_dependency(
             str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
             "--collection-manifest",
             str(future_collection),
+            "--chaser-authority-manifest",
+            str(future_authority),
             "--export-run-id",
             "future_collection_export_v1",
             "--output-root",
@@ -149,12 +167,14 @@ def test_submit_analytics_export_accepts_future_manifest_with_dependency(
         / "run_analytics_export.sh"
     ).read_text(encoding="utf-8")
     assert "Collection manifest is unavailable after dependencies completed" in job
+    assert "Chaser authority manifest is unavailable after dependencies completed" in job
 
 
 def test_submit_analytics_export_bsub_sshes_only_bsub_command(tmp_path: Path) -> None:
     repo = Path(__file__).resolve().parents[3]
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
+    authority = _authority_manifest(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     ssh_args = tmp_path / "ssh_args.txt"
@@ -179,6 +199,8 @@ def test_submit_analytics_export_bsub_sshes_only_bsub_command(tmp_path: Path) ->
             str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
             "--collection-manifest",
             str(collection),
+            "--chaser-authority-manifest",
+            str(authority),
             "--export-run-id",
             run_id,
             "--output-root",

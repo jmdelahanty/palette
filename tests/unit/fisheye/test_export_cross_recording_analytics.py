@@ -10,24 +10,9 @@ import zarr
 
 from fisheye.analytics_exports.arrow_contracts import ARROW_TABLE_CONTRACTS
 from fisheye.analytics_exports.contracts import (
-    CHASER_BOUT_EVENTS_TABLE,
-    CHASER_BOUT_HISTOGRAM_TABLE,
-    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
     CHASER_DISTANCE_HISTOGRAM_TABLE,
     CHASER_DISTANCE_SUMMARY_TABLE,
-    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
-    CHASER_EGOCENTRIC_SUMMARY_TABLE,
-    CHASER_EPOCH_BEHAVIOR_TABLE,
-    CHASER_IBI_HISTOGRAM_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
-    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
-    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
-    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
     CHASER_SPATIAL_TABLE,
-    CHASER_SPEED_DISTANCE_TABLE,
 )
 from fisheye.analytics_exports.publication import manifest_selected_part_files
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
@@ -689,7 +674,7 @@ def test_exact_response_export_rejects_schema_by_observation(tmp_path: Path) -> 
         )
 
 
-def test_export_cross_recording_analytics_fails_closed_for_unsealed_chaser_tables(
+def test_export_cross_recording_analytics_keeps_unsealed_chaser_tables_unavailable(
     tmp_path: Path,
 ) -> None:
     source = _make_archive_with_detection_occupancy(tmp_path)
@@ -702,22 +687,7 @@ def test_export_cross_recording_analytics_fails_closed_for_unsealed_chaser_table
     output = tmp_path / "exports" / "palette_analytics"
     derived_tables = (
         CHASER_DISTANCE_SUMMARY_TABLE,
-        CHASER_EPOCH_BEHAVIOR_TABLE,
-        CHASER_BOUT_EVENTS_TABLE,
-        CHASER_BOUT_HISTOGRAM_TABLE,
-        CHASER_IBI_HISTOGRAM_TABLE,
-        CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
-        CHASER_SPEED_DISTANCE_TABLE,
         CHASER_DISTANCE_HISTOGRAM_TABLE,
-        CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
-        CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
-        CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
-        CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
-        CHASER_EGOCENTRIC_SUMMARY_TABLE,
-        CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
     )
 
     manifest = export_sources(
@@ -743,7 +713,8 @@ def test_export_cross_recording_analytics_fails_closed_for_unsealed_chaser_table
         for diagnostic in unavailable.values()
     )
     assert all(
-        "canonical chaser-distance preflight failed closed" in diagnostic["reason"]
+        "no independently verified sealed semantic authority"
+        in diagnostic["reason"]
         for diagnostic in unavailable.values()
     )
     assert all(
