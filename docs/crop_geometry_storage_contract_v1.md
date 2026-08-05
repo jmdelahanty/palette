@@ -323,7 +323,7 @@ Before production integration:
       selector-ineligible import path;
 - [ ] feed its added/changed rows into the raw-keypoint successor materializer;
 - [x] benchmark production-candidate publication at recording scale;
-- [ ] benchmark production-candidate reads at recording scale;
+- [x] benchmark production-candidate reads at recording scale;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.
 
@@ -337,8 +337,15 @@ in 972 files. Median per-archive publication was 18.83 seconds; physical copy
 accounted for 76.34 of 677.78 total seconds. Every receipt passed direct and
 consolidated metadata, source-authority, pixel-authority, logical-content,
 physical-inventory, and selector-invariance validation. All crop runs remain
-selector-ineligible and no registry record was changed. Recording-scale read
-validation remains open.
+selector-ineligible and no registry record was changed.
+
+Recording-scale Palette reads passed on the 126,214-row canary and the largest
+172,312-row cohort member, which crosses the 131,072-row shard boundary. Every
+logical array hash and direct/consolidated reference matched. Median full-scan
+times were 147 ms for 20.30 MB and 355 ms for 27.31 MB; 1,024-row four-column
+windows remained below 66 ms. Cache eviction was deliberately scoped to the
+selected run's 27 files at benchmark checkpoint `ffe10f98`, avoiding a walk of
+unrelated archive products.
 
 The DAG review closed on the integration branch after identifying and fixing
 the standard completion-marker gap and replacing the cache planner's legacy-

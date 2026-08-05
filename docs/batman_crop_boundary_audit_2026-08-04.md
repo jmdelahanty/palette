@@ -422,6 +422,20 @@ does not weaken the completed correctness and selector-invariance gate.
 Node-local materialization directories were removed after each successful
 import, leaving the allocated scratch root empty.
 
+Recording-scale read validation then exercised both the 126,214-row arena-2
+canary and the cohort's largest 172,312-row archive. The latter crosses the
+131,072-row outer-shard boundary. The benchmark's cold pass now advises only
+the selected run's 27 files with `POSIX_FADV_DONTNEED`, not the entire analysis
+archive; that scope fix is Palette commit `ffe10f98`. Both three-pass reads
+validated every array digest and the direct/consolidated run reference.
+
+On workstation NFS/PRFS, the arena-2 run's 20.30 MB logical full scan took
+141--173 ms with 131.7 MiB/s median throughput; its 1,024-row four-column
+windows took 31.6--65.6 ms. The largest run's 27.31 MB full scan took 334--364
+ms with 73.5 MiB/s median throughput; its windows took 33.7--55.2 ms. This
+closes the Palette-side recording-scale geometry read gate without reading or
+evicting unrelated masks, keypoints, or other archive products.
+
 Durable evidence is under:
 
 ```text
@@ -435,11 +449,12 @@ batman_crop_geometry_v2_348_20260805/
 | Plan construction result | `fea37fd7111dec0fa71908537901247458abd87e978fe35e2672aaa95e539e6d` |
 | Arena-2 canary result | `0bced3c700f60957fea64103447c48514299cf200fcf4e226421eb4be59758eb` |
 | Remaining-35 result | `5abf8a68a67632d8bec4b7c65b4e4048e5c58c5949ba954d893f4156873663d3` |
+| Arena-2 read benchmark | `97cb637ac3a961b2601010fa2c881b995cf5d0dd51ff1af6b3e22c889292bbd5` |
+| Largest-run read benchmark | `790580ef75a04dd2d2015365dd48b7b1e1a310162d5a3133e8d63b3039504782` |
 
 The durable `receipts/` directory contains one complete receipt per recording.
 Crop runs remain selector-ineligible and registry-unregistered throughout this
-checkpoint. Recording-scale read validation and any guarded crop selector are
-later, separate decisions.
+checkpoint. Any guarded crop selector is a later, separate decision.
 
 ## Dry-run commands
 
