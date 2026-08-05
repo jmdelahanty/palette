@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.shared.pose_model_schema_binding import (
@@ -306,6 +307,7 @@ def test_legacy_yolo_payload_prepares_exact_v2_without_embedded_qc_or_heading() 
         "keypoint_confidences": arrays["keypoint_confidences"].astype(np.float64),
         "confidence": arrays["pose_confidence"].astype(np.float64),
         "detection_success": arrays["pose_success"],
+        "pose_failure_codes": np.asarray([0, 0, 0, 1], dtype=np.uint8),
         "pose_bbox_xyxy_roi": arrays["pose_bbox_xyxy_roi"].astype(np.float64),
         "pose_bbox_xyxy_img": arrays["pose_bbox_xyxy_img"].astype(np.float64),
         "heading": np.zeros(dimensions.n_instances, dtype=np.float64),
@@ -331,6 +333,40 @@ def test_legacy_yolo_payload_prepares_exact_v2_without_embedded_qc_or_heading() 
         "count_aliases",
         "embedded_quality",
     ]
+    assert conversion.conversion_receipt["terminal_pose_failure_evidence"] == {
+        "present": True,
+        "array_path": "pose_failure_codes",
+        "dtype": "uint8",
+        "code_map": {
+            "0": "none",
+            "1": "no_pose_detection_above_threshold",
+            "2": "keypoint_payload_missing",
+            "3": "keypoint_payload_empty",
+            "4": "insufficient_keypoint_count",
+        },
+        "histogram": {
+            "none": 3,
+            "no_pose_detection_above_threshold": 1,
+            "keypoint_payload_missing": 0,
+            "keypoint_payload_empty": 0,
+            "insufficient_keypoint_count": 0,
+        },
+        "public_raw_v2_array": False,
+    }
+
+    tampered = dict(legacy)
+    tampered["pose_failure_codes"] = np.zeros(
+        dimensions.n_instances, dtype=np.uint8
+    )
+    with pytest.raises(ValueError, match="zero exactly"):
+        prepare_raw_keypoint_v2_from_yolo_arrays(
+            tampered,
+            dimensions=dimensions,
+            source_crop_arrays=crop,
+            source_crop_manifest=crop_manifest,
+            pose_model_schema_binding=pose_binding,
+            preprocessing=preprocessing,
+        )
 
 
 def test_keypoint_manifest_rejects_recomputed_nested_tampering(

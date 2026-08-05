@@ -81,6 +81,7 @@ def test_finalizer_publishes_four_crop_bound_candidates_without_activation(
         "pose_bbox_xyxy_roi": bbox,
         "pose_bbox_xyxy_img": bbox + np.column_stack((origins, origins)),
         "detection_success": np.ones(keys.size, dtype=bool),
+        "pose_failure_codes": np.zeros(keys.size, dtype=np.uint8),
     }
     terminal = tmp_path / "terminal.zarr"
     terminal_root = zarr.open_group(str(terminal), mode="w", zarr_format=3)

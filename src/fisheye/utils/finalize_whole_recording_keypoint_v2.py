@@ -63,6 +63,7 @@ _SOURCE_ARRAY_PATHS = (
     "pose_bbox_xyxy_roi",
     "pose_bbox_xyxy_img",
     "detection_success",
+    "pose_failure_codes",
 )
 
 

@@ -329,6 +329,8 @@ def test_create_output_arrays_includes_keypoint_confidences(tmp_path) -> None:
     assert arrays["keypoints_roi"].shape == (10, 5, 2)
     assert arrays["keypoint_confidences"].shape == (10, 5)
     assert arrays["keypoint_confidences"].dtype.name == "float64"
+    assert arrays["pose_failure_codes"].shape == (10,)
+    assert arrays["pose_failure_codes"].dtype.name == "uint8"
     assert "pose_bbox_xyxy_roi" in arrays
     assert arrays["pose_bbox_xyxy_roi"].shape == (10, 4)
     assert arrays["pose_bbox_xyxy_roi"].dtype.name == "float32"
@@ -578,6 +580,14 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
     assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
     assert run.attrs["keypoint_storage_policy"] == "default_indexed_sharding_v1"
     assert run.attrs["coordinate_contract"] == "legacy_noncanonical_explicit_v1"
+    assert np.asarray(run["pose_failure_codes"][:]).tolist() == [0, 0, 1]
+    assert run.attrs["pose_failure_code_histogram"] == {
+        "none": 2,
+        "no_pose_detection_above_threshold": 1,
+        "keypoint_payload_missing": 0,
+        "keypoint_payload_empty": 0,
+        "insufficient_keypoint_count": 0,
+    }
     assert run.attrs[IMMUTABLE_YOLO_STORAGE_ATTR]["status"] == "ok"
     actual = run["n_keypoints"][:]
     assert actual.shape == run["frame_counts"].shape == (20,)

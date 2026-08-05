@@ -90,6 +90,7 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
             "pose_bbox_xyxy_roi": np.zeros((1, 4), dtype=np.float64),
             "pose_bbox_xyxy_img": np.zeros((1, 4), dtype=np.float64),
             "detection_success": np.ones(1, dtype=bool),
+            "pose_failure_codes": np.zeros(1, dtype=np.uint8),
         }
         for name, values in arrays.items():
             run.create_array(name, data=values, chunks=values.shape)
@@ -140,6 +141,11 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
         expected_transform.to_attrs()
     )
     assert preprocessing.document["model_input_stride"] == 32
+    assert payload["pose_failure_codes"]["histogram"]["none"] == 1
+    assert (
+        payload["row_terminal_semantics"]
+        == "every_crop_row_present_with_exact_pose_failure_code_v2"
+    )
     assert not (analysis / "keypoints_runs").exists()
     terminal = zarr.open_group(str(output), mode="r", use_consolidated=True)
     assert terminal["keypoint_terminal_runs/terminal-a/instance_key"][:].tolist() == [7]

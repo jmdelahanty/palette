@@ -27,6 +27,13 @@ from fisheye.shared.model_input_transform import (
     resolve_model_input_transform,
     resolve_stride_aligned_square_input_transform,
 )
+from fisheye.shared.pose_inference_failure import (
+    POSE_INFERENCE_FAILURE_SCHEMA_ID,
+    POSE_INFERENCE_FAILURE_SCHEMA_VERSION,
+    pose_inference_failure_code_map_json,
+    pose_inference_failure_histogram,
+    validate_pose_inference_failure_codes,
+)
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -43,7 +50,7 @@ from fisheye.utils.run_keypoints_with_registry_model import (
 WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_ID = (
     "palette.keypoint.whole_recording_terminal"
 )
-WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION = 1
+WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION = 2
 TERMINAL_RECEIPT_NAME = "terminal_receipt.json"
 _SOURCE_ARRAY_PATHS = (
     "instance_key",
@@ -57,6 +64,7 @@ _SOURCE_ARRAY_PATHS = (
     "pose_bbox_xyxy_roi",
     "pose_bbox_xyxy_img",
     "detection_success",
+    "pose_failure_codes",
 )
 
 
@@ -345,6 +353,16 @@ def run_whole_recording_keypoint_terminal(
             },
         ).as_manifest()
         detection_success = np.asarray(run["detection_success"][:], dtype=bool)
+        pose_failure_codes = np.asarray(
+            run["pose_failure_codes"][:], dtype=np.uint8
+        )
+        validate_pose_inference_failure_codes(
+            pose_failure_codes,
+            pose_success=detection_success,
+        )
+        failure_code_histogram = pose_inference_failure_histogram(
+            pose_failure_codes
+        )
         payload = {
             "status": "complete",
             "created_at_utc": utc_now(),
@@ -359,6 +377,16 @@ def run_whole_recording_keypoint_terminal(
             "terminal_failure_count": int(
                 detection_success.size - np.count_nonzero(detection_success)
             ),
+            "pose_failure_codes": {
+                "schema_id": POSE_INFERENCE_FAILURE_SCHEMA_ID,
+                "schema_version": POSE_INFERENCE_FAILURE_SCHEMA_VERSION,
+                "array_path": "pose_failure_codes",
+                "dtype": "uint8",
+                "code_map": pose_inference_failure_code_map_json(),
+                "histogram": failure_code_histogram,
+                "success_alignment": "code_zero_iff_detection_success_true",
+                "public_raw_v2_array": False,
+            },
             "source_array_hashes": array_hashes,
             "cache": cache_binding,
             "model": {
@@ -371,7 +399,7 @@ def run_whole_recording_keypoint_terminal(
             },
             "preprocessing": preprocessing,
             "row_terminal_semantics": (
-                "every_crop_row_present_pose_success_true_or_false_v1"
+                "every_crop_row_present_with_exact_pose_failure_code_v2"
             ),
             "selector_eligible": False,
             "registry_registered": False,

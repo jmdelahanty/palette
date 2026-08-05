@@ -11,6 +11,11 @@ from typing import Any, Mapping
 import numpy as np
 import zarr
 
+from fisheye.shared.pose_inference_failure import (
+    pose_inference_failure_code_map_json,
+    pose_inference_failure_histogram,
+    validate_pose_inference_failure_codes,
+)
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.keypoint_manifest import (
@@ -187,6 +192,21 @@ def prepare_raw_keypoint_v2_from_yolo_arrays(
     keypoints_roi = keypoints_roi_legacy.astype(np.float32)
     confidences = values("keypoint_confidences").astype(np.float32)
     pose_success = values("detection_success").astype(bool, copy=False)
+    failure_code_evidence: dict[str, Any] = {"present": False}
+    if "pose_failure_codes" in yolo_arrays:
+        pose_failure_codes = values("pose_failure_codes")
+        validate_pose_inference_failure_codes(
+            pose_failure_codes,
+            pose_success=pose_success,
+        )
+        failure_code_evidence = {
+            "present": True,
+            "array_path": "pose_failure_codes",
+            "dtype": "uint8",
+            "code_map": pose_inference_failure_code_map_json(),
+            "histogram": pose_inference_failure_histogram(pose_failure_codes),
+            "public_raw_v2_array": False,
+        }
     keypoint_valid = (
         pose_success[:, None]
         & np.all(np.isfinite(keypoints_roi), axis=2)
@@ -282,6 +302,7 @@ def prepare_raw_keypoint_v2_from_yolo_arrays(
             "destination_layout": KEYPOINT_SCHEMA_V2.layout,
             "projection_tolerance_pixels": float(projection_tolerance_pixels),
             "numerical_comparison": projection_errors,
+            "terminal_pose_failure_evidence": failure_code_evidence,
             "derived_arrays": [
                 "frame_row_offsets",
                 "keypoint_valid",

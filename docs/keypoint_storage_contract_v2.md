@@ -112,6 +112,33 @@ records the maximum conversion/reprojection error. It deliberately drops
 legacy heading, normalized-coordinate, count-alias, and embedded-QC families.
 This is a canary boundary, not a production selector change.
 
+### Terminal inference failure evidence
+
+Production-shaped YOLO inference persists a terminal-only
+`pose_failure_codes: uint8[N]` array before strict raw-v2 preparation. Code zero
+must coincide exactly with `detection_success == true`; every failed row has
+one declared nonzero terminal outcome:
+
+| Code | Label | Meaning |
+| ---: | --- | --- |
+| 0 | `none` | A pose row was resolved |
+| 1 | `no_pose_detection_above_threshold` | Postprocessing returned no pose detection at the recorded confidence threshold |
+| 2 | `keypoint_payload_missing` | A selected pose detection lacked its keypoint payload |
+| 3 | `keypoint_payload_empty` | The keypoint payload was empty or had no detection axis |
+| 4 | `insufficient_keypoint_count` | A legacy terminal result contained fewer landmarks than the bound skeleton |
+
+Unknown codes, non-`uint8` arrays, or disagreement with the success mask fail
+terminal validation. Structural incompatibilities in canonical inference—such
+as a model/skeleton cardinality mismatch—remain job-level failures rather than
+being downgraded to a row-level code.
+
+The immutable terminal receipt binds the code map, complete histogram, and
+array digest. Strict raw-v2 preparation validates this evidence but does not
+copy `pose_failure_codes` into `keypoints_runs`: v2 is an already frozen public
+schema. Promoting these diagnostics to the public archive requires an explicit
+raw-keypoint schema revision rather than an optional array or an in-place v2
+change.
+
 ## Keypoint Quality v1
 
 `keypoint_quality_runs/<run>` is an immutable, selector-independent diagnostic

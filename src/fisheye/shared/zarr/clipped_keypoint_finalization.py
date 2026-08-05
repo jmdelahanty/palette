@@ -17,6 +17,9 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.shared.pose_inference_failure import (
+    validate_pose_inference_failure_codes,
+)
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.body_frame_producer import (
     BodyFrameSourceReference,
@@ -559,6 +562,14 @@ def clip_terminal_result_from_yolo_arrays(
         raise ClippedKeypointFinalizationError(
             "YOLO clip detection_success must have exact bool shape [M]."
         )
+    if "pose_failure_codes" in yolo_arrays:
+        try:
+            validate_pose_inference_failure_codes(
+                _values(yolo_arrays["pose_failure_codes"]),
+                pose_success=source_success,
+            )
+        except ValueError as exc:
+            raise ClippedKeypointFinalizationError(str(exc)) from exc
     inference = TerminalKeypointInferenceBatch(
         instance_key=np.array(keys, copy=True),
         keypoints_roi=_values(yolo_arrays["keypoints_roi"]).astype(np.float32),

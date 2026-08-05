@@ -73,6 +73,14 @@ from ..shared.pose_model_schema_binding import (
     load_pose_model_schema_binding,
     pose_schema_from_model_binding,
 )
+from ..shared.pose_inference_failure import (
+    POSE_INFERENCE_FAILURE_SCHEMA_ID,
+    POSE_INFERENCE_FAILURE_SCHEMA_VERSION,
+    PoseInferenceFailureCode,
+    pose_inference_failure_code_map_json,
+    pose_inference_failure_histogram,
+    validate_pose_inference_failure_codes,
+)
 from ..shared.proof_verification import (
     finish_proof_verification,
     proof_verification_operation,
@@ -896,6 +904,17 @@ def _create_output_arrays(
             chunks=scalar_chunk,
             dtype="bool",
             fill_value=False,
+            overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
+        ),
+        "pose_failure_codes": group.create_array(
+            "pose_failure_codes",
+            shape=(total_rois,),
+            chunks=scalar_chunk,
+            dtype="u1",
+            fill_value=np.uint8(
+                PoseInferenceFailureCode.NO_POSE_DETECTION_ABOVE_THRESHOLD
+            ),
             overwrite=True,
             **_shard_kwargs(scalar_chunk, shard_rows),
         ),
@@ -2380,6 +2399,13 @@ def detect_keypoints_yolo(
             batch_conf = np.full(batch_count, np.nan, dtype=np.float64)
             batch_keypoint_conf = np.full((batch_count, n_keypoints), np.nan, dtype=np.float64)
             batch_success = np.zeros(batch_count, dtype=bool)
+            batch_failure_codes = np.full(
+                batch_count,
+                np.uint8(
+                    PoseInferenceFailureCode.NO_POSE_DETECTION_ABOVE_THRESHOLD
+                ),
+                dtype=np.uint8,
+            )
             batch_pose_bbox_roi = np.full((batch_count, 4), np.nan, dtype=np.float32)
             batch_pose_bbox_img = np.full_like(batch_pose_bbox_roi, np.nan)
             batch_pose_bbox_norm = np.full_like(batch_pose_bbox_roi, np.nan)
@@ -2390,10 +2416,16 @@ def detect_keypoints_yolo(
                     if det_idx is None:
                         continue
                     keypoints = getattr(res, "keypoints", None)
-                    if keypoints is None or keypoints.xy is None:
+                    kp_xy = getattr(keypoints, "xy", None)
+                    if kp_xy is None:
+                        batch_failure_codes[i] = np.uint8(
+                            PoseInferenceFailureCode.KEYPOINT_PAYLOAD_MISSING
+                        )
                         continue
-                    kp_xy = keypoints.xy
-                    if kp_xy is None or kp_xy.ndim != 3 or kp_xy.shape[0] == 0:
+                    if kp_xy.ndim != 3 or kp_xy.shape[0] == 0:
+                        batch_failure_codes[i] = np.uint8(
+                            PoseInferenceFailureCode.KEYPOINT_PAYLOAD_EMPTY
+                        )
                         continue
 
                     kp = kp_xy[det_idx].detach().cpu().numpy()
@@ -2405,6 +2437,9 @@ def detect_keypoints_yolo(
                                 f"keypoint count {n_keypoints}."
                             )
                         if kp.shape[0] < n_keypoints:
+                            batch_failure_codes[i] = np.uint8(
+                                PoseInferenceFailureCode.INSUFFICIENT_KEYPOINT_COUNT
+                            )
                             continue
                         kp = kp[:n_keypoints]
                     if keypoint_coordinate_context is not None:
@@ -2465,6 +2500,9 @@ def detect_keypoints_yolo(
 
                     batch_conf[i] = det_conf
                     batch_success[i] = True
+                    batch_failure_codes[i] = np.uint8(
+                        PoseInferenceFailureCode.NONE
+                    )
                     success_total += 1
                     confidence_accum.append(det_conf)
 
@@ -2527,6 +2565,7 @@ def detect_keypoints_yolo(
                     "confidence": batch_conf,
                     "keypoint_confidences": batch_keypoint_conf,
                     "detection_success": batch_success,
+                    "pose_failure_codes": batch_failure_codes,
                     "pose_bbox_xyxy_roi": batch_pose_bbox_roi,
                     "pose_bbox_xyxy_img": batch_pose_bbox_img,
                     "pose_bbox_xyxy_norm": batch_pose_bbox_norm,
@@ -2580,10 +2619,21 @@ def detect_keypoints_yolo(
 
     success_rate = (success_total / total_rois * 100.0) if total_rois > 0 else 0.0
     failure_total = total_rois - success_total
+    persisted_pose_success = np.asarray(arrays["detection_success"][:], dtype=bool)
+    persisted_failure_codes = np.asarray(
+        arrays["pose_failure_codes"][:], dtype=np.uint8
+    )
+    validate_pose_inference_failure_codes(
+        persisted_failure_codes,
+        pose_success=persisted_pose_success,
+    )
+    failure_code_histogram = pose_inference_failure_histogram(
+        persisted_failure_codes
+    )
 
     success_counts = build_frame_keypoint_counts(
         frame_indices,
-        arrays["detection_success"][:],
+        persisted_pose_success,
         frame_axis_len=int(frame_counts_total.shape[0]),
         keypoint_count=n_keypoints,
     )
@@ -2719,6 +2769,15 @@ def detect_keypoints_yolo(
         "artifact_mutability": "raw_immutable",
         "keypoints_processed": total_rois,
         "success_rate": round(success_rate, 2),
+        "pose_failure_code_contract": {
+            "schema_id": POSE_INFERENCE_FAILURE_SCHEMA_ID,
+            "schema_version": POSE_INFERENCE_FAILURE_SCHEMA_VERSION,
+            "array_path": "pose_failure_codes",
+            "dtype": "uint8",
+            "code_map": pose_inference_failure_code_map_json(),
+            "success_alignment": "code_zero_iff_detection_success_true",
+        },
+        "pose_failure_code_histogram": failure_code_histogram,
         "keypoint_storage_layout": (
             "indexed_sharding_v1" if keypoint_roi_shard_rows is not None else "regular_chunks_v1"
         ),
@@ -2794,6 +2853,7 @@ def detect_keypoints_yolo(
             "failed_detections": int(failure_total),
             "success_rate_percent": round(success_rate, 2),
             "mean_confidence": float(np.mean(confidence_accum)) if confidence_accum else 0.0,
+            "pose_failure_code_histogram": failure_code_histogram,
         },
         "git_commit": git_info.get("commit_hash", "unknown"),
         "git_branch": git_info.get("branch", "unknown"),
@@ -3003,6 +3063,7 @@ def detect_keypoints_yolo(
         "successful_detections": int(success_total),
         "failed_detections": int(failure_total),
         "success_rate_percent": round(float(success_rate), 2),
+        "pose_failure_code_histogram": failure_code_histogram,
         "pose_schema": pose_schema_obj.name,
         "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
         "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
