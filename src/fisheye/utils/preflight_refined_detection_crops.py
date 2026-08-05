@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -34,6 +34,8 @@ from fisheye.shared.zarr.refined_detection_crop_source import (
 
 PREFLIGHT_SCHEMA_ID = "palette.refined_detection.crop_v2_preflight"
 PREFLIGHT_SCHEMA_VERSION = 1
+COHORT_PREFLIGHT_SCHEMA_ID = "palette.refined_detection.crop_v2_cohort_preflight"
+COHORT_PREFLIGHT_SCHEMA_VERSION = 1
 
 
 def inspect_refined_detection_crop_preflight(
@@ -138,10 +140,104 @@ def inspect_refined_detection_crop_preflight(
     )
 
 
+def inspect_refined_detection_crop_cohort(
+    plan: Mapping[str, Any],
+    *,
+    policy: CropGeometryPolicy,
+) -> dict[str, object]:
+    """Run the exact no-write crop-v2 preflight for one frozen refined plan."""
+
+    from fisheye.utils.publish_accept_all_refined_detection_batch import (
+        validate_plan,
+    )
+
+    errors = validate_plan(plan)
+    if errors:
+        raise ValueError("Refusing invalid refined cohort plan: " + "; ".join(errors))
+    reports: list[dict[str, object]] = []
+    for candidate in plan["candidates"]:
+        inspection = candidate["inspection"]
+        report = inspect_refined_detection_crop_preflight(
+            analysis_zarr=Path(str(candidate["analysis_zarr"])),
+            refined_run_id=str(plan["refined_run_id"]),
+            policy=policy,
+            max_examples=0,
+        )
+        reports.append(
+            {
+                "analysis_zarr": report["analysis_zarr"],
+                "recording_identity": inspection["recording_identity"],
+                "refined_run_id": report["refined_run_id"],
+                "refined_manifest_digest": report["refined_manifest_digest"],
+                "refined_logical_content_digest": report[
+                    "refined_logical_content_digest"
+                ],
+                "dimensions": report["dimensions"],
+                "pixel_authority_digest": report["pixel_authority"][
+                    "binding_document_digest"
+                ],
+                "padding": {
+                    key: value
+                    for key, value in report["padding"].items()
+                    if key != "examples"
+                },
+                "array_content_sha256": report["array_content_sha256"],
+            }
+        )
+    max_padding = [0, 0, 0, 0]
+    for report in reports:
+        observed = report["padding"]["max_padding_ltrb"]
+        max_padding = [
+            max(int(current), int(candidate))
+            for current, candidate in zip(max_padding, observed, strict=True)
+        ]
+    return json_attr_safe(
+        {
+            "schema_id": COHORT_PREFLIGHT_SCHEMA_ID,
+            "schema_version": COHORT_PREFLIGHT_SCHEMA_VERSION,
+            "status": "ready",
+            "plan_digest": plan["plan_digest"],
+            "canonical_successor_plan_digest": plan[
+                "canonical_successor_plan_digest"
+            ],
+            "refined_run_id": plan["refined_run_id"],
+            "policy": policy.as_manifest(),
+            "archive_count": len(reports),
+            "total_instance_count": sum(
+                int(report["dimensions"]["n_instances"]) for report in reports
+            ),
+            "total_padded_row_count": sum(
+                int(report["padding"]["padded_row_count"]) for report in reports
+            ),
+            "affected_archive_count": sum(
+                int(report["padding"]["padded_row_count"]) > 0 for report in reports
+            ),
+            "max_padding_ltrb": max_padding,
+            "archives": reports,
+            "crop_zarr_writes": False,
+            "selector_activation": "none",
+            "registry_updated": False,
+        }
+    )
+
+
+def _strict_json_load(path: Path) -> dict[str, Any]:
+    def reject_nonfinite(token: str) -> None:
+        raise ValueError(f"Non-finite JSON token is forbidden: {token}")
+
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle, parse_constant=reject_nonfinite)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object in {path}.")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--analysis-zarr", type=Path, required=True)
-    parser.add_argument("--refined-run", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--analysis-zarr", type=Path)
+    source.add_argument("--plan-json", type=Path)
+    parser.add_argument("--refined-run")
     parser.add_argument("--camera-id")
     parser.add_argument("--purpose", default=DEFAULT_ZEBRAFISH_CROP_PURPOSE)
     parser.add_argument("--roi-width", type=int, default=DEFAULT_ZEBRAFISH_CROP_SIZE_PX)
@@ -160,19 +256,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         padding_mode=CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME,
     )
     try:
-        result = inspect_refined_detection_crop_preflight(
-            analysis_zarr=args.analysis_zarr,
-            refined_run_id=args.refined_run,
-            policy=policy,
-            expected_camera_identity=args.camera_id,
-            max_examples=args.max_examples,
-        )
+        if args.plan_json is not None:
+            if args.camera_id is not None:
+                raise ValueError("Cohort preflight resolves each persisted camera id.")
+            plan = _strict_json_load(args.plan_json.expanduser().resolve())
+            result = inspect_refined_detection_crop_cohort(plan, policy=policy)
+        else:
+            if not args.refined_run:
+                raise ValueError("Single-archive preflight requires --refined-run.")
+            result = inspect_refined_detection_crop_preflight(
+                analysis_zarr=args.analysis_zarr,
+                refined_run_id=args.refined_run,
+                policy=policy,
+                expected_camera_identity=args.camera_id,
+                max_examples=args.max_examples,
+            )
     except Exception as exc:
         result = {
             "schema_id": PREFLIGHT_SCHEMA_ID,
             "schema_version": PREFLIGHT_SCHEMA_VERSION,
             "status": "failed",
-            "analysis_zarr": str(args.analysis_zarr),
+            "analysis_zarr": (
+                None if args.analysis_zarr is None else str(args.analysis_zarr)
+            ),
+            "plan_json": None if args.plan_json is None else str(args.plan_json),
             "refined_run_id": args.refined_run,
             "error": f"{type(exc).__name__}: {exc}",
             "crop_zarr_writes": False,

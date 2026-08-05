@@ -2,10 +2,10 @@
 
 Date: 2026-08-04
 
-Status: crop-policy and canonical-v3 successor implementations validated;
-all 36 selector-ineligible successors and the complete crop-v2 preflight have
-passed. No LSF jobs, crop writes, registry changes, or selector changes were
-performed.
+Status: crop-policy, canonical-v3, and all-accepted refined-v2 successor
+implementations validated; all 36 selector-ineligible raw/refined successors
+and the complete crop-v2 preflight have passed. No LSF jobs, crop writes,
+registry changes, or selector changes were performed.
 
 ## Decision
 
@@ -217,9 +217,88 @@ and records zero crop writes, selector updates, and registry updates.
 
 Detection authority activation remains a later, separate reviewed operation.
 The future-facing crop publisher also requires a refined-detection identity
-snapshot; the next implementation checkpoint is the raw-canonical to
-all-accepted refined-v1 transition, not a fallback to the legacy materialized
-crop writer.
+snapshot; that raw-canonical to all-accepted refined transition is recorded in
+the next checkpoint. There is no fallback to the legacy materialized crop
+writer.
+
+## All-accepted refined-v2 checkpoint (2026-08-05)
+
+Palette now has a dedicated canonical-v3 to refined-v2 root transition. It is
+deliberately an identity-preserving initialization, not a claim that a human or
+quality model scientifically reviewed every detection. For every canonical
+row it:
+
+- preserves `instance_key`, frame identity, source-acquisition frame,
+  normalized/pixel geometry, score, and class exactly;
+- allocates root `refined_row_ids` as contiguous `int64 [0, N)`;
+- records `source_detect_row_index` as the canonical row position;
+- records the source decision as accepted and the source kind as raw detect;
+- writes independent exact F+1 offsets for presented and source-audit rows;
+- writes refined coordinate-manifest v2 and
+  `detection_published_access_aware_v1` storage; and
+- remains immutable, selector-ineligible, and registry-ineligible.
+
+The production placement boundary accepts only a complete selector-ineligible
+canonical-v3 source using the current published profile. It materializes all
+28 refined arrays on bounded node-local scratch, validates identity and source
+audit joins, atomically imports the child, reconsolidates once after final
+metadata, validates direct/consolidated declarations, and finally binds the
+published artifact through the strict refined crop-source adapter. Any failure
+stops the cohort and tombstones the imported child fail-closed.
+
+The refined cohort is derived from—not rediscovered independently of—the exact
+36-recording canonical successor plan. The inherited canonical plan digest is
+`4be7bbfdd5fa5676197818800eb0256b07cc43c94bb174dc4799fa81549ae296`.
+The refined plan digest is:
+
+```text
+64808a5a057686f42232ff166fe61874b95dddf1a76a6d2a3acc0259dd06edc4
+```
+
+The arena-2 canary passed first, including the strict 348-pixel crop-v2
+preflight. The other 35 archives then passed the unchanged frozen plan. Across
+all 36 durable receipts:
+
+- all 4,987,449 canonical rows are represented exactly once;
+- every source/refined `instance_key` SHA-256 pair matches;
+- every source/refined frame-offset SHA-256 pair matches;
+- every manifest uses refined coordinate-manifest version 2;
+- every profile is `detection_published_access_aware_v1`;
+- every direct/consolidated metadata comparison and crop-source binding passes;
+- every selector snapshot is unchanged;
+- every child remains selector-ineligible and no registry row was updated; and
+- per-archive publication time ranged from 11.08 to 18.75 seconds, with an
+  11.89-second median and 439.72 seconds total.
+
+The no-write refined crop-v2 cohort preflight then reopened all 36 live source
+video authorities and prepared and hashed all 13 crop-v2 arrays per archive.
+It reproduced the independent canonical census exactly: 84,133 padded rows
+among 4,987,449 observations, 30 affected archives, and maximum
+`[left, top, right, bottom]` padding `[103, 73, 121, 104]`. This proves the
+refined identity boundary and the 348-pixel explicit zero-padding geometry are
+compatible before any crop run or pixel cache is published.
+
+Durable evidence is under:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.processing_logs/
+batman_accept_all_refined_v2_20260805/
+```
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Frozen refined plan | `20d9a3b63836eea7496e5dbfe6e4a40ff1d371a9ef139e9fe04a1d7f257456f0` |
+| Plan result | `0c1e1ce276c69a13f39d9077ef4862b40ba3512561eb1ae5b4d86622f0c96a05` |
+| Canary batch result | `d9fe32341c83deb0fd4846c9216b27f31485df680b7b53ee78380d9c89e00d94` |
+| Remaining-35 batch result | `68906f3133b718b49ae7e09ec62faa748be3d0b04d5bebeff59eca87087a27ed` |
+| Canary crop-v2 preflight | `144b748646d2c3f3484fabe31372bdb79d5c77004213a482d88ede6372c43348` |
+| Cohort crop-v2 preflight | `54a6b1d99d0ad8fbd330bc66117b18c4e436d3381ac536304908cd66879f477c` |
+
+The publication implementation checkpoint is Palette commit `1a520795`; the
+repeatable single-archive crop preflight checkpoint is `6d42c171`. Thirteen
+focused tests now cover raw/refined atomic publication, root identity,
+selector invariance, frozen-plan drift, exact padding calculation, and cohort
+aggregation.
 
 ## Dry-run commands
 
@@ -275,6 +354,25 @@ scripts/py -m fisheye.utils.preflight_canonical_detection_crops \
   --padding-mode zero_outside_source_frame \
   --allow-selector-ineligible-candidate \
   --result-json /tmp/batman_arena2_canonical_v3_crop_preflight_20260805.json
+```
+
+Freeze the all-accepted refined-v2 cohort from the exact canonical plan without
+Zarr writes:
+
+```bash
+scripts/py -m fisheye.utils.publish_accept_all_refined_detection_batch \
+  --canonical-successor-plan /tmp/batman_canonical_v3_successor_plan_20260805.json \
+  --refined-run refined_accept_all_v2_crop_20260805 \
+  --plan-json /tmp/batman_accept_all_refined_v2_plan_20260805.json \
+  --result-json /tmp/batman_accept_all_refined_v2_plan_result_20260805.json
+```
+
+Run the full no-write refined crop-v2 cohort preflight:
+
+```bash
+scripts/py -m fisheye.utils.preflight_refined_detection_crops \
+  --plan-json /tmp/batman_accept_all_refined_v2_plan_20260805.json \
+  --result-json /tmp/batman_accept_all_refined_v2_crop_cohort_preflight_20260805.json
 ```
 
 ## Open scientific and lineage questions
