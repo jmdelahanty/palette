@@ -60,6 +60,69 @@ def _contract():
     )
 
 
+def _fresh_process_publish_program() -> str:
+    return textwrap.dedent(
+        """
+        import os
+        import sys
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from fisheye.analysis.chaser_component_publication import ChaserComponentContract
+        from fisheye.analysis_workflows.materializers import chaser_component as mod
+
+        snapshot = SimpleNamespace(
+            run_path="analysis/chaser_distance_runs/canonical",
+            publication_seal_ref=(
+                "/analysis/chaser_distance_runs/canonical@chaser_distance_publication_seal"
+            ),
+            publication_seal_sha256="a" * 64,
+            surface_manifest_ref=(
+                "/analysis/chaser_distance_runs/canonical@chaser_distance_surface_manifest"
+            ),
+            surface_manifest_sha256="b" * 64,
+            row_identity_ref=(
+                "/analysis/chaser_distance_runs/canonical@row_identity_contract"
+            ),
+            row_identity_sha256="c" * 64,
+            authority_record=lambda: {
+                "schema_id": "palette.chaser_distance_read_authority",
+                "schema_version": 1,
+                "run_ref": "/analysis/chaser_distance_runs/canonical",
+            },
+        )
+        mod.load_chaser_distance_run = lambda *_a, **_k: snapshot
+        contract = ChaserComponentContract(
+            component_family="chaser_escape_events",
+            component_name="escape_v2",
+            semantic_schema_id="palette.chaser_escape_events",
+            semantic_schema_version=2,
+            method_id="palette.chaser_escape_event_detector",
+            method_version="2.1.0",
+            parameters={"threshold_mm": 4.0},
+            source_authorities={"bout_manifest_sha256": "d" * 64},
+        )
+        mode = sys.argv[3]
+        if mode == "selector_crash":
+            def crash_before_selector(*_args, **_kwargs):
+                os._exit(74)
+            mod.persist_chaser_component_selector = crash_before_selector
+        mod.publish_sealed_chaser_component(
+            mod.ChaserComponentPublishRequest(
+                source_zarr=Path(sys.argv[1]),
+                local_component_path=Path(sys.argv[2]),
+                base_run_name="canonical",
+                base_run_path="analysis/chaser_distance_runs/canonical",
+                relative_path="chaser_escape_events/escape_v2",
+                contract=contract,
+                activate_selector=mode == "selector_crash",
+            )
+        )
+        os._exit(73)
+        """
+    )
+
+
 def _fixture(tmp_path: Path):
     source = tmp_path / "analysis.zarr"
     root = zarr.open_group(str(source), mode="w", zarr_format=3, use_consolidated=False)
@@ -128,11 +191,18 @@ def test_atomic_component_publication_commits_selector_last(
     assert receipt["physical_copy"]["verification"] == "sha256_all_physical_files"
     assert receipt["physical_copy"]["content_sha256"]
     assert local.is_dir()
+    assert parent.attrs[mod.CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR] == 1
+    lease = parent.attrs[mod.CHASER_COMPONENT_ACTIVATION_LEASE_ATTR]
+    assert lease["component_manifest_sha256"] == receipt[
+        "component_manifest_sha256"
+    ]
 
-    with pytest.raises(FileExistsError, match="Refusing to replace"):
-        mod.publish_sealed_chaser_component(
-            replace(request, activate_selector=True)
-        )
+    recovered = mod.publish_sealed_chaser_component(
+        replace(request, activate_selector=True)
+    )
+    assert recovered["selector_activation_recovered"] is True
+    assert recovered["recovery"]["activation_completed_by_recovery"] is False
+    assert recovered["recovery"]["activation_generation"] == 1
 
 
 def test_activation_failure_restores_selector_and_retains_failed_child(
@@ -170,6 +240,8 @@ def test_activation_failure_restores_selector_and_retains_failed_child(
     failed = parent["escape_v2"]
     assert parent.attrs[COMPONENT_SELECTOR_ATTR] == previous_selector
     assert parent.attrs[COMPONENT_SELECTOR_DIGEST_ATTR] == "e" * 64
+    assert mod.CHASER_COMPONENT_ACTIVATION_LEASE_ATTR not in parent.attrs
+    assert mod.CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR not in parent.attrs
     assert failed.attrs["stage_selector_eligible"] is False
     assert failed.attrs["palette_run_completion_status"] == "failed"
     assert failed.attrs["atomic_publication_tombstone"]["public_path_retained"] is True
@@ -285,63 +357,15 @@ def test_fresh_process_acknowledgement_loss_recovers_completed_candidate(
     tmp_path: Path,
 ) -> None:
     source, local, request = _fixture(tmp_path)
-    child = textwrap.dedent(
-        """
-        import os
-        import sys
-        from pathlib import Path
-        from types import SimpleNamespace
-
-        from fisheye.analysis.chaser_component_publication import ChaserComponentContract
-        from fisheye.analysis_workflows.materializers import chaser_component as mod
-
-        snapshot = SimpleNamespace(
-            run_path="analysis/chaser_distance_runs/canonical",
-            publication_seal_ref=(
-                "/analysis/chaser_distance_runs/canonical@chaser_distance_publication_seal"
-            ),
-            publication_seal_sha256="a" * 64,
-            surface_manifest_ref=(
-                "/analysis/chaser_distance_runs/canonical@chaser_distance_surface_manifest"
-            ),
-            surface_manifest_sha256="b" * 64,
-            row_identity_ref=(
-                "/analysis/chaser_distance_runs/canonical@row_identity_contract"
-            ),
-            row_identity_sha256="c" * 64,
-            authority_record=lambda: {
-                "schema_id": "palette.chaser_distance_read_authority",
-                "schema_version": 1,
-                "run_ref": "/analysis/chaser_distance_runs/canonical",
-            },
-        )
-        mod.load_chaser_distance_run = lambda *_a, **_k: snapshot
-        contract = ChaserComponentContract(
-            component_family="chaser_escape_events",
-            component_name="escape_v2",
-            semantic_schema_id="palette.chaser_escape_events",
-            semantic_schema_version=2,
-            method_id="palette.chaser_escape_event_detector",
-            method_version="2.1.0",
-            parameters={"threshold_mm": 4.0},
-            source_authorities={"bout_manifest_sha256": "d" * 64},
-        )
-        mod.publish_sealed_chaser_component(
-            mod.ChaserComponentPublishRequest(
-                source_zarr=Path(sys.argv[1]),
-                local_component_path=Path(sys.argv[2]),
-                base_run_name="canonical",
-                base_run_path="analysis/chaser_distance_runs/canonical",
-                relative_path="chaser_escape_events/escape_v2",
-                contract=contract,
-            )
-        )
-        os._exit(73)
-        """
-    )
-
     completed = subprocess.run(
-        [sys.executable, "-c", child, str(source), str(local)],
+        [
+            sys.executable,
+            "-c",
+            _fresh_process_publish_program(),
+            str(source),
+            str(local),
+            "ack_loss",
+        ],
         check=False,
     )
     assert completed.returncode == 73
@@ -350,6 +374,100 @@ def test_fresh_process_acknowledgement_loss_recovers_completed_candidate(
     recovered = mod.publish_sealed_chaser_component(request)
     assert recovered["recovered_existing"] is True
     assert recovered["final_validation"]["valid"] is True
+
+
+def test_fresh_process_selector_crash_finishes_only_generation_leased_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, local, request = _fixture(tmp_path)
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _fresh_process_publish_program(),
+            str(source),
+            str(local),
+            "selector_crash",
+        ],
+        check=False,
+    )
+    assert interrupted.returncode == 74
+
+    root = zarr.open_group(
+        str(source), mode="r", zarr_format=3, use_consolidated=False
+    )
+    parent = root["analysis/chaser_distance_runs/canonical/chaser_escape_events"]
+    component = parent["escape_v2"]
+    assert component.attrs["palette_run_completion_status"] == "complete"
+    assert component.attrs["stage_selector_eligible"] is False
+    assert parent.attrs[mod.CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR] == 1
+    assert mod.CHASER_COMPONENT_ACTIVATION_LEASE_ATTR in parent.attrs
+    assert COMPONENT_SELECTOR_ATTR not in parent.attrs
+
+    monkeypatch.setattr(mod, "load_chaser_distance_run", lambda *_a, **_k: _snapshot())
+    recovered = mod.publish_sealed_chaser_component(
+        replace(request, activate_selector=True)
+    )
+
+    assert recovered["selector_activation_recovered"] is True
+    assert recovered["recovery"]["activation_completed_by_recovery"] is True
+    assert recovered["recovery"]["activation_generation"] == 1
+    check = zarr.open_group(
+        str(source), mode="r", zarr_format=3, use_consolidated=False
+    )
+    parent = check[
+        "analysis/chaser_distance_runs/canonical/chaser_escape_events"
+    ]
+    component = parent["escape_v2"]
+    assert component.attrs["stage_selector_eligible"] is True
+    validate_chaser_component_selector(
+        parent,
+        component=component,
+        snapshot=_snapshot(),
+        expected_family="chaser_escape_events",
+    )
+
+
+def test_selector_recovery_rejects_changed_generation_without_parent_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, local, request = _fixture(tmp_path)
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _fresh_process_publish_program(),
+            str(source),
+            str(local),
+            "selector_crash",
+        ],
+        check=False,
+    )
+    assert interrupted.returncode == 74
+
+    root = zarr.open_group(
+        str(source), mode="a", zarr_format=3, use_consolidated=False
+    )
+    parent = root["analysis/chaser_distance_runs/canonical/chaser_escape_events"]
+    parent.attrs[mod.CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR] = 2
+
+    monkeypatch.setattr(mod, "load_chaser_distance_run", lambda *_a, **_k: _snapshot())
+    with pytest.raises(FileExistsError, match="another component or generation"):
+        mod.publish_sealed_chaser_component(
+            replace(request, activate_selector=True)
+        )
+
+    check = zarr.open_group(
+        str(source), mode="r", zarr_format=3, use_consolidated=False
+    )
+    parent = check[
+        "analysis/chaser_distance_runs/canonical/chaser_escape_events"
+    ]
+    assert parent["escape_v2"].attrs["stage_selector_eligible"] is False
+    assert COMPONENT_SELECTOR_ATTR not in parent.attrs
+    assert parent.attrs[mod.CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR] == 2
 
 
 def test_unsealed_local_component_fails_before_destination_mutation(

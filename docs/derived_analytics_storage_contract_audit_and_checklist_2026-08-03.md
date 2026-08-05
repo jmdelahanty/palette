@@ -774,7 +774,10 @@ a v3 storage-candidate regression.
       one complete untombstoned scientifically equivalent candidate, and
       rejects changed payloads or failed children. Coverage includes a fresh
       process exiting after commit, regenerated operational timestamps,
-      pre-rename retry, and post-selector failure rollback; every maintained
+      pre-rename retry, and post-selector failure rollback. Explicit activation
+      now also carries a self-digested owner/generation lease: a fresh-process
+      crash before selector publication can finish only that exact generation,
+      while a changed generation fails without mutation. Every maintained
       component writer routes through this same boundary.
 
 The v1 logical envelope, validation boundary, and remaining adoption checklist

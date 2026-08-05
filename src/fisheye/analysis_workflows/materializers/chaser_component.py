@@ -9,7 +9,6 @@ default publication remains selector-ineligible.
 
 from __future__ import annotations
 
-import copy
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +30,7 @@ from fisheye.analysis.chaser_component_publication import (
     component_record_sha256,
     persist_chaser_component_selector,
     validate_chaser_component_manifest,
+    validate_chaser_component_selector,
 )
 from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
 from fisheye.shared.json_safety import json_attr_safe
@@ -53,6 +53,29 @@ CHASER_COMPONENT_RECOVERY_SCHEMA_ID = (
     "palette.chaser_component_publication_recovery"
 )
 CHASER_COMPONENT_RECOVERY_SCHEMA_VERSION = 1
+CHASER_COMPONENT_ACTIVATION_LEASE_ATTR = (
+    "chaser_component_publication_activation_lease"
+)
+CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR = (
+    "chaser_component_publication_activation_generation"
+)
+CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_ID = (
+    "palette.chaser_component_publication_activation_lease"
+)
+CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_VERSION = 1
+
+_ACTIVATION_LEASE_FIELDS = frozenset(
+    {
+        "schema_id",
+        "schema_version",
+        "owner_uuid",
+        "next_generation",
+        "component_path",
+        "component_manifest_sha256",
+        "selector_sha256",
+        "record_sha256",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -70,11 +93,95 @@ class ChaserComponentPublishRequest:
     activate_selector: bool = False
 
 
-def _restore_attr(attrs: Any, name: str, *, present: bool, value: Any) -> None:
-    if present:
-        attrs[name] = copy.deepcopy(value)
-    elif name in attrs:
-        del attrs[name]
+def _canonical_uuid(value: Any, *, label: str) -> str:
+    try:
+        canonical = str(uuid.UUID(str(value)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(f"{label} must be one canonical UUID.") from exc
+    if value != canonical:
+        raise ValueError(f"{label} must be one canonical UUID.")
+    return canonical
+
+
+def _activation_generation(parent: zarr.Group) -> int:
+    value = parent.attrs.get(CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(
+            "Chaser component activation generation must be one nonnegative integer."
+        )
+    return int(value)
+
+
+def _lower_sha256(value: Any, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be one lowercase SHA-256 digest.")
+    return value
+
+
+def _build_activation_lease(
+    *,
+    owner_uuid: str,
+    next_generation: int,
+    component_path: str,
+    component_manifest_sha256: str,
+    selector_sha256: str,
+) -> dict[str, Any]:
+    body = {
+        "schema_id": CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_ID,
+        "schema_version": CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_VERSION,
+        "owner_uuid": _canonical_uuid(
+            owner_uuid,
+            label="activation lease owner",
+        ),
+        "next_generation": int(next_generation),
+        "component_path": component_path,
+        "component_manifest_sha256": _lower_sha256(
+            component_manifest_sha256,
+            label="activation component manifest digest",
+        ),
+        "selector_sha256": _lower_sha256(
+            selector_sha256,
+            label="activation selector digest",
+        ),
+    }
+    if body["next_generation"] <= 0:
+        raise ValueError("Activation lease generation must be positive.")
+    return {
+        **body,
+        "record_sha256": component_record_sha256(body),
+    }
+
+
+def _validate_activation_lease(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _ACTIVATION_LEASE_FIELDS:
+        raise RuntimeError("Chaser component activation lease has unexpected fields.")
+    body = {key: value[key] for key in _ACTIVATION_LEASE_FIELDS - {"record_sha256"}}
+    if (
+        body["schema_id"] != CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_ID
+        or body["schema_version"]
+        != CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_VERSION
+        or isinstance(body["next_generation"], bool)
+        or not isinstance(body["next_generation"], int)
+        or body["next_generation"] <= 0
+        or not isinstance(body["component_path"], str)
+        or not isinstance(body["component_manifest_sha256"], str)
+        or not isinstance(body["selector_sha256"], str)
+    ):
+        raise RuntimeError("Chaser component activation lease is malformed.")
+    _canonical_uuid(body["owner_uuid"], label="activation lease owner")
+    _lower_sha256(
+        body["component_manifest_sha256"],
+        label="activation component manifest digest",
+    )
+    _lower_sha256(body["selector_sha256"], label="activation selector digest")
+    _lower_sha256(value["record_sha256"], label="activation lease record digest")
+    if component_record_sha256(body) != value["record_sha256"]:
+        raise RuntimeError("Chaser component activation lease digest changed.")
+    return dict(value)
 
 
 def _normalized_request(
@@ -207,6 +314,160 @@ def _recover_completed_ineligible_component(
         return json_attr_safe(receipt)
 
 
+def _recover_or_complete_selector_activation(
+    request: ChaserComponentPublishRequest,
+    *,
+    source_zarr: Path,
+    base_path: str,
+    family: str,
+    component_name: str,
+    local_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Recover only the exact activation epoch durably leased by this child."""
+
+    target_group_path = f"{base_path}/{family}/{component_name}"
+    with archive_metadata_publication_lock(source_zarr):
+        root = open_zarr_root(source_zarr, mode="a")
+        snapshot = load_chaser_distance_run(root, run_name=request.base_run_name)
+        if snapshot.run_path != base_path:
+            raise RuntimeError(
+                "Verified chaser-distance base changed before activation recovery."
+            )
+        try:
+            parent = root[f"{base_path}/{family}"]
+            component = parent[component_name]
+        except Exception as exc:
+            raise FileExistsError(
+                "Existing chaser component disappeared before activation recovery."
+            ) from exc
+        if not isinstance(parent, zarr.Group) or not isinstance(component, zarr.Group):
+            raise FileExistsError(
+                "Existing chaser activation recovery paths are not groups."
+            )
+        owner_uuid = _canonical_uuid(
+            component.attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR),
+            label="existing component owner",
+        )
+        if (
+            component.attrs.get("palette_run_completion_status") != "complete"
+            or ATOMIC_PUBLICATION_TOMBSTONE_ATTR in component.attrs
+            or type(component.attrs.get("stage_selector_eligible")) is not bool
+        ):
+            raise FileExistsError(
+                "Existing chaser component is not one complete, untombstoned "
+                "activation candidate."
+            )
+        try:
+            manifest = validate_chaser_component_manifest(
+                component,
+                snapshot=snapshot,
+                expected_relative_path=request.relative_path,
+                expected_contract=request.contract,
+            )
+        except ChaserComponentPublicationError as exc:
+            raise FileExistsError(
+                "Existing chaser activation candidate fails its requested contract."
+            ) from exc
+        if chaser_component_retry_equivalence_sha256(
+            manifest
+        ) != chaser_component_retry_equivalence_sha256(local_manifest):
+            raise FileExistsError(
+                "Existing chaser activation candidate differs scientifically "
+                "from the local retry."
+            )
+
+        manifest_sha256 = component_record_sha256(manifest)
+        expected_selector = build_chaser_component_selector(
+            snapshot=snapshot,
+            relative_path=request.relative_path,
+            component_manifest_sha256=manifest_sha256,
+        )
+        expected_selector_sha256 = component_record_sha256(expected_selector)
+        lease = _validate_activation_lease(
+            parent.attrs.get(CHASER_COMPONENT_ACTIVATION_LEASE_ATTR)
+        )
+        generation = _activation_generation(parent)
+        expected_lease_fields = {
+            "owner_uuid": owner_uuid,
+            "next_generation": generation,
+            "component_path": request.relative_path,
+            "component_manifest_sha256": manifest_sha256,
+            "selector_sha256": expected_selector_sha256,
+        }
+        if any(lease.get(key) != value for key, value in expected_lease_fields.items()):
+            raise FileExistsError(
+                "Existing chaser activation lease belongs to another component "
+                "or generation."
+            )
+
+        eligibility = component.attrs["stage_selector_eligible"]
+        completed_by_recovery = False
+        if eligibility is False:
+            selector, selector_sha256 = persist_chaser_component_selector(
+                parent,
+                component=component,
+                snapshot=snapshot,
+                relative_path=request.relative_path,
+            )
+            if (
+                selector != expected_selector
+                or selector_sha256 != expected_selector_sha256
+            ):
+                raise RuntimeError(
+                    "Recovered selector differs from its durable activation lease."
+                )
+            # Literal activation commit. Any later acknowledgement failure is
+            # recoverable from the same generation-bound lease.
+            component.attrs["stage_selector_eligible"] = True
+            completed_by_recovery = True
+        else:
+            validate_chaser_component_selector(
+                parent,
+                component=component,
+                snapshot=snapshot,
+                expected_family=family,
+            )
+            if (
+                parent.attrs.get(COMPONENT_SELECTOR_ATTR) != expected_selector
+                or parent.attrs.get(COMPONENT_SELECTOR_DIGEST_ATTR)
+                != expected_selector_sha256
+            ):
+                raise FileExistsError(
+                    "Eligible chaser component is not selected by its exact lease."
+                )
+
+        validation = {
+            "valid": True,
+            "component_manifest_sha256": manifest_sha256,
+            "array_count": len(manifest["payload"]["arrays"]),
+            "group_count": len(manifest["payload"]["groups"]),
+        }
+        return json_attr_safe(
+            {
+                "schema_id": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_ID,
+                "schema_version": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION,
+                "base_run_path": base_path,
+                "component_family": family,
+                "component_name": component_name,
+                "component_manifest_sha256": manifest_sha256,
+                "selector_activation_requested": True,
+                "selector_activation_recovered": True,
+                "publication_owner_uuid": owner_uuid,
+                "recovered_existing": True,
+                "recovery": {
+                    "schema_id": CHASER_COMPONENT_RECOVERY_SCHEMA_ID,
+                    "schema_version": CHASER_COMPONENT_RECOVERY_SCHEMA_VERSION,
+                    "policy": "generation_leased_selector_activation_v1",
+                    "target_group_path": target_group_path,
+                    "activation_generation": generation,
+                    "activation_completed_by_recovery": completed_by_recovery,
+                    "activation_lease_sha256": lease["record_sha256"],
+                },
+                "final_validation": validation,
+            }
+        )
+
+
 def publish_sealed_chaser_component(
     request: ChaserComponentPublishRequest,
 ) -> dict[str, Any]:
@@ -241,9 +502,6 @@ def publish_sealed_chaser_component(
         component_manifest_sha256=local_manifest_digest,
     )
     expected_selector_digest = component_record_sha256(expected_selector)
-
-    selector_state: dict[str, tuple[bool, Any]] = {}
-    selector_attempted = False
 
     def snapshot() -> Any:
         root = open_zarr_root(source_zarr, mode="r")
@@ -309,19 +567,30 @@ def publish_sealed_chaser_component(
         parent: zarr.Group,
         component: zarr.Group,
     ) -> None:
-        nonlocal selector_attempted
         fresh_snapshot = load_chaser_distance_run(
             root,
             run_name=request.base_run_name,
         )
         if fresh_snapshot.run_path != base_path:
             raise RuntimeError("Base authority changed before component activation.")
-        for name in (COMPONENT_SELECTOR_ATTR, COMPONENT_SELECTOR_DIGEST_ATTR):
-            selector_state[name] = (
-                name in parent.attrs,
-                copy.deepcopy(parent.attrs.get(name)),
-            )
-        selector_attempted = True
+        owner_uuid = _canonical_uuid(
+            component.attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR),
+            label="published component owner",
+        )
+        next_generation = _activation_generation(parent) + 1
+        lease = _build_activation_lease(
+            owner_uuid=owner_uuid,
+            next_generation=next_generation,
+            component_path=request.relative_path,
+            component_manifest_sha256=local_manifest_digest,
+            selector_sha256=expected_selector_digest,
+        )
+        parent.attrs[CHASER_COMPONENT_ACTIVATION_LEASE_ATTR] = json_attr_safe(
+            lease
+        )
+        parent.attrs[CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR] = (
+            next_generation
+        )
         selector, selector_digest = persist_chaser_component_selector(
             parent,
             component=component,
@@ -335,30 +604,6 @@ def publish_sealed_chaser_component(
         # Literal commit point. No fallible validation or metadata write follows.
         component.attrs["stage_selector_eligible"] = True
 
-    def rollback_activation() -> None:
-        if not selector_attempted:
-            return
-        root = open_zarr_root(source_zarr, mode="a")
-        parent = root[f"{base_path}/{family}"]
-        current_selector = parent.attrs.get(COMPONENT_SELECTOR_ATTR)
-        current_digest = parent.attrs.get(COMPONENT_SELECTOR_DIGEST_ATTR)
-        if current_selector == expected_selector:
-            present, value = selector_state[COMPONENT_SELECTOR_ATTR]
-            _restore_attr(
-                parent.attrs,
-                COMPONENT_SELECTOR_ATTR,
-                present=present,
-                value=value,
-            )
-        if current_digest == expected_selector_digest:
-            present, value = selector_state[COMPONENT_SELECTOR_DIGEST_ATTR]
-            _restore_attr(
-                parent.attrs,
-                COMPONENT_SELECTOR_DIGEST_ATTR,
-                present=present,
-                value=value,
-            )
-
     spec = AtomicRunPublishSpec(
         source_zarr=source_zarr,
         local_run_path=local_component,
@@ -371,6 +616,26 @@ def publish_sealed_chaser_component(
             "retain_owner_bound_ineligible_tombstone_and_conditionally_restore_selector"
         ),
         content_checksum=bool(request.content_checksum),
+        selector_owner_attr=(
+            CHASER_COMPONENT_ACTIVATION_LEASE_ATTR
+            if request.activate_selector
+            else None
+        ),
+        selector_generation_attr=(
+            CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR
+            if request.activate_selector
+            else None
+        ),
+        owned_parent_attr_names=(
+            (
+                COMPONENT_SELECTOR_ATTR,
+                COMPONENT_SELECTOR_DIGEST_ATTR,
+                CHASER_COMPONENT_ACTIVATION_LEASE_ATTR,
+                CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR,
+            ),
+        )
+        if request.activate_selector
+        else (),
     )
     try:
         result = atomic_publish_run_group(
@@ -381,9 +646,6 @@ def publish_sealed_chaser_component(
             complete_run=complete_run,
             verify_pointers=verify_pre_activation,
             activate_run=activate_run if request.activate_selector else None,
-            rollback_activation=(
-                rollback_activation if request.activate_selector else None
-            ),
             payload_metadata={
                 "schema_version": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION,
                 "base_run_path": base_path,
@@ -398,16 +660,24 @@ def publish_sealed_chaser_component(
         )
     except FileExistsError:
         if request.activate_selector:
-            raise
-        result = _recover_completed_ineligible_component(
-            request,
-            source_zarr=source_zarr,
-            base_path=base_path,
-            family=family,
-            component_name=component_name,
-            local_manifest=dict(local_manifest),
-            expected_manifest_sha256=local_manifest_digest,
-        )
+            result = _recover_or_complete_selector_activation(
+                request,
+                source_zarr=source_zarr,
+                base_path=base_path,
+                family=family,
+                component_name=component_name,
+                local_manifest=dict(local_manifest),
+            )
+        else:
+            result = _recover_completed_ineligible_component(
+                request,
+                source_zarr=source_zarr,
+                base_path=base_path,
+                family=family,
+                component_name=component_name,
+                local_manifest=dict(local_manifest),
+                expected_manifest_sha256=local_manifest_digest,
+            )
 
     return result
 
@@ -415,6 +685,10 @@ def publish_sealed_chaser_component(
 __all__ = [
     "CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_ID",
     "CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION",
+    "CHASER_COMPONENT_ACTIVATION_GENERATION_ATTR",
+    "CHASER_COMPONENT_ACTIVATION_LEASE_ATTR",
+    "CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_ID",
+    "CHASER_COMPONENT_ACTIVATION_LEASE_SCHEMA_VERSION",
     "CHASER_COMPONENT_RECOVERY_SCHEMA_ID",
     "CHASER_COMPONENT_RECOVERY_SCHEMA_VERSION",
     "ChaserComponentPublishRequest",

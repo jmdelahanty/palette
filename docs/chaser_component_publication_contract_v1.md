@@ -53,6 +53,25 @@ explicit activation operation after review. Merely passing a historical
 `overwrite=True` argument does not authorize replacement or activation; a
 same-name immutable child fails closed.
 
+An explicit activation persists a self-digested owner/generation lease on the
+component-family parent before it writes either selector attribute. The lease
+binds the exact component path, component-manifest digest, selector digest,
+publication-owner UUID, and next nonnegative parent generation. The selector
+envelope and its digest are then written and validated; the child's literal
+`stage_selector_eligible=true` write remains the final commit point. Ordinary
+exceptions use the shared publisher's owned-parent mutation receipt to restore
+the prior selector, digest, generation, and lease without clobbering a
+successor.
+
+After a hard process exit, another explicit activation request may finish or
+acknowledge the operation only when the durable lease still matches the
+current generation and exact completed child. If the child is ineligible, the
+recovery rewrites and validates the leased selector pair and then commits
+eligibility. If the child is already eligible, the selector pair must already
+be exact. A missing/malformed lease, changed generation, different owner,
+different manifest, failed child, or tombstone is terminal and leaves the
+archive untouched.
+
 For the default selector-ineligible path, a retry that finds a public child
 does not blindly fail and does not overwrite it. Under the archive-wide lock it
 may reconstruct the lost acknowledgement only when the existing child:
@@ -227,6 +246,11 @@ attributes. Maintained readers must consume only this authority envelope.
       equivalence. Coverage includes a fresh process exiting after commit,
       operational timestamp regeneration, changed-payload rejection, and
       failed/tombstoned rejection.
+- [x] Bind explicit activation to one durable owner/generation lease. Coverage
+      kills a fresh process after the lease but before selector publication,
+      completes that exact activation on retry, acknowledges an already
+      committed activation, rolls back ordinary post-selector failures, and
+      rejects a changed generation without parent mutation.
 - [x] Run the selector-ineligible egocentric -> bout-response -> escape-event
       chain through explicit handles outside the sandbox.
 - [ ] Run end-to-end activated component-family workflow tests outside the
