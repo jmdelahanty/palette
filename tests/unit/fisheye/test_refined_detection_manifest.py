@@ -566,6 +566,61 @@ def test_metadata_declaration_normalizer_is_exact_and_checks_consolidation() -> 
         )
 
 
+def test_metadata_normalizer_allows_only_exact_final_eligibility_commit_lag() -> None:
+    dimensions = _dimensions(1)
+    direct, consolidated = _metadata_declarations(dimensions)
+    manifest = _build_manifest(
+        run_id="refined_activated",
+        dimensions=dimensions,
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
+        selector_eligible=True,
+    )
+    direct[""]["attributes"] = {
+        "run_manifest": manifest,
+        "stage_selector_eligible": True,
+    }
+    consolidated[""]["attributes"] = {
+        "run_manifest": copy.deepcopy(manifest),
+        "stage_selector_eligible": False,
+    }
+
+    normalized = normalize_refined_detection_metadata_declarations(
+        direct,
+        consolidated_metadata_by_path=consolidated,
+        dimensions=dimensions,
+    )
+    assert "attributes" not in normalized["declarations"][""]
+
+    wrong_intent = copy.deepcopy(direct)
+    wrong_intent_manifest = copy.deepcopy(manifest)
+    wrong_intent_manifest["payload"]["publication"][
+        "stage_selector_eligible"
+    ] = False
+    wrong_intent_manifest["payload_digest"] = canonical_json_sha256(
+        wrong_intent_manifest["payload"]
+    )
+    wrong_intent[""]["attributes"]["run_manifest"] = wrong_intent_manifest
+    wrong_intent_consolidated = copy.deepcopy(consolidated)
+    wrong_intent_consolidated[""]["attributes"][
+        "run_manifest"
+    ] = copy.deepcopy(wrong_intent_manifest)
+    with pytest.raises(ValueError, match="Direct and consolidated metadata differ"):
+        normalize_refined_detection_metadata_declarations(
+            wrong_intent,
+            consolidated_metadata_by_path=wrong_intent_consolidated,
+            dimensions=dimensions,
+        )
+
+    unrelated_drift = copy.deepcopy(direct)
+    unrelated_drift[""]["attributes"]["unexpected"] = "changed"
+    with pytest.raises(ValueError, match="Direct and consolidated metadata differ"):
+        normalize_refined_detection_metadata_declarations(
+            unrelated_drift,
+            consolidated_metadata_by_path=consolidated,
+            dimensions=dimensions,
+        )
+
+
 def test_manifest_rejects_ambiguous_reason_registry_and_zero_frame_dimension() -> None:
     dimensions = _dimensions(1)
     storage_plan = plan_refined_detection_storage(dimensions)
