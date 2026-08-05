@@ -3,9 +3,9 @@
 Date: 2026-08-04
 
 Status: crop-policy and canonical-v3 successor implementations validated;
-the 36-archive successor cohort is frozen and one selector-ineligible canary
-has passed publication and crop-v2 preflight. No LSF jobs, crop writes,
-registry changes, or selector changes have been performed.
+all 36 selector-ineligible successors and the complete crop-v2 preflight have
+passed. No LSF jobs, crop writes, registry changes, or selector changes were
+performed.
 
 ## Decision
 
@@ -146,13 +146,30 @@ and target `detect_canonical_v3_crop_20260805`. Its canonical plan digest is:
 4be7bbfdd5fa5676197818800eb0256b07cc43c94bb174dc4799fa81549ae296
 ```
 
-The plan was written outside the repository at:
+The plan was first written outside the repository at:
 
 ```text
 /tmp/batman_canonical_v3_successor_plan_20260805.json
 ```
 
-Nine focused publication/plan tests pass. They include exact key
+The plan, batch summaries, cohort preflight, and all per-recording receipts are
+retained under:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.processing_logs/
+batman_canonical_v3_successor_20260805/
+```
+
+Evidence SHA-256 values are:
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Frozen plan | `b1f369a0def77bf850d1ce5a39f5f34b90eeea5c96cf9c86394d4feee20a39c3` |
+| Cohort crop preflight | `e2f448cd012f61e9abdbee33e698275948ca95dcf9485a8a2805c7693e1ffec2` |
+| Canary batch result | `af108631feb19fe5a4752d4e0ae48ea1fbd105f22438e112bda328f9dae087f1` |
+| Remaining-35 batch result | `a57bb6aabb352480a1a22bd60f6530e77e990fed94c793df9db14ed48842a858` |
+
+Ten focused publication/plan/preflight tests pass. They include exact key
 preservation, selector invariance, recomputed-digest tampering, frozen-source
 drift, and an injected final-consolidation failure.
 
@@ -181,9 +198,28 @@ policy before deriving placement. Against the canary it found 1,436 padded
 rows out of 126,214 (1.138%), with maximum `[left, top, right, bottom]` padding
 of `[0, 0, 118, 75]`. It performed no crop, selector, or registry writes.
 
-The next staged operation is to publish the remaining 35 successors and run
-this same modern preflight across the complete cohort. Detection authority
-activation is a later, separate reviewed operation.
+The remaining 35 successors then passed the same frozen-plan gate. Across all
+36 durable receipts:
+
+- every publication is complete canonical manifest v3;
+- every source/successor `instance_key` SHA-256 pair is identical;
+- every profile is `detection_published_access_aware_v1`;
+- every selector snapshot is unchanged;
+- no child is selector-eligible and no registry row was updated; and
+- total per-archive publication time was 232.41 seconds, ranging from 5.25 to
+  16.99 seconds.
+
+The complete read-only crop-v2 preflight then passed all 36 archives. It
+reproduced the independent census exactly: 84,133 padded rows among 4,987,449
+detections, affecting 30 archives. Cohort maximum `[left, top, right, bottom]`
+padding is `[103, 73, 121, 104]`. The report is bound to the frozen plan digest
+and records zero crop writes, selector updates, and registry updates.
+
+Detection authority activation remains a later, separate reviewed operation.
+The future-facing crop publisher also requires a refined-detection identity
+snapshot; the next implementation checkpoint is the raw-canonical to
+all-accepted refined-v1 transition, not a fallback to the legacy materialized
+crop writer.
 
 ## Dry-run commands
 

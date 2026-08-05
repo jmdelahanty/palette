@@ -8,7 +8,13 @@ from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_sha256,
 )
+from fisheye.shared.zarr.crop_schema import (
+    CropGeometryPolicy,
+    CropPaddingMode,
+    CropSizeMode,
+)
 from fisheye.utils import publish_canonical_detection_successor_batch as batch
+from fisheye.utils import preflight_canonical_detection_crops as crop_preflight
 
 
 def _inspection(path: Path, identity: str) -> dict[str, object]:
@@ -140,3 +146,41 @@ def test_apply_plan_filters_and_writes_one_bound_receipt(
     assert observed_receipt == tmp_path / "receipts/recording_one.json"
     assert result["selector_activation"] == "none"
     assert result["registry_updated"] is False
+
+
+def test_crop_cohort_preflight_aggregates_the_frozen_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    policy = CropGeometryPolicy(
+        purpose="ordinary_zebrafish_analysis",
+        size_mode=CropSizeMode.FIXED_PER_RUN,
+        fixed_size_wh=(348, 348),
+        padding_mode=CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME,
+    )
+    monkeypatch.setattr(
+        crop_preflight,
+        "inspect_canonical_detection_crop_preflight",
+        lambda **_kwargs: {
+            "dimensions": {"n_instances": 10},
+            "padding": {
+                "padded_row_count": 3,
+                "max_padding_ltrb": [1, 2, 3, 4],
+            },
+        },
+    )
+
+    result = crop_preflight.inspect_cohort_plan(
+        plan,
+        policy=policy,
+        allow_selector_ineligible_candidate=True,
+    )
+
+    assert result["archive_count"] == 1
+    assert result["affected_archive_count"] == 1
+    assert result["total_instance_count"] == 10
+    assert result["total_padded_row_count"] == 3
+    assert result["max_padding_ltrb"] == [1, 2, 3, 4]
+    assert result["plan_digest"] == plan["plan_digest"]
+    assert result["crop_zarr_writes"] is False
