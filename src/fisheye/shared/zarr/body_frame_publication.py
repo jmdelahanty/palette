@@ -24,12 +24,18 @@ from fisheye.shared.zarr.body_frame_storage import (
     BodyFrameStoragePlanSet,
     plan_body_frame_storage,
 )
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    KeypointPublicationDisposition,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_intent import StoragePlan
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
     require_runs_parent,
 )
 
@@ -197,8 +203,9 @@ def publish_selector_ineligible_body_frame_snapshot(
     shadow_root: Path = DEFAULT_BODY_FRAME_SHADOW_ROOT,
     storage_profile: StorageProfile = PUBLISHED_HTTP_V1,
     created_by: str = "body_frame_shadow",
+    disposition: KeypointPublicationDisposition = KeypointPublicationDisposition(),
 ) -> BodyFrameShadowPublication:
-    """Write, consolidate, and validate one standalone body-frame snapshot."""
+    """Write and validate one immutable, selector-ineligible body-frame snapshot."""
 
     output_path = require_safe_body_frame_shadow_destination(
         destination, shadow_root=shadow_root
@@ -224,10 +231,7 @@ def publish_selector_ineligible_body_frame_snapshot(
     root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
     root.attrs.update(
         {
-            "benchmark_only": True,
-            "canonical": False,
-            "registry_registered": False,
-            "selector_eligible": False,
+            **disposition.root_attributes(),
             "schema_id": BODY_FRAME_SHADOW_SCHEMA_ID,
             "schema_version": BODY_FRAME_SHADOW_SCHEMA_VERSION,
             "created_at_utc": utc_now(),
@@ -238,19 +242,12 @@ def publish_selector_ineligible_body_frame_snapshot(
     family = require_runs_parent(
         analysis, "body_frame_runs", completion_epoch=COMPLETION_EPOCH_STRICT
     )
-    family.attrs.update(
-        {
-            "benchmark_only": True,
-            "selector_eligible": False,
-            "selection_contract": "none_shadow_direct_path_only",
-        }
-    )
+    family.attrs.update(disposition.family_attributes())
     run = family.create_group(str(run_id))
     run.attrs.update(
         {
             "status": "running",
-            "stage_selector_eligible": False,
-            "shadow_only": True,
+            **disposition.run_attributes(),
             "artifact_class": "derived_keypoint_body_frame_cache",
             "keypoint_authority": False,
             "logical_schema": BODY_FRAME_SCHEMA_V1.as_manifest(
@@ -261,6 +258,8 @@ def publish_selector_ineligible_body_frame_snapshot(
             "heading_recipe": prepared.recipe.as_manifest(),
         }
     )
+    if disposition.production_candidate:
+        mark_run_started(run, run_name=str(run_id), stage="body_frame")
 
     destination_arrays: dict[str, Any] = {}
     bindings = {binding.path: binding for binding in BODY_FRAME_SCHEMA_V1.bindings}
@@ -279,8 +278,7 @@ def publish_selector_ineligible_body_frame_snapshot(
             plan=entry.plan,
             fill_value=0,
             attributes={
-                "benchmark_only": True,
-                "selector_eligible": False,
+                **disposition.array_attributes(),
                 "artifact_class": "derived_keypoint_body_frame_cache",
                 "keypoint_authority": False,
             },
@@ -295,6 +293,12 @@ def publish_selector_ineligible_body_frame_snapshot(
         source_keypoint_arrays=prepared.source_arrays,
     )
     run.attrs["status"] = "complete"
+    if disposition.production_candidate:
+        mark_run_complete(
+            run,
+            run_name=str(run_id),
+            run_provenance=disposition.run_provenance,
+        )
 
     phase_started = time.perf_counter()
     consolidate_metadata_capture_expected_warnings(output_path)
@@ -341,6 +345,12 @@ def publish_selector_ineligible_body_frame_snapshot(
                 "publication_errors": list(errors),
             }
         )
+        if disposition.production_candidate:
+            mark_run_failed(
+                run,
+                run_name=str(run_id),
+                error="; ".join(errors),
+            )
         raise RuntimeError("Body-frame publication gate failed: " + "; ".join(errors))
 
     publication = BodyFrameShadowPublication(

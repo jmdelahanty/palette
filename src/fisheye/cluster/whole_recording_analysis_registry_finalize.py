@@ -56,7 +56,7 @@ def finalize_registry(
     keypoint_report = finalize_keypoints(
         Path(str(payload["keypoint_plan_path"])).parent,
         registry_path=registry_path,
-        apply=apply,
+        apply=False,
     )
     mask_reports: list[dict[str, Any]] = []
     for raw in targets:

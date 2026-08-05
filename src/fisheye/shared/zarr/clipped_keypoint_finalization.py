@@ -38,6 +38,9 @@ from fisheye.shared.zarr.keypoint_manifest import (
     KeypointPreprocessingReference,
     keypoint_skeleton_digest,
 )
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    KeypointChainPublicationDispositions,
+)
 from fisheye.shared.zarr.keypoint_publication import (
     KeypointShadowPublication,
     PreparedRawKeypointSnapshot,
@@ -898,6 +901,9 @@ def publish_selector_ineligible_clipped_keypoint_chain(
     reason_code_map: Mapping[int, str] | None = None,
     storage_profile: StorageProfile = PUBLISHED_HTTP_V1,
     created_by: str = "clipped_keypoint_v2_finalizer",
+    dispositions: KeypointChainPublicationDispositions = (
+        KeypointChainPublicationDispositions()
+    ),
 ) -> ClippedKeypointPublicationChain:
     """Publish raw, quality, refined, and body-frame runs plus one receipt."""
 
@@ -929,6 +935,7 @@ def publish_selector_ineligible_clipped_keypoint_chain(
         shadow_root=root,
         storage_profile=storage_profile,
         created_by=created_by,
+        disposition=dispositions.raw,
     )
     raw_manifest_digest = canonical_json_sha256(raw.manifest)
     row_signatures_digest = sha256_array(
@@ -957,6 +964,7 @@ def publish_selector_ineligible_clipped_keypoint_chain(
         shadow_root=root,
         storage_profile=storage_profile,
         created_by=created_by,
+        disposition=dispositions.quality,
     )
     refined_prepared = prepare_refined_keypoint_snapshot(
         raw.prepared.arrays,
@@ -996,6 +1004,7 @@ def publish_selector_ineligible_clipped_keypoint_chain(
         shadow_root=root,
         storage_profile=storage_profile,
         created_by=created_by,
+        disposition=dispositions.refined,
     )
     recipe = build_keypoint_body_frame_recipe(
         pose_schema=pose_schema,
@@ -1030,6 +1039,7 @@ def publish_selector_ineligible_clipped_keypoint_chain(
         shadow_root=root,
         storage_profile=storage_profile,
         created_by=created_by,
+        disposition=dispositions.body_frame,
     )
     crop_binding = {
         "stage": "crop",

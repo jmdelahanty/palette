@@ -19,7 +19,7 @@ from fisheye.shared.flat_roi_cache import (
 
 
 ANALYSIS_PLAN_SCHEMA = "palette.whole_recording_analysis_bsub_plan.v1"
-KEYPOINT_PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v1"
+KEYPOINT_PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v2"
 CLEANUP_REPORT_SCHEMA = "palette.whole_recording_analysis_cache_cleanup.v1"
 DEFAULT_ALLOWED_ROOT = DEFAULT_SHARED_CACHE_ROOT
 

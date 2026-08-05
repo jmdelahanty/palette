@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.shared.zarr.clipped_keypoint_finalization import (
     CLIPPED_KEYPOINT_RESULT_RECEIPT_SCHEMA_ID,
@@ -20,12 +22,27 @@ from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_sha256,
 )
+from fisheye.shared.run_provenance import build_run_provenance
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    KEYPOINT_PUBLICATION_MODE_PRODUCTION_CANDIDATE,
+    KeypointChainPublicationDispositions,
+    KeypointPublicationDisposition,
+)
+from fisheye.shared.zarr.keypoint_bundle_production_publication import (
+    publish_keypoint_v2_production_candidate_chain,
+)
 from fisheye.shared.zarr.crop_shadow import CropGeometryShadowPublication
 from fisheye.shared.zarr.crop_storage import plan_crop_geometry_storage
 from fisheye.shared.zarr.keypoint_manifest import KeypointPreprocessingReference
 from fisheye.shared.zarr.keypoint_successor import TerminalKeypointInferenceBatch
 from fisheye.shared.zarr.refined_keypoint_manifest import (
     initial_refined_keypoint_snapshot_identity,
+)
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
 )
 from tests.unit.fisheye.test_keypoint_publication import (
     _crop_fixture,
@@ -398,3 +415,110 @@ def test_complete_chain_uses_shared_plans_and_one_selector_ineligible_receipt(
     ] = "0" * 64
     errors = validate_clipped_keypoint_finalization_receipt(tampered)
     assert "clipped finalization payload digest mismatch" in errors
+
+
+def test_complete_chain_can_seal_production_candidates_without_selecting_them(
+    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crop = _crop(tmp_path)
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.clipped_keypoint_finalization."
+        "validate_crop_geometry_shadow_publication",
+        lambda publication: (),
+    )
+    identity = initial_refined_keypoint_snapshot_identity(
+        recording_identity="keypoint_v2_canary",
+        lineage_id="33333333-3333-4333-8333-333333333333",
+        snapshot_id="44444444-4444-4444-8444-444444444444",
+    )
+    provenance = build_run_provenance(
+        command="pytest production candidate",
+        params={"selector_activation": "deferred"},
+        input_run_ids={"crop": crop.run_id},
+        cwd=Path.cwd(),
+    )
+
+    def disposition(owner: str) -> KeypointPublicationDisposition:
+        return KeypointPublicationDisposition(
+            mode=KEYPOINT_PUBLICATION_MODE_PRODUCTION_CANDIDATE,
+            publication_owner_uuid=owner,
+            run_provenance=provenance,
+        )
+
+    chain = publish_selector_ineligible_clipped_keypoint_chain(
+        crop,
+        _clip_results(crop),
+        pose_model_schema_binding=_pose_binding(),
+        preprocessing=_preprocessing(),
+        bundle_root=tmp_path / "production",  # type: ignore[operator]
+        raw_run_id="raw_v2",
+        quality_run_id="quality_v1",
+        refined_run_id="refined_v2",
+        body_frame_run_id="body_frame_v1",
+        refined_identity=identity,
+        created_by="pytest",
+        dispositions=KeypointChainPublicationDispositions(
+            raw=disposition("a" * 32),
+            quality=disposition("b" * 32),
+            refined=disposition("c" * 32),
+            body_frame=disposition("d" * 32),
+        ),
+    )
+
+    for publication, parent_path, owner in zip(
+        (chain.raw, chain.quality, chain.refined, chain.body_frame),
+        (
+            "keypoints_runs",
+            "keypoint_quality_runs",
+            "refined_keypoints_runs",
+            "analysis/body_frame_runs",
+        ),
+        ("a" * 32, "b" * 32, "c" * 32, "d" * 32),
+        strict=True,
+    ):
+        run = zarr.open_group(
+            str(publication.output_path / parent_path / publication.run_id),
+            mode="r",
+            use_consolidated=False,
+        )
+        assert run.attrs["production_candidate"] is True
+        assert run.attrs["stage_selector_eligible"] is False
+        assert run.attrs["atomic_publication_owner_uuid"] == owner
+        assert run.attrs["palette_run_completion_status"] == "complete"
+
+    archive = tmp_path / "analysis.zarr"  # type: ignore[operator]
+    archive_root = zarr.open_group(str(archive), mode="w", zarr_format=3)
+    crop_parent = archive_root.create_group("crop_runs")
+    crop_parent.attrs["palette_completion_epoch"] = COMPLETION_EPOCH_STRICT
+    crop_run = crop_parent.create_group(crop.run_id)
+    crop_run.attrs.update(
+        {
+            "status": "complete",
+            "stage_selector_eligible": False,
+            RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
+            "run_manifest": crop.manifest,
+        }
+    )
+    consolidate_metadata_capture_expected_warnings(archive)
+    publication = publish_keypoint_v2_production_candidate_chain(
+        analysis_zarr=archive,
+        chain=chain,
+    )
+
+    assert publication["status"] == "complete"
+    assert publication["selector_eligible"] is False
+    assert publication["registry_updated"] is False
+    consolidated = zarr.open_group(
+        str(archive), mode="r", zarr_format=3, use_consolidated=True
+    )
+    for parent_path, run_id in (
+        ("keypoints_runs", "raw_v2"),
+        ("keypoint_quality_runs", "quality_v1"),
+        ("refined_keypoints_runs", "refined_v2"),
+        ("analysis/body_frame_runs", "body_frame_v1"),
+    ):
+        run = consolidated[f"{parent_path}/{run_id}"]
+        assert run.attrs["production_candidate"] is True
+        assert run.attrs["stage_selector_eligible"] is False
+        assert "cluster_output_staging" not in run.attrs

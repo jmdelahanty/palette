@@ -24,7 +24,7 @@ from fisheye.cluster.keypoints.common import (
     build_prediction_job,
     build_refinement_job,
     resolve_pose_model_binding,
-    resolve_keypoint_storage,
+    resolve_keypoint_v2_publication_storage,
     safe_component,
     validate_flat_roi_cache_binding,
     validate_keypoint_input_dag,
@@ -45,7 +45,7 @@ from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN, build_runtime_comm
 
 
 TARGET_MANIFEST_SCHEMA = "palette.whole_recording_keypoint_targets.v1"
-PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v1"
+PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v2"
 NORMALIZED_TARGETS_SCHEMA = "palette.whole_recording_keypoint_targets.normalized.v1"
 DEFAULT_GROUPS_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
 DEFAULT_REGISTRY = Path(
@@ -79,7 +79,10 @@ class PlannedWholeRecordingTarget:
     input_capability: KeypointInputCapability
     run_names: KeypointRunNames
     expected_keypoint_group: Path
+    expected_keypoint_quality_group: Path
     expected_refined_keypoint_group: Path
+    expected_body_frame_group: Path
+    finalization_result: Path
     prediction_job_key: str
     refinement_job_key: str
 
@@ -91,9 +94,14 @@ class PlannedWholeRecordingTarget:
             "input_capability": self.input_capability.to_json(),
             "run_names": self.run_names.to_json(),
             "expected_keypoint_group": str(self.expected_keypoint_group),
+            "expected_keypoint_quality_group": str(
+                self.expected_keypoint_quality_group
+            ),
             "expected_refined_keypoint_group": str(
                 self.expected_refined_keypoint_group
             ),
+            "expected_body_frame_group": str(self.expected_body_frame_group),
+            "finalization_result": str(self.finalization_result),
             "prediction_job_key": self.prediction_job_key,
             "refinement_job_key": self.refinement_job_key,
         }
@@ -112,6 +120,7 @@ class WholeRecordingWorkflowPlan:
     pose_schema: str
     min_roi_size: int
     keypoint_storage: dict[str, Any]
+    finalization_execution: dict[str, Any]
     targets: tuple[PlannedWholeRecordingTarget, ...]
     registry_finalizer_job_key: str
     lsf_workflow: LsfWorkflow
@@ -130,6 +139,7 @@ class WholeRecordingWorkflowPlan:
             "pose_schema": self.pose_schema,
             "min_roi_size": self.min_roi_size,
             "keypoint_storage": self.keypoint_storage,
+            "finalization_execution": self.finalization_execution,
             "target_count": len(self.targets),
             "targets": [target.to_json() for target in self.targets],
             "registry_finalizer_job_key": self.registry_finalizer_job_key,
@@ -246,20 +256,35 @@ def _refuse_output_collisions(
     *,
     target: WholeRecordingTarget,
     run_names: KeypointRunNames,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path, Path]:
     keypoint_group = target.analysis_zarr / "keypoints_runs" / run_names.keypoint_run
     refined_group = (
         target.analysis_zarr
         / "refined_keypoints_runs"
         / run_names.refined_keypoint_run
     )
-    collisions = [path for path in (keypoint_group, refined_group) if path.exists()]
+    quality_group = (
+        target.analysis_zarr
+        / "keypoint_quality_runs"
+        / run_names.keypoint_quality_run
+    )
+    body_frame_group = (
+        target.analysis_zarr
+        / "analysis"
+        / "body_frame_runs"
+        / run_names.body_frame_run
+    )
+    collisions = [
+        path
+        for path in (keypoint_group, quality_group, refined_group, body_frame_group)
+        if path.exists()
+    ]
     if collisions:
         raise FileExistsError(
             f"Planned output already exists for {target.target_id!r}: "
             + ", ".join(str(path) for path in collisions)
         )
-    return keypoint_group, refined_group
+    return keypoint_group, quality_group, refined_group, body_frame_group
 
 
 def build_plan(
@@ -308,10 +333,26 @@ def build_plan(
         raise ValueError("Minimum zebrafish ROI size must be positive.")
     if int(refine_chunk_size) <= 0 or int(refine_num_workers) <= 0:
         raise ValueError("Refinement chunk size and worker count must be positive.")
-    keypoint_storage = resolve_keypoint_storage(
-        roi_shard_rows=keypoint_roi_shard_rows,
-        frame_shard_rows=keypoint_frame_shard_rows,
+    keypoint_storage = resolve_keypoint_v2_publication_storage(
+        legacy_roi_shard_rows=keypoint_roi_shard_rows,
+        legacy_frame_shard_rows=keypoint_frame_shard_rows,
     )
+    finalization_execution = {
+        "requested_legacy_controls": {
+            "chunk_size": int(refine_chunk_size),
+            "scheduler": str(refine_scheduler),
+            "num_workers": int(refine_num_workers),
+            "memory_limit": refine_memory_limit,
+            "effect_on_v2_finalization": "none",
+        },
+        "effective": {
+            "algorithm": "strict_keypoint_v2_chain_finalizer_v1",
+            "write_ownership": "serial_whole_physical_units",
+            "storage_planning": "shared_byte_planner_per_array",
+            "publication": "atomic_per_run_then_single_root_consolidation",
+            "selector_activation": False,
+        },
+    }
 
     manifest_bytes = resolved_manifest.read_bytes()
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
@@ -381,7 +422,12 @@ def build_plan(
             cache=cache,
             min_roi_size=int(min_roi_size),
         )
-        expected_keypoint, expected_refined = _refuse_output_collisions(
+        (
+            expected_keypoint,
+            expected_quality,
+            expected_refined,
+            expected_body_frame,
+        ) = _refuse_output_collisions(
             target=target,
             run_names=run_names,
         )
@@ -401,8 +447,6 @@ def build_plan(
             device=device,
             input_mode=input_mode,
             progress_every_batches=int(progress_every_batches),
-            keypoint_roi_shard_rows=keypoint_roi_shard_rows,
-            keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
             resources=prediction_resources,
         )
         if cache.producer_job_key is not None:
@@ -417,14 +461,17 @@ def build_plan(
             repo=resolved_repo,
             run_root=resolved_run_root,
             run_names=run_names,
-            chunk_size=int(refine_chunk_size),
-            scheduler=refine_scheduler,
-            num_workers=int(refine_num_workers),
-            memory_limit=refine_memory_limit,
             resources=refinement_resources,
             prediction_job=prediction_job,
+            crop_run=cache.crop_run,
+            recording_identity=target.recording_id,
         )
         jobs.extend((prediction_job, refinement_job))
+        finalization_result = (
+            resolved_run_root
+            / "finalization"
+            / f"{safe_component(target.target_id, default='target', max_length=56)}.json"
+        )
         planned_targets.append(
             PlannedWholeRecordingTarget(
                 target=target,
@@ -433,7 +480,10 @@ def build_plan(
                 input_capability=input_capability,
                 run_names=run_names,
                 expected_keypoint_group=expected_keypoint,
+                expected_keypoint_quality_group=expected_quality,
                 expected_refined_keypoint_group=expected_refined,
+                expected_body_frame_group=expected_body_frame,
+                finalization_result=finalization_result,
                 prediction_job_key=prediction_job.job_key,
                 refinement_job_key=refinement_job.job_key,
             )
@@ -452,7 +502,6 @@ def build_plan(
         str(resolved_run_root),
         "--registry",
         str(resolved_registry),
-        "--apply",
         "--output-json",
         str(
             resolved_run_root
@@ -470,7 +519,7 @@ def build_plan(
         workflow_id=resolved_run_label,
         family="keypoints.whole_recording",
         job_key=finalizer_job_key,
-        stage="registry_finalization",
+        stage="candidate_validation",
         cwd=resolved_repo,
         expected_output_templates=(
             str(
@@ -495,8 +544,9 @@ def build_plan(
             dependency=LsfDependency(refinement_job_keys),
             metadata={
                 "target_count": len(planned_targets),
-                "keypoint_run": run_names.keypoint_run,
-                "refined_keypoint_run": run_names.refined_keypoint_run,
+                "candidate_validation_only": True,
+                "selector_activation": False,
+                "registry_mutation": False,
                 "registry": str(resolved_registry),
             },
         )
@@ -511,6 +561,7 @@ def build_plan(
             "manifest_sha256": manifest_sha256,
             "target_count": len(planned_targets),
             "keypoint_storage": keypoint_storage,
+            "finalization_execution": finalization_execution,
         },
     )
     return WholeRecordingWorkflowPlan(
@@ -525,6 +576,7 @@ def build_plan(
         pose_schema=str(pose_schema),
         min_roi_size=int(min_roi_size),
         keypoint_storage=keypoint_storage,
+        finalization_execution=finalization_execution,
         targets=tuple(planned_targets),
         registry_finalizer_job_key=finalizer_job_key,
         lsf_workflow=workflow,
@@ -656,8 +708,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
         help=(
-            "Outer rows for indexed-sharded ROI arrays "
-            f"(default: {DEFAULT_KEYPOINT_ROI_SHARD_ROWS})."
+            "Legacy compatibility input only; strict v2 publication ignores "
+            "row-count shard overrides and plans from uncompressed bytes."
         ),
     )
     keypoint_storage_group.add_argument(
@@ -665,15 +717,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_const",
         dest="keypoint_roi_shard_rows",
         const=None,
-        help="Use ordinary chunks for keypoint outputs.",
+        help=(
+            "Legacy compatibility input only; strict v2 publication remains "
+            "byte-planned and access-aware."
+        ),
     )
     parser.add_argument(
         "--keypoint-frame-shard-rows",
         type=int,
         default=DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
         help=(
-            "Outer rows for indexed-sharded frame arrays "
-            f"(default: {DEFAULT_KEYPOINT_FRAME_SHARD_ROWS})."
+            "Legacy compatibility input only; strict v2 frame indexes use the "
+            "shared byte planner."
         ),
     )
     parser.add_argument("--device", default="0")
@@ -694,14 +749,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--refine-ncores", type=int, default=4)
     parser.add_argument("--refine-mem-gb", type=int, default=16)
     parser.add_argument("--refine-walltime", default="1:00")
-    parser.add_argument("--refine-chunk-size", type=int, default=2048)
+    parser.add_argument(
+        "--refine-chunk-size",
+        type=int,
+        default=2048,
+        help="Legacy compatibility input; ignored by the strict v2 finalizer.",
+    )
     parser.add_argument(
         "--refine-scheduler",
         choices=("processes", "threads", "distributed"),
         default="threads",
+        help="Legacy compatibility input; ignored by the strict v2 finalizer.",
     )
-    parser.add_argument("--refine-num-workers", type=int, default=4)
-    parser.add_argument("--refine-memory-limit", default=None)
+    parser.add_argument(
+        "--refine-num-workers",
+        type=int,
+        default=4,
+        help="Legacy compatibility input; ignored by the strict v2 finalizer.",
+    )
+    parser.add_argument(
+        "--refine-memory-limit",
+        default=None,
+        help="Legacy compatibility input; ignored by the strict v2 finalizer.",
+    )
 
     parser.add_argument("--finalizer-queue", default="short")
     parser.add_argument("--finalizer-ncores", type=int, default=1)

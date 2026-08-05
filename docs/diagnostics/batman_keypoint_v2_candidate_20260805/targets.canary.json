@@ -1,0 +1,14 @@
+{
+  "schema": "palette.whole_recording_keypoint_targets.v1",
+  "expected_target_count": 1,
+  "targets": [
+    {
+      "target_id": "2026-07-21T19-38-32Z_arena_2_Batman",
+      "recording_id": "2026-07-21T19-38-32Z_arena_2_Batman",
+      "recording_dir": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-21T19-38-32Z_arena_2_Batman",
+      "analysis_zarr": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-21T19-38-32Z_arena_2_Batman/zarr/2026-07-21T19-38-32Z_arena_2_Batman_analysis.zarr",
+      "roi_cache_manifest": "/nrs/johnson/palette_staging/flat_roi_cache/batman_crop_geometry_v2_348_20260805/roi_cache/2026-07-21T19-38-32Z_arena_2_Batman.flat_roi_cache.json",
+      "crop_run": "crop_geometry_v2_348_20260805"
+    }
+  ]
+}

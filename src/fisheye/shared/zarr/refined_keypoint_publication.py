@@ -18,6 +18,9 @@ from fisheye.shared.zarr.keypoint_quality_manifest import (
     quality_profile_from_manifest,
 )
 from fisheye.shared.zarr.keypoint_quality_schema import KeypointQualityDimensions
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    KeypointPublicationDisposition,
+)
 from fisheye.shared.zarr.refined_keypoint_manifest import (
     REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE,
     RefinedKeypointSnapshotIdentity,
@@ -42,6 +45,9 @@ from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfi
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
     require_runs_parent,
 )
 
@@ -258,8 +264,9 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
     parent_manifest: Mapping[str, Any] | None = None,
     parent_arrays: Mapping[str, Any] | None = None,
     parent_retired_instance_keys: Sequence[int] | None = None,
+    disposition: KeypointPublicationDisposition = KeypointPublicationDisposition(),
 ) -> RefinedKeypointShadowPublication:
-    """Write, consolidate, and reopen-gate one refined-keypoint-v2 snapshot."""
+    """Write and reopen-gate one immutable selector-ineligible refined snapshot."""
 
     output_path = require_safe_refined_keypoint_shadow_destination(
         destination,
@@ -299,10 +306,7 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
     root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
     root.attrs.update(
         {
-            "benchmark_only": True,
-            "canonical": False,
-            "registry_registered": False,
-            "selector_eligible": False,
+            **disposition.root_attributes(),
             "schema_id": REFINED_KEYPOINT_SHADOW_SCHEMA_ID,
             "schema_version": REFINED_KEYPOINT_SHADOW_SCHEMA_VERSION,
             "created_at_utc": utc_now(),
@@ -314,19 +318,12 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
         "refined_keypoints_runs",
         completion_epoch=COMPLETION_EPOCH_STRICT,
     )
-    family.attrs.update(
-        {
-            "benchmark_only": True,
-            "selector_eligible": False,
-            "selection_contract": "none_shadow_direct_path_only",
-        }
-    )
+    family.attrs.update(disposition.family_attributes())
     run = family.create_group(str(run_id))
     run.attrs.update(
         {
             "status": "running",
-            "stage_selector_eligible": False,
-            "shadow_only": True,
+            **disposition.run_attributes(),
             "artifact_class": "reviewed_keypoint_authority_candidate",
             "keypoint_authority": False,
             "logical_schema": REFINED_KEYPOINT_SCHEMA_V2.as_manifest(
@@ -343,6 +340,8 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
             },
         }
     )
+    if disposition.production_candidate:
+        mark_run_started(run, run_name=str(run_id), stage="refined_keypoints")
 
     destination_arrays: dict[str, Any] = {}
     bindings = {
@@ -364,8 +363,7 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
             plan=entry.plan,
             fill_value=0,
             attributes={
-                "benchmark_only": True,
-                "selector_eligible": False,
+                **disposition.array_attributes(),
                 "artifact_class": "reviewed_keypoint_authority_candidate",
             },
         )
@@ -382,6 +380,12 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
         reason_code_map=reason_code_map,
     )
     run.attrs["status"] = "complete"
+    if disposition.production_candidate:
+        mark_run_complete(
+            run,
+            run_name=str(run_id),
+            run_provenance=disposition.run_provenance,
+        )
 
     phase_started = time.perf_counter()
     consolidate_metadata_capture_expected_warnings(output_path)
@@ -445,6 +449,12 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
                 "publication_errors": list(errors),
             }
         )
+        if disposition.production_candidate:
+            mark_run_failed(
+                run,
+                run_name=str(run_id),
+                error="; ".join(errors),
+            )
         raise RuntimeError(
             "Refined-keypoint publication gate failed: " + "; ".join(errors)
         )

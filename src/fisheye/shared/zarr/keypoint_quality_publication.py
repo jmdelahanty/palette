@@ -28,6 +28,9 @@ from fisheye.shared.zarr.keypoint_quality_storage import (
     KeypointQualityStoragePlanSet,
     plan_keypoint_quality_storage,
 )
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    KeypointPublicationDisposition,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_intent import StoragePlan
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
@@ -36,6 +39,9 @@ from fisheye.shared.zarr_helpers import (
 )
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
     require_runs_parent,
 )
 
@@ -207,8 +213,9 @@ def publish_selector_ineligible_keypoint_quality_snapshot(
     shadow_root: Path = DEFAULT_KEYPOINT_QUALITY_SHADOW_ROOT,
     storage_profile: StorageProfile = PUBLISHED_HTTP_V1,
     created_by: str = "keypoint_quality_shadow",
+    disposition: KeypointPublicationDisposition = KeypointPublicationDisposition(),
 ) -> KeypointQualityShadowPublication:
-    """Write, consolidate, and validate one standalone quality snapshot."""
+    """Write and validate one immutable, selector-ineligible quality snapshot."""
 
     output_path = require_safe_keypoint_quality_shadow_destination(
         destination, shadow_root=shadow_root
@@ -235,10 +242,7 @@ def publish_selector_ineligible_keypoint_quality_snapshot(
     root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
     root.attrs.update(
         {
-            "benchmark_only": True,
-            "canonical": False,
-            "registry_registered": False,
-            "selector_eligible": False,
+            **disposition.root_attributes(),
             "schema_id": KEYPOINT_QUALITY_SHADOW_SCHEMA_ID,
             "schema_version": KEYPOINT_QUALITY_SHADOW_SCHEMA_VERSION,
             "created_at_utc": utc_now(),
@@ -250,19 +254,12 @@ def publish_selector_ineligible_keypoint_quality_snapshot(
         "keypoint_quality_runs",
         completion_epoch=COMPLETION_EPOCH_STRICT,
     )
-    family.attrs.update(
-        {
-            "benchmark_only": True,
-            "selector_eligible": False,
-            "selection_contract": "none_shadow_direct_path_only",
-        }
-    )
+    family.attrs.update(disposition.family_attributes())
     run = family.create_group(str(run_id))
     run.attrs.update(
         {
             "status": "running",
-            "stage_selector_eligible": False,
-            "shadow_only": True,
+            **disposition.run_attributes(),
             "artifact_class": "observation_local_quality_diagnostics",
             "logical_schema": KEYPOINT_QUALITY_SCHEMA_V1.as_manifest(
                 dimensions=prepared.dimensions,
@@ -274,6 +271,8 @@ def publish_selector_ineligible_keypoint_quality_snapshot(
             "policy": prepared.policy.as_manifest(),
         }
     )
+    if disposition.production_candidate:
+        mark_run_started(run, run_name=str(run_id), stage="keypoint_quality")
 
     destination_arrays: dict[str, Any] = {}
     bindings = {
@@ -294,8 +293,7 @@ def publish_selector_ineligible_keypoint_quality_snapshot(
             plan=entry.plan,
             fill_value=0,
             attributes={
-                "benchmark_only": True,
-                "selector_eligible": False,
+                **disposition.array_attributes(),
                 "artifact_class": "observation_local_quality_diagnostics",
             },
         )
@@ -310,6 +308,12 @@ def publish_selector_ineligible_keypoint_quality_snapshot(
         source_keypoint_arrays=prepared.source_arrays,
     )
     run.attrs["status"] = "complete"
+    if disposition.production_candidate:
+        mark_run_complete(
+            run,
+            run_name=str(run_id),
+            run_provenance=disposition.run_provenance,
+        )
 
     phase_started = time.perf_counter()
     consolidate_metadata_capture_expected_warnings(output_path)
@@ -363,6 +367,12 @@ def publish_selector_ineligible_keypoint_quality_snapshot(
                 "publication_errors": list(errors),
             }
         )
+        if disposition.production_candidate:
+            mark_run_failed(
+                run,
+                run_name=str(run_id),
+                error="; ".join(errors),
+            )
         raise RuntimeError("Quality publication gate failed: " + "; ".join(errors))
 
     publication = KeypointQualityShadowPublication(

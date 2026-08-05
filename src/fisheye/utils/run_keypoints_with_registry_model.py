@@ -497,12 +497,14 @@ def run_keypoints_with_registry_model(
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
     roi_cache_manifest: Optional[Path] = None,
+    roi_cache_expected_archive_path: Optional[Path] = None,
     stage_roi_cache_to_scratch: bool = False,
     roi_cache_staging_dir: Optional[Path] = None,
     profile_timings: bool = False,
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
     input_mode: str = "numpy-list",
+    coordinate_contract_mode: str = "canonical",
     keypoint_roi_shard_rows: Optional[int] = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     cpu: bool = False,
@@ -539,12 +541,14 @@ def run_keypoints_with_registry_model(
         roi_cache_policy=roi_cache_policy,
         roi_cache_dir=roi_cache_dir,
         roi_cache_manifest=roi_cache_manifest,
+        roi_cache_expected_archive_path=roi_cache_expected_archive_path,
         stage_roi_cache_to_scratch=bool(stage_roi_cache_to_scratch),
         roi_cache_staging_dir=roi_cache_staging_dir,
         profile_timings=bool(profile_timings),
         progress_jsonl=progress_jsonl,
         progress_every_batches=int(progress_every_batches),
         input_mode=input_mode,
+        coordinate_contract_mode=coordinate_contract_mode,
         keypoint_roi_shard_rows=keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
         cpu=bool(cpu),
@@ -727,10 +731,12 @@ def run_keypoints_with_registry_model(
             roi_cache_policy=roi_cache_policy,
             roi_cache_dir=roi_cache_dir,
             roi_cache_manifest=effective_roi_cache_manifest,
+            roi_cache_expected_archive_path=roi_cache_expected_archive_path,
             roi_cache_source_tier=roi_cache_staging_details.get("effective_source_tier"),
             roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
             roi_cache_staging_details=roi_cache_staging_details or None,
             input_mode=input_mode,
+            coordinate_contract_mode=coordinate_contract_mode,
             keypoint_roi_shard_rows=keypoint_roi_shard_rows,
             keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
             profile_timings=bool(profile_timings),
@@ -873,6 +879,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Optional flat_bin_v1 ROI cache manifest to consume directly.",
     )
     parser.add_argument(
+        "--roi-cache-expected-archive-path",
+        type=Path,
+        default=None,
+        help=(
+            "Original analysis archive bound by a cache staged into a local "
+            "compute shell."
+        ),
+    )
+    parser.add_argument(
         "--stage-roi-cache-to-scratch",
         action="store_true",
         help="Copy --roi-cache-manifest and payload to node-local scratch before inference.",
@@ -906,6 +921,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="numpy-list",
         help="Ultralytics input preparation mode (default: legacy numpy-list).",
     )
+    parser.add_argument(
+        "--coordinate-contract-mode",
+        choices=("canonical", "legacy_noncanonical"),
+        default="canonical",
+        help=(
+            "Canonical publication mode, or explicit noncanonical terminal "
+            "compute output for a later strict v2 finalizer."
+        ),
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output.")
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
@@ -935,12 +959,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
+        roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
         stage_roi_cache_to_scratch=bool(args.stage_roi_cache_to_scratch),
         roi_cache_staging_dir=args.roi_cache_staging_dir,
         profile_timings=bool(args.profile_timings),
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,
         input_mode=args.input_mode,
+        coordinate_contract_mode=args.coordinate_contract_mode,
         keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=args.keypoint_frame_shard_rows,
         cpu=bool(args.cpu),

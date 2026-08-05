@@ -76,6 +76,29 @@ def test_atomic_copy_integrity_defaults_fail_safe() -> None:
     assert mod.DEFAULT_COPY_CONTENT_CHECKSUM is True
 
 
+def test_atomic_publisher_can_keep_operational_receipt_outside_sealed_run(
+    tmp_path: Path,
+) -> None:
+    source, target, spec, _owner, validate, prepare = _publication_fixture(tmp_path)
+    sealed = replace(spec, persist_run_receipt=False)
+
+    result = mod.atomic_publish_run_group(
+        sealed,
+        copy_backend="python",
+        validate_run=validate,
+        prepare_parents=prepare,
+        complete_run=lambda _root, _parent, run: run.attrs.update(
+            {"palette_run_completion_status": "complete"}
+        ),
+        verify_pointers=lambda _root: None,
+    )
+
+    assert result["final_validation"]["valid"] is True
+    run = zarr.open_group(str(target), mode="r", use_consolidated=False)
+    assert "cluster_output_staging" not in run.attrs
+    assert run.attrs["palette_run_completion_status"] == "complete"
+
+
 def test_atomic_temporary_paths_are_host_job_and_attempt_unique(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

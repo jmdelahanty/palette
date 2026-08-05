@@ -28,6 +28,9 @@ from fisheye.shared.zarr.keypoint_schema import (
     derive_frame_row_offsets,
     derive_keypoint_row_signatures,
 )
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    KeypointPublicationDisposition,
+)
 from fisheye.shared.zarr.keypoint_storage import (
     KeypointStoragePlanSet,
     plan_keypoint_storage,
@@ -37,6 +40,9 @@ from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfi
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
     require_runs_parent,
 )
 
@@ -425,8 +431,9 @@ def publish_selector_ineligible_keypoint_snapshot(
     shadow_root: Path = DEFAULT_KEYPOINT_SHADOW_ROOT,
     storage_profile: StorageProfile = PUBLISHED_HTTP_V1,
     created_by: str = "keypoint_v2_shadow",
+    disposition: KeypointPublicationDisposition = KeypointPublicationDisposition(),
 ) -> KeypointShadowPublication:
-    """Write, consolidate, and validate one standalone raw-keypoint-v2 canary."""
+    """Write and validate one immutable, selector-ineligible raw snapshot."""
 
     output_path = require_safe_keypoint_shadow_destination(
         destination, shadow_root=shadow_root
@@ -448,10 +455,7 @@ def publish_selector_ineligible_keypoint_snapshot(
     root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
     root.attrs.update(
         {
-            "benchmark_only": True,
-            "canonical": False,
-            "registry_registered": False,
-            "selector_eligible": False,
+            **disposition.root_attributes(),
             "schema_id": KEYPOINT_SHADOW_SCHEMA_ID,
             "schema_version": KEYPOINT_SHADOW_SCHEMA_VERSION,
             "created_at_utc": utc_now(),
@@ -461,19 +465,12 @@ def publish_selector_ineligible_keypoint_snapshot(
     family = require_runs_parent(
         root, "keypoints_runs", completion_epoch=COMPLETION_EPOCH_STRICT
     )
-    family.attrs.update(
-        {
-            "benchmark_only": True,
-            "selector_eligible": False,
-            "selection_contract": "none_shadow_direct_path_only",
-        }
-    )
+    family.attrs.update(disposition.family_attributes())
     run = family.create_group(str(run_id))
     run.attrs.update(
         {
             "status": "running",
-            "stage_selector_eligible": False,
-            "shadow_only": True,
+            **disposition.run_attributes(),
             "artifact_class": "raw_keypoint_observations",
             "keypoint_authority": False,
             "logical_schema": KEYPOINT_SCHEMA_V2.as_manifest(
@@ -485,6 +482,8 @@ def publish_selector_ineligible_keypoint_snapshot(
             "preprocessing": prepared.preprocessing.as_manifest(),
         }
     )
+    if disposition.production_candidate:
+        mark_run_started(run, run_name=str(run_id), stage="keypoints")
     arrays: dict[str, Any] = {}
     bindings = {binding.path: binding for binding in KEYPOINT_SCHEMA_V2.bindings}
     phase_started = time.perf_counter()
@@ -502,8 +501,7 @@ def publish_selector_ineligible_keypoint_snapshot(
             plan=entry.plan,
             fill_value=0,
             attributes={
-                "benchmark_only": True,
-                "selector_eligible": False,
+                **disposition.array_attributes(),
                 "artifact_class": "raw_keypoint_observations",
             },
         )
@@ -517,6 +515,12 @@ def publish_selector_ineligible_keypoint_snapshot(
         skeleton_digest=keypoint_skeleton_digest(prepared.pose_model_schema_binding),
     )
     run.attrs["status"] = "complete"
+    if disposition.production_candidate:
+        mark_run_complete(
+            run,
+            run_name=str(run_id),
+            run_provenance=disposition.run_provenance,
+        )
     phase_started = time.perf_counter()
     consolidate_metadata_capture_expected_warnings(output_path)
     direct, consolidated = keypoint_metadata_declaration_maps(
@@ -561,6 +565,12 @@ def publish_selector_ineligible_keypoint_snapshot(
                 "publication_errors": list(errors),
             }
         )
+        if disposition.production_candidate:
+            mark_run_failed(
+                run,
+                run_name=str(run_id),
+                error="; ".join(errors),
+            )
         raise RuntimeError("Keypoint publication gate failed: " + "; ".join(errors))
     publication = KeypointShadowPublication(
         output_path=output_path,

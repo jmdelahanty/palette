@@ -18,6 +18,7 @@ from fisheye.cluster.keypoints.common import (
     build_refinement_job,
     resolve_pose_model_binding,
     resolve_keypoint_storage,
+    resolve_keypoint_v2_publication_storage,
     validate_flat_roi_cache_binding,
     validate_keypoint_input_dag,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "build_refinement_job",
     "resolve_pose_model_binding",
     "resolve_keypoint_storage",
+    "resolve_keypoint_v2_publication_storage",
     "validate_flat_roi_cache_binding",
     "validate_keypoint_input_dag",
 ]

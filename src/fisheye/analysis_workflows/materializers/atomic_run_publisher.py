@@ -137,6 +137,10 @@ class AtomicRunPublishSpec:
     # while rsync copies use a checksum dry-run. Historical compatibility
     # callers must opt out explicitly and retain path/size verification.
     content_checksum: bool = DEFAULT_COPY_CONTENT_CHECKSUM
+    # Exact-manifest publishers may seal the immutable run metadata before
+    # import and persist this operational receipt outside the run.  They still
+    # receive the complete returned receipt, but opt out of post-seal attrs.
+    persist_run_receipt: bool = True
     publication_owner_attr: str | None = None
     selector_owner_attr: str | None = None
     selector_generation_attr: str | None = None
@@ -982,7 +986,8 @@ def _atomic_publish_locked(
             "temporary_validation": temporary_validation,
         }
         with telemetry.phase("initial_publication_metadata_write"):
-            run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
+            if spec.persist_run_receipt:
+                run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
 
         with telemetry.phase("pre_pointer_validation"):
             pre_pointer_validation = _require_valid(
@@ -991,7 +996,8 @@ def _atomic_publish_locked(
             )
         payload["pre_pointer_validation"] = pre_pointer_validation
         with telemetry.phase("pre_pointer_metadata_write"):
-            run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
+            if spec.persist_run_receipt:
+                run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
 
         with telemetry.phase("completion_and_pointer_publication"):
             complete_run(root, target_parent, run_group)
@@ -1015,7 +1021,8 @@ def _atomic_publish_locked(
             }
             final_run = final_parents[-1][spec.run_name]
         with telemetry.phase("final_publication_metadata_write"):
-            final_run.attrs["cluster_output_staging"] = json_attr_safe(payload)
+            if spec.persist_run_receipt:
+                final_run.attrs["cluster_output_staging"] = json_attr_safe(payload)
         result = json_attr_safe(payload)
         if activate_run is not None:
             # Reopen after the final publisher-owned metadata write. A stale

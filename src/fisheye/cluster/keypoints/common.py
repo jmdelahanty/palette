@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import NAMESPACE_URL, uuid5
 
 from fisheye.cluster.lsf import LsfDependency, LsfJob, LsfResources
 from fisheye.cluster.lsf.runtime import (
@@ -39,6 +40,7 @@ from fisheye.shared.zarr.crop_consumer import (
 )
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
+from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 
 
 DEFAULT_ZEBRAFISH_MIN_ROI_SIZE = 348
@@ -83,10 +85,57 @@ def resolve_keypoint_storage(
     }
 
 
+def resolve_keypoint_v2_publication_storage(
+    *,
+    legacy_roi_shard_rows: int | None,
+    legacy_frame_shard_rows: int,
+) -> dict[str, Any]:
+    """Describe strict v2 publication, which derives chunks from bytes and dtype.
+
+    The row arguments remain accepted by the planner for command-line
+    compatibility, but apply only to obsolete direct-writer layouts.  Terminal
+    inference is deliberately unsharded; strict finalization replans every
+    canonical array through the shared byte planner.
+    """
+
+    if legacy_roi_shard_rows is not None and int(legacy_roi_shard_rows) <= 0:
+        raise ValueError("Legacy keypoint ROI shard rows must be positive or None.")
+    if int(legacy_frame_shard_rows) <= 0:
+        raise ValueError("Legacy keypoint frame shard rows must be positive.")
+    return {
+        "requested": {
+            "legacy_keypoint_roi_shard_rows": (
+                int(legacy_roi_shard_rows)
+                if legacy_roi_shard_rows is not None
+                else None
+            ),
+            "legacy_keypoint_frame_shard_rows": int(legacy_frame_shard_rows),
+            "effect_on_v2_publication": "none",
+        },
+        "effective": {
+            "keypoint_storage_layout": "shared_byte_planned_indexed_sharding_v1",
+            "keypoint_storage_policy": "strict_keypoint_v2_published_http_v1",
+            "storage_profile": PUBLISHED_HTTP_V1.as_manifest(),
+            "chunk_derivation": "dtype_itemsize_times_per_row_shape_to_byte_budget",
+            "access_classes": {
+                "frame_row_offsets": "eager",
+                "observation_columns": "windowed",
+            },
+            "terminal_inference_layout": "unsharded_non_authoritative",
+            "canonical_publication_planner": (
+                "fisheye.shared.zarr.keypoint_storage.plan_keypoint_storage"
+            ),
+        },
+    }
+
+
 @dataclass(frozen=True)
 class KeypointRunNames:
     keypoint_run: str
+    keypoint_quality_run: str
     refined_keypoint_run: str
+    body_frame_run: str
+    terminal_run: str
 
     def to_json(self) -> dict[str, str]:
         return asdict(self)
@@ -230,7 +279,10 @@ def build_keypoint_run_names(run_label: str) -> KeypointRunNames:
     safe_label = safe_component(run_label, default="keypoints")
     return KeypointRunNames(
         keypoint_run=f"keypoints_{safe_label}",
+        keypoint_quality_run=f"keypoint_quality_{safe_label}",
         refined_keypoint_run=f"refined_keypoints_{safe_label}",
+        body_frame_run=f"body_frame_{safe_label}",
+        terminal_run=f"keypoint_terminal_{safe_label}",
     )
 
 
@@ -752,8 +804,6 @@ def build_prediction_job(
     device: str,
     input_mode: str,
     progress_every_batches: int,
-    keypoint_roi_shard_rows: int | None = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
-    keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     resources: LsfResources,
 ) -> LsfJob:
     safe_target = safe_component(target_id, default="target", max_length=56)
@@ -765,45 +815,41 @@ def build_prediction_job(
     )
     scratch_stage = (
         f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
-        "palette_keypoint_roi_cache_stage"
+        "palette_keypoint_terminal"
     )
-    storage = resolve_keypoint_storage(
-        roi_shard_rows=keypoint_roi_shard_rows,
-        frame_shard_rows=keypoint_frame_shard_rows,
-    )
+    terminal_output = run_root / "terminal" / f"{safe_target}.zarr"
     worker: list[str] = [
         str(repo / "scripts" / "py"),
         "-m",
-        "fisheye.utils.run_keypoints_with_registry_model",
+        "fisheye.utils.run_whole_recording_keypoint_terminal",
+        "--recording-id",
+        model.recording_id,
         "--recording-dir",
         str(recording_dir),
-        "--output",
+        "--analysis-zarr",
         str(analysis_zarr),
         "--registry",
         str(registry_path),
-        "--set-id",
+        "--model-set-id",
         model.set_id,
         "--model-run-id",
         model.run_id,
-        "--require-unique",
-        "--run-name",
-        run_names.keypoint_run,
+        "--terminal-run-id",
+        run_names.terminal_run,
+        "--terminal-output",
+        str(terminal_output),
         "--crop-run",
         cache.crop_run,
+        "--cache-manifest",
+        str(cache.manifest_path),
         "--pose-schema",
         str(pose_schema),
         "--batch-size",
         str(int(batch_size)),
         "--device",
         str(device),
-        "--roi-cache-policy",
-        "always",
-        "--roi-cache-manifest",
-        str(cache.manifest_path),
-        "--stage-roi-cache-to-scratch",
-        "--roi-cache-staging-dir",
+        "--scratch-root",
         scratch_stage,
-        "--profile-timings",
         "--input-mode",
         str(input_mode),
         "--progress-jsonl",
@@ -814,19 +860,7 @@ def build_prediction_job(
         ),
         "--progress-every-batches",
         str(int(progress_every_batches)),
-        "--json",
     ]
-    if keypoint_roi_shard_rows is None:
-        worker.append("--no-keypoint-sharding")
-    else:
-        worker.extend(
-            [
-                "--keypoint-roi-shard-rows",
-                str(int(keypoint_roi_shard_rows)),
-                "--keypoint-frame-shard-rows",
-                str(int(keypoint_frame_shard_rows)),
-            ]
-        )
     command = build_runtime_command(
         worker,
         status_path_template=(
@@ -842,7 +876,7 @@ def build_prediction_job(
         environment_overrides={"PALETTE_DISABLE_REGISTRY_WRITES": "1"},
         cleanup_path_templates=(scratch_stage,),
         expected_output_templates=(
-            str(analysis_zarr / "keypoints_runs" / run_names.keypoint_run),
+            str(terminal_output / "terminal_receipt.json"),
         ),
         python_launcher=(str(repo / "scripts" / "py"),),
     )
@@ -857,10 +891,11 @@ def build_prediction_job(
             "target_id": target_id,
             "recording_id": model.recording_id,
             "analysis_zarr": str(analysis_zarr),
-            "keypoint_run": run_names.keypoint_run,
+            "terminal_run": run_names.terminal_run,
+            "terminal_output": str(terminal_output),
             "model": model.to_json(),
             "cache": cache.to_json(),
-            "keypoint_storage": storage,
+            "publication_boundary": "strict_v2_finalizer_only",
         },
     )
 
@@ -873,12 +908,10 @@ def build_refinement_job(
     repo: Path,
     run_root: Path,
     run_names: KeypointRunNames,
-    chunk_size: int,
-    scheduler: str,
-    num_workers: int,
-    memory_limit: str | None,
     resources: LsfResources,
     prediction_job: LsfJob,
+    crop_run: str,
+    recording_identity: str,
 ) -> LsfJob:
     safe_target = safe_component(target_id, default="target", max_length=56)
     job_key = f"refine:{target_id}"
@@ -887,27 +920,53 @@ def build_refinement_job(
         default="keypoint_refinement",
         max_length=120,
     )
+    terminal_output = run_root / "terminal" / f"{safe_target}.zarr"
+    result_json = run_root / "finalization" / f"{safe_target}.json"
+    lineage_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"palette:{recording_identity}:{run_names.refined_keypoint_run}:lineage",
+        )
+    )
+    snapshot_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"palette:{recording_identity}:{run_names.refined_keypoint_run}:snapshot",
+        )
+    )
+    scratch_stage = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "palette_keypoint_v2_finalize"
+    )
     worker: list[str] = [
         str(repo / "scripts" / "py"),
         "-m",
-        "fisheye.refinement.refine_keypoints",
+        "fisheye.utils.finalize_whole_recording_keypoint_v2",
+        "--analysis-zarr",
         str(analysis_zarr),
-        "--keypoint-run",
+        "--crop-run",
+        crop_run,
+        "--terminal-artifact",
+        str(terminal_output),
+        "--raw-run",
         run_names.keypoint_run,
-        "--run-name",
+        "--quality-run",
+        run_names.keypoint_quality_run,
+        "--refined-run",
         run_names.refined_keypoint_run,
-        "--config",
-        str(repo / "configs" / "fisheye" / "default.yaml"),
-        "--chunk-size",
-        str(int(chunk_size)),
-        "--scheduler",
-        str(scheduler),
-        "--num-workers",
-        str(int(num_workers)),
-        "--no-post-audit",
+        "--body-frame-run",
+        run_names.body_frame_run,
+        "--recording-identity",
+        recording_identity,
+        "--refined-lineage-id",
+        lineage_id,
+        "--refined-snapshot-id",
+        snapshot_id,
+        "--scratch-root",
+        scratch_stage,
+        "--result-json",
+        str(result_json),
     ]
-    if memory_limit:
-        worker.extend(["--memory-limit", str(memory_limit)])
     command = build_runtime_command(
         worker,
         status_path_template=(
@@ -922,11 +981,13 @@ def build_refinement_job(
         cwd=repo,
         environment_overrides={"PALETTE_DISABLE_REGISTRY_WRITES": "1"},
         expected_output_templates=(
+            str(analysis_zarr / "keypoints_runs" / run_names.keypoint_run),
             str(
-                analysis_zarr
-                / "refined_keypoints_runs"
-                / run_names.refined_keypoint_run
+                analysis_zarr / "keypoint_quality_runs" / run_names.keypoint_quality_run
             ),
+            str(analysis_zarr / "refined_keypoints_runs" / run_names.refined_keypoint_run),
+            str(analysis_zarr / "analysis" / "body_frame_runs" / run_names.body_frame_run),
+            str(result_json),
         ),
         python_launcher=(str(repo / "scripts" / "py"),),
     )
@@ -942,7 +1003,11 @@ def build_refinement_job(
             "target_id": target_id,
             "analysis_zarr": str(analysis_zarr),
             "source_keypoint_run": run_names.keypoint_run,
+            "keypoint_quality_run": run_names.keypoint_quality_run,
             "refined_keypoint_run": run_names.refined_keypoint_run,
+            "body_frame_run": run_names.body_frame_run,
+            "terminal_output": str(terminal_output),
+            "selector_activation": False,
         },
     )
 
@@ -960,6 +1025,7 @@ __all__ = [
     "build_refinement_job",
     "resolve_pose_model_binding",
     "resolve_keypoint_storage",
+    "resolve_keypoint_v2_publication_storage",
     "safe_component",
     "validate_flat_roi_cache_binding",
     "validate_keypoint_input_dag",

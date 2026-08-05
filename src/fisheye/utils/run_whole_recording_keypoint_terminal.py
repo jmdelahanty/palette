@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""Run one cache-backed whole-recording pose model into terminal evidence.
+
+The analysis archive is never used as an inference output.  A geometry-only
+crop shell and the authenticated flat cache are staged to node-local scratch;
+the completed noncanonical compute result is then copied to a new immutable
+workflow artifact for strict keypoint-v2 finalization.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+from typing import Any, Mapping, Sequence
+import uuid
+
+import numpy as np
+import zarr
+
+from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
+from fisheye.shared.zarr.manifest_digest import (
+    CANONICAL_JSON_DIGEST_ALGORITHM,
+    canonical_json_sha256,
+)
+from fisheye.shared.zarr.keypoint_manifest import KeypointPreprocessingReference
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from fisheye.shared.zarr_run_completion import is_run_complete
+from fisheye.utils.run_keypoints_with_registry_model import (
+    run_keypoints_with_registry_model,
+)
+
+
+WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_ID = (
+    "palette.keypoint.whole_recording_terminal"
+)
+WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION = 1
+TERMINAL_RECEIPT_NAME = "terminal_receipt.json"
+_SOURCE_ARRAY_PATHS = (
+    "instance_key",
+    "source_crop_row_ids",
+    "source_acquisition_frame_index",
+    "frame_indices",
+    "keypoints_roi",
+    "keypoints_img",
+    "keypoint_confidences",
+    "confidence",
+    "pose_bbox_xyxy_roi",
+    "pose_bbox_xyxy_img",
+    "detection_success",
+)
+
+
+def _sha256_file(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected JSON object at {path}.")
+    return value
+
+
+def _require_node_scratch(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if not (str(resolved).startswith("/scratch/") or str(resolved).startswith("/tmp/")):
+        raise ValueError("scratch_root must be under /scratch or /tmp.")
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _stage_crop_shell(
+    analysis_zarr: Path,
+    *,
+    crop_run: str,
+    destination: Path,
+) -> Path:
+    source = analysis_zarr / "crop_runs" / crop_run
+    if not source.is_dir():
+        raise FileNotFoundError(f"Crop run not found: {source}")
+    local = destination / "analysis.zarr"
+    root = zarr.open_group(str(local), mode="w-", zarr_format=3)
+    root.create_group("crop_runs")
+    shutil.copytree(source, local / "crop_runs" / crop_run, copy_function=shutil.copy2)
+    return local
+
+
+def _cache_evidence(manifest_path: Path) -> dict[str, Any]:
+    manifest = _read_json(manifest_path)
+    array = manifest.get("array")
+    if not isinstance(array, Mapping):
+        raise ValueError("Flat-cache manifest lacks array metadata.")
+    payload_sha = str(array.get("sha256") or "")
+    if len(payload_sha) != 64:
+        raise ValueError("Flat-cache manifest lacks its payload SHA-256.")
+    payload_path = Path(str(array.get("bin_path") or "")).expanduser()
+    if not payload_path.is_absolute():
+        payload_path = manifest_path.parent / payload_path
+    payload_path = payload_path.resolve()
+    if not payload_path.is_file():
+        raise FileNotFoundError(f"Flat-cache payload not found: {payload_path}")
+    shape = tuple(int(value) for value in array.get("shape", ()))
+    if len(shape) != 3 or any(value <= 0 for value in shape):
+        raise ValueError("Flat-cache manifest requires one positive [N,H,W] shape.")
+    dtype = np.dtype(array.get("dtype"))
+    expected_bytes = int(np.prod(shape, dtype=np.int64)) * int(dtype.itemsize)
+    if payload_path.stat().st_size != expected_bytes:
+        raise ValueError("Flat-cache payload size differs from its manifest.")
+    return {
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": _sha256_file(manifest_path),
+        "payload_path": str(payload_path),
+        "payload_sha256": payload_sha,
+        "payload_size_bytes": expected_bytes,
+        "shape": list(shape),
+        "dtype": dtype.str,
+        "source": manifest.get("source"),
+        "builder": manifest.get("builder"),
+    }
+
+
+def _publish_terminal_tree(
+    *,
+    local_archive: Path,
+    source_run: str,
+    destination: Path,
+    receipt: Mapping[str, Any],
+) -> None:
+    output = destination.expanduser().resolve()
+    if output.exists():
+        raise FileExistsError(f"Terminal artifact already exists: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.parent / f".{output.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    if temporary.exists():
+        raise FileExistsError(f"Terminal temporary exists: {temporary}")
+    try:
+        root = zarr.open_group(str(temporary), mode="w-", zarr_format=3)
+        root.attrs.update(
+            {
+                "schema_id": WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_ID,
+                "schema_version": WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION,
+                "status": "complete",
+                "selector_eligible": False,
+                "registry_registered": False,
+            }
+        )
+        root.create_group("keypoint_terminal_runs")
+        shutil.copytree(
+            local_archive / "keypoint_shard_runs" / source_run,
+            temporary / "keypoint_terminal_runs" / source_run,
+            copy_function=shutil.copy2,
+        )
+        consolidate_metadata_capture_expected_warnings(temporary)
+        check = zarr.open_group(
+            str(temporary), mode="r", zarr_format=3, use_consolidated=True
+        )
+        run = check[f"keypoint_terminal_runs/{source_run}"]
+        if (
+            not is_run_complete(run)
+            or run.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Terminal keypoint run lost its completed ineligible state."
+            )
+        write_json_atomic(temporary / TERMINAL_RECEIPT_NAME, receipt)
+        os.replace(temporary, output)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
+def run_whole_recording_keypoint_terminal(
+    *,
+    recording_id: str,
+    recording_dir: Path,
+    analysis_zarr: Path,
+    crop_run: str,
+    cache_manifest: Path,
+    registry: Path,
+    model_set_id: str,
+    model_run_id: str,
+    pose_schema: str,
+    terminal_run_id: str,
+    terminal_output: Path,
+    scratch_root: Path,
+    batch_size: int,
+    device: str,
+    input_mode: str,
+    progress_jsonl: Path | None = None,
+    progress_every_batches: int = 1,
+) -> Mapping[str, Any]:
+    archive = analysis_zarr.expanduser().resolve()
+    cache = cache_manifest.expanduser().resolve()
+    scratch = _require_node_scratch(scratch_root) / f"keypoint_{uuid.uuid4().hex}"
+    scratch.mkdir(parents=True, exist_ok=False)
+    try:
+        local_archive = _stage_crop_shell(
+            archive, crop_run=crop_run, destination=scratch / "compute"
+        )
+        result = run_keypoints_with_registry_model(
+            recording_dir=recording_dir,
+            output=local_archive,
+            registry=registry,
+            set_id=model_set_id,
+            model_run_id=model_run_id,
+            require_unique=True,
+            run_name=terminal_run_id,
+            output_parent="keypoint_shard_runs",
+            crop_run=crop_run,
+            pose_schema=pose_schema,
+            batch_size=batch_size,
+            device=device,
+            roi_cache_policy="always",
+            roi_cache_manifest=cache,
+            roi_cache_expected_archive_path=archive,
+            stage_roi_cache_to_scratch=True,
+            roi_cache_staging_dir=scratch / "cache",
+            profile_timings=True,
+            progress_jsonl=progress_jsonl,
+            progress_every_batches=progress_every_batches,
+            input_mode=input_mode,
+            coordinate_contract_mode="legacy_noncanonical",
+            keypoint_roi_shard_rows=None,
+        )
+        if not result.ok or result.keypoint_run != terminal_run_id:
+            raise RuntimeError(
+                f"Terminal keypoint inference failed: {result.to_dict()}"
+            )
+        root = zarr.open_group(str(local_archive), mode="r", use_consolidated=False)
+        run = root[f"keypoint_shard_runs/{terminal_run_id}"]
+        if (
+            not is_run_complete(run)
+            or run.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Terminal compute output is not complete and ineligible."
+            )
+        missing = [path for path in _SOURCE_ARRAY_PATHS if path not in run]
+        if missing:
+            raise RuntimeError(f"Terminal compute output lacks arrays: {missing!r}")
+        array_hashes = {
+            path: sha256_array(run[path][...]) for path in _SOURCE_ARRAY_PATHS
+        }
+        resolution = result.resolution_payload
+        if not isinstance(resolution, Mapping):
+            raise RuntimeError("Terminal inference lacks model-resolution provenance.")
+        artifacts = resolution.get("artifacts")
+        pose_binding = (
+            artifacts.get("model_pose_schema_binding")
+            if isinstance(artifacts, Mapping)
+            else None
+        )
+        if not isinstance(pose_binding, Mapping):
+            raise RuntimeError("Terminal inference lacks exact pose-model binding.")
+        selected = resolution.get("selected")
+        if not isinstance(selected, Mapping):
+            raise RuntimeError("Terminal inference lacks selected model identity.")
+        staging = run.attrs.get("source_roi_cache_staging")
+        staging_copy = staging.get("copy") if isinstance(staging, Mapping) else None
+        if (
+            not isinstance(staging, Mapping)
+            or staging.get("staged") is not True
+            or not isinstance(staging_copy, Mapping)
+            or staging_copy.get("verification") != "single_pass_copy_stream_sha256_v1"
+            or staging_copy.get("source_sha256") != staging_copy.get("staged_sha256")
+        ):
+            raise RuntimeError(
+                "Terminal inference lacks authenticated node-local cache staging."
+            )
+        cache_binding = _cache_evidence(cache)
+        if staging_copy.get("source_sha256") != cache_binding["payload_sha256"]:
+            raise RuntimeError(
+                "Authenticated cache staging disagrees with the source manifest."
+            )
+        cache_binding["staging_verification"] = dict(staging)
+        preprocessing = KeypointPreprocessingReference(
+            profile_id="yolo_pose_flat_cache_v1",
+            profile_version=1,
+            input_mode="flat_bin_node_scratch",
+            document={
+                "source_pixel_dtype": cache_binding["dtype"],
+                "source_pixel_shape": cache_binding["shape"],
+                "source_pixel_contract": (
+                    cache_binding["builder"].get("pixel_contract")
+                    if isinstance(cache_binding["builder"], Mapping)
+                    else None
+                ),
+                "cache_manifest_sha256": cache_binding["manifest_sha256"],
+                "cache_payload_sha256": cache_binding["payload_sha256"],
+                "model_input_mode": run.attrs.get("input_mode_effective"),
+                "model_input_transform": run.attrs.get("model_input_transform"),
+                "confidence_threshold": run.attrs.get("confidence_threshold"),
+                "iou_threshold": run.attrs.get("iou_threshold"),
+                "max_detections_per_roi": run.attrs.get("max_detections"),
+                "coordinate_contract_mode": "legacy_noncanonical",
+            },
+        ).as_manifest()
+        detection_success = np.asarray(run["detection_success"][:], dtype=bool)
+        payload = {
+            "status": "complete",
+            "created_at_utc": utc_now(),
+            "recording_id": recording_id,
+            "recording_dir": str(recording_dir.expanduser().resolve()),
+            "analysis_zarr": str(archive),
+            "crop_run": crop_run,
+            "terminal_run_id": terminal_run_id,
+            "terminal_group_path": f"keypoint_terminal_runs/{terminal_run_id}",
+            "row_count": int(run["instance_key"].shape[0]),
+            "terminal_success_count": int(np.count_nonzero(detection_success)),
+            "terminal_failure_count": int(
+                detection_success.size - np.count_nonzero(detection_success)
+            ),
+            "source_array_hashes": array_hashes,
+            "cache": cache_binding,
+            "model": {
+                "set_id": model_set_id,
+                "run_id": model_run_id,
+                "path": selected.get("model_path"),
+                "sha256": selected.get("model_sha256"),
+                "pose_model_schema_binding": dict(pose_binding),
+                "pose_model_schema_binding_digest": canonical_json_sha256(pose_binding),
+            },
+            "preprocessing": preprocessing,
+            "row_terminal_semantics": (
+                "every_crop_row_present_pose_success_true_or_false_v1"
+            ),
+            "selector_eligible": False,
+            "registry_registered": False,
+            "production_state_changes": [],
+        }
+        receipt = {
+            "schema_id": WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_ID,
+            "schema_version": WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION,
+            "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
+            "payload_digest": canonical_json_sha256(payload),
+            "payload": payload,
+        }
+        _publish_terminal_tree(
+            local_archive=local_archive,
+            source_run=terminal_run_id,
+            destination=terminal_output,
+            receipt=receipt,
+        )
+        return receipt
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--recording-id", required=True)
+    parser.add_argument("--recording-dir", type=Path, required=True)
+    parser.add_argument("--analysis-zarr", type=Path, required=True)
+    parser.add_argument("--crop-run", required=True)
+    parser.add_argument("--cache-manifest", type=Path, required=True)
+    parser.add_argument("--registry", type=Path, required=True)
+    parser.add_argument("--model-set-id", required=True)
+    parser.add_argument("--model-run-id", required=True)
+    parser.add_argument("--pose-schema", default="traditional_v2")
+    parser.add_argument("--terminal-run-id", required=True)
+    parser.add_argument("--terminal-output", type=Path, required=True)
+    parser.add_argument("--scratch-root", type=Path, required=True)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--device", default="0")
+    parser.add_argument(
+        "--input-mode", choices=("tensor", "numpy-list", "auto"), default="tensor"
+    )
+    parser.add_argument("--progress-jsonl", type=Path)
+    parser.add_argument("--progress-every-batches", type=int, default=1)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    receipt = run_whole_recording_keypoint_terminal(
+        recording_id=args.recording_id,
+        recording_dir=args.recording_dir,
+        analysis_zarr=args.analysis_zarr,
+        crop_run=args.crop_run,
+        cache_manifest=args.cache_manifest,
+        registry=args.registry,
+        model_set_id=args.model_set_id,
+        model_run_id=args.model_run_id,
+        pose_schema=args.pose_schema,
+        terminal_run_id=args.terminal_run_id,
+        terminal_output=args.terminal_output,
+        scratch_root=args.scratch_root,
+        batch_size=args.batch_size,
+        device=args.device,
+        input_mode=args.input_mode,
+        progress_jsonl=args.progress_jsonl,
+        progress_every_batches=args.progress_every_batches,
+    )
+    print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

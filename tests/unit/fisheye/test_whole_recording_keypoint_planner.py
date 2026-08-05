@@ -296,12 +296,27 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     assert len(plan.targets[0].cache.manifest_sha256) == 64
     assert plan.targets[0].input_capability.selected_source == "flat_roi_cache"
     assert plan.min_roi_size == 348
-    assert plan.keypoint_storage["effective"] == {
-        "keypoint_storage_layout": "indexed_sharding_v1",
-        "keypoint_storage_policy": "default_indexed_sharding_v1",
-        "keypoint_roi_shard_rows": 131072,
-        "keypoint_frame_shard_rows": 131072,
+    assert plan.keypoint_storage["effective"]["keypoint_storage_layout"] == (
+        "shared_byte_planned_indexed_sharding_v1"
+    )
+    assert plan.keypoint_storage["effective"]["storage_profile"]["profile_id"] == (
+        "published_http_v1"
+    )
+    assert plan.keypoint_storage["effective"]["chunk_derivation"] == (
+        "dtype_itemsize_times_per_row_shape_to_byte_budget"
+    )
+    assert plan.finalization_execution["effective"] == {
+        "algorithm": "strict_keypoint_v2_chain_finalizer_v1",
+        "write_ownership": "serial_whole_physical_units",
+        "storage_planning": "shared_byte_planner_per_array",
+        "publication": "atomic_per_run_then_single_root_consolidation",
+        "selector_activation": False,
     }
+    assert (
+        plan.finalization_execution["requested_legacy_controls"]
+        ["effect_on_v2_finalization"]
+        == "none"
+    )
     assert len(plan.lsf_workflow.jobs) == 5
     assert [job.job_key for job in plan.lsf_workflow.topological_jobs()] == [
         "predict:target_0",
@@ -326,25 +341,31 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
         "fisheye.cluster.lsf.runtime",
     )
     assert "PALETTE_DISABLE_REGISTRY_WRITES=1" in prediction_command
+    assert "fisheye.utils.run_whole_recording_keypoint_terminal" in prediction_command
     assert "--model-run-id" in prediction_command
     assert prediction_command[prediction_command.index("--model-run-id") + 1] == (
         "pose_run"
     )
-    assert "--stage-roi-cache-to-scratch" in prediction_command
-    assert prediction_command[prediction_command.index("--keypoint-roi-shard-rows") + 1] == "131072"
-    assert prediction_command[prediction_command.index("--keypoint-frame-shard-rows") + 1] == "131072"
+    assert "--cache-manifest" in prediction_command
+    assert "--keypoint-roi-shard-rows" not in prediction_command
+    assert "--keypoint-frame-shard-rows" not in prediction_command
     assert "--expected-output" in prediction_command
     assert (
         "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
-        "palette_keypoint_roi_cache_stage"
+        "palette_keypoint_terminal"
     ) in (
         prediction_command
     )
     assert all("<jobid>" not in arg and "<user>" not in arg for arg in prediction_command)
     refinement_command = jobs["refine:target_0"].command
-    assert "--keypoint-run" in refinement_command
+    assert "fisheye.utils.finalize_whole_recording_keypoint_v2" in refinement_command
+    assert "--raw-run" in refinement_command
+    assert "--quality-run" in refinement_command
+    assert "--body-frame-run" in refinement_command
     assert "keypoints_goodcopbadcop_20260710" in refinement_command
     assert "refined_keypoints_goodcopbadcop_20260710" in refinement_command
+    assert "--apply" not in jobs["registry_finalize"].command
+    assert jobs["registry_finalize"].metadata["registry_mutation"] is False
 
 
 def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
@@ -590,7 +611,7 @@ def test_rolling_gate_applies_after_shared_cache_bundle_without_cycle(
     )
 
 
-def test_whole_recording_plan_supports_regular_chunk_opt_out(
+def test_whole_recording_v2_ignores_legacy_row_shard_override(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -604,15 +625,13 @@ def test_whole_recording_plan_supports_regular_chunk_opt_out(
         job for job in plan.lsf_workflow.jobs if job.job_key == "predict:target_0"
     )
 
-    assert plan.keypoint_storage["effective"] == {
-        "keypoint_storage_layout": "regular_chunks_v1",
-        "keypoint_storage_policy": "explicit_regular_chunks_override",
-        "keypoint_roi_shard_rows": None,
-        "keypoint_frame_shard_rows": None,
-    }
-    assert "--no-keypoint-sharding" in prediction.command
+    assert plan.keypoint_storage["requested"]["legacy_keypoint_roi_shard_rows"] is None
+    assert plan.keypoint_storage["requested"]["effect_on_v2_publication"] == "none"
+    assert plan.keypoint_storage["effective"]["keypoint_storage_layout"] == (
+        "shared_byte_planned_indexed_sharding_v1"
+    )
+    assert "--no-keypoint-sharding" not in prediction.command
     assert "--keypoint-roi-shard-rows" not in prediction.command
-    assert prediction.metadata["keypoint_storage"] == plan.keypoint_storage
 
 
 def test_plan_bundle_is_durable_and_apply_submits_only_through_shared_backend(
@@ -780,13 +799,8 @@ def test_keypoint_input_dag_rejects_crop_below_zebrafish_minimum(
         )
 
 
-def test_registry_finalizer_dry_run_requires_exact_source_lineage(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_candidate_validator_requires_all_four_v2_runs_in_plan(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
-    zarr_path = tmp_path / "recording_analysis.zarr"
-    zarr_path.mkdir()
     _write_json(
         run_root / "plan.json",
         {
@@ -796,198 +810,35 @@ def test_registry_finalizer_dry_run_requires_exact_source_lineage(
                     "target": {
                         "target_id": "target_a",
                         "recording_id": "recording_a",
-                        "analysis_zarr": str(zarr_path),
+                        "analysis_zarr": str(tmp_path / "recording_analysis.zarr"),
                     },
                     "run_names": {
-                        "keypoint_run": "keypoints_test",
-                        "refined_keypoint_run": "refined_keypoints_test",
+                        "keypoint_run": "raw",
+                        "refined_keypoint_run": "refined",
                     },
                     "model": {
                         "set_id": "pose_set",
                         "run_id": "pose_run",
-                        "model_path": str(tmp_path / "model.pt"),
+                        "model_sha256": "a" * 64,
                     },
                     "cache": {"crop_run": "crop_001"},
+                    "finalization_result": str(run_root / "finalization" / "a.json"),
                 }
             ],
         },
     )
-    keypoint_run = _FakeGroup(
-        model_resolution_selected_set_id="pose_set",
-        model_resolution_selected_run_id="pose_run",
-        model_resolution_selected_model_path=str(tmp_path / "model.pt"),
-        source_crop_run="crop_001",
-        summary_statistics={
-            "total_rois": 2,
-            "successful_detections": 2,
-            "failed_detections": 0,
-            "success_rate_percent": 100.0,
-        }
-    )
-    refined_run = _FakeGroup(
-        source_keypoints_run="keypoints_test",
-        summary_statistics={
-            "total_rois": 2,
-            "refined_success": 2,
-            "usable_keypoints": 2,
-            "pass_rate_percent": 100.0,
-        },
-    )
-    root = _FakeGroup()
-    root["keypoints_runs"] = _FakeGroup()
-    root["keypoints_runs"]["keypoints_test"] = keypoint_run
-    root["refined_keypoints_runs"] = _FakeGroup()
-    root["refined_keypoints_runs"]["refined_keypoints_test"] = refined_run
-    monkeypatch.setattr(
-        registry_finalize_mod,
-        "open_zarr_group_direct",
-        lambda *_args, **_kwargs: root,
-    )
-    monkeypatch.setattr(
-        registry_finalize_mod,
-        "is_run_complete_in_parent",
-        lambda *_args, **_kwargs: True,
-    )
-
-    report = registry_finalize_mod.finalize_registry(
-        run_root,
-        registry_path=tmp_path / "missing-registry.sqlite",
-        apply=False,
-    )
-
-    assert report["status"] == "ok"
-    assert report["finalized_count"] == 1
-    assert report["finalized"][0]["registry_status"] == "validated"
-
-    refined_run.attrs["source_keypoints_run"] = "wrong_source"
-    failed = registry_finalize_mod.finalize_registry(
-        run_root,
-        registry_path=tmp_path / "missing-registry.sqlite",
-        apply=False,
-    )
-    assert failed["status"] == "error"
-    assert "expected 'keypoints_test'" in failed["errors"][0]["error"]
+    with pytest.raises(ValueError, match="incomplete"):
+        registry_finalize_mod.finalize_registry(
+            run_root,
+            registry_path=tmp_path / "registry.sqlite",
+            apply=False,
+        )
 
 
-def test_registry_finalizer_applies_prediction_then_refinement_serially(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    run_root = tmp_path / "run"
-    zarr_path = tmp_path / "recording_analysis.zarr"
-    zarr_path.mkdir()
-    model_path = tmp_path / "model.pt"
-    _write_json(
-        run_root / "plan.json",
-        {
-            "schema": planner.PLAN_SCHEMA,
-            "targets": [
-                {
-                    "target": {
-                        "target_id": "target_a",
-                        "recording_id": "recording_a",
-                        "analysis_zarr": str(zarr_path),
-                    },
-                    "run_names": {
-                        "keypoint_run": "keypoints_test",
-                        "refined_keypoint_run": "refined_keypoints_test",
-                    },
-                    "model": {
-                        "set_id": "pose_set",
-                        "run_id": "pose_run",
-                        "model_path": str(model_path),
-                    },
-                    "cache": {"crop_run": "crop_001"},
-                }
-            ],
-        },
-    )
-    keypoint_run = _FakeGroup(
-        method="yolo_pose",
-        model_resolution_selected_set_id="pose_set",
-        model_resolution_selected_run_id="pose_run",
-        model_resolution_selected_model_path=str(model_path),
-        source_crop_run="crop_001",
-        summary_statistics={
-            "total_rois": 2,
-            "successful_detections": 2,
-            "failed_detections": 0,
-            "success_rate_percent": 100.0,
-        },
-    )
-    refined_run = _FakeGroup(
-        method="refine_keypoints",
-        source_keypoints_run="keypoints_test",
-        source_crop_run="crop_001",
-        summary_statistics={
-            "total_rois": 2,
-            "refined_success": 2,
-            "usable_keypoints": 2,
-            "pass_rate_percent": 100.0,
-        },
-    )
-    root = _FakeGroup()
-    root["keypoints_runs"] = _FakeGroup()
-    root["keypoints_runs"]["keypoints_test"] = keypoint_run
-    root["refined_keypoints_runs"] = _FakeGroup()
-    root["refined_keypoints_runs"]["refined_keypoints_test"] = refined_run
-    monkeypatch.setattr(
-        registry_finalize_mod,
-        "open_zarr_group_direct",
-        lambda *_args, **_kwargs: root,
-    )
-    monkeypatch.setattr(
-        registry_finalize_mod,
-        "is_run_complete_in_parent",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        registry_finalize_mod,
-        "_check_registry_integrity",
-        lambda _path: "ok",
-    )
-    calls: list[str] = []
-
-    def refresh(**_kwargs):
-        calls.append("performance")
-        return {"keypoint_performance_refresh_status": "ok"}
-
-    def emit_keypoints(*_args, **kwargs):
-        calls.append(f"step:{kwargs['step_name']}")
-        return True
-
-    context = SimpleNamespace(dataset_id="dataset_a", recording_id="recording_a")
-
-    def emit_refined(**_kwargs):
-        calls.append("step:refined_keypoints")
-        return True
-
-    monkeypatch.setattr(
-        registry_finalize_mod,
-        "refresh_keypoint_performance_details",
-        refresh,
-    )
-    monkeypatch.setattr(registry_finalize_mod, "emit_stage_completion", emit_keypoints)
-    monkeypatch.setattr(
-        registry_finalize_mod.refine_mod,
-        "_resolve_status_context_from_root",
-        lambda *_args, **_kwargs: context,
-    )
-    monkeypatch.setattr(
-        registry_finalize_mod.refine_mod,
-        "_emit_refined_keypoint_status",
-        emit_refined,
-    )
-    registry = tmp_path / "registry.sqlite"
-    registry.touch()
-
-    report = registry_finalize_mod.finalize_registry(
-        run_root,
-        registry_path=registry,
-        apply=True,
-    )
-
-    assert report["status"] == "ok"
-    assert report["finalized_count"] == 1
-    assert calls == ["performance", "step:keypoints", "step:refined_keypoints"]
-    assert report["finalized"][0]["dataset_id"] == "dataset_a"
+def test_candidate_validator_forbids_registry_or_selector_activation(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="separate reviewed selector/registry"):
+        registry_finalize_mod.finalize_registry(
+            tmp_path / "run",
+            registry_path=tmp_path / "registry.sqlite",
+            apply=True,
+        )

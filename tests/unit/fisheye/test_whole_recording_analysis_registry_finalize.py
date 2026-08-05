@@ -82,7 +82,13 @@ def test_combined_registry_finalizer_validates_exact_mask_lineage(
     monkeypatch,
 ) -> None:
     run_root = _write_plan(tmp_path)
-    monkeypatch.setattr(mod, "finalize_keypoints", lambda *_args, **_kwargs: {"status": "ok"})
+    keypoint_calls: list[bool] = []
+
+    def validate_keypoints(*_args, **kwargs):
+        keypoint_calls.append(bool(kwargs["apply"]))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(mod, "finalize_keypoints", validate_keypoints)
     monkeypatch.setattr(mod, "open_zarr_group_direct", lambda *_args, **_kwargs: _root())
     monkeypatch.setattr(mod, "is_run_complete_in_parent", lambda *_args: True)
     monkeypatch.setattr(mod, "Registry", _Registry)
@@ -94,6 +100,7 @@ def test_combined_registry_finalizer_validates_exact_mask_lineage(
     )
 
     assert report["status"] == "ok"
+    assert keypoint_calls == [False]
     assert report["registry_integrity"] == "ok"
     assert report["subject_masks"][0]["assignment_keypoint_run"] == (
         "refined_keypoints_exact"
