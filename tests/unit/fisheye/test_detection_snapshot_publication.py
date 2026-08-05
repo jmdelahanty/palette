@@ -9,6 +9,8 @@ import zarr
 from fisheye.shared.detect_reason_codec import encode_reason_bytes
 from fisheye.shared.instance_keys import mint_detection_instance_keys
 from fisheye.shared.zarr.detection_snapshot_publication import (
+    inspect_canonical_detection_successor_source,
+    publish_canonical_detection_successor,
     publish_detection_snapshot_pair,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
@@ -52,6 +54,7 @@ def _build_sources(archive: Path) -> None:
     raw.create_array("bbox_norm_coords", data=bbox)
     raw.create_array("scores", data=scores)
     raw.create_array("class_ids", data=classes)
+    raw.create_array("instance_key", data=keys)
     raw.create_array("frame_counts", data=np.asarray([0, 1, 0, 1], dtype=np.int32))
 
     refined_family = root.create_group("refined_detect_runs")
@@ -180,6 +183,165 @@ def test_pair_is_atomically_placed_but_not_selected(tmp_path: Path) -> None:
         1,
         2,
     ]
+
+
+def test_raw_successor_dry_run_preserves_source_identity_without_writes(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    _build_sources(archive)
+
+    result = inspect_canonical_detection_successor_source(
+        analysis_zarr=archive,
+        source_detect_group_path="detect_runs/detect_source",
+        recording_identity=RECORDING_IDENTITY,
+        successor_run_id="detect_canonical_v3",
+    )
+
+    assert result["status"] == "ready"
+    assert result["successor_group_path"] == ("detect_runs/detect_canonical_v3")
+    assert result["instance_key_policy"] == "preserved_from_source"
+    assert result["storage_profile_id"] == ("detection_published_access_aware_v1")
+    assert result["coordinate_catalog"] is True
+    assert result["selector_eligible"] is False
+    assert not (archive / result["successor_group_path"]).exists()
+
+
+def test_raw_successor_is_canonical_v3_atomic_and_selector_ineligible(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _build_sources(archive)
+    source = zarr.open_group(
+        str(archive / "detect_runs/detect_source"),
+        mode="a",
+        use_consolidated=False,
+    )
+    custom_keys = np.asarray([111, 222], dtype=np.uint64)
+    source["instance_key"][:] = custom_keys
+
+    result = publish_canonical_detection_successor(
+        analysis_zarr=archive,
+        source_detect_group_path="detect_runs/detect_source",
+        recording_identity=RECORDING_IDENTITY,
+        successor_run_id="detect_canonical_v3",
+        scratch_root=scratch,
+    )
+
+    assert result["status"] == "complete"
+    assert result["coordinate_catalog"] is True
+    assert result["instance_key_policy"] == "preserved_from_source"
+    assert result["selector_eligible"] is False
+    assert result["registry_updated"] is False
+    assert result["selectors_before"] == result["selectors_after"]
+    assert result["validation"]["canonical_errors"] == []
+    assert result["validation"]["direct_consolidated_metadata_equal"] is True
+    assert list(scratch.iterdir()) == []
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    family = root["detect_runs"]
+    assert family.attrs["latest"] == "detect_source"
+    assert family.attrs["latest_complete"] == "detect_source"
+    successor = family["detect_canonical_v3"]
+    assert successor.attrs["run_manifest"]["schema_version"] == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert successor.attrs["stage_selector_eligible"] is False
+    assert successor.attrs["immutable_snapshot"] is True
+    assert successor.attrs["production_selector_activation"] == "deferred"
+    assert "shadow_only" not in successor.attrs
+    np.testing.assert_array_equal(
+        successor["instances/instance_key"][:],
+        custom_keys,
+    )
+    np.testing.assert_array_equal(source["instance_key"][:], custom_keys)
+    assert np.asarray(successor["instances/frame_row_offsets"][:]).tolist() == [
+        0,
+        0,
+        1,
+        1,
+        2,
+    ]
+
+
+def test_raw_successor_requires_existing_instance_keys_before_writing(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _build_sources(archive)
+    source = zarr.open_group(
+        str(archive / "detect_runs/detect_source"),
+        mode="a",
+        use_consolidated=False,
+    )
+    del source["instance_key"]
+
+    with pytest.raises(ValueError, match="lacks persisted instance_key"):
+        publish_canonical_detection_successor(
+            analysis_zarr=archive,
+            source_detect_group_path="detect_runs/detect_source",
+            recording_identity=RECORDING_IDENTITY,
+            successor_run_id="detect_canonical_v3",
+            scratch_root=scratch,
+        )
+
+    assert not (archive / "detect_runs/detect_canonical_v3").exists()
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    assert root["detect_runs"].attrs["latest"] == "detect_source"
+
+
+def test_raw_successor_tombstones_postcopy_metadata_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _build_sources(archive)
+
+    from fisheye.shared.zarr import detection_snapshot_publication as module
+
+    original = module.consolidate_metadata_capture_expected_warnings
+    calls = 0
+
+    def fail_once(path):  # noqa: ANN001, ANN202
+        nonlocal calls
+        if Path(path).resolve() == archive.resolve():
+            calls += 1
+        if Path(path).resolve() == archive.resolve() and calls == 1:
+            raise RuntimeError("injected consolidation failure")
+        return original(path)
+
+    monkeypatch.setattr(
+        module,
+        "consolidate_metadata_capture_expected_warnings",
+        fail_once,
+    )
+
+    with pytest.raises(RuntimeError, match="injected consolidation failure"):
+        publish_canonical_detection_successor(
+            analysis_zarr=archive,
+            source_detect_group_path="detect_runs/detect_source",
+            recording_identity=RECORDING_IDENTITY,
+            successor_run_id="detect_canonical_v3",
+            scratch_root=scratch,
+        )
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    family = root["detect_runs"]
+    failed = family["detect_canonical_v3"]
+    assert family.attrs["latest"] == "detect_source"
+    assert family.attrs["latest_complete"] == "detect_source"
+    # The immutable scientific payload remains sealed as complete, while the
+    # lifecycle completion marker is the fail-closed publication authority.
+    assert failed.attrs["status"] == "complete"
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert "atomic_publication_tombstone" in failed.attrs
 
 
 def test_clipped_compatibility_source_fails_before_archive_publication(

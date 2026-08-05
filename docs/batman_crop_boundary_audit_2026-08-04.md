@@ -2,8 +2,9 @@
 
 Date: 2026-08-04
 
-Status: implementation validated locally; no LSF jobs, Zarr writes, registry
-changes, or selector changes were performed.
+Status: crop-policy and canonical-v3 successor implementations validated;
+the 36-archive successor cohort is frozen as a read-only plan. No LSF jobs,
+Zarr writes, registry changes, or selector changes have been performed.
 
 ## Decision
 
@@ -112,6 +113,53 @@ refined detection snapshot. Rerunning detection creates a new raw run and new
 observation identities. A legacy crop path must not be promoted as a current
 contract run.
 
+## Canonical-v3 successor checkpoint (2026-08-05)
+
+The accepted raw detection rowsets do not need YOLO reinference merely to
+adopt the current storage and coordinate contract. Palette now has a dedicated
+raw-only successor boundary which:
+
+- requires an exact `detect_runs/<run>` source selected by the existing
+  authoritative detection resolver;
+- requires and preserves every persisted `uint64 instance_key` exactly;
+- writes canonical coordinate-manifest v3 on bounded node-local scratch;
+- uses `detection_published_access_aware_v1` storage;
+- atomically imports a new immutable child run;
+- keeps the child selector-ineligible and leaves every detection selector and
+  registry row unchanged;
+- reconsolidates metadata only after the final publication metadata write;
+- validates direct/consolidated declarations and source-bound logical content
+  after copy-back; and
+- tombstones the child and reconsolidates fail-closed if final visibility
+  validation fails.
+
+A separate batch boundary freezes exact source paths, dimensions, instance-key
+hashes, logical source evidence, selector snapshots, and target IDs before any
+apply. Apply re-inspects the complete frozen evidence and refuses drift.
+
+The read-only Batman plan contains all 36 active analysis archives, 5,029,464
+frames, and 4,987,449 detections. All candidates use the access-aware profile
+and target `detect_canonical_v3_crop_20260805`. Its canonical plan digest is:
+
+```text
+4be7bbfdd5fa5676197818800eb0256b07cc43c94bb174dc4799fa81549ae296
+```
+
+The plan was written outside the repository at:
+
+```text
+/tmp/batman_canonical_v3_successor_plan_20260805.json
+```
+
+Nine focused publication/plan tests pass. They include exact key
+preservation, selector invariance, recomputed-digest tampering, frozen-source
+drift, and an injected final-consolidation failure.
+
+Publication remains deliberately staged: publish and validate one
+selector-ineligible canary, run the 348-pixel crop preflight against its exact
+successor path, and only then publish the remaining 35 successors. Detection
+authority activation is a later, separate reviewed operation.
+
 ## Dry-run commands
 
 Single recording:
@@ -138,6 +186,22 @@ scripts/py -m fisheye.utils.crop_batch \
 ```
 
 The command has no `--apply`, so it performs no crop or publication writes.
+
+Freeze the canonical-v3 successor cohort without Zarr writes:
+
+```bash
+scripts/py -m fisheye.utils.publish_canonical_detection_successor_batch \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --scope /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains Batman \
+  --successor-run detect_canonical_v3_crop_20260805 \
+  --plan-json /tmp/batman_canonical_v3_successor_plan_20260805.json \
+  --result-json /tmp/batman_canonical_v3_successor_plan_result_20260805.json
+```
+
+Apply is intentionally a separate invocation that consumes this exact plan,
+requires bounded node-local scratch and a durable receipt directory, and can
+select one recording with `--only-recording` for the canary.
 
 ## Open scientific and lineage questions
 
