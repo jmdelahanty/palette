@@ -101,6 +101,21 @@ those worker-local identifiers, but the collection keeps them under the core
 digest. This supports either one shared recording keypoint authority or exact
 clip-local authorities without silently pretending they are the same run.
 
+`load_subject_shape_bundle_source()` is the next sealed boundary. It converts
+only a validated bundle-v3 authority into a versioned subject-shape source
+record, retains the exact component-channel order and assignment-keypoint
+collection, and exposes typed point/box translation helpers. The adapter does
+not construct or masquerade as the historical
+`BoundRefinedSubjectMaskCoordinateSurfaces` type.
+
+The subject-shape logical array layout may remain v4 only if the publisher
+reconstructs every existing semantic guarantee from this new source record.
+Because multi-clip assignment may legitimately bind distinct keypoint runs,
+the conservative publication target is a new source-binding/derivation
+manifest version and, unless a recording-level equivalence proof restores the
+old single-source semantics, subject-shape profile v5/method v12. The output
+camera-pixel/body-frame coordinate contract itself need not change.
+
 ## Validation
 
 The focused outside-sandbox real-Zarr matrix passed 41 tests covering the
@@ -133,8 +148,9 @@ republished from the still-verifiable worker/crop inputs or recomputed.
 
 The remaining safe sequence is:
 
-- adapt subject-shape publication to consume the sealed bundle-v3 authority
-  alongside the unchanged historical rich-coordinate reader;
+- add the versioned subject-shape publication/derivation path that consumes
+  the sealed bundle source alongside the unchanged historical rich-coordinate
+  reader;
 - bind the recording/camera/frame-axis identity required by subject-shape v4;
 - prove a realistic multi-clip canary, including an empty-only frame window;
 - materialize a selector-ineligible subject-shape-v4 source;

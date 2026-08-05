@@ -1458,7 +1458,10 @@ Recommended benchmark and promotion-review order:
       members, crop-v2, the source receipts, and every retained worker record.
       The 41-test real-Zarr core/bundle matrix and the active/inactive reader
       integration gate pass. A newly published recording-scale canary and the
-      subject-shape consumer adapter remain required; see
+      subject-shape publication adapter remain required. The sealed
+      subject-shape bundle-source bridge now proves row/frame/camera/placement
+      geometry and the ordered per-worker keypoint-assignment collection
+      without impersonating the historical rich-coordinate source; see
       `docs/subject_mask_recording_coordinate_aggregation_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
@@ -1506,10 +1509,10 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. adapt subject-shape publication to consume the strict bundle-authorized
-   subject-mask coordinate-v3 reader, publish a selector-ineligible recording
-   canary from crop-v2 plus retained worker evidence, and then resume the eye
-   and tail representative-short/full-duration export matrices;
+1. version the subject-shape publication/derivation source binding over the
+   sealed bundle-source bridge, publish a selector-ineligible recording canary
+   from crop-v2 plus retained worker evidence, and then resume the eye and tail
+   representative-short/full-duration export matrices;
 2. include tail-specific narrow normalized-position predicates, camera-frame
    windows, complete scans, part/object counts, and peak RSS;
 3. obtain real consumer evidence where a maintained Palette or Crimson path

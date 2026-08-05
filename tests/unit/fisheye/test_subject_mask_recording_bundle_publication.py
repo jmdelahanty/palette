@@ -30,6 +30,11 @@ from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
     SubjectMaskBundleCoordinateAuthorityError,
     load_recording_subject_mask_coordinate_authority,
 )
+from fisheye.shared.zarr.subject_shape_bundle_source import (
+    BoundSubjectShapeBundleSource,
+    SubjectShapeBundleSourceError,
+    load_subject_shape_bundle_source,
+)
 from fisheye.shared.zarr.subject_mask_schema import (
     derive_subject_mask_frame_row_offsets,
     derive_subject_mask_metrics,
@@ -421,6 +426,29 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
         inactive.require_translation_only_offsets(),
         np.asarray(inactive.source_crop_xywh_node[:, :2], dtype=np.float64),
     )
+    with pytest.raises(SubjectShapeBundleSourceError, match="cannot be constructed"):
+        BoundSubjectShapeBundleSource()
+    shape_source = load_subject_shape_bundle_source(
+        analysis,
+        bundle_id="bundle_coordinate_v3",
+        allow_inactive=True,
+    )
+    assert shape_source.active is False
+    assert shape_source.source_record["component_labels"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    offsets = shape_source.translation_offsets()
+    np.testing.assert_array_equal(
+        shape_source.transform_roi_points(np.zeros((4, 2), dtype=np.float32)),
+        offsets,
+    )
+    np.testing.assert_array_equal(
+        shape_source.transform_roi_boxes(np.zeros((4, 4), dtype=np.float32)),
+        np.concatenate((offsets, offsets), axis=1),
+    )
 
     activate_subject_mask_bundle(
         analysis_zarr=analysis,
@@ -429,6 +457,10 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
     active = load_recording_subject_mask_coordinate_authority(analysis)
     assert active.active is True
     assert active.authority_digest == inactive.authority_digest
+    active_shape_source = load_subject_shape_bundle_source(analysis)
+    assert active_shape_source.active is True
+    assert active_shape_source.source_digest == shape_source.source_digest
+    shape_source.assert_verified()
 
 
 def test_recording_bundle_composes_multiple_raw_clip_shards_without_reordering(
