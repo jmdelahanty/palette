@@ -1,8 +1,9 @@
 # Whole-recording keypoint-v2 production adapter — 2026-08-05
 
 Status: implementation complete and first selector-ineligible Batman canary
-passed. Palette publication and candidate validation passed; Crimson review
-and any separate selector activation remain pending.
+passed Palette publication validation and Crimson interoperability review.
+Scientific acceptance of the observed pose yield and any separate selector
+activation remain pending.
 
 ## Goal
 
@@ -182,6 +183,140 @@ validation otherwise passed with no metadata errors. Updating the warning
 classifier for this library wording is a non-scientific follow-up; it does not
 authorize selector activation.
 
+## Post-canary pose-yield investigation
+
+The 70.93% success rate is a model/inference outcome, not a storage or
+publication failure. All 126,214 requested observations reached an explicit
+terminal state, and all four recording-level surfaces were published and
+validated. Read-only investigation found:
+
+- the immediate failed-row outcome was that postprocessing returned no usable
+  pose at the configured `conf=0.25` threshold;
+- successful rows reached as low as approximately `0.250004`, so some outcomes
+  lie close to that threshold;
+- sampled successful and failed crops had nearly identical brightness and
+  contrast distributions, providing no evidence for blank or corrupt cache
+  rows;
+- 1,436 rows used explicit padding and 620 of those rows failed; padded rows
+  therefore account for only 1.69% of all 36,687 failures;
+- padded rows failed more often than unpadded rows (43.18% versus 28.90%), so
+  edge geometry is a contributing covariate but cannot explain most failures;
+- failures were temporally and row-clustered rather than distributed like
+  independent storage corruption; and
+- failure rate varied strongly with detection confidence, from 77.78% in the
+  `[0.4, 0.5)` stratum to 14.31% in `[0.8, 0.9)`.
+
+The strongest current hypothesis is model-domain mismatch. The selected model
+was trained from 512x512 source crops resized to a 256x256 model input, whereas
+the Batman canary uses 348x348 source crops mapped by centered zero padding to
+352x352 with no scale change. The canary proves that the latter transform is
+exactly bound and reversible; it does not prove that the trained model is
+scientifically adequate under the changed apparent scale and context.
+
+## Terminal failure provenance
+
+Palette commit `1327fe9f833c12d6d5e197426ab8f8fb4a430b11` adds an exact
+terminal-only `pose_failure_codes: uint8[N]` contract. Code zero is valid only
+for a successful pose row. Declared nonzero outcomes distinguish no detection
+above threshold, missing keypoint payload, empty payload, and insufficient
+keypoint cardinality. The immutable terminal receipt binds the exact code map,
+complete histogram, and array digest. Unknown codes and disagreement with the
+success mask fail closed.
+
+This evidence remains outside the already frozen public raw-keypoint-v2 array
+set. Strict v2 preparation validates it but does not add an optional public
+array. Any public adoption requires an explicit schema revision.
+
+The v005 canary predates this implementation. Its rows cannot be assigned to
+the new subclasses retrospectively; collecting an exact histogram requires a
+new terminal inference run. Job-wide model/skeleton or array-cardinality
+incompatibilities remain hard job failures rather than row-level failure codes.
+
+## Mixed crop-size training decision
+
+Training data may contain both 348x348 and 512x512 source crops, but source
+geometry must not be erased. Each example must retain its crop policy, native
+shape, source coordinate contract, and exact source-to-model transform.
+Batching should normalize or shape-bucket pixels at the model boundary, while
+labels are transformed through the same reversible geometry.
+
+The current canary should not be rerun merely to populate the new failure-code
+histogram. First, inference must fail closed unless the selected model package
+declares—and the worker applies—the exact source-pixel-to-model transform used
+during training. Matching only the final tensor dimensions is insufficient.
+For the current model, `512x512 -> 256x256` is the relevant training transform;
+naively resizing `348x348 -> 256x256` changes anatomical scale and field of
+view, while the current `348x348 -> 352x352` padding changes both the input
+extent and apparent model scale.
+
+The safest diagnostic rerun for the current model is therefore to materialize
+the same 512x512 source-camera window and apply its exact historical 256x256
+preprocessing. The resulting landmarks should be inverse-mapped into
+source-camera pixels and then projected into the canonical 348x348 crop
+geometry by stable `instance_key`; the inference pixel window need not replace
+the published downstream crop authority. If the historical transform cannot
+be reconstructed exactly from digest-bound model metadata, the job must stop
+rather than infer a resize policy.
+
+The next training checkpoint should:
+
+1. add manually reviewed Batman 348x348 examples rather than treating failed
+   inference as ground truth;
+2. split by recording or session so nearby frames cannot leak across train and
+   validation sets;
+3. retain a Batman-domain holdout and report metrics separately for 348x348
+   and 512x512 source profiles;
+4. compare the current 348-to-352 transform at multiple diagnostic confidence
+   thresholds with the exact historical 512-to-256 inference path; a
+   348-to-256 resize may be studied as a separate candidate but must not be
+   described as reproducing training scale;
+5. train a successor against the intended production crop/input policy before
+   deciding whether the current 70.93% candidate is scientifically acceptable.
+
+Multi-scale augmentation may improve robustness, but it does not by itself
+resolve a change in source field of view, anatomical scale, or acquisition
+domain.
+
+## Crimson interoperability verdict
+
+Crimson reported `PASS` for refined source-binding v2 using exact,
+digest-validated skeleton semantics. It performed no dtype probing, selector
+fallback, or archive writes. Across five fresh processes it reported:
+
+- median readiness 353 ms, with a 3.98 s worst uncontrolled-cache trial;
+- warm random-frame p95 0.137 ms;
+- forward 70-frame-page p95 4.36 ms;
+- zero deadline misses and zero stale frames;
+- 32.23 MB transferred in 109 reads per process;
+- approximately 104.6 MB peak RSS;
+- zero quality-payload reads; and
+- exactly one read of each retained offset index.
+
+The Metal visual gate passed at frame 1,000 with 11 keypoint primitives, one
+body-frame heading, and exact live-crop placement. It confirms visible
+alignment for the inspected frame, not an exhaustive search of every padded or
+ROI-edge case. Crimson also reported 79/79 passing macOS headless tests.
+
+The supplied immutable evidence reference is Crimson commit
+`f4edbff7b5c3e6d341395f35092b2a8997d5c3d5`, with evidence under
+`docs/diagnostics/keypoint_v2_batman_canary_2026-08-05/`. That commit was
+reported clean but remains local and unpushed. It must be pushed or otherwise
+made durably retrievable before Palette uses it as activation provenance.
+
+## Activation boundary
+
+Crimson's result completes the consumer interoperability gate. It does not
+alone activate production selectors. Activation still requires an explicit
+review that separates:
+
+- schema, identity, storage, and publication correctness, which passed;
+- consumer correctness and performance, which passed for the tested canary;
+- scientific acceptance of the current pose-yield profile, which remains a
+  project decision; and
+- one atomic, fail-closed activation operation for the raw, quality, refined,
+  and body-frame authority chain, followed by final consolidated-metadata
+  validation and registry update.
+
 ## Canary checklist
 
 - [x] Commit this implementation with a clean worktree.
@@ -197,10 +332,26 @@ authorize selector activation.
 - [x] Confirm all four candidate manifests, dtypes, logical hashes, storage
   plans, direct/consolidated equivalence, and source-chain digests.
 - [x] Confirm no production selector or registry row changed.
-- [ ] Give Crimson the explicit refined-keypoint and crop run IDs for exact
+- [x] Give Crimson the explicit refined-keypoint and crop run IDs for exact
   typed open, traversal, cancellation, identity, and rendering validation.
-- [ ] Activate selectors only through a later reviewed gate if both Palette and
-  Crimson approve the canary.
+- [x] Pass Crimson's exact-schema, traversal, cancellation, performance, and
+  visual-alignment canary gate.
+- [x] Add exact terminal-only failure codes and bind them into v2 preparation
+  receipts without changing the frozen public raw-v2 array set.
+- [ ] Push or otherwise durably publish Crimson evidence commit
+  `f4edbff7b5c3e6d341395f35092b2a8997d5c3d5`.
+- [ ] Decide whether 70.93% current-model yield is acceptable for initial
+  production use or requires a diagnostic matrix, new 348-domain labels, and a
+  successor model first.
+- [ ] Make the model package declare the training source geometry and complete
+  source-to-model preprocessing transform, and make inference fail closed when
+  that transform cannot be reproduced exactly.
+- [ ] Rerun a selector-ineligible terminal canary using the enforced
+  model-trained scale when an exact failure-code histogram is needed; v005
+  cannot be retroactively classified.
+- [ ] Implement and review the atomic four-surface selector activation gate.
+- [ ] Activate selectors only through that later reviewed gate after final
+  direct/consolidated metadata and registry validation.
 - [ ] Expand to the remaining 35 Batman recordings only after that checkpoint.
 
 ## Dry-run template
