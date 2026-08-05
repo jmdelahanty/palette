@@ -2,10 +2,10 @@
 
 Date: 2026-08-04
 
-Status: first selector-ineligible contract checkpoint implemented; no production
-archive, selector, registry authority, physical profile, or canonical data was
-changed. A future recording-level canary and downstream subject-shape adapter
-remain required.
+Status: selector-ineligible contract and strict bundle-authority reader
+implemented; no production archive, selector, registry authority, physical
+profile, or canonical data was changed. A future recording-level canary and
+downstream subject-shape adapter remain required.
 
 ## Decision
 
@@ -75,9 +75,21 @@ worker model/policy evidence fails before publication.
 fixtures. When crop v2 is present, the publisher emits raw/refined core v3 and
 the bundle cross-binding proves their shared crop and exact refined-to-raw edge.
 
+The backend-neutral
+`load_recording_subject_mask_coordinate_authority()` reader accepts only one
+of two explicit policies: the single activated root bundle authority, or a
+named inactive bundle when the caller opts into `allow_inactive=True` for a
+benchmark/canary. It revalidates the complete bundle, both core-v3 members, the
+crop-v2 manifest, both source-receipt sidecars, every retained worker record,
+and their digest chain before returning a sealed authority object. It never
+uses family `latest` pointers and never treats an unselected run as implicit
+authority.
+
 ## Validation
 
-The focused outside-sandbox real-Zarr matrix passed 41 tests covering:
+The focused outside-sandbox real-Zarr matrix passed 41 tests covering the
+publisher foundation, followed by a dedicated active/inactive strict-reader
+integration gate covering:
 
 - retained worker evidence and exact assembly coverage;
 - conflicting worker scientific authority rejection;
@@ -88,7 +100,9 @@ The focused outside-sandbox real-Zarr matrix passed 41 tests covering:
 - recomputed-digest coordinate-catalog tampering;
 - crop-v2-required fail-closed behavior;
 - inactive recording-level bundle import, cross-binding, activation, and
-  recovery behavior.
+  recovery behavior;
+- explicit inactive authorization, default rejection of unselected bundles,
+  and exact activated-root-authority resolution.
 
 Static validation also passed Ruff, Python compilation, and `git diff --check`.
 
@@ -100,8 +114,8 @@ republished from the still-verifiable worker/crop inputs or recomputed.
 
 The remaining safe sequence is:
 
-- add a strict bundle-authorized coordinate-v3 reader alongside the unchanged
-  historical rich-coordinate reader;
+- adapt subject-shape publication to consume the sealed bundle-v3 authority
+  alongside the unchanged historical rich-coordinate reader;
 - bind the recording/camera/frame-axis identity required by subject-shape v4;
 - prove a realistic multi-clip canary, including an empty-only frame window;
 - materialize a selector-ineligible subject-shape-v4 source;

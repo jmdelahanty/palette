@@ -24,6 +24,11 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
 from fisheye.shared.zarr.crop_manifest import build_coordinate_crop_run_manifest
 from fisheye.shared.zarr.subject_mask_bundle_publication import (
     SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
+    activate_subject_mask_bundle,
+)
+from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
+    SubjectMaskBundleCoordinateAuthorityError,
+    load_recording_subject_mask_coordinate_authority,
 )
 from fisheye.shared.zarr.subject_mask_schema import (
     derive_subject_mask_frame_row_offsets,
@@ -246,7 +251,7 @@ def _draft(
 
 def _install_crop_v2(draft_path: Path) -> None:
     root = zarr.open_group(str(draft_path), mode="a", use_consolidated=False)
-    crop = root["crop_runs/crop_001"]
+    crop = root.require_group("crop_runs").require_group("crop_001")
     arrays = _crop_manifest_arrays()
     for path, values in arrays.items():
         _create_array(crop, path, values)
@@ -347,6 +352,7 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
     analysis = tmp_path / "analysis_coordinate_v3.zarr"
     root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
     root.attrs["recording_id"] = "crop_manifest_test"
+    _install_crop_v2(analysis)
 
     result = publish_recording_subject_mask_bundle(
         analysis_zarr=analysis,
@@ -389,6 +395,31 @@ def test_recording_bundle_publishes_coordinate_bound_v3_members(
         "manifest_payload_digest"
     ] == raw_manifest["payload_digest"]
     assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
+
+    with pytest.raises(
+        SubjectMaskBundleCoordinateAuthorityError,
+        match="allow_inactive",
+    ):
+        load_recording_subject_mask_coordinate_authority(
+            analysis,
+            bundle_id="bundle_coordinate_v3",
+        )
+    inactive = load_recording_subject_mask_coordinate_authority(
+        analysis,
+        bundle_id="bundle_coordinate_v3",
+        allow_inactive=True,
+    )
+    assert inactive.active is False
+    assert inactive.crop_run_path == "crop_runs/crop_001"
+    assert inactive.refined_run.path == "refined_subject_masks_runs/refined_coordinate_v3"
+
+    activate_subject_mask_bundle(
+        analysis_zarr=analysis,
+        bundle_id="bundle_coordinate_v3",
+    )
+    active = load_recording_subject_mask_coordinate_authority(analysis)
+    assert active.active is True
+    assert active.authority_digest == inactive.authority_digest
 
 
 def test_recording_bundle_composes_multiple_raw_clip_shards_without_reordering(
