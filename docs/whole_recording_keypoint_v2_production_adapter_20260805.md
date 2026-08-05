@@ -458,7 +458,14 @@ explicitly rejecting the current model/input pairing for scientific promotion.
   detections and therefore failed the scientific gate.
 - [ ] Train and validate a successor model against the intended production crop
   and model-input policy before broad Batman inference or selector activation.
-- [ ] Implement and review the atomic four-surface selector activation gate.
+- [x] Implement the atomic four-surface activation gate as one root-level,
+  digest-bound bundle authority. The dry-run planner exhaustively re-hashes all
+  logical arrays, revalidates direct/consolidated metadata and the complete
+  crop -> raw -> quality -> refined -> body-frame chain, and records the exact
+  candidate owners and prior authority generation. Applying requires that exact
+  reviewed plan and fails if any live state changed. Per-run manifests and
+  family selectors remain untouched; the final consolidated root authority is
+  the all-four-or-none visibility commit.
 - [ ] Activate selectors only through that later reviewed gate after final
   direct/consolidated metadata and registry validation.
 - [ ] Expand to the remaining 35 Batman recordings only after that checkpoint.
@@ -483,3 +490,32 @@ explicitly rejecting the current model/input pairing for scientific promotion.
 
 Dry-run materializes only plan evidence. It does not submit LSF jobs or mutate
 any analysis archive, selector, or registry row.
+
+## Four-surface activation command
+
+Activation is a separate reviewed operation and defaults to read-only. First
+produce a deterministic plan:
+
+```bash
+scripts/py -m fisheye.utils.activate_keypoint_v2_bundle \
+  /path/to/recording_analysis.zarr \
+  --crop-run <crop-v2-run> \
+  --raw-run <raw-keypoint-v2-run> \
+  --quality-run <keypoint-quality-v1-run> \
+  --refined-run <refined-keypoint-v2-run> \
+  --body-frame-run <body-frame-v1-run> \
+  --result-json /path/to/reviewed-activation-plan.json
+```
+
+After independent review, apply that exact plan by repeating the candidate IDs
+and adding:
+
+```bash
+  --apply \
+  --reviewed-plan /path/to/reviewed-activation-plan.json
+```
+
+The apply path serializes on the recording-wide metadata publication lock,
+revalidates the reviewed plan against live state, writes a fail-closed lease,
+and commits `keypoint_bundle_authority` at the archive root. It never rewrites
+the four sealed run manifests or marks an unreviewed model result authoritative.
