@@ -321,6 +321,31 @@ allowlists both reviewed runtime versions, and requires that exact probe at the
 worker boundary. No package installation or unverified version fallback is
 used.
 
+The resulting `v007` full-duration canary proved runtime compatibility but
+rejected the synthetic-context hypothesis scientifically. All 126,214 rows
+completed, and every row received
+`no_pose_detection_above_threshold`; the other frozen failure-code counts were
+zero. The raw, quality, refined, and body-frame candidate runs passed strict
+storage/publication validation but remained selector-ineligible, unregistered,
+and unselected. The immutable outcome is documented in
+`docs/diagnostics/batman_keypoint_v2_candidate_20260805/whole_recording_canary_v007.md`.
+
+A bounded 128-row follow-up under Ultralytics `8.3.214` separated geometry from
+threshold effects. Native 348-pixel submission produced 10 detections at
+`conf=0.25`, 22 at `0.05`, 36 at `0.01`, and 58 at `0.001`. Center-zero-padding
+to 512 produced no detections even at `0.001`; padding with gray value 114
+produced four detections at `0.001` and none at `0.01`. Therefore the failed
+full run was not caused by the normal `0.25` threshold alone. A synthetic
+border does not reproduce the real 512x512 source-camera context present in
+the training set.
+
+The next candidate must materialize a real 512x512 camera-pixel inference
+window centered on each unchanged canonical crop instance. That inference
+window is model input, not a replacement crop authority: the canonical 348x348
+crop run, `instance_key`, frame identity, and downstream coordinate space stay
+fixed, while the exact 82-pixel context-window translation is persisted and
+inverted when publishing keypoints.
+
 This design avoids a public coordinate-schema change. Ultralytics returns
 coordinates in the submitted 512x512 extent after its internal resize, and the
 existing exact padding inverse restores native 348x348 ROI coordinates. The
@@ -398,9 +423,15 @@ review that separates:
   and worker fail closed on missing, stale, or conflicting evidence.
 - [ ] Make future training/model-packaging workflows emit that contract
   directly instead of using the audited historical backfill utility.
-- [ ] Rerun a selector-ineligible terminal canary using the enforced
-  model-trained scale when an exact failure-code histogram is needed; v005
-  cannot be retroactively classified.
+- [x] Rerun a selector-ineligible terminal canary using the enforced
+  model-trained scale and collect the exact failure-code histogram. The v007
+  synthetic-padding candidate produced zero successful poses and is explicitly
+  rejected for activation.
+- [ ] Implement and validate a source-camera-context materializer that derives
+  a real 512x512 inference window from the unchanged 348x348 crop geometry and
+  binds its translation, pixels, cache digest, and instance lineage.
+- [ ] Pass a bounded identity-fixed model-output gate on real 512x512 context
+  before submitting another full-duration run.
 - [ ] Implement and review the atomic four-surface selector activation gate.
 - [ ] Activate selectors only through that later reviewed gate after final
   direct/consolidated metadata and registry validation.
