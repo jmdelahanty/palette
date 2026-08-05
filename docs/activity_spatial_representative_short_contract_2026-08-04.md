@@ -2,9 +2,9 @@
 
 Date: 2026-08-04
 
-Status: the clean five-process representative-short writer/read matrix passed.
-The independent edge-bin recomputation receipt remains open. No selector,
-registry, storage profile, or source archive is changed by this checkpoint.
+Status: the clean five-process representative-short writer/read matrix and the
+independent source-backed edge-bin receipt passed. No selector, registry,
+storage profile, or source archive is changed by this checkpoint.
 
 ## Goal
 
@@ -83,6 +83,8 @@ The five-process matrix ran from the detached clean revision:
 Palette commit: 68266eff5790390eacc889e5b9015a5adc9e8e13
 Request digest: 2f6ecfd5b56b98b5702986184d2ece24c014f76d083a7ca1ad2457c88c8181c4
 Matrix digest: f86f462f4efaedef8458926f7d1564551decf6c5a79950e54fb120c67877efcb
+Equivalence-validator commit: 17f0656ece68531c69dd1961e89e95bb318e794d
+Equivalence digest: 58078ab65f4d85a4536ce26eebc278fb2ca85eca440b04bf4108e4bd4c88a59b
 ```
 
 Evidence root:
@@ -118,6 +120,15 @@ The publisher requested 441.5 million read characters in 14,818 read-like
 syscalls. These counters include cache-served data and are not network-transfer
 telemetry. Network bytes and request counts remain explicitly unavailable.
 
+The clean equality validator compared the 1,333 fully contained rows against
+the prior unbounded v2/v3 export, excluding only the deliberately changed
+`source_lineage_hash`. It then reopened the Zarr track authority and exact bout
+run and recomputed all 1,334 bounded rows. The recomputed payload exactly
+matched decoded digest
+`cf44f671c540dca8060d93363193eec94a3940fd2728b383b44eb7fa407d73ce`.
+The only selection edge was track 0, bin 1,333, whose denominator was exactly
+50 frames. Both manifests remained unchanged.
+
 ## Validation completed
 
 - [x] Exact interval construction and digest coverage.
@@ -130,7 +141,7 @@ telemetry. Network bytes and request counts remain explicitly unavailable.
 - [x] Benchmark request and CLI transport.
 - [x] Exact 200,000-frame representative-short enforcement.
 - [x] Full-duration bounded-request rejection.
-- [x] Focused exporter/controller tests: 51 passed.
+- [x] Focused exporter/controller/equivalence tests: 52 passed.
 
 ## Remaining evidence
 
@@ -139,7 +150,7 @@ telemetry. Network bytes and request counts remain explicitly unavailable.
       revision using node-local scratch and immutable benchmark publication.
 - [x] Record writer phase timing, apparent and allocated bytes, object count,
       CPU, peak RSS, random/window/full-scan latency, and logical digests.
-- [ ] Independently compare the scientific columns with a recomputed
+- [x] Independently compare the scientific columns with a recomputed
       `[start, stop)` projection. Do not infer equality by slicing the prior
       full-duration Parquet file because the non-aligned edge bin has different
       clipped denominators and aggregates.

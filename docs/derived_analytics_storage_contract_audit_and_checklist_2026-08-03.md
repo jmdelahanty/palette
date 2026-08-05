@@ -1406,12 +1406,15 @@ Recommended benchmark and promotion-review order:
       requests. Binning v3 and export v4 bind the interval and edge-bin,
       clipped-denominator, union-occupancy, started-bout, validity, and row
       policies without weakening full-source identity. Unbounded binning v2
-      and export v3 remain readable. Focused exporter/controller validation
-      passes 51/51. The clean `68266eff` five-process matrix produced 1,334
+      and export v3 remain readable. Focused exporter/controller/equivalence
+      validation passes 52/52. The clean `68266eff` five-process matrix produced 1,334
       rows and two objects, with 21.46-second publication, 5.57 ms median
       random p95, 5.66 ms median window p95, 15.35 ms median full scan, and an
-      unchanged 268-file source guard. The independent partial-edge-bin
-      recomputation remains open. See
+      unchanged 268-file source guard. Clean `17f0656e` then matched 1,333
+      interior bins to the full export and recomputed all 1,334 rows directly
+      from Zarr, including the final 50-frame edge bin; receipt digest
+      `58078ab65f4d85a4536ce26eebc278fb2ca85eca440b04bf4108e4bd4c88a59b`.
+      See
       `docs/activity_spatial_representative_short_contract_2026-08-04.md`.
 - [x] Freeze the honest representative-short query-export boundary. A
       `representative_short` kinematics request now requires exactly one
@@ -1489,9 +1492,8 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. complete the independent representative-short activity/spatial edge-bin
-   recomputation receipt; then resume eye and tail export matrices only after
-   their canonical coordinate-source prerequisite is repaired;
+1. repair the canonical coordinate-source aggregation prerequisite, then
+   resume the eye and tail representative-short/full-duration export matrices;
 2. include tail-specific narrow normalized-position predicates, camera-frame
    windows, complete scans, part/object counts, and peak RSS;
 3. obtain real consumer evidence where a maintained Palette or Crimson path
