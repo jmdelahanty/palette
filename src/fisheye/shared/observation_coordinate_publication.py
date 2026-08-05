@@ -123,6 +123,11 @@ from fisheye.shared.pixel_frame_authority import (
     require_trusted_coordinate_attrs,
 )
 from fisheye.shared.proof_verification import proof_verification_operation
+from fisheye.shared.sampled_training_detection_selection import (
+    SELECTION_REASON_LABELS,
+    select_strong_single_detections,
+    strong_single_policy_record,
+)
 from fisheye.shared.transform_authority import (
     TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     load_bound_transform_authority,
@@ -209,6 +214,20 @@ COLLECTION_PROXY_SUCCESSOR_RUN_SCHEMA = (
 )
 COLLECTION_PROXY_SUCCESSOR_SOURCE_KIND = (
     "historical_collection_proxy_coordinate_successor"
+)
+
+SAMPLED_TRAINING_DETECTION_SELECTION_ATTR = (
+    "sampled_training_detection_selection"
+)
+SAMPLED_TRAINING_DETECTION_SELECTION_SCHEMA_ID = (
+    "palette.sampled_training_detection.selection"
+)
+SAMPLED_TRAINING_DETECTION_SELECTION_SCHEMA_VERSION = 1
+SAMPLED_TRAINING_DETECTION_RUN_SCHEMA = (
+    "palette.sampled_training_detection_run.v1"
+)
+SAMPLED_TRAINING_DETECTION_SOURCE_KIND = (
+    "strong_single_full_frame_detection_selection"
 )
 
 CROP_ROI_GEOMETRY_DERIVATION_ATTR = "crop_roi_geometry_derivation"
@@ -3657,6 +3676,443 @@ def _require_collection_proxy_successor_mapping(
     return historical
 
 
+def _sampled_training_source_path(
+    value: Any,
+    *,
+    run_family: str,
+    field_name: str,
+) -> str:
+    path = str(value).strip().strip("/")
+    parts = path.split("/")
+    if len(parts) != 2 or parts[0] != run_family or not parts[1]:
+        _fail(f"{field_name} must be one exact {run_family}/<run> path.")
+    return path
+
+
+def _sampled_training_detection_selection_record(
+    root_node: Any,
+    rowset: Any,
+    *,
+    acquisition: BoundAcquisitionCameraFrame,
+) -> dict[str, Any]:
+    """Recompute one sampled strong-single selection from exact live arrays."""
+
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Sampled-training detection rowset",
+    )
+    if (
+        attrs.get("schema") != SAMPLED_TRAINING_DETECTION_RUN_SCHEMA
+        or attrs.get("source_kind") != SAMPLED_TRAINING_DETECTION_SOURCE_KIND
+    ):
+        _fail("Sampled-training detection run schema is unsupported.")
+    source_detection_path = _sampled_training_source_path(
+        attrs.get("source_detection_path"),
+        run_family="detect_runs",
+        field_name="source_detection_path",
+    )
+    source_crop_path = _sampled_training_source_path(
+        attrs.get("source_proposal_crop_path"),
+        run_family="crop_runs",
+        field_name="source_proposal_crop_path",
+    )
+    _persisted_node(
+        root_node,
+        source_detection_path,
+        label="sampled source detection artifact",
+    )
+    _persisted_node(
+        root_node,
+        source_crop_path,
+        label="sampled source proposal crop",
+    )
+    policy = attrs.get("selection_policy")
+    if not isinstance(policy, Mapping):
+        _fail("Sampled-training detection selection_policy is missing.")
+    target_size = policy.get("target_roi_size_height_width")
+    if (
+        not isinstance(target_size, (list, tuple))
+        or len(target_size) != 2
+        or any(type(value) is not int or value <= 0 for value in target_size)
+    ):
+        _fail("Sampled-training target ROI size is invalid.")
+    minimum_score = policy.get("minimum_score_inclusive")
+    minimum_iou = policy.get("minimum_proposal_iou_inclusive")
+    policy_schema_version = policy.get("schema_version")
+    try:
+        expected_policy = strong_single_policy_record(
+            minimum_score=float(minimum_score),
+            minimum_proposal_iou=float(minimum_iou),
+            target_roi_size=(int(target_size[0]), int(target_size[1])),
+            policy_schema_version=policy_schema_version,
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"Sampled-training selection policy is invalid: {exc}.")
+    if dict(policy) != expected_policy:
+        _fail("Sampled-training selection policy is not its exact canonical form.")
+
+    source_nodes = {
+        "crop_frame_indices": _persisted_node(
+            root_node,
+            f"{source_crop_path}/frame_indices",
+            label="sampled crop acquisition frames",
+        ),
+        "proposal_bbox_img_xyxy": _persisted_node(
+            root_node,
+            f"{source_crop_path}/bbox_img_xyxy",
+            label="sampled proposal image bbox",
+        ),
+        "target_roi_top_left_xy": _persisted_node(
+            root_node,
+            f"{source_crop_path}/roi_coordinates_full",
+            label="sampled target ROI placement",
+        ),
+        "detection_source_frame_indices": _persisted_node(
+            root_node,
+            f"{source_detection_path}/source_frame_indices",
+            label="sampled detector acquisition frames",
+        ),
+        "detection_bbox_norm_coords": _persisted_node(
+            root_node,
+            f"{source_detection_path}/bbox_norm_coords",
+            label="sampled detector normalized bboxes",
+        ),
+        "detection_scores": _persisted_node(
+            root_node,
+            f"{source_detection_path}/scores",
+            label="sampled detector scores",
+        ),
+        "detection_class_ids": _persisted_node(
+            root_node,
+            f"{source_detection_path}/class_ids",
+            label="sampled detector class IDs",
+        ),
+    }
+    source_values = {
+        name: _array(node, label=f"sampled selection source {name}")
+        for name, node in source_nodes.items()
+    }
+    selection = select_strong_single_detections(
+        crop_source_acquisition_frame_index=source_values["crop_frame_indices"],
+        proposal_bbox_img_xyxy=source_values["proposal_bbox_img_xyxy"],
+        target_roi_top_left_xy=source_values["target_roi_top_left_xy"],
+        target_roi_size=(int(target_size[0]), int(target_size[1])),
+        detection_source_acquisition_frame_index=source_values[
+            "detection_source_frame_indices"
+        ],
+        detection_bbox_norm_coords=source_values["detection_bbox_norm_coords"],
+        detection_scores=source_values["detection_scores"],
+        source_width=int(acquisition.record.width_px),
+        source_height=int(acquisition.record.height_px),
+        minimum_score=float(minimum_score),
+        minimum_proposal_iou=float(minimum_iou),
+        policy_schema_version=policy_schema_version,
+    )
+
+    base = canonical_node_path(rowset)
+    output_nodes = {
+        name: _persisted_node(
+            root_node,
+            f"{base}/{name}",
+            label=f"sampled detection output {name}",
+        )
+        for name in (
+            "instance_key",
+            "source_acquisition_frame_index",
+            "bbox_norm_coords",
+            "bbox_img_xyxy",
+            "centers_img_xy",
+            "scores",
+            "class_ids",
+            "source_training_crop_row_index",
+            "source_detection_row_index",
+        )
+    }
+    output_values = {
+        name: _array(node, label=f"sampled detection output {name}")
+        for name, node in output_nodes.items()
+    }
+    receipt_nodes = {
+        name: _persisted_node(
+            root_node,
+            f"{base}/selection_receipt/{name}",
+            label=f"sampled selection receipt {name}",
+        )
+        for name in (
+            "candidate_count",
+            "selected_detection_row_index",
+            "selected_score",
+            "proposal_iou",
+            "included",
+            "reason_code",
+        )
+    }
+    receipt_values = {
+        name: _array(node, label=f"sampled selection receipt {name}")
+        for name, node in receipt_nodes.items()
+    }
+    expected_receipt = {
+        "candidate_count": selection.candidate_count,
+        "selected_detection_row_index": selection.selected_detection_row_index,
+        "selected_score": selection.selected_score,
+        "proposal_iou": selection.proposal_iou,
+        "included": selection.included,
+        "reason_code": selection.reason_code,
+    }
+    for name, expected in expected_receipt.items():
+        if not np.array_equal(receipt_values[name], expected, equal_nan=True):
+            _fail(f"Sampled selection receipt {name!r} differs from recomputation.")
+
+    accepted_crop_rows = selection.accepted_crop_row_indices
+    accepted_detection_rows = selection.accepted_detection_row_indices
+    detect_frames = source_values["detection_source_frame_indices"].astype(
+        np.int64, copy=False
+    )
+    expected_frames = detect_frames[accepted_detection_rows]
+    expected_bbox_norm = source_values["detection_bbox_norm_coords"][
+        accepted_detection_rows
+    ]
+    expected_scores = source_values["detection_scores"][accepted_detection_rows]
+    expected_class_ids = source_values["detection_class_ids"][
+        accepted_detection_rows
+    ]
+    expected_keys = mint_detection_instance_keys(
+        recording_identity=acquisition.record.recording_id,
+        frame_indices=expected_frames,
+        bbox_norm_coords=expected_bbox_norm,
+        class_ids=expected_class_ids,
+    )
+    expected_outputs = {
+        "instance_key": expected_keys,
+        "source_acquisition_frame_index": expected_frames.astype(
+            np.int64, copy=False
+        ),
+        "bbox_norm_coords": expected_bbox_norm,
+        "scores": expected_scores,
+        "class_ids": expected_class_ids,
+        "source_training_crop_row_index": accepted_crop_rows,
+        "source_detection_row_index": accepted_detection_rows,
+    }
+    for name, expected in expected_outputs.items():
+        if not np.array_equal(output_values[name], expected, equal_nan=True):
+            _fail(f"Sampled detection output {name!r} differs from exact selection.")
+    declared_rows = attrs.get(OBSERVATION_ROW_COUNT_ATTR)
+    if (
+        type(declared_rows) is not int
+        or declared_rows != selection.accepted_row_count
+    ):
+        _fail("Sampled detection observation_row_count differs from selection.")
+
+    return {
+        "schema_id": SAMPLED_TRAINING_DETECTION_SELECTION_SCHEMA_ID,
+        "schema_version": SAMPLED_TRAINING_DETECTION_SELECTION_SCHEMA_VERSION,
+        "operation": "strict_strong_single_sampled_detection_selection_v1",
+        "recording_id": acquisition.record.recording_id,
+        "acquisition_camera_frame": {
+            "record_ref": acquisition.record_ref,
+            "record_sha256": acquisition.record_sha256,
+        },
+        "source_detection_rowset_ref": f"/{source_detection_path}",
+        "source_proposal_crop_rowset_ref": f"/{source_crop_path}",
+        "selection_policy": copy.deepcopy(expected_policy),
+        "source_arrays": {
+            name: _payload(node, source_values[name])
+            for name, node in source_nodes.items()
+        },
+        "selection_receipt": {
+            name: _payload(node, receipt_values[name])
+            for name, node in receipt_nodes.items()
+        },
+        "output_arrays": {
+            name: _payload(node, output_values[name])
+            for name, node in output_nodes.items()
+        },
+        "source_row_count": selection.source_row_count,
+        "accepted_row_count": selection.accepted_row_count,
+        "reason_counts": selection.reason_counts(),
+        "reason_code_labels": {
+            str(code): label for code, label in SELECTION_REASON_LABELS.items()
+        },
+        "proof": "exact_live_source_recomputation_and_output_projection_v1",
+    }
+
+
+@proof_verification_operation
+def publish_sampled_training_detection_selection(
+    root_node: Any,
+    rowset: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> BoundCoordinateRecord:
+    """Seal the exact source, policy, all-row receipt, and accepted projection."""
+
+    acquisition = require_bound_acquisition_camera_frame(acquisition_frame)
+    record = _sampled_training_detection_selection_record(
+        root_node,
+        rowset,
+        acquisition=acquisition,
+    )
+    return stamp_and_bind_persisted_coordinate_record(
+        rowset,
+        record,
+        attr_name=SAMPLED_TRAINING_DETECTION_SELECTION_ATTR,
+    )
+
+
+def _load_detection_frame_evidence_for_rowset(
+    root_node: Any,
+    rowset: Any,
+    *,
+    acquisition: BoundAcquisitionCameraFrame,
+) -> BoundDetectionFrameEvidence:
+    camera_id = acquisition.record.camera_id
+    camera = load_source_camera_pixel_frame_authority(
+        _persisted_node(
+            root_node,
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_POINT_PIXEL_CONVENTION}",
+            label="source-camera frame authority",
+        ),
+        acquisition_frame=acquisition,
+    )
+    bbox_camera = load_source_camera_pixel_frame_authority(
+        _persisted_node(
+            root_node,
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_BBOX_PIXEL_CONVENTION}",
+            label="source-camera bbox-edge frame authority",
+        ),
+        acquisition_frame=acquisition,
+    )
+    base = canonical_node_path(rowset)
+    normalized = load_normalized_pixel_frame_authority(
+        _persisted_node(
+            root_node,
+            f"{base}/coordinate_frames/source_camera_normalized",
+            label="detection normalized frame",
+        ),
+        pixel_frame=bbox_camera,
+    )
+    matrix_node = _persisted_node(
+        root_node,
+        f"{base}/coordinate_transforms/source_camera_normalized_to_image",
+        label="normalized-to-camera transform",
+    )
+    authority = load_bound_transform_authority(
+        _persisted_node(
+            root_node,
+            f"{base}/coordinate_transforms/"
+            "source_camera_normalized_to_image_authority",
+            label="normalized-to-camera transform authority",
+        ),
+        payload_node=matrix_node,
+        source_frame=normalized,
+        target_frame=bbox_camera,
+    )
+    transform = load_bound_directed_transform_v2(
+        matrix_node,
+        authority=authority,
+        source_frame=normalized,
+        target_frame=bbox_camera,
+    )
+    return build_bound_detection_frame_evidence(
+        source_camera_frame=camera,
+        bbox_source_camera_frame=bbox_camera,
+        normalized_frame=normalized,
+        normalized_to_source_camera=resolve_bound_directed_transform_chain(
+            (transform,)
+        ),
+    )
+
+
+def _load_persisted_sampled_training_detection_geometry(
+    root_node: Any,
+    rowset_path: str,
+    *,
+    require_selector_eligible: bool = False,
+) -> BoundDetectionObservationGeometry:
+    """Load a complete selector-free sampled detection geometry authority."""
+
+    rowset = _persisted_node(
+        root_node,
+        rowset_path,
+        label="sampled-training detection rowset",
+    )
+    _require_complete_canonical_observation_rowset(
+        rowset,
+        run_family="sampled_detection_runs",
+        label="Sampled-training detection rowset",
+        require_selector_eligible=require_selector_eligible,
+    )
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Sampled-training detection rowset",
+    )
+    if (
+        attrs.get("schema") != SAMPLED_TRAINING_DETECTION_RUN_SCHEMA
+        or attrs.get("source_kind") != SAMPLED_TRAINING_DETECTION_SOURCE_KIND
+    ):
+        _fail("Sampled-training detection rowset schema is unsupported.")
+    _, acquisition = load_persisted_acquisition_camera_authority(root_node)
+    evidence = _load_detection_frame_evidence_for_rowset(
+        root_node,
+        rowset,
+        acquisition=acquisition,
+    )
+    selection = bind_persisted_coordinate_record(
+        rowset,
+        attr_name=SAMPLED_TRAINING_DETECTION_SELECTION_ATTR,
+    )
+    expected = _sampled_training_detection_selection_record(
+        root_node,
+        rowset,
+        acquisition=acquisition,
+    )
+    if selection.record != expected:
+        _fail("Persisted sampled-training detection selection is stale.")
+    base = canonical_node_path(rowset)
+    return load_detection_observation_geometry(
+        rowset,
+        _persisted_node(root_node, f"{base}/instance_key", label="sampled instance_key"),
+        _persisted_node(
+            root_node,
+            f"{base}/source_acquisition_frame_index",
+            label="sampled acquisition frame",
+        ),
+        _persisted_node(
+            root_node,
+            f"{base}/bbox_norm_coords",
+            label="sampled normalized bbox",
+        ),
+        _persisted_node(
+            root_node,
+            f"{base}/bbox_img_xyxy",
+            label="sampled image bbox",
+        ),
+        _persisted_node(
+            root_node,
+            f"{base}/centers_img_xy",
+            label="sampled image center",
+        ),
+        frame_evidence=evidence,
+        source_lineage_records=(selection,),
+    )
+
+
+@proof_verification_operation
+def load_persisted_sampled_training_detection_geometry(
+    root_node: Any,
+    rowset_path: str,
+) -> BoundDetectionObservationGeometry:
+    """Load one complete selector-ineligible sampled detection authority."""
+
+    return _load_persisted_sampled_training_detection_geometry(
+        root_node,
+        rowset_path,
+        require_selector_eligible=False,
+    )
+
+
 def _load_persisted_detection_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -4011,6 +4467,20 @@ def load_collection_proxy_successor_source_rowset(
     return rowset_ref[1:]
 
 
+def _load_persisted_crop_source_observation_geometry(
+    root_node: Any,
+    source_path: str,
+) -> BoundDetectionObservationGeometry:
+    """Resolve the exact supported detection-source family for one crop."""
+
+    if source_path.startswith("sampled_detection_runs/"):
+        return load_persisted_sampled_training_detection_geometry(
+            root_node,
+            source_path,
+        )
+    return load_persisted_detection_observation_geometry(root_node, source_path)
+
+
 def _load_persisted_crop_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -4042,7 +4512,10 @@ def _load_persisted_crop_observation_geometry(
     ):
         _fail("Crop selection does not identify one exact source instance_key array.")
     source_path = source_ref[1 : -len(suffix)]
-    source = load_persisted_detection_observation_geometry(root_node, source_path)
+    source = _load_persisted_crop_source_observation_geometry(
+        root_node,
+        source_path,
+    )
     base = canonical_node_path(rowset)
     return load_crop_observation_geometry(
         rowset,
@@ -4301,6 +4774,11 @@ __all__ = [
     "COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION",
     "COLLECTION_PROXY_SUCCESSOR_RUN_SCHEMA",
     "COLLECTION_PROXY_SUCCESSOR_SOURCE_KIND",
+    "SAMPLED_TRAINING_DETECTION_RUN_SCHEMA",
+    "SAMPLED_TRAINING_DETECTION_SELECTION_ATTR",
+    "SAMPLED_TRAINING_DETECTION_SELECTION_SCHEMA_ID",
+    "SAMPLED_TRAINING_DETECTION_SELECTION_SCHEMA_VERSION",
+    "SAMPLED_TRAINING_DETECTION_SOURCE_KIND",
     "CROP_ROI_GEOMETRY_DERIVATION_ATTR",
     "CROP_ROI_GEOMETRY_DERIVATION_OPERATION",
     "CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID",
@@ -4328,6 +4806,7 @@ __all__ = [
     "load_persisted_collection_proxy_successor_geometry",
     "load_persisted_detection_observation_geometry",
     "load_persisted_ordinary_crop_observation_geometry",
+    "load_persisted_sampled_training_detection_geometry",
     "load_persisted_source_camera_position_surface",
     "publish_crop_observation_geometry",
     "publish_collection_proxy_successor_mapping",
@@ -4335,6 +4814,7 @@ __all__ = [
     "publish_detection_observation_geometry",
     "publish_detection_observation_cardinality",
     "publish_detection_instance_key_derivation",
+    "publish_sampled_training_detection_selection",
     "publish_empty_detection_observation_declaration",
     "require_bound_crop_observation_geometry",
     "require_bound_detection_frame_evidence",
