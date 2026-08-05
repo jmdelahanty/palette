@@ -1410,7 +1410,12 @@ def _resolve_crop_run_frame_count_from_domains(root: zarr.Group, crop_group: zar
         return None
 
 
-def _tensor_input_blocker(batch: np.ndarray, *, model_input_transform: ModelInputTransform) -> Optional[str]:
+def _tensor_input_blocker(
+    batch: np.ndarray,
+    *,
+    model_input_transform: ModelInputTransform,
+    model_stride: int = 32,
+) -> Optional[str]:
     if batch.ndim != 3:
         return f"expected ROI batch shape (N, H, W), got {batch.shape}"
     _, height, width = batch.shape
@@ -1424,8 +1429,11 @@ def _tensor_input_blocker(batch: np.ndarray, *, model_input_transform: ModelInpu
     model_height, model_width = model_input_transform.model_shape
     if model_height != model_width:
         return f"tensor mode requires square model inputs, got {model_height}x{model_width}"
-    if model_height % 32 or model_width % 32:
-        return f"tensor mode requires model input dimensions divisible by 32, got {model_height}x{model_width}"
+    if model_height % model_stride or model_width % model_stride:
+        return (
+            "tensor mode requires model input dimensions divisible by model "
+            f"stride {model_stride}, got {model_height}x{model_width}"
+        )
     return None
 
 
@@ -1435,6 +1443,7 @@ def _prepare_model_inputs(
     input_mode: str,
     model_input_transform: ModelInputTransform,
     device: Optional[str],
+    model_stride: int = 32,
 ) -> Tuple[object, str]:
     """Prepare one ROI batch for Ultralytics prediction.
 
@@ -1444,7 +1453,11 @@ def _prepare_model_inputs(
     path; otherwise it falls back to the list path.
     """
     mode = _normalize_input_mode(input_mode)
-    blocker = _tensor_input_blocker(batch, model_input_transform=model_input_transform)
+    blocker = _tensor_input_blocker(
+        batch,
+        model_input_transform=model_input_transform,
+        model_stride=model_stride,
+    )
     if mode == "tensor" and blocker is not None:
         raise ValueError(f"Cannot use keypoint tensor input mode: {blocker}")
     batch = model_input_transform.apply_numpy_luma_batch(batch)
@@ -1470,6 +1483,7 @@ def _resolve_effective_input_mode_contract(
     requested_mode: str,
     *,
     model_input_transform: ModelInputTransform,
+    model_stride: int = 32,
 ) -> str:
     mode = _normalize_input_mode(requested_mode)
     native_height, native_width = model_input_transform.native_shape
@@ -1477,6 +1491,7 @@ def _resolve_effective_input_mode_contract(
     blocker = _tensor_input_blocker(
         shape_probe,
         model_input_transform=model_input_transform,
+        model_stride=model_stride,
     )
     if mode == "tensor" and blocker is not None:
         raise ValueError(f"Cannot use keypoint tensor input mode: {blocker}")
@@ -1614,6 +1629,25 @@ def _resolve_model_kpt_shape(model: YOLO) -> Optional[tuple[int, int]]:
     return None
 
 
+def _resolve_model_max_stride(model: YOLO) -> int:
+    """Return the exact positive maximum stride declared by the loaded model."""
+
+    model_obj = getattr(model, "model", None)
+    raw_stride = getattr(model_obj, "stride", None)
+    if raw_stride is None:
+        raise ValueError("Loaded keypoint model does not declare an input stride.")
+    if hasattr(raw_stride, "detach"):
+        raw_stride = raw_stride.detach().cpu().numpy()
+    values = np.asarray(raw_stride, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not np.all(np.isfinite(values)) or np.any(values <= 0):
+        raise ValueError("Loaded keypoint model declares an invalid input stride.")
+    maximum = float(np.max(values))
+    rounded = int(round(maximum))
+    if not np.isclose(maximum, rounded, rtol=0.0, atol=1e-9):
+        raise ValueError("Loaded keypoint model stride must be an exact integer.")
+    return rounded
+
+
 def _normalize_torch_device(device: Optional[str]) -> Optional[str]:
     """Accept Ultralytics-style GPU ids while passing a valid torch device string."""
     if device is None:
@@ -1688,6 +1722,7 @@ def detect_keypoints_yolo(
     model_path: str,
     *,
     model_sha256: Optional[str] = None,
+    expected_model_stride: Optional[int] = None,
     run_name: Optional[str] = None,
     output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
     crop_run: Optional[str] = None,
@@ -1841,6 +1876,11 @@ def detect_keypoints_yolo(
             pose_schema or DEFAULT_POSE_SCHEMA_NAME
         )
 
+    if expected_model_stride is not None and (
+        type(expected_model_stride) is not int or expected_model_stride <= 0
+    ):
+        raise ValueError("Expected model stride must be a positive exact integer.")
+
     model = YOLO(str(model_path))
     _revalidate_keypoint_model_artifact(
         model_path,
@@ -1857,6 +1897,15 @@ def detect_keypoints_yolo(
     model_path_resolved = model_path.resolve()
     n_keypoints = int(pose_schema_obj.num_keypoints)
     model_kpt_shape = _resolve_model_kpt_shape(model)
+    model_stride = _resolve_model_max_stride(model)
+    if (
+        expected_model_stride is not None
+        and model_stride != int(expected_model_stride)
+    ):
+        raise ValueError(
+            "Loaded keypoint model stride differs from the planned preprocessing "
+            f"contract: expected {int(expected_model_stride)}, got {model_stride}."
+        )
     if canonical_coordinates and model_kpt_shape is None:
         raise ValueError(
             "Canonical keypoint inference requires an explicit model kpt_shape; "
@@ -2014,6 +2063,7 @@ def detect_keypoints_yolo(
     contracted_effective_input_mode = _resolve_effective_input_mode_contract(
         resolved_input_mode,
         model_input_transform=model_input_transform,
+        model_stride=model_stride,
     )
 
     run_parent, run_group, resolved_run_name = _prepare_run_group_for_parent(
@@ -2294,6 +2344,7 @@ def detect_keypoints_yolo(
                     input_mode=resolved_input_mode,
                     model_input_transform=effective_model_input_transform,
                     device=torch_device,
+                    model_stride=model_stride,
                 )
                 _require_prepared_model_input_contract(
                     model_inputs,
@@ -2714,6 +2765,8 @@ def detect_keypoints_yolo(
             "input_mode_requested": resolved_input_mode,
             "input_mode_effective": effective_input_mode,
             "model_input_transform": model_input_transform.to_attrs(),
+            "model_input_stride": int(model_stride),
+            "expected_model_stride": expected_model_stride,
             "coordinate_contract_mode": coordinate_contract_mode,
             # Maintained for API compatibility with pipeline/batch configs.
             "mask_threshold": float(mask_threshold),
@@ -2752,6 +2805,7 @@ def detect_keypoints_yolo(
         "input_mode_requested": resolved_input_mode,
         "input_mode_effective": effective_input_mode,
         "model_input_transform": model_input_transform.to_attrs(),
+        "model_input_stride": int(model_stride),
         "model_input_transform_name": model_input_transform.name,
         "model_input_shape_hw": list(model_input_transform.model_shape),
         "native_roi_shape_hw": list(model_input_transform.native_shape),
@@ -2801,6 +2855,7 @@ def detect_keypoints_yolo(
                 ),
                 "roi_live_acceleration": roi_live_acceleration,
                 "model_input_transform_mode": model_input_transform_mode,
+                "expected_model_stride": expected_model_stride,
                 "coordinate_contract_mode": coordinate_contract_mode,
                 "input_mode": input_mode,
                 "keypoint_roi_shard_rows": keypoint_roi_shard_rows,
@@ -2867,6 +2922,7 @@ def detect_keypoints_yolo(
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
             "input_mode_requested": resolved_input_mode,
             "input_mode_effective": effective_input_mode,
+            "model_input_stride": int(model_stride),
             "source_detect_run": source_detect_run or "unknown",
             "source_refined_run": source_refined_run,
             "frame_source": crop_source.frame_source_kind,
@@ -2886,6 +2942,7 @@ def detect_keypoints_yolo(
             "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
             "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
             "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
+            "model_input_stride": int(model_stride),
             "keypoint_storage_layout": (
                 "indexed_sharding_v1"
                 if keypoint_roi_shard_rows is not None
@@ -2952,6 +3009,7 @@ def detect_keypoints_yolo(
         "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
         "input_mode_requested": resolved_input_mode,
         "input_mode_effective": effective_input_mode,
+        "model_input_stride": int(model_stride),
         "requested_device": device,
         "normalized_torch_device": torch_device,
         "initial_model_device": model_device,
@@ -3197,6 +3255,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--imgsz", type=int, default=None, help="Image size for YOLO inference")
+    parser.add_argument(
+        "--expected-model-stride",
+        type=int,
+        default=None,
+        help="Fail unless the loaded model declares this maximum stride.",
+    )
     parser.add_argument("--device", default=None, help="Torch device string (e.g. '0' or 'cuda:0')")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for NMS")
@@ -3313,6 +3377,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     detect_keypoints_yolo(
         zarr_path=args.zarr_path,
         model_path=args.model,
+        expected_model_stride=args.expected_model_stride,
         run_name=args.run_name,
         output_parent=args.output_parent,
         crop_run=args.crop_run,

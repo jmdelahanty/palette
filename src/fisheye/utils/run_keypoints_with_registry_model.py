@@ -26,6 +26,7 @@ from fisheye.shared.flat_roi_cache import (
     open_flat_roi_cache,
     stage_flat_roi_cache_manifest,
 )
+from fisheye.shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES
 from fisheye.shared.pose_model_schema_binding import (
     resolve_registered_pose_model_schema_binding,
 )
@@ -490,6 +491,7 @@ def run_keypoints_with_registry_model(
     batch_size: int = 256,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
+    expected_model_stride: Optional[int] = None,
     conf: float = 0.25,
     iou: float = 0.5,
     max_det: int = 1,
@@ -504,6 +506,7 @@ def run_keypoints_with_registry_model(
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
     input_mode: str = "numpy-list",
+    model_input_transform_mode: str = "auto",
     coordinate_contract_mode: str = "canonical",
     keypoint_roi_shard_rows: Optional[int] = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
@@ -534,6 +537,7 @@ def run_keypoints_with_registry_model(
         batch_size=int(batch_size),
         device=device,
         imgsz=imgsz,
+        expected_model_stride=expected_model_stride,
         conf=float(conf),
         iou=float(iou),
         max_det=int(max_det),
@@ -548,6 +552,7 @@ def run_keypoints_with_registry_model(
         progress_jsonl=progress_jsonl,
         progress_every_batches=int(progress_every_batches),
         input_mode=input_mode,
+        model_input_transform_mode=model_input_transform_mode,
         coordinate_contract_mode=coordinate_contract_mode,
         keypoint_roi_shard_rows=keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
@@ -715,6 +720,7 @@ def run_keypoints_with_registry_model(
             zarr_path=str(output_path),
             model_path=best.model_path,
             model_sha256=selected_model_sha256,
+            expected_model_stride=expected_model_stride,
             run_name=run_name,
             output_parent=output_parent,
             crop_run=crop_run,
@@ -736,6 +742,7 @@ def run_keypoints_with_registry_model(
             roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
             roi_cache_staging_details=roi_cache_staging_details or None,
             input_mode=input_mode,
+            model_input_transform_mode=model_input_transform_mode,
             coordinate_contract_mode=coordinate_contract_mode,
             keypoint_roi_shard_rows=keypoint_roi_shard_rows,
             keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
@@ -856,6 +863,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--device", type=str, default=None, help="Optional torch device override.")
     parser.add_argument("--imgsz", type=int, default=None, help="Optional pose inference image size override.")
+    parser.add_argument(
+        "--expected-model-stride",
+        type=int,
+        default=None,
+        help="Fail unless the loaded pose model declares this maximum stride.",
+    )
     parser.add_argument("--conf", type=float, default=0.25, help="Optional confidence threshold override.")
     parser.add_argument("--iou", type=float, default=0.5, help="Optional IoU threshold override.")
     parser.add_argument("--max-det", type=int, default=1, help="Optional max detections override.")
@@ -922,6 +935,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Ultralytics input preparation mode (default: legacy numpy-list).",
     )
     parser.add_argument(
+        "--model-input-transform",
+        choices=MODEL_INPUT_TRANSFORM_CHOICES,
+        default="auto",
+        help="Exact reversible native-ROI to model-input transform.",
+    )
+    parser.add_argument(
         "--coordinate-contract-mode",
         choices=("canonical", "legacy_noncanonical"),
         default="canonical",
@@ -952,6 +971,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         batch_size=args.batch_size,
         device=args.device,
         imgsz=args.imgsz,
+        expected_model_stride=args.expected_model_stride,
         conf=args.conf,
         iou=args.iou,
         max_det=args.max_det,
@@ -966,6 +986,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,
         input_mode=args.input_mode,
+        model_input_transform_mode=args.model_input_transform,
         coordinate_contract_mode=args.coordinate_contract_mode,
         keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=args.keypoint_frame_shard_rows,

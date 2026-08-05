@@ -18,6 +18,7 @@ from fisheye.detection.detect_keypoints_yolo import (
     _extract_keypoint_confidences,
     _extract_pose_bbox_xyxy_roi,
     _prepare_model_inputs,
+    _resolve_model_max_stride,
     _require_model_result_coordinate_contract,
     _require_prepared_model_input_contract,
     detect_keypoints_yolo,
@@ -197,6 +198,7 @@ class _FakeYOLO:
     def __init__(self, _path: str) -> None:
         self.model = SimpleNamespace(
             names={0: "fish"},
+            stride=torch.tensor([8.0, 16.0, 32.0]),
             parameters=lambda: iter([torch.nn.Parameter(torch.zeros((), dtype=torch.float32))]),
         )
         self._results = [
@@ -221,6 +223,25 @@ class _CanonicalFakeYOLO(_FakeYOLO):
         self.model.kpt_shape = [10, 3]
         for result in self._results:
             result.orig_shape = (40, 40)
+
+
+def test_model_max_stride_comes_from_loaded_model() -> None:
+    model = SimpleNamespace(
+        model=SimpleNamespace(stride=torch.tensor([8.0, 16.0, 32.0]))
+    )
+
+    assert _resolve_model_max_stride(model) == 32
+
+
+@pytest.mark.parametrize(
+    "raw_stride",
+    (None, [], [0], [float("nan")], [15.5]),
+)
+def test_model_max_stride_rejects_missing_or_invalid_values(raw_stride) -> None:
+    model = SimpleNamespace(model=SimpleNamespace(stride=raw_stride))
+
+    with pytest.raises(ValueError, match="stride"):
+        _resolve_model_max_stride(model)
 
 
 class _SecondBatchWrongShapeCanonicalFakeYOLO(_CanonicalFakeYOLO):

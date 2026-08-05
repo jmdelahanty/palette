@@ -22,6 +22,11 @@ import numpy as np
 import zarr
 
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.model_input_transform import (
+    MODEL_INPUT_TRANSFORM_CHOICES,
+    resolve_model_input_transform,
+    resolve_stride_aligned_square_input_transform,
+)
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -192,11 +197,32 @@ def run_whole_recording_keypoint_terminal(
     batch_size: int,
     device: str,
     input_mode: str,
+    model_input_size: int,
+    model_input_transform_mode: str,
+    model_input_stride: int,
     progress_jsonl: Path | None = None,
     progress_every_batches: int = 1,
 ) -> Mapping[str, Any]:
     archive = analysis_zarr.expanduser().resolve()
     cache = cache_manifest.expanduser().resolve()
+    cache_binding = _cache_evidence(cache)
+    cache_shape = tuple(int(value) for value in cache_binding["shape"])
+    if type(model_input_stride) is not int or model_input_stride <= 0:
+        raise ValueError("Model input stride must be a positive exact integer.")
+    expected_model_input_transform = resolve_model_input_transform(
+        (cache_shape[1], cache_shape[2]),
+        mode=model_input_transform_mode,
+        model_hw=(int(model_input_size), int(model_input_size)),
+    )
+    derived_model_input_transform = resolve_stride_aligned_square_input_transform(
+        (cache_shape[1], cache_shape[2]),
+        stride=model_input_stride,
+    )
+    if expected_model_input_transform != derived_model_input_transform:
+        raise ValueError(
+            "Planned model-input transform is not the minimal centered "
+            "stride-aligned padding contract for this cache."
+        )
     scratch = _require_node_scratch(scratch_root) / f"keypoint_{uuid.uuid4().hex}"
     scratch.mkdir(parents=True, exist_ok=False)
     try:
@@ -216,6 +242,8 @@ def run_whole_recording_keypoint_terminal(
             pose_schema=pose_schema,
             batch_size=batch_size,
             device=device,
+            imgsz=int(model_input_size),
+            expected_model_stride=model_input_stride,
             roi_cache_policy="always",
             roi_cache_manifest=cache,
             roi_cache_expected_archive_path=archive,
@@ -225,6 +253,7 @@ def run_whole_recording_keypoint_terminal(
             progress_jsonl=progress_jsonl,
             progress_every_batches=progress_every_batches,
             input_mode=input_mode,
+            model_input_transform_mode=model_input_transform_mode,
             coordinate_contract_mode="legacy_noncanonical",
             keypoint_roi_shard_rows=None,
         )
@@ -244,6 +273,20 @@ def run_whole_recording_keypoint_terminal(
         missing = [path for path in _SOURCE_ARRAY_PATHS if path not in run]
         if missing:
             raise RuntimeError(f"Terminal compute output lacks arrays: {missing!r}")
+        if run.attrs.get("input_mode_effective") != "tensor":
+            raise RuntimeError(
+                "Whole-recording terminal inference did not retain tensor input mode."
+            )
+        if run.attrs.get("model_input_transform") != (
+            expected_model_input_transform.to_attrs()
+        ):
+            raise RuntimeError(
+                "Terminal model-input transform differs from the planned padding contract."
+            )
+        if run.attrs.get("model_input_stride") != model_input_stride:
+            raise RuntimeError(
+                "Terminal model stride differs from the verified plan contract."
+            )
         array_hashes = {
             path: sha256_array(run[path][...]) for path in _SOURCE_ARRAY_PATHS
         }
@@ -273,7 +316,6 @@ def run_whole_recording_keypoint_terminal(
             raise RuntimeError(
                 "Terminal inference lacks authenticated node-local cache staging."
             )
-        cache_binding = _cache_evidence(cache)
         if staging_copy.get("source_sha256") != cache_binding["payload_sha256"]:
             raise RuntimeError(
                 "Authenticated cache staging disagrees with the source manifest."
@@ -295,6 +337,7 @@ def run_whole_recording_keypoint_terminal(
                 "cache_payload_sha256": cache_binding["payload_sha256"],
                 "model_input_mode": run.attrs.get("input_mode_effective"),
                 "model_input_transform": run.attrs.get("model_input_transform"),
+                "model_input_stride": run.attrs.get("model_input_stride"),
                 "confidence_threshold": run.attrs.get("confidence_threshold"),
                 "iou_threshold": run.attrs.get("iou_threshold"),
                 "max_detections_per_roi": run.attrs.get("max_detections"),
@@ -372,6 +415,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input-mode", choices=("tensor", "numpy-list", "auto"), default="tensor"
     )
+    parser.add_argument("--model-input-size", type=int, required=True)
+    parser.add_argument(
+        "--model-input-transform-mode",
+        choices=MODEL_INPUT_TRANSFORM_CHOICES,
+        required=True,
+    )
+    parser.add_argument("--model-input-stride", type=int, required=True)
     parser.add_argument("--progress-jsonl", type=Path)
     parser.add_argument("--progress-every-batches", type=int, default=1)
     return parser
@@ -395,6 +445,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch_size=args.batch_size,
         device=args.device,
         input_mode=args.input_mode,
+        model_input_size=args.model_input_size,
+        model_input_transform_mode=args.model_input_transform_mode,
+        model_input_stride=args.model_input_stride,
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,
     )

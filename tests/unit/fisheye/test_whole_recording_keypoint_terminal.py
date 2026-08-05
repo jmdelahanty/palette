@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import zarr
 
+from fisheye.shared.model_input_transform import resolve_model_input_transform
 from fisheye.shared.zarr.keypoint_manifest import keypoint_preprocessing_from_manifest
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -39,12 +40,18 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
     }
     cache_manifest.write_text(json.dumps(cache_document), encoding="utf-8")
     binding = _pose_binding()
+    expected_transform = resolve_model_input_transform(
+        (4, 4), mode="pad_to_size", model_hw=(32, 32)
+    )
 
     def fake_inference(**kwargs):
         assert kwargs["output"] != analysis
         assert kwargs["output_parent"] == "keypoint_shard_runs"
         assert kwargs["coordinate_contract_mode"] == "legacy_noncanonical"
         assert kwargs["roi_cache_expected_archive_path"] == analysis
+        assert kwargs["imgsz"] == 32
+        assert kwargs["expected_model_stride"] == 32
+        assert kwargs["model_input_transform_mode"] == "pad_to_size"
         local = zarr.open_group(str(kwargs["output"]), mode="a", use_consolidated=False)
         run = local.require_group("keypoint_shard_runs").create_group(
             kwargs["run_name"]
@@ -56,7 +63,8 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
                 "stage_selector_eligible": False,
                 RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
                 "input_mode_effective": "tensor",
-                "model_input_transform": "identity_uint8",
+                "model_input_transform": expected_transform.to_attrs(),
+                "model_input_stride": 32,
                 "confidence_threshold": 0.25,
                 "iou_threshold": 0.5,
                 "max_detections": 1,
@@ -113,6 +121,9 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
         batch_size=8,
         device="0",
         input_mode="tensor",
+        model_input_size=32,
+        model_input_transform_mode="pad_to_size",
+        model_input_stride=32,
     )
 
     payload = receipt["payload"]
@@ -124,7 +135,11 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
         payload["cache"]["staging_verification"]["copy"]["verification"]
         == "single_pass_copy_stream_sha256_v1"
     )
-    assert keypoint_preprocessing_from_manifest(payload["preprocessing"])
+    preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
+    assert preprocessing.document["model_input_transform"] == (
+        expected_transform.to_attrs()
+    )
+    assert preprocessing.document["model_input_stride"] == 32
     assert not (analysis / "keypoints_runs").exists()
     terminal = zarr.open_group(str(output), mode="r", use_consolidated=True)
     assert terminal["keypoint_terminal_runs/terminal-a/instance_key"][:].tolist() == [7]

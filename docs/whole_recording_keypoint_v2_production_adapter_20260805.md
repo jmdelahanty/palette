@@ -1,7 +1,9 @@
 # Whole-recording keypoint-v2 production adapter — 2026-08-05
 
-Status: implementation and source-worktree dry-run complete; commit-pinned
-deployment and first selector-ineligible Batman canary pending.
+Status: the first selector-ineligible Batman attempt failed closed before
+inference because the 348x348 cache was not stride-aligned. The repaired
+padding and model-stride binding are implemented and validated; a new
+commit-pinned canary is pending.
 
 ## Goal
 
@@ -69,6 +71,17 @@ analysis-array authority. The cache payload is not reread merely to hash it:
 the node-local staging copy computes SHA-256 while transferring the bytes and
 compares it with the cache manifest before inference begins.
 
+The inference tensor shape is derived rather than hardcoded. For tensor and
+auto input modes, the planner applies the existing reversible
+`ModelInputTransform` contract and selects the smallest centered square extent
+divisible by the planned maximum model stride. The current five-keypoint model
+therefore maps native 348x348 pixels to a zero-padded 352x352 tensor with two
+pixels on every edge. Predictions are inverse-mapped into native ROI
+coordinates before terminal arrays are written. The worker loads the exact
+model, reads its declared maximum stride, and fails before ROI inference unless
+that value matches the planned stride. Both the transform and verified stride
+are persisted in preprocessing provenance.
+
 ## Frozen first canary
 
 The initial canary uses the smallest Batman crop-v2 recording:
@@ -79,7 +92,7 @@ The initial canary uses the smallest Batman crop-v2 recording:
 - ROI shape: 348×348 `uint8`
 - cache manifest:
   `/nrs/johnson/palette_staging/flat_roi_cache/batman_crop_geometry_v2_348_20260805/roi_cache/2026-07-21T19-38-32Z_arena_2_Batman.flat_roi_cache.json`
-- next run label: `batman_kpt5_v2_canary_20260805_v004`
+- next run label: `batman_kpt5_v2_canary_20260805_v005`
 
 Exact model:
 
@@ -123,8 +136,16 @@ deployment before submission.
   the cluster. Its dependent jobs exited without publication.
 - `v003` proved the digest-verified packaged-manifest repair from the cluster
   and submitted no jobs. Its plan lacked an explicit full Palette commit.
-- `v004` is reserved for the exact deployment-commit binding. It must use the
-  same exact `/groups` model path and digest and remain selector-ineligible.
+- `v004` used the exact deployment commit and model binding, then failed safely
+  before inference because tensor mode received an identity 348x348 transform
+  that was not divisible by the model's maximum stride of 32. Prediction job
+  `153273489` failed; dependent finalization job `153273490` and validation job
+  `153273491` did not run. Scratch cleanup completed and no terminal arrays,
+  canonical runs, selectors, or registry records were created.
+- `v005` retains the same exact cache, model, and publication boundary. Its only
+  scientific-input change is enforcing the existing reversible preprocessing
+  contract as derived 348x348 to 352x352 centered padding, bound to the stride
+  reported by the loaded model.
 
 ## Canary checklist
 
@@ -152,8 +173,8 @@ deployment before submission.
 ```bash
 "${PALETTE_GROUPS_REPO}/scripts/submit_whole_recording_keypoints_bsub.sh" \
   --manifest "${PALETTE_GROUPS_REPO}/docs/diagnostics/batman_keypoint_v2_candidate_20260805/targets.canary.json" \
-  --run-label batman_kpt5_v2_canary_20260805_v004 \
-  --run-root /groups/johnson/johnsonlab/jeremy/logs/whole_recording_keypoints/batman_kpt5_v2_canary_20260805_v004 \
+  --run-label batman_kpt5_v2_canary_20260805_v005 \
+  --run-root /groups/johnson/johnsonlab/jeremy/logs/whole_recording_keypoints/batman_kpt5_v2_canary_20260805_v005 \
   --palette-repo "${PALETTE_GROUPS_REPO}" \
   --palette-commit "${PALETTE_COMMIT}" \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
@@ -162,6 +183,7 @@ deployment before submission.
   --pose-schema traditional_v2 \
   --min-roi-size 348 \
   --input-mode tensor \
+  --model-input-stride 32 \
   --dry-run
 ```
 

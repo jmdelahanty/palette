@@ -8,13 +8,15 @@ explicit and invertible.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
-import torch
-import torch.nn.functional as F
+
+if TYPE_CHECKING:
+    import torch
 
 MODEL_INPUT_TRANSFORM_CHOICES = ("auto", "identity", "pad_to_size")
+DEFAULT_MODEL_INPUT_STRIDE = 32
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ class ModelInputTransform:
 
     def apply_torch_image_batch(self, batch: torch.Tensor) -> torch.Tensor:
         """Apply the transform to an ``(N,C,H,W)`` tensor batch."""
+        import torch.nn.functional as F
         if batch.ndim != 4:
             raise ValueError(f"Expected tensor batch shape (N,C,H,W), got {tuple(batch.shape)}")
         if tuple(batch.shape[-2:]) != self.native_shape:
@@ -189,3 +192,33 @@ def resolve_model_input_transform(
         )
 
     raise AssertionError(f"Unhandled model input transform mode: {mode}")
+
+
+def resolve_stride_aligned_square_input_transform(
+    native_hw: tuple[int, int],
+    *,
+    stride: int = DEFAULT_MODEL_INPUT_STRIDE,
+) -> ModelInputTransform:
+    """Resolve centered zero-padding to the smallest stride-aligned square.
+
+    This is the existing reversible ``ModelInputTransform`` contract applied
+    to tensor models that require a square input extent divisible by their
+    maximum stride. Pixels are never resized.
+    """
+
+    native_height, native_width = (int(native_hw[0]), int(native_hw[1]))
+    if native_height <= 0 or native_width <= 0:
+        raise ValueError(f"Native ROI shape must be positive, got {native_hw}")
+    if native_height != native_width:
+        raise ValueError(
+            "Stride-aligned tensor keypoint input requires square native ROIs; "
+            f"got {native_height}x{native_width}."
+        )
+    if type(stride) is not int or stride <= 0:
+        raise ValueError("Model input stride must be a positive exact integer.")
+    model_extent = ((native_height + stride - 1) // stride) * stride
+    return resolve_model_input_transform(
+        (native_height, native_width),
+        mode="auto",
+        model_hw=(model_extent, model_extent),
+    )

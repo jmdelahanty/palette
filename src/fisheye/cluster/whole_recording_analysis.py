@@ -1015,7 +1015,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-label", required=True)
     parser.add_argument("--mask-run-label")
     parser.add_argument("--run-root", required=True, type=Path)
-    parser.add_argument("--repo", type=Path, default=keypoints.DEFAULT_GROUPS_REPO)
+    parser.add_argument(
+        "--palette-repo",
+        "--repo",
+        dest="repo",
+        type=Path,
+        default=keypoints.DEFAULT_GROUPS_REPO,
+        help="Absolute commit-pinned Palette deployment (legacy alias: --repo).",
+    )
+    parser.add_argument(
+        "--palette-commit",
+        required=True,
+        help="Full commit checked out at --palette-repo.",
+    )
     parser.add_argument("--registry", type=Path, default=keypoints.DEFAULT_REGISTRY)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
@@ -1023,6 +1035,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size-kp", type=int, default=256)
     parser.add_argument("--batch-size-sm", type=int, default=128)
     parser.add_argument("--device", default="0")
+    parser.add_argument(
+        "--model-input-stride",
+        type=int,
+        default=keypoints.DEFAULT_MODEL_INPUT_STRIDE,
+        help="Planned keypoint-model stride, verified against the loaded model.",
+    )
     parser.add_argument("--mask-model-coverage-class", default="dense_all_components")
     parser.add_argument(
         "--mask-model-component-coverage-key",
@@ -1199,6 +1217,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest_path=args.manifest,
         run_label=args.run_label,
         repo=args.repo,
+        palette_commit=args.palette_commit,
         registry=args.registry,
         run_root=run_root / "keypoints",
         model_set_id=args.model_set_id,
@@ -1208,6 +1227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch_size=args.batch_size_kp,
         device=args.device,
         input_mode="tensor",
+        model_input_stride=int(args.model_input_stride),
         progress_every_batches=1,
         prediction_resources=LsfResources(queue="gpu_l4", ncores=4, mem_gb=32, gpus=1),
         refinement_resources=LsfResources(

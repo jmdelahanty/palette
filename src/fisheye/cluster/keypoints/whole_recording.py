@@ -42,10 +42,16 @@ from fisheye.cluster.lsf import (
     write_json_snapshot,
 )
 from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN, build_runtime_command
+from fisheye.shared.model_input_transform import (
+    DEFAULT_MODEL_INPUT_STRIDE,
+    ModelInputTransform,
+    resolve_model_input_transform,
+    resolve_stride_aligned_square_input_transform,
+)
 
 
 TARGET_MANIFEST_SCHEMA = "palette.whole_recording_keypoint_targets.v1"
-PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v3"
+PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v4"
 NORMALIZED_TARGETS_SCHEMA = "palette.whole_recording_keypoint_targets.normalized.v1"
 DEFAULT_GROUPS_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
 DEFAULT_REGISTRY = Path(
@@ -86,6 +92,8 @@ class PlannedWholeRecordingTarget:
     target: WholeRecordingTarget
     model: PoseModelBinding
     cache: FlatRoiCacheBinding
+    model_input_transform: ModelInputTransform
+    model_input_stride: int
     input_capability: KeypointInputCapability
     run_names: KeypointRunNames
     expected_keypoint_group: Path
@@ -101,6 +109,8 @@ class PlannedWholeRecordingTarget:
             "target": self.target.to_json(),
             "model": self.model.to_json(),
             "cache": self.cache.to_json(),
+            "model_input_transform": self.model_input_transform.to_attrs(),
+            "model_input_stride": self.model_input_stride,
             "input_capability": self.input_capability.to_json(),
             "run_names": self.run_names.to_json(),
             "expected_keypoint_group": str(self.expected_keypoint_group),
@@ -130,6 +140,7 @@ class WholeRecordingWorkflowPlan:
     model_run_id: str
     pose_schema: str
     min_roi_size: int
+    model_input_stride: int
     keypoint_storage: dict[str, Any]
     finalization_execution: dict[str, Any]
     targets: tuple[PlannedWholeRecordingTarget, ...]
@@ -150,6 +161,7 @@ class WholeRecordingWorkflowPlan:
             "model_run_id": self.model_run_id,
             "pose_schema": self.pose_schema,
             "min_roi_size": self.min_roi_size,
+            "model_input_stride": self.model_input_stride,
             "keypoint_storage": self.keypoint_storage,
             "finalization_execution": self.finalization_execution,
             "target_count": len(self.targets),
@@ -314,6 +326,7 @@ def build_plan(
     batch_size: int,
     device: str,
     input_mode: str,
+    model_input_stride: int,
     progress_every_batches: int,
     keypoint_roi_shard_rows: int | None = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
@@ -357,6 +370,8 @@ def build_plan(
         raise ValueError("Batch size and progress interval must be positive.")
     if int(min_roi_size) <= 0:
         raise ValueError("Minimum zebrafish ROI size must be positive.")
+    if type(model_input_stride) is not int or model_input_stride <= 0:
+        raise ValueError("Model input stride must be a positive exact integer.")
     if int(refine_chunk_size) <= 0 or int(refine_num_workers) <= 0:
         raise ValueError("Refinement chunk size and worker count must be positive.")
     keypoint_storage = resolve_keypoint_v2_publication_storage(
@@ -448,6 +463,18 @@ def build_plan(
             cache=cache,
             min_roi_size=int(min_roi_size),
         )
+        native_shape = (int(cache.shape[1]), int(cache.shape[2]))
+        if input_mode in {"tensor", "auto"}:
+            model_input_transform = resolve_stride_aligned_square_input_transform(
+                native_shape,
+                stride=model_input_stride,
+            )
+        else:
+            model_input_transform = resolve_model_input_transform(
+                native_shape,
+                mode="identity",
+                model_hw=native_shape,
+            )
         (
             expected_keypoint,
             expected_quality,
@@ -469,6 +496,8 @@ def build_plan(
             run_names=run_names,
             model=model,
             cache=cache,
+            model_input_transform=model_input_transform,
+            model_input_stride=model_input_stride,
             pose_schema=pose_schema,
             batch_size=int(batch_size),
             device=device,
@@ -505,6 +534,8 @@ def build_plan(
                 target=target,
                 model=model,
                 cache=cache,
+                model_input_transform=model_input_transform,
+                model_input_stride=model_input_stride,
                 input_capability=input_capability,
                 run_names=run_names,
                 expected_keypoint_group=expected_keypoint,
@@ -595,6 +626,7 @@ def build_plan(
             "manifest_sha256": manifest_sha256,
             "palette_repo": str(resolved_repo),
             "palette_commit": normalized_palette_commit,
+            "model_input_stride": model_input_stride,
             "target_count": len(planned_targets),
             "keypoint_storage": keypoint_storage,
             "finalization_execution": finalization_execution,
@@ -612,6 +644,7 @@ def build_plan(
         model_run_id=str(model_run_id),
         pose_schema=str(pose_schema),
         min_roi_size=int(min_roi_size),
+        model_input_stride=model_input_stride,
         keypoint_storage=keypoint_storage,
         finalization_execution=finalization_execution,
         targets=tuple(planned_targets),
@@ -786,6 +819,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("numpy-list", "tensor", "auto"),
         default="tensor",
     )
+    parser.add_argument(
+        "--model-input-stride",
+        type=int,
+        default=DEFAULT_MODEL_INPUT_STRIDE,
+        help=(
+            "Planned maximum model stride. The inference worker verifies this "
+            "against the loaded model before reading ROI payloads."
+        ),
+    )
     parser.add_argument("--progress-every-batches", type=int, default=1)
 
     parser.add_argument("--prediction-queue", default="gpu_l4")
@@ -849,6 +891,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch_size=int(args.batch_size_kp),
         device=args.device,
         input_mode=args.input_mode,
+        model_input_stride=int(args.model_input_stride),
         progress_every_batches=int(args.progress_every_batches),
         keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=int(args.keypoint_frame_shard_rows),

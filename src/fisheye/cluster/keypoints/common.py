@@ -26,6 +26,7 @@ from fisheye.shared.flat_roi_cache import (
     crop_run_name_from_manifest,
     load_flat_roi_cache_manifest,
 )
+from fisheye.shared.model_input_transform import ModelInputTransform
 from fisheye.shared.roi_pixel_contract import normalize_pixel_contract
 from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.zarr.crop_consumer import (
@@ -800,6 +801,8 @@ def build_prediction_job(
     run_names: KeypointRunNames,
     model: PoseModelBinding,
     cache: FlatRoiCacheBinding,
+    model_input_transform: ModelInputTransform,
+    model_input_stride: int,
     pose_schema: str,
     batch_size: int,
     device: str,
@@ -807,6 +810,17 @@ def build_prediction_job(
     progress_every_batches: int,
     resources: LsfResources,
 ) -> LsfJob:
+    if model_input_transform.model_height != model_input_transform.model_width:
+        raise ValueError("Keypoint prediction requires one square model input extent.")
+    if type(model_input_stride) is not int or model_input_stride <= 0:
+        raise ValueError("Keypoint model input stride must be a positive exact integer.")
+    if (
+        model_input_transform.model_height % model_input_stride
+        or model_input_transform.model_width % model_input_stride
+    ):
+        raise ValueError(
+            "Keypoint model input extent must be divisible by the planned stride."
+        )
     safe_target = safe_component(target_id, default="target", max_length=56)
     job_key = f"predict:{target_id}"
     job_name = safe_component(
@@ -853,6 +867,12 @@ def build_prediction_job(
         scratch_stage,
         "--input-mode",
         str(input_mode),
+        "--model-input-size",
+        str(model_input_transform.model_height),
+        "--model-input-transform-mode",
+        model_input_transform.name,
+        "--model-input-stride",
+        str(model_input_stride),
         "--progress-jsonl",
         str(
             run_root
@@ -900,6 +920,8 @@ def build_prediction_job(
             "terminal_output": str(terminal_output),
             "model": model.to_json(),
             "cache": cache.to_json(),
+            "model_input_transform": model_input_transform.to_attrs(),
+            "model_input_stride": model_input_stride,
             "palette_repo": str(repo),
             "palette_commit": palette_commit,
             "publication_boundary": "strict_v2_finalizer_only",

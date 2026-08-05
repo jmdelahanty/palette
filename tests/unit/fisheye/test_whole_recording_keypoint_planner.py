@@ -198,6 +198,7 @@ def _build_plan(
         batch_size=256,
         device="0",
         input_mode="tensor",
+        model_input_stride=32,
         progress_every_batches=1,
         keypoint_roi_shard_rows=keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=keypoint_frame_shard_rows,
@@ -310,6 +311,18 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     assert len(plan.targets) == 2
     assert len(plan.targets[0].cache.manifest_sha256) == 64
     assert plan.targets[0].input_capability.selected_source == "flat_roi_cache"
+    assert plan.targets[0].model_input_transform.to_attrs() == {
+        "name": "pad_to_size",
+        "native_shape_hw": [348, 348],
+        "model_shape_hw": [352, 352],
+        "pad_top": 2,
+        "pad_bottom": 2,
+        "pad_left": 2,
+        "pad_right": 2,
+        "coordinate_mapping": "native_xy = model_xy - [pad_left, pad_top]",
+    }
+    assert plan.targets[0].model_input_stride == 32
+    assert plan.model_input_stride == 32
     assert plan.min_roi_size == 348
     assert plan.keypoint_storage["effective"]["keypoint_storage_layout"] == (
         "shared_byte_planned_indexed_sharding_v1"
@@ -364,6 +377,16 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
         "pose_run"
     )
     assert "--cache-manifest" in prediction_command
+    assert prediction_command[prediction_command.index("--model-input-size") + 1] == (
+        "352"
+    )
+    assert prediction_command[
+        prediction_command.index("--model-input-transform-mode") + 1
+    ] == "pad_to_size"
+    assert prediction_command[
+        prediction_command.index("--model-input-stride") + 1
+    ] == "32"
+    assert jobs["predict:target_0"].metadata["model_input_stride"] == 32
     assert "--keypoint-roi-shard-rows" not in prediction_command
     assert "--keypoint-frame-shard-rows" not in prediction_command
     assert "--expected-output" in prediction_command

@@ -40,6 +40,7 @@ def test_detect_keypoints_yolo_accepts_mask_threshold() -> None:
     assert "roi_live_gpu_chunk_frames" in params
     assert "input_mode" in params
     assert "model_input_transform_mode" in params
+    assert "expected_model_stride" in params
     assert "coordinate_contract_mode" in params
     assert params["coordinate_contract_mode"].default == "canonical"
     assert "profile_timings" in params
@@ -59,6 +60,7 @@ def test_keypoint_cli_defaults_to_sharding_and_supports_regular_chunk_opt_out() 
     assert default_args.keypoint_roi_shard_rows == DEFAULT_KEYPOINT_ROI_SHARD_ROWS
     assert default_args.keypoint_frame_shard_rows == DEFAULT_KEYPOINT_FRAME_SHARD_ROWS
     assert default_args.coordinate_contract_mode == "canonical"
+    assert default_args.expected_model_stride is None
     assert regular_args.keypoint_roi_shard_rows is None
 
 

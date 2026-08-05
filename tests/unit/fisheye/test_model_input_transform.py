@@ -1,7 +1,34 @@
 import numpy as np
 import torch
 
-from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.shared.model_input_transform import (
+    resolve_model_input_transform,
+    resolve_stride_aligned_square_input_transform,
+)
+
+
+def test_stride_aligned_348_contract_uses_centered_352_padding() -> None:
+    transform = resolve_stride_aligned_square_input_transform((348, 348))
+
+    assert transform.to_attrs() == {
+        "name": "pad_to_size",
+        "native_shape_hw": [348, 348],
+        "model_shape_hw": [352, 352],
+        "pad_top": 2,
+        "pad_bottom": 2,
+        "pad_left": 2,
+        "pad_right": 2,
+        "coordinate_mapping": "native_xy = model_xy - [pad_left, pad_top]",
+    }
+    native = np.ones((1, 348, 348), dtype=np.uint8)
+    padded = transform.apply_numpy_luma_batch(native)
+    assert padded.shape == (1, 352, 352)
+    np.testing.assert_array_equal(padded[:, 2:350, 2:350], native)
+    assert int(padded[:, :2, :].sum()) == 0
+    np.testing.assert_allclose(
+        transform.invert_points_xy(np.array([[2.0, 2.0], [349.0, 349.0]])),
+        [[0.0, 0.0], [347.0, 347.0]],
+    )
 
 
 def test_pad_to_size_numpy_and_coordinate_inverse() -> None:
