@@ -133,6 +133,21 @@ NON_AUTHORITATIVE_PUBLISHER_ATTRS = frozenset(
     }
 )
 
+# Maintained component builders stamp these operational wall-clock values while
+# recreating an otherwise identical node-local candidate.  They remain present
+# in, and protected by, each immutable component manifest.  Only the explicit
+# retry-equivalence helper below redacts them so a caller can reconstruct a
+# lost post-commit acknowledgement without pretending a new timestamp changes
+# the scientific payload.  No other attribute is ignored during recovery.
+RETRY_TRANSIENT_ATTRIBUTE_NAMES = frozenset(
+    {
+        "completed_at_utc",
+        "created_at_utc",
+        "generated_at",
+        "generated_at_utc",
+    }
+)
+
 
 class ChaserComponentPublicationError(ValueError):
     """Raised when a derived component cannot be sealed or selected exactly."""
@@ -270,6 +285,20 @@ def _canonical_value(value: Any, *, path: str = "$") -> Any:
             for index, item in enumerate(value)
         ]
     _fail(f"{path} contains unsupported JSON value {type(value).__name__}.")
+
+
+def _redact_retry_transient_attributes(value: Any) -> Any:
+    """Remove only explicit operational timestamps from an attribute value."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_retry_transient_attributes(item)
+            for key, item in value.items()
+            if str(key) not in RETRY_TRANSIENT_ATTRIBUTE_NAMES
+        }
+    if isinstance(value, list):
+        return [_redact_retry_transient_attributes(item) for item in value]
+    return copy.deepcopy(value)
 
 
 def canonical_component_json_bytes(value: Any) -> bytes:
@@ -578,6 +607,24 @@ def validate_chaser_component_manifest(
     ):
         _fail("Component payload or semantic contract changed after sealing.")
     return manifest
+
+
+def chaser_component_retry_equivalence_sha256(manifest: Any) -> str:
+    """Digest one manifest while redacting only operational timestamps.
+
+    This identity is narrower than the persisted manifest digest and is valid
+    only for reconstructing acknowledgement of an already-committed,
+    selector-ineligible component.  Exact manifest validation still protects
+    each candidate independently before this comparison is made.
+    """
+
+    record = copy.deepcopy(dict(_validate_manifest_shape(manifest)))
+    payload = record["payload"]
+    for declaration in (*payload["groups"], *payload["arrays"]):
+        declaration["attributes"] = _redact_retry_transient_attributes(
+            declaration["attributes"]
+        )
+    return component_record_sha256(record)
 
 
 def build_chaser_component_selector(
@@ -1030,6 +1077,7 @@ __all__ = [
     "COMPONENT_HANDLE_SCHEMA_ID",
     "COMPONENT_HANDLE_SCHEMA_VERSION",
     "NON_AUTHORITATIVE_PUBLISHER_ATTRS",
+    "RETRY_TRANSIENT_ATTRIBUTE_NAMES",
     "ChaserComponentContract",
     "ChaserComponentPublicationError",
     "VerifiedChaserComponent",
@@ -1038,6 +1086,7 @@ __all__ = [
     "build_chaser_component_selector",
     "build_chaser_component_handle",
     "canonical_component_json_bytes",
+    "chaser_component_retry_equivalence_sha256",
     "component_record_sha256",
     "persist_chaser_component_manifest",
     "persist_chaser_component_selector",

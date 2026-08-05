@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 
 import numpy as np
@@ -171,6 +174,9 @@ def test_activation_failure_restores_selector_and_retains_failed_child(
     assert failed.attrs["palette_run_completion_status"] == "failed"
     assert failed.attrs["atomic_publication_tombstone"]["public_path_retained"] is True
 
+    with pytest.raises(FileExistsError, match="not one completed"):
+        mod.publish_sealed_chaser_component(request)
+
 
 def test_default_publication_is_ineligible_and_preserves_stale_legacy_pointers(
     monkeypatch: pytest.MonkeyPatch,
@@ -203,8 +209,147 @@ def test_default_publication_is_ineligible_and_preserves_stale_legacy_pointers(
     assert receipt["component_name"] == "escape_v2"
     assert receipt["final_validation"]["valid"] is True
 
-    with pytest.raises(FileExistsError, match="Refusing to replace"):
+    recovered = mod.publish_sealed_chaser_component(request)
+    assert recovered["recovered_existing"] is True
+    assert recovered["publication_owner_uuid"] == receipt["publication_owner_uuid"]
+    assert recovered["component_manifest_sha256"] == receipt[
+        "component_manifest_sha256"
+    ]
+    assert recovered["recovery"]["policy"].startswith("exact_science_")
+
+
+def test_retry_recovery_ignores_only_declared_operational_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, local, request = _fixture(tmp_path)
+    monkeypatch.setattr(mod, "load_chaser_distance_run", lambda *_a, **_k: _snapshot())
+    first = mod.publish_sealed_chaser_component(request)
+
+    component = zarr.open_group(
+        str(local), mode="a", zarr_format=3, use_consolidated=False
+    )
+    del component.attrs[COMPONENT_MANIFEST_ATTR]
+    del component.attrs[COMPONENT_MANIFEST_DIGEST_ATTR]
+    component.attrs["created_at_utc"] = "2099-01-02T03:04:05+00:00"
+    _manifest, local_digest = persist_chaser_component_manifest(
+        component,
+        snapshot=_snapshot(),
+        relative_path=request.relative_path,
+        contract=request.contract,
+    )
+
+    recovered = mod.publish_sealed_chaser_component(request)
+
+    assert recovered["recovered_existing"] is True
+    assert recovered["component_manifest_sha256"] == first[
+        "component_manifest_sha256"
+    ]
+    assert recovered["component_manifest_sha256"] != local_digest
+    assert recovered["recovery"]["local_manifest_sha256"] == local_digest
+    assert recovered["recovery"]["ignored_attribute_names"] == [
+        "completed_at_utc",
+        "created_at_utc",
+        "generated_at",
+        "generated_at_utc",
+    ]
+
+
+def test_retry_recovery_rejects_changed_scientific_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, local, request = _fixture(tmp_path)
+    monkeypatch.setattr(mod, "load_chaser_distance_run", lambda *_a, **_k: _snapshot())
+    mod.publish_sealed_chaser_component(request)
+
+    component = zarr.open_group(
+        str(local), mode="a", zarr_format=3, use_consolidated=False
+    )
+    del component.attrs[COMPONENT_MANIFEST_ATTR]
+    del component.attrs[COMPONENT_MANIFEST_DIGEST_ATTR]
+    component.attrs["coordinate_space"] = "different_scientific_space"
+    persist_chaser_component_manifest(
+        component,
+        snapshot=_snapshot(),
+        relative_path=request.relative_path,
+        contract=request.contract,
+    )
+
+    with pytest.raises(FileExistsError, match="scientific payload or semantics"):
         mod.publish_sealed_chaser_component(request)
+
+
+def test_fresh_process_acknowledgement_loss_recovers_completed_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, local, request = _fixture(tmp_path)
+    child = textwrap.dedent(
+        """
+        import os
+        import sys
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from fisheye.analysis.chaser_component_publication import ChaserComponentContract
+        from fisheye.analysis_workflows.materializers import chaser_component as mod
+
+        snapshot = SimpleNamespace(
+            run_path="analysis/chaser_distance_runs/canonical",
+            publication_seal_ref=(
+                "/analysis/chaser_distance_runs/canonical@chaser_distance_publication_seal"
+            ),
+            publication_seal_sha256="a" * 64,
+            surface_manifest_ref=(
+                "/analysis/chaser_distance_runs/canonical@chaser_distance_surface_manifest"
+            ),
+            surface_manifest_sha256="b" * 64,
+            row_identity_ref=(
+                "/analysis/chaser_distance_runs/canonical@row_identity_contract"
+            ),
+            row_identity_sha256="c" * 64,
+            authority_record=lambda: {
+                "schema_id": "palette.chaser_distance_read_authority",
+                "schema_version": 1,
+                "run_ref": "/analysis/chaser_distance_runs/canonical",
+            },
+        )
+        mod.load_chaser_distance_run = lambda *_a, **_k: snapshot
+        contract = ChaserComponentContract(
+            component_family="chaser_escape_events",
+            component_name="escape_v2",
+            semantic_schema_id="palette.chaser_escape_events",
+            semantic_schema_version=2,
+            method_id="palette.chaser_escape_event_detector",
+            method_version="2.1.0",
+            parameters={"threshold_mm": 4.0},
+            source_authorities={"bout_manifest_sha256": "d" * 64},
+        )
+        mod.publish_sealed_chaser_component(
+            mod.ChaserComponentPublishRequest(
+                source_zarr=Path(sys.argv[1]),
+                local_component_path=Path(sys.argv[2]),
+                base_run_name="canonical",
+                base_run_path="analysis/chaser_distance_runs/canonical",
+                relative_path="chaser_escape_events/escape_v2",
+                contract=contract,
+            )
+        )
+        os._exit(73)
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", child, str(source), str(local)],
+        check=False,
+    )
+    assert completed.returncode == 73
+
+    monkeypatch.setattr(mod, "load_chaser_distance_run", lambda *_a, **_k: _snapshot())
+    recovered = mod.publish_sealed_chaser_component(request)
+    assert recovered["recovered_existing"] is True
+    assert recovered["final_validation"]["valid"] is True
 
 
 def test_unsealed_local_component_fails_before_destination_mutation(

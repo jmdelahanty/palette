@@ -18,7 +18,7 @@ import socket
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -141,6 +141,9 @@ class AtomicRunPublishSpec:
     selector_owner_attr: str | None = None
     selector_generation_attr: str | None = None
     owned_parent_attr_names: tuple[tuple[str, ...], ...] = ()
+    publication_attempt_uuid: str = field(
+        default_factory=lambda: uuid.uuid4().hex
+    )
 
     @property
     def lock_path(self) -> Path:
@@ -148,8 +151,23 @@ class AtomicRunPublishSpec:
 
     @property
     def temporary_path(self) -> Path:
+        try:
+            attempt = uuid.UUID(str(self.publication_attempt_uuid)).hex
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                "publication_attempt_uuid must be one canonical UUID token."
+            ) from exc
+        host = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in socket.gethostname()
+        ).strip("_") or "unknown-host"
+        job = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in str(os.environ.get("LSB_JOBID") or "local")
+        ).strip("_") or "local"
         return self.target_run_path.parent / (
-            f".{self.run_name}.publish_tmp.{os.getpid()}"
+            f".{self.run_name}.publish_tmp.{host}.{job}.{os.getpid()}."
+            f"{attempt}"
         )
 
 

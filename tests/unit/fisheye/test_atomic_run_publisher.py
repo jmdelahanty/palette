@@ -76,6 +76,37 @@ def test_atomic_copy_integrity_defaults_fail_safe() -> None:
     assert mod.DEFAULT_COPY_CONTENT_CHECKSUM is True
 
 
+def test_atomic_temporary_paths_are_host_job_and_attempt_unique(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, _target, first, _owner, _validate, _prepare = _publication_fixture(
+        tmp_path
+    )
+    second = replace(first, publication_attempt_uuid=uuid.uuid4().hex)
+    monkeypatch.setattr(mod.socket, "gethostname", lambda: "compute/node 7")
+    monkeypatch.setenv("LSB_JOBID", "job/123")
+
+    assert first.temporary_path != second.temporary_path
+    assert first.temporary_path.parent == first.target_run_path.parent
+    assert first.temporary_path.name.startswith(
+        ".candidate.publish_tmp.compute_node_7.job_123."
+    )
+    assert first.publication_attempt_uuid in first.temporary_path.name
+    assert second.publication_attempt_uuid in second.temporary_path.name
+
+
+def test_atomic_temporary_path_rejects_non_uuid_attempt_token(
+    tmp_path: Path,
+) -> None:
+    _source, _target, spec, _owner, _validate, _prepare = _publication_fixture(
+        tmp_path
+    )
+
+    with pytest.raises(ValueError, match="publication_attempt_uuid"):
+        _ = replace(spec, publication_attempt_uuid="../escape").temporary_path
+
+
 def test_atomic_publisher_checks_renamed_owner_before_callbacks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

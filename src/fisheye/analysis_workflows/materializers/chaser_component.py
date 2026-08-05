@@ -10,6 +10,7 @@ default publication remains selector-ineligible.
 from __future__ import annotations
 
 import copy
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,22 +23,36 @@ from fisheye.analysis.chaser_component_publication import (
     COMPONENT_MANIFEST_DIGEST_ATTR,
     COMPONENT_SELECTOR_ATTR,
     COMPONENT_SELECTOR_DIGEST_ATTR,
+    RETRY_TRANSIENT_ATTRIBUTE_NAMES,
     ChaserComponentContract,
+    ChaserComponentPublicationError,
     build_chaser_component_selector,
+    chaser_component_retry_equivalence_sha256,
     component_record_sha256,
     persist_chaser_component_selector,
     validate_chaser_component_manifest,
 )
 from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
+from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.zarr_helpers import archive_metadata_publication_lock
 from fisheye.shared.zarr_io import open_zarr_root
 
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from .atomic_run_publisher import (
+    ATOMIC_PUBLICATION_OWNER_ATTR,
+    ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
+    AtomicRunPublishSpec,
+    atomic_publish_run_group,
+)
 
 
 CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_ID = (
     "palette.chaser_component_atomic_publication"
 )
 CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION = 1
+CHASER_COMPONENT_RECOVERY_SCHEMA_ID = (
+    "palette.chaser_component_publication_recovery"
+)
+CHASER_COMPONENT_RECOVERY_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -81,6 +96,115 @@ def _normalized_request(
             "Chaser component base run path must match the exact requested run name."
         )
     return base_path, family, component_name
+
+
+def _recover_completed_ineligible_component(
+    request: ChaserComponentPublishRequest,
+    *,
+    source_zarr: Path,
+    base_path: str,
+    family: str,
+    component_name: str,
+    local_manifest: dict[str, Any],
+    expected_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Reconstruct acknowledgement for one exact already-committed candidate."""
+
+    target_group_path = f"{base_path}/{family}/{component_name}"
+    with archive_metadata_publication_lock(source_zarr):
+        root = open_zarr_root(source_zarr, mode="r")
+        snapshot = load_chaser_distance_run(
+            root,
+            run_name=request.base_run_name,
+        )
+        if snapshot.run_path != base_path:
+            raise RuntimeError(
+                "Verified chaser-distance base changed before receipt recovery."
+            )
+        try:
+            component = root[target_group_path]
+        except Exception as exc:
+            raise FileExistsError(
+                "Existing chaser component disappeared before receipt recovery."
+            ) from exc
+        if not isinstance(component, zarr.Group):
+            raise FileExistsError(
+                "Existing chaser component recovery target is not a group."
+            )
+        owner = component.attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR)
+        try:
+            canonical_owner = str(uuid.UUID(str(owner)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise FileExistsError(
+                "Existing chaser component lacks one valid publication owner."
+            ) from exc
+        if (
+            owner != canonical_owner
+            or component.attrs.get("palette_run_completion_status") != "complete"
+            or component.attrs.get("stage_selector_eligible") is not False
+            or ATOMIC_PUBLICATION_TOMBSTONE_ATTR in component.attrs
+        ):
+            raise FileExistsError(
+                "Existing chaser component is not one completed, "
+                "selector-ineligible, untombstoned publication."
+            )
+        try:
+            manifest = validate_chaser_component_manifest(
+                component,
+                snapshot=snapshot,
+                expected_relative_path=request.relative_path,
+                expected_contract=request.contract,
+            )
+        except ChaserComponentPublicationError as exc:
+            raise FileExistsError(
+                "Existing chaser component is not one valid publication of "
+                "the requested contract."
+            ) from exc
+        manifest_sha256 = component_record_sha256(manifest)
+        local_retry_sha256 = chaser_component_retry_equivalence_sha256(
+            local_manifest
+        )
+        existing_retry_sha256 = chaser_component_retry_equivalence_sha256(
+            manifest
+        )
+        if existing_retry_sha256 != local_retry_sha256:
+            raise FileExistsError(
+                "Existing chaser component scientific payload or semantics differ "
+                "from the local retry."
+            )
+        validation = {
+            "valid": True,
+            "component_manifest_sha256": manifest_sha256,
+            "array_count": len(manifest["payload"]["arrays"]),
+            "group_count": len(manifest["payload"]["groups"]),
+        }
+        receipt = {
+            "schema_id": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_ID,
+            "schema_version": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION,
+            "base_run_path": base_path,
+            "component_family": family,
+            "component_name": component_name,
+            "component_manifest_sha256": manifest_sha256,
+            "selector_activation_requested": False,
+            "publication_owner_uuid": canonical_owner,
+            "recovered_existing": True,
+            "recovery": {
+                "schema_id": CHASER_COMPONENT_RECOVERY_SCHEMA_ID,
+                "schema_version": CHASER_COMPONENT_RECOVERY_SCHEMA_VERSION,
+                "policy": (
+                    "exact_science_complete_ineligible_untombstoned_reopen_v1"
+                ),
+                "target_group_path": target_group_path,
+                "local_manifest_sha256": expected_manifest_sha256,
+                "existing_manifest_sha256": manifest_sha256,
+                "retry_equivalence_sha256": existing_retry_sha256,
+                "ignored_attribute_names": sorted(
+                    RETRY_TRANSIENT_ATTRIBUTE_NAMES
+                ),
+            },
+            "final_validation": validation,
+        }
+        return json_attr_safe(receipt)
 
 
 def publish_sealed_chaser_component(
@@ -248,29 +372,42 @@ def publish_sealed_chaser_component(
         ),
         content_checksum=bool(request.content_checksum),
     )
-    result = atomic_publish_run_group(
-        spec,
-        copy_backend=request.copy_backend,
-        validate_run=validate_path,
-        prepare_parents=prepare_parents,
-        complete_run=complete_run,
-        verify_pointers=verify_pre_activation,
-        activate_run=activate_run if request.activate_selector else None,
-        rollback_activation=(
-            rollback_activation if request.activate_selector else None
-        ),
-        payload_metadata={
-            "schema_version": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION,
-            "base_run_path": base_path,
-            "component_family": family,
-            "component_name": component_name,
-            "component_manifest_attr": COMPONENT_MANIFEST_ATTR,
-            "component_manifest_digest_attr": COMPONENT_MANIFEST_DIGEST_ATTR,
-            "component_manifest_sha256": local_manifest_digest,
-            "component_selector_sha256": expected_selector_digest,
-            "selector_activation_requested": bool(request.activate_selector),
-        },
-    )
+    try:
+        result = atomic_publish_run_group(
+            spec,
+            copy_backend=request.copy_backend,
+            validate_run=validate_path,
+            prepare_parents=prepare_parents,
+            complete_run=complete_run,
+            verify_pointers=verify_pre_activation,
+            activate_run=activate_run if request.activate_selector else None,
+            rollback_activation=(
+                rollback_activation if request.activate_selector else None
+            ),
+            payload_metadata={
+                "schema_version": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION,
+                "base_run_path": base_path,
+                "component_family": family,
+                "component_name": component_name,
+                "component_manifest_attr": COMPONENT_MANIFEST_ATTR,
+                "component_manifest_digest_attr": COMPONENT_MANIFEST_DIGEST_ATTR,
+                "component_manifest_sha256": local_manifest_digest,
+                "component_selector_sha256": expected_selector_digest,
+                "selector_activation_requested": bool(request.activate_selector),
+            },
+        )
+    except FileExistsError:
+        if request.activate_selector:
+            raise
+        result = _recover_completed_ineligible_component(
+            request,
+            source_zarr=source_zarr,
+            base_path=base_path,
+            family=family,
+            component_name=component_name,
+            local_manifest=dict(local_manifest),
+            expected_manifest_sha256=local_manifest_digest,
+        )
 
     return result
 
@@ -278,6 +415,8 @@ def publish_sealed_chaser_component(
 __all__ = [
     "CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_ID",
     "CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION",
+    "CHASER_COMPONENT_RECOVERY_SCHEMA_ID",
+    "CHASER_COMPONENT_RECOVERY_SCHEMA_VERSION",
     "ChaserComponentPublishRequest",
     "publish_sealed_chaser_component",
 ]

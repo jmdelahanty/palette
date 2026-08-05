@@ -261,8 +261,14 @@ def test_sealed_writer_stages_publishes_and_returns_exact_receipt(
         expected_manifest_sha256=receipt["component_manifest_sha256"],
     )
 
-    with pytest.raises(FileExistsError, match="Refusing to replace"):
-        write_component(source, result, overwrite=True)
+    recovered_path = write_component(source, result, overwrite=True)
+    assert recovered_path == path
+    recovered_receipt = recovered_path.publication_receipt
+    assert recovered_receipt["component_manifest_sha256"] == receipt[
+        "component_manifest_sha256"
+    ]
+    assert recovered_receipt["dependency_handle"] == receipt["dependency_handle"]
+    assert recovered_receipt["atomic_publication"]["recovered_existing"] is True
 
 
 def test_missing_lineage_fails_before_any_destination_child(

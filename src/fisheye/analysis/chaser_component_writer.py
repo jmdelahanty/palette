@@ -297,7 +297,22 @@ def sealed_chaser_component_writer(
                         activate_selector=False,
                     )
                 )
-                if receipt.get("component_manifest_sha256") != manifest_digest:
+                published_manifest_digest = receipt.get(
+                    "component_manifest_sha256"
+                )
+                recovered_existing = receipt.get("recovered_existing") is True
+                if recovered_existing:
+                    recovery = receipt.get("recovery")
+                    if (
+                        not isinstance(recovery, Mapping)
+                        or recovery.get("local_manifest_sha256") != manifest_digest
+                        or recovery.get("existing_manifest_sha256")
+                        != published_manifest_digest
+                    ):
+                        raise ChaserComponentWriterError(
+                            "Atomic publisher returned malformed recovery evidence."
+                        )
+                elif published_manifest_digest != manifest_digest:
                     raise ChaserComponentWriterError(
                         "Atomic publisher returned a different component manifest digest."
                     )
@@ -315,6 +330,13 @@ def sealed_chaser_component_writer(
                     ),
                     relative_path=relative_path,
                 )
+                if (
+                    dependency_handle["component_manifest_sha256"]
+                    != published_manifest_digest
+                ):
+                    raise ChaserComponentWriterError(
+                        "Recovered component handle differs from the publication receipt."
+                    )
                 writer_receipt = {
                     "schema_id": CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_ID,
                     "schema_version": CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_VERSION,
@@ -325,10 +347,10 @@ def sealed_chaser_component_writer(
                     "semantic_schema_version": semantic_schema_version,
                     "method_id": method_id,
                     "method_version": method_version,
-                    "component_manifest_sha256": manifest_digest,
+                    "component_manifest_sha256": published_manifest_digest,
                     "dependency_handle": dependency_handle,
-                    "payload_array_count": len(manifest["payload"]["arrays"]),
-                    "payload_group_count": len(manifest["payload"]["groups"]),
+                    "payload_array_count": int(validation["array_count"]),
+                    "payload_group_count": int(validation["group_count"]),
                     "selector_eligible": False,
                     "validation": copy.deepcopy(dict(validation)),
                     "atomic_publication": copy.deepcopy(dict(receipt)),

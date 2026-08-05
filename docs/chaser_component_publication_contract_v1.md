@@ -42,11 +42,35 @@ writers use `analysis/chaser_component_writer.py` to build only in a private
 node-local archive and then submit the sealed component directory to that
 materializer.
 
+Hidden copy names are unique per host, LSF job (or local execution), process,
+and publication-attempt UUID. A stale hidden directory left by a hard process
+or host failure therefore cannot collide with a later attempt from another
+machine.
+
 The public scientific writer path never requests selector activation. The
 materializer's `activate_selector=True` mode exists only for a separate,
 explicit activation operation after review. Merely passing a historical
 `overwrite=True` argument does not authorize replacement or activation; a
 same-name immutable child fails closed.
+
+For the default selector-ineligible path, a retry that finds a public child
+does not blindly fail and does not overwrite it. Under the archive-wide lock it
+may reconstruct the lost acknowledgement only when the existing child:
+
+- has one valid atomic-publication owner UUID;
+- is complete, selector-ineligible, and untombstoned;
+- validates against the current base authority and requested component
+  contract; and
+- has the same schema, sources, parameters, authoritative attributes, array
+  declarations, and decoded-array hashes as the retry.
+
+The retry comparison permits differences in exactly four recursively located
+operational timestamp attributes: `created_at_utc`, `completed_at_utc`,
+`generated_at`, and `generated_at_utc`. Each immutable manifest still records
+and validates its own timestamps exactly. The recovery receipt records both
+manifest digests, the common retry-equivalence digest, and the ignored-name
+set. Changed payloads, changed semantic attributes, failed/tombstoned children,
+eligible children, and activation requests remain terminal collisions.
 
 ## Maintained Writer Adoption
 
@@ -198,6 +222,11 @@ attributes. Maintained readers must consume only this authority envelope.
       after all requested steps finish.
 - [x] Run focused real-Zarr success and post-selector failure/rollback tests
       outside the sandbox.
+- [x] Make hidden-copy names host/job/process/attempt unique and reconstruct a
+      lost selector-ineligible acknowledgement only after exact scientific
+      equivalence. Coverage includes a fresh process exiting after commit,
+      operational timestamp regeneration, changed-payload rejection, and
+      failed/tombstoned rejection.
 - [x] Run the selector-ineligible egocentric -> bout-response -> escape-event
       chain through explicit handles outside the sandbox.
 - [ ] Run end-to-end activated component-family workflow tests outside the

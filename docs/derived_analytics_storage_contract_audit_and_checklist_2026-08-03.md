@@ -768,9 +768,14 @@ a v3 storage-candidate regression.
       distance summary/histogram tables remain explicitly unavailable. The
       authority/export/publication matrix passes 182/182 tests, including 7/7
       real sealed-base/component integration tests and process-pool transport.
-- [ ] Add recovery tests for interrupted component publication and stale
-      pointers. Post-selector failure rollback is covered; add interruption
-      points for each adopted component workflow.
+- [x] Add recovery tests for interrupted component publication and stale
+      pointers. The shared path now uses host/job/process/attempt-unique hidden
+      names, reconstructs a lost selector-ineligible acknowledgement only from
+      one complete untombstoned scientifically equivalent candidate, and
+      rejects changed payloads or failed children. Coverage includes a fresh
+      process exiting after commit, regenerated operational timestamps,
+      pre-rename retry, and post-selector failure rollback; every maintained
+      component writer routes through this same boundary.
 
 The v1 logical envelope, validation boundary, and remaining adoption checklist
 are frozen in `docs/chaser_component_publication_contract_v1.md`.
