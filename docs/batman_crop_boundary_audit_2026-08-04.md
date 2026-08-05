@@ -364,6 +364,59 @@ batman_refined_authority_activation_20260805/
 
 The directory also contains 36 per-recording activation receipts.
 
+## Frozen crop-v2 production-candidate cohort (2026-08-05)
+
+The recording-scale crop cohort is now frozen without publishing any crop
+arrays. The cohort planner consumed the exact refined-authority activation
+plan rather than rediscovering recordings, then reopened every active
+authority through normal production selection, revalidated all 13 crop-v2
+arrays, rebound the live video and camera authority, and fixed one shared crop
+policy and physical profile. The plan contains:
+
+- 36 analysis archives and 4,987,449 instance rows;
+- one selection mode, `approved_authoritative_refined_v1`;
+- crop size `348 x 348` and purpose
+  `zebrafish_pose_subject_mask_input`;
+- padding mode `zero_outside_source_frame`;
+- storage profile `published_http_v1`;
+- cameras `2010093`, `2010094`, `2010095`, and `2010096`;
+- 84,133 padded rows across 30 archives; and
+- maximum `[left, top, right, bottom]` padding `[103, 73, 121, 104]`.
+
+The immutable cohort plan digest is:
+
+```text
+e39781fc5e46c9add5fdcbab5a0b7fae7da4fd2d5124134a226c4f66b6a1b10f
+```
+
+It binds source activation plan digest
+`c04f88d4298db4a821f9ea14f7f3c37a3bb854f6c34c05eacd1beb214353c10b`
+and crop-policy digest
+`4ea3232c90dd8dc9625179d7938e0a7275cdc19b3217cc2024adbc7c12d84bb1`.
+The planner implementation is Palette commit `0f576d2d`. Five deterministic
+in-memory planner/preflight tests passed, together with the static checks. The
+real-Zarr publication suite did not start because the outside-sandbox approval
+bridge timed out; this is an unexecuted gate, not a test failure. Consequently
+no canary or cohort crop run has been published.
+
+Durable no-write evidence is under:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.processing_logs/
+batman_crop_geometry_v2_348_20260805/
+```
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Frozen crop plan | `f2d1265a38f371b8988c0b9d8486503ccf9eb38150fee6696149d3d6f3631852` |
+| Plan construction result | `fea37fd7111dec0fa71908537901247458abd87e978fe35e2672aaa95e539e6d` |
+
+The durable `receipts/` directory is empty. Publication remains a separate
+apply operation after the real-Zarr suite passes. The first write must be the
+single arena-2 canary; the other 35 may follow only from the unchanged frozen
+plan after that receipt validates. Crop runs remain selector-ineligible and
+registry-unregistered throughout this checkpoint.
+
 ## Dry-run commands
 
 Single recording:
@@ -439,6 +492,17 @@ scripts/py -m fisheye.utils.preflight_refined_detection_crops \
   --result-json /tmp/batman_accept_all_refined_v2_crop_cohort_preflight_20260805.json
 ```
 
+Freeze the production-candidate crop cohort from the exact activation plan
+without publishing crop arrays:
+
+```bash
+scripts/py -m fisheye.utils.publish_crop_geometry_candidate_batch \
+  --activation-plan /tmp/batman_refined_authority_activation_plan_20260805.json \
+  --crop-run crop_geometry_v2_348_20260805 \
+  --plan-json /tmp/batman_crop_geometry_v2_348_plan_20260805.json \
+  --result-json /tmp/batman_crop_geometry_v2_348_plan_result_20260805.json
+```
+
 ## Open scientific and lineage questions
 
 - Confirm that the 348-pixel field of view contains the complete fish and the
@@ -448,7 +512,7 @@ scripts/py -m fisheye.utils.preflight_refined_detection_crops \
 - Decide whether zero-padded rows need a quality/QC flag or per-side padding
   widths in future crop-v2 extensions. Exact placement already makes the widths
   derivable, but an indexed QC surface may be more convenient for filtering.
-- Freeze which current canonical/refined detection authority supplies each
-  Batman crop snapshot before running the production DAG.
+- Preserve the frozen refined-authority and crop-plan bindings when the
+  arena-2 canary and remaining cohort are eventually applied.
 - Publish the missing Batman stimulus/chaser authorities before treating
   chaser-specific analytics as eligible outputs.
