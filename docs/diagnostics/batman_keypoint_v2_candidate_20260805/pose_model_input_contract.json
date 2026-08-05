@@ -1,0 +1,72 @@
+{
+  "digest_algorithm": "sha256_canonical_json_v1",
+  "payload": {
+    "evidence": {
+      "training_args": {
+        "relative_path": "args.yaml",
+        "sha256": "60f85f403ab16245de9947080eb8600b57da582bc5348af4c963e6a4bdc4d796"
+      },
+      "training_manifest": {
+        "relative_path": "inputs/pose_all_registry_reviewed_v2_keypoints_20260520_v001.manifest.json",
+        "sha256": "5cfe9cefdeb5adde2eb35e26e469c1898cd31b007274b259272a42a6c1cdc317"
+      },
+      "training_report": {
+        "relative_path": "20260520-234952_pose_training_report.yaml",
+        "sha256": "8aede160164355cd65b3db12f058283e9e88479ee466aaa2cbf553b38b3e7b0e"
+      }
+    },
+    "model": {
+      "run_id": "pose_all_registry_reviewed_v2_kpt5_warm_v2_20260520_retry2",
+      "set_id": "pose_all_registry_reviewed_v2_keypoints_20260520_v001",
+      "weights": {
+        "relative_path": "weights/best.pt",
+        "sha256": "cce63d534a8f1491db1e2c71cb9236768c445722013dc39faeaf62a9d0a9a377"
+      }
+    },
+    "runtime_profile": {
+      "classification": "scale_matched_diagnostic_not_training_context",
+      "input_mode": "numpy-list",
+      "native_to_submitted": {
+        "padding_mode": "constant",
+        "padding_value_uint8": 0,
+        "policy": "center_pad_to_training_source_shape"
+      },
+      "profile_id": "scale_matched_center_pad_ultralytics_v1",
+      "result_coordinates": "ultralytics_results_original_submitted_pixel_coordinates",
+      "submitted_to_network": {
+        "adapter": "ultralytics_numpy_list_predict_v1",
+        "imgsz_hw": [
+          256,
+          256
+        ],
+        "letterbox_interpolation": "opencv_inter_linear",
+        "letterbox_padding_value_uint8": 114,
+        "luma_channel_policy": "uint8_luma_repeated_bgr_then_equivalent_rgb",
+        "normalization": "uint8_divide_255_to_float",
+        "rect": false,
+        "ultralytics_version": "8.3.214"
+      }
+    },
+    "status": "complete",
+    "training_input": {
+      "input_format": "gray",
+      "model_stride": 32,
+      "network_shape_hw": [
+        256,
+        256
+      ],
+      "roi_pixel_contract_name": "orange_mono_pynvvc_luma_uint8_v1",
+      "source_roi_shape_hw": [
+        512,
+        512
+      ],
+      "training_multi_scale": false,
+      "training_rect": false,
+      "training_semantics": "augmented_training_pipeline_with_deterministic_validation_imgsz_reference",
+      "ultralytics_version": "8.3.214"
+    }
+  },
+  "payload_digest": "96c23419266b0a8aef78f8303a746c85fbe32a12b31d443e127d97cdc0c1f2cb",
+  "schema_id": "palette.pose_model_input_contract",
+  "schema_version": 1
+}

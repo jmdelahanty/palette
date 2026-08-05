@@ -1031,6 +1031,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, default=keypoints.DEFAULT_REGISTRY)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
+    parser.add_argument("--model-input-contract", type=Path, required=True)
     parser.add_argument("--pose-schema", default="traditional_v2")
     parser.add_argument("--batch-size-kp", type=int, default=256)
     parser.add_argument("--batch-size-sm", type=int, default=128)
@@ -1038,8 +1039,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-input-stride",
         type=int,
-        default=keypoints.DEFAULT_MODEL_INPUT_STRIDE,
-        help="Planned keypoint-model stride, verified against the loaded model.",
+        default=None,
+        help="Optional assertion against the contract-owned keypoint-model stride.",
     )
     parser.add_argument("--mask-model-coverage-class", default="dense_all_components")
     parser.add_argument(
@@ -1222,12 +1223,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=run_root / "keypoints",
         model_set_id=args.model_set_id,
         model_run_id=args.model_run_id,
+        model_input_contract_path=args.model_input_contract,
         pose_schema=args.pose_schema,
         min_roi_size=348,
         batch_size=args.batch_size_kp,
         device=args.device,
-        input_mode="tensor",
-        model_input_stride=int(args.model_input_stride),
+        input_mode="model-contract",
+        model_input_stride=(
+            int(args.model_input_stride)
+            if args.model_input_stride is not None
+            else None
+        ),
         progress_every_batches=1,
         prediction_resources=LsfResources(queue="gpu_l4", ncores=4, mem_gb=32, gpus=1),
         refinement_resources=LsfResources(

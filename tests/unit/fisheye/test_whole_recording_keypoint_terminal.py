@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.shared.pose_model_input_contract import PoseModelInputRuntimePlan
 from fisheye.shared.zarr.keypoint_manifest import keypoint_preprocessing_from_manifest
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -40,17 +41,48 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
     }
     cache_manifest.write_text(json.dumps(cache_document), encoding="utf-8")
     binding = _pose_binding()
+    expected_model_path = tmp_path / "model" / "weights" / "best.pt"
+    expected_model_path.parent.mkdir(parents=True)
+    expected_model_path.write_bytes(b"model")
+    expected_model_sha256 = "d" * 64
+    model_input_contract = tmp_path / "pose_model_input_contract.json"
+    model_input_contract.write_text("{}", encoding="utf-8")
     expected_transform = resolve_model_input_transform(
         (4, 4), mode="pad_to_size", model_hw=(32, 32)
     )
+    runtime_plan = PoseModelInputRuntimePlan(
+        transform=expected_transform,
+        network_shape_hw=(16, 16),
+        model_stride=16,
+        input_mode="numpy-list",
+        profile_id="scale_matched_center_pad_ultralytics_v1",
+        classification="scale_matched_diagnostic_not_training_context",
+        contract_path=model_input_contract,
+        contract_sha256="c" * 64,
+        contract_payload_digest="e" * 64,
+    )
+    contract = SimpleNamespace(
+        ultralytics_version="8.3.214",
+        plan_for_native_shape=lambda _shape: runtime_plan,
+        to_json=lambda: {
+            "path": str(model_input_contract),
+            "sha256": "c" * 64,
+            "payload_digest": "e" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        mod, "load_pose_model_input_contract", lambda *_args, **_kwargs: contract
+    )
+    monkeypatch.setattr(mod.importlib.metadata, "version", lambda _name: "8.3.214")
 
     def fake_inference(**kwargs):
         assert kwargs["output"] != analysis
         assert kwargs["output_parent"] == "keypoint_shard_runs"
         assert kwargs["coordinate_contract_mode"] == "legacy_noncanonical"
         assert kwargs["roi_cache_expected_archive_path"] == analysis
-        assert kwargs["imgsz"] == 32
-        assert kwargs["expected_model_stride"] == 32
+        assert kwargs["imgsz"] == 16
+        assert kwargs["model_input_size"] == 32
+        assert kwargs["expected_model_stride"] == 16
         assert kwargs["model_input_transform_mode"] == "pad_to_size"
         local = zarr.open_group(str(kwargs["output"]), mode="a", use_consolidated=False)
         run = local.require_group("keypoint_shard_runs").create_group(
@@ -62,9 +94,15 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
                 "status": "complete",
                 "stage_selector_eligible": False,
                 RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
-                "input_mode_effective": "tensor",
+                "input_mode_effective": "numpy-list",
                 "model_input_transform": expected_transform.to_attrs(),
-                "model_input_stride": 32,
+                "model_input_stride": 16,
+                "ultralytics_version": "8.3.214",
+                "parameters": {
+                    "imgsz": 16,
+                    "model_input_size": 32,
+                    "model_predict_rect": False,
+                },
                 "confidence_threshold": 0.25,
                 "iou_threshold": 0.5,
                 "max_detections": 1,
@@ -98,7 +136,10 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
             ok=True,
             keypoint_run=kwargs["run_name"],
             resolution_payload={
-                "selected": {"model_path": "/models/pose.pt", "model_sha256": "d" * 64},
+                "selected": {
+                    "model_path": str(expected_model_path),
+                    "model_sha256": expected_model_sha256,
+                },
                 "artifacts": {"model_pose_schema_binding": binding},
             },
             to_dict=lambda: {},
@@ -115,16 +156,20 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
         registry=tmp_path / "registry.sqlite",
         model_set_id="pose-set",
         model_run_id="pose-run",
+        expected_model_path=expected_model_path,
+        expected_model_sha256=expected_model_sha256,
+        model_input_contract=model_input_contract,
         pose_schema="traditional_v2",
         terminal_run_id="terminal-a",
         terminal_output=output,
         scratch_root=tmp_path / "scratch",
         batch_size=8,
         device="0",
-        input_mode="tensor",
+        input_mode="numpy-list",
         model_input_size=32,
+        network_input_size=16,
         model_input_transform_mode="pad_to_size",
-        model_input_stride=32,
+        model_input_stride=16,
     )
 
     payload = receipt["payload"]
@@ -140,7 +185,11 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
     assert preprocessing.document["model_input_transform"] == (
         expected_transform.to_attrs()
     )
-    assert preprocessing.document["model_input_stride"] == 32
+    assert preprocessing.document["model_input_stride"] == 16
+    assert preprocessing.document["model_input_runtime"]["network_shape_hw"] == [
+        16,
+        16,
+    ]
     assert payload["pose_failure_codes"]["histogram"]["none"] == 1
     assert (
         payload["row_terminal_semantics"]

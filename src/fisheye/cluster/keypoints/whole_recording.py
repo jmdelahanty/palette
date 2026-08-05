@@ -43,15 +43,17 @@ from fisheye.cluster.lsf import (
 )
 from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN, build_runtime_command
 from fisheye.shared.model_input_transform import (
-    DEFAULT_MODEL_INPUT_STRIDE,
     ModelInputTransform,
-    resolve_model_input_transform,
-    resolve_stride_aligned_square_input_transform,
+)
+from fisheye.shared.pose_model_input_contract import (
+    PoseModelInputContractBinding,
+    PoseModelInputRuntimePlan,
+    load_pose_model_input_contract,
 )
 
 
 TARGET_MANIFEST_SCHEMA = "palette.whole_recording_keypoint_targets.v1"
-PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v4"
+PLAN_SCHEMA = "palette.whole_recording_keypoint_bsub_plan.v5"
 NORMALIZED_TARGETS_SCHEMA = "palette.whole_recording_keypoint_targets.normalized.v1"
 DEFAULT_GROUPS_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
 DEFAULT_REGISTRY = Path(
@@ -92,6 +94,8 @@ class PlannedWholeRecordingTarget:
     target: WholeRecordingTarget
     model: PoseModelBinding
     cache: FlatRoiCacheBinding
+    model_input_contract: PoseModelInputContractBinding
+    model_input_runtime: PoseModelInputRuntimePlan
     model_input_transform: ModelInputTransform
     model_input_stride: int
     input_capability: KeypointInputCapability
@@ -109,6 +113,8 @@ class PlannedWholeRecordingTarget:
             "target": self.target.to_json(),
             "model": self.model.to_json(),
             "cache": self.cache.to_json(),
+            "model_input_contract": self.model_input_contract.to_json(),
+            "model_input_runtime": self.model_input_runtime.to_json(),
             "model_input_transform": self.model_input_transform.to_attrs(),
             "model_input_stride": self.model_input_stride,
             "input_capability": self.input_capability.to_json(),
@@ -138,6 +144,7 @@ class WholeRecordingWorkflowPlan:
     run_root: Path
     model_set_id: str
     model_run_id: str
+    model_input_contract: PoseModelInputContractBinding
     pose_schema: str
     min_roi_size: int
     model_input_stride: int
@@ -159,6 +166,7 @@ class WholeRecordingWorkflowPlan:
             "run_root": str(self.run_root),
             "model_set_id": self.model_set_id,
             "model_run_id": self.model_run_id,
+            "model_input_contract": self.model_input_contract.to_json(),
             "pose_schema": self.pose_schema,
             "min_roi_size": self.min_roi_size,
             "model_input_stride": self.model_input_stride,
@@ -321,12 +329,13 @@ def build_plan(
     run_root: Path,
     model_set_id: str,
     model_run_id: str,
+    model_input_contract_path: Path,
     pose_schema: str,
     min_roi_size: int,
     batch_size: int,
     device: str,
     input_mode: str,
-    model_input_stride: int,
+    model_input_stride: int | None,
     progress_every_batches: int,
     keypoint_roi_shard_rows: int | None = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
@@ -344,6 +353,7 @@ def build_plan(
     resolved_repo = repo.expanduser().resolve()
     resolved_registry = registry.expanduser().resolve()
     resolved_run_root = run_root.expanduser().resolve()
+    resolved_model_input_contract = model_input_contract_path.expanduser().resolve()
     resolved_run_label = safe_component(run_label, default="keypoints")
     normalized_palette_commit = str(palette_commit).strip().lower()
     if (
@@ -370,8 +380,16 @@ def build_plan(
         raise ValueError("Batch size and progress interval must be positive.")
     if int(min_roi_size) <= 0:
         raise ValueError("Minimum zebrafish ROI size must be positive.")
-    if type(model_input_stride) is not int or model_input_stride <= 0:
-        raise ValueError("Model input stride must be a positive exact integer.")
+    if not resolved_model_input_contract.is_file():
+        raise FileNotFoundError(
+            f"Pose model-input contract not found: {resolved_model_input_contract}"
+        )
+    if input_mode not in {"model-contract", "numpy-list", "tensor", "auto"}:
+        raise ValueError("Unsupported model input-mode assertion.")
+    if model_input_stride is not None and (
+        type(model_input_stride) is not int or model_input_stride <= 0
+    ):
+        raise ValueError("Model input stride assertion must be a positive integer.")
     if int(refine_chunk_size) <= 0 or int(refine_num_workers) <= 0:
         raise ValueError("Refinement chunk size and worker count must be positive.")
     keypoint_storage = resolve_keypoint_v2_publication_storage(
@@ -402,6 +420,8 @@ def build_plan(
     jobs: list[LsfJob] = list(upstream_jobs)
     planned_targets: list[PlannedWholeRecordingTarget] = []
     model_identity: tuple[str, str, str, str] | None = None
+    contract_identity: tuple[str, str] | None = None
+    selected_contract: PoseModelInputContractBinding | None = None
 
     for target in targets:
         supplied_cache = (
@@ -439,6 +459,24 @@ def build_plan(
                 f"across targets; {target.target_id!r} resolved {current_model_identity}, "
                 f"expected {model_identity}."
             )
+        model_contract = load_pose_model_input_contract(
+            resolved_model_input_contract,
+            model_path=model.model_path,
+            expected_set_id=model.set_id,
+            expected_run_id=model.run_id,
+            expected_model_sha256=model.model_sha256,
+        )
+        current_contract_identity = (
+            model_contract.sha256,
+            model_contract.payload_digest,
+        )
+        if contract_identity is None:
+            contract_identity = current_contract_identity
+            selected_contract = model_contract
+        elif current_contract_identity != contract_identity:
+            raise ValueError(
+                "Pose model-input contract resolved inconsistently across targets."
+            )
         if supplied_cache is None:
             cache = validate_flat_roi_cache_binding(
                 manifest_path=target.roi_cache_manifest,
@@ -464,17 +502,21 @@ def build_plan(
             min_roi_size=int(min_roi_size),
         )
         native_shape = (int(cache.shape[1]), int(cache.shape[2]))
-        if input_mode in {"tensor", "auto"}:
-            model_input_transform = resolve_stride_aligned_square_input_transform(
-                native_shape,
-                stride=model_input_stride,
+        model_input_runtime = model_contract.plan_for_native_shape(native_shape)
+        if input_mode != "model-contract" and input_mode != model_input_runtime.input_mode:
+            raise ValueError(
+                "Requested input mode disagrees with the exact model-input contract: "
+                f"requested={input_mode!r}, contract={model_input_runtime.input_mode!r}."
             )
-        else:
-            model_input_transform = resolve_model_input_transform(
-                native_shape,
-                mode="identity",
-                model_hw=native_shape,
+        if (
+            model_input_stride is not None
+            and model_input_stride != model_input_runtime.model_stride
+        ):
+            raise ValueError(
+                "Requested model stride disagrees with the model-input contract: "
+                f"requested={model_input_stride}, contract={model_input_runtime.model_stride}."
             )
+        model_input_transform = model_input_runtime.transform
         (
             expected_keypoint,
             expected_quality,
@@ -496,12 +538,10 @@ def build_plan(
             run_names=run_names,
             model=model,
             cache=cache,
-            model_input_transform=model_input_transform,
-            model_input_stride=model_input_stride,
+            model_input_runtime=model_input_runtime,
             pose_schema=pose_schema,
             batch_size=int(batch_size),
             device=device,
-            input_mode=input_mode,
             progress_every_batches=int(progress_every_batches),
             resources=prediction_resources,
         )
@@ -534,8 +574,10 @@ def build_plan(
                 target=target,
                 model=model,
                 cache=cache,
+                model_input_contract=model_contract,
+                model_input_runtime=model_input_runtime,
                 model_input_transform=model_input_transform,
-                model_input_stride=model_input_stride,
+                model_input_stride=model_input_runtime.model_stride,
                 input_capability=input_capability,
                 run_names=run_names,
                 expected_keypoint_group=expected_keypoint,
@@ -547,6 +589,10 @@ def build_plan(
                 refinement_job_key=refinement_job.job_key,
             )
         )
+
+    if not planned_targets or selected_contract is None:
+        raise ValueError("Whole-recording keypoint target manifest is empty.")
+    effective_model_input_stride = selected_contract.model_stride
 
     finalizer_job_key = "registry_finalize"
     finalizer_job_name = safe_component(
@@ -626,7 +672,8 @@ def build_plan(
             "manifest_sha256": manifest_sha256,
             "palette_repo": str(resolved_repo),
             "palette_commit": normalized_palette_commit,
-            "model_input_stride": model_input_stride,
+            "model_input_contract": selected_contract.to_json(),
+            "model_input_stride": effective_model_input_stride,
             "target_count": len(planned_targets),
             "keypoint_storage": keypoint_storage,
             "finalization_execution": finalization_execution,
@@ -642,9 +689,10 @@ def build_plan(
         run_root=resolved_run_root,
         model_set_id=str(model_set_id),
         model_run_id=str(model_run_id),
+        model_input_contract=selected_contract,
         pose_schema=str(pose_schema),
         min_roi_size=int(min_roi_size),
-        model_input_stride=model_input_stride,
+        model_input_stride=effective_model_input_stride,
         keypoint_storage=keypoint_storage,
         finalization_execution=finalization_execution,
         targets=tuple(planned_targets),
@@ -734,6 +782,13 @@ def _print_plan(plan: WholeRecordingWorkflowPlan) -> None:
     print(f"  run_root: {plan.run_root}")
     print(f"  targets: {len(plan.targets)}")
     print(f"  model: {plan.model_set_id} / {plan.model_run_id}")
+    print(f"  model_input_contract: {plan.model_input_contract.path}")
+    print(
+        "  model_input: "
+        f"source={plan.model_input_contract.training_source_shape_hw}, "
+        f"network={plan.model_input_contract.network_shape_hw}, "
+        f"mode={plan.model_input_contract.input_mode}"
+    )
     print(f"  pose_schema: {plan.pose_schema}")
     print(f"  minimum ROI size: {plan.min_roi_size}x{plan.min_roi_size}")
     print(f"  keypoint_storage: {plan.keypoint_storage['effective']}")
@@ -776,6 +831,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
+    parser.add_argument(
+        "--model-input-contract",
+        type=Path,
+        required=True,
+        help=(
+            "Digest-bound model package input contract. It owns submitted "
+            "extent, network imgsz, runtime adapter, and stride."
+        ),
+    )
     parser.add_argument("--pose-schema", default="traditional_v2")
     parser.add_argument(
         "--min-roi-size",
@@ -816,16 +880,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="0")
     parser.add_argument(
         "--input-mode",
-        choices=("numpy-list", "tensor", "auto"),
-        default="tensor",
+        choices=("model-contract", "numpy-list", "tensor", "auto"),
+        default="model-contract",
+        help="Optional assertion; model-contract selects the bound runtime mode.",
     )
     parser.add_argument(
         "--model-input-stride",
         type=int,
-        default=DEFAULT_MODEL_INPUT_STRIDE,
+        default=None,
         help=(
-            "Planned maximum model stride. The inference worker verifies this "
-            "against the loaded model before reading ROI payloads."
+            "Optional assertion against the contract-owned maximum model stride."
         ),
     )
     parser.add_argument("--progress-every-batches", type=int, default=1)
@@ -886,12 +950,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=args.run_root,
         model_set_id=args.model_set_id,
         model_run_id=args.model_run_id,
+        model_input_contract_path=args.model_input_contract,
         pose_schema=args.pose_schema,
         min_roi_size=int(args.min_roi_size),
         batch_size=int(args.batch_size_kp),
         device=args.device,
         input_mode=args.input_mode,
-        model_input_stride=int(args.model_input_stride),
+        model_input_stride=(
+            int(args.model_input_stride)
+            if args.model_input_stride is not None
+            else None
+        ),
         progress_every_batches=int(args.progress_every_batches),
         keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=int(args.keypoint_frame_shard_rows),

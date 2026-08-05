@@ -112,6 +112,45 @@ records the maximum conversion/reprojection error. It deliberately drops
 legacy heading, normalized-coordinate, count-alias, and embedded-QC families.
 This is a canary boundary, not a production selector change.
 
+### Pose model-input contract v1
+
+The model graph does not own source crop geometry. Strict whole-recording
+inference therefore requires a separate
+`palette.pose_model_input_contract` document bound to one exact model set,
+run, weights digest, training-manifest digest, training-report digest, and
+training-args digest. The contract declares the training source ROI shape,
+network `imgsz`, pixel contract, Ultralytics version, maximum model stride,
+training-time rectangular/multi-scale settings, runtime adapter,
+channel/normalization behavior, and result-coordinate space.
+Planner and worker both validate it; the worker also verifies the actual model
+selected through the registry and the installed Ultralytics version.
+
+Historical model backfill uses
+`fisheye.utils.build_pose_model_input_contract`. It reconstructs only claims
+supported by immutable package evidence and refuses disagreement between the
+training manifest, report, and arguments. Future training workflows should
+emit the same document directly rather than require reconstruction.
+
+For the first Batman diagnostic, the contract derives two distinct stages:
+
+1. center-pad the native 348x348 cache row with constant zero to the 512x512
+   training source extent;
+2. submit that 512x512 luma-repeated image through Ultralytics `8.3.214` at
+   `imgsz=256`, `rect=false`, OpenCV linear letterbox preprocessing, and
+   uint8-to-float `/255` normalization.
+
+Ultralytics reports detections in the original submitted 512-pixel extent, so
+the canonical coordinate transform remains the existing exact 512-to-348
+padding inverse. The internal 512-to-256 resize is library preprocessing, not
+a new public coordinate space. A smaller native crop padded to 512 is labeled
+`scale_matched_diagnostic_not_training_context`: it matches the trained scale
+but does not pretend that synthetic padding contains the real surrounding
+camera pixels.
+
+The raw-keypoint-v2 array schema is unchanged. The terminal receipt binds the
+input-contract file digest, payload digest, derived runtime plan, and observed
+runtime attributes before strict v2 finalization.
+
 ### Terminal inference failure evidence
 
 Production-shaped YOLO inference persists a terminal-only

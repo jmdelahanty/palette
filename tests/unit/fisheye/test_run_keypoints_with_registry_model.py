@@ -385,6 +385,10 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
             "keypoint_shard_runs",
             "--pose-schema",
             "traditional_v2",
+            "--imgsz",
+            "256",
+            "--model-input-size",
+            "512",
             "--keypoint-roi-shard-rows",
             "262144",
             "--keypoint-frame-shard-rows",
@@ -418,6 +422,8 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     )
     assert detect_kwargs.get("output_parent") == "keypoint_shard_runs"
     assert detect_kwargs.get("pose_schema") == "traditional_v2"
+    assert detect_kwargs.get("imgsz") == 256
+    assert detect_kwargs.get("model_input_size") == 512
     assert detect_kwargs.get("keypoint_roi_shard_rows") == 262144
     assert detect_kwargs.get("keypoint_frame_shard_rows") == 262144
     assert detect_kwargs.get("device") == "cpu"

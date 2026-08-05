@@ -859,7 +859,8 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
             crop_run="c1",
             pose_schema="traditional_v3",
             batch_size=2,
-            imgsz=40,
+            imgsz=20,
+            model_input_size=40,
             input_mode="numpy-list",
             keypoint_roi_shard_rows=None,
             registry=None,
@@ -879,6 +880,10 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
         == "explicit_digest_bound_assertion_v1"
     )
     assert run.attrs["model_sha256"] == hashlib.sha256(b"fake").hexdigest()
+    assert run.attrs["model_input_shape_hw"] == [40, 40]
+    assert run.attrs["model_network_input_shape_hw"] == [20, 20]
+    assert run.attrs["parameters"]["imgsz"] == 20
+    assert run.attrs["parameters"]["model_input_size"] == 40
     assert activation_observation == {
         "latest": "k1",
         "latest_complete": "k1",

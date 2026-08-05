@@ -491,6 +491,7 @@ def run_keypoints_with_registry_model(
     batch_size: int = 256,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
+    model_input_size: Optional[int] = None,
     expected_model_stride: Optional[int] = None,
     conf: float = 0.25,
     iou: float = 0.5,
@@ -537,6 +538,7 @@ def run_keypoints_with_registry_model(
         batch_size=int(batch_size),
         device=device,
         imgsz=imgsz,
+        model_input_size=model_input_size,
         expected_model_stride=expected_model_stride,
         conf=float(conf),
         iou=float(iou),
@@ -729,6 +731,7 @@ def run_keypoints_with_registry_model(
             batch_size=batch_size,
             device=resolved_device,
             imgsz=imgsz,
+            model_input_size=model_input_size,
             conf=conf,
             iou=iou,
             max_det=max_det,
@@ -862,7 +865,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument("--device", type=str, default=None, help="Optional torch device override.")
-    parser.add_argument("--imgsz", type=int, default=None, help="Optional pose inference image size override.")
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=None,
+        help="Optional Ultralytics network preprocessing size override.",
+    )
+    parser.add_argument(
+        "--model-input-size",
+        type=int,
+        default=None,
+        help=(
+            "Optional square pixel extent submitted before Ultralytics internal "
+            "preprocessing; defaults to --imgsz."
+        ),
+    )
     parser.add_argument(
         "--expected-model-stride",
         type=int,
@@ -971,6 +988,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         batch_size=args.batch_size,
         device=args.device,
         imgsz=args.imgsz,
+        model_input_size=args.model_input_size,
         expected_model_stride=args.expected_model_stride,
         conf=args.conf,
         iou=args.iou,

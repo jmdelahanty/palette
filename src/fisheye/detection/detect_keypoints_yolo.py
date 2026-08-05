@@ -1750,6 +1750,7 @@ def detect_keypoints_yolo(
     batch_size: int = 256,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
+    model_input_size: Optional[int] = None,
     conf: float = 0.25,
     iou: float = 0.5,
     max_det: int = 1,
@@ -2073,10 +2074,15 @@ def detect_keypoints_yolo(
         )
 
     imgsz = imgsz or max(roi_h, roi_w)
+    submitted_model_input_size = (
+        int(imgsz) if model_input_size is None else int(model_input_size)
+    )
+    if int(imgsz) <= 0 or submitted_model_input_size <= 0:
+        raise ValueError("Model network and submitted input sizes must be positive.")
     model_input_transform = resolve_model_input_transform(
         (roi_h, roi_w),
         mode=model_input_transform_mode,
-        model_hw=(int(imgsz), int(imgsz)),
+        model_hw=(submitted_model_input_size, submitted_model_input_size),
     )
     resolved_input_mode = _normalize_input_mode(input_mode)
     contracted_effective_input_mode = _resolve_effective_input_mode_contract(
@@ -2380,6 +2386,7 @@ def detect_keypoints_yolo(
                         conf=conf,
                         iou=iou,
                         max_det=max_det,
+                        rect=False,
                         device=torch_device,
                         verbose=verbose,
                         stream=True,
@@ -2798,6 +2805,8 @@ def detect_keypoints_yolo(
             "iou_threshold": iou,
             "max_det": max_det,
             "imgsz": imgsz,
+            "model_input_size": submitted_model_input_size,
+            "model_predict_rect": False,
             "batch_size": batch_size,
             "device": resolved_model_device,
             "requested_device": device,
@@ -2868,6 +2877,7 @@ def detect_keypoints_yolo(
         "model_input_stride": int(model_stride),
         "model_input_transform_name": model_input_transform.name,
         "model_input_shape_hw": list(model_input_transform.model_shape),
+        "model_network_input_shape_hw": [int(imgsz), int(imgsz)],
         "native_roi_shape_hw": list(model_input_transform.native_shape),
     })
     if timing_profiler.enabled:
@@ -3315,7 +3325,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             f"(default: {DEFAULT_KEYPOINT_FRAME_SHARD_ROWS})."
         ),
     )
-    parser.add_argument("--imgsz", type=int, default=None, help="Image size for YOLO inference")
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=None,
+        help="Ultralytics network preprocessing size for YOLO inference.",
+    )
+    parser.add_argument(
+        "--model-input-size",
+        type=int,
+        default=None,
+        help=(
+            "Square pixel extent submitted to Ultralytics before its internal "
+            "--imgsz preprocessing; defaults to --imgsz for compatibility."
+        ),
+    )
     parser.add_argument(
         "--expected-model-stride",
         type=int,
@@ -3447,6 +3471,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         batch_size=args.batch_size,
         device=args.device,
         imgsz=args.imgsz,
+        model_input_size=args.model_input_size,
         conf=args.conf,
         iou=args.iou,
         max_det=args.max_det,

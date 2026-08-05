@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -24,9 +25,8 @@ import zarr
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.model_input_transform import (
     MODEL_INPUT_TRANSFORM_CHOICES,
-    resolve_model_input_transform,
-    resolve_stride_aligned_square_input_transform,
 )
+from fisheye.shared.pose_model_input_contract import load_pose_model_input_contract
 from fisheye.shared.pose_inference_failure import (
     POSE_INFERENCE_FAILURE_SCHEMA_ID,
     POSE_INFERENCE_FAILURE_SCHEMA_VERSION,
@@ -50,7 +50,7 @@ from fisheye.utils.run_keypoints_with_registry_model import (
 WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_ID = (
     "palette.keypoint.whole_recording_terminal"
 )
-WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION = 2
+WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION = 3
 TERMINAL_RECEIPT_NAME = "terminal_receipt.json"
 _SOURCE_ARRAY_PATHS = (
     "instance_key",
@@ -198,6 +198,9 @@ def run_whole_recording_keypoint_terminal(
     registry: Path,
     model_set_id: str,
     model_run_id: str,
+    expected_model_path: Path,
+    expected_model_sha256: str,
+    model_input_contract: Path,
     pose_schema: str,
     terminal_run_id: str,
     terminal_output: Path,
@@ -206,6 +209,7 @@ def run_whole_recording_keypoint_terminal(
     device: str,
     input_mode: str,
     model_input_size: int,
+    network_input_size: int,
     model_input_transform_mode: str,
     model_input_stride: int,
     progress_jsonl: Path | None = None,
@@ -215,21 +219,33 @@ def run_whole_recording_keypoint_terminal(
     cache = cache_manifest.expanduser().resolve()
     cache_binding = _cache_evidence(cache)
     cache_shape = tuple(int(value) for value in cache_binding["shape"])
-    if type(model_input_stride) is not int or model_input_stride <= 0:
-        raise ValueError("Model input stride must be a positive exact integer.")
-    expected_model_input_transform = resolve_model_input_transform(
-        (cache_shape[1], cache_shape[2]),
-        mode=model_input_transform_mode,
-        model_hw=(int(model_input_size), int(model_input_size)),
+    model_contract = load_pose_model_input_contract(
+        model_input_contract,
+        model_path=expected_model_path,
+        expected_set_id=model_set_id,
+        expected_run_id=model_run_id,
+        expected_model_sha256=expected_model_sha256,
     )
-    derived_model_input_transform = resolve_stride_aligned_square_input_transform(
-        (cache_shape[1], cache_shape[2]),
-        stride=model_input_stride,
+    runtime_plan = model_contract.plan_for_native_shape(
+        (cache_shape[1], cache_shape[2])
     )
-    if expected_model_input_transform != derived_model_input_transform:
+    expected_model_input_transform = runtime_plan.transform
+    if (
+        input_mode != runtime_plan.input_mode
+        or model_input_transform_mode != expected_model_input_transform.name
+        or int(model_input_size) != expected_model_input_transform.model_height
+        or int(network_input_size) != runtime_plan.network_imgsz
+        or int(model_input_stride) != runtime_plan.model_stride
+    ):
         raise ValueError(
-            "Planned model-input transform is not the minimal centered "
-            "stride-aligned padding contract for this cache."
+            "Worker arguments disagree with the digest-bound model-input runtime plan."
+        )
+    runtime_ultralytics_version = importlib.metadata.version("ultralytics")
+    if runtime_ultralytics_version != model_contract.ultralytics_version:
+        raise ValueError(
+            "Installed Ultralytics version disagrees with the model-input contract: "
+            f"runtime={runtime_ultralytics_version!r}, "
+            f"contract={model_contract.ultralytics_version!r}."
         )
     scratch = _require_node_scratch(scratch_root) / f"keypoint_{uuid.uuid4().hex}"
     scratch.mkdir(parents=True, exist_ok=False)
@@ -250,7 +266,8 @@ def run_whole_recording_keypoint_terminal(
             pose_schema=pose_schema,
             batch_size=batch_size,
             device=device,
-            imgsz=int(model_input_size),
+            imgsz=int(network_input_size),
+            model_input_size=int(model_input_size),
             expected_model_stride=model_input_stride,
             roi_cache_policy="always",
             roi_cache_manifest=cache,
@@ -260,7 +277,7 @@ def run_whole_recording_keypoint_terminal(
             profile_timings=True,
             progress_jsonl=progress_jsonl,
             progress_every_batches=progress_every_batches,
-            input_mode=input_mode,
+            input_mode=runtime_plan.input_mode,
             model_input_transform_mode=model_input_transform_mode,
             coordinate_contract_mode="legacy_noncanonical",
             keypoint_roi_shard_rows=None,
@@ -281,9 +298,9 @@ def run_whole_recording_keypoint_terminal(
         missing = [path for path in _SOURCE_ARRAY_PATHS if path not in run]
         if missing:
             raise RuntimeError(f"Terminal compute output lacks arrays: {missing!r}")
-        if run.attrs.get("input_mode_effective") != "tensor":
+        if run.attrs.get("input_mode_effective") != runtime_plan.input_mode:
             raise RuntimeError(
-                "Whole-recording terminal inference did not retain tensor input mode."
+                "Whole-recording terminal inference changed the contract input mode."
             )
         if run.attrs.get("model_input_transform") != (
             expected_model_input_transform.to_attrs()
@@ -294,6 +311,18 @@ def run_whole_recording_keypoint_terminal(
         if run.attrs.get("model_input_stride") != model_input_stride:
             raise RuntimeError(
                 "Terminal model stride differs from the verified plan contract."
+            )
+        parameters = run.attrs.get("parameters")
+        if (
+            not isinstance(parameters, Mapping)
+            or parameters.get("imgsz") != int(network_input_size)
+            or parameters.get("model_input_size") != int(model_input_size)
+            or parameters.get("model_predict_rect") is not False
+            or run.attrs.get("ultralytics_version")
+            != model_contract.ultralytics_version
+        ):
+            raise RuntimeError(
+                "Terminal model-side preprocessing differs from its input contract."
             )
         array_hashes = {
             path: sha256_array(run[path][...]) for path in _SOURCE_ARRAY_PATHS
@@ -312,6 +341,14 @@ def run_whole_recording_keypoint_terminal(
         selected = resolution.get("selected")
         if not isinstance(selected, Mapping):
             raise RuntimeError("Terminal inference lacks selected model identity.")
+        if (
+            Path(str(selected.get("model_path") or "")).expanduser().resolve()
+            != expected_model_path.expanduser().resolve()
+            or selected.get("model_sha256") != expected_model_sha256
+        ):
+            raise RuntimeError(
+                "Terminal inference selected a model different from its input contract."
+            )
         staging = run.attrs.get("source_roi_cache_staging")
         staging_copy = staging.get("copy") if isinstance(staging, Mapping) else None
         if (
@@ -346,6 +383,8 @@ def run_whole_recording_keypoint_terminal(
                 "model_input_mode": run.attrs.get("input_mode_effective"),
                 "model_input_transform": run.attrs.get("model_input_transform"),
                 "model_input_stride": run.attrs.get("model_input_stride"),
+                "model_input_contract": model_contract.to_json(),
+                "model_input_runtime": runtime_plan.to_json(),
                 "confidence_threshold": run.attrs.get("confidence_threshold"),
                 "iou_threshold": run.attrs.get("iou_threshold"),
                 "max_detections_per_roi": run.attrs.get("max_detections"),
@@ -396,6 +435,8 @@ def run_whole_recording_keypoint_terminal(
                 "sha256": selected.get("model_sha256"),
                 "pose_model_schema_binding": dict(pose_binding),
                 "pose_model_schema_binding_digest": canonical_json_sha256(pose_binding),
+                "input_contract": model_contract.to_json(),
+                "input_runtime": runtime_plan.to_json(),
             },
             "preprocessing": preprocessing,
             "row_terminal_semantics": (
@@ -434,6 +475,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
+    parser.add_argument("--expected-model-path", type=Path, required=True)
+    parser.add_argument("--expected-model-sha256", required=True)
+    parser.add_argument("--model-input-contract", type=Path, required=True)
     parser.add_argument("--pose-schema", default="traditional_v2")
     parser.add_argument("--terminal-run-id", required=True)
     parser.add_argument("--terminal-output", type=Path, required=True)
@@ -444,6 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-mode", choices=("tensor", "numpy-list", "auto"), default="tensor"
     )
     parser.add_argument("--model-input-size", type=int, required=True)
+    parser.add_argument("--network-input-size", type=int, required=True)
     parser.add_argument(
         "--model-input-transform-mode",
         choices=MODEL_INPUT_TRANSFORM_CHOICES,
@@ -466,6 +511,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         registry=args.registry,
         model_set_id=args.model_set_id,
         model_run_id=args.model_run_id,
+        expected_model_path=args.expected_model_path,
+        expected_model_sha256=args.expected_model_sha256,
+        model_input_contract=args.model_input_contract,
         pose_schema=args.pose_schema,
         terminal_run_id=args.terminal_run_id,
         terminal_output=args.terminal_output,
@@ -474,6 +522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         device=args.device,
         input_mode=args.input_mode,
         model_input_size=args.model_input_size,
+        network_input_size=args.network_input_size,
         model_input_transform_mode=args.model_input_transform_mode,
         model_input_stride=args.model_input_stride,
         progress_jsonl=args.progress_jsonl,

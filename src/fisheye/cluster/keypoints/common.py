@@ -26,7 +26,7 @@ from fisheye.shared.flat_roi_cache import (
     crop_run_name_from_manifest,
     load_flat_roi_cache_manifest,
 )
-from fisheye.shared.model_input_transform import ModelInputTransform
+from fisheye.shared.pose_model_input_contract import PoseModelInputRuntimePlan
 from fisheye.shared.roi_pixel_contract import normalize_pixel_contract
 from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.zarr.crop_consumer import (
@@ -801,15 +801,15 @@ def build_prediction_job(
     run_names: KeypointRunNames,
     model: PoseModelBinding,
     cache: FlatRoiCacheBinding,
-    model_input_transform: ModelInputTransform,
-    model_input_stride: int,
+    model_input_runtime: PoseModelInputRuntimePlan,
     pose_schema: str,
     batch_size: int,
     device: str,
-    input_mode: str,
     progress_every_batches: int,
     resources: LsfResources,
 ) -> LsfJob:
+    model_input_transform = model_input_runtime.transform
+    model_input_stride = model_input_runtime.model_stride
     if model_input_transform.model_height != model_input_transform.model_width:
         raise ValueError("Keypoint prediction requires one square model input extent.")
     if type(model_input_stride) is not int or model_input_stride <= 0:
@@ -849,6 +849,12 @@ def build_prediction_job(
         model.set_id,
         "--model-run-id",
         model.run_id,
+        "--expected-model-path",
+        str(model.model_path),
+        "--expected-model-sha256",
+        model.model_sha256,
+        "--model-input-contract",
+        str(model_input_runtime.contract_path),
         "--terminal-run-id",
         run_names.terminal_run,
         "--terminal-output",
@@ -866,9 +872,11 @@ def build_prediction_job(
         "--scratch-root",
         scratch_stage,
         "--input-mode",
-        str(input_mode),
+        model_input_runtime.input_mode,
         "--model-input-size",
         str(model_input_transform.model_height),
+        "--network-input-size",
+        str(model_input_runtime.network_imgsz),
         "--model-input-transform-mode",
         model_input_transform.name,
         "--model-input-stride",
@@ -922,6 +930,7 @@ def build_prediction_job(
             "cache": cache.to_json(),
             "model_input_transform": model_input_transform.to_attrs(),
             "model_input_stride": model_input_stride,
+            "model_input_runtime": model_input_runtime.to_json(),
             "palette_repo": str(repo),
             "palette_commit": palette_commit,
             "publication_boundary": "strict_v2_finalizer_only",

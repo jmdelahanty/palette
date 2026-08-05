@@ -15,6 +15,8 @@ from fisheye.cluster.lsf import LsfJob, LsfResources
 from fisheye.shared.roi_pixel_contract import (
     orange_mono_pynvvc_luma_pixel_contract,
 )
+from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.shared.pose_model_input_contract import PoseModelInputRuntimePlan
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -120,6 +122,51 @@ def _build_plan(
         )
 
     monkeypatch.setattr(planner, "resolve_pose_model_binding", resolve_model)
+    model_input_contract_path = tmp_path / "pose_model_input_contract.json"
+    model_input_contract_path.write_text("{}\n", encoding="utf-8")
+    contract = SimpleNamespace(
+        path=model_input_contract_path,
+        sha256="c" * 64,
+        payload_digest="d" * 64,
+        training_source_shape_hw=(512, 512),
+        network_shape_hw=(256, 256),
+        model_stride=32,
+        input_mode="numpy-list",
+        to_json=lambda: {
+            "path": str(model_input_contract_path),
+            "sha256": "c" * 64,
+            "payload_digest": "d" * 64,
+            "training_source_shape_hw": [512, 512],
+            "network_shape_hw": [256, 256],
+            "model_stride": 32,
+            "input_mode": "numpy-list",
+        },
+    )
+
+    def plan_for_native_shape(native_shape):
+        transform = resolve_model_input_transform(
+            native_shape,
+            mode="pad_to_size",
+            model_hw=(512, 512),
+        )
+        return PoseModelInputRuntimePlan(
+            transform=transform,
+            network_shape_hw=(256, 256),
+            model_stride=32,
+            input_mode="numpy-list",
+            profile_id="scale_matched_center_pad_ultralytics_v1",
+            classification="scale_matched_diagnostic_not_training_context",
+            contract_path=model_input_contract_path,
+            contract_sha256="c" * 64,
+            contract_payload_digest="d" * 64,
+        )
+
+    contract.plan_for_native_shape = plan_for_native_shape
+    monkeypatch.setattr(
+        planner,
+        "load_pose_model_input_contract",
+        lambda *_args, **_kwargs: contract,
+    )
     monkeypatch.setattr(
         planner,
         "validate_keypoint_input_dag",
@@ -193,12 +240,13 @@ def _build_plan(
         run_root=tmp_path / "run",
         model_set_id="pose_set",
         model_run_id="pose_run",
+        model_input_contract_path=model_input_contract_path,
         pose_schema="traditional_v2",
         min_roi_size=348,
         batch_size=256,
         device="0",
-        input_mode="tensor",
-        model_input_stride=32,
+        input_mode="model-contract",
+        model_input_stride=None,
         progress_every_batches=1,
         keypoint_roi_shard_rows=keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=keypoint_frame_shard_rows,
@@ -314,11 +362,11 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     assert plan.targets[0].model_input_transform.to_attrs() == {
         "name": "pad_to_size",
         "native_shape_hw": [348, 348],
-        "model_shape_hw": [352, 352],
-        "pad_top": 2,
-        "pad_bottom": 2,
-        "pad_left": 2,
-        "pad_right": 2,
+        "model_shape_hw": [512, 512],
+        "pad_top": 82,
+        "pad_bottom": 82,
+        "pad_left": 82,
+        "pad_right": 82,
         "coordinate_mapping": "native_xy = model_xy - [pad_left, pad_top]",
     }
     assert plan.targets[0].model_input_stride == 32
@@ -378,7 +426,13 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     )
     assert "--cache-manifest" in prediction_command
     assert prediction_command[prediction_command.index("--model-input-size") + 1] == (
-        "352"
+        "512"
+    )
+    assert prediction_command[
+        prediction_command.index("--network-input-size") + 1
+    ] == "256"
+    assert prediction_command[prediction_command.index("--input-mode") + 1] == (
+        "numpy-list"
     )
     assert prediction_command[
         prediction_command.index("--model-input-transform-mode") + 1

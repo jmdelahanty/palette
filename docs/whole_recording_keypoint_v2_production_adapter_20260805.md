@@ -249,14 +249,15 @@ naively resizing `348x348 -> 256x256` changes anatomical scale and field of
 view, while the current `348x348 -> 352x352` padding changes both the input
 extent and apparent model scale.
 
-The safest diagnostic rerun for the current model is therefore to materialize
-the same 512x512 source-camera window and apply its exact historical 256x256
-preprocessing. The resulting landmarks should be inverse-mapped into
-source-camera pixels and then projected into the canonical 348x348 crop
-geometry by stable `instance_key`; the inference pixel window need not replace
-the published downstream crop authority. If the historical transform cannot
-be reconstructed exactly from digest-bound model metadata, the job must stop
-rather than infer a resize policy.
+The first inexpensive diagnostic rerun will center-pad the existing 348x348
+cache row to the 512x512 training source extent, then use the historical
+256x256 network `imgsz`. This restores the trained pixel scale without
+rebuilding cache pixels, but its 82-pixel border is synthetic and therefore
+does not reproduce training context. If it does not recover acceptable yield,
+the next comparison must materialize a true 512x512 source-camera window. In
+both cases, resulting landmarks are inverse-mapped into source-camera pixels
+and joined to the canonical 348x348 crop geometry by stable `instance_key`;
+the inference pixel window does not replace the downstream crop authority.
 
 The next training checkpoint should:
 
@@ -276,6 +277,43 @@ The next training checkpoint should:
 Multi-scale augmentation may improve robustness, but it does not by itself
 resolve a change in source field of view, anatomical scale, or acquisition
 domain.
+
+## Contract-bound scale diagnostic implementation
+
+Palette now implements `palette.pose_model_input_contract` v1. The historical
+builder hashes and cross-validates weights, the training manifest, training
+report, and training arguments. The whole-recording planner derives runtime
+shape, mode, and stride from that document; manual CLI values are assertions
+only. The terminal worker revalidates the contract and installed Ultralytics
+version before staging pixels, then checks the selected model and persisted
+runtime attributes after inference.
+
+The audited current-model contract is
+`docs/diagnostics/batman_keypoint_v2_candidate_20260805/pose_model_input_contract.json`:
+
+- contract SHA-256:
+  `0321d6f258c36c01f785156eb86faa7012de295b0a7d61f0414ff7e71be4ec0c`;
+- payload digest:
+  `96c23419266b0a8aef78f8303a746c85fbe32a12b31d443e127d97cdc0c1f2cb`;
+- training source extent: 512x512;
+- network `imgsz`: 256x256;
+- loaded-model stride assertion: 32;
+- runtime input mode: `numpy-list`;
+- native submitted transform for Batman: 348x348 center-zero-pad to
+  512x512, 82 pixels per side; and
+- model-side preprocessing: Ultralytics `8.3.214`, `rect=false`, OpenCV
+  linear resize, luma-repeated channels, and `/255` normalization.
+
+The contract also verifies the package's training-time `rect=false` and
+`multi_scale=false` settings. Runtime records the submitted extent separately
+from network `imgsz`; the Batman worker therefore passes `model_input_size=512`
+and `imgsz=256` rather than overloading one value with both meanings.
+
+This design avoids a public coordinate-schema change. Ultralytics returns
+coordinates in the submitted 512x512 extent after its internal resize, and the
+existing exact padding inverse restores native 348x348 ROI coordinates. The
+terminal receipt schema is version 3 and binds the input contract and derived
+runtime plan in addition to the exact failure-code evidence.
 
 ## Crimson interoperability verdict
 
@@ -343,9 +381,11 @@ review that separates:
 - [ ] Decide whether 70.93% current-model yield is acceptable for initial
   production use or requires a diagnostic matrix, new 348-domain labels, and a
   successor model first.
-- [ ] Make the model package declare the training source geometry and complete
-  source-to-model preprocessing transform, and make inference fail closed when
-  that transform cannot be reproduced exactly.
+- [x] Add a digest-bound current-model input contract declaring training source
+  geometry, network `imgsz`, runtime preprocessing, and stride; make planner
+  and worker fail closed on missing, stale, or conflicting evidence.
+- [ ] Make future training/model-packaging workflows emit that contract
+  directly instead of using the audited historical backfill utility.
 - [ ] Rerun a selector-ineligible terminal canary using the enforced
   model-trained scale when an exact failure-code histogram is needed; v005
   cannot be retroactively classified.
@@ -366,10 +406,9 @@ review that separates:
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --model-set-id pose_all_registry_reviewed_v2_keypoints_20260520_v001 \
   --model-run-id pose_all_registry_reviewed_v2_kpt5_warm_v2_20260520_retry2 \
+  --model-input-contract "${PALETTE_GROUPS_REPO}/docs/diagnostics/batman_keypoint_v2_candidate_20260805/pose_model_input_contract.json" \
   --pose-schema traditional_v2 \
   --min-roi-size 348 \
-  --input-mode tensor \
-  --model-input-stride 32 \
   --dry-run
 ```
 
