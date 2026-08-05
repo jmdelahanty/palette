@@ -478,6 +478,119 @@ def activate_refined_detection_authority(
     )
 
 
+def inspect_active_refined_detection_authority(
+    *,
+    analysis_zarr: Path,
+    run_id: str,
+) -> dict[str, Any]:
+    """Deeply verify one committed authority through production selection."""
+
+    archive = analysis_zarr.expanduser().resolve()
+    name = str(run_id).strip()
+    if not archive.is_dir() or archive.suffix != ".zarr":
+        raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
+    if not name or "/" in name:
+        raise ValueError("run_id must be one safe child-group name.")
+    root = open_zarr_root(archive, mode="r")
+    parent = root.get("refined_detect_runs")
+    if parent is None or parent.attrs.get(
+        REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE
+    ) != name:
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority pointer does not select the expected run."
+        )
+    authority = parent.attrs.get(
+        REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE
+    )
+    if not isinstance(authority, Mapping):
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority lacks its provenance envelope."
+        )
+    authority_errors = validate_refined_detection_authority_provenance(authority)
+    if authority_errors:
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority provenance is invalid: "
+            + "; ".join(authority_errors)
+        )
+    proof = _validate_publication(
+        archive,
+        run_id=name,
+        expected_run_eligibility=True,
+    )
+    manifest = proof["manifest"]
+    if manifest["payload"]["publication"]["stage_selector_eligible"] is not True:
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority manifest lacks final eligibility intent."
+        )
+    if (
+        authority["payload"]["run_id"] != name
+        or authority["payload"]["run_manifest_digest"]
+        != proof["manifest_digest"]
+        or authority["payload"]["intended_use"] != "analysis"
+    ):
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority provenance does not bind its run."
+        )
+    if parent.attrs.get(REFINED_AUTHORITY_ACTIVATION_POLICY_ATTR) != (
+        REFINED_AUTHORITY_ACTIVATION_POLICY
+    ):
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority activation policy differs."
+        )
+    generation = parent.attrs.get(REFINED_AUTHORITY_ACTIVATION_GENERATION_ATTR)
+    lease = parent.attrs.get(REFINED_AUTHORITY_ACTIVATION_LEASE_ATTR)
+    if type(generation) is not int or generation < 1 or not isinstance(
+        lease, Mapping
+    ):
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority lacks its generation/lease evidence."
+        )
+    if (
+        lease.get("schema_id") != REFINED_AUTHORITY_ACTIVATION_LEASE_SCHEMA_ID
+        or lease.get("next_generation") != generation
+        or lease.get("run_name") != name
+        or lease.get("owner_uuid") != proof["publication_owner_uuid"]
+    ):
+        raise RefinedDetectionAuthorityActivationError(
+            "Committed refined authority lease does not bind its generation."
+        )
+
+    from fisheye.shared.zarr.refined_detection_crop_source import (
+        bind_refined_detection_crop_source,
+    )
+
+    bound = bind_refined_detection_crop_source(archive)
+    if bound.run_id != name or (
+        bound.selection_mode != "approved_authoritative_refined_v1"
+    ):
+        raise RefinedDetectionAuthorityActivationError(
+            "Normal production selection does not resolve the committed authority."
+        )
+    return json_attr_safe(
+        {
+            "schema_id": "palette.refined_detection.active_authority_inspection",
+            "schema_version": 1,
+            "status": "valid",
+            "analysis_zarr": str(archive),
+            "recording_identity": str(root.attrs.get("recording_id") or ""),
+            "run_id": name,
+            "manifest_digest": proof["manifest_digest"],
+            "logical_content_digest": proof["logical_content_digest"],
+            "publication_owner_uuid": proof["publication_owner_uuid"],
+            "dimensions": proof["dimensions"],
+            "storage_profile_id": proof["storage_profile_id"],
+            "authority_provenance": authority,
+            "activation_policy": REFINED_AUTHORITY_ACTIVATION_POLICY,
+            "activation_generation": generation,
+            "activation_lease": lease,
+            "selection_mode": bound.selection_mode,
+            "intended_use": "analysis",
+            "run_selector_eligible": True,
+            "registry_updated": False,
+        }
+    )
+
+
 __all__ = [
     "REFINED_AUTHORITY_ACTIVATION_GENERATION_ATTR",
     "REFINED_AUTHORITY_ACTIVATION_LEASE_ATTR",
@@ -487,5 +600,6 @@ __all__ = [
     "REFINED_AUTHORITY_ACTIVATION_SCHEMA_VERSION",
     "RefinedDetectionAuthorityActivationError",
     "activate_refined_detection_authority",
+    "inspect_active_refined_detection_authority",
     "inspect_refined_detection_authority_candidate",
 ]

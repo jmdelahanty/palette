@@ -15,6 +15,7 @@ from fisheye.shared.zarr.manifest_digest import (
 )
 from fisheye.shared.zarr.refined_detection_authority_activation import (
     activate_refined_detection_authority,
+    inspect_active_refined_detection_authority,
     inspect_refined_detection_authority_candidate,
 )
 from fisheye.utils.publish_accept_all_refined_detection_batch import (
@@ -259,11 +260,118 @@ def apply_plan(
     }
 
 
+def verify_plan(
+    plan: Mapping[str, Any],
+    *,
+    receipt_root: Path,
+) -> dict[str, Any]:
+    """Reopen every committed authority and reconcile it to plan and receipt."""
+
+    errors = validate_plan(plan)
+    if errors:
+        raise ValueError("Refusing invalid activation plan: " + "; ".join(errors))
+    receipt_root = receipt_root.expanduser().resolve()
+    approval = plan["approval"]
+    inspections: list[dict[str, Any]] = []
+    for candidate in plan["candidates"]:
+        frozen = candidate["inspection"]
+        identity = str(frozen["recording_identity"])
+        active = inspect_active_refined_detection_authority(
+            analysis_zarr=Path(str(candidate["analysis_zarr"])),
+            run_id=str(plan["run_id"]),
+        )
+        expected_authority_payload = {
+            "run_id": str(plan["run_id"]),
+            "run_manifest_digest": frozen["activation_manifest_digest"],
+            "review_state": "approved",
+            "review_method": approval["review_method"],
+            "intended_use": "analysis",
+            "approved_by": approval["approved_by"],
+            "approved_at_utc": approval["approved_at_utc"],
+            "git_sha": approval["git_sha"],
+            "note": approval["note"],
+        }
+        expected = {
+            "analysis_zarr": candidate["analysis_zarr"],
+            "recording_identity": identity,
+            "run_id": plan["run_id"],
+            "manifest_digest": frozen["activation_manifest_digest"],
+            "logical_content_digest": frozen["logical_content_digest"],
+            "publication_owner_uuid": frozen["publication_owner_uuid"],
+            "storage_profile_id": frozen["storage_profile_id"],
+            "authority_payload": expected_authority_payload,
+        }
+        observed = {
+            "analysis_zarr": active["analysis_zarr"],
+            "recording_identity": active["recording_identity"],
+            "run_id": active["run_id"],
+            "manifest_digest": active["manifest_digest"],
+            "logical_content_digest": active["logical_content_digest"],
+            "publication_owner_uuid": active["publication_owner_uuid"],
+            "storage_profile_id": active["storage_profile_id"],
+            "authority_payload": active["authority_provenance"]["payload"],
+        }
+        if observed != expected:
+            raise RuntimeError(
+                f"Active refined authority differs from plan for {identity}."
+            )
+        receipt_path = receipt_root / f"{identity}.json"
+        receipt = _strict_json_load(receipt_path)
+        receipt_projection = {
+            "analysis_zarr": receipt.get("analysis_zarr"),
+            "recording_identity": receipt.get("recording_identity"),
+            "run_id": receipt.get("run_id"),
+            "manifest_digest": receipt.get("activated_manifest_digest"),
+            "logical_content_digest": receipt.get("logical_content_digest"),
+            "publication_owner_uuid": receipt.get("publication_owner_uuid"),
+            "storage_profile_id": frozen["storage_profile_id"],
+            "authority_payload": receipt.get("authority_provenance", {}).get(
+                "payload"
+            ),
+        }
+        if receipt_projection != expected:
+            raise RuntimeError(
+                f"Refined authority receipt differs from plan for {identity}."
+            )
+        if (
+            receipt.get("status") != "complete"
+            or receipt.get("selection_mode")
+            != "approved_authoritative_refined_v1"
+            or receipt.get("post_commit_archive_writes") != 0
+            or receipt.get("registry_updated") is not False
+        ):
+            raise RuntimeError(
+                f"Refined authority receipt state is invalid for {identity}."
+            )
+        inspections.append(active)
+    return {
+        "schema_id": "palette.refined_detection.authority_activation_batch_verification",
+        "schema_version": 1,
+        "status": "valid",
+        "verified_at_utc": utc_now(),
+        "plan_digest": plan["plan_digest"],
+        "verified_candidate_count": len(inspections),
+        "total_instance_count": sum(
+            int(item["dimensions"]["n_instances"]) for item in inspections
+        ),
+        "intended_use": "analysis",
+        "all_selection_modes": sorted(
+            {str(item["selection_mode"]) for item in inspections}
+        ),
+        "all_storage_profiles": sorted(
+            {str(item["storage_profile_id"]) for item in inspections}
+        ),
+        "registry_updated": False,
+        "archives": inspections,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan-json", type=Path, required=True)
     parser.add_argument("--result-json", type=Path)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--verify", action="store_true")
     parser.add_argument("--refined-publication-plan", type=Path)
     parser.add_argument("--approved-by")
     parser.add_argument("--approved-at-utc")
@@ -279,7 +387,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.apply:
+        if args.apply and args.verify:
+            raise ValueError("--apply and --verify are mutually exclusive.")
+        if args.verify:
+            if args.receipt_root is None:
+                raise ValueError("--verify requires --receipt-root.")
+            plan = _strict_json_load(args.plan_json.expanduser().resolve())
+            result = verify_plan(plan, receipt_root=args.receipt_root)
+        elif args.apply:
             if args.receipt_root is None:
                 raise ValueError("--apply requires --receipt-root.")
             plan = _strict_json_load(args.plan_json.expanduser().resolve())
@@ -335,4 +450,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
