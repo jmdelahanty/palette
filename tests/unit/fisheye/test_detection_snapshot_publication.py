@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +13,14 @@ from fisheye.shared.zarr.detection_snapshot_publication import (
     inspect_canonical_detection_successor_source,
     publish_canonical_detection_successor,
     publish_detection_snapshot_pair,
+)
+from fisheye.shared.zarr.canonical_detection_crop_preflight import (
+    inspect_canonical_detection_crop_preflight,
+)
+from fisheye.shared.zarr.crop_schema import (
+    CropGeometryPolicy,
+    CropPaddingMode,
+    CropSizeMode,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
@@ -208,6 +217,7 @@ def test_raw_successor_dry_run_preserves_source_identity_without_writes(
 
 
 def test_raw_successor_is_canonical_v3_atomic_and_selector_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     archive = tmp_path / "recording_analysis.zarr"
@@ -264,6 +274,50 @@ def test_raw_successor_is_canonical_v3_atomic_and_selector_ineligible(
         1,
         2,
     ]
+
+    from fisheye.shared.zarr import canonical_detection_crop_preflight as preflight
+
+    monkeypatch.setattr(
+        preflight,
+        "load_persisted_acquisition_camera_authority",
+        lambda _root: (
+            object(),
+            SimpleNamespace(
+                record=SimpleNamespace(
+                    source_total_frames=4,
+                    width_px=640,
+                    height_px=480,
+                )
+            ),
+        ),
+    )
+    policy = CropGeometryPolicy(
+        purpose="ordinary_zebrafish_analysis",
+        size_mode=CropSizeMode.FIXED_PER_RUN,
+        fixed_size_wh=(348, 348),
+        padding_mode=CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME,
+    )
+    with pytest.raises(ValueError, match="candidate-preflight allowance"):
+        inspect_canonical_detection_crop_preflight(
+            analysis_zarr=archive,
+            detection_run_id="detect_canonical_v3",
+            policy=policy,
+        )
+    crop_preflight = inspect_canonical_detection_crop_preflight(
+        analysis_zarr=archive,
+        detection_run_id="detect_canonical_v3",
+        policy=policy,
+        allow_selector_ineligible_candidate=True,
+    )
+    assert crop_preflight["status"] == "ready"
+    assert crop_preflight["padding"]["padded_row_count"] == 2
+    assert crop_preflight["padding"]["examples"][0]["padding_ltrb"] == [
+        14,
+        0,
+        0,
+        0,
+    ]
+    assert crop_preflight["crop_zarr_writes"] is False
 
 
 def test_raw_successor_requires_existing_instance_keys_before_writing(
