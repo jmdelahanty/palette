@@ -3,8 +3,9 @@
 Date: 2026-08-04
 
 Status: crop-policy and canonical-v3 successor implementations validated;
-the 36-archive successor cohort is frozen as a read-only plan. No LSF jobs,
-Zarr writes, registry changes, or selector changes have been performed.
+the 36-archive successor cohort is frozen and one selector-ineligible canary
+has passed publication and crop-v2 preflight. No LSF jobs, crop writes,
+registry changes, or selector changes have been performed.
 
 ## Decision
 
@@ -155,10 +156,34 @@ Nine focused publication/plan tests pass. They include exact key
 preservation, selector invariance, recomputed-digest tampering, frozen-source
 drift, and an injected final-consolidation failure.
 
-Publication remains deliberately staged: publish and validate one
-selector-ineligible canary, run the 348-pixel crop preflight against its exact
-successor path, and only then publish the remaining 35 successors. Detection
-authority activation is a later, separate reviewed operation.
+The arena-2 canary was published as an immutable selector-ineligible child in
+16.99 seconds. Its 126,214 source and successor `instance_key` vectors have the
+same SHA-256, all canonical validation errors are empty, and the pre-existing
+`latest` and `latest_complete` selectors remain unchanged. The durable receipt
+is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.processing_logs/
+batman_canonical_v3_successor_20260805/
+2026-07-21T19-38-32Z_arena_2_Batman.json
+```
+
+This canary exposed an adapter distinction rather than a data defect. The old
+ordinary `crop_batch` materialized writer consumes the legacy canonical-v2
+bound-coordinate graph with arrays directly under `detect_runs/<run>`.
+Canonical detection v3 uses its strict run manifest/coordinate catalog and an
+`instances` table. The old path remains fail-closed rather than treating the
+new representation as the legacy graph.
+
+A new read-only canonical-v3 crop-v2 preflight validates the complete manifest,
+nine arrays, physical metadata, active acquisition dimensions, and fixed crop
+policy before deriving placement. Against the canary it found 1,436 padded
+rows out of 126,214 (1.138%), with maximum `[left, top, right, bottom]` padding
+of `[0, 0, 118, 75]`. It performed no crop, selector, or registry writes.
+
+The next staged operation is to publish the remaining 35 successors and run
+this same modern preflight across the complete cohort. Detection authority
+activation is a later, separate reviewed operation.
 
 ## Dry-run commands
 
@@ -202,6 +227,19 @@ scripts/py -m fisheye.utils.publish_canonical_detection_successor_batch \
 Apply is intentionally a separate invocation that consumes this exact plan,
 requires bounded node-local scratch and a durable receipt directory, and can
 select one recording with `--only-recording` for the canary.
+
+Read-only canonical-v3 crop-v2 preflight for the canary:
+
+```bash
+scripts/py -m fisheye.utils.preflight_canonical_detection_crops \
+  --analysis-zarr /groups/johnson/johnsonlab/jeremy/recordings/2026-07-21T19-38-32Z_arena_2_Batman/zarr/2026-07-21T19-38-32Z_arena_2_Batman_analysis.zarr \
+  --detection-run detect_canonical_v3_crop_20260805 \
+  --roi-width 348 \
+  --roi-height 348 \
+  --padding-mode zero_outside_source_frame \
+  --allow-selector-ineligible-candidate \
+  --result-json /tmp/batman_arena2_canonical_v3_crop_preflight_20260805.json
+```
 
 ## Open scientific and lineage questions
 
