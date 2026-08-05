@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -143,3 +144,67 @@ def test_apply_plan_binds_receipt_to_frozen_inspection(
     assert received["approved_by"] == "jeremy"
     assert (tmp_path / "receipts/recording_one.json").is_file()
 
+
+def test_verify_plan_reconciles_active_authority_and_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _activation_plan(monkeypatch, tmp_path)
+    frozen = plan["candidates"][0]["inspection"]
+    approval = plan["approval"]
+    authority_payload = {
+        "run_id": plan["run_id"],
+        "run_manifest_digest": frozen["activation_manifest_digest"],
+        "review_state": "approved",
+        "review_method": approval["review_method"],
+        "intended_use": "analysis",
+        "approved_by": approval["approved_by"],
+        "approved_at_utc": approval["approved_at_utc"],
+        "git_sha": approval["git_sha"],
+        "note": approval["note"],
+    }
+    active = {
+        "analysis_zarr": frozen["analysis_zarr"],
+        "recording_identity": frozen["recording_identity"],
+        "run_id": plan["run_id"],
+        "manifest_digest": frozen["activation_manifest_digest"],
+        "logical_content_digest": frozen["logical_content_digest"],
+        "publication_owner_uuid": frozen["publication_owner_uuid"],
+        "storage_profile_id": frozen["storage_profile_id"],
+        "authority_provenance": {"payload": authority_payload},
+        "dimensions": frozen["dimensions"],
+        "selection_mode": "approved_authoritative_refined_v1",
+    }
+    monkeypatch.setattr(
+        activation,
+        "inspect_active_refined_detection_authority",
+        lambda **_kwargs: active,
+    )
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    receipt = {
+        "status": "complete",
+        "analysis_zarr": frozen["analysis_zarr"],
+        "recording_identity": frozen["recording_identity"],
+        "run_id": plan["run_id"],
+        "activated_manifest_digest": frozen["activation_manifest_digest"],
+        "logical_content_digest": frozen["logical_content_digest"],
+        "publication_owner_uuid": frozen["publication_owner_uuid"],
+        "authority_provenance": {"payload": authority_payload},
+        "selection_mode": "approved_authoritative_refined_v1",
+        "post_commit_archive_writes": 0,
+        "registry_updated": False,
+    }
+    (receipts / "recording_one.json").write_text(
+        json.dumps(receipt),
+        encoding="utf-8",
+    )
+
+    result = activation.verify_plan(plan, receipt_root=receipts)
+
+    assert result["status"] == "valid"
+    assert result["verified_candidate_count"] == 1
+    assert result["total_instance_count"] == 2
+    assert result["all_selection_modes"] == [
+        "approved_authoritative_refined_v1"
+    ]

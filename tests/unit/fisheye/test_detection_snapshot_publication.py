@@ -32,6 +32,7 @@ from fisheye.shared.zarr.refined_detection_manifest import (
 )
 from fisheye.shared.zarr.refined_detection_authority_activation import (
     activate_refined_detection_authority,
+    inspect_active_refined_detection_authority,
     inspect_refined_detection_authority_candidate,
 )
 from fisheye.shared.zarr.refined_detection_schema import (
@@ -505,6 +506,13 @@ def test_accept_all_refined_root_activates_as_analysis_authority(
         "stage_selector_eligible"
     ] is True
     assert run.attrs["stage_selector_eligible"] is True
+    active = inspect_active_refined_detection_authority(
+        analysis_zarr=archive,
+        run_id="refined_accept_all_v2",
+    )
+    assert active["status"] == "valid"
+    assert active["manifest_digest"] == result["activated_manifest_digest"]
+    assert active["selection_mode"] == "approved_authoritative_refined_v1"
 
 
 def test_refined_authority_staging_rolls_back_before_visibility_commit(

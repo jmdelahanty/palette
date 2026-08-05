@@ -300,6 +300,70 @@ focused tests now cover raw/refined atomic publication, root identity,
 selector invariance, frozen-plan drift, exact padding calculation, and cohort
 aggregation.
 
+## Refined analysis-authority activation (2026-08-05)
+
+The 36 all-accepted refined-v2 roots are now the approved analysis authorities
+for their recording archives. This is an identity-preserving initialization
+approval, not a claim of human or model-quality review. The authority envelope
+uses `intended_use=analysis`; it does not authorize training.
+
+Activation consumed the exact refined publication plan above rather than
+rediscovering archives. A new immutable activation plan bound every pre-change
+manifest digest, final-intent manifest digest, logical-content digest,
+publication-owner UUID, dimensions, storage profile, and recording identity.
+Its plan digest is:
+
+```text
+c04f88d4298db4a821f9ea14f7f3c37a3bb854f6c34c05eacd1beb214353c10b
+```
+
+The transaction stages the final-intent manifest and analysis-only authority
+provenance, reconsolidates, deeply validates the still-invisible candidate,
+then leases one owner/generation epoch and writes
+`stage_selector_eligible=true` as the literal final archive write. The exact
+pre-commit consolidated `false` versus direct post-commit `true` eligibility
+lag is the sole permitted metadata-equivalence exception; selection reads the
+authority and commit bit from direct metadata. Failures before that final bit
+restore the original manifest/provenance and reconsolidate.
+
+The original arena-2 archive was activated first. Normal, non-benchmark
+selection reopened it as `approved_authoritative_refined_v1`; the remaining 35
+then completed under the unchanged plan. A separate read-only verifier finally
+reopened all 36 archives, deep-validated their 28-array publications, compared
+direct/consolidated metadata, validated owner/generation leases and authority
+provenance, invoked normal production selection, and reconciled every active
+state to its frozen plan entry and durable receipt. Results:
+
+- 36 of 36 authorities valid;
+- 4,987,449 of 4,987,449 instance rows bound;
+- one selection mode: `approved_authoritative_refined_v1`;
+- one physical profile: `detection_published_access_aware_v1`;
+- every activation generation is 1 from an authority-free generation 0;
+- every authority is analysis-only;
+- no registry row was changed.
+
+The guarded activation implementation is bound to Palette commit
+`bd1bec0575bfc4189822eb6e2cf5a7a91b451e31`. Focused validation passed 36 tests
+before live activation; the added active-state verifier and rollback coverage
+then passed 6 focused tests.
+
+Durable activation evidence is under:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.processing_logs/
+batman_refined_authority_activation_20260805/
+```
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Frozen activation plan | `cb16c28fc068e2844dfa509c3191f6010cb6ff87834530645d060700e4f6da7f` |
+| Plan construction result | `26ba86eb19ec4a214b0af7784452297b8be642c28fdbd1f5ce3b1476f8b90a06` |
+| Arena-2 canary result | `3ebf334eb747d0d0bced5eb8ba6c2a9472c5e8aeeb470867700344442313cf4c` |
+| Remaining-35 result | `970e29f0710b01daf25438e3942dae983963e0287c7148cdd5f3d8e46bac8839` |
+| Independent 36-archive verification | `a501d784634aff4ff72a5269008f42fb9e31d4f1b429f9e0a80240cd80a51225` |
+
+The directory also contains 36 per-recording activation receipts.
+
 ## Dry-run commands
 
 Single recording:
