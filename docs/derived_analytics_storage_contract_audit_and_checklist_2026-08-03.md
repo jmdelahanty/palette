@@ -1407,7 +1407,11 @@ Recommended benchmark and promotion-review order:
       clipped-denominator, union-occupancy, started-bout, validity, and row
       policies without weakening full-source identity. Unbounded binning v2
       and export v3 remain readable. Focused exporter/controller validation
-      passes 51/51; the clean real matrix remains open. See
+      passes 51/51. The clean `68266eff` five-process matrix produced 1,334
+      rows and two objects, with 21.46-second publication, 5.57 ms median
+      random p95, 5.66 ms median window p95, 15.35 ms median full scan, and an
+      unchanged 268-file source guard. The independent partial-edge-bin
+      recomputation remains open. See
       `docs/activity_spatial_representative_short_contract_2026-08-04.md`.
 - [x] Freeze the honest representative-short query-export boundary. A
       `representative_short` kinematics request now requires exactly one
@@ -1485,10 +1489,9 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. run the clean five-process representative-short activity/spatial matrix
-   through bounded writer, scratch-copy, validation, publication, and
-   manifest-selected reader phases; then resume eye and tail export matrices
-   only after their canonical coordinate-source prerequisite is repaired;
+1. complete the independent representative-short activity/spatial edge-bin
+   recomputation receipt; then resume eye and tail export matrices only after
+   their canonical coordinate-source prerequisite is repaired;
 2. include tail-specific narrow normalized-position predicates, camera-frame
    windows, complete scans, part/object counts, and peak RSS;
 3. obtain real consumer evidence where a maintained Palette or Crimson path

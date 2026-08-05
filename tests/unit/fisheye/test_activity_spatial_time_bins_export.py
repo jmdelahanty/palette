@@ -35,6 +35,9 @@ from fisheye.analytics_exports.validation import (
     ExportValidationError,
     validate_export_run,
 )
+from fisheye.diagnostics import (
+    validate_activity_spatial_query_window_equivalence as equivalence,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye.test_kinematics_samples_export import _eligible_source
@@ -629,6 +632,7 @@ def _publish(
     export_run_id: str,
     output_name: str = "exports",
     source_window_rows: int = mod.DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS,
+    requested_bin_size_s: float = 1.0,
     source_frame_start: int | None = None,
     source_frame_stop_exclusive: int | None = None,
     overwrite: bool = False,
@@ -646,7 +650,7 @@ def _publish(
         track_kinematics_run="motion_physical",
         track_scope="offline",
         swim_bout_runs_by_track={7: "bouts_track_7"},
-        requested_bin_size_s=1.0,
+        requested_bin_size_s=requested_bin_size_s,
         output_root=tmp_path / output_name,
         export_run_id=export_run_id,
         scratch_root=tmp_path / f"scratch_{output_name}",
@@ -745,6 +749,49 @@ def test_activity_spatial_disjoint_selection_is_a_valid_zero_row_export(
 
     assert result["row_counts_by_table"] == {ACTIVITY_SPATIAL_TIME_BINS_TABLE: 0}
     assert result["activity_spatial_time_bins_validation"]["valid"] is True
+
+
+def test_bounded_export_has_source_backed_edge_bin_equivalence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _publish(
+        monkeypatch,
+        tmp_path,
+        export_run_id="activity_full",
+        output_name="exports_full",
+        requested_bin_size_s=2.0,
+    )
+    _publish(
+        monkeypatch,
+        tmp_path,
+        export_run_id="activity_bounded",
+        output_name="exports_bounded",
+        requested_bin_size_s=2.0,
+        source_frame_start=0,
+        source_frame_stop_exclusive=1,
+    )
+    monkeypatch.setattr(equivalence.zarr, "open_group", lambda *_args, **_kwargs: {})
+
+    evidence = equivalence.validate_activity_spatial_query_window_equivalence(
+        full_export_root=tmp_path / "exports_full",
+        full_export_run_id="activity_full",
+        bounded_export_root=tmp_path / "exports_bounded",
+        bounded_export_run_id="activity_bounded",
+        output=tmp_path
+        / "palette_benchmarks"
+        / "activity_window_equivalence.json",
+    )
+
+    payload = evidence["payload"]
+    assert payload["status"] == "passed"
+    assert payload["interior_equality"]["equal"] is True
+    assert payload["interior_equality"]["row_count"] == 0
+    assert payload["source_backed_recomputation"]["equal"] is True
+    assert payload["source_backed_recomputation"]["selection_edge_rows"] == [
+        {"track_id": 7, "time_bin_index": 0, "expected_track_frame_count": 1}
+    ]
+    assert payload["promotion_authorized"] is False
 
 
 def test_activity_spatial_validator_rejects_rehashed_selection_tampering(
