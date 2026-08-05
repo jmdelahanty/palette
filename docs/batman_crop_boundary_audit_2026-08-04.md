@@ -4,8 +4,9 @@ Date: 2026-08-04
 
 Status: crop-policy, canonical-v3, and all-accepted refined-v2 successor
 implementations validated; all 36 selector-ineligible raw/refined successors
-and the complete crop-v2 preflight have passed. No LSF jobs, crop writes,
-registry changes, or selector changes were performed.
+and crop-v2 production candidates have passed. Crop geometry was published
+locally through node-local scratch; no LSF jobs, registry changes, or crop
+selector changes were performed.
 
 ## Decision
 
@@ -364,14 +365,14 @@ batman_refined_authority_activation_20260805/
 
 The directory also contains 36 per-recording activation receipts.
 
-## Frozen crop-v2 production-candidate cohort (2026-08-05)
+## Frozen and published crop-v2 production-candidate cohort (2026-08-05)
 
-The recording-scale crop cohort is now frozen without publishing any crop
-arrays. The cohort planner consumed the exact refined-authority activation
-plan rather than rediscovering recordings, then reopened every active
-authority through normal production selection, revalidated all 13 crop-v2
-arrays, rebound the live video and camera authority, and fixed one shared crop
-policy and physical profile. The plan contains:
+The recording-scale crop cohort was frozen before publication. The cohort
+planner consumed the exact refined-authority activation plan rather than
+rediscovering recordings, then reopened every active authority through normal
+production selection, revalidated all 13 crop-v2 arrays, rebound the live
+video and camera authority, and fixed one shared crop policy and physical
+profile. The plan contains:
 
 - 36 analysis archives and 4,987,449 instance rows;
 - one selection mode, `approved_authoritative_refined_v1`;
@@ -395,11 +396,33 @@ and crop-policy digest
 `4ea3232c90dd8dc9625179d7938e0a7275cdc19b3217cc2024adbc7c12d84bb1`.
 The planner implementation is Palette commit `0f576d2d`. Five deterministic
 in-memory planner/preflight tests passed, together with the static checks. The
-real-Zarr publication suite did not start because the outside-sandbox approval
-bridge timed out; this is an unexecuted gate, not a test failure. Consequently
-no canary or cohort crop run has been published.
+focused outside-sandbox real-Zarr publication suite subsequently passed all 13
+tests in 6.00 seconds.
 
-Durable no-write evidence is under:
+The exact `2026-07-21T19-38-32Z_arena_2_Batman` plan entry was applied first.
+Its 126,214-row canary completed in 18.60 seconds and atomically copied 27
+files containing 7,480,893 physical bytes in 2.04 seconds. Its direct and
+consolidated metadata, source authorities, pixel authority, logical hashes,
+physical inventory, and parent selector snapshots all validated. The other 35
+entries then completed from the unchanged plan.
+
+Across all 36 receipts:
+
+- all 36 statuses are complete and all validations pass;
+- all 36 runs are selector-ineligible and registry-unregistered;
+- all use storage profile `published_http_v1`;
+- 4,987,449 logical rows produced 972 files and 298,478,195 physical bytes;
+- publication took 677.78 seconds total, with an 18.83-second median and a
+  17.46--20.53-second range;
+- physical copying took 76.34 seconds total; and
+- the maximum reported process peak RSS was 3,401,326,592 bytes.
+
+The peak RSS is retained as a publication-efficiency optimization target. It
+does not weaken the completed correctness and selector-invariance gate.
+Node-local materialization directories were removed after each successful
+import, leaving the allocated scratch root empty.
+
+Durable evidence is under:
 
 ```text
 /groups/johnson/johnsonlab/jeremy/recordings/.processing_logs/
@@ -410,12 +433,13 @@ batman_crop_geometry_v2_348_20260805/
 | --- | --- |
 | Frozen crop plan | `f2d1265a38f371b8988c0b9d8486503ccf9eb38150fee6696149d3d6f3631852` |
 | Plan construction result | `fea37fd7111dec0fa71908537901247458abd87e978fe35e2672aaa95e539e6d` |
+| Arena-2 canary result | `0bced3c700f60957fea64103447c48514299cf200fcf4e226421eb4be59758eb` |
+| Remaining-35 result | `5abf8a68a67632d8bec4b7c65b4e4048e5c58c5949ba954d893f4156873663d3` |
 
-The durable `receipts/` directory is empty. Publication remains a separate
-apply operation after the real-Zarr suite passes. The first write must be the
-single arena-2 canary; the other 35 may follow only from the unchanged frozen
-plan after that receipt validates. Crop runs remain selector-ineligible and
-registry-unregistered throughout this checkpoint.
+The durable `receipts/` directory contains one complete receipt per recording.
+Crop runs remain selector-ineligible and registry-unregistered throughout this
+checkpoint. Recording-scale read validation and any guarded crop selector are
+later, separate decisions.
 
 ## Dry-run commands
 

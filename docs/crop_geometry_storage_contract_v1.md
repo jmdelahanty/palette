@@ -317,10 +317,13 @@ Before production integration:
       standalone crop archive without moving pixels into the analysis Zarr;
 - [x] freeze an authority-bound 36-recording production-candidate cohort after
       exact crop preflight without publishing any crop arrays;
+- [x] publish and validate the frozen 36-recording cohort through node-local
+      materialization and atomic selector-ineligible import;
 - [ ] insert the successor publisher into the production DAG's atomic
       selector-ineligible import path;
 - [ ] feed its added/changed rows into the raw-keypoint successor materializer;
-- [ ] benchmark production-candidate publication and reads at recording scale;
+- [x] benchmark production-candidate publication at recording scale;
+- [ ] benchmark production-candidate reads at recording scale;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.
 
@@ -328,10 +331,14 @@ The first recording-scale Batman candidate plan was frozen at Palette commit
 `0f576d2d`. It binds 36 approved refined authorities, 4,987,449 rows, the
 shared 348-pixel zero-padding policy, and `published_http_v1` under plan digest
 `e39781fc5e46c9add5fdcbab5a0b7fae7da4fd2d5124134a226c4f66b6a1b10f`.
-No crop array, selector, or registry record was written. The real-Zarr
-publication test suite remains an explicit gate before the single-recording
-canary, so this plan freeze does not complete the recording-scale publication
-benchmark item above.
+The focused real-Zarr suite passed 13 tests before the arena-2 canary. The
+canary and remaining 35 candidates then published 298,478,195 physical bytes
+in 972 files. Median per-archive publication was 18.83 seconds; physical copy
+accounted for 76.34 of 677.78 total seconds. Every receipt passed direct and
+consolidated metadata, source-authority, pixel-authority, logical-content,
+physical-inventory, and selector-invariance validation. All crop runs remain
+selector-ineligible and no registry record was changed. Recording-scale read
+validation remains open.
 
 The DAG review closed on the integration branch after identifying and fixing
 the standard completion-marker gap and replacing the cache planner's legacy-
