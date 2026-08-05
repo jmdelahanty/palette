@@ -339,12 +339,28 @@ full run was not caused by the normal `0.25` threshold alone. A synthetic
 border does not reproduce the real 512x512 source-camera context present in
 the training set.
 
-The next candidate must materialize a real 512x512 camera-pixel inference
-window centered on each unchanged canonical crop instance. That inference
-window is model input, not a replacement crop authority: the canonical 348x348
-crop run, `instance_key`, frame identity, and downstream coordinate space stay
-fixed, while the exact 82-pixel context-window translation is persisted and
-inverted when publishing keypoints.
+The next bounded gate materialized a real 512x512 camera-pixel inference window
+centered on each unchanged canonical crop instance. That inference window was
+model input, not a replacement crop authority: the canonical 348x348 crop run,
+`instance_key`, frame identity, and downstream coordinate space stayed fixed,
+while the exact 82-pixel context-window translation and pixel digest were
+persisted.
+
+Real context did not recover the model-trained path. The first 128 crop rows
+were selected because all 128 are exact v005 successes with matching
+`source_crop_row_ids` and `instance_key`. At the contract-bound `imgsz=256`,
+native 348, synthetic 512, and real-source 512 profiles all produced zero
+detections even at `conf=0.001`. The same identities succeeded in v005 through
+the tensor profile whose persisted transform is 348x348 to 352x352. This
+isolates effective network/anatomical scale as the dominant difference for the
+tested segment; synthetic context was harmful, but missing context was not the
+only incompatibility.
+
+Do not submit another full-duration current-model run. The preferred production
+resolution is to train a successor against the intended 348 crop and declared
+model-input policy. A small, explicitly non-promotable 256/352 network-resolution
+comparison may be used to quantify the scale boundary before training, but a
+larger inference surface must not be relabeled as the historical trained path.
 
 This design avoids a public coordinate-schema change. Ultralytics returns
 coordinates in the submitted 512x512 extent after its internal resize, and the
@@ -427,11 +443,14 @@ review that separates:
   model-trained scale and collect the exact failure-code histogram. The v007
   synthetic-padding candidate produced zero successful poses and is explicitly
   rejected for activation.
-- [ ] Implement and validate a source-camera-context materializer that derives
-  a real 512x512 inference window from the unchanged 348x348 crop geometry and
-  binds its translation, pixels, cache digest, and instance lineage.
-- [ ] Pass a bounded identity-fixed model-output gate on real 512x512 context
-  before submitting another full-duration run.
+- [x] Implement and validate a bounded source-camera-context materializer that
+  derives a real 512x512 inference window from unchanged 348x348 crop geometry
+  and binds its translation, pixels, cache digest, and instance lineage.
+- [x] Run the bounded identity-fixed model-output gate on 128 exact v005
+  successes. Real 512x512 context at the historical `imgsz=256` produced zero
+  detections and therefore failed the scientific gate.
+- [ ] Train and validate a successor model against the intended production crop
+  and model-input policy before broad Batman inference or selector activation.
 - [ ] Implement and review the atomic four-surface selector activation gate.
 - [ ] Activate selectors only through that later reviewed gate after final
   direct/consolidated metadata and registry validation.

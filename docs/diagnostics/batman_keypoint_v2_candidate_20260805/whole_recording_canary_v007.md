@@ -70,11 +70,50 @@ synthetic border as the immediate incompatibility:
 | 348 center-zero-padded to 512 | 0 | 0 | 0 | 0 |
 | 348 center-padded to 512 with value 114 | 0 | 0 | 0 | 4 |
 
-The model therefore still responds to native Batman crops, although native
-yield is too low to promote without review. Lowering the threshold cannot
-rescue the zero-padded profile. The correct next comparison is real 512x512
-source-camera context around the same instance, not another synthetic fill
-value.
+The model therefore still responds to some native Batman crops, although the
+native `imgsz=256` yield is too low to promote without review. Lowering the
+threshold cannot rescue the zero-padded profile. This result justified a
+second comparison using real 512x512 source-camera context rather than another
+synthetic fill value.
+
+## Real source-context gate
+
+Palette commit `575b272d5a5d1d1a725f5c40cb72f5d291226a71` added a reusable,
+read-only source-context benchmark. Job `153283778` completed on an L4 and
+published:
+
+`/groups/johnson/johnsonlab/jeremy/logs/whole_recording_keypoints/batman_pose_source_context_20260805_v002/result.json`
+
+Result SHA-256:
+
+`ef28414260e700447bf07a578780204d1287267bdf99f716f73ccdc114e98de2`
+
+The benchmark selected crop rows `[0, 128)`. Independent validation proved all
+128 were successful in v005, their v005 `source_crop_row_ids` were exactly
+`[0, 128)`, and their v005 and crop-v2 `instance_key` values matched exactly.
+The benchmark decoded a true 512x512 camera-luma window around each identity,
+using an exact `[-82, -82]` top-left translation. Its 33,554,432-byte context
+payload SHA-256 was
+`3fd3fc4b017ebe65078a941724d5010cd84b32f90941cf3c3aae2762004efc83`.
+
+At the contract-bound network `imgsz=256`, all three profiles returned zero
+detections at every reported threshold down to `0.001`:
+
+| Profile on the exact 128 rows | detections at 0.25 | at 0.05 | at 0.01 | at 0.001 |
+|---|---:|---:|---:|---:|
+| native 348 through numpy-list preprocessing | 0 | 0 | 0 | 0 |
+| synthetic 348-to-512 padding | 0 | 0 | 0 | 0 |
+| real source-camera 512 context | 0 | 0 | 0 | 0 |
+
+The same 128 identities succeeded in v005 through its persisted tensor profile,
+which mapped 348x348 to a stride-aligned 352x352 input. Real context therefore
+does not rescue the historical 512-to-256 training path on this segment. The
+dominant tested difference is effective network/anatomical scale, although
+recording-domain effects may also contribute.
+
+The benchmark explicitly records no archive mutation, selector activation, or
+registry mutation. Its temporary context payload was node-local and was removed
+after the result receipt was published.
 
 ## Publication safety result
 
@@ -113,17 +152,12 @@ Key receipts:
 
 ## Required next gate
 
-Do not activate these runs. Before another full-duration inference, run a
-small, representative image-backed comparison that inspects the actual crop
-content and model detections under at least:
+Do not activate these runs, and do not submit another full-duration current-
+model run. The preferred next step is a successor model trained and validated
+against the intended 348 crop and explicit model-input policy, including
+Batman-domain examples and a recording-level holdout.
 
-1. native 512 x 512 crops reconstructed from source frames around the same
-   detection centers;
-2. the successful v005 native/stride-aligned profile; and
-3. any legacy model-native crop generation used by successful training or
-   prior inference.
-
-The comparison must keep instance identity fixed, report per-profile success
-rate and confidence distributions, and visually review representative edge,
-center, and failed crops. A full recording should be resubmitted only after a
-profile produces scientifically plausible keypoints on that bounded gate.
+If needed before training, run one small, explicitly non-promotable comparison
+of the exact v005 352-pixel tensor surface against the 256-pixel contract
+surface on the same identities. That experiment may explain the scale boundary;
+it cannot change the historical training contract or authorize production use.
