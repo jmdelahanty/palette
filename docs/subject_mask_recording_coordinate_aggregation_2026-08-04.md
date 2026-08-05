@@ -1,0 +1,114 @@
+# Subject-Mask Recording Coordinate Aggregation
+
+Date: 2026-08-04
+
+Status: first selector-ineligible contract checkpoint implemented; no production
+archive, selector, registry authority, physical profile, or canonical data was
+changed. A future recording-level canary and downstream subject-shape adapter
+remain required.
+
+## Decision
+
+Canonical coordinate ownership belongs to recording-level subject-mask bundle
+publication, not to individual clip/shard finalization.
+
+`subject_mask_shard_runs` and their refined counterparts are noncanonical work
+packages. They do not contain the rich historical coordinate-publication nodes
+needed by the old single-run publisher, and the collection finalizer does not
+know the authoritative whole-recording crop axis. Changing
+`future_canonical` in `finalize_subject_masks.py` would therefore assert proof
+that the collection does not possess.
+
+The safe publication sequence is:
+
+1. Each worker emits a complete scientific identity, immutable attempt, and
+   semantic receipt over its whole owned row interval.
+2. Recording assembly proves the ordered shard union is exactly `[0, R)` and
+   reconstructs identity, frame-offset, and placement arrays from crop v2.
+3. The raw recording core binds that exact crop-v2 manifest and retained worker
+   evidence in subject-mask core manifest v3.
+4. The refined recording core binds the same crop authority and the exact raw
+   core from the same publication attempt.
+5. Bundle cross-validation binds both coordinate catalogs, both recording
+   assembly identities, the crop authority, and the refined-to-raw edge.
+6. Members remain selector-ineligible until the single bundle authority is
+   explicitly activated.
+
+Historical core manifest v2 and validation receipt v1 remain readable only as
+explicit compatibility surfaces. They are not silently upgraded and cannot be
+retrofitted into coordinate authority because they discarded semantic evidence.
+
+## Implemented Contract
+
+The raw and refined logical schemas now expose an exact
+`palette.array_coordinate_catalog` derived from their frozen array contracts.
+The catalogs correctly distinguish raw probability raster authority from dense
+refined raster authority while sharing ROI placement and derived metric surface
+semantics.
+
+Coordinate-aware core manifest v3 adds two closed fields:
+
+- `coordinate_contract`: the exact digest-bound schema catalog;
+- `coordinate_dependencies`: the exact crop-v2 identity, logical-content and
+  coordinate-catalog digests, the recording source-receipt and producer-evidence
+  digests, and—on refined cores—the exact raw-core manifest/catalog binding.
+
+The dependency builder re-hashes the live crop `instance_key`,
+`source_acquisition_frame_index`, `frame_row_offsets`, and `source_crop_xywh`
+arrays and requires equality with the crop-v2 logical-content manifest. A valid
+JSON envelope alone is insufficient.
+
+Recording source-validation receipt v2 retains the complete recording assembly
+identity. Each ordered worker entry contains its full scientific identity,
+attempt, and semantic receipt rather than only three opaque digests. Validation
+reconstructs every nested digest, run binding, local/global interval, and exact
+`[0, R)` coverage.
+
+The recording identity also freezes a common scientific-authority projection.
+Worker-local pixel hashes, package IDs, row identities, and clip paths may vary;
+model/refinement policy, preprocessing/coordinate semantics, component policy,
+ROI pixel domain, and other recording-wide semantics may not. Conflicting
+worker model/policy evidence fails before publication.
+
+`publish_recording_subject_mask_bundle()` now requires crop-v2 by default.
+`legacy_allow_missing` exists only for explicit compatibility callers and unit
+fixtures. When crop v2 is present, the publisher emits raw/refined core v3 and
+the bundle cross-binding proves their shared crop and exact refined-to-raw edge.
+
+## Validation
+
+The focused outside-sandbox real-Zarr matrix passed 41 tests covering:
+
+- retained worker evidence and exact assembly coverage;
+- conflicting worker scientific authority rejection;
+- legacy core-v2/receipt-v1 compatibility;
+- raw and refined coordinate-core-v3 publication;
+- crop live-array-to-manifest equality;
+- refined-to-raw binding;
+- recomputed-digest coordinate-catalog tampering;
+- crop-v2-required fail-closed behavior;
+- inactive recording-level bundle import, cross-binding, activation, and
+  recovery behavior.
+
+Static validation also passed Ruff, Python compilation, and `git diff --check`.
+
+## Still Open
+
+This checkpoint does not make the existing full-duration Sleepyfish mask canary
+canonical. Its v2 manifests do not retain the missing evidence, so it must be
+republished from the still-verifiable worker/crop inputs or recomputed.
+
+The remaining safe sequence is:
+
+- add a strict bundle-authorized coordinate-v3 reader alongside the unchanged
+  historical rich-coordinate reader;
+- bind the recording/camera/frame-axis identity required by subject-shape v4;
+- prove a realistic multi-clip canary, including an empty-only frame window;
+- materialize a selector-ineligible subject-shape-v4 source;
+- resume eye-angle-v7 and tail-kinematics-v2 short/full query-export matrices;
+- obtain Palette and, where user-facing, Crimson consumer evidence before any
+  activation or physical-profile promotion.
+
+Large dense raster arrays remain governed by whole-shard publication ownership.
+Parallel logical row slices are not sufficient when two writers could touch the
+same physical shard.

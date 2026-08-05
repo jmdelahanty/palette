@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -22,6 +21,7 @@ from fisheye.shared.subject_mask_worker_receipt import (
     build_subject_mask_worker_semantic_receipt,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
+from fisheye.shared.zarr.crop_manifest import build_coordinate_crop_run_manifest
 from fisheye.shared.zarr.subject_mask_bundle_publication import (
     SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
 )
@@ -41,6 +41,14 @@ from fisheye.utils.import_refined_subject_mask_clip_packages import (
 )
 from tests.unit.fisheye.test_import_refined_subject_mask_clip_packages import (
     _write_package,
+)
+from tests.unit.fisheye.test_crop_manifest import (
+    _arrays as _crop_manifest_arrays,
+    _dimensions as _crop_manifest_dimensions,
+    _metadata as _crop_manifest_metadata,
+    _pixel as _crop_manifest_pixel,
+    _policy as _crop_manifest_policy,
+    _source as _crop_manifest_source,
 )
 
 
@@ -236,6 +244,27 @@ def _draft(
     return path
 
 
+def _install_crop_v2(draft_path: Path) -> None:
+    root = zarr.open_group(str(draft_path), mode="a", use_consolidated=False)
+    crop = root["crop_runs/crop_001"]
+    arrays = _crop_manifest_arrays()
+    for path, values in arrays.items():
+        _create_array(crop, path, values)
+    plan, direct, consolidated = _crop_manifest_metadata()
+    crop.attrs["run_manifest"] = build_coordinate_crop_run_manifest(
+        run_id="crop_001",
+        dimensions=_crop_manifest_dimensions(),
+        policy=_crop_manifest_policy(),
+        storage_plan=plan,
+        arrays=arrays,
+        source=_crop_manifest_source(),
+        pixel_authority=_crop_manifest_pixel(),
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+    )
+
+
 @pytest.mark.parametrize("raw_parent", ("subject_mask_runs", "subject_mask_shard_runs"))
 def test_recording_bundle_publication_is_proof_bound_and_inactive(
     tmp_path: Path,
@@ -259,6 +288,7 @@ def test_recording_bundle_publication_is_proof_bound_and_inactive(
         bundle_id="bundle_001",
         local_output_root=tmp_path / "local_outputs",
         quality_scratch_root=tmp_path / "quality_scratch",
+        coordinate_contract_policy="legacy_allow_missing",
     )
 
     assert result["status"] == "complete"
@@ -276,6 +306,89 @@ def test_recording_bundle_publication_is_proof_bound_and_inactive(
         "subject_mask_quality_runs/quality_001",
     ):
         assert published[path].attrs["stage_selector_eligible"] is False
+
+
+def test_recording_bundle_requires_crop_v2_by_default(tmp_path: Path) -> None:
+    draft = _draft(tmp_path, raw_parent="subject_mask_shard_runs")
+    analysis = tmp_path / "analysis_requires_crop_v2.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "recording_001"
+
+    with pytest.raises(ValueError, match="requires a persisted crop-v2"):
+        publish_recording_subject_mask_bundle(
+            analysis_zarr=analysis,
+            draft_zarr=draft,
+            crop_run="crop_001",
+            raw_draft_parent="subject_mask_shard_runs",
+            raw_draft_run="raw_draft",
+            refined_draft_run="refined_draft",
+            raw_run="raw_rejected",
+            refined_run="refined_rejected",
+            quality_run="quality_rejected",
+            bundle_id="bundle_rejected",
+            local_output_root=tmp_path / "rejected_outputs",
+            quality_scratch_root=tmp_path / "rejected_scratch",
+        )
+
+
+def test_recording_bundle_publishes_coordinate_bound_v3_members(
+    tmp_path: Path,
+) -> None:
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_a": slice(0, 2), "raw_clip_b": slice(2, 4)},
+        refined_slices={
+            "refined_clip_a": slice(0, 2),
+            "refined_clip_b": slice(2, 4),
+        },
+    )
+    _install_crop_v2(draft)
+    analysis = tmp_path / "analysis_coordinate_v3.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "crop_manifest_test"
+
+    result = publish_recording_subject_mask_bundle(
+        analysis_zarr=analysis,
+        draft_zarr=draft,
+        crop_run="crop_001",
+        raw_draft_parent="subject_mask_shard_runs",
+        raw_draft_run="raw_clip_a",
+        raw_draft_runs=("raw_clip_b", "raw_clip_a"),
+        refined_draft_run="refined_clip_a",
+        refined_draft_runs=("refined_clip_b", "refined_clip_a"),
+        raw_run="raw_coordinate_v3",
+        refined_run="refined_coordinate_v3",
+        quality_run="quality_coordinate_v3",
+        bundle_id="bundle_coordinate_v3",
+        local_output_root=tmp_path / "coordinate_outputs",
+        quality_scratch_root=tmp_path / "coordinate_quality_scratch",
+    )
+
+    assert result["status"] == "complete"
+    published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    raw_manifest = published["subject_mask_runs/raw_coordinate_v3"].attrs[
+        "run_manifest"
+    ]
+    refined_manifest = published[
+        "refined_subject_masks_runs/refined_coordinate_v3"
+    ].attrs["run_manifest"]
+    assert raw_manifest["schema_version"] == 3
+    assert refined_manifest["schema_version"] == 3
+    assert refined_manifest["payload"]["coordinate_dependencies"]["document"][
+        "raw_core"
+    ]["manifest_payload_digest"] == raw_manifest["payload_digest"]
+    bundle_manifest = published["subject_mask_bundle_runs/bundle_coordinate_v3"].attrs[
+        "run_manifest"
+    ]
+    coordinate_binding = bundle_manifest["payload"]["cross_binding"][
+        "coordinate_contract"
+    ]
+    assert coordinate_binding["crop"]["run_path"] == "crop_runs/crop_001"
+    assert coordinate_binding["refined_raw_core_binding"][
+        "manifest_payload_digest"
+    ] == raw_manifest["payload_digest"]
+    assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
 
 
 def test_recording_bundle_composes_multiple_raw_clip_shards_without_reordering(
@@ -306,6 +419,7 @@ def test_recording_bundle_composes_multiple_raw_clip_shards_without_reordering(
         bundle_id="bundle_multi_001",
         local_output_root=tmp_path / "local_multi_outputs",
         quality_scratch_root=tmp_path / "quality_multi_scratch",
+        coordinate_contract_policy="legacy_allow_missing",
     )
 
     assert result["status"] == "complete"
@@ -356,6 +470,7 @@ def test_recording_bundle_composes_multiple_refined_clip_shards_without_reorderi
         bundle_id="bundle_multi_refined_001",
         local_output_root=tmp_path / "local_multi_refined_outputs",
         quality_scratch_root=tmp_path / "quality_multi_refined_scratch",
+        coordinate_contract_policy="legacy_allow_missing",
     )
 
     assert result["status"] == "complete"
@@ -408,6 +523,7 @@ def test_recording_bundle_binds_distinct_raw_and_refined_component_registries(
         bundle_id="bundle_split_eye_001",
         local_output_root=tmp_path / "local_split_eye_outputs",
         quality_scratch_root=tmp_path / "quality_split_eye_scratch",
+        coordinate_contract_policy="legacy_allow_missing",
     )
 
     assert result["status"] == "complete"
@@ -526,6 +642,7 @@ def test_two_clip_proof_import_flows_into_atomic_recording_bundle(
         bundle_id="bundle_from_clips",
         local_output_root=tmp_path / "local_clipped_outputs",
         quality_scratch_root=tmp_path / "quality_clipped_scratch",
+        coordinate_contract_policy="legacy_allow_missing",
     )
 
     assert result["status"] == "complete"

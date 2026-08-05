@@ -33,7 +33,13 @@ from fisheye.shared.zarr.subject_mask_bundle_publication import (
 )
 from fisheye.shared.zarr.subject_mask_core_publication import (
     SubjectMaskCoreValidationMode,
+    build_subject_mask_core_coordinate_dependencies,
     publish_selector_ineligible_subject_mask_core_snapshot,
+)
+from fisheye.shared.zarr.crop_manifest import (
+    CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    CROP_RUN_MANIFEST_ATTRIBUTE,
+    validate_crop_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_cache_publication import (
     DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
@@ -147,7 +153,12 @@ def _paths(group: Any, names: Sequence[str]) -> dict[str, Any]:
 def _crop_arrays(crop: Any) -> dict[str, Any]:
     return _paths(
         crop,
-        ("instance_key", "source_acquisition_frame_index", "source_crop_xywh"),
+        (
+            "instance_key",
+            "source_acquisition_frame_index",
+            "frame_row_offsets",
+            "source_crop_xywh",
+        ),
     )
 
 
@@ -497,6 +508,7 @@ def publish_recording_subject_mask_bundle(
     refined_draft_runs: Sequence[str] | None = None,
     cache_source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     cache_compute_workers: int = 1,
+    coordinate_contract_policy: str = "require_crop_v2",
 ) -> dict[str, object]:
     target = analysis_zarr.expanduser().resolve()
     draft_path = draft_zarr.expanduser().resolve()
@@ -504,6 +516,26 @@ def publish_recording_subject_mask_bundle(
     output.mkdir(parents=True, exist_ok=True)
     draft = open_zarr_root(draft_path, mode="r")
     crop = draft[f"crop_runs/{crop_run}"]
+    policy = str(coordinate_contract_policy).strip()
+    if policy not in {"require_crop_v2", "legacy_allow_missing"}:
+        raise ValueError("Unsupported coordinate_contract_policy.")
+    crop_manifest_value = crop.attrs.get(CROP_RUN_MANIFEST_ATTRIBUTE)
+    crop_manifest: dict[str, Any] | None = None
+    if isinstance(crop_manifest_value, Mapping):
+        crop_errors = validate_crop_run_manifest(crop_manifest_value)
+        if crop_errors:
+            raise ValueError("Invalid crop run manifest: " + "; ".join(crop_errors))
+        if (
+            crop_manifest_value.get("schema_version")
+            != CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        ):
+            raise ValueError("Recording subject-mask publication requires crop v2.")
+        crop_manifest = dict(crop_manifest_value)
+    elif policy == "require_crop_v2":
+        raise ValueError(
+            "Recording subject-mask publication requires a persisted crop-v2 "
+            "coordinate manifest."
+        )
     if raw_draft_parent not in {"subject_mask_runs", "subject_mask_shard_runs"}:
         raise ValueError("raw_draft_parent must name a canonical or shard raw parent.")
     raw_names = tuple(
@@ -622,6 +654,19 @@ def publish_recording_subject_mask_bundle(
             workers=raw_workers,
         )
     )
+    raw_coordinate_dependencies = (
+        build_subject_mask_core_coordinate_dependencies(
+            kind="raw_probability_uint8",
+            crop_run_path=f"crop_runs/{crop_run}",
+            crop_manifest=crop_manifest,
+            source_crop_arrays=_crop_arrays(crop),
+            source_run_path=raw_source_path,
+            source_validation_receipt=raw_receipt,
+            n_rois=raw_dimensions.n_rois,
+        )
+        if crop_manifest is not None
+        else None
+    )
     raw_store = output / "raw.zarr"
     raw_publication = publish_selector_ineligible_subject_mask_core_snapshot(
         raw_arrays,
@@ -649,6 +694,7 @@ def publish_recording_subject_mask_bundle(
         threshold=threshold,
         validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
         source_validation_receipt=raw_receipt,
+        coordinate_dependencies=raw_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
     )
     refined_documents = (
@@ -688,6 +734,20 @@ def publish_recording_subject_mask_bundle(
             },
         )
     )
+    refined_coordinate_dependencies = (
+        build_subject_mask_core_coordinate_dependencies(
+            kind="refined_dense_core",
+            crop_run_path=f"crop_runs/{crop_run}",
+            crop_manifest=crop_manifest,
+            source_crop_arrays=_crop_arrays(crop),
+            source_run_path=refined_source_path,
+            source_validation_receipt=refined_receipt,
+            n_rois=refined_dimensions.n_rois,
+            raw_core_manifest=raw_publication.manifest,
+        )
+        if crop_manifest is not None
+        else None
+    )
     refined_store = output / "refined.zarr"
     refined_publication = publish_selector_ineligible_subject_mask_core_snapshot(
         refined_arrays,
@@ -702,6 +762,7 @@ def publish_recording_subject_mask_bundle(
         source_attributes=refined_source_attrs,
         validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
         source_validation_receipt=refined_receipt,
+        coordinate_dependencies=refined_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
     )
     cache_publication = None

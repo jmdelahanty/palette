@@ -56,6 +56,14 @@ REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS = (
     "metrics/bbox_xyxy",
     "metrics/bbox_valid",
 )
+SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID = (
+    "palette.subject_mask.recording_assembly_identity"
+)
+SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION = 2
+SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_ID = (
+    "palette.subject_mask.recording_common_scientific_authority"
+)
+SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_VERSION = 1
 
 
 def _strict_copy(value: Any, *, name: str) -> Any:
@@ -71,6 +79,80 @@ def _valid_sha256(value: Any) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _without_fields(value: Any, names: set[str]) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    return {str(key): item for key, item in value.items() if str(key) not in names}
+
+
+def _recording_common_scientific_authority(
+    scientific_identity: Mapping[str, Any],
+    *,
+    stage_kind: str,
+) -> dict[str, object]:
+    """Project worker-local science onto recording-wide invariant semantics."""
+
+    payload = scientific_identity.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("Subject-mask scientific identity payload is absent.")
+    stage = str(stage_kind)
+    nested = {
+        name: payload.get(name)
+        for name in ("model", "crop", "pixels", "inference_contract")
+    }
+    if any(not isinstance(value, Mapping) for value in nested.values()):
+        raise ValueError("Subject-mask scientific authority fields must be objects.")
+    model = dict(nested["model"])
+    crop = dict(nested["crop"])
+    pixels = dict(nested["pixels"])
+    inference = dict(nested["inference_contract"])
+    if stage == "raw_subject_mask":
+        pixel_local = {
+            "decoded_shape",
+            "decoded_pixels_sha256",
+            "declared_pixels_sha256",
+            "cache_key",
+            "pixel_materialization_id",
+        }
+        normalized_model = model
+        normalized_pixels = _without_fields(pixels, pixel_local)
+        normalized_inference = inference
+    elif stage == "refined_subject_mask":
+        normalized_model = _without_fields(model, {"source_input_binding"})
+        normalized_pixels = _without_fields(
+            pixels,
+            {"source_input_binding", "digest"},
+        )
+        assignment = inference.get("eye_assignment_contract")
+        if isinstance(assignment, Mapping):
+            assignment = _without_fields(
+                assignment,
+                {
+                    "assignment_keypoint_group",
+                    "assignment_keypoints_run",
+                    "assignment_keypoint_run",
+                },
+            )
+        normalized_inference = dict(inference)
+        if "eye_assignment_contract" in normalized_inference:
+            normalized_inference["eye_assignment_contract"] = assignment
+    else:
+        raise ValueError(f"Unsupported recording assembly stage {stage!r}.")
+    document = {
+        "schema_id": SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_ID,
+        "schema_version": SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_VERSION,
+        "stage_kind": stage,
+        "model": normalized_model,
+        "crop_pixel_domain": {
+            "roi_shape_hw": crop.get("roi_shape_hw"),
+            "storage_mode": crop.get("storage_mode"),
+        },
+        "pixels": normalized_pixels,
+        "inference_contract": normalized_inference,
+    }
+    return _strict_copy(document, name="recording common scientific authority")
 
 
 def _validate_array_document(
@@ -292,6 +374,144 @@ def validate_subject_mask_worker_semantic_receipt(
     return canonical
 
 
+def validate_recording_subject_mask_assembly_identity(
+    value: Mapping[str, Any],
+    *,
+    kind: str,
+    stage_kind: str,
+    source_run_path: str,
+    n_rois: int,
+) -> dict[str, object]:
+    """Deeply validate retained recording-assembly producer evidence."""
+
+    canonical = _strict_copy(value, name="recording assembly identity")
+    if not isinstance(canonical, dict) or set(canonical) != {
+        "schema_id",
+        "schema_version",
+        "kind",
+        "source_run_path",
+        "row_policy",
+        "context",
+        "common_scientific_authority",
+        "workers",
+    }:
+        raise ValueError("Recording assembly identity fields are not exact.")
+    if (
+        canonical.get("schema_id")
+        != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID
+        or canonical.get("schema_version")
+        != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+        or canonical.get("kind") != str(kind)
+        or canonical.get("source_run_path")
+        != str(source_run_path).strip().strip("/")
+        or canonical.get("row_policy")
+        != "ordered_contiguous_real_work_units_v1"
+        or not isinstance(canonical.get("context"), dict)
+    ):
+        raise ValueError("Recording assembly identity header changed.")
+    stage = str(stage_kind).strip()
+    required_paths = (
+        RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+        if stage == "raw_subject_mask"
+        else REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+        if stage == "refined_subject_mask"
+        else ()
+    )
+    if not required_paths:
+        raise ValueError(f"Unsupported recording assembly stage {stage!r}.")
+    workers = canonical.get("workers")
+    common_authority = canonical.get("common_scientific_authority")
+    if not isinstance(common_authority, dict):
+        raise ValueError("Recording common scientific authority is absent.")
+    if not isinstance(workers, list) or not workers:
+        raise ValueError("Recording assembly workers are absent.")
+    cursor = 0
+    for worker in workers:
+        if not isinstance(worker, dict) or set(worker) != {
+            "global_row_interval",
+            "run_path",
+            "scientific_identity_digest",
+            "attempt_payload_digest",
+            "worker_receipt_payload_digest",
+            "scientific_identity",
+            "attempt",
+            "worker_receipt",
+        }:
+            raise ValueError("Recording assembly worker fields are not exact.")
+        interval = worker.get("global_row_interval")
+        if not isinstance(interval, dict) or set(interval) != {
+            "start_row",
+            "stop_row",
+        }:
+            raise ValueError("Recording assembly worker interval is invalid.")
+        start = interval.get("start_row")
+        stop = interval.get("stop_row")
+        if (
+            type(start) is not int
+            or type(stop) is not int
+            or start != cursor
+            or not (start < stop <= int(n_rois))
+        ):
+            raise ValueError(
+                "Recording assembly workers must cover ordered contiguous rows."
+            )
+        science = worker.get("scientific_identity")
+        attempt = worker.get("attempt")
+        receipt = worker.get("worker_receipt")
+        if not isinstance(science, dict) or validate_subject_mask_scientific_identity(
+            science
+        ):
+            raise ValueError("Recording worker scientific identity is invalid.")
+        if science["payload"].get("stage_kind") != stage:
+            raise ValueError("Recording worker scientific stage differs.")
+        if (
+            _recording_common_scientific_authority(science, stage_kind=stage)
+            != common_authority
+        ):
+            raise ValueError("Recording workers have conflicting scientific authority.")
+        if not isinstance(attempt, dict) or validate_subject_mask_attempt(attempt):
+            raise ValueError("Recording worker attempt identity is invalid.")
+        attempt_payload = attempt["payload"]
+        if attempt_payload.get("scientific_identity_digest") != science.get("digest"):
+            raise ValueError("Recording worker attempt binds another science identity.")
+        if not isinstance(receipt, dict):
+            raise ValueError("Recording worker semantic receipt is absent.")
+        receipt_payload_value = receipt.get("payload")
+        receipt_paths = (
+            receipt_payload_value.get("required_output_paths")
+            if isinstance(receipt_payload_value, Mapping)
+            else None
+        )
+        allowed_paths = [list(required_paths)]
+        if stage == "raw_subject_mask":
+            allowed_paths.append(
+                [required_paths[0], "masks_roi", *required_paths[1:]]
+            )
+        if receipt_paths not in allowed_paths:
+            raise ValueError("Recording worker output inventory is unsupported.")
+        validated_receipt = validate_subject_mask_worker_semantic_receipt(
+            receipt,
+            scientific_identity=science,
+            attempt=attempt,
+            required_paths=tuple(receipt_paths),
+        )
+        receipt_payload = validated_receipt["payload"]
+        if (
+            worker.get("run_path") != receipt_payload.get("run_path")
+            or worker.get("scientific_identity_digest") != science.get("digest")
+            or worker.get("attempt_payload_digest") != attempt.get("payload_digest")
+            or worker.get("worker_receipt_payload_digest")
+            != receipt.get("payload_digest")
+            or int(receipt_payload["local_row_interval"]["stop_row"])
+            != stop - start
+        ):
+            raise ValueError("Recording worker retained bindings changed.")
+        cursor = int(stop)
+    if cursor != int(n_rois):
+        raise ValueError("Recording assembly does not cover every ROI row.")
+    return canonical
+
+
 def build_recording_subject_mask_source_receipt(
     *,
     kind: str,
@@ -442,6 +662,9 @@ def build_recording_subject_mask_source_receipt(
                 "scientific_identity_digest": science["digest"],
                 "attempt_payload_digest": attempt["payload_digest"],
                 "worker_receipt_payload_digest": receipt["payload_digest"],
+                "scientific_identity": dict(science),
+                "attempt": dict(attempt),
+                "worker_receipt": dict(receipt),
             }
         )
         cursor = stop
@@ -464,17 +687,29 @@ def build_recording_subject_mask_source_receipt(
             "units": units,
         }
     array_document = {path: array_document[path] for path in schema_paths}
+    common_authority = _recording_common_scientific_authority(
+        worker_bindings[0]["scientific_identity"],
+        stage_kind=stage,
+    )
     assembly_identity = {
-        "schema_id": "palette.subject_mask.recording_assembly_identity",
-        "schema_version": 1,
+        "schema_id": SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID,
+        "schema_version": SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION,
         "kind": str(kind),
         "source_run_path": str(source_run_path).strip().strip("/"),
         "row_policy": "ordered_contiguous_real_work_units_v1",
         "context": _strict_copy(
             dict(assembly_context or {}), name="recording assembly context"
         ),
+        "common_scientific_authority": common_authority,
         "workers": worker_bindings,
     }
+    assembly_identity = validate_recording_subject_mask_assembly_identity(
+        assembly_identity,
+        kind=kind,
+        stage_kind=stage,
+        source_run_path=source_run_path,
+        n_rois=dimensions.n_rois,
+    )
     source_manifest = build_subject_mask_source_run_manifest(
         kind=kind,
         run_path=source_run_path,
@@ -502,6 +737,7 @@ def build_recording_subject_mask_source_receipt(
         threshold=threshold,
         array_document=array_document,
         semantic_units=semantic_units,
+        producer_evidence=assembly_identity,
     )
     return source_manifest, receipt
 
@@ -511,7 +747,12 @@ __all__ = [
     "REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS",
     "SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_SCHEMA_ID",
     "SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_SCHEMA_VERSION",
+    "SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID",
+    "SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION",
+    "SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_ID",
+    "SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_VERSION",
     "build_subject_mask_worker_semantic_receipt",
     "build_recording_subject_mask_source_receipt",
     "validate_subject_mask_worker_semantic_receipt",
+    "validate_recording_subject_mask_assembly_identity",
 ]

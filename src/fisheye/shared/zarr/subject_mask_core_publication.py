@@ -21,6 +21,20 @@ import zarr
 
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import utc_now
+from fisheye.shared.subject_mask_worker_receipt import (
+    SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID,
+    SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION,
+    validate_recording_subject_mask_assembly_identity,
+)
+from fisheye.shared.zarr.coordinate_manifest import (
+    build_coordinate_catalog_envelope,
+    validate_coordinate_catalog_envelope,
+)
+from fisheye.shared.zarr.crop_manifest import (
+    CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    CROP_RUN_MANIFEST_SCHEMA_ID,
+    validate_crop_run_manifest,
+)
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_bytes,
@@ -49,6 +63,7 @@ from fisheye.shared.zarr.subject_mask_storage import (
 from fisheye.shared.zarr.subject_mask_validation_receipt import (
     SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM,
     SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM,
+    SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION,
     validate_subject_mask_source_validation_receipt,
 )
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
@@ -64,6 +79,7 @@ from fisheye.shared.zarr_run_completion import (
 
 SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID = "palette.subject_mask_core.run_manifest"
 SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION = 2
+SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 3
 SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR = "source_validation_receipt.json"
 SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_ID = "palette.subject_mask_core.shadow_publication"
@@ -82,6 +98,10 @@ _TRANSPORT_PUBLICATION_ATTRS = (
 )
 SUBJECT_MASK_PROB_MAX_CANONICALIZATION = "cpu_max_encoded_then_decode_float32_v1"
 SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE = float(np.finfo(np.float32).eps)
+SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_ID = (
+    "palette.subject_mask_core.coordinate_dependencies"
+)
+SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION = 1
 
 
 class SubjectMaskCoreValidationMode(str, Enum):
@@ -105,6 +125,295 @@ class SubjectMaskCorePublication:
     manifest: Mapping[str, Any]
     phase_seconds: Mapping[str, float]
     elapsed_seconds: float
+
+
+def _core_coordinate_catalog(
+    kind: str,
+) -> tuple[RawSubjectMaskSchema | RefinedSubjectMaskCoreSchema, dict[str, object]]:
+    if kind == "raw_probability_uint8":
+        schema: RawSubjectMaskSchema | RefinedSubjectMaskCoreSchema = (
+            RAW_SUBJECT_MASK_UINT8_SCHEMA_V1
+        )
+    elif kind == "refined_dense_core":
+        schema = REFINED_SUBJECT_MASK_CORE_SCHEMA_V1
+    else:
+        raise ValueError(f"Unsupported subject-mask core kind {kind!r}.")
+    return schema, build_coordinate_catalog_envelope(
+        schema.coordinate_contract_manifest()
+    )
+
+
+def _coordinate_dependency_envelope(
+    document: Mapping[str, Any],
+) -> dict[str, object]:
+    normalized = json.loads(canonical_json_bytes(document).decode("utf-8"))
+    if not isinstance(normalized, dict):
+        raise ValueError("Subject-mask coordinate dependencies must be an object.")
+    return {
+        "schema_id": SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_ID,
+        "schema_version": SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION,
+        "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
+        "digest": canonical_json_sha256(normalized),
+        "document": normalized,
+    }
+
+
+def build_subject_mask_core_coordinate_dependencies(
+    *,
+    kind: str,
+    crop_run_path: str,
+    crop_manifest: Mapping[str, Any],
+    source_crop_arrays: Mapping[str, Any],
+    source_run_path: str,
+    source_validation_receipt: Mapping[str, Any],
+    n_rois: int,
+    raw_core_manifest: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    """Bind one recording core to crop, worker, and optional raw authorities."""
+
+    crop_errors = validate_crop_run_manifest(crop_manifest)
+    if crop_errors:
+        raise ValueError("Invalid crop coordinate manifest: " + "; ".join(crop_errors))
+    crop_payload = crop_manifest.get("payload")
+    if (
+        crop_manifest.get("schema_id") != CROP_RUN_MANIFEST_SCHEMA_ID
+        or crop_manifest.get("schema_version")
+        != CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        or not isinstance(crop_payload, Mapping)
+    ):
+        raise ValueError("Subject-mask recording cores require crop manifest v2.")
+    crop_coordinate = crop_payload.get("coordinate_contract")
+    crop_logical = crop_payload.get("logical_content")
+    if not isinstance(crop_coordinate, Mapping) or not isinstance(
+        crop_logical, Mapping
+    ):
+        raise ValueError("Crop coordinate or logical-content authority is absent.")
+    crop_content_document = crop_logical.get("document")
+    crop_content_arrays = (
+        crop_content_document.get("arrays")
+        if isinstance(crop_content_document, Mapping)
+        else None
+    )
+    identity_paths = (
+        "instance_key",
+        "source_acquisition_frame_index",
+        "frame_row_offsets",
+        "source_crop_xywh",
+    )
+    if not isinstance(crop_content_arrays, Mapping):
+        raise ValueError("Crop logical-content array evidence is absent.")
+    for path in identity_paths:
+        value = source_crop_arrays.get(path)
+        record = crop_content_arrays.get(path)
+        if value is None or not isinstance(record, Mapping):
+            raise ValueError(f"Crop coordinate evidence lacks {path!r}.")
+        shape, dtype = _shape_dtype(value)
+        if (
+            record.get("shape") != list(shape)
+            or record.get("dtype") != str(dtype)
+            or record.get("sha256") != _array_hash(value)
+        ):
+            raise ValueError(
+                f"Live crop array {path!r} differs from its coordinate manifest."
+            )
+    crop_path = str(crop_run_path).strip().strip("/")
+    expected_crop_path = f"crop_runs/{crop_payload.get('run_id')}"
+    if crop_path != expected_crop_path:
+        raise ValueError("Crop run path differs from its manifest run_id.")
+
+    receipt_payload = source_validation_receipt.get("payload")
+    producer_evidence = (
+        receipt_payload.get("producer_evidence")
+        if isinstance(receipt_payload, Mapping)
+        else None
+    )
+    if (
+        source_validation_receipt.get("schema_version")
+        != SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION
+        or not isinstance(producer_evidence, Mapping)
+    ):
+        raise ValueError(
+            "Coordinate-aware subject-mask cores require retained recording "
+            "assembly evidence."
+        )
+    stage_kind = (
+        "raw_subject_mask"
+        if kind == "raw_probability_uint8"
+        else "refined_subject_mask"
+        if kind == "refined_dense_core"
+        else ""
+    )
+    validated_evidence = validate_recording_subject_mask_assembly_identity(
+        producer_evidence,
+        kind=kind,
+        stage_kind=stage_kind,
+        source_run_path=source_run_path,
+        n_rois=int(n_rois),
+    )
+
+    raw_binding: dict[str, object] | None = None
+    if kind == "refined_dense_core":
+        if not isinstance(raw_core_manifest, Mapping):
+            raise ValueError("Refined coordinate cores require the exact raw core.")
+        raw_payload = raw_core_manifest.get("payload")
+        raw_coordinate = (
+            raw_payload.get("coordinate_contract")
+            if isinstance(raw_payload, Mapping)
+            else None
+        )
+        raw_dependencies = (
+            raw_payload.get("coordinate_dependencies")
+            if isinstance(raw_payload, Mapping)
+            else None
+        )
+        raw_dependency_document = (
+            raw_dependencies.get("document")
+            if isinstance(raw_dependencies, Mapping)
+            else None
+        )
+        raw_crop = (
+            raw_dependency_document.get("crop")
+            if isinstance(raw_dependency_document, Mapping)
+            else None
+        )
+        if (
+            raw_core_manifest.get("schema_id")
+            != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID
+            or raw_core_manifest.get("schema_version")
+            != SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            or not isinstance(raw_payload, Mapping)
+            or raw_payload.get("kind") != "raw_probability_uint8"
+            or raw_core_manifest.get("payload_digest")
+            != canonical_json_sha256(raw_payload)
+            or not isinstance(raw_coordinate, Mapping)
+            or not isinstance(raw_crop, Mapping)
+            or raw_crop.get("manifest_payload_digest")
+            != crop_manifest.get("payload_digest")
+        ):
+            raise ValueError("Refined coordinate core binds an invalid raw core.")
+        raw_binding = {
+            "run_id": raw_payload.get("run_id"),
+            "manifest_payload_digest": raw_core_manifest.get("payload_digest"),
+            "coordinate_catalog_digest": raw_coordinate.get("digest"),
+        }
+    elif raw_core_manifest is not None:
+        raise ValueError("Raw coordinate cores cannot bind another raw core.")
+
+    return _coordinate_dependency_envelope(
+        {
+            "crop": {
+                "run_path": crop_path,
+                "manifest_payload_digest": crop_manifest.get("payload_digest"),
+                "coordinate_catalog_digest": crop_coordinate.get("digest"),
+                "logical_content_digest": crop_logical.get("digest"),
+            },
+            "recording_assembly": {
+                "source_run_path": str(source_run_path).strip().strip("/"),
+                "source_validation_receipt_payload_digest": (
+                    source_validation_receipt.get("payload_digest")
+                ),
+                "producer_evidence_schema_id": validated_evidence.get("schema_id"),
+                "producer_evidence_schema_version": validated_evidence.get(
+                    "schema_version"
+                ),
+                "producer_evidence_digest": canonical_json_sha256(
+                    validated_evidence
+                ),
+            },
+            "raw_core": raw_binding,
+        }
+    )
+
+
+def _validate_core_coordinate_dependencies(
+    value: Any,
+    *,
+    kind: str,
+) -> tuple[str, ...]:
+    if not isinstance(value, Mapping):
+        return ("subject-mask coordinate dependencies must be an object",)
+    if set(value) != {
+        "schema_id",
+        "schema_version",
+        "digest_algorithm",
+        "digest",
+        "document",
+    }:
+        return ("subject-mask coordinate dependency envelope is not exact",)
+    document = value.get("document")
+    if (
+        value.get("schema_id") != SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_ID
+        or value.get("schema_version")
+        != SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION
+        or value.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
+        or not isinstance(document, Mapping)
+        or value.get("digest") != canonical_json_sha256(document)
+    ):
+        return ("subject-mask coordinate dependency envelope is stale",)
+    if set(document) != {"crop", "recording_assembly", "raw_core"}:
+        return ("subject-mask coordinate dependency document is not exact",)
+    crop = document.get("crop")
+    assembly = document.get("recording_assembly")
+    raw = document.get("raw_core")
+    if not isinstance(crop, Mapping) or set(crop) != {
+        "run_path",
+        "manifest_payload_digest",
+        "coordinate_catalog_digest",
+        "logical_content_digest",
+    }:
+        return ("subject-mask crop coordinate dependency is invalid",)
+    if not isinstance(assembly, Mapping) or set(assembly) != {
+        "source_run_path",
+        "source_validation_receipt_payload_digest",
+        "producer_evidence_schema_id",
+        "producer_evidence_schema_version",
+        "producer_evidence_digest",
+    }:
+        return ("subject-mask assembly coordinate dependency is invalid",)
+    errors: list[str] = []
+    for field_name in (
+        "manifest_payload_digest",
+        "coordinate_catalog_digest",
+        "logical_content_digest",
+    ):
+        try:
+            _require_sha256(crop.get(field_name), name=f"crop {field_name}")
+        except ValueError as exc:
+            errors.append(str(exc))
+    for field_name in (
+        "source_validation_receipt_payload_digest",
+        "producer_evidence_digest",
+    ):
+        try:
+            _require_sha256(assembly.get(field_name), name=field_name)
+        except ValueError as exc:
+            errors.append(str(exc))
+    if (
+        assembly.get("producer_evidence_schema_id")
+        != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID
+        or assembly.get("producer_evidence_schema_version")
+        != SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_VERSION
+    ):
+        errors.append("subject-mask assembly evidence identity mismatch")
+    if kind == "raw_probability_uint8" and raw is not None:
+        errors.append("raw coordinate core unexpectedly binds another raw core")
+    if kind == "refined_dense_core":
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "run_id",
+            "manifest_payload_digest",
+            "coordinate_catalog_digest",
+        }:
+            errors.append("refined coordinate core raw dependency is invalid")
+        else:
+            for field_name in (
+                "manifest_payload_digest",
+                "coordinate_catalog_digest",
+            ):
+                try:
+                    _require_sha256(raw.get(field_name), name=f"raw {field_name}")
+                except ValueError as exc:
+                    errors.append(str(exc))
+    return tuple(errors)
 
 
 def _shape_dtype(value: Any) -> tuple[tuple[int, ...], np.dtype[Any]]:
@@ -673,10 +982,14 @@ def validate_subject_mask_core_run_manifest(
     }
     if set(manifest) != expected_envelope:
         errors.append("subject-mask core manifest envelope has unexpected fields")
+    manifest_schema_version = manifest.get("schema_version")
     if (
         manifest.get("schema_id") != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID
-        or manifest.get("schema_version")
-        != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION
+        or manifest_schema_version
+        not in {
+            SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION,
+            SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+        }
         or manifest.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
     ):
         errors.append("subject-mask core manifest envelope identity mismatch")
@@ -701,6 +1014,8 @@ def validate_subject_mask_core_run_manifest(
         "write_receipt",
         "logical_content",
     }
+    if manifest_schema_version == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+        expected_payload.update({"coordinate_contract", "coordinate_dependencies"})
     if set(payload) != expected_payload:
         errors.append("subject-mask core manifest payload has unexpected fields")
     run_id = payload.get("run_id")
@@ -795,6 +1110,23 @@ def validate_subject_mask_core_run_manifest(
                 )
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
+
+    if manifest_schema_version == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+        if schema is None:
+            errors.append("subject-mask coordinate catalog lacks a resolved schema")
+        else:
+            errors.extend(
+                validate_coordinate_catalog_envelope(
+                    payload.get("coordinate_contract"),
+                    expected_document=schema.coordinate_contract_manifest(),
+                )
+            )
+        errors.extend(
+            _validate_core_coordinate_dependencies(
+                payload.get("coordinate_dependencies"),
+                kind=str(kind),
+            )
+        )
 
     source = payload.get("source")
     if not isinstance(source, Mapping) or set(source) != {
@@ -992,6 +1324,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         SubjectMaskCoreValidationMode.REFERENCE_FULL
     ),
     source_validation_receipt: Mapping[str, Any] | None = None,
+    coordinate_dependencies: Mapping[str, Any] | None = None,
 ) -> SubjectMaskCorePublication:
     """Validate and rematerialize one complete raw or refined core."""
 
@@ -1080,6 +1413,40 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         logical_schema = schema.as_manifest(
             dimensions=dimensions,
             components=components,
+        )
+    manifest_schema_version = SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION
+    coordinate_contract: dict[str, object] | None = None
+    normalized_coordinate_dependencies: dict[str, object] | None = None
+    if coordinate_dependencies is not None:
+        if source_validation_receipt is None:
+            raise ValueError(
+                "Coordinate-aware core publication requires source validation evidence."
+            )
+        coordinate_contract = build_coordinate_catalog_envelope(
+            schema.coordinate_contract_manifest()
+        )
+        normalized_coordinate_dependencies = json.loads(
+            canonical_json_bytes(coordinate_dependencies).decode("utf-8")
+        )
+        coordinate_errors = _validate_core_coordinate_dependencies(
+            normalized_coordinate_dependencies,
+            kind=kind,
+        )
+        if coordinate_errors:
+            raise ValueError(
+                "Invalid subject-mask coordinate dependencies: "
+                + "; ".join(coordinate_errors)
+            )
+        dependency_document = normalized_coordinate_dependencies["document"]
+        assembly_dependency = dependency_document["recording_assembly"]
+        if assembly_dependency[
+            "source_validation_receipt_payload_digest"
+        ] != source_validation_receipt.get("payload_digest"):
+            raise ValueError(
+                "Coordinate dependencies bind another source-validation receipt."
+            )
+        manifest_schema_version = (
+            SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
         )
 
     started = time.perf_counter()
@@ -1270,9 +1637,16 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "document": content,
         },
     }
+    if manifest_schema_version == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+        assert coordinate_contract is not None
+        assert normalized_coordinate_dependencies is not None
+        manifest_payload["coordinate_contract"] = coordinate_contract
+        manifest_payload["coordinate_dependencies"] = (
+            normalized_coordinate_dependencies
+        )
     manifest = {
         "schema_id": SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID,
-        "schema_version": SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": manifest_schema_version,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
         "payload_digest": canonical_json_sha256(manifest_payload),
         "payload": manifest_payload,
@@ -1403,6 +1777,9 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
 
 __all__ = [
     "SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM",
+    "SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_ID",
+    "SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION",
+    "SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION",
     "SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_ID",
     "SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_VERSION",
     "SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE",
@@ -1411,6 +1788,7 @@ __all__ = [
     "SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR",
     "SubjectMaskCorePublication",
     "SubjectMaskCoreValidationMode",
+    "build_subject_mask_core_coordinate_dependencies",
     "publish_selector_ineligible_subject_mask_core_snapshot",
     "subject_mask_core_metadata_declaration_maps",
     "validate_persisted_subject_mask_core_publication",

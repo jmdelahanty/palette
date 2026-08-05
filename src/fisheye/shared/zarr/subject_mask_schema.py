@@ -543,6 +543,15 @@ class RawSubjectMaskSchema:
     def binding_paths(self) -> tuple[str, ...]:
         return tuple(binding.path for binding in self.bindings)
 
+    def coordinate_contract_manifest(self) -> dict[str, object]:
+        """Return the exact coordinate catalog for raw mask surfaces."""
+
+        from fisheye.shared.zarr.coordinate_contracts import (
+            array_coordinate_catalog_manifest,
+        )
+
+        return array_coordinate_catalog_manifest(self.contracts)
+
     def validate(
         self,
         arrays: Mapping[str, Any],
@@ -718,6 +727,15 @@ class RefinedSubjectMaskCoreSchema:
     @property
     def binding_paths(self) -> tuple[str, ...]:
         return tuple(binding.path for binding in self.bindings)
+
+    def coordinate_contract_manifest(self) -> dict[str, object]:
+        """Return the exact coordinate catalog for refined mask surfaces."""
+
+        from fisheye.shared.zarr.coordinate_contracts import (
+            array_coordinate_catalog_manifest,
+        )
+
+        return array_coordinate_catalog_manifest(self.contracts)
 
     def validate(
         self,

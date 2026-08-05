@@ -37,7 +37,8 @@ from fisheye.shared.zarr.subject_mask_schema import (
 SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_ID = (
     "palette.subject_mask.source_validation_receipt"
 )
-SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION = 1
+SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_LEGACY_SCHEMA_VERSION = 1
+SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION = 2
 SUBJECT_MASK_SOURCE_VALIDATION_MODE = "incremental_complete_row_coverage_v1"
 SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_ID = "palette.subject_mask.source_semantics"
 SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_VERSION = 1
@@ -570,6 +571,7 @@ def build_subject_mask_source_validation_receipt(
     threshold: float | None,
     array_document: Mapping[str, Any],
     semantic_units: Sequence[Mapping[str, Any]],
+    producer_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Seal already-computed full-coverage scientific validation evidence."""
 
@@ -585,7 +587,7 @@ def build_subject_mask_source_validation_receipt(
         not np.isfinite(threshold) or not 0.0 <= float(threshold) <= 1.0
     ):
         raise ValueError("Validation receipt threshold must be finite within [0,1].")
-    payload = {
+    payload: dict[str, object] = {
         "validation_mode": SUBJECT_MASK_SOURCE_VALIDATION_MODE,
         "result": "valid",
         "kind": str(kind),
@@ -615,9 +617,34 @@ def build_subject_mask_source_validation_receipt(
             "units": units,
         },
     }
+    schema_version = SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_LEGACY_SCHEMA_VERSION
+    if producer_evidence is not None:
+        normalized_evidence = _strict_copy(
+            producer_evidence,
+            name="subject-mask producer evidence",
+        )
+        if not isinstance(normalized_evidence, dict):
+            raise ValueError("Subject-mask producer evidence must be an object.")
+        source_producer = source_manifest.get("payload")
+        source_producer = (
+            source_producer.get("producer_identity")
+            if isinstance(source_producer, Mapping)
+            else None
+        )
+        if (
+            not isinstance(source_producer, Mapping)
+            or source_producer.get("digest")
+            != canonical_json_sha256(normalized_evidence)
+        ):
+            raise ValueError(
+                "Subject-mask producer evidence differs from the source-manifest "
+                "producer identity."
+            )
+        payload["producer_evidence"] = normalized_evidence
+        schema_version = SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION
     return {
         "schema_id": SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_ID,
-        "schema_version": SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
         "payload_digest": canonical_json_sha256(payload),
         "payload": payload,
@@ -650,10 +677,14 @@ def validate_subject_mask_source_validation_receipt(
         raise ValueError("Subject-mask validation receipt fields are not exact.")
     payload = canonical.get("payload")
     digest = canonical.get("payload_digest")
+    schema_version = canonical.get("schema_version")
     if (
         canonical.get("schema_id") != SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_ID
-        or canonical.get("schema_version")
-        != SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION
+        or schema_version
+        not in {
+            SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_LEGACY_SCHEMA_VERSION,
+            SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION,
+        }
         or canonical.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
         or not isinstance(payload, dict)
         or not _is_sha256(digest)
@@ -673,6 +704,8 @@ def validate_subject_mask_source_validation_receipt(
         "arrays",
         "semantic_coverage",
     }
+    if schema_version == SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION:
+        payload_fields.add("producer_evidence")
     if set(payload) != payload_fields:
         raise ValueError(
             "Subject-mask validation receipt payload fields are not exact."
@@ -699,6 +732,23 @@ def validate_subject_mask_source_validation_receipt(
         or payload.get("threshold") != expected_threshold
     ):
         raise ValueError("Subject-mask validation receipt binding changed.")
+    if schema_version == SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION:
+        evidence = payload.get("producer_evidence")
+        source_payload = source_manifest.get("payload")
+        producer = (
+            source_payload.get("producer_identity")
+            if isinstance(source_payload, Mapping)
+            else None
+        )
+        if (
+            not isinstance(evidence, dict)
+            or not isinstance(producer, Mapping)
+            or producer.get("digest") != canonical_json_sha256(evidence)
+        ):
+            raise ValueError(
+                "Subject-mask producer evidence is absent or differs from its "
+                "source-manifest identity."
+            )
     paths = _receipt_paths(schema, arrays)
     _canonical_array_document(
         payload.get("arrays"), arrays=arrays, expected_paths=paths
@@ -804,6 +854,7 @@ __all__ = [
     "SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM",
     "SUBJECT_MASK_SOURCE_VALIDATION_MODE",
     "SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_ID",
+    "SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_LEGACY_SCHEMA_VERSION",
     "SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION",
     "SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_ID",
     "SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_VERSION",

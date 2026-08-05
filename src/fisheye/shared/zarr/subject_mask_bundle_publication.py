@@ -31,6 +31,7 @@ from fisheye.shared.zarr.manifest_digest import (
     metadata_without_empty_group_consolidation,
 )
 from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
     validate_persisted_subject_mask_core_publication,
     validate_subject_mask_core_run_manifest,
@@ -409,6 +410,49 @@ def _bundle_cross_binding(
                 "component_registry_policy": "raw_and_refined_bound_independently_v1",
             }
         )
+    raw_coordinate = (
+        raw_manifest.get("schema_version")
+        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    refined_coordinate = (
+        refined_manifest.get("schema_version")
+        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    if raw_coordinate is not refined_coordinate:
+        raise ValueError(
+            "Raw and refined bundle members must both carry coordinate-v3 or "
+            "both remain legacy."
+        )
+    if raw_coordinate:
+        raw_payload = raw_manifest["payload"]
+        refined_payload = refined_manifest["payload"]
+        raw_catalog = raw_payload["coordinate_contract"]
+        refined_catalog = refined_payload["coordinate_contract"]
+        raw_dependencies = raw_payload["coordinate_dependencies"]["document"]
+        refined_dependencies = refined_payload["coordinate_dependencies"]["document"]
+        raw_core_binding = refined_dependencies.get("raw_core")
+        if raw_dependencies.get("crop") != refined_dependencies.get("crop"):
+            raise ValueError("Raw and refined coordinate crop authorities differ.")
+        expected_raw_binding = {
+            "run_id": raw_payload["run_id"],
+            "manifest_payload_digest": raw_manifest["payload_digest"],
+            "coordinate_catalog_digest": raw_catalog["digest"],
+        }
+        if raw_core_binding != expected_raw_binding:
+            raise ValueError("Refined coordinate member binds another raw core.")
+        cross_binding["coordinate_contract"] = {
+            "crop": dict(raw_dependencies["crop"]),
+            "raw_coordinate_catalog_digest": raw_catalog["digest"],
+            "refined_coordinate_catalog_digest": refined_catalog["digest"],
+            "raw_recording_assembly": dict(
+                raw_dependencies["recording_assembly"]
+            ),
+            "refined_recording_assembly": dict(
+                refined_dependencies["recording_assembly"]
+            ),
+            "refined_raw_core_binding": dict(raw_core_binding),
+            "binding_policy": "crop_v2_raw_core_v3_refined_core_v3_exact_v1",
+        }
     if version >= 3:
         if not isinstance(cache_manifest, Mapping):
             raise ValueError("Bundle v3 requires a sampled-contour cache manifest.")

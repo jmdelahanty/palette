@@ -1446,6 +1446,16 @@ Recommended benchmark and promotion-review order:
       Restamping selected v5/v1 or subject-shape v3 runs is prohibited; the
       collection finalizer must aggregate clip coordinate proofs first. See
       `docs/diagnostics/eye_tail_query_export_source_prerequisite_2026-08-04.md`.
+- [x] Implement the recording-level subject-mask coordinate aggregation
+      foundation. Validation receipt v2 now retains every worker scientific
+      identity, attempt, and semantic receipt; core manifest v3 binds the live
+      crop-v2 identity arrays and coordinate catalog; refined v3 binds the exact
+      raw core; and bundle cross-validation binds the complete crop/raw/refined
+      chain. Missing crop-v2 fails closed by default, while historical v2/v1
+      artifacts remain explicit compatibility inputs. The 41-test real-Zarr
+      core/bundle matrix passes. A bundle-authorized downstream reader and a
+      newly published recording-scale canary remain required; see
+      `docs/subject_mask_recording_coordinate_aggregation_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,
@@ -1492,8 +1502,10 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. repair the canonical coordinate-source aggregation prerequisite, then
-   resume the eye and tail representative-short/full-duration export matrices;
+1. add the strict bundle-authorized subject-mask coordinate-v3 reader, publish
+   a selector-ineligible recording canary from crop-v2 plus retained worker
+   evidence, and then resume the eye and tail representative-short/full-duration
+   export matrices;
 2. include tail-specific narrow normalized-position predicates, camera-frame
    windows, complete scans, part/object counts, and peak RSS;
 3. obtain real consumer evidence where a maintained Palette or Crimson path

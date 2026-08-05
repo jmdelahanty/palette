@@ -1,19 +1,41 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
 import pytest
 import zarr
 
 import fisheye.shared.zarr.subject_mask_core_publication as core_publication
+from fisheye.shared.subject_mask_attempt import (
+    build_subject_mask_attempt,
+    build_subject_mask_scientific_identity,
+)
+from fisheye.shared.subject_mask_worker_receipt import (
+    RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    build_recording_subject_mask_source_receipt,
+    build_subject_mask_worker_semantic_receipt,
+)
+from fisheye.shared.zarr.crop_manifest import build_coordinate_crop_run_manifest
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
+    SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR,
     SubjectMaskCoreValidationMode,
+    build_subject_mask_core_coordinate_dependencies,
     publish_selector_ineligible_subject_mask_core_snapshot,
     validate_subject_mask_core_run_manifest,
+)
+from tests.unit.fisheye.test_crop_manifest import (
+    _arrays as _crop_manifest_arrays,
+    _dimensions as _crop_dimensions,
+    _metadata as _crop_metadata,
+    _pixel as _crop_pixel,
+    _policy as _crop_policy,
+    _source as _crop_source,
 )
 from fisheye.shared.zarr.subject_mask_schema import (
     RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
@@ -126,6 +148,102 @@ def _dimensions() -> SubjectMaskDimensions:
     )
 
 
+def _coordinate_crop_manifest() -> dict[str, object]:
+    plan, direct, consolidated = _crop_metadata()
+    return build_coordinate_crop_run_manifest(
+        run_id="crop_coordinate_shadow",
+        dimensions=_crop_dimensions(),
+        policy=_crop_policy(),
+        storage_plan=plan,
+        arrays=_crop_manifest_arrays(),
+        source=_crop_source(),
+        pixel_authority=_crop_pixel(),
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+    )
+
+
+def _recording_documents(
+    *,
+    kind: str,
+    arrays: dict[str, np.ndarray],
+) -> tuple[dict[str, object], dict[str, object], str]:
+    raw = kind == "raw_probability_uint8"
+    stage = "raw_subject_mask" if raw else "refined_subject_mask"
+    schema = (
+        RAW_SUBJECT_MASK_UINT8_SCHEMA_V1
+        if raw
+        else REFINED_SUBJECT_MASK_CORE_SCHEMA_V1
+    )
+    worker_paths = (
+        RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+        if raw
+        else REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+    )
+    worker_path = (
+        "subject_mask_shard_runs/worker_001"
+        if raw
+        else "refined_subject_masks_runs/worker_001"
+    )
+    source_path = (
+        "subject_mask_shard_collections/recording_001"
+        if raw
+        else "refined_subject_mask_shard_collections/recording_001"
+    )
+    science = build_subject_mask_scientific_identity(
+        stage_kind=stage,
+        model={"artifact_sha256": "a" * 64},
+        crop={"roi_shape_hw": [8, 8], "storage_mode": "geometry_only"},
+        pixels={"profile": "crop_pixels_v1"},
+        row_identity={"rows": 4},
+        inference_contract={"components": list(_components().labels)},
+    )
+    attempt = build_subject_mask_attempt(
+        scientific_identity=science,
+        run_path=worker_path,
+        attempt_id=str(uuid5(NAMESPACE_URL, f"pytest:{kind}")),
+    )
+    local = {path: arrays[path] for path in worker_paths}
+    receipt = build_subject_mask_worker_semantic_receipt(
+        stage_kind=stage,
+        run_path=worker_path,
+        scientific_identity=science,
+        attempt=attempt,
+        scope={"recording": "crop_manifest_test"},
+        row_count=4,
+        array_document=subject_mask_array_unit_document(
+            local,
+            worker_paths,
+            unit_rows=2,
+        ),
+        required_paths=worker_paths,
+        roi_aligned_paths=tuple(
+            path for path in worker_paths if path != "available_channels"
+        ),
+    )
+    manifest, source_receipt = build_recording_subject_mask_source_receipt(
+        kind=kind,
+        stage_kind=stage,
+        source_run_path=source_path,
+        schema=schema,
+        arrays=arrays,
+        dimensions=_dimensions(),
+        components=_components(),
+        threshold=0.5 if raw else None,
+        workers=(
+            {
+                "global_start_row": 0,
+                "scientific_identity": science,
+                "attempt": attempt,
+                "receipt": receipt,
+            },
+        ),
+        identity_unit_rows=2,
+    )
+    return manifest, source_receipt, source_path
+
+
 def _source_manifest() -> dict[str, object]:
     return {
         "schema_id": "palette.subject_mask.source_fixture",
@@ -215,6 +333,96 @@ def test_subject_mask_core_publication_round_trip(
         "authoritative_run",
     ):
         assert parent.attrs.get(selector) is None
+
+
+def test_coordinate_core_v3_binds_crop_raw_refined_and_worker_evidence(
+    tmp_path: object,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    crop_arrays = refined_with_crop.pop("_crop")
+    crop_manifest = _coordinate_crop_manifest()
+    raw_source, raw_receipt, raw_source_path = _recording_documents(
+        kind="raw_probability_uint8",
+        arrays=raw,
+    )
+    raw_dependencies = build_subject_mask_core_coordinate_dependencies(
+        kind="raw_probability_uint8",
+        crop_run_path="crop_runs/crop_coordinate_shadow",
+        crop_manifest=crop_manifest,
+        source_crop_arrays=_crop_manifest_arrays(),
+        source_run_path=raw_source_path,
+        source_validation_receipt=raw_receipt,
+        n_rois=4,
+    )
+    raw_publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        raw,
+        source_crop_arrays=crop_arrays,  # type: ignore[arg-type]
+        source_manifest=raw_source,
+        n_frames=4,
+        components=_components(),
+        destination=tmp_path / "raw_coordinate_v3.zarr",  # type: ignore[operator]
+        run_id="raw_coordinate_v3",
+        kind="raw_probability_uint8",
+        source_run_path=raw_source_path,
+        threshold=0.5,
+        validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+        source_validation_receipt=raw_receipt,
+        coordinate_dependencies=raw_dependencies,
+    )
+    assert (
+        raw_publication.manifest["schema_version"]
+        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert validate_subject_mask_core_run_manifest(raw_publication.manifest) == ()
+
+    refined_source, refined_receipt, refined_source_path = _recording_documents(
+        kind="refined_dense_core",
+        arrays=refined_with_crop,
+    )
+    refined_dependencies = build_subject_mask_core_coordinate_dependencies(
+        kind="refined_dense_core",
+        crop_run_path="crop_runs/crop_coordinate_shadow",
+        crop_manifest=crop_manifest,
+        source_crop_arrays=_crop_manifest_arrays(),
+        source_run_path=refined_source_path,
+        source_validation_receipt=refined_receipt,
+        n_rois=4,
+        raw_core_manifest=raw_publication.manifest,
+    )
+    refined_publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        refined_with_crop,
+        source_crop_arrays=crop_arrays,  # type: ignore[arg-type]
+        source_manifest=refined_source,
+        n_frames=4,
+        components=_components(),
+        destination=tmp_path / "refined_coordinate_v3.zarr",  # type: ignore[operator]
+        run_id="refined_coordinate_v3",
+        kind="refined_dense_core",
+        source_run_path=refined_source_path,
+        validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+        source_validation_receipt=refined_receipt,
+        coordinate_dependencies=refined_dependencies,
+    )
+    refined_payload = refined_publication.manifest["payload"]
+    assert refined_payload["coordinate_contract"]["document"] == (
+        REFINED_SUBJECT_MASK_CORE_SCHEMA_V1.coordinate_contract_manifest()
+    )
+    assert refined_payload["coordinate_dependencies"]["document"]["raw_core"][
+        "manifest_payload_digest"
+    ] == raw_publication.manifest["payload_digest"]
+    assert validate_subject_mask_core_run_manifest(refined_publication.manifest) == ()
+
+    tampered = deepcopy(refined_publication.manifest)
+    tampered["payload"]["coordinate_contract"]["document"]["surfaces"][0][
+        "pixel_convention"
+    ] = "wrong"
+    tampered["payload"]["coordinate_contract"]["digest"] = canonical_json_sha256(
+        tampered["payload"]["coordinate_contract"]["document"]
+    )
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+    assert "coordinate catalog differs from the frozen stage catalog" in (
+        validate_subject_mask_core_run_manifest(tampered)
+    )
 
 
 def test_subject_mask_core_publication_rejects_crop_identity_mismatch(

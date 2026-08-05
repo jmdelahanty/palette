@@ -18,6 +18,7 @@ from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     build_recording_subject_mask_source_receipt,
     build_subject_mask_worker_semantic_receipt,
+    validate_recording_subject_mask_assembly_identity,
     validate_subject_mask_worker_semantic_receipt,
 )
 from fisheye.shared.zarr.subject_mask_validation_receipt import (
@@ -312,6 +313,22 @@ def test_recording_receipt_concatenates_real_worker_intervals() -> None:
     )
     assert source_receipt["payload"]["semantic_coverage"]["stop_row"] == 4
     assert source_receipt["payload"]["semantic_coverage"]["unit_count"] == 4
+    assert source_receipt["schema_version"] == 2
+    producer_evidence = source_receipt["payload"]["producer_evidence"]
+    assert len(producer_evidence["workers"]) == 2
+    assert producer_evidence["workers"][0]["scientific_identity"] == (
+        workers[0]["scientific_identity"]
+    )
+    assert (
+        validate_recording_subject_mask_assembly_identity(
+            producer_evidence,
+            kind="refined_dense_core",
+            stage_kind="refined_subject_mask",
+            source_run_path="refined_subject_masks_runs/recording",
+            n_rois=4,
+        )
+        == producer_evidence
+    )
     assert (
         validate_subject_mask_source_validation_receipt(
             source_receipt,
@@ -329,6 +346,99 @@ def test_recording_receipt_concatenates_real_worker_intervals() -> None:
 
     workers[1]["global_start_row"] = 3
     with pytest.raises(ValueError, match="ordered, contiguous"):
+        build_recording_subject_mask_source_receipt(
+            kind="refined_dense_core",
+            stage_kind="refined_subject_mask",
+            source_run_path="refined_subject_masks_runs/recording",
+            schema=REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
+            arrays=arrays,
+            dimensions=dimensions,
+            components=components,
+            threshold=None,
+            workers=workers,
+        )
+
+
+def test_recording_receipt_rejects_conflicting_worker_science() -> None:
+    n_rows = 2
+    dimensions = SubjectMaskDimensions(
+        n_frames=2,
+        n_rois=n_rows,
+        n_channels=2,
+        roi_height=2,
+        roi_width=2,
+    )
+    components = SubjectMaskComponentRegistry(("body", "eye"))
+    masks = np.ones((n_rows, 2, 2, 2), dtype=np.uint8)
+    metrics = {
+        "metrics/mask_present": np.ones((n_rows, 2), dtype=bool),
+        "metrics/area_px": np.full((n_rows, 2), 4, dtype=np.float32),
+        "metrics/centroid_xy": np.ones((n_rows, 2, 2), dtype=np.float32),
+        "metrics/centroid_valid": np.ones((n_rows, 2), dtype=bool),
+        "metrics/bbox_xyxy": np.ones((n_rows, 2, 4), dtype=np.float32),
+        "metrics/bbox_valid": np.ones((n_rows, 2), dtype=bool),
+    }
+    arrays = {
+        "source_crop_row_ids": np.arange(n_rows, dtype=np.int64),
+        "instance_key": np.arange(10, 12, dtype=np.uint64),
+        "source_acquisition_frame_index": np.arange(n_rows, dtype=np.int64),
+        "frame_row_offsets": np.arange(3, dtype=np.int64),
+        "source_crop_xywh": np.ones((n_rows, 4), dtype=np.float32),
+        "masks_roi": masks,
+        "available_channels": np.ones((2,), dtype=bool),
+        **metrics,
+    }
+    workers = []
+    for index, model in enumerate(("policy_a", "policy_b")):
+        science = build_subject_mask_scientific_identity(
+            stage_kind="refined_subject_mask",
+            model={"policy": model},
+            crop={"roi_shape_hw": [2, 2]},
+            pixels={"source": "raw_masks"},
+            row_identity={"rows": 1},
+            inference_contract={"components": ["body", "eye"]},
+        )
+        run_path = f"refined_subject_masks_runs/clip_{index}"
+        attempt = build_subject_mask_attempt(
+            scientific_identity=science,
+            run_path=run_path,
+            attempt_id=f"00000000-0000-4000-8000-{index + 1:012d}",
+        )
+        local = {
+            path: arrays[path][index : index + 1]
+            if path != "available_channels"
+            else arrays[path]
+            for path in REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+        }
+        receipt = build_subject_mask_worker_semantic_receipt(
+            stage_kind="refined_subject_mask",
+            run_path=run_path,
+            scientific_identity=science,
+            attempt=attempt,
+            scope={"clip": index},
+            row_count=1,
+            array_document=subject_mask_array_unit_document(
+                local,
+                REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+                unit_rows=1,
+            ),
+            required_paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+            roi_aligned_paths=tuple(
+                path
+                for path in REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+                if path != "available_channels"
+            ),
+        )
+        workers.append(
+            {
+                "global_start_row": index,
+                "scientific_identity": science,
+                "attempt": attempt,
+                "receipt": receipt,
+            }
+        )
+
+    with pytest.raises(ValueError, match="conflicting scientific authority"):
         build_recording_subject_mask_source_receipt(
             kind="refined_dense_core",
             stage_kind="refined_subject_mask",
