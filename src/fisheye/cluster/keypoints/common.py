@@ -22,6 +22,7 @@ from fisheye.registry.model_resolution import (
     load_target_profile,
     resolve_recording_id,
 )
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.flat_roi_cache import (
     crop_run_name_from_manifest,
     load_flat_roi_cache_manifest,
@@ -44,7 +45,7 @@ from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 
 
-DEFAULT_ZEBRAFISH_MIN_ROI_SIZE = 348
+DEFAULT_ZEBRAFISH_MIN_ROI_SIZE = DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 131_072
 DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 131_072
 

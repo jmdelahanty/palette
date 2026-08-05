@@ -38,6 +38,8 @@ def build_crop_signature(attrs: Mapping[str, object]) -> Dict[str, object]:
         "source_refined_run": attrs.get("source_refined_run"),
         "source_background_run": attrs.get("source_background_run"),
         "roi_size": attrs.get("roi_size"),
+        "crop_geometry_policy_digest": attrs.get("crop_geometry_policy_digest"),
+        "crop_padding_mode": attrs.get("crop_padding_mode"),
         "crop_revision": current_crop_revision(attrs),
         "parameter_source": attrs.get("parameter_source"),
         "parameters_hash": _hash_parameters(attrs.get("parameters")),

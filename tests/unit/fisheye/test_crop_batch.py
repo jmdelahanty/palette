@@ -153,7 +153,7 @@ def test_build_plan_runs_full_canonical_preflight_before_reporting_ok(
     def preflight(root, **kwargs):  # noqa: ANN001, ANN202
         seen.update(kwargs)
         assert root["detect_runs/detect_001"].path == kwargs["source_group"].path
-        return SimpleNamespace(row_count=2)
+        return SimpleNamespace(row_count=2, padded_row_count=1)
 
     monkeypatch.setattr(mod, "_preflight_ordinary_crop_coordinates", preflight)
 
@@ -169,8 +169,11 @@ def test_build_plan_runs_full_canonical_preflight_before_reporting_ok(
 
     assert plan.status == "ok"
     assert seen["source_path"] == "detect_runs/detect_001"
-    assert seen["roi_size"] == (64, 48)
+    assert seen["policy"].fixed_size_wh == (48, 64)
+    assert seen["policy"].padding_mode.value == "zero_outside_source_frame"
     assert seen["video_source_type"] == "zarr"
+    assert plan.padding_mode == "zero_outside_source_frame"
+    assert plan.padded_row_count == 1
 
 
 def test_build_plan_fails_closed_when_canonical_preflight_rejects_source(
@@ -387,12 +390,16 @@ def test_build_plan_rejects_geometry_only_instead_of_reusing_latest_any(tmp_path
     crop_parent.attrs["latest_materialized"] = "crop_materialized"
     crop_parent.attrs["latest_any"] = "crop_geometry"
 
+    policy = mod.ordinary_crop_geometry_policy_from_parameters(
+        {"roi_sz": [348, 348], "padding_mode": "zero_outside_source_frame"}
+    )
     crop_materialized = crop_parent.create_group("crop_materialized")
     crop_materialized.attrs.update(
         {
             "detection_source_path": "detect_runs/detect_001",
             "detection_source_type": "detect",
-            "roi_size": [512, 512],
+            "roi_size": [348, 348],
+            "crop_geometry_policy_digest": policy.payload_digest,
             "crop_storage_mode": "materialized",
             "status": "completed",
         }
@@ -441,12 +448,16 @@ def test_build_plan_materialized_compares_against_validated_latest_materialized(
     crop_parent.attrs["latest_materialized"] = "crop_materialized"
     crop_parent.attrs["latest_any"] = "crop_geometry"
 
+    policy = mod.ordinary_crop_geometry_policy_from_parameters(
+        {"roi_sz": [348, 348], "padding_mode": "zero_outside_source_frame"}
+    )
     crop_materialized = crop_parent.create_group("crop_materialized")
     crop_materialized.attrs.update(
         {
             "detection_source_path": "detect_runs/detect_001",
             "detection_source_type": "detect",
-            "roi_size": [512, 512],
+            "roi_size": [348, 348],
+            "crop_geometry_policy_digest": policy.payload_digest,
             "crop_storage_mode": "materialized",
             "status": "completed",
             "coordinate_contract": "canonical_v2",
@@ -484,6 +495,52 @@ def test_build_plan_materialized_compares_against_validated_latest_materialized(
     assert plan.latest_crop == "crop_materialized"
     assert plan.latest_pointer == "latest_materialized"
     assert plan.crop_storage_mode == "materialized"
+
+
+def test_build_plan_replaces_canonical_run_without_explicit_padding_policy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive(
+        tmp_path,
+        "rec_a",
+        "rec_a_analysis.zarr",
+        zarr_purpose="analysis",
+    )
+    root = zarr.open_group(str(zarr_path), mode="a")
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_old"
+    crop_parent.attrs["latest_materialized"] = "crop_old"
+    crop_old = crop_parent.create_group("crop_old")
+    crop_old.attrs.update(
+        {
+            "detection_source_path": "detect_runs/detect_001",
+            "detection_source_type": "detect",
+            "roi_size": [348, 348],
+            "crop_storage_mode": "materialized",
+            "status": "completed",
+            "coordinate_contract": "canonical_v2",
+            "stage_selector_eligible": True,
+        }
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_ordinary_crop_observation_geometry",
+        lambda _root, _path: object(),
+    )
+
+    plan = mod._build_plan(
+        zarr_path=zarr_path,
+        config={},
+        source_type="detect",
+        source_path=None,
+        selection_policy=None,
+        force_new=False,
+        crop_storage_mode="materialized",
+    )
+
+    assert plan.status == "ok"
+    assert plan.reason == "differs: crop_geometry_policy"
 
 
 def test_build_plan_does_not_reuse_legacy_materialized_run(tmp_path: Path) -> None:

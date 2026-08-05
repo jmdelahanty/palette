@@ -56,6 +56,10 @@ from ..shared.refined_detect_curation import (
 )
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.crop_signature import build_crop_signature
+from ..shared.crop_defaults import (
+    DEFAULT_ZEBRAFISH_CROP_PURPOSE,
+    DEFAULT_ZEBRAFISH_CROP_SIZE_HW,
+)
 from ..shared.grayscale import rgb_to_gray_unweighted_mean_torch
 from ..shared.crop_roi_layout import (
     DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
@@ -119,6 +123,11 @@ from ..shared.zarr_run_completion import (
     mark_run_failed,
     mark_run_started,
     note_pending_latest,
+)
+from ..shared.zarr.crop_schema import (
+    CropGeometryPolicy,
+    CropPaddingMode,
+    CropSizeMode,
 )
 from ..shared.source_video_metadata import resolve_source_video
 from ..shared.transform_authority import (
@@ -316,6 +325,31 @@ def _round_crop_center_pixels(
     return int(center[0]), int(center[1])
 
 
+def build_ordinary_crop_geometry_policy(
+    roi_size: Tuple[int, int],
+    *,
+    padding_mode: str | CropPaddingMode = CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME,
+) -> CropGeometryPolicy:
+    """Return the exact fixed-size policy used by an ordinary crop run.
+
+    ``crop.py`` historically represents sizes as ``(height, width)`` while the
+    crop-v2 policy stores ``fixed_size_wh``.  Keeping this conversion in one
+    helper prevents rectangular crops from silently swapping their axes.
+    """
+
+    if len(roi_size) != 2:
+        raise ValueError("roi_size must contain exact (height, width) values.")
+    roi_height, roi_width = (int(roi_size[0]), int(roi_size[1]))
+    if roi_height <= 0 or roi_width <= 0:
+        raise ValueError("roi_size dimensions must be positive.")
+    return CropGeometryPolicy(
+        purpose=DEFAULT_ZEBRAFISH_CROP_PURPOSE,
+        size_mode=CropSizeMode.FIXED_PER_RUN,
+        fixed_size_wh=(roi_width, roi_height),
+        padding_mode=CropPaddingMode(padding_mode),
+    )
+
+
 def _coerce_existing_crop_pointer(
     crop_parent: zarr.Group,
     value: object,
@@ -445,6 +479,8 @@ class _CanonicalCropPreflight:
     roi_coordinates_full: np.ndarray
     source_crop_xywh: np.ndarray
     bbox_roi_xyxy: np.ndarray
+    policy: CropGeometryPolicy
+    padded_row_count: int
     frame_shape: Tuple[int, int]
     total_frames: int
     acquisition_mode: str
@@ -511,7 +547,7 @@ def _canonical_crop_arrays(
     source_path: str,
     source_group: zarr.Group,
     frame_shape: Tuple[int, int],
-    roi_size: Tuple[int, int],
+    policy: CropGeometryPolicy,
     require_sorted_frames: bool,
 ) -> _CanonicalCropPreflight:
     values = detection_observation_geometry_values(source_geometry)
@@ -544,8 +580,16 @@ def _canonical_crop_arrays(
     if require_sorted_frames:
         _validate_frame_indices_sorted(frame_indices, source_label=source_path)
 
+    if (
+        policy.size_mode is not CropSizeMode.FIXED_PER_RUN
+        or policy.fixed_size_wh is None
+    ):
+        raise OrdinaryCropCoordinateError(
+            "Ordinary crop publication requires one fixed-size crop policy."
+        )
     frame_height, frame_width = frame_shape
-    roi_height, roi_width = (int(roi_size[0]), int(roi_size[1]))
+    roi_width, roi_height = policy.fixed_size_wh
+    roi_size = (int(roi_height), int(roi_width))
     existing_coordinates = _ordinary_crop_top_left_from_bbox(
         bbox_norm_coords,
         frame_shape=frame_shape,
@@ -567,12 +611,15 @@ def _canonical_crop_arrays(
         | (canonical_coordinates[:, 0] + roi_width > frame_width)
         | (canonical_coordinates[:, 1] + roi_height > frame_height)
     )
-    if padded.size:
+    if (
+        padded.size
+        and policy.padding_mode is CropPaddingMode.REQUIRE_FULLY_CONTAINED
+    ):
         sample = ", ".join(str(int(index)) for index in padded[:8])
         raise OrdinaryCropCoordinateError(
-            "Future-canonical ordinary crop requires every ROI to be fully contained "
-            "in the exact source-camera frame. Padded crops need an explicit padding "
-            f"lineage contract; affected source rows include: {sample}."
+            "The crop geometry policy requires every ROI to be fully contained "
+            "in the exact source-camera frame; affected source rows include: "
+            f"{sample}."
         )
 
     bbox_img = values["bbox_img_xyxy"]
@@ -604,6 +651,8 @@ def _canonical_crop_arrays(
         roi_coordinates_full=np.array(canonical_coordinates, copy=True, order="C"),
         source_crop_xywh=np.array(source_crop_xywh, copy=True, order="C"),
         bbox_roi_xyxy=np.array(bbox_roi_xyxy, copy=True, order="C"),
+        policy=policy,
+        padded_row_count=int(padded.size),
         frame_shape=(int(frame_height), int(frame_width)),
         total_frames=int(source_geometry.frame_evidence.acquisition_frame.record.source_total_frames),
         acquisition_mode="",
@@ -618,7 +667,7 @@ def _preflight_ordinary_crop_coordinates(
     source_group: zarr.Group,
     video_source_type: str,
     video_path: Optional[str],
-    roi_size: Tuple[int, int],
+    policy: CropGeometryPolicy,
 ) -> _CanonicalCropPreflight:
     """Resolve one exact source/acquisition authority before run creation."""
 
@@ -756,7 +805,7 @@ def _preflight_ordinary_crop_coordinates(
         source_path=normalized_source_path,
         source_group=exact_source_group,
         frame_shape=frame_shape,
-        roi_size=roi_size,
+        policy=policy,
         require_sorted_frames=(video_source_type == "zarr"),
     )
     _validate_frame_indices_in_bounds(
@@ -774,6 +823,8 @@ def _preflight_ordinary_crop_coordinates(
         roi_coordinates_full=result.roi_coordinates_full,
         source_crop_xywh=result.source_crop_xywh,
         bbox_roi_xyxy=result.bbox_roi_xyxy,
+        policy=result.policy,
+        padded_row_count=result.padded_row_count,
         frame_shape=result.frame_shape,
         total_frames=total_frames,
         acquisition_mode=expected_mode,
@@ -819,8 +870,17 @@ def _write_canonical_crop_coordinate_arrays(
             "instance_key_policy": "copied_from_exact_canonical_detection_source",
             "coordinate_contract_mode": "canonical",
             "source_acquisition_authority_mode": preflight.acquisition_mode,
+            "crop_geometry_policy": preflight.policy.as_manifest(),
+            "crop_geometry_policy_digest": preflight.policy.payload_digest,
+            "crop_padding_mode": preflight.policy.padding_mode.value,
+            "padded_roi_count": int(preflight.padded_row_count),
+            "source_frame_shape_hw": [
+                int(preflight.frame_shape[0]),
+                int(preflight.frame_shape[1]),
+            ],
         }
     )
+    crop_group.attrs["crop_signature"] = build_crop_signature(crop_group.attrs)
 
 
 def _publish_ordinary_crop_coordinate_contract(
@@ -843,6 +903,22 @@ def _publish_ordinary_crop_coordinate_contract(
     if not np.array_equal(persisted_coordinates, preflight.roi_coordinates_full):
         raise OrdinaryCropCoordinateError(
             "Persisted ROI placement differs from canonical preflight placement."
+        )
+    expected_policy = preflight.policy.as_manifest()
+    if crop_group.attrs.get("crop_geometry_policy") != expected_policy:
+        raise OrdinaryCropCoordinateError(
+            "Persisted crop geometry policy differs from canonical preflight policy."
+        )
+    if (
+        crop_group.attrs.get("crop_geometry_policy_digest")
+        != preflight.policy.payload_digest
+        or crop_group.attrs.get("crop_padding_mode")
+        != preflight.policy.padding_mode.value
+        or crop_group.attrs.get("padded_roi_count")
+        != int(preflight.padded_row_count)
+    ):
+        raise OrdinaryCropCoordinateError(
+            "Persisted crop padding lineage differs from canonical preflight."
         )
     bbox_edge_frame_node = crop_group.require_group(
         "coordinate_frames"
@@ -2461,6 +2537,7 @@ def crop_from_external_video(
     roi_sz: Tuple[int, int],
     use_gpu: bool,
     console: Console,
+    crop_policy: Optional[CropGeometryPolicy] = None,
     selection_policy: Optional[str] = None,
     external_write_backend: str = "standard",
     external_roi_storage: str = "compressed",
@@ -2478,6 +2555,13 @@ def crop_from_external_video(
     Crop detections from external video file (GPU or CPU).
     """
     start_time = time.perf_counter()
+    crop_policy = crop_policy or build_ordinary_crop_geometry_policy(roi_sz)
+    expected_size_wh = (int(roi_sz[1]), int(roi_sz[0]))
+    if crop_policy.fixed_size_wh != expected_size_wh:
+        raise ValueError(
+            "External crop policy fixed size differs from roi_sz: "
+            f"{crop_policy.fixed_size_wh!r} != {expected_size_wh!r}."
+        )
     
     use_kvikio_writes = False
     backend_norm = str(external_write_backend or "standard").strip().lower()
@@ -2535,7 +2619,7 @@ def crop_from_external_video(
             source_group=source_group,
             video_source_type="external",
             video_path=video_path,
-            roi_size=roi_sz,
+            policy=crop_policy,
         )
         if canonical_preflight.row_count == 0:
             console.print("[yellow]No detections to crop[/yellow]")
@@ -2663,6 +2747,8 @@ def crop_from_external_video(
             'pipeline_type': 'fisheye_tracking',
             'status': 'running',
             'crop_storage_mode': crop_storage_mode,
+            'padding_mode': crop_policy.padding_mode.value,
+            'padded_roi_count': canonical_preflight.padded_row_count,
             'crop_revision': 0,
             
             # === Video Source ===
@@ -2799,6 +2885,8 @@ def crop_from_external_video(
             env_info=env_info,
             parameters={
                 "roi_size": list(roi_sz),
+                "crop_geometry_policy": crop_policy.as_manifest(),
+                "crop_geometry_policy_digest": crop_policy.payload_digest,
                 "crop_storage_mode": crop_storage_mode,
                 "acceleration": crop_group.attrs.get("acceleration"),
                 "write_backend_requested": crop_group.attrs.get("write_backend_requested"),
@@ -2846,6 +2934,8 @@ def crop_from_external_video(
                 'total_rois_cropped': total_detections,
                 'percent_frames_with_crops': round(percent_cropped, 2),
                 'roi_size': list(roi_sz),
+                'padding_mode': crop_policy.padding_mode.value,
+                'padded_roi_count': canonical_preflight.padded_row_count,
                 'roi_pixels_materialized': False,
             }
             crop_group.attrs['duration_seconds'] = duration
@@ -3033,7 +3123,9 @@ def crop_from_external_video(
             'frames_with_crops': frames_with_crops,
             'total_rois_cropped': total_detections,
             'percent_frames_with_crops': round(percent_cropped, 2),
-            'roi_size': list(roi_sz)
+            'roi_size': list(roi_sz),
+            'padding_mode': crop_policy.padding_mode.value,
+            'padded_roi_count': canonical_preflight.padded_row_count,
         }
         crop_group.attrs['duration_seconds'] = duration
         crop_group.attrs['avg_batch_ms'] = float(np.mean(batch_times)) if batch_times else 0.0
@@ -3087,7 +3179,7 @@ def crop_from_external_video(
             source_group=root[source_path],
             video_source_type="external",
             video_path=video_path,
-            roi_size=roi_sz,
+            policy=crop_policy,
         )
         if crop_parent is None or run_name is None:
             raise OrdinaryCropCoordinateError(
@@ -3112,6 +3204,8 @@ def crop_from_external_video(
             'detection_source_type': source_type,
             'detection_source_path': source_path,
             'crop_storage_mode': crop_storage_mode,
+            'padding_mode': crop_policy.padding_mode.value,
+            'padded_roi_count': fresh_preflight.padded_row_count,
         }
     except KeyboardInterrupt:
         error_message = "Interrupted by user"
@@ -3518,7 +3612,11 @@ def get_crop_parameters(
     """
     # Start with config defaults
     crop_params = config.get('crop', {}).copy()
-    crop_params.setdefault('roi_sz', [512, 512])
+    crop_params.setdefault('roi_sz', list(DEFAULT_ZEBRAFISH_CROP_SIZE_HW))
+    crop_params.setdefault(
+        'padding_mode',
+        CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME.value,
+    )
     crop_params.setdefault('acceleration', 'auto')
     crop_params.setdefault('gpu_min_detections', 200)
     crop_params.setdefault('crop_storage_mode', 'materialized')
@@ -3571,6 +3669,22 @@ def get_crop_parameters(
                     console.print(f"[green]✓ Using circular dish mask from zarr[/green]")
     
     return crop_params, param_source
+
+
+def ordinary_crop_geometry_policy_from_parameters(
+    crop_params: Mapping[str, Any],
+) -> CropGeometryPolicy:
+    """Resolve an explicit persisted crop policy from workflow parameters."""
+
+    roi_size = tuple(
+        crop_params.get('roi_sz', DEFAULT_ZEBRAFISH_CROP_SIZE_HW)
+    )
+    return build_ordinary_crop_geometry_policy(
+        roi_size,
+        padding_mode=crop_params.get(
+            'padding_mode', CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME.value
+        ),
+    )
 
 
 # -------- Worker task: compute + WRITE directly into Zarr -------- #
@@ -3899,7 +4013,9 @@ def _crop_detections_impl(
         crop_storage_mode=crop_storage_mode_resolved,
     )
     crop_params['crop_storage_mode'] = crop_storage_mode_resolved
-    roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))
+    crop_policy = ordinary_crop_geometry_policy_from_parameters(crop_params)
+    roi_width, roi_height = crop_policy.fixed_size_wh or (0, 0)
+    roi_sz = (int(roi_height), int(roi_width))
     detect_run_name, background_run_name, refined_run_name = resolve_source_run_info(root, source_path)
     effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
     if effective_run_provenance is None:
@@ -3915,6 +4031,8 @@ def _crop_detections_impl(
                 "acceleration": acceleration,
                 "crop_storage_mode": crop_storage_mode_resolved,
                 "roi_size": list(roi_sz),
+                "crop_geometry_policy": crop_policy.as_manifest(),
+                "crop_geometry_policy_digest": crop_policy.payload_digest,
                 "external_write_backend": external_write_backend,
                 "external_roi_storage": external_roi_storage,
                 "external_use_sharding": external_use_sharding,
@@ -3948,7 +4066,7 @@ def _crop_detections_impl(
         source_group=source_group,
         video_source_type=video_source_type,
         video_path=video_path,
-        roi_size=roi_sz,
+        policy=crop_policy,
     )
     source_group = canonical_preflight.source_group
     if canonical_preflight.row_count == 0:
@@ -4085,6 +4203,7 @@ def _crop_detections_impl(
             roi_sz=roi_sz,
             use_gpu=use_gpu,
             console=console,
+            crop_policy=crop_policy,
             selection_policy=selection_policy,
             external_write_backend=backend,
             external_roi_storage=storage,
@@ -4157,7 +4276,6 @@ def _crop_detections_impl(
     scheduler_effective = "distributed" if use_distributed else "synchronous"
     effective_num_workers = (num_workers or os.cpu_count()) if use_distributed else 1
     
-    roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))
     chunk_size = config.get('import', {}).get('chunk_size', 32)
 
     console.print(f"ROI size: {roi_sz[0]}×{roi_sz[1]} pixels")
@@ -4235,6 +4353,8 @@ def _crop_detections_impl(
         'pipeline_type': 'fisheye_tracking',
         'status': 'running',
         'crop_storage_mode': crop_storage_mode_resolved,
+        'padding_mode': crop_policy.padding_mode.value,
+        'padded_roi_count': canonical_preflight.padded_row_count,
         'crop_revision': 0,
         
         # === Video Source ===
@@ -4540,6 +4660,8 @@ def _crop_detections_impl(
         'total_rois_cropped': total_detections,
         'percent_frames_with_crops': round(percent_cropped, 2),
         'roi_size': list(roi_sz),
+        'padding_mode': crop_policy.padding_mode.value,
+        'padded_roi_count': canonical_preflight.padded_row_count,
         'roi_pixels_materialized': True,
     }
     crop_group.attrs['summary_statistics'] = summary_stats
@@ -4591,7 +4713,7 @@ def _crop_detections_impl(
         source_group=root[source_path],
         video_source_type="zarr",
         video_path=None,
-        roi_size=roi_sz,
+        policy=crop_policy,
     )
     if crop_parent is None:
         raise OrdinaryCropCoordinateError(
@@ -4638,6 +4760,8 @@ def _crop_detections_impl(
         'detection_source_path': source_path,
         'run_name': run_group_name,
         'crop_storage_mode': crop_storage_mode_resolved,
+        'padding_mode': crop_policy.padding_mode.value,
+        'padded_roi_count': fresh_preflight.padded_row_count,
     }
 
 

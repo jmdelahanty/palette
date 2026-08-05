@@ -325,14 +325,22 @@ scripts/py -m fisheye.utils.crop_batch \
   --apply
 ```
 
-The default ROI size is 512x512 (set in `configs/fisheye/default.yaml`). The
-crop source defaults to the canonical current refined surface
-`refined_detect_runs/{run_id}/instances`, with legacy fallback only for older
-archives.
+The shared zebrafish workflow default is 348x348 (set in
+`configs/fisheye/default.yaml` and `fisheye.shared.crop_defaults`). Ordinary
+crop placement uses the persisted detection center and zero-fills pixels that
+fall outside the source-camera frame. The exact fixed size and
+`zero_outside_source_frame` policy are persisted as crop lineage; 348x348 is a
+workflow default, not a schema invariant.
 
-**What it writes:** `crop_runs/{run_id}/`. Analysis archives may use
-`crop_storage_mode=geometry_only`, while training/export artifacts should remain
-materialized.
+The ordinary materialized writer currently admits only an exact
+`detect_runs/{run_id}` source. Future-facing crop-v2 geometry publication uses
+the separately approved refined-detection snapshot publisher and remains
+selector-ineligible until its promotion gate passes.
+
+**What it writes:** the ordinary command writes a materialized
+`crop_runs/{run_id}/`. Crop-v2 analysis publications are geometry-only and
+materialize pixels into bound caches or work packages; training/export
+artifacts remain materialized.
 
 For local workflows that will immediately run keypoints or segmentation on
 geometry-only crops, build the flat ROI cache in the same serial pass:
@@ -628,7 +636,7 @@ Most steps read defaults from `configs/fisheye/default.yaml`. Key sections:
 |---------|----------|
 | `import` | Frame chunk size, sharding, downsampling resolution |
 | `detect` | Thresholds, dish mask geometry |
-| `crop` | ROI size (default 512x512), scheduler, source type |
+| `crop` | ROI size (default 348x348), zero-padding policy, scheduler, source type |
 | `keypoints` | Method (traditional/yolo), geometry filters |
 | `refine_detect` | Raw artifact filtering, sparse curated detect writes |
 | `refine_subject_masks` | Component selection, scheduler |

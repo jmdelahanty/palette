@@ -52,8 +52,9 @@ detect:
       timestamp: '2025-09-30T23:21:53.102671'
 crop:
   roi_sz:
-  - 512
-  - 512
+  - 348
+  - 348
+  padding_mode: zero_outside_source_frame
   scheduler: distributed
   source_type: detect              # future-canonical ordinary crops require detect_runs/<run>
   num_workers: 5

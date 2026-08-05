@@ -7,6 +7,7 @@ from fisheye.cluster.crop_snapshot import (
     CropSnapshotFragmentInputs,
     build_crop_snapshot_fragment,
 )
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.zarr.crop_schema import CropPaddingMode, CropSizeMode
 from fisheye.utils import publish_crop_geometry_candidate as cli
 
@@ -104,3 +105,28 @@ def test_crop_candidate_cli_builds_fixed_policy_and_writes_receipt(
     assert policy.fixed_size_wh == (512, 384)
     assert policy.padding_mode is CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME
     assert captured["expected_camera_identity"] == "2010093"
+
+
+def test_crop_candidate_cli_defaults_to_shared_zebrafish_size_and_zero_padding(
+    tmp_path: Path,
+) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "--analysis-zarr",
+            str(tmp_path / "analysis.zarr"),
+            "--run-id",
+            "crop_default",
+            "--purpose",
+            "keypoints",
+            "--camera-id",
+            "cam0",
+            "--scratch-root",
+            str(tmp_path / "scratch"),
+            "--result-json",
+            str(tmp_path / "result.json"),
+        ]
+    )
+
+    assert args.roi_width == DEFAULT_ZEBRAFISH_CROP_SIZE_PX
+    assert args.roi_height == DEFAULT_ZEBRAFISH_CROP_SIZE_PX
+    assert args.padding_mode == CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME.value

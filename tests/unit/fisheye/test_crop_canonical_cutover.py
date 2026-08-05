@@ -63,6 +63,17 @@ def _fake_geometry() -> Any:
     )
 
 
+def _policy(
+    padding_mode: crop_module.CropPaddingMode = (
+        crop_module.CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME
+    ),
+) -> crop_module.CropGeometryPolicy:
+    return crop_module.build_ordinary_crop_geometry_policy(
+        (4, 4),
+        padding_mode=padding_mode,
+    )
+
+
 def _install_fake_acquisition_authority(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -135,7 +146,7 @@ def test_canonical_crop_arrays_preserve_existing_placement_numerics(
         source_path="detect_runs/d1",
         source_group=source,
         frame_shape=(10, 10),
-        roi_size=(4, 4),
+        policy=_policy(),
         require_sorted_frames=True,
     )
 
@@ -144,7 +155,7 @@ def test_canonical_crop_arrays_preserve_existing_placement_numerics(
     np.testing.assert_array_equal(result.bbox_roi_xyxy, [[1.0, 1.0, 3.0, 3.0]])
 
 
-def test_canonical_crop_arrays_fail_closed_on_padded_roi(
+def test_canonical_crop_arrays_fully_contained_policy_rejects_padded_roi(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
@@ -161,16 +172,80 @@ def test_canonical_crop_arrays_fail_closed_on_padded_roi(
 
     with pytest.raises(
         crop_module.OrdinaryCropCoordinateError,
-        match="Padded crops need an explicit padding lineage",
+        match="policy requires every ROI to be fully contained",
     ):
         crop_module._canonical_crop_arrays(
             _fake_geometry(),
             source_path="detect_runs/d1",
             source_group=source,
             frame_shape=(10, 10),
-            roi_size=(4, 4),
+            policy=_policy(crop_module.CropPaddingMode.REQUIRE_FULLY_CONTAINED),
             require_sorted_frames=True,
         )
+
+
+def test_canonical_crop_arrays_zero_padding_policy_accepts_edge_crossing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+    source = _source_group(root, "detect_runs/d1", center=(0.1, 0.1))
+    values = _source_geometry_values(
+        center=(1.0, 1.0),
+        bbox_norm_center=(0.1, 0.1),
+    )
+    monkeypatch.setattr(
+        crop_module,
+        "detection_observation_geometry_values",
+        lambda _source: values,
+    )
+
+    result = crop_module._canonical_crop_arrays(
+        _fake_geometry(),
+        source_path="detect_runs/d1",
+        source_group=source,
+        frame_shape=(10, 10),
+        policy=_policy(),
+        require_sorted_frames=True,
+    )
+
+    np.testing.assert_array_equal(result.roi_coordinates_full, [[-1, -1]])
+    np.testing.assert_array_equal(result.source_crop_xywh, [[-1.0, -1.0, 4.0, 4.0]])
+    np.testing.assert_array_equal(result.bbox_roi_xyxy, [[5.0, 5.0, 7.0, 7.0]])
+    assert result.padded_row_count == 1
+    assert (
+        result.policy.padding_mode
+        is crop_module.CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME
+    )
+
+    output = root.create_group("crop_runs/c1")
+    crop_module._write_canonical_crop_coordinate_arrays(output, result)
+    assert output.attrs["crop_geometry_policy"] == result.policy.as_manifest()
+    assert output.attrs["crop_geometry_policy_digest"] == result.policy.payload_digest
+    assert output.attrs["crop_padding_mode"] == "zero_outside_source_frame"
+    assert output.attrs["padded_roi_count"] == 1
+    assert output.attrs["source_frame_shape_hw"] == [10, 10]
+
+
+def test_ordinary_crop_default_is_348_square_zero_padding() -> None:
+    root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+
+    parameters, source = crop_module.get_crop_parameters(root, {})
+    policy = crop_module.ordinary_crop_geometry_policy_from_parameters(parameters)
+
+    assert source == "config_default"
+    assert parameters["roi_sz"] == [348, 348]
+    assert parameters["padding_mode"] == "zero_outside_source_frame"
+    assert policy.fixed_size_wh == (348, 348)
+    assert (
+        policy.padding_mode
+        is crop_module.CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME
+    )
+
+
+def test_ordinary_crop_policy_preserves_rectangular_height_width_order() -> None:
+    policy = crop_module.build_ordinary_crop_geometry_policy((300, 420))
+
+    assert policy.fixed_size_wh == (420, 300)
 
 
 def test_canonical_crop_arrays_reject_coordinate_relabeling(
@@ -194,7 +269,7 @@ def test_canonical_crop_arrays_reject_coordinate_relabeling(
             source_path="detect_runs/d1",
             source_group=source,
             frame_shape=(10, 10),
-            roi_size=(4, 4),
+            policy=_policy(),
             require_sorted_frames=True,
         )
 
@@ -219,7 +294,7 @@ def test_materialized_preflight_uses_exact_acquisition_extent_not_root_dimension
         source_group=source,
         video_source_type="zarr",
         video_path=None,
-        roi_size=(4, 4),
+        policy=_policy(),
     )
 
     assert result.frame_shape == (10, 10)
@@ -250,7 +325,7 @@ def test_materialized_preflight_rejects_frame_source_extent_mismatch(
             source_group=source,
             video_source_type="zarr",
             video_path=None,
-            roi_size=(4, 4),
+            policy=_policy(),
         )
 
 
@@ -307,7 +382,7 @@ def test_external_preflight_binds_exact_locator_and_live_fingerprint(
         source_group=source,
         video_source_type="external",
         video_path=str(video_path),
-        roi_size=(4, 4),
+        policy=_policy(),
     )
 
     assert result.acquisition_mode == crop_module.EXTERNAL_ACQUISITION_AUTHORITY_MODE
@@ -328,7 +403,7 @@ def test_refined_source_is_rejected_before_acquisition_or_run_creation() -> None
             source_group=source,
             video_source_type="zarr",
             video_path=None,
-            roi_size=(4, 4),
+            policy=_policy(),
         )
 
     assert "crop_runs" not in root
@@ -401,6 +476,8 @@ def test_validated_canonical_zero_rows_create_no_crop_run_or_pending_pointer(
             roi_coordinates_full=np.empty((0, 2), dtype=np.int32),
             source_crop_xywh=np.empty((0, 4), dtype=np.float64),
             bbox_roi_xyxy=np.empty((0, 4), dtype=np.float64),
+            policy=_policy(),
+            padded_row_count=0,
             frame_shape=(10, 10),
             total_frames=1,
             acquisition_mode=crop_module.MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
@@ -579,10 +656,15 @@ def _publication_fixture() -> tuple[Any, Any, Any, Any]:
     )
     selector_snapshot = crop_module._snapshot_crop_selector_attrs(parent)
     run = parent.create_group("new")
+    policy = _policy()
     run.attrs.update(
         {
             "stage_selector_eligible": False,
             "crop_storage_mode": "materialized",
+            "crop_geometry_policy": policy.as_manifest(),
+            "crop_geometry_policy_digest": policy.payload_digest,
+            "crop_padding_mode": policy.padding_mode.value,
+            "padded_roi_count": 0,
         }
     )
     mark_run_started(run, run_name="new", stage="crop")
@@ -630,6 +712,8 @@ def _publication_fixture() -> tuple[Any, Any, Any, Any]:
         roi_coordinates_full=np.asarray([[3, 3]], dtype=np.int32),
         source_crop_xywh=np.asarray([[3.0, 3.0, 4.0, 4.0]], dtype=np.float64),
         bbox_roi_xyxy=np.asarray([[1.0, 1.0, 3.0, 3.0]], dtype=np.float64),
+        policy=policy,
+        padded_row_count=0,
         frame_shape=(10, 10),
         total_frames=1,
         acquisition_mode="materialized_source_frames_v1",

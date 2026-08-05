@@ -4,7 +4,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import zarr
 import yaml
@@ -29,6 +29,7 @@ from ..tracking.crop import (
     get_crop_parameters,
     get_video_source,
     infer_detection_source_type,
+    ordinary_crop_geometry_policy_from_parameters,
 )
 
 try:
@@ -52,6 +53,8 @@ class CropPlan:
     source_type: Optional[str] = None
     source_path: Optional[str] = None
     roi_size: Optional[Tuple[int, int]] = None
+    padding_mode: Optional[str] = None
+    padded_row_count: Optional[int] = None
     crop_storage_mode: Optional[str] = None
     selection_policy: Optional[str] = None
     latest_crop: Optional[str] = None
@@ -210,6 +213,9 @@ def _latest_crop_signature(
             crop_group.attrs.get("detection_preferred_policy"),
         ),
         "roi_size": crop_group.attrs.get("roi_size"),
+        "crop_geometry_policy_digest": crop_group.attrs.get(
+            "crop_geometry_policy_digest"
+        ),
         "crop_storage_mode": _infer_crop_run_storage_mode(crop_group),
         "status": crop_group.attrs.get("status"),
     }
@@ -234,6 +240,10 @@ def _diff_signature(
     existing_roi = _normalize_roi(existing.get("roi_size"))
     if desired_roi != existing_roi:
         diffs.append("roi_size")
+    if desired.get("crop_geometry_policy_digest") != existing.get(
+        "crop_geometry_policy_digest"
+    ):
+        diffs.append("crop_geometry_policy")
     desired_storage_mode = _normalize_str(desired.get("crop_storage_mode"))
     existing_storage_mode = _normalize_str(existing.get("crop_storage_mode"))
     if desired_storage_mode != existing_storage_mode:
@@ -275,7 +285,9 @@ def _build_plan(
         )
 
     crop_params, _ = get_crop_parameters(root, config, console=None)
-    roi_size = tuple(crop_params.get("roi_sz", [512, 512]))
+    crop_policy = ordinary_crop_geometry_policy_from_parameters(crop_params)
+    roi_width, roi_height = crop_policy.fixed_size_wh or (0, 0)
+    roi_size = (int(roi_height), int(roi_width))
     desired_crop_storage_mode = _desired_crop_storage_mode(
         root=root,
         zarr_path=zarr_path,
@@ -327,7 +339,7 @@ def _build_plan(
             source_group=_source_group,
             video_source_type=video_source_type,
             video_path=video_path,
-            roi_size=roi_size,
+            policy=crop_policy,
         )
     except Exception as exc:
         return CropPlan(
@@ -360,6 +372,7 @@ def _build_plan(
         "detection_source_type": resolved_type,
         "detection_selection_policy": selection_policy,
         "roi_size": roi_size,
+        "crop_geometry_policy_digest": crop_policy.payload_digest,
         "crop_storage_mode": desired_crop_storage_mode,
     }
 
@@ -416,6 +429,12 @@ def _build_plan(
         source_type=resolved_type,
         source_path=resolved_path,
         roi_size=roi_size,
+        padding_mode=crop_policy.padding_mode.value,
+        padded_row_count=(
+            int(canonical_preflight.padded_row_count)
+            if getattr(canonical_preflight, "padded_row_count", None) is not None
+            else None
+        ),
         crop_storage_mode=desired_crop_storage_mode,
         selection_policy=selection_policy,
         latest_crop=latest_crop,
@@ -728,6 +747,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  source_path: {plan.source_path}")
             if plan.roi_size:
                 print(f"  roi_size: {plan.roi_size[0]}x{plan.roi_size[1]}")
+            if plan.padding_mode:
+                print(f"  padding_mode: {plan.padding_mode}")
+            if plan.padded_row_count is not None:
+                print(f"  padded_roi_count: {plan.padded_row_count}")
             if plan.crop_storage_mode:
                 print(f"  crop_storage_mode: {plan.crop_storage_mode}")
             if plan.latest_crop:
@@ -842,6 +865,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 source_type=plan.source_type,
                 source_path=plan.source_path,
                 roi_size=list(plan.roi_size) if plan.roi_size else None,
+                padding_mode=plan.padding_mode,
+                padded_roi_count=plan.padded_row_count,
                 selection_policy=plan.selection_policy,
                 crop_storage_mode=plan.crop_storage_mode,
             )

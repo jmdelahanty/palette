@@ -35,6 +35,7 @@ from ..refinement.refine_keypoints import (
 )
 from ..registry.stage_catalog import canonical_stage_id
 from ..shared.experiment_setup import infer_experiment_setup
+from ..shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_HW
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -255,7 +256,8 @@ class Pipeline:
                 'max_fish': 20
             },
             'crop': {
-                'roi_sz': [256, 256]
+                'roi_sz': list(DEFAULT_ZEBRAFISH_CROP_SIZE_HW),
+                'padding_mode': 'zero_outside_source_frame',
             },
             'keypoints': {
                 'roi_thresh': 50,

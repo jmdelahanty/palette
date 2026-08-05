@@ -25,6 +25,7 @@ from fisheye.tracking.crop import (
     infer_detection_source_type,
     get_detection_source_info,
     get_video_source,
+    ordinary_crop_geometry_policy_from_parameters,
 )
 
 
@@ -95,7 +96,9 @@ def simulate_crop(
         )
         return
 
-    roi_sz = tuple(crop_params.get("roi_sz", [256, 256]))
+    crop_policy = ordinary_crop_geometry_policy_from_parameters(crop_params)
+    roi_width, roi_height = crop_policy.fixed_size_wh or (0, 0)
+    roi_sz = (int(roi_height), int(roi_width))
     try:
         video_source_type, video_path = get_video_source(root, console=None)
         canonical_preflight = _preflight_ordinary_crop_coordinates(
@@ -105,7 +108,7 @@ def simulate_crop(
             source_group=source_group,
             video_source_type=video_source_type,
             video_path=video_path,
-            roi_size=roi_sz,
+            policy=crop_policy,
         )
     except Exception as exc:
         console.print(
