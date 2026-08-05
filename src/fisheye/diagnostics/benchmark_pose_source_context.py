@@ -304,7 +304,7 @@ def benchmark_pose_source_context(
         "native_cache": _predict_profile(
             model,
             native_pixels,
-            network_imgsz=contract.network_imgsz,
+            network_imgsz=runtime_plan.network_imgsz,
             prediction_floor=prediction_floor,
             thresholds=thresholds_tuple,
             device=device,
@@ -312,7 +312,7 @@ def benchmark_pose_source_context(
         "synthetic_contract_padding": _predict_profile(
             model,
             synthetic_pixels,
-            network_imgsz=contract.network_imgsz,
+            network_imgsz=runtime_plan.network_imgsz,
             prediction_floor=prediction_floor,
             thresholds=thresholds_tuple,
             device=device,
@@ -320,7 +320,7 @@ def benchmark_pose_source_context(
         "real_source_context": _predict_profile(
             model,
             np.asarray(context_pixels),
-            network_imgsz=contract.network_imgsz,
+            network_imgsz=runtime_plan.network_imgsz,
             prediction_floor=prediction_floor,
             thresholds=thresholds_tuple,
             device=device,
@@ -358,7 +358,7 @@ def benchmark_pose_source_context(
         "prediction": {
             "floor": float(prediction_floor),
             "thresholds": list(thresholds_tuple),
-            "network_imgsz": contract.network_imgsz,
+            "network_imgsz": runtime_plan.network_imgsz,
             "device": device,
         },
         "profiles": profiles,
