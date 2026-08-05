@@ -65,11 +65,13 @@ def test_preflight_reports_exact_zero_padding_without_zarr_writes(
             ),
         },
     )
-    monkeypatch.setattr(
-        preflight,
-        "bind_refined_detection_crop_source",
-        lambda *_args, **_kwargs: source,
-    )
+    bind_calls = []
+
+    def bind(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        bind_calls.append((args, kwargs))
+        return source
+
+    monkeypatch.setattr(preflight, "bind_refined_detection_crop_source", bind)
     monkeypatch.setattr(
         preflight,
         "bind_refined_crop_source_pixel_authority",
@@ -107,6 +109,24 @@ def test_preflight_reports_exact_zero_padding_without_zarr_writes(
     assert result["crop_zarr_writes"] is False
     assert result["selector_activation"] == "none"
     assert result["registry_updated"] is False
+    assert bind_calls[0][1] == {
+        "run_id": "refined_v2",
+        "allow_selector_ineligible_benchmark": True,
+    }
+
+    source.selection_mode = "approved_authoritative_refined_v1"
+    production = preflight.inspect_refined_detection_crop_preflight(
+        analysis_zarr=archive,
+        policy=CropGeometryPolicy(
+            purpose="zebrafish_pose_subject_mask_input",
+            size_mode=CropSizeMode.FIXED_PER_RUN,
+            fixed_size_wh=(20, 20),
+            padding_mode=CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME,
+        ),
+        max_examples=0,
+    )
+    assert bind_calls[1] == ((archive.resolve(),), {})
+    assert production["selection_mode"] == "approved_authoritative_refined_v1"
 
 
 def test_cohort_preflight_aggregates_frozen_plan(

@@ -1,4 +1,4 @@
-"""Read-only crop-v2 geometry preflight for one explicit refined snapshot."""
+"""Read-only crop-v2 geometry preflight for approved or explicit refined data."""
 
 from __future__ import annotations
 
@@ -41,21 +41,28 @@ COHORT_PREFLIGHT_SCHEMA_VERSION = 1
 def inspect_refined_detection_crop_preflight(
     *,
     analysis_zarr: Path,
-    refined_run_id: str,
+    refined_run_id: str | None = None,
     policy: CropGeometryPolicy,
     expected_camera_identity: str | None = None,
     max_examples: int = 32,
 ) -> dict[str, object]:
-    """Prepare and validate all crop arrays in memory without publishing them."""
+    """Prepare and validate all crop arrays in memory without publishing them.
+
+    Omitting ``refined_run_id`` uses the approved production authority.  An
+    explicit id remains the selector-ineligible candidate/benchmark boundary.
+    """
 
     if type(max_examples) is not int or max_examples < 0:
         raise ValueError("max_examples must be a nonnegative exact integer.")
     archive = analysis_zarr.expanduser().resolve()
-    source = bind_refined_detection_crop_source(
-        archive,
-        run_id=str(refined_run_id),
-        allow_selector_ineligible_benchmark=True,
-    )
+    if refined_run_id is None:
+        source = bind_refined_detection_crop_source(archive)
+    else:
+        source = bind_refined_detection_crop_source(
+            archive,
+            run_id=str(refined_run_id),
+            allow_selector_ineligible_benchmark=True,
+        )
     pixels = bind_refined_crop_source_pixel_authority(
         source,
         expected_camera_identity=expected_camera_identity,
@@ -262,8 +269,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan = _strict_json_load(args.plan_json.expanduser().resolve())
             result = inspect_refined_detection_crop_cohort(plan, policy=policy)
         else:
-            if not args.refined_run:
-                raise ValueError("Single-archive preflight requires --refined-run.")
             result = inspect_refined_detection_crop_preflight(
                 analysis_zarr=args.analysis_zarr,
                 refined_run_id=args.refined_run,
