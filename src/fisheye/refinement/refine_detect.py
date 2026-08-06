@@ -1218,6 +1218,8 @@ def create_refined_run(
     refined_run_name: Optional[str] = None,
     dish_mask_boundary_tolerance_mm: Optional[float] = None,
     pixels_per_mm_camera: Optional[float] = None,
+    stage_selector_eligible: bool = True,
+    emit_completion_status: bool = True,
 ) -> str:
     """
     Create a refined detection run with sparse-first curated detect surfaces.
@@ -1245,6 +1247,10 @@ def create_refined_run(
             dish boundary. Defaults to 0.5 mm when a dish mask is present.
         pixels_per_mm_camera: Explicit camera-space calibration override. The
             override is recorded in provenance and does not mutate Zarr calibration.
+        stage_selector_eligible: Whether completion may update the refined-run
+            selectors. Set false for explicitly selected canaries and review seeds.
+        emit_completion_status: Whether to project the completed stage into the
+            registry/status system. Set false for unregistered benchmark canaries.
         
     Returns:
         Name of created refined run
@@ -1589,7 +1595,9 @@ def create_refined_run(
         raise ValueError(f"{refined_runs.path}/{run_name} already exists")
     refined_group = refined_runs.create_group(run_name)
     mark_run_started(refined_group, run_name=run_name, stage="refined_detect")
-    note_pending_latest(refined_runs, run_name)
+    refined_group.attrs["stage_selector_eligible"] = bool(stage_selector_eligible)
+    if stage_selector_eligible:
+        note_pending_latest(refined_runs, run_name)
     
     # Store root metadata
     created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
@@ -1834,36 +1842,43 @@ def create_refined_run(
     )
 
     detect_review_status = _parse_mapping(refined_group.attrs.get("detect_review_status"))
-    _emit_refined_detect_status(
-        root=root,
-        zarr_path=Path(zarr_path).expanduser().resolve(),
-        status="ok",
-        run_name=run_name,
-        method=(
-            (normalize_attr(refined_group.attrs.get("method")) if hasattr(refined_group, "attrs") else None)
-            or refine_mode
-        ),
-        coverage_pct=comparison_stats.get("refined", {}).get("coverage_percent"),
-        review_status=detect_review_status,
-        details={
-            "reason": "present",
-            "source_detect_run": detect_run,
-            "source_detect_family_path": detect_family_path,
-            "source_detect_path": source_detect_path,
-            "source_quality_run": resolved_quality_run,
-            "refined_family_path": refined_family_path,
-            "refine_mode": refine_mode,
-            "parameter_source": param_source,
-            "filters_applied": filters,
-            "coverage_frame_source": coverage_frame_source,
-            "coverage_frames_total": num_frames,
-            "coverage_frames_full": full_frame_count,
-            "refined_present_detections": int(len(filtered_bboxes)),
-            "filtered_out_detections": int(drop_stats["total_dropped"]),
-            "interpolation_enabled": False,
-        },
-        console=console,
-    )
+    if emit_completion_status:
+        _emit_refined_detect_status(
+            root=root,
+            zarr_path=Path(zarr_path).expanduser().resolve(),
+            status="ok",
+            run_name=run_name,
+            method=(
+                (
+                    normalize_attr(refined_group.attrs.get("method"))
+                    if hasattr(refined_group, "attrs")
+                    else None
+                )
+                or refine_mode
+            ),
+            coverage_pct=comparison_stats.get("refined", {}).get(
+                "coverage_percent"
+            ),
+            review_status=detect_review_status,
+            details={
+                "reason": "present",
+                "source_detect_run": detect_run,
+                "source_detect_family_path": detect_family_path,
+                "source_detect_path": source_detect_path,
+                "source_quality_run": resolved_quality_run,
+                "refined_family_path": refined_family_path,
+                "refine_mode": refine_mode,
+                "parameter_source": param_source,
+                "filters_applied": filters,
+                "coverage_frame_source": coverage_frame_source,
+                "coverage_frames_total": num_frames,
+                "coverage_frames_full": full_frame_count,
+                "refined_present_detections": int(len(filtered_bboxes)),
+                "filtered_out_detections": int(drop_stats["total_dropped"]),
+                "interpolation_enabled": False,
+            },
+            console=console,
+        )
     
     return run_name
 
@@ -1986,6 +2001,22 @@ Examples:
             'Used only when supplied and recorded in provenance.'
         ),
     )
+    parser.add_argument(
+        '--selector-ineligible',
+        action='store_true',
+        help=(
+            'Complete the refined run without updating refined-run selectors. '
+            'Use for explicitly selected canaries and review seeds.'
+        ),
+    )
+    parser.add_argument(
+        '--skip-completion-status',
+        action='store_true',
+        help=(
+            'Do not project completion into registry/stage status. '
+            'Use for unregistered benchmark canaries.'
+        ),
+    )
     
     args = parser.parse_args()
     
@@ -2023,6 +2054,8 @@ Examples:
             refined_run_name=args.run_name,
             dish_mask_boundary_tolerance_mm=args.dish_mask_boundary_tolerance_mm,
             pixels_per_mm_camera=args.pixels_per_mm_camera,
+            stage_selector_eligible=not args.selector_ineligible,
+            emit_completion_status=not args.skip_completion_status,
         )
         
         print(f"\n✓ Created refined run: {run_name}")
