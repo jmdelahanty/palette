@@ -799,6 +799,58 @@ def test_prepare_existing_refined_subject_run_materializes_dense_cache_from_rle(
     )
 
 
+def test_prepare_existing_editable_refined_run_without_raw_subject_parent(
+    monkeypatch,
+) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "eye_left", "eye_right"),
+    )
+    refined.group.attrs["stage_selector_eligible"] = False
+    stamp_refined_subject_mask_editable_draft(refined.group)
+    if "source_subject_mask_run" in refined.group.attrs:
+        del refined.group.attrs["source_subject_mask_run"]
+    refined.group.attrs["source_component_sources"] = {
+        component_name: {
+            "source_stage": "subject_mask_shard_runs",
+            "source_run": "subject_mask_shard_collection",
+        }
+        for component_name in refined.component_names
+    }
+    for component_name in refined.component_names:
+        provenance = mod._get_component_provenance_group(  # noqa: SLF001
+            refined.group,
+            component_name,
+        )
+        assert provenance is not None
+        provenance.attrs.update(
+            {
+                "source_stage": "subject_mask_shard_runs",
+                "source_run": "subject_mask_shard_collection",
+            }
+        )
+    del root["subject_mask_runs"]
+
+    source, reopened = mod.prepare_refined_subject_run(
+        root,
+        refined_run="refined_subject_masks_001",
+        components=("eye_left",),
+    )
+
+    assert reopened.run_name == "refined_subject_masks_001"
+    assert source.run_name == "refined_subject_masks_001"
+    assert source.mask_surface_kind == "refined_subject_component"
+    assert source.mask_surface_path.endswith("masks_roi[eye_left]")
+    np.testing.assert_array_equal(
+        np.asarray(source.masks_roi[:, 0], dtype=np.uint8),
+        np.asarray(reopened.group["masks_roi"][:, 1], dtype=np.uint8),
+    )
+
+
 def test_prepare_refined_subject_run_defaults_to_available_source_components(monkeypatch) -> None:
     root = _build_subject_review_root()
     _patch_review_provenance(monkeypatch)

@@ -2297,7 +2297,61 @@ def prepare_refined_subject_run(
     if resolved_subject_run is None and refined_run is not None:
         refined_parent = root.get("refined_subject_masks_runs")
         if refined_parent is not None and str(refined_run) in refined_parent:
-            resolved_subject_run = _resolve_primary_source_subject_mask_run_name(refined_parent[str(refined_run)])
+            existing_group = refined_parent[str(refined_run)]
+            resolved_subject_run = _resolve_primary_source_subject_mask_run_name(
+                existing_group
+            )
+            source_parent = root.get("subject_mask_runs")
+            source_component_declarations = existing_group.attrs.get(
+                "source_component_sources"
+            )
+            shard_source_only = bool(source_component_declarations) and isinstance(
+                source_component_declarations, Mapping
+            ) and all(
+                isinstance(payload, Mapping)
+                and str(payload.get("source_stage") or "")
+                == "subject_mask_shard_runs"
+                for payload in source_component_declarations.values()
+            )
+            subject_source_available = (
+                source_parent is not None
+                and resolved_subject_run is not None
+                and str(resolved_subject_run) in source_parent
+            )
+            if shard_source_only and not subject_source_available:
+                # Modern training-review artifacts may publish an existing dense
+                # editable draft directly from terminal shard evidence without
+                # also materializing a redundant subject_mask_runs authority.
+                # In that lifecycle the current dense component is the editor's
+                # bounded comparison source.  The strict opener below continues
+                # to reject immutable canonical publications.
+                refined = _open_existing_refined_subject_run(root, str(refined_run))
+                requested_components = tuple(
+                    component
+                    for component in (
+                        _normalize_component_name(item)
+                        for item in (components or refined.component_names)
+                    )
+                    if component is not None
+                )
+                if not requested_components:
+                    raise ValueError(
+                        "Refined subject-mask review requires at least one component."
+                    )
+                missing = sorted(
+                    set(requested_components) - set(refined.component_names)
+                )
+                if missing:
+                    raise ValueError(
+                        "Requested refined subject-mask components are unavailable: "
+                        f"{missing!r}."
+                    )
+                source = _load_refined_subject_component_source(
+                    root,
+                    str(refined_run),
+                    requested_components[0],
+                )
+                return source, refined
     source = _load_source_subject_mask_run(root, resolved_subject_run)
     normalized_components = _normalize_component_list(components, default_source=source)
     refined = _open_or_create_refined_subject_run(
