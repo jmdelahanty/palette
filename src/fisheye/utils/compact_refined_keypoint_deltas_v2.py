@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.keypoint_manual_review_qc import (
+    build_manual_keypoint_review_derivation,
+)
 from fisheye.shared.tabular_deltas import resolve_keypoint_delta_overlay
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.keypoint_manifest import KEYPOINT_RUN_MANIFEST_ATTRIBUTE
@@ -33,7 +36,7 @@ from fisheye.shared.zarr.refined_keypoint_publication import (
 from fisheye.shared.zarr_io import open_zarr_root
 
 COMPACTION_RECEIPT_SCHEMA_ID = "palette.refined_keypoint.delta_compaction"
-COMPACTION_RECEIPT_SCHEMA_VERSION = 1
+COMPACTION_RECEIPT_SCHEMA_VERSION = 2
 
 
 def _mapping(value: object, *, name: str) -> Mapping[str, Any]:
@@ -132,6 +135,17 @@ def compact_refined_keypoint_deltas_v2(
         parent_manifest=parent_manifest,
         snapshot_id=output_snapshot_id,
     )
+    generation_group = root[f"edit_delta_runs/{delta_run}/generations/{generation}"]
+    review_derivation = build_manual_keypoint_review_derivation(
+        base_run_path=base_run_path,
+        delta_run=delta_run,
+        generation=generation,
+        generation_sha256=str(generation_group.attrs.get("generation_sha256") or ""),
+        overlay_sha256=overlay.overlay_sha256,
+        partition_count=overlay.partition_count,
+        event_count=overlay.event_count,
+        policy=overlay.review_qc_policy,
+    )
     publication = publish_selector_ineligible_refined_keypoint_snapshot(
         compacted.prepared,
         source=source,
@@ -151,8 +165,8 @@ def compact_refined_keypoint_deltas_v2(
         parent_manifest=parent_manifest,
         parent_arrays=parent,
         parent_retired_instance_keys=(),
+        review_derivation=review_derivation,
     )
-    generation_group = root[f"edit_delta_runs/{delta_run}/generations/{generation}"]
     payload = {
         "status": "complete",
         "created_at_utc": utc_now(),
@@ -173,6 +187,8 @@ def compact_refined_keypoint_deltas_v2(
             "overlay_sha256": overlay.overlay_sha256,
             "partition_count": overlay.partition_count,
             "event_count": overlay.event_count,
+            "review_qc_policy_digest": overlay.review_qc_policy_digest,
+            "review_derivation": review_derivation,
         },
         "output": {
             "path": str(publication.output_path),

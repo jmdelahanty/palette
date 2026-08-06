@@ -11,10 +11,16 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.refinement.keypoint_quality import compute_geometry_metrics, select_head_triangle_points
+from fisheye.refinement.keypoint_quality import (
+    compute_geometry_metrics,
+    select_head_triangle_points,
+)
 from fisheye.pose.metric_schema import DerivedMetricStorage, metric_schema_from_package
 from fisheye.registry.db import Registry
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from fisheye.shared.keypoint_manual_review_qc import (
+    build_default_manual_keypoint_qc_policy,
+)
 from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR, mark_run_complete
 from fisheye.tune import keypoint_review_backend as mod
 from fisheye.tune import keypoint_review_web as web
@@ -37,13 +43,17 @@ class _FakeArray:
     def __setitem__(self, item: object, value: object) -> None:
         self._data[item] = value
 
-    def __array__(self, dtype: np.dtype | None = None) -> np.ndarray:  # pragma: no cover - compatibility
+    def __array__(
+        self, dtype: np.dtype | None = None
+    ) -> np.ndarray:  # pragma: no cover - compatibility
         array = np.asarray(self._data)
         return array.astype(dtype) if dtype is not None else array
 
 
 class _FakeGroup(dict[str, object]):
-    def __init__(self, *args: Any, attrs: dict[str, object] | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, attrs: dict[str, object] | None = None, **kwargs: Any
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.attrs = attrs or {}
 
@@ -60,7 +70,9 @@ class _FakeGroup(dict[str, object]):
         dtype: object | None = None,
         **_kwargs: object,
     ) -> _FakeArray:
-        values = np.asarray(data) if data is not None else np.zeros(shape or (), dtype=dtype)
+        values = (
+            np.asarray(data) if data is not None else np.zeros(shape or (), dtype=dtype)
+        )
         array = _FakeArray(values, chunks=chunks)
         self[name] = array
         return array
@@ -74,13 +86,19 @@ def _labels_for_count(keypoint_count: int) -> list[str]:
     return base + extra
 
 
-def _build_fake_review_root(keypoint_count: int, *, include_derived: bool = False) -> tuple[_FakeGroup, _FakeGroup, _FakeGroup]:
+def _build_fake_review_root(
+    keypoint_count: int, *, include_derived: bool = False
+) -> tuple[_FakeGroup, _FakeGroup, _FakeGroup]:
     row_count = 3
     labels = _labels_for_count(keypoint_count)
 
     refined_attrs: dict[str, object] = {
         "keypoint_labels": labels,
-        "summary_statistics": {"min_triangle_area": 0.0, "min_triangle_angle": 0.0, "confidence_threshold": 0.2},
+        "summary_statistics": {
+            "min_triangle_area": 0.0,
+            "min_triangle_angle": 0.0,
+            "confidence_threshold": 0.2,
+        },
     }
     if include_derived:
         refined_attrs["pose_schema"] = {
@@ -100,12 +118,23 @@ def _build_fake_review_root(keypoint_count: int, *, include_derived: bool = Fals
 
     refined = _FakeGroup(
         {
-            "keypoints_roi": _FakeArray(np.full((row_count, keypoint_count, 2), np.nan, dtype=np.float64), chunks=(1, keypoint_count, 2)),
-            "keypoints_img": _FakeArray(np.zeros((row_count, keypoint_count, 2), dtype=np.float64)),
-            "keypoints_norm": _FakeArray(np.zeros((row_count, keypoint_count, 2), dtype=np.float64)),
-            "heading": _FakeArray(np.full((row_count,), np.nan, dtype=np.float64), chunks=(row_count,)),
+            "keypoints_roi": _FakeArray(
+                np.full((row_count, keypoint_count, 2), np.nan, dtype=np.float64),
+                chunks=(1, keypoint_count, 2),
+            ),
+            "keypoints_img": _FakeArray(
+                np.zeros((row_count, keypoint_count, 2), dtype=np.float64)
+            ),
+            "keypoints_norm": _FakeArray(
+                np.zeros((row_count, keypoint_count, 2), dtype=np.float64)
+            ),
+            "heading": _FakeArray(
+                np.full((row_count,), np.nan, dtype=np.float64), chunks=(row_count,)
+            ),
             "confidence": _FakeArray(np.zeros((row_count,), dtype=np.float64)),
-            "keypoint_confidences": _FakeArray(np.zeros((row_count, keypoint_count), dtype=np.float64)),
+            "keypoint_confidences": _FakeArray(
+                np.zeros((row_count, keypoint_count), dtype=np.float64)
+            ),
             "triangle_area": _FakeArray(np.zeros((row_count,), dtype=np.float64)),
             "min_angle": _FakeArray(np.zeros((row_count,), dtype=np.float64)),
             "triangle_angles": _FakeArray(np.zeros((row_count, 3), dtype=np.float64)),
@@ -119,7 +148,9 @@ def _build_fake_review_root(keypoint_count: int, *, include_derived: bool = Fals
             "heading_finite": _FakeArray(np.array([False, False, False], dtype=bool)),
             "heading_usable": _FakeArray(np.array([False, False, False], dtype=bool)),
             "detection_source": _FakeArray(np.array([0, 0, 1], dtype=np.int64)),
-            "reason": _FakeArray(np.array(["", "detection_issue", "manual_correction"], dtype=object)),
+            "reason": _FakeArray(
+                np.array(["", "detection_issue", "manual_correction"], dtype=object)
+            ),
         },
         attrs=refined_attrs,
     )
@@ -128,9 +159,15 @@ def _build_fake_review_root(keypoint_count: int, *, include_derived: bool = Fals
         {
             "frame_indices": _FakeArray(np.array([10, 11, 12], dtype=np.int64)),
             "roi_coordinates_full": _FakeArray(roi_coords),
-            "roi_images": _FakeArray(np.arange(3 * 16 * 16 * 1, dtype=np.uint8).reshape(3, 16, 16, 1)),
-            "source_refined_row_ids": _FakeArray(np.array([1000, 1001, 1002], dtype=np.int64)),
-            "source_detect_row_index": _FakeArray(np.array([200, 201, 202], dtype=np.int64)),
+            "roi_images": _FakeArray(
+                np.arange(3 * 16 * 16 * 1, dtype=np.uint8).reshape(3, 16, 16, 1)
+            ),
+            "source_refined_row_ids": _FakeArray(
+                np.array([1000, 1001, 1002], dtype=np.int64)
+            ),
+            "source_detect_row_index": _FakeArray(
+                np.array([200, 201, 202], dtype=np.int64)
+            ),
         },
         attrs={},
     )
@@ -169,46 +206,87 @@ def test_build_reason_array_edits_canonical_reason_bytes(tmp_path: Path) -> None
 
     assert reason_column is not None
     reason_column[1:2] = np.asarray(["manual_correction"], dtype=object)
-    assert read_reason_labels(refined).tolist() == ["clean", "manual_correction", "clean"]
+    assert read_reason_labels(refined).tolist() == [
+        "clean",
+        "manual_correction",
+        "clean",
+    ]
     assert "reason" not in refined
 
 
-def _build_session(*, keypoint_count: int = 5, include_derived: bool = False) -> mod.ReviewSession:
+def _build_session(
+    *, keypoint_count: int = 5, include_derived: bool = False
+) -> mod.ReviewSession:
     row_count = 4
     labels = _labels_for_count(keypoint_count)
 
     refined = _FakeGroup(
         {
-            "keypoints_roi": _FakeArray(np.full((row_count, keypoint_count, 2), np.nan, dtype=np.float64)),
-            "keypoints_img": _FakeArray(np.full((row_count, keypoint_count, 2), 5.0, dtype=np.float64)),
-            "keypoints_norm": _FakeArray(np.full((row_count, keypoint_count, 2), 0.25, dtype=np.float64)),
+            "keypoints_roi": _FakeArray(
+                np.full((row_count, keypoint_count, 2), np.nan, dtype=np.float64)
+            ),
+            "keypoints_img": _FakeArray(
+                np.full((row_count, keypoint_count, 2), 5.0, dtype=np.float64)
+            ),
+            "keypoints_norm": _FakeArray(
+                np.full((row_count, keypoint_count, 2), 0.25, dtype=np.float64)
+            ),
             "heading": _FakeArray(np.full((row_count,), np.nan, dtype=np.float64)),
             "confidence": _FakeArray(np.zeros((row_count,), dtype=np.float64)),
-            "keypoint_confidences": _FakeArray(np.zeros((row_count, keypoint_count), dtype=np.float64)),
+            "keypoint_confidences": _FakeArray(
+                np.zeros((row_count, keypoint_count), dtype=np.float64)
+            ),
             "triangle_area": _FakeArray(np.zeros((row_count,), dtype=np.float64)),
             "min_angle": _FakeArray(np.zeros((row_count,), dtype=np.float64)),
             "triangle_angles": _FakeArray(np.zeros((row_count, 3), dtype=np.float64)),
-            "refined_success": _FakeArray(np.array([False, False, False, False], dtype=bool)),
-            "flip_corrected": _FakeArray(np.array([True, True, True, True], dtype=bool)),
+            "refined_success": _FakeArray(
+                np.array([False, False, False, False], dtype=bool)
+            ),
+            "flip_corrected": _FakeArray(
+                np.array([True, True, True, True], dtype=bool)
+            ),
             "quality_labels": _FakeArray(np.array([2, 2, 2, 2], dtype=np.int64)),
-            "confidence_valid": _FakeArray(np.array([False, False, False, False], dtype=bool)),
-            "geometry_valid": _FakeArray(np.array([False, False, False, False], dtype=bool)),
-            "usable_keypoints": _FakeArray(np.array([False, False, False, False], dtype=bool)),
-            "edit_applied": _FakeArray(np.array([False, False, False, False], dtype=bool)),
-            "heading_finite": _FakeArray(np.array([False, False, False, False], dtype=bool)),
-            "heading_usable": _FakeArray(np.array([False, False, False, False], dtype=bool)),
+            "confidence_valid": _FakeArray(
+                np.array([False, False, False, False], dtype=bool)
+            ),
+            "geometry_valid": _FakeArray(
+                np.array([False, False, False, False], dtype=bool)
+            ),
+            "usable_keypoints": _FakeArray(
+                np.array([False, False, False, False], dtype=bool)
+            ),
+            "edit_applied": _FakeArray(
+                np.array([False, False, False, False], dtype=bool)
+            ),
+            "heading_finite": _FakeArray(
+                np.array([False, False, False, False], dtype=bool)
+            ),
+            "heading_usable": _FakeArray(
+                np.array([False, False, False, False], dtype=bool)
+            ),
             "detection_source": _FakeArray(np.array([0, 1, 0, 0], dtype=np.int64)),
             "reason": _FakeArray(np.array(["", "", "", ""], dtype=object)),
         },
-        attrs={"keypoint_labels": labels, "summary_statistics": {"confidence_threshold": 0.2}},
+        attrs={
+            "keypoint_labels": labels,
+            "summary_statistics": {"confidence_threshold": 0.2},
+        },
     )
     crop = _FakeGroup(
         {
             "frame_indices": _FakeArray(np.array([10, 11, 12, 13], dtype=np.int64)),
-            "roi_coordinates_full": _FakeArray(np.arange(row_count * keypoint_count * 2, dtype=np.float64).reshape(row_count, keypoint_count, 2)),
+            "roi_coordinates_full": _FakeArray(
+                np.arange(row_count * keypoint_count * 2, dtype=np.float64).reshape(
+                    row_count, keypoint_count, 2
+                )
+            ),
             "roi_images": _FakeArray(np.ones((row_count, 12, 16, 1), dtype=np.uint8)),
-            "source_refined_row_ids": _FakeArray(np.array([1000, 1001, 1002, 1003], dtype=np.int64)),
-            "source_detect_row_index": _FakeArray(np.array([200, 201, 202, 203], dtype=np.int64)),
+            "source_refined_row_ids": _FakeArray(
+                np.array([1000, 1001, 1002, 1003], dtype=np.int64)
+            ),
+            "source_detect_row_index": _FakeArray(
+                np.array([200, 201, 202, 203], dtype=np.int64)
+            ),
         }
     )
     root = _FakeGroup(
@@ -230,8 +308,12 @@ def _build_session(*, keypoint_count: int = 5, include_derived: bool = False) ->
         metric_count = len(schema.metrics)
         derived_storage = DerivedMetricStorage(
             schema=schema,
-            values=_FakeArray(np.full((row_count, metric_count), np.nan, dtype=np.float32)),
-            values_norm=_FakeArray(np.full((row_count, metric_count), np.nan, dtype=np.float32)),
+            values=_FakeArray(
+                np.full((row_count, metric_count), np.nan, dtype=np.float32)
+            ),
+            values_norm=_FakeArray(
+                np.full((row_count, metric_count), np.nan, dtype=np.float32)
+            ),
             valid=_FakeArray(np.zeros((row_count, metric_count), dtype=bool)),
         )
 
@@ -277,6 +359,7 @@ def _build_session(*, keypoint_count: int = 5, include_derived: bool = False) ->
         max_triangle_area=None,
         confidence_threshold=0.2,
         head_triangle_indices=head_triangle_indices,
+        manual_qc_policy=None,
         derived_metric_storage=derived_storage,
     )
 
@@ -292,7 +375,9 @@ def _mark_keypoint_review_approved(path: Path, *, run_name: str = "refined_1") -
     parent = path / "refined_keypoints_runs"
     parent.mkdir(parents=True, exist_ok=True)
     (parent / "zarr.json").write_text(
-        json.dumps({"zarr_format": 3, "node_type": "group", "attributes": {"latest": run_name}}),
+        json.dumps(
+            {"zarr_format": 3, "node_type": "group", "attributes": {"latest": run_name}}
+        ),
         encoding="utf-8",
     )
     run = parent / run_name
@@ -359,7 +444,13 @@ def test_resolve_latest_refined_and_crop_uses_latest_runs() -> None:
     original = mod.open_zarr_root
     monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
     try:
-        resolved_root, resolved_refined, resolved_crop, resolved_refined_run, resolved_crop_run = mod.resolve_latest_refined_and_crop(
+        (
+            resolved_root,
+            resolved_refined,
+            resolved_crop,
+            resolved_refined_run,
+            resolved_crop_run,
+        ) = mod.resolve_latest_refined_and_crop(
             "in-memory",
             mode="a",
         )
@@ -458,8 +549,12 @@ def test_load_roi_payload_encodes_missing_points_as_valid_json_nulls() -> None:
 
 
 @pytest.mark.parametrize("keypoint_count", (3, 5))
-def test_save_roi_correction_updates_keypoint_rows_and_flags(keypoint_count: int) -> None:
-    session = _build_session(keypoint_count=keypoint_count, include_derived=(keypoint_count == 5))
+def test_save_roi_correction_updates_keypoint_rows_and_flags(
+    keypoint_count: int,
+) -> None:
+    session = _build_session(
+        keypoint_count=keypoint_count, include_derived=(keypoint_count == 5)
+    )
     points = np.linspace(
         1.0,
         1.0 + (keypoint_count - 1) * 2.0,
@@ -470,25 +565,35 @@ def test_save_roi_correction_updates_keypoint_rows_and_flags(keypoint_count: int
     result = mod.save_roi_correction(session, position=0, points=points)
 
     np.testing.assert_allclose(np.asarray(session.kp_roi_arr[0]), points)
-    np.testing.assert_allclose(np.asarray(session.kp_img_arr[0]), points + np.asarray(session.roi_coordinates_full[0], dtype=np.float64))
+    np.testing.assert_allclose(
+        np.asarray(session.kp_img_arr[0]),
+        points + np.asarray(session.roi_coordinates_full[0], dtype=np.float64),
+    )
     np.testing.assert_allclose(
         np.asarray(session.kp_norm_arr[0]),
-        (points + np.asarray(session.roi_coordinates_full[0], dtype=np.float64)) / session.norm_factor,
+        (points + np.asarray(session.roi_coordinates_full[0], dtype=np.float64))
+        / session.norm_factor,
     )
 
     assert bool(session.refined_success_arr[0]) is True
     assert bool(session.confidence_valid_arr[0]) is True
     assert bool(session.geometry_valid_arr[0]) == bool(result["geometry_ok"])
-    assert bool(session.usable_arr[0]) == (bool(result["confidence_ok"]) and bool(result["geometry_ok"]))
+    assert bool(session.usable_arr[0]) == (
+        bool(result["confidence_ok"]) and bool(result["geometry_ok"])
+    )
     assert bool(session.edit_applied_arr[0]) is True
-    expected_heading_finite = result["heading"] is not None and bool(np.isfinite(result["heading"]))
+    expected_heading_finite = result["heading"] is not None and bool(
+        np.isfinite(result["heading"])
+    )
     assert bool(session.heading_finite_arr[0]) == expected_heading_finite
     assert "manual_correction" in str(session.reason_arr[0])
     assert result["changed"] is True
     assert result["stale_touched"] >= 0
 
     if session.derived_metric_storage is not None:
-        assert bool(np.asarray(session.derived_metric_storage.valid[0], dtype=bool).any())
+        assert bool(
+            np.asarray(session.derived_metric_storage.valid[0], dtype=bool).any()
+        )
 
 
 def test_immutable_review_save_appends_delta_without_mutating_base(
@@ -499,6 +604,11 @@ def test_immutable_review_save_appends_delta_without_mutating_base(
     instance_keys = np.asarray([101, 102, 103, 104], dtype=np.uint64)
     base.create_array("instance_key", data=instance_keys, chunks=(4,))
     base.attrs["artifact_mutability"] = "immutable_snapshot"
+    policy = build_default_manual_keypoint_qc_policy(
+        skeleton_id="test_five_point_pose",
+        skeleton_digest="a" * 64,
+        keypoint_labels=_labels_for_count(5),
+    )
     create_delta_generation(
         root,
         delta_run="review",
@@ -507,6 +617,7 @@ def test_immutable_review_save_appends_delta_without_mutating_base(
         target_kind="keypoints",
         base_run_path="refined_keypoints_runs/snapshot",
         created_by="test",
+        review_qc_policy=policy.as_manifest(),
     )
     session = _build_session(keypoint_count=5)
     session.root = root
@@ -516,6 +627,7 @@ def test_immutable_review_save_appends_delta_without_mutating_base(
     session.delta_generation = "generation_000001"
     session.delta_editor = "reviewer@example.org"
     session.instance_keys = instance_keys
+    session.manual_qc_policy = policy
     points = np.asarray(
         [[2.0, 3.0], [4.0, 5.0], [6.0, 7.0], [8.0, 9.0], [10.0, 11.0]],
         dtype=np.float64,
@@ -574,7 +686,9 @@ def test_save_roi_correction_no_change_does_not_mark_stale_or_edit() -> None:
     )
     session.heading_arr[0] = heading
 
-    metrics = compute_geometry_metrics(select_head_triangle_points(base_points, session.head_triangle_indices))
+    metrics = compute_geometry_metrics(
+        select_head_triangle_points(base_points, session.head_triangle_indices)
+    )
     geometry_ok = bool(
         np.isfinite(metrics.min_angle)
         and np.isfinite(metrics.area)
@@ -618,8 +732,13 @@ def test_save_roi_correction_no_change_does_not_mark_stale_or_edit() -> None:
     assert touched == {}
     assert bool(result["reason_updated"]) is False
     assert bool(session.edit_applied_arr[0]) is True
-    np.testing.assert_array_equal(session.source_refined_row_ids, np.array([1000, 1001, 1002, 1003], dtype=np.int64))
-    np.testing.assert_array_equal(session.source_detect_row_index, np.array([200, 201, 202, 203], dtype=np.int64))
+    np.testing.assert_array_equal(
+        session.source_refined_row_ids,
+        np.array([1000, 1001, 1002, 1003], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        session.source_detect_row_index, np.array([200, 201, 202, 203], dtype=np.int64)
+    )
 
 
 def test_mark_no_keypoints_updates_failure_state_and_reason(monkeypatch) -> None:
@@ -649,7 +768,9 @@ def test_mark_no_keypoints_updates_failure_state_and_reason(monkeypatch) -> None
 
 def test_mark_detection_issue_and_clear_failure_label(monkeypatch) -> None:
     session = _build_session(keypoint_count=5)
-    monkeypatch.setattr(mod, "mark_downstream_subject_mask_runs_stale", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(
+        mod, "mark_downstream_subject_mask_runs_stale", lambda *_args, **_kwargs: 1
+    )
 
     result = mod.mark_detection_issue(session, position=0)
     assert result["action"] == "mark_detection_issue"
@@ -674,11 +795,23 @@ def test_filter_review_rois_supports_failed_all_manual_and_search() -> None:
     session.reason_arr[2] = "detection_issue"
     session.edit_applied_arr[1] = True
 
-    np.testing.assert_array_equal(mod.filter_review_rois(session, filter_mode="failed"), np.array([0], dtype="i4"))
-    np.testing.assert_array_equal(mod.filter_review_rois(session, filter_mode="all"), np.array([0, 1, 2, 3], dtype="i4"))
-    np.testing.assert_array_equal(mod.filter_review_rois(session, filter_mode="manual"), np.array([1], dtype="i4"))
-    np.testing.assert_array_equal(mod.filter_review_rois(session, filter_mode="edited"), np.array([1], dtype="i4"))
-    np.testing.assert_array_equal(mod.filter_review_rois(session, filter_mode="all", search="frame=12"), np.array([2], dtype="i4"))
+    np.testing.assert_array_equal(
+        mod.filter_review_rois(session, filter_mode="failed"), np.array([0], dtype="i4")
+    )
+    np.testing.assert_array_equal(
+        mod.filter_review_rois(session, filter_mode="all"),
+        np.array([0, 1, 2, 3], dtype="i4"),
+    )
+    np.testing.assert_array_equal(
+        mod.filter_review_rois(session, filter_mode="manual"), np.array([1], dtype="i4")
+    )
+    np.testing.assert_array_equal(
+        mod.filter_review_rois(session, filter_mode="edited"), np.array([1], dtype="i4")
+    )
+    np.testing.assert_array_equal(
+        mod.filter_review_rois(session, filter_mode="all", search="frame=12"),
+        np.array([2], dtype="i4"),
+    )
 
 
 def test_flag_followup_frame_writes_identity_payload(tmp_path) -> None:
@@ -701,7 +834,9 @@ def test_apply_review_status_delegates_existing_status_writer(monkeypatch) -> No
     parent = _FakeGroup({"refined_1": session.refined}, attrs={})
     session.root["refined_keypoints_runs"] = parent
 
-    def _fake_apply(refined_parent: object, refined_run: str, refined: object, **kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
+    def _fake_apply(
+        refined_parent: object, refined_run: str, refined: object, **kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
         payload = {
             "state": kwargs["state"],
             "method": kwargs["method"],
@@ -714,7 +849,11 @@ def test_apply_review_status_delegates_existing_status_writer(monkeypatch) -> No
         return payload, {"synced": True}
 
     monkeypatch.setattr(mod, "_apply_review_status", _fake_apply)
-    monkeypatch.setattr(mod, "_update_postprocess_summary", lambda refined, *, root=None, print_summary=False: {"total_rois": 4})
+    monkeypatch.setattr(
+        mod,
+        "_update_postprocess_summary",
+        lambda refined, *, root=None, print_summary=False: {"total_rois": 4},
+    )
 
     result = mod.apply_review_status(
         session,
@@ -732,13 +871,17 @@ def test_apply_review_status_delegates_existing_status_writer(monkeypatch) -> No
     assert result["authoritative_approval"]["attempted"] is False
 
 
-def test_apply_review_status_approved_is_fail_closed_when_authoritative_approval_fails(monkeypatch) -> None:
+def test_apply_review_status_approved_is_fail_closed_when_authoritative_approval_fails(
+    monkeypatch,
+) -> None:
     session = _build_session(keypoint_count=5)
     parent = _FakeGroup({"refined_1": session.refined}, attrs={})
     session.root["refined_keypoints_runs"] = parent
     calls: list[str] = []
 
-    def _fake_apply(*_args: object, **_kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
+    def _fake_apply(
+        *_args: object, **_kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
         calls.append("apply")
         return {"state": "approved"}, {"synced": True}
 
@@ -770,7 +913,9 @@ def test_apply_review_status_approved_is_fail_closed_when_authoritative_approval
     assert "keypoint_review_status_latest" not in parent.attrs
 
 
-def test_apply_review_status_approved_sets_authoritative_refined_keypoint_run(monkeypatch, tmp_path) -> None:
+def test_apply_review_status_approved_sets_authoritative_refined_keypoint_run(
+    monkeypatch, tmp_path
+) -> None:
     zarr_path = tmp_path / "keypoint_review_approval.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
     refined_parent = root.create_group("refined_keypoints_runs")
@@ -781,7 +926,11 @@ def test_apply_review_status_approved_sets_authoritative_refined_keypoint_run(mo
     session.zarr_path = str(zarr_path)
     session.root = root
     session.refined = refined
-    monkeypatch.setattr(mod, "_update_postprocess_summary", lambda refined, *, root=None, print_summary=False: {"total_rois": 4})
+    monkeypatch.setattr(
+        mod,
+        "_update_postprocess_summary",
+        lambda refined, *, root=None, print_summary=False: {"total_rois": 4},
+    )
 
     result = mod.apply_review_status(
         session,
@@ -796,7 +945,9 @@ def test_apply_review_status_approved_sets_authoritative_refined_keypoint_run(mo
     assert result["authoritative_approval"]["attempted"] is True
     assert result["authoritative_approval"]["status"] == "ok"
     reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
-    assert reopened["refined_keypoints_runs"].attrs[AUTHORITATIVE_RUN_ATTR] == "refined_1"
+    assert (
+        reopened["refined_keypoints_runs"].attrs[AUTHORITATIVE_RUN_ATTR] == "refined_1"
+    )
 
 
 def _post_json(url: str, payload: dict[str, object]) -> dict[str, object]:
@@ -829,10 +980,18 @@ def test_web_endpoints_cover_action_filter_jump_and_review_status(monkeypatch) -
         reviewer="tester",
     )
 
-    monkeypatch.setattr(mod, "mark_downstream_subject_mask_runs_stale", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        mod, "mark_downstream_subject_mask_runs_stale", lambda *_args, **_kwargs: 0
+    )
 
-    def _fake_apply(refined_parent: object, refined_run: str, refined: object, **kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
-        payload = {"state": kwargs["state"], "method": kwargs["method"], "intended_use": kwargs["intended_use"]}
+    def _fake_apply(
+        refined_parent: object, refined_run: str, refined: object, **kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        payload = {
+            "state": kwargs["state"],
+            "method": kwargs["method"],
+            "intended_use": kwargs["intended_use"],
+        }
         refined.attrs["keypoint_review_status"] = payload
         return payload, {"synced": True}
 
@@ -840,21 +999,35 @@ def test_web_endpoints_cover_action_filter_jump_and_review_status(monkeypatch) -
     monkeypatch.setattr(
         mod,
         "_approve_authoritative_refined_keypoints",
-        lambda *_args, **_kwargs: {"attempted": True, "status": "ok", "reason_code": "OK"},
+        lambda *_args, **_kwargs: {
+            "attempted": True,
+            "status": "ok",
+            "reason_code": "OK",
+        },
     )
-    monkeypatch.setattr(mod, "_update_postprocess_summary", lambda refined, *, root=None, print_summary=False: {"total_rois": 4})
+    monkeypatch.setattr(
+        mod,
+        "_update_postprocess_summary",
+        lambda refined, *, root=None, print_summary=False: {"total_rois": 4},
+    )
 
-    handler = web._build_handler(state=state, static_root=Path(__file__).parent, backend_module=mod)
+    handler = web._build_handler(
+        state=state, static_root=Path(__file__).parent, backend_module=mod
+    )
     server = web.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        action = _post_json(f"{base}/api/roi/current/action", {"action": "mark_no_keypoints"})
+        action = _post_json(
+            f"{base}/api/roi/current/action", {"action": "mark_no_keypoints"}
+        )
         assert action["ok"] is True
         assert action["result"]["action"] == "mark_no_keypoints"
 
-        filtered = _post_json(f"{base}/api/filter", {"filter_mode": "all", "search": "frame=12"})
+        filtered = _post_json(
+            f"{base}/api/filter", {"filter_mode": "all", "search": "frame=12"}
+        )
         assert filtered["ok"] is True
         assert filtered["state"]["total"] == 1
 
@@ -901,7 +1074,9 @@ def test_registry_training_dataset_listing_filters_to_training_zarrs(tmp_path) -
     assert rows[0]["recording_id"] == "rec_train"
 
 
-def test_registry_training_dataset_listing_defaults_to_unapproved_keypoint_zarrs(tmp_path) -> None:
+def test_registry_training_dataset_listing_defaults_to_unapproved_keypoint_zarrs(
+    tmp_path,
+) -> None:
     registry_path = tmp_path / "palette_registry.sqlite"
     registry = Registry(registry_path)
     approved_zarr = tmp_path / "approved.zarr"
@@ -925,8 +1100,12 @@ def test_registry_training_dataset_listing_defaults_to_unapproved_keypoint_zarrs
     )
 
     default_rows = web._list_training_datasets(str(registry_path), limit=50)
-    all_rows = web._list_training_datasets(str(registry_path), limit=50, review_filter="all")
-    approved_rows = web._list_training_datasets(str(registry_path), limit=50, review_filter="approved")
+    all_rows = web._list_training_datasets(
+        str(registry_path), limit=50, review_filter="all"
+    )
+    approved_rows = web._list_training_datasets(
+        str(registry_path), limit=50, review_filter="approved"
+    )
 
     assert [row["dataset_id"] for row in default_rows] == ["needs_review_ds"]
     assert {row["dataset_id"] for row in all_rows} == {"approved_ds", "needs_review_ds"}
@@ -934,7 +1113,9 @@ def test_registry_training_dataset_listing_defaults_to_unapproved_keypoint_zarrs
     assert approved_rows[0]["keypoint_review_approved"] is True
 
 
-def test_web_registry_endpoints_list_and_switch_training_dataset(monkeypatch, tmp_path) -> None:
+def test_web_registry_endpoints_list_and_switch_training_dataset(
+    monkeypatch, tmp_path
+) -> None:
     registry_path = tmp_path / "palette_registry.sqlite"
     registry = Registry(registry_path)
     zarr_a = tmp_path / "train_a.zarr"
@@ -976,7 +1157,9 @@ def test_web_registry_endpoints_list_and_switch_training_dataset(monkeypatch, tm
 
     monkeypatch.setattr(mod, "resolve_review_session", _fake_resolve_review_session)
 
-    handler = web._build_handler(state=state, static_root=Path(__file__).parent, backend_module=mod)
+    handler = web._build_handler(
+        state=state, static_root=Path(__file__).parent, backend_module=mod
+    )
     server = web.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -985,7 +1168,10 @@ def test_web_registry_endpoints_list_and_switch_training_dataset(monkeypatch, tm
         listed = _get_json(f"{base}/api/registry/datasets")
         assert listed["ok"] is True
         assert listed["enabled"] is True
-        assert [row["dataset_id"] for row in listed["datasets"]] == ["train_a", "train_b"]
+        assert [row["dataset_id"] for row in listed["datasets"]] == [
+            "train_a",
+            "train_b",
+        ]
 
         selected = _post_json(f"{base}/api/registry/select", {"dataset_id": "train_b"})
         assert selected["ok"] is True
@@ -1003,7 +1189,9 @@ def test_web_registry_endpoints_list_and_switch_training_dataset(monkeypatch, tm
         thread.join(timeout=5)
 
 
-def test_web_config_ignores_whitespace_positional_zarr_in_registry_mode(tmp_path) -> None:
+def test_web_config_ignores_whitespace_positional_zarr_in_registry_mode(
+    tmp_path,
+) -> None:
     args = web.parse_args(
         [
             " ",

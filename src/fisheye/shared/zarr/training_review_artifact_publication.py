@@ -22,6 +22,10 @@ from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
 )
 from fisheye.refinement.finalize_subject_masks import finalize_subject_masks
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
+from fisheye.shared.keypoint_manual_review_qc import (
+    build_default_manual_keypoint_qc_policy,
+    manual_keypoint_qc_policy_from_manifest,
+)
 from fisheye.shared.refined_subject_mask_mutation import (
     REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
     refined_subject_mask_lifecycle_state,
@@ -183,6 +187,22 @@ def _validate_review_state(
         != f"refined_keypoints_runs/{refined_run_id}"
     ):
         raise RuntimeError("Keypoint edit generation lost its immutable-base binding.")
+    review_policy = manual_keypoint_qc_policy_from_manifest(
+        generation.attrs.get("review_qc_policy")
+    )
+    source_bindings = refined_manifest.get("payload", {}).get("source_bindings", {})
+    skeleton = source_bindings.get("skeleton", {})
+    skeleton_semantics = skeleton.get("semantics", {})
+    if (
+        generation.attrs.get("review_qc_policy_digest") != review_policy.policy_digest
+        or review_policy.skeleton_id != skeleton.get("skeleton_id")
+        or review_policy.skeleton_digest != skeleton.get("skeleton_digest")
+        or list(review_policy.keypoint_labels)
+        != skeleton_semantics.get("keypoint_labels")
+    ):
+        raise RuntimeError(
+            "Keypoint edit generation QC policy differs from the refined skeleton."
+        )
     masks = root[f"refined_subject_masks_runs/{refined_mask_run_id}"]
     if (
         refined_subject_mask_lifecycle_state(masks)
@@ -221,6 +241,7 @@ def _validate_review_state(
         "keypoint_delta_path": (
             f"edit_delta_runs/{delta_run_id}/generations/{delta_generation}"
         ),
+        "manual_keypoint_qc_policy_digest": review_policy.policy_digest,
         "refined_subject_mask_path": (
             f"refined_subject_masks_runs/{refined_mask_run_id}"
         ),
@@ -339,6 +360,11 @@ def publish_training_review_artifact(
                 "metadata_read_mode": "direct_unconsolidated_while_review_mutable",
             }
         )
+        manual_qc_policy = build_default_manual_keypoint_qc_policy(
+            skeleton_id=chain.refined.source.skeleton_id,
+            skeleton_digest=chain.refined.source.skeleton_digest,
+            keypoint_labels=chain.refined.source.skeleton_semantics["keypoint_labels"],
+        )
         delta_binding = create_delta_generation(
             local_root,
             delta_run=run_ids["keypoint_delta"],
@@ -347,6 +373,7 @@ def publish_training_review_artifact(
             target_kind="keypoints",
             base_run_path=f"refined_keypoints_runs/{run_ids['refined_keypoints']}",
             created_by=created_by,
+            review_qc_policy=manual_qc_policy.as_manifest(),
         )
         mask_summary = finalize_subject_masks(
             local_archive,

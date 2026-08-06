@@ -11,6 +11,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.keypoint_manual_review_qc import (
+    manual_keypoint_qc_policy_from_manifest,
+    validate_manual_keypoint_review_derivation,
+)
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.keypoint_schema import REFINED_KEYPOINT_SCHEMA_V2
@@ -54,8 +58,7 @@ from fisheye.shared.zarr_run_completion import (
 REFINED_KEYPOINT_SHADOW_SCHEMA_ID = "palette.refined_keypoint.shadow_publication"
 REFINED_KEYPOINT_SHADOW_SCHEMA_VERSION = 1
 DEFAULT_REFINED_KEYPOINT_SHADOW_ROOT = Path(
-    "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
-    "refined_keypoints"
+    "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_keypoints"
 )
 _SELECTOR_ATTRIBUTES = (
     "latest",
@@ -88,6 +91,7 @@ class RefinedKeypointShadowPublication:
     parent_manifest: Mapping[str, Any] | None = None
     parent_arrays: Mapping[str, Any] | None = None
     parent_retired_instance_keys: tuple[int, ...] | None = None
+    review_derivation: Mapping[str, Any] | None = None
 
 
 def require_safe_refined_keypoint_shadow_destination(
@@ -227,6 +231,20 @@ def validate_refined_keypoint_shadow_publication(
         errors.append("refined-keypoint shadow status is not complete")
     if run.attrs.get("stage_selector_eligible") is not False:
         errors.append("refined-keypoint shadow is not selector-ineligible")
+    if publication.review_derivation is not None:
+        observed_derivation = run.attrs.get("review_derivation")
+        derivation_errors = validate_manual_keypoint_review_derivation(
+            observed_derivation
+        )
+        if derivation_errors:
+            errors.extend(
+                f"refined-keypoint review derivation: {error}"
+                for error in derivation_errors
+            )
+        elif observed_derivation != publication.review_derivation:
+            errors.append(
+                "refined-keypoint review derivation changed after publication"
+            )
     family = zarr.open_group(
         str(publication.output_path / "refined_keypoints_runs"),
         mode="r",
@@ -264,6 +282,7 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
     parent_manifest: Mapping[str, Any] | None = None,
     parent_arrays: Mapping[str, Any] | None = None,
     parent_retired_instance_keys: Sequence[int] | None = None,
+    review_derivation: Mapping[str, Any] | None = None,
     disposition: KeypointPublicationDisposition = KeypointPublicationDisposition(),
 ) -> RefinedKeypointShadowPublication:
     """Write and reopen-gate one immutable selector-ineligible refined snapshot."""
@@ -286,6 +305,28 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
         raise ValueError("Parent manifest and arrays must be supplied together.")
     if parent_manifest is None and parent_retired is not None:
         raise ValueError("Parent retired keys require parent manifest and arrays.")
+    normalized_review_derivation: dict[str, Any] | None = None
+    if review_derivation is not None:
+        derivation_errors = validate_manual_keypoint_review_derivation(
+            review_derivation
+        )
+        if derivation_errors:
+            raise ValueError(
+                "Refined-keypoint review derivation is invalid: "
+                + "; ".join(derivation_errors)
+            )
+        policy = manual_keypoint_qc_policy_from_manifest(
+            review_derivation.get("review_qc_policy")
+        )
+        if (
+            policy.skeleton_digest != source.skeleton_digest
+            or policy.keypoint_labels
+            != tuple(source.skeleton_semantics["keypoint_labels"])
+        ):
+            raise ValueError(
+                "Refined-keypoint review derivation targets another skeleton."
+            )
+        normalized_review_derivation = dict(review_derivation)
 
     REFINED_KEYPOINT_SCHEMA_V2.require(
         prepared.arrays,
@@ -341,6 +382,10 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
             },
         }
     )
+    if normalized_review_derivation is not None:
+        # This precedes the first consolidation and manifest construction, so
+        # the refined run's metadata-declarations digest binds the derivation.
+        run.attrs["review_derivation"] = normalized_review_derivation
     if disposition.production_candidate:
         mark_run_started(run, run_name=str(run_id), stage="refined_keypoints")
 
@@ -482,6 +527,7 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
         parent_manifest=(None if parent_manifest is None else dict(parent_manifest)),
         parent_arrays=parent_arrays,
         parent_retired_instance_keys=parent_retired,
+        review_derivation=normalized_review_derivation,
     )
     reopen_errors = validate_refined_keypoint_shadow_publication(publication)
     if reopen_errors:

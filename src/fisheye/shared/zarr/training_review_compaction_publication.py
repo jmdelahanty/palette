@@ -14,6 +14,10 @@ from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
     tree_inventory,
 )
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
+from fisheye.shared.keypoint_manual_review_qc import (
+    manual_keypoint_qc_policy_from_manifest,
+    validate_manual_keypoint_review_derivation,
+)
 from fisheye.shared.refined_subject_mask_mutation import (
     REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
     REFINED_SUBJECT_MASK_SEALED_SNAPSHOT,
@@ -41,6 +45,7 @@ REVIEWED_TRAINING_ARTIFACT_SCHEMA_ID = "palette.reviewed_training_artifact"
 REVIEWED_TRAINING_ARTIFACT_SCHEMA_VERSION = 1
 REVIEWED_TRAINING_ARTIFACT_RECEIPT = "reviewed_training_artifact_receipt.json"
 KEYPOINT_COMPACTION_RECEIPT_SCHEMA_ID = "palette.refined_keypoint.delta_compaction"
+KEYPOINT_COMPACTION_RECEIPT_SCHEMA_VERSION = 2
 
 
 def _safe_run_id(value: str, *, name: str) -> str:
@@ -91,7 +96,7 @@ def _validated_compaction_receipt(
         raise ValueError("Keypoint compaction receipt envelope is not exact.")
     if (
         receipt.get("schema_id") != KEYPOINT_COMPACTION_RECEIPT_SCHEMA_ID
-        or receipt.get("schema_version") != 1
+        or receipt.get("schema_version") != KEYPOINT_COMPACTION_RECEIPT_SCHEMA_VERSION
     ):
         raise ValueError("Keypoint compaction receipt schema is unsupported.")
     payload = receipt.get("payload")
@@ -126,6 +131,8 @@ def _validated_compaction_receipt(
             "overlay_sha256",
             "partition_count",
             "event_count",
+            "review_qc_policy_digest",
+            "review_derivation",
         }
         or not isinstance(output, Mapping)
         or set(output)
@@ -140,6 +147,31 @@ def _validated_compaction_receipt(
         or payload.get("production_state_changes") != []
     ):
         raise ValueError("Keypoint compaction receipt nested envelope is not exact.")
+    derivation_errors = validate_manual_keypoint_review_derivation(
+        delta.get("review_derivation")
+    )
+    if derivation_errors:
+        raise ValueError(
+            "Keypoint compaction receipt review derivation is invalid: "
+            + "; ".join(derivation_errors)
+        )
+    review_policy = manual_keypoint_qc_policy_from_manifest(
+        delta["review_derivation"].get("review_qc_policy")
+    )
+    derivation = delta["review_derivation"]
+    if (
+        delta.get("review_qc_policy_digest") != review_policy.policy_digest
+        or derivation.get("delta_run") != delta.get("delta_run")
+        or derivation.get("generation") != delta.get("generation")
+        or derivation.get("generation_sha256") != delta.get("generation_sha256")
+        or derivation.get("overlay_sha256") != delta.get("overlay_sha256")
+        or derivation.get("partition_count") != delta.get("partition_count")
+        or derivation.get("event_count") != delta.get("event_count")
+        or derivation.get("base_run_path") != base.get("run_path")
+    ):
+        raise ValueError(
+            "Keypoint compaction receipt QC/derivation evidence is inconsistent."
+        )
     if (
         Path(str(payload.get("source_archive") or "")).expanduser().resolve()
         != source_archive
@@ -207,6 +239,10 @@ def _validate_source_and_compaction(
         generation.attrs.get("status") != "frozen"
         or generation.attrs.get("generation_sha256")
         != delta_evidence["generation_sha256"]
+        or generation.attrs.get("review_qc_policy_digest")
+        != delta_evidence["review_qc_policy_digest"]
+        or generation.attrs.get("review_qc_policy")
+        != delta_evidence["review_derivation"]["review_qc_policy"]
     ):
         raise ValueError("Compaction receipt delta generation differs from the source.")
     compacted = open_zarr_group_direct(compacted_archive, mode="r")
@@ -229,6 +265,8 @@ def _validate_source_and_compaction(
         or compacted_run.attrs.get("artifact_mutability") != "immutable_snapshot"
         or compaction_output.get("manifest_digest")
         != canonical_json_sha256(compacted_manifest)
+        or compacted_run.attrs.get("review_derivation")
+        != delta_evidence["review_derivation"]
     ):
         raise ValueError("Compacted refined-keypoint run differs from its receipt.")
 

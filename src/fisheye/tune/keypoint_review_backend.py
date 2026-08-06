@@ -24,6 +24,10 @@ from ..shared.frame_flags import (
     load_row_identity_arrays,
     row_identity_payload,
 )
+from ..shared.keypoint_manual_review_qc import (
+    ManualKeypointQcPolicy,
+    evaluate_manual_keypoint_qc,
+)
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..shared.tabular_deltas import (
     KEYPOINT_DELTA_REASON_CODE_MAP,
@@ -160,6 +164,7 @@ class ReviewSession:
     max_triangle_area: Optional[float]
     confidence_threshold: float
     head_triangle_indices: object
+    manual_qc_policy: Optional[ManualKeypointQcPolicy]
     derived_metric_storage: Optional[object]
 
     immutable_base: bool = False
@@ -199,23 +204,32 @@ def _resolve_active_keypoint_delta(
 ) -> tuple[str, str]:
     parent = root.get("edit_delta_runs")
     if parent is None:
-        raise RuntimeError("Immutable refined keypoints require a bound edit_delta_runs generation.")
+        raise RuntimeError(
+            "Immutable refined keypoints require a bound edit_delta_runs generation."
+        )
     matches: list[tuple[str, str]] = []
     for run_name, run in parent.groups():
-        if run.attrs.get("target_kind") != "keypoints" or run.attrs.get("base_run_path") != base_run_path:
+        if (
+            run.attrs.get("target_kind") != "keypoints"
+            or run.attrs.get("base_run_path") != base_run_path
+        ):
             continue
         generation = run.attrs.get("active_generation")
         if generation:
             matches.append((str(run_name), str(generation)))
     if len(matches) != 1:
-        raise RuntimeError(f"Immutable refined keypoints require exactly one active, bound keypoint delta generation; found {matches!r}.")
+        raise RuntimeError(
+            f"Immutable refined keypoints require exactly one active, bound keypoint delta generation; found {matches!r}."
+        )
     return matches[0]
 
 
 def _refined_reason_labels(refined: zarr.Group) -> dict[int, str]:
     manifest = refined.attrs.get(REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
     if not isinstance(manifest, Mapping):
-        raise RuntimeError("Immutable refined-keypoint base is missing its run manifest.")
+        raise RuntimeError(
+            "Immutable refined-keypoint base is missing its run manifest."
+        )
     _review_map, reason_map = refined_keypoint_code_maps_from_manifest(manifest)
     return reason_map
 
@@ -223,14 +237,22 @@ def _refined_reason_labels(refined: zarr.Group) -> dict[int, str]:
 def _immutable_keypoint_labels(refined: zarr.Group) -> list[str]:
     manifest = refined.attrs.get(REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
     if not isinstance(manifest, Mapping):
-        raise RuntimeError("Immutable refined-keypoint base is missing its run manifest.")
+        raise RuntimeError(
+            "Immutable refined-keypoint base is missing its run manifest."
+        )
     payload = manifest.get("payload")
     source = payload.get("source_bindings") if isinstance(payload, Mapping) else None
     skeleton = source.get("skeleton") if isinstance(source, Mapping) else None
     semantics = skeleton.get("semantics") if isinstance(skeleton, Mapping) else None
-    labels = semantics.get("keypoint_labels") if isinstance(semantics, Mapping) else None
-    if not isinstance(labels, list) or any(not isinstance(label, str) or not label for label in labels):
-        raise RuntimeError("Immutable refined-keypoint manifest has no exact skeleton label order.")
+    labels = (
+        semantics.get("keypoint_labels") if isinstance(semantics, Mapping) else None
+    )
+    if not isinstance(labels, list) or any(
+        not isinstance(label, str) or not label for label in labels
+    ):
+        raise RuntimeError(
+            "Immutable refined-keypoint manifest has no exact skeleton label order."
+        )
     return list(labels)
 
 
@@ -248,12 +270,19 @@ def _overlay_reason_array(
     base_reason_map = _refined_reason_labels(refined)
     reason_codes = np.asarray(refined["reason_codes"][:], dtype=np.uint16)
     values = np.asarray(
-        ["" if base_reason_map[int(code)] == "none" else base_reason_map[int(code)] for code in reason_codes],
+        [
+            "" if base_reason_map[int(code)] == "none" else base_reason_map[int(code)]
+            for code in reason_codes
+        ],
         dtype=object,
     )
     if values.shape != (row_count,):
-        raise RuntimeError("Immutable refined-keypoint reason column has the wrong shape.")
-    label_by_code = {int(code): label for label, code in overlay.reason_code_map.items()}
+        raise RuntimeError(
+            "Immutable refined-keypoint reason column has the wrong shape."
+        )
+    label_by_code = {
+        int(code): label for label, code in overlay.reason_code_map.items()
+    }
     newest_by_row: dict[int, tuple[tuple[int, int, str, int], int]] = {}
     for edit in overlay.edits:
         order = (
@@ -271,7 +300,9 @@ def _overlay_reason_array(
         elif reason_code in label_by_code:
             values[row] = label_by_code[reason_code]
         else:  # pragma: no cover - verified delta resolver rejects this
-            raise RuntimeError(f"Resolved delta reason code {reason_code} is undeclared.")
+            raise RuntimeError(
+                f"Resolved delta reason code {reason_code} is undeclared."
+            )
     return values
 
 
@@ -294,13 +325,19 @@ def _apply_overlay_status_arrays(
         )
     }
     base_edit_flags = _copy_optional(refined, "keypoint_edit_flags")
-    edited_rows = np.any(base_edit_flags, axis=1) if base_edit_flags is not None else np.zeros(points_roi.shape[0], dtype=bool)
+    edited_rows = (
+        np.any(base_edit_flags, axis=1)
+        if base_edit_flags is not None
+        else np.zeros(points_roi.shape[0], dtype=bool)
+    )
     valid = np.all(np.isfinite(points_roi), axis=2)
     for edit in overlay.edits:
         edited_rows[edit.row_index] = True
         confidence = arrays["keypoint_confidences"]
         if confidence is not None:
-            confidence[edit.row_index, edit.keypoint_index] = np.float32(1.0) if edit.valid else np.float32(np.nan)
+            confidence[edit.row_index, edit.keypoint_index] = (
+                np.float32(1.0) if edit.valid else np.float32(np.nan)
+            )
     if arrays["refined_success"] is not None:
         arrays["refined_success"][edited_rows] = np.any(valid[edited_rows], axis=1)
     if arrays["flip_corrected"] is not None:
@@ -313,8 +350,16 @@ def _apply_overlay_status_arrays(
         confidence_valid = arrays["confidence_valid"]
         geometry_valid = arrays["geometry_valid"]
         refined_success = arrays["refined_success"]
-        if confidence_valid is not None and geometry_valid is not None and refined_success is not None:
-            arrays["usable_keypoints"][edited_rows] = confidence_valid[edited_rows] & geometry_valid[edited_rows] & refined_success[edited_rows]
+        if (
+            confidence_valid is not None
+            and geometry_valid is not None
+            and refined_success is not None
+        ):
+            arrays["usable_keypoints"][edited_rows] = (
+                confidence_valid[edited_rows]
+                & geometry_valid[edited_rows]
+                & refined_success[edited_rows]
+            )
     arrays["edit_applied"] = edited_rows
     return arrays
 
@@ -323,42 +368,32 @@ def _refresh_immutable_overlay_qc(
     *,
     points_roi: np.ndarray,
     overlay: ResolvedKeypointDeltaOverlay,
-    head_triangle_indices: object,
     confidences: Optional[np.ndarray],
     refined_success: Optional[np.ndarray],
     confidence_valid: Optional[np.ndarray],
     geometry_valid: Optional[np.ndarray],
     usable: Optional[np.ndarray],
-    confidence_threshold: float,
-    min_triangle_angle: float,
-    min_triangle_area: float,
-    max_triangle_area: Optional[float],
+    policy: ManualKeypointQcPolicy,
 ) -> None:
     for row in sorted({edit.row_index for edit in overlay.edits}):
         points = np.asarray(points_roi[row], dtype=np.float64)
-        point_valid = np.all(np.isfinite(points), axis=1)
-        success = bool(np.any(point_valid))
-        conf_ok = False
-        if confidences is not None:
-            values = np.asarray(confidences[row], dtype=np.float64)
-            conf_ok = bool(np.all(point_valid) and np.all(np.isfinite(values)) and np.all(values >= float(confidence_threshold)))
-        triangle = compute_geometry_metrics(select_head_triangle_points(points, head_triangle_indices))
-        max_ok = max_triangle_area is None or triangle.area <= float(max_triangle_area)
-        geom_ok = bool(
-            np.isfinite(triangle.min_angle)
-            and np.isfinite(triangle.area)
-            and triangle.min_angle >= float(min_triangle_angle)
-            and triangle.area >= float(min_triangle_area)
-            and max_ok
+        if confidences is None:
+            raise RuntimeError(
+                "Immutable keypoint QC replay requires keypoint_confidences."
+            )
+        result = evaluate_manual_keypoint_qc(
+            points,
+            confidences[row],
+            policy=policy,
         )
         if refined_success is not None:
-            refined_success[row] = success
+            refined_success[row] = result.refined_success
         if confidence_valid is not None:
-            confidence_valid[row] = conf_ok
+            confidence_valid[row] = result.confidence_valid
         if geometry_valid is not None:
-            geometry_valid[row] = geom_ok
+            geometry_valid[row] = result.geometry_valid
         if usable is not None:
-            usable[row] = success and conf_ok and geom_ok
+            usable[row] = result.usable_keypoints
 
 
 def _resolve_session_geometry(
@@ -368,9 +403,13 @@ def _resolve_session_geometry(
     allow_storage_mutation: bool = True,
 ) -> tuple[float, float, Optional[float], float, Optional[float], object]:
     summary_raw = refined.attrs.get("summary_statistics", {})
-    summary = summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
+    summary = (
+        summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
+    )
 
-    min_triangle_angle, min_triangle_area, max_triangle_area = _resolve_review_geometry_defaults(refined.attrs)
+    min_triangle_angle, min_triangle_area, max_triangle_area = (
+        _resolve_review_geometry_defaults(refined.attrs)
+    )
     min_triangle_angle = float(summary.get("min_triangle_angle", min_triangle_angle))
     min_triangle_area = float(summary.get("min_triangle_area", min_triangle_area))
     max_area_value = summary.get("max_triangle_area")
@@ -380,7 +419,9 @@ def _resolve_session_geometry(
     else:
         max_triangle_area = float(max_area_value)
 
-    confidence_threshold = float(summary.get("confidence_threshold", _DEFAULT_CONFIDENCE_THRESHOLD))
+    confidence_threshold = float(
+        summary.get("confidence_threshold", _DEFAULT_CONFIDENCE_THRESHOLD)
+    )
 
     roi_diagonal = _roi_diagonal_from_roi_images(roi_images)
 
@@ -478,19 +519,33 @@ def _roi_status(session: ReviewSession, roi_idx: int) -> dict[str, object]:
     if session.heading_arr is not None:
         status["heading"] = _coerce_float_or_none(session.heading_arr[idx])
     if session.refined_success_arr is not None:
-        status["refined_success"] = _coerce_bool(np.asarray(session.refined_success_arr[idx], dtype=bool).item())
+        status["refined_success"] = _coerce_bool(
+            np.asarray(session.refined_success_arr[idx], dtype=bool).item()
+        )
     if session.usable_arr is not None:
-        status["usable_keypoints"] = _coerce_bool(np.asarray(session.usable_arr[idx], dtype=bool).item())
+        status["usable_keypoints"] = _coerce_bool(
+            np.asarray(session.usable_arr[idx], dtype=bool).item()
+        )
     if session.edit_applied_arr is not None:
-        status["edit_applied"] = _coerce_bool(np.asarray(session.edit_applied_arr[idx], dtype=bool).item())
+        status["edit_applied"] = _coerce_bool(
+            np.asarray(session.edit_applied_arr[idx], dtype=bool).item()
+        )
     if session.confidence_valid_arr is not None:
-        status["confidence_valid"] = _coerce_bool(np.asarray(session.confidence_valid_arr[idx], dtype=bool).item())
+        status["confidence_valid"] = _coerce_bool(
+            np.asarray(session.confidence_valid_arr[idx], dtype=bool).item()
+        )
     if session.geometry_valid_arr is not None:
-        status["geometry_valid"] = _coerce_bool(np.asarray(session.geometry_valid_arr[idx], dtype=bool).item())
+        status["geometry_valid"] = _coerce_bool(
+            np.asarray(session.geometry_valid_arr[idx], dtype=bool).item()
+        )
     if session.heading_finite_arr is not None:
-        status["heading_finite"] = _coerce_bool(np.asarray(session.heading_finite_arr[idx], dtype=bool).item())
+        status["heading_finite"] = _coerce_bool(
+            np.asarray(session.heading_finite_arr[idx], dtype=bool).item()
+        )
     if session.heading_usable_arr is not None:
-        status["heading_usable"] = _coerce_bool(np.asarray(session.heading_usable_arr[idx], dtype=bool).item())
+        status["heading_usable"] = _coerce_bool(
+            np.asarray(session.heading_usable_arr[idx], dtype=bool).item()
+        )
     if session.source_refined_row_ids is not None:
         status["source_refined_row_id"] = int(session.source_refined_row_ids[idx])
     if session.source_detect_row_index is not None:
@@ -548,12 +603,16 @@ def review_session_summary(session: ReviewSession) -> dict[str, object]:
         "total_rois": total,
         "refined_success": refined_success,
         "remaining_failures": max(0, total - refined_success),
-        "reviewable_failures": int(filter_review_rois(session, filter_mode="failed").size),
+        "reviewable_failures": int(
+            filter_review_rois(session, filter_mode="failed").size
+        ),
         "usable_keypoints": usable,
         "manual_corrections": int(reason_counts.get("manual_correction", 0)),
         "edited_rows": edit_applied,
         "reason_counts": reason_counts,
-        "review_status": dict(review_status) if isinstance(review_status, Mapping) else None,
+        "review_status": dict(review_status)
+        if isinstance(review_status, Mapping)
+        else None,
     }
 
 
@@ -576,19 +635,26 @@ def filter_review_rois(
         if session.edit_applied_arr is None:
             indices = np.zeros(0, dtype="i4")
         else:
-            indices = np.where(np.asarray(session.edit_applied_arr[:], dtype=bool))[0].astype("i4", copy=False)
+            indices = np.where(np.asarray(session.edit_applied_arr[:], dtype=bool))[
+                0
+            ].astype("i4", copy=False)
     elif mode in {"manual", "manual_correction"}:
         if session.reason_arr is None:
             indices = np.zeros(0, dtype="i4")
         else:
             values = np.asarray(session.reason_arr[:], dtype=object)
-            keep = ["manual_correction" in ("" if value is None else str(value)) for value in values]
+            keep = [
+                "manual_correction" in ("" if value is None else str(value))
+                for value in values
+            ]
             indices = np.where(np.asarray(keep, dtype=bool))[0].astype("i4", copy=False)
     elif mode in {"usable", "valid"}:
         if session.usable_arr is None:
             indices = np.zeros(0, dtype="i4")
         else:
-            indices = np.where(np.asarray(session.usable_arr[:], dtype=bool))[0].astype("i4", copy=False)
+            indices = np.where(np.asarray(session.usable_arr[:], dtype=bool))[0].astype(
+                "i4", copy=False
+            )
     elif mode in {"raw_failed", "failed_raw"}:
         indices = _load_failure_indices(session.refined, include_all=True)
         if session.refined_success_arr is not None:
@@ -609,7 +675,8 @@ def filter_review_rois(
     for roi_idx in np.asarray(indices, dtype="i4").tolist():
         summary = summarize_roi(session, int(roi_idx))
         status_text = " ".join(
-            f"{key}={value}" for key, value in sorted(summary["status"].items())  # type: ignore[union-attr]
+            f"{key}={value}"
+            for key, value in sorted(summary["status"].items())  # type: ignore[union-attr]
         )
         haystack = (
             f"roi={roi_idx} frame={summary['frame_idx']} "
@@ -631,7 +698,10 @@ def find_queue_position(
         if matches.size > 0:
             return int(matches[0])
     if frame_idx is not None:
-        current_frames = np.asarray(session.frame_indices[np.asarray(session.failures, dtype="i4")], dtype=np.int64)
+        current_frames = np.asarray(
+            session.frame_indices[np.asarray(session.failures, dtype="i4")],
+            dtype=np.int64,
+        )
         matches = np.where(current_frames == int(frame_idx))[0]
         if matches.size > 0:
             return int(matches[0])
@@ -648,11 +718,13 @@ def resolve_review_session(
     target_roi_indices: Optional[Sequence[int]] = None,
     editor: Optional[str] = None,
 ) -> ReviewSession:
-    root, refined, crop, resolved_refined_run, resolved_crop_run = resolve_latest_refined_and_crop(
-        zarr_path,
-        refined_run=refined_run,
-        crop_run=crop_run,
-        mode="a",
+    root, refined, crop, resolved_refined_run, resolved_crop_run = (
+        resolve_latest_refined_and_crop(
+            zarr_path,
+            refined_run=refined_run,
+            crop_run=crop_run,
+            mode="a",
+        )
     )
 
     if "frame_indices" not in crop:
@@ -683,7 +755,9 @@ def resolve_review_session(
         target_roi_indices=target_roi_indices,
     )
 
-    immutable_base = str(refined.attrs.get("artifact_mutability") or "") == "immutable_snapshot"
+    immutable_base = (
+        str(refined.attrs.get("artifact_mutability") or "") == "immutable_snapshot"
+    )
     delta_run: Optional[str] = None
     delta_generation: Optional[str] = None
     delta_overlay: Optional[ResolvedKeypointDeltaOverlay] = None
@@ -727,9 +801,13 @@ def resolve_review_session(
         if kp_img_arr is not None and delta_overlay.edits:
             origins = np.asarray(roi_coordinates_full[:], dtype=np.float32)
             if origins.shape != (kp_roi_arr.shape[0], 2):
-                raise RuntimeError("Immutable keypoint review requires one [x,y] crop origin per row.")
+                raise RuntimeError(
+                    "Immutable keypoint review requires one [x,y] crop origin per row."
+                )
             edited_rows = sorted({edit.row_index for edit in delta_overlay.edits})
-            kp_img_arr[edited_rows] = kp_roi_arr[edited_rows] + origins[edited_rows, None, :]
+            kp_img_arr[edited_rows] = (
+                kp_roi_arr[edited_rows] + origins[edited_rows, None, :]
+            )
         kp_norm_arr = None
         heading_arr = None
         confidence_arr = None
@@ -773,41 +851,72 @@ def resolve_review_session(
         heading_finite_arr = refined.get("heading_finite")
         heading_usable_arr = refined.get("heading_usable")
         detection_source_arr = refined.get("detection_source")
-    labels = _immutable_keypoint_labels(refined) if immutable_base else list(refined.attrs.get("keypoint_labels", _DEFAULT_LABELS))
+    labels = (
+        _immutable_keypoint_labels(refined)
+        if immutable_base
+        else list(refined.attrs.get("keypoint_labels", _DEFAULT_LABELS))
+    )
     if len(labels) != keypoint_count:
-        raise ValueError(f"Refined keypoint run keypoint_labels count does not match keypoints_roi K ({len(labels)} vs {keypoint_count}).")
+        raise ValueError(
+            f"Refined keypoint run keypoint_labels count does not match keypoints_roi K ({len(labels)} vs {keypoint_count})."
+        )
 
-    (
-        min_triangle_angle,
-        min_triangle_area,
-        max_triangle_area,
-        confidence_threshold,
-        roi_diagonal,
-        derived_metric_storage,
-    ) = _resolve_session_geometry(
-        refined,
-        roi_images,
-        allow_storage_mutation=not immutable_base,
-    )
-    head_triangle_indices = resolve_head_triangle_for_labels(
-        labels,
-        keypoint_count=keypoint_count,
-        allow_legacy_3point_fallback=True,
-    )
+    manual_qc_policy: Optional[ManualKeypointQcPolicy] = None
+    if immutable_base:
+        if delta_overlay is None:
+            raise RuntimeError(
+                "Immutable keypoint review has no verified delta policy."
+            )
+        manual_qc_policy = delta_overlay.review_qc_policy
+        refined_manifest = refined.attrs[REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE]
+        skeleton = refined_manifest["payload"]["source_bindings"]["skeleton"]
+        if (
+            tuple(labels) != manual_qc_policy.keypoint_labels
+            or manual_qc_policy.skeleton_id != skeleton["skeleton_id"]
+            or manual_qc_policy.skeleton_digest != skeleton["skeleton_digest"]
+        ):
+            raise RuntimeError(
+                "Delta generation QC policy differs from the immutable skeleton."
+            )
+        min_triangle_angle = manual_qc_policy.min_triangle_angle_deg
+        min_triangle_area = manual_qc_policy.min_triangle_area_px2
+        max_triangle_area = manual_qc_policy.max_triangle_area_px2
+        confidence_threshold = manual_qc_policy.confidence_threshold
+        roi_diagonal = _roi_diagonal_from_roi_images(roi_images)
+        derived_metric_storage = None
+        head_triangle_indices = resolve_head_triangle_for_labels(
+            labels,
+            keypoint_count=keypoint_count,
+            allow_legacy_3point_fallback=False,
+        )
+    else:
+        (
+            min_triangle_angle,
+            min_triangle_area,
+            max_triangle_area,
+            confidence_threshold,
+            roi_diagonal,
+            derived_metric_storage,
+        ) = _resolve_session_geometry(
+            refined,
+            roi_images,
+            allow_storage_mutation=True,
+        )
+        head_triangle_indices = resolve_head_triangle_for_labels(
+            labels,
+            keypoint_count=keypoint_count,
+            allow_legacy_3point_fallback=True,
+        )
     if immutable_base and delta_overlay is not None:
         _refresh_immutable_overlay_qc(
             points_roi=np.asarray(kp_roi_arr),
             overlay=delta_overlay,
-            head_triangle_indices=head_triangle_indices,
             confidences=conf_arr,
             refined_success=refined_success_arr,
             confidence_valid=confidence_valid_arr,
             geometry_valid=geometry_valid_arr,
             usable=usable_arr,
-            confidence_threshold=confidence_threshold,
-            min_triangle_angle=min_triangle_angle,
-            min_triangle_area=min_triangle_area,
-            max_triangle_area=max_triangle_area,
+            policy=manual_qc_policy,
         )
 
     full_h, full_w = _resolve_full_frame_dimensions(root)
@@ -855,6 +964,7 @@ def resolve_review_session(
         max_triangle_area=max_triangle_area,
         confidence_threshold=confidence_threshold,
         head_triangle_indices=head_triangle_indices,
+        manual_qc_policy=manual_qc_policy,
         derived_metric_storage=derived_metric_storage,
         immutable_base=immutable_base,
         delta_run=delta_run,
@@ -884,7 +994,9 @@ def load_roi_payload(session: ReviewSession, position: int) -> Mapping[str, obje
         "channels": int(image.shape[-1]) if image.ndim >= 3 else 1,
         "dtype": str(image.dtype),
         "encoding": "base64_raw",
-        "pixels": base64.b64encode(np.asarray(image, dtype=np.uint8).tobytes()).decode("ascii"),
+        "pixels": base64.b64encode(np.asarray(image, dtype=np.uint8).tobytes()).decode(
+            "ascii"
+        ),
     }
 
     def _json_point(point: np.ndarray) -> list[Optional[float]]:
@@ -918,7 +1030,12 @@ def _append_immutable_keypoint_delta(
     valid: Sequence[bool],
     reason_code: int,
 ) -> Mapping[str, object]:
-    if not session.immutable_base or session.delta_run is None or session.delta_generation is None or session.instance_keys is None:
+    if (
+        not session.immutable_base
+        or session.delta_run is None
+        or session.delta_generation is None
+        or session.instance_keys is None
+    ):
         raise RuntimeError("Immutable keypoint delta session binding is incomplete.")
     count = len(operation_codes)
     lengths = {
@@ -940,6 +1057,13 @@ def _append_immutable_keypoint_delta(
     )
     if current.generation_status != "open":
         raise RuntimeError("The bound keypoint delta generation is no longer open.")
+    if (
+        session.manual_qc_policy is None
+        or current.review_qc_policy_digest != session.manual_qc_policy.policy_digest
+    ):
+        raise RuntimeError(
+            "The bound keypoint delta QC policy changed after the session opened."
+        )
     revision = current.max_revision + 1
     timestamp = time_ns()
     partition = f"review_{timestamp}_{uuid4().hex}"
@@ -992,11 +1116,21 @@ def save_roi_correction(
 
     points_arr = np.asarray(points, dtype=np.float64)
     if points_arr.shape != (session.keypoint_count, 2):
-        raise ValueError(f"Expected points shape ({session.keypoint_count}, 2), got {points_arr.shape}.")
+        raise ValueError(
+            f"Expected points shape ({session.keypoint_count}, 2), got {points_arr.shape}."
+        )
     if not np.isfinite(points_arr).all():
-        missing = [label for label, point in zip(session.keypoint_labels, points_arr) if not np.isfinite(point).all()]
+        missing = [
+            label
+            for label, point in zip(session.keypoint_labels, points_arr)
+            if not np.isfinite(point).all()
+        ]
         detail = ", ".join(missing)
-        raise ValueError(f"Cannot save incomplete keypoints. Missing: {detail}" if detail else "Cannot save incomplete keypoints.")
+        raise ValueError(
+            f"Cannot save incomplete keypoints. Missing: {detail}"
+            if detail
+            else "Cannot save incomplete keypoints."
+        )
 
     roi_idx = int(session.failures[position])
     delta_write: Optional[Mapping[str, object]] = None
@@ -1004,7 +1138,8 @@ def save_roi_correction(
         delta_write = _append_immutable_keypoint_delta(
             session,
             roi_idx=roi_idx,
-            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["replace_xy"]] * session.keypoint_count,
+            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["replace_xy"]]
+            * session.keypoint_count,
             keypoint_indices=list(range(session.keypoint_count)),
             new_xy=points_arr.tolist(),
             valid=[True] * session.keypoint_count,
@@ -1027,9 +1162,13 @@ def save_roi_correction(
 
     changed |= _set_roi_value_if_changed(session.kp_roi_arr, roi_idx, points_arr)
 
-    full_points = points_arr + np.asarray(session.roi_coordinates_full[roi_idx], dtype=np.float64)
+    full_points = points_arr + np.asarray(
+        session.roi_coordinates_full[roi_idx], dtype=np.float64
+    )
     changed |= _set_roi_value_if_changed(session.kp_img_arr, roi_idx, full_points)
-    changed |= _set_roi_value_if_changed(session.kp_norm_arr, roi_idx, full_points / session.norm_factor)
+    changed |= _set_roi_value_if_changed(
+        session.kp_norm_arr, roi_idx, full_points / session.norm_factor
+    )
 
     heading_val = compute_heading_from_attrs(
         session.refined.attrs,
@@ -1038,21 +1177,47 @@ def save_roi_correction(
     )
     changed |= _set_roi_value_if_changed(session.heading_arr, roi_idx, heading_val)
 
-    triangle = compute_geometry_metrics(
-        select_head_triangle_points(points_arr, session.head_triangle_indices)
-    )
-    max_ok = session.max_triangle_area is None or triangle.area <= float(session.max_triangle_area)
-    geom_ok = bool(
-        np.isfinite(triangle.min_angle)
-        and np.isfinite(triangle.area)
-        and triangle.min_angle >= float(session.min_triangle_angle)
-        and triangle.area >= float(session.min_triangle_area)
-        and max_ok
-    )
+    manual_qc_result = None
+    if session.manual_qc_policy is not None:
+        manual_qc_result = evaluate_manual_keypoint_qc(
+            points_arr,
+            np.full(
+                session.keypoint_count,
+                session.manual_qc_policy.replacement_confidence,
+                dtype=np.float64,
+            ),
+            policy=session.manual_qc_policy,
+        )
+        triangle_area = manual_qc_result.triangle_area_px2
+        minimum_angle = manual_qc_result.minimum_triangle_angle_deg
+        triangle = compute_geometry_metrics(
+            select_head_triangle_points(points_arr, session.head_triangle_indices)
+        )
+        geom_ok = manual_qc_result.geometry_valid
+    else:
+        triangle = compute_geometry_metrics(
+            select_head_triangle_points(points_arr, session.head_triangle_indices)
+        )
+        triangle_area = triangle.area
+        minimum_angle = triangle.min_angle
+        max_ok = session.max_triangle_area is None or triangle.area <= float(
+            session.max_triangle_area
+        )
+        geom_ok = bool(
+            np.isfinite(triangle.min_angle)
+            and np.isfinite(triangle.area)
+            and triangle.min_angle >= float(session.min_triangle_angle)
+            and triangle.area >= float(session.min_triangle_area)
+            and max_ok
+        )
 
-    changed |= _set_roi_value_if_changed(session.triangle_area_arr, roi_idx, triangle.area)
-    changed |= _set_roi_value_if_changed(session.min_angle_arr, roi_idx, triangle.min_angle)
-    changed |= _set_roi_value_if_changed(session.triangle_angles_arr, roi_idx, triangle.angles)
+    changed |= _set_roi_value_if_changed(
+        session.triangle_area_arr, roi_idx, triangle_area
+    )
+    changed |= _set_roi_value_if_changed(session.min_angle_arr, roi_idx, minimum_angle)
+    changed |= _set_roi_value_if_changed(
+        session.triangle_angles_arr, roi_idx, triangle.angles
+    )
     changed |= _set_review_derived_metric_row(
         session.derived_metric_storage,
         roi_idx=roi_idx,
@@ -1063,20 +1228,45 @@ def save_roi_correction(
 
     conf_ok = True
     if session.conf_arr is not None:
-        conf_vals = np.ones(session.keypoint_count, dtype=np.float64)
+        replacement_confidence = (
+            session.manual_qc_policy.replacement_confidence
+            if session.manual_qc_policy is not None
+            else 1.0
+        )
+        conf_vals = np.full(
+            session.keypoint_count,
+            replacement_confidence,
+            dtype=np.float64,
+        )
         changed |= _set_roi_value_if_changed(session.conf_arr, roi_idx, conf_vals)
-        conf_ok = bool(np.all(conf_vals >= session.confidence_threshold))
+        conf_ok = (
+            manual_qc_result.confidence_valid
+            if manual_qc_result is not None
+            else bool(np.all(conf_vals >= session.confidence_threshold))
+        )
 
     changed |= _set_roi_value_if_changed(session.confidence_arr, roi_idx, 1.0)
-    changed |= _set_roi_value_if_changed(session.refined_success_arr, roi_idx, True)
+    refined_success = (
+        manual_qc_result.refined_success if manual_qc_result is not None else True
+    )
+    usable = (
+        manual_qc_result.usable_keypoints
+        if manual_qc_result is not None
+        else conf_ok and geom_ok
+    )
+    changed |= _set_roi_value_if_changed(
+        session.refined_success_arr, roi_idx, refined_success
+    )
     changed |= _set_roi_value_if_changed(session.flip_corrected_arr, roi_idx, False)
     changed |= _set_roi_value_if_changed(session.quality_labels_arr, roi_idx, 0)
     changed |= _set_roi_value_if_changed(session.confidence_valid_arr, roi_idx, conf_ok)
     changed |= _set_roi_value_if_changed(session.geometry_valid_arr, roi_idx, geom_ok)
-    changed |= _set_roi_value_if_changed(session.usable_arr, roi_idx, conf_ok and geom_ok)
+    changed |= _set_roi_value_if_changed(session.usable_arr, roi_idx, usable)
 
     heading_is_finite = bool(np.isfinite(heading_val))
-    changed |= _set_roi_value_if_changed(session.heading_finite_arr, roi_idx, heading_is_finite)
+    changed |= _set_roi_value_if_changed(
+        session.heading_finite_arr, roi_idx, heading_is_finite
+    )
     if session.heading_usable_arr is not None:
         detection_source = 0
         if session.detection_source_arr is not None:
@@ -1093,7 +1283,9 @@ def save_roi_correction(
         existing_text = "" if existing is None else str(existing)
         reason_value = _build_manual_reason(existing_text, geom_ok=geom_ok)
         if reason_value != existing_text:
-            session.reason_arr[roi_idx : roi_idx + 1] = np.array([reason_value], dtype=object)
+            session.reason_arr[roi_idx : roi_idx + 1] = np.array(
+                [reason_value], dtype=object
+            )
             reason_updated = True
             changed = True
 
@@ -1169,7 +1361,8 @@ def _clear_keypoint_solution(
         delta_write = _append_immutable_keypoint_delta(
             session,
             roi_idx=idx,
-            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["clear_keypoint"]] * session.keypoint_count,
+            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["clear_keypoint"]]
+            * session.keypoint_count,
             keypoint_indices=list(range(session.keypoint_count)),
             new_xy=[[np.nan, np.nan]] * session.keypoint_count,
             valid=[False] * session.keypoint_count,
@@ -1192,15 +1385,27 @@ def _clear_keypoint_solution(
     frame_idx = int(session.frame_indices[idx])
     changed = False
 
-    changed |= _set_roi_value_if_changed(session.kp_roi_arr, idx, _nan_like_row(session.kp_roi_arr, idx))
-    changed |= _set_roi_value_if_changed(session.kp_img_arr, idx, _nan_like_row(session.kp_img_arr, idx))
-    changed |= _set_roi_value_if_changed(session.kp_norm_arr, idx, _nan_like_row(session.kp_norm_arr, idx))
+    changed |= _set_roi_value_if_changed(
+        session.kp_roi_arr, idx, _nan_like_row(session.kp_roi_arr, idx)
+    )
+    changed |= _set_roi_value_if_changed(
+        session.kp_img_arr, idx, _nan_like_row(session.kp_img_arr, idx)
+    )
+    changed |= _set_roi_value_if_changed(
+        session.kp_norm_arr, idx, _nan_like_row(session.kp_norm_arr, idx)
+    )
     changed |= _set_roi_value_if_changed(session.heading_arr, idx, np.nan)
     changed |= _set_roi_value_if_changed(session.confidence_arr, idx, np.nan)
-    changed |= _set_roi_value_if_changed(session.conf_arr, idx, _nan_like_row(session.conf_arr, idx))
+    changed |= _set_roi_value_if_changed(
+        session.conf_arr, idx, _nan_like_row(session.conf_arr, idx)
+    )
     changed |= _set_roi_value_if_changed(session.triangle_area_arr, idx, np.nan)
     changed |= _set_roi_value_if_changed(session.min_angle_arr, idx, np.nan)
-    changed |= _set_roi_value_if_changed(session.triangle_angles_arr, idx, _nan_like_row(session.triangle_angles_arr, idx))
+    changed |= _set_roi_value_if_changed(
+        session.triangle_angles_arr,
+        idx,
+        _nan_like_row(session.triangle_angles_arr, idx),
+    )
     changed |= _set_review_derived_metric_row(
         session.derived_metric_storage,
         roi_idx=idx,
@@ -1291,7 +1496,8 @@ def clear_failure_label(session: ReviewSession, *, position: int) -> dict[str, o
         delta_write = _append_immutable_keypoint_delta(
             session,
             roi_idx=roi_idx,
-            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["set_valid"]] * session.keypoint_count,
+            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["set_valid"]]
+            * session.keypoint_count,
             keypoint_indices=list(range(session.keypoint_count)),
             new_xy=[[np.nan, np.nan]] * session.keypoint_count,
             valid=current_valid.tolist(),
@@ -1314,7 +1520,9 @@ def clear_failure_label(session: ReviewSession, *, position: int) -> dict[str, o
     if clearable:
         reason_value = _build_cleared_failure_reason(existing)
         if existing != reason_value:
-            session.reason_arr[roi_idx : roi_idx + 1] = np.asarray([reason_value], dtype=object)
+            session.reason_arr[roi_idx : roi_idx + 1] = np.asarray(
+                [reason_value], dtype=object
+            )
             changed = True
     stale_touched = _mark_manual_state_changed(
         session,
@@ -1382,7 +1590,11 @@ def _approve_authoritative_refined_keypoints(
         return {"attempted": False, "reason": "review_state_not_approved"}
     zarr_path = Path(session.zarr_path).expanduser()
     if not zarr_path.exists():
-        return {"attempted": False, "reason": "zarr_path_unavailable", "zarr_path": str(session.zarr_path)}
+        return {
+            "attempted": False,
+            "reason": "zarr_path_unavailable",
+            "zarr_path": str(session.zarr_path),
+        }
 
     from ..cli.palette import ApproveRequest, approve
 
@@ -1406,10 +1618,15 @@ def _approve_authoritative_refined_keypoints(
 
 
 def _authoritative_approval_ok(payload: Mapping[str, object]) -> bool:
-    return bool(payload.get("attempted")) and str(payload.get("status") or "").strip().lower() == "ok"
+    return (
+        bool(payload.get("attempted"))
+        and str(payload.get("status") or "").strip().lower() == "ok"
+    )
 
 
-def _mirror_authoritative_approval(parent: zarr.Group, run_name: str, payload: Mapping[str, object]) -> None:
+def _mirror_authoritative_approval(
+    parent: zarr.Group, run_name: str, payload: Mapping[str, object]
+) -> None:
     envelope = payload.get("envelope")
     approval = envelope.get("approval") if isinstance(envelope, Mapping) else None
     if not isinstance(approval, Mapping):
@@ -1452,17 +1669,23 @@ def apply_review_status(
         reviewer=reviewer,
         notes=notes,
     )
-    if str(state).strip().lower() == "approved" and not _authoritative_approval_ok(authoritative_approval):
+    if str(state).strip().lower() == "approved" and not _authoritative_approval_ok(
+        authoritative_approval
+    ):
         return {
             "action": "apply_review_status",
             "changed": False,
-            "review_status": dict(session.refined.attrs.get("keypoint_review_status") or {}),
+            "review_status": dict(
+                session.refined.attrs.get("keypoint_review_status") or {}
+            ),
             "registry_sync": None,
             "postprocess_summary": None,
             "authoritative_approval": authoritative_approval,
         }
     if _authoritative_approval_ok(authoritative_approval):
-        _mirror_authoritative_approval(refined_parent, session.refined_run, authoritative_approval)
+        _mirror_authoritative_approval(
+            refined_parent, session.refined_run, authoritative_approval
+        )
     payload, sync = _apply_review_status(
         refined_parent,
         session.refined_run,

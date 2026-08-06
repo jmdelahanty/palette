@@ -1,16 +1,18 @@
 # Tabular Delta And Compaction Contract
 
-**Status:** keypoint/general v1 partition prototype retained; its detection
-payload is superseded for future work by
+**Status:** policy-bound keypoint v2 generation/partition contract implemented;
+the detection v1 payload is retained only as historical context and is
+superseded for future work by
 `refined_detection_delta_v2_contract.md`. The maintained Palette keypoint
-reviewer now resolves and appends verified keypoint-v1 partitions. Crimson
-overlay reads and keypoint compaction/scheduling remain follow-up integration
+reviewer resolves and appends verified keypoint-v2 partitions, and the
+selector-ineligible compactor replays the same exact QC evaluator. Crimson
+overlay reads and production generation rollover remain follow-up integration
 work.
 
 The v1 detection payload below is historical implementation context. It cannot
 represent a complete manual detection row and must not be extended into the v2
 contract. New detection work uses the exact detection-specific v2 schema and
-resolver; keypoint v1 behavior is unchanged.
+resolver; it does not inherit the keypoint policy schema.
 
 ## Decision
 
@@ -83,17 +85,20 @@ edit_delta_runs/<delta_run>/
 
   generations/<generation>/
     attrs:
-      schema = palette.tabular_delta_generation.v1
+      schema = palette.tabular_delta_generation.v2  # keypoints
       generation_ordinal
       status = open | frozen | compacted
+      review_qc_policy
+      review_qc_policy_digest
 
     partitions/<worker-or-batch-id>/
       attrs:
-        schema = palette.tabular_delta_partition.v1
+        schema = palette.tabular_delta_partition.v2  # keypoints
         editor
         partition_sha256
         operation_code_map
         reason_code_map
+        review_qc_policy_digest
 
       instance_key       uint64[N]
       row_index_hint     int64[N]
@@ -110,6 +115,14 @@ keypoint_index  int16[N]
 new_xy          float64[N,2]
 valid           bool[N]
 ```
+
+Keypoint v2 generations bind an exact skeleton ID, skeleton-semantics digest,
+ordered labels, derived head-triangle indices, inclusive confidence/geometry
+thresholds, manual replacement confidence, output rules, evaluator version,
+and canonical policy digest. The policy digest is included in every partition,
+the frozen-generation digest, and the resolved overlay digest. A v1 or
+otherwise unbound keypoint generation is legacy evidence and cannot enter the
+strict compactor.
 
 Detection partitions additionally contain:
 
@@ -200,6 +213,9 @@ for example:
 - `fisheye.utils.publish_tabular_snapshot` clones a completed keypoint or
   refined-detection run into an exact immutable sharded sibling. It is dry-run
   by default and promotes only after decoded SHA-256 validation.
+- `fisheye.shared.keypoint_manual_review_qc` owns the exact manual-review
+  policy, its canonical digest, and the one evaluator used by both live review
+  overlays and compaction.
 - `fisheye.shared.tabular_deltas` creates base-bound generations, writes
   immutable keypoint/detection partitions, validates key/hint identity, and
   freezes generations. Its keypoint resolver additionally validates the exact
@@ -220,15 +236,16 @@ for example:
 - `fisheye.utils.compact_refined_keypoint_deltas_v2` consumes one already
   frozen, digest-verified keypoint generation, regenerates every dependent
   refined array, and publishes a selector-ineligible sharded successor plus a
-  sidecar receipt. It deliberately does not freeze a live generation, mutate
+  sidecar receipt. The successor run persists a canonical
+  `review_derivation` attribute before manifest construction; the run's exact
+  metadata-declarations digest therefore binds the policy, base, generation,
+  frozen-generation digest, overlay digest, partition count, and event count.
+  It deliberately does not freeze a live generation, mutate
   the source archive, import the output, or activate selectors. Generation
   rollover and reviewed publication orchestration remain pending.
-  Manual coordinate replacements receive confidence `1.0`; cleared landmarks
-  receive `NaN`. The current selector-ineligible compactor treats a complete
-  finite manually reviewed pose as confidence- and geometry-valid. Production
-  activation remains blocked until the reviewed-publication gate binds and
-  replays the exact review-QC policy rather than relying on that provisional
-  manual-acceptance rule.
+  Manual coordinate replacements receive the policy's replacement confidence;
+  cleared landmarks receive `NaN`. Success, confidence validity, geometry
+  validity, and usability are recomputed by the shared evaluator.
 - `fisheye.utils.publish_reviewed_training_artifact_candidate` is the combined
   training-artifact boundary. It snapshots the mutable review package, imports
   the receipt-bound compacted keypoint run, seals approved dense subject masks
@@ -246,8 +263,8 @@ for example:
   additive mask-key repair only after exact blockwise equality across the ten
   shared keypoint/mask lineage arrays.
 
-Crimson still needs its own overlay reader, and the keypoint compactor remains
-required before review approval. Existing in-place review writers remain
+Crimson still needs its own overlay reader, and production rollover remains
+required around compaction. Existing in-place review writers remain
 compatibility paths and must not be used to edit an
 `artifact_mutability=immutable_snapshot` run.
 

@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.keypoint_manual_review_qc import (
+    build_default_manual_keypoint_qc_policy,
+)
 from fisheye.shared.tabular_deltas import (
     KEYPOINT_OPERATION_CODE_MAP,
     apply_keypoint_delta_overlay,
@@ -14,6 +17,14 @@ from fisheye.shared.tabular_deltas import (
     resolve_keypoint_delta_overlay,
     write_delta_partition,
 )
+
+
+def _review_policy() -> dict[str, object]:
+    return build_default_manual_keypoint_qc_policy(
+        skeleton_id="test_three_point_pose",
+        skeleton_digest="a" * 64,
+        keypoint_labels=("swim_bladder", "eye_left", "eye_right"),
+    ).as_manifest()
 
 
 def _base_root(path: Path) -> zarr.Group:
@@ -30,7 +41,23 @@ def _base_root(path: Path) -> zarr.Group:
     return root
 
 
-def test_partitioned_keypoint_delta_binds_by_instance_key_and_freezes(tmp_path: Path) -> None:
+def test_keypoint_delta_generation_requires_exact_qc_policy(tmp_path: Path) -> None:
+    root = _base_root(tmp_path)
+    with pytest.raises(ValueError, match="policy envelope"):
+        create_delta_generation(
+            root,
+            delta_run="review_001",
+            generation="generation_000001",
+            generation_ordinal=1,
+            target_kind="keypoints",
+            base_run_path="refined_keypoints_runs/snapshot",
+            created_by="reviewer@example.org",
+        )
+
+
+def test_partitioned_keypoint_delta_binds_by_instance_key_and_freezes(
+    tmp_path: Path,
+) -> None:
     root = _base_root(tmp_path)
     created = create_delta_generation(
         root,
@@ -40,6 +67,7 @@ def test_partitioned_keypoint_delta_binds_by_instance_key_and_freezes(tmp_path: 
         target_kind="keypoints",
         base_run_path="refined_keypoints_runs/snapshot",
         created_by="reviewer@example.org",
+        review_qc_policy=_review_policy(),
     )
     assert created["base_instance_key_count"] == 3
 
@@ -51,7 +79,9 @@ def test_partitioned_keypoint_delta_binds_by_instance_key_and_freezes(tmp_path: 
         editor="reviewer@example.org",
         instance_keys=np.array([20], dtype=np.uint64),
         row_index_hints=np.array([1], dtype=np.int64),
-        operation_codes=np.array([KEYPOINT_OPERATION_CODE_MAP["replace_xy"]], dtype=np.uint8),
+        operation_codes=np.array(
+            [KEYPOINT_OPERATION_CODE_MAP["replace_xy"]], dtype=np.uint8
+        ),
         revisions=np.array([1], dtype=np.uint64),
         timestamp_ns=np.array([123], dtype=np.int64),
         reason_codes=np.array([7], dtype=np.uint16),
@@ -64,7 +94,9 @@ def test_partitioned_keypoint_delta_binds_by_instance_key_and_freezes(tmp_path: 
     partition = root[
         "edit_delta_runs/review_001/generations/generation_000001/partitions/worker_00_batch_0001"
     ]
-    np.testing.assert_array_equal(partition["instance_key"][:], np.array([20], dtype=np.uint64))
+    np.testing.assert_array_equal(
+        partition["instance_key"][:], np.array([20], dtype=np.uint64)
+    )
     assert partition["instance_key"].shards is None
 
     frozen = freeze_delta_generation(
@@ -104,6 +136,7 @@ def test_delta_refuses_stale_row_index_hint(tmp_path: Path) -> None:
         target_kind="keypoints",
         base_run_path="refined_keypoints_runs/snapshot",
         created_by="reviewer",
+        review_qc_policy=_review_policy(),
     )
     with pytest.raises(ValueError, match="does not resolve"):
         write_delta_partition(
@@ -131,13 +164,13 @@ def test_keypoint_overlay_verifies_and_resolves_newest_edit(tmp_path: Path) -> N
         "keypoints_roi",
         data=np.asarray(
             [
-                [[1.0, 1.0], [2.0, 2.0]],
-                [[3.0, 3.0], [4.0, 4.0]],
-                [[5.0, 5.0], [6.0, 6.0]],
+                [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]],
+                [[3.0, 3.0], [4.0, 4.0], [5.0, 5.0]],
+                [[5.0, 5.0], [6.0, 6.0], [7.0, 7.0]],
             ],
             dtype=np.float32,
         ),
-        chunks=(3, 2, 2),
+        chunks=(3, 3, 2),
     )
     create_delta_generation(
         root,
@@ -147,6 +180,7 @@ def test_keypoint_overlay_verifies_and_resolves_newest_edit(tmp_path: Path) -> N
         target_kind="keypoints",
         base_run_path="refined_keypoints_runs/snapshot",
         created_by="reviewer",
+        review_qc_policy=_review_policy(),
     )
     for partition, revision, xy in (
         ("edit_a", 1, [12.0, 13.0]),
@@ -174,7 +208,7 @@ def test_keypoint_overlay_verifies_and_resolves_newest_edit(tmp_path: Path) -> N
         root,
         delta_run="review_001",
         generation="generation_000001",
-        n_keypoints=2,
+        n_keypoints=3,
     )
     assert overlay.event_count == 2
     assert overlay.partition_count == 2
@@ -188,7 +222,9 @@ def test_keypoint_overlay_verifies_and_resolves_newest_edit(tmp_path: Path) -> N
     )
     np.testing.assert_array_equal(points[1, 1], np.asarray([22.0, 23.0]))
     assert bool(valid[1, 1])
-    np.testing.assert_array_equal(base["keypoints_roi"][1, 1], np.asarray([4.0, 4.0], dtype=np.float32))
+    np.testing.assert_array_equal(
+        base["keypoints_roi"][1, 1], np.asarray([4.0, 4.0], dtype=np.float32)
+    )
 
 
 def test_keypoint_overlay_rejects_recomputed_payload_tampering(tmp_path: Path) -> None:
@@ -201,6 +237,7 @@ def test_keypoint_overlay_rejects_recomputed_payload_tampering(tmp_path: Path) -
         target_kind="keypoints",
         base_run_path="refined_keypoints_runs/snapshot",
         created_by="reviewer",
+        review_qc_policy=_review_policy(),
     )
     write_delta_partition(
         root,
@@ -219,12 +256,14 @@ def test_keypoint_overlay_rejects_recomputed_payload_tampering(tmp_path: Path) -
         valid=[True],
         reason_code_map={"manual_correction": 7},
     )
-    partition = root["edit_delta_runs/review_001/generations/generation_000001/partitions/edit_a"]
+    partition = root[
+        "edit_delta_runs/review_001/generations/generation_000001/partitions/edit_a"
+    ]
     partition["new_xy"][0] = np.asarray([99.0, 100.0])
     with pytest.raises(ValueError, match="digest mismatch"):
         resolve_keypoint_delta_overlay(
             root,
             delta_run="review_001",
             generation="generation_000001",
-            n_keypoints=2,
+            n_keypoints=3,
         )

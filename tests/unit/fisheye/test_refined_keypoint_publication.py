@@ -10,6 +10,10 @@ from fisheye.refinement.assemble_refined_subject_masks import (
     _resolve_eye_keypoint_indices,
 )
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.keypoint_manual_review_qc import (
+    build_default_manual_keypoint_qc_policy,
+    build_manual_keypoint_review_derivation,
+)
 from fisheye.shared.pose_model_schema_binding import (
     build_explicit_pose_model_schema_binding,
 )
@@ -478,6 +482,11 @@ def test_refined_delta_compaction_publishes_complete_successor(
     tmp_path: object,
 ) -> None:
     parent, _, _, _ = _publish_refined(tmp_path)
+    policy = build_default_manual_keypoint_qc_policy(
+        skeleton_id=parent.source.skeleton_id,
+        skeleton_digest=parent.source.skeleton_digest,
+        keypoint_labels=parent.source.skeleton_semantics["keypoint_labels"],
+    )
     overlay = ResolvedKeypointDeltaOverlay(
         delta_run="manual_review",
         generation="generation_000001",
@@ -488,6 +497,8 @@ def test_refined_delta_compaction_publishes_complete_successor(
         event_count=1,
         max_revision=1,
         overlay_sha256="b" * 64,
+        review_qc_policy=policy,
+        review_qc_policy_digest=policy.policy_digest,
         reason_code_map={"manual_correction": 1},
         edits=(
             ResolvedKeypointDelta(
@@ -522,6 +533,16 @@ def test_refined_delta_compaction_publishes_complete_successor(
         snapshot_id="66666666-6666-4666-8666-666666666666",
     )
     destination_root = tmp_path / "compacted_root"  # type: ignore[operator]
+    review_derivation = build_manual_keypoint_review_derivation(
+        base_run_path=overlay.base_run_path,
+        delta_run=overlay.delta_run,
+        generation=overlay.generation,
+        generation_sha256="c" * 64,
+        overlay_sha256=overlay.overlay_sha256,
+        partition_count=overlay.partition_count,
+        event_count=overlay.event_count,
+        policy=policy,
+    )
     successor = publish_selector_ineligible_refined_keypoint_snapshot(
         compacted.prepared,
         source=parent.source,
@@ -541,6 +562,7 @@ def test_refined_delta_compaction_publishes_complete_successor(
         parent_manifest=parent.manifest,
         parent_arrays=parent.prepared.arrays,
         parent_retired_instance_keys=(),
+        review_derivation=review_derivation,
     )
 
     assert successor.prepared.arrays["keypoints_roi"][2, 1].tolist() == [7.0, 12.0]
@@ -550,12 +572,28 @@ def test_refined_delta_compaction_publishes_complete_successor(
     )
     assert successor.prepared.arrays["reason_codes"][2] == 2
     assert compacted.edited_instance_keys == (201,)
+    assert successor.review_derivation == review_derivation
 
 
 def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
     tmp_path: Path,
 ) -> None:
     parent, _, _, _ = _publish_refined(tmp_path)
+    policy = build_default_manual_keypoint_qc_policy(
+        skeleton_id=parent.source.skeleton_id,
+        skeleton_digest=parent.source.skeleton_digest,
+        keypoint_labels=parent.source.skeleton_semantics["keypoint_labels"],
+    )
+    review_derivation = build_manual_keypoint_review_derivation(
+        base_run_path=f"refined_keypoints_runs/{parent.run_id}",
+        delta_run="manual_review",
+        generation="generation_000001",
+        generation_sha256="a" * 64,
+        overlay_sha256="b" * 64,
+        partition_count=0,
+        event_count=0,
+        policy=policy,
+    )
     successor_identity = successor_refined_keypoint_snapshot_identity(
         parent_manifest=parent.manifest,
         snapshot_id="77777777-7777-4777-8777-777777777777",
@@ -580,6 +618,7 @@ def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
         parent_manifest=parent.manifest,
         parent_arrays=parent.prepared.arrays,
         parent_retired_instance_keys=(),
+        review_derivation=review_derivation,
     )
 
     source_root = zarr.open_group(
@@ -608,6 +647,8 @@ def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
         {
             "status": "frozen",
             "generation_sha256": "a" * 64,
+            "review_qc_policy": policy.as_manifest(),
+            "review_qc_policy_digest": policy.policy_digest,
         }
     )
     mask_run = source_root.require_group("refined_subject_masks_runs").create_group(
@@ -661,6 +702,8 @@ def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
             "overlay_sha256": "b" * 64,
             "partition_count": 0,
             "event_count": 0,
+            "review_qc_policy_digest": policy.policy_digest,
+            "review_derivation": review_derivation,
         },
         "output": {
             "path": str(compacted.output_path.resolve()),
@@ -678,7 +721,7 @@ def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
         ),
         {
             "schema_id": "palette.refined_keypoint.delta_compaction",
-            "schema_version": 1,
+            "schema_version": 2,
             "payload_digest": canonical_json_sha256(compaction_payload),
             "payload": compaction_payload,
         },

@@ -7,6 +7,10 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.shared.keypoint_manual_review_qc import (
+    ManualKeypointQcPolicy,
+    evaluate_manual_keypoint_qc,
+)
 from fisheye.shared.tabular_deltas import (
     KEYPOINT_OPERATION_CODE_MAP,
     ResolvedKeypointDeltaOverlay,
@@ -35,6 +39,7 @@ class PreparedRefinedKeypointCompaction:
     reason_code_map: Mapping[int, str]
     edited_instance_keys: tuple[int, ...]
     overlay_sha256: str
+    review_qc_policy: ManualKeypointQcPolicy
 
 
 def _array_values(value: Any) -> np.ndarray:
@@ -107,6 +112,13 @@ def prepare_refined_keypoint_compaction(
         raise ValueError("Keypoint-quality dimensions differ during compaction.")
     if overlay.generation_status not in {"frozen", "compacted"}:
         raise ValueError("Keypoint compaction requires a frozen delta generation.")
+    policy = overlay.review_qc_policy
+    if overlay.review_qc_policy_digest != policy.policy_digest:
+        raise ValueError("Keypoint compaction QC policy digest changed.")
+    if policy.skeleton_digest != skeleton_digest:
+        raise ValueError("Keypoint compaction QC policy targets another skeleton.")
+    if len(policy.keypoint_labels) != dimensions.n_keypoints:
+        raise ValueError("Keypoint compaction QC policy has another landmark count.")
 
     parent_keys = _array_values(parent_arrays["instance_key"]).astype(
         np.uint64, copy=False
@@ -134,7 +146,9 @@ def prepare_refined_keypoint_compaction(
         if edit.operation_code in {replace_code, clear_code}:
             coordinate_decision_rows.add(edit.row_index)
         confidences[edit.row_index, edit.keypoint_index] = (
-            np.float32(1.0) if edit.valid else np.float32(np.nan)
+            np.float32(policy.replacement_confidence)
+            if edit.valid
+            else np.float32(np.nan)
         )
         order = (
             edit.revision,
@@ -169,20 +183,19 @@ def prepare_refined_keypoint_compaction(
     reason_codes = arrays["reason_codes"]
     flip_corrected = arrays["flip_corrected"]
     for row in sorted(edited_rows):
-        all_valid = bool(np.all(keypoint_valid[row]))
-        any_valid = bool(np.any(keypoint_valid[row]))
-        conf_ok = bool(
-            all_valid
-            and np.all(np.isfinite(confidences[row]))
-            and np.all(confidences[row] >= np.float32(0.0))
+        qc = evaluate_manual_keypoint_qc(
+            points_roi[row],
+            confidences[row],
+            policy=policy,
         )
-        geom_ok = all_valid
-        refined_success[row] = any_valid
-        confidence_valid[row] = conf_ok
-        geometry_valid[row] = geom_ok
-        usable[row] = any_valid and conf_ok and geom_ok
+        refined_success[row] = qc.refined_success
+        confidence_valid[row] = qc.confidence_valid
+        geometry_valid[row] = qc.geometry_valid
+        usable[row] = qc.usable_keypoints
         review_codes[row] = np.uint8(
-            review_code_by_label["manual_reviewed" if any_valid else "manual_rejected"]
+            review_code_by_label[
+                "manual_reviewed" if qc.refined_success else "manual_rejected"
+            ]
         )
         _order, delta_reason_code = newest_reason_by_row[row]
         if delta_reason_code == 0:
@@ -251,6 +264,7 @@ def prepare_refined_keypoint_compaction(
             sorted(int(parent_keys[row]) for row in edited_rows)
         ),
         overlay_sha256=overlay.overlay_sha256,
+        review_qc_policy=policy,
     )
 
 

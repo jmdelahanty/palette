@@ -80,6 +80,13 @@ therefore integration evidence only. Authority activation remains blocked
 until the combined reviewed-publication gate binds and replays the exact
 review-QC policy.
 
+That historical smoke is intentionally not upgraded in place. New review
+artifacts now create `palette.tabular_delta_generation.v2` keypoint
+generations with an exact skeleton-bound manual-QC policy. Live review and
+compaction share one evaluator, and the successor run plus v2 compaction
+receipt bind the policy and complete frozen-generation derivation. The older
+unbound generation remains non-promotable legacy evidence.
+
 The combined immutable-publication boundary is now implemented by
 `fisheye.utils.publish_reviewed_training_artifact_candidate`. It copies and
 inventories the active review artifact, imports the receipt-bound compacted
@@ -289,6 +296,7 @@ validated inline metadata result.
       successor publisher; fail compaction on pre-fix artifacts until migrated.
 - [ ] Keep the benchmark artifact outside production selectors and registry
       activation unless a separate promotion gate authorizes it.
-- [ ] Bind and replay the exact manual keypoint QC policy, obtain real mask
-      approvals, and run the resulting immutable candidate through Crimson
-      before any authority activation.
+- [x] Bind and replay the exact manual keypoint QC policy in review deltas,
+      compaction, successor metadata, and the combined publication receipt.
+- [ ] Obtain real mask approvals and run the resulting immutable candidate
+      through Crimson before any authority activation.

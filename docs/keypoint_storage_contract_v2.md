@@ -639,9 +639,11 @@ not a substitute for the final canonical/refined snapshot pair.
 - [ ] Add the bounded-row body-frame DAG node after refined-keypoint selection.
 - [ ] Keep legacy embedded heading readable but never copy it into v2; migrate
       by recomputation into a new body-frame run after numerical/consumer gates.
-- [ ] Add keyed refined-keypoint deltas and immutable compaction.
-- [ ] Recompute accepted snapshot-local QC during compaction and body frame
-      after it.
+- [x] Add keyed refined-keypoint deltas and selector-ineligible immutable
+      compaction.
+- [x] Bind one skeleton-specific manual-QC policy and recompute accepted
+      snapshot-local QC through the same evaluator used by live review.
+- [ ] Recompute the downstream body-frame snapshot after approved compaction.
 - [x] Preserve source crop, pixel-package, skeleton, model, preprocessing, and
       coordinate identities through every clip receipt and the final bundle
       receipt.

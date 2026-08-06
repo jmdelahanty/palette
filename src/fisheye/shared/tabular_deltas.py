@@ -11,10 +11,17 @@ from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.shared.keypoint_manual_review_qc import (
+    ManualKeypointQcPolicy,
+    manual_keypoint_qc_policy_from_manifest,
+)
+
 
 DELTA_RUN_SCHEMA = "palette.tabular_delta_run.v1"
 DELTA_GENERATION_SCHEMA = "palette.tabular_delta_generation.v1"
 DELTA_PARTITION_SCHEMA = "palette.tabular_delta_partition.v1"
+KEYPOINT_DELTA_GENERATION_SCHEMA = "palette.tabular_delta_generation.v2"
+KEYPOINT_DELTA_PARTITION_SCHEMA = "palette.tabular_delta_partition.v2"
 DELTA_PARENT = "edit_delta_runs"
 
 KEYPOINT_OPERATION_CODE_MAP: dict[str, int] = {
@@ -70,6 +77,8 @@ class ResolvedKeypointDeltaOverlay:
     event_count: int
     max_revision: int
     overlay_sha256: str
+    review_qc_policy: ManualKeypointQcPolicy
+    review_qc_policy_digest: str
     reason_code_map: Mapping[str, int]
     edits: tuple[ResolvedKeypointDelta, ...]
 
@@ -81,7 +90,9 @@ def _utc_now() -> str:
 def _safe_component(value: str, *, name: str) -> str:
     text = str(value).strip()
     if not text or not _SAFE_COMPONENT.fullmatch(text):
-        raise ValueError(f"{name} must match {_SAFE_COMPONENT.pattern!r}; got {value!r}.")
+        raise ValueError(
+            f"{name} must match {_SAFE_COMPONENT.pattern!r}; got {value!r}."
+        )
     return text
 
 
@@ -103,11 +114,17 @@ def instance_key_digest(values: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(keys).view(np.uint8)).hexdigest()
 
 
-def bind_base_run(root: Any, *, base_run_path: str, target_kind: DeltaKind) -> dict[str, Any]:
+def bind_base_run(
+    root: Any, *, base_run_path: str, target_kind: DeltaKind
+) -> dict[str, Any]:
     base = _resolve_group(root, base_run_path)
-    keys = np.asarray(_instance_key_array(base, target_kind)[:], dtype=np.uint64).reshape(-1)
+    keys = np.asarray(
+        _instance_key_array(base, target_kind)[:], dtype=np.uint64
+    ).reshape(-1)
     if keys.size and np.unique(keys).shape[0] != keys.shape[0]:
-        raise ValueError(f"Base run {base_run_path} instance_key values are not unique.")
+        raise ValueError(
+            f"Base run {base_run_path} instance_key values are not unique."
+        )
     if str(base.attrs.get("artifact_mutability") or "") not in {
         "immutable_snapshot",
         "raw_immutable",
@@ -132,6 +149,7 @@ def create_delta_generation(
     target_kind: DeltaKind,
     base_run_path: str,
     created_by: str,
+    review_qc_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one open generation bound to an immutable base rowset."""
 
@@ -141,6 +159,13 @@ def create_delta_generation(
         raise ValueError("target_kind must be 'keypoints' or 'detections'.")
     if int(generation_ordinal) < 0:
         raise ValueError("generation_ordinal must be non-negative.")
+    resolved_review_policy: ManualKeypointQcPolicy | None = None
+    if target_kind == "keypoints":
+        resolved_review_policy = manual_keypoint_qc_policy_from_manifest(
+            review_qc_policy
+        )
+    elif review_qc_policy is not None:
+        raise ValueError("Detection delta generations cannot bind keypoint QC policy.")
     binding = bind_base_run(root, base_run_path=base_run_path, target_kind=target_kind)
 
     parent = root.require_group(DELTA_PARENT)
@@ -157,7 +182,9 @@ def create_delta_generation(
             "base_instance_key_sha256": binding["base_instance_key_sha256"],
         }
         if existing != expected:
-            raise ValueError(f"Existing delta run binding mismatch: {existing!r} != {expected!r}.")
+            raise ValueError(
+                f"Existing delta run binding mismatch: {existing!r} != {expected!r}."
+            )
     else:
         delta = parent.create_group(run_name)
         delta.attrs.update(
@@ -176,25 +203,37 @@ def create_delta_generation(
         )
     generations = delta.require_group("generations")
     if generation_name in generations:
-        raise ValueError(f"Delta generation already exists: {run_name}/{generation_name}.")
+        raise ValueError(
+            f"Delta generation already exists: {run_name}/{generation_name}."
+        )
     generation_group = generations.create_group(generation_name)
     generation_group.require_group("partitions")
-    generation_group.attrs.update(
-        {
-            "schema": DELTA_GENERATION_SCHEMA,
-            "generation": generation_name,
-            "generation_ordinal": int(generation_ordinal),
-            "target_kind": target_kind,
-            "base_run_path": binding["base_run_path"],
-            "base_instance_key_sha256": binding["base_instance_key_sha256"],
-            "created_at_utc": _utc_now(),
-            "created_by": str(created_by),
-            "status": "open",
-        }
-    )
+    generation_attrs: dict[str, Any] = {
+        "schema": (
+            KEYPOINT_DELTA_GENERATION_SCHEMA
+            if target_kind == "keypoints"
+            else DELTA_GENERATION_SCHEMA
+        ),
+        "generation": generation_name,
+        "generation_ordinal": int(generation_ordinal),
+        "target_kind": target_kind,
+        "base_run_path": binding["base_run_path"],
+        "base_instance_key_sha256": binding["base_instance_key_sha256"],
+        "created_at_utc": _utc_now(),
+        "created_by": str(created_by),
+        "status": "open",
+    }
+    if resolved_review_policy is not None:
+        generation_attrs.update(
+            {
+                "review_qc_policy": resolved_review_policy.as_manifest(),
+                "review_qc_policy_digest": resolved_review_policy.policy_digest,
+            }
+        )
+    generation_group.attrs.update(generation_attrs)
     delta.attrs["active_generation"] = generation_name
     delta.attrs["active_generation_ordinal"] = int(generation_ordinal)
-    return {
+    result = {
         key: value for key, value in binding.items() if key != "base_instance_keys"
     } | {
         "delta_run": run_name,
@@ -202,6 +241,14 @@ def create_delta_generation(
         "generation_ordinal": int(generation_ordinal),
         "target_kind": target_kind,
     }
+    if resolved_review_policy is not None:
+        result.update(
+            {
+                "review_qc_policy": resolved_review_policy.as_manifest(),
+                "review_qc_policy_digest": resolved_review_policy.policy_digest,
+            }
+        )
+    return result
 
 
 def _normalize_common(
@@ -233,13 +280,20 @@ def _normalize_common(
 
 def _write_array(group: Any, name: str, values: np.ndarray) -> None:
     data = np.asarray(values)
-    chunks = (max(1, int(data.shape[0])), *tuple(int(value) for value in data.shape[1:]))
+    chunks = (
+        max(1, int(data.shape[0])),
+        *tuple(int(value) for value in data.shape[1:]),
+    )
     group.create_array(name, data=data, chunks=chunks, overwrite=False)
 
 
-def _partition_digest(arrays: Mapping[str, np.ndarray], attrs: Mapping[str, Any]) -> str:
+def _partition_digest(
+    arrays: Mapping[str, np.ndarray], attrs: Mapping[str, Any]
+) -> str:
     digest = hashlib.sha256()
-    digest.update(json.dumps(dict(attrs), sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    digest.update(
+        json.dumps(dict(attrs), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
     for name in sorted(arrays):
         values = np.ascontiguousarray(arrays[name])
         digest.update(name.encode("utf-8"))
@@ -278,6 +332,16 @@ def write_delta_partition(
     if str(generation_group.attrs.get("status")) != "open":
         raise ValueError(f"Delta generation {generation_name} is not open.")
     target_kind = str(delta.attrs.get("target_kind"))
+    review_qc_policy_digest: str | None = None
+    if target_kind == "keypoints":
+        review_policy = manual_keypoint_qc_policy_from_manifest(
+            generation_group.attrs.get("review_qc_policy")
+        )
+        review_qc_policy_digest = str(
+            generation_group.attrs.get("review_qc_policy_digest") or ""
+        )
+        if review_policy.policy_digest != review_qc_policy_digest:
+            raise ValueError("Delta generation keypoint QC policy digest changed.")
     arrays = _normalize_common(
         instance_keys=instance_keys,
         row_index_hints=row_index_hints,
@@ -308,10 +372,14 @@ def write_delta_partition(
         resolved = base_lookup.get(int(key))
         if target_kind == "detections" and int(operation) == add_code:
             if resolved is not None or int(hint) != -1:
-                raise ValueError("add_instance requires a new instance_key and row_index_hint=-1.")
+                raise ValueError(
+                    "add_instance requires a new instance_key and row_index_hint=-1."
+                )
             continue
         if resolved is None:
-            raise ValueError(f"Delta row {idx} instance_key is absent from the base run.")
+            raise ValueError(
+                f"Delta row {idx} instance_key is absent from the base run."
+            )
         if int(hint) >= 0 and int(hint) != int(resolved):
             raise ValueError(
                 f"Delta row {idx} row_index_hint={hint} does not resolve to its instance_key."
@@ -319,14 +387,20 @@ def write_delta_partition(
 
     if target_kind == "keypoints":
         if keypoint_index is None or new_xy is None or valid is None:
-            raise ValueError("Keypoint delta partitions require keypoint_index, new_xy, and valid.")
-        arrays["keypoint_index"] = np.asarray(keypoint_index, dtype=np.int16).reshape(-1)
+            raise ValueError(
+                "Keypoint delta partitions require keypoint_index, new_xy, and valid."
+            )
+        arrays["keypoint_index"] = np.asarray(keypoint_index, dtype=np.int16).reshape(
+            -1
+        )
         arrays["new_xy"] = np.asarray(new_xy, dtype=np.float64).reshape(-1, 2)
         arrays["valid"] = np.asarray(valid, dtype=bool).reshape(-1)
         allowed = set(KEYPOINT_OPERATION_CODE_MAP.values())
     else:
         if new_bbox_norm_coords is None or valid is None:
-            raise ValueError("Detection delta partitions require new_bbox_norm_coords and valid.")
+            raise ValueError(
+                "Detection delta partitions require new_bbox_norm_coords and valid."
+            )
         arrays["new_bbox_norm_coords"] = np.asarray(
             new_bbox_norm_coords, dtype=np.float64
         ).reshape(-1, 4)
@@ -334,8 +408,12 @@ def write_delta_partition(
         allowed = set(DETECTION_OPERATION_CODE_MAP.values())
     for name, values in arrays.items():
         if int(values.shape[0]) != row_count:
-            raise ValueError(f"Delta array {name} has {values.shape[0]} rows; expected {row_count}.")
-    unknown = sorted(set(int(value) for value in arrays["operation_codes"].tolist()) - allowed)
+            raise ValueError(
+                f"Delta array {name} has {values.shape[0]} rows; expected {row_count}."
+            )
+    unknown = sorted(
+        set(int(value) for value in arrays["operation_codes"].tolist()) - allowed
+    )
     if unknown:
         raise ValueError(f"Unsupported {target_kind} operation code(s): {unknown}.")
     if target_kind == "keypoints":
@@ -352,17 +430,27 @@ def write_delta_partition(
             )
         ):
             if int(index) < 0:
-                raise ValueError(f"Keypoint delta row {row} has a negative keypoint_index.")
+                raise ValueError(
+                    f"Keypoint delta row {row} has a negative keypoint_index."
+                )
             finite_xy = bool(np.all(np.isfinite(xy)))
             nan_xy = bool(np.all(np.isnan(xy)))
             if int(operation) == replace_code and (not finite_xy or not is_valid):
-                raise ValueError(f"replace_xy requires finite new_xy and valid=true; row {row} violates that contract.")
+                raise ValueError(
+                    f"replace_xy requires finite new_xy and valid=true; row {row} violates that contract."
+                )
             if int(operation) == set_valid_code and not nan_xy:
-                raise ValueError(f"set_valid requires NaN placeholder new_xy at row {row}.")
+                raise ValueError(
+                    f"set_valid requires NaN placeholder new_xy at row {row}."
+                )
             if int(operation) == clear_code and (not nan_xy or is_valid):
-                raise ValueError(f"clear_keypoint requires NaN placeholder new_xy and valid=false; row {row} violates that contract.")
+                raise ValueError(
+                    f"clear_keypoint requires NaN placeholder new_xy and valid=false; row {row} violates that contract."
+                )
 
-    normalized_reason_map = {str(label): int(code) for label, code in dict(reason_code_map or {}).items()}
+    normalized_reason_map = {
+        str(label): int(code) for label, code in dict(reason_code_map or {}).items()
+    }
     if any(not label for label in normalized_reason_map):
         raise ValueError("Delta reason labels must be non-empty strings.")
     if any(code < 0 or code > 65535 for code in normalized_reason_map.values()):
@@ -370,15 +458,24 @@ def write_delta_partition(
     if len(set(normalized_reason_map.values())) != len(normalized_reason_map):
         raise ValueError("Delta reason-code values must be unique within a partition.")
     declared_reason_codes = set(normalized_reason_map.values()) | {0}
-    unknown_reasons = sorted(set(int(value) for value in arrays["reason_codes"].tolist()) - declared_reason_codes)
+    unknown_reasons = sorted(
+        set(int(value) for value in arrays["reason_codes"].tolist())
+        - declared_reason_codes
+    )
     if unknown_reasons:
-        raise ValueError(f"Delta reason code(s) are absent from reason_code_map: {unknown_reasons}.")
+        raise ValueError(
+            f"Delta reason code(s) are absent from reason_code_map: {unknown_reasons}."
+        )
 
     partitions = generation_group["partitions"]
     if partition_name in partitions:
         raise ValueError(f"Delta partition already exists: {partition_name}.")
     attrs = {
-        "schema": DELTA_PARTITION_SCHEMA,
+        "schema": (
+            KEYPOINT_DELTA_PARTITION_SCHEMA
+            if target_kind == "keypoints"
+            else DELTA_PARTITION_SCHEMA
+        ),
         "delta_run": run_name,
         "generation": generation_name,
         "generation_ordinal": int(generation_group.attrs["generation_ordinal"]),
@@ -390,10 +487,16 @@ def write_delta_partition(
         "created_at_utc": _utc_now(),
         "row_count": row_count,
         "operation_code_schema": OPERATION_CODE_SCHEMA,
-        "operation_code_map": (KEYPOINT_OPERATION_CODE_MAP if target_kind == "keypoints" else DETECTION_OPERATION_CODE_MAP),
+        "operation_code_map": (
+            KEYPOINT_OPERATION_CODE_MAP
+            if target_kind == "keypoints"
+            else DETECTION_OPERATION_CODE_MAP
+        ),
         "reason_code_map": normalized_reason_map,
         "merge_order": ["revision", "timestamp_ns", "partition", "partition_row_index"],
     }
+    if review_qc_policy_digest is not None:
+        attrs["review_qc_policy_digest"] = review_qc_policy_digest
     attrs["partition_sha256"] = _partition_digest(arrays, attrs)
     partition_group = partitions.create_group(partition_name)
     try:
@@ -436,6 +539,7 @@ _DELTA_PARTITION_ATTRIBUTE_NAMES = {
     "operation_code_schema",
     "operation_code_map",
     "reason_code_map",
+    "review_qc_policy_digest",
     "merge_order",
     "partition_sha256",
 }
@@ -450,16 +554,18 @@ def _read_exact_keypoint_partition(
     generation_ordinal: int,
     base_run_path: str,
     base_instance_key_sha256: str,
+    review_qc_policy_digest: str,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     attrs = dict(partition_group.attrs)
     unexpected_attrs = sorted(set(attrs) - _DELTA_PARTITION_ATTRIBUTE_NAMES)
     missing_attrs = sorted(_DELTA_PARTITION_ATTRIBUTE_NAMES - set(attrs))
     if unexpected_attrs or missing_attrs:
         raise ValueError(
-            f"Delta partition {partition_name} attribute envelope differs from v1: missing={missing_attrs}, unexpected={unexpected_attrs}."
+            f"Delta partition {partition_name} attribute envelope differs from "
+            f"keypoint v2: missing={missing_attrs}, unexpected={unexpected_attrs}."
         )
     expected_attrs = {
-        "schema": DELTA_PARTITION_SCHEMA,
+        "schema": KEYPOINT_DELTA_PARTITION_SCHEMA,
         "delta_run": delta_run,
         "generation": generation,
         "generation_ordinal": int(generation_ordinal),
@@ -467,6 +573,7 @@ def _read_exact_keypoint_partition(
         "target_kind": "keypoints",
         "base_run_path": base_run_path,
         "base_instance_key_sha256": base_instance_key_sha256,
+        "review_qc_policy_digest": review_qc_policy_digest,
         "operation_code_schema": OPERATION_CODE_SCHEMA,
         "operation_code_map": KEYPOINT_OPERATION_CODE_MAP,
         "merge_order": [
@@ -478,7 +585,9 @@ def _read_exact_keypoint_partition(
     }
     for name, expected in expected_attrs.items():
         if attrs.get(name) != expected:
-            raise ValueError(f"Delta partition {partition_name} has invalid {name}: {attrs.get(name)!r} != {expected!r}.")
+            raise ValueError(
+                f"Delta partition {partition_name} has invalid {name}: {attrs.get(name)!r} != {expected!r}."
+            )
     if not str(attrs.get("editor") or "").strip():
         raise ValueError(f"Delta partition {partition_name} has no editor identity.")
 
@@ -495,29 +604,44 @@ def _read_exact_keypoint_partition(
     for name, expected_dtype in _KEYPOINT_PARTITION_ARRAY_DTYPES.items():
         array = partition_group[name]
         if np.dtype(array.dtype) != expected_dtype:
-            raise ValueError(f"Delta partition {partition_name}/{name} dtype is {np.dtype(array.dtype)}, expected {expected_dtype}.")
+            raise ValueError(
+                f"Delta partition {partition_name}/{name} dtype is {np.dtype(array.dtype)}, expected {expected_dtype}."
+            )
         values = np.asarray(array[:])
         expected_shape = (row_count, 2) if name == "new_xy" else (row_count,)
         if values.shape != expected_shape:
-            raise ValueError(f"Delta partition {partition_name}/{name} shape is {values.shape}, expected {expected_shape}.")
+            raise ValueError(
+                f"Delta partition {partition_name}/{name} shape is {values.shape}, expected {expected_shape}."
+            )
         arrays[name] = values
 
     digest_attrs = dict(attrs)
     stored_digest = str(digest_attrs.pop("partition_sha256") or "")
     computed_digest = _partition_digest(arrays, digest_attrs)
     if stored_digest != computed_digest:
-        raise ValueError(f"Delta partition {partition_name} digest mismatch: {stored_digest!r} != {computed_digest!r}.")
+        raise ValueError(
+            f"Delta partition {partition_name} digest mismatch: {stored_digest!r} != {computed_digest!r}."
+        )
     reason_map = attrs.get("reason_code_map")
     if not isinstance(reason_map, Mapping):
-        raise ValueError(f"Delta partition {partition_name} reason_code_map is invalid.")
-    normalized_reason_map = {str(label): int(code) for label, code in reason_map.items()}
+        raise ValueError(
+            f"Delta partition {partition_name} reason_code_map is invalid."
+        )
+    normalized_reason_map = {
+        str(label): int(code) for label, code in reason_map.items()
+    }
     if any(not label for label in normalized_reason_map):
         raise ValueError(f"Delta partition {partition_name} has an empty reason label.")
     if len(set(normalized_reason_map.values())) != len(normalized_reason_map):
         raise ValueError(f"Delta partition {partition_name} reuses a reason code.")
-    unknown_reasons = sorted(set(int(value) for value in arrays["reason_codes"].tolist()) - (set(normalized_reason_map.values()) | {0}))
+    unknown_reasons = sorted(
+        set(int(value) for value in arrays["reason_codes"].tolist())
+        - (set(normalized_reason_map.values()) | {0})
+    )
     if unknown_reasons:
-        raise ValueError(f"Delta partition {partition_name} uses undeclared reason codes {unknown_reasons}.")
+        raise ValueError(
+            f"Delta partition {partition_name} uses undeclared reason codes {unknown_reasons}."
+        )
     return arrays, attrs
 
 
@@ -553,12 +677,28 @@ def resolve_keypoint_delta_overlay(
     row_by_key = {int(value): row for row, value in enumerate(base_keys.tolist())}
 
     generation_group = delta[f"generations/{generation_name}"]
-    if generation_group.attrs.get("schema") != DELTA_GENERATION_SCHEMA:
-        raise ValueError(f"Delta generation {generation_name} has an unsupported schema.")
+    if generation_group.attrs.get("schema") != KEYPOINT_DELTA_GENERATION_SCHEMA:
+        raise ValueError(
+            f"Delta generation {generation_name} has an unsupported schema."
+        )
     status = str(generation_group.attrs.get("status") or "")
     if status not in {"open", "frozen", "compacted"}:
-        raise ValueError(f"Delta generation {generation_name} has invalid status {status!r}.")
+        raise ValueError(
+            f"Delta generation {generation_name} has invalid status {status!r}."
+        )
     generation_ordinal = int(generation_group.attrs.get("generation_ordinal", -1))
+    review_qc_policy = manual_keypoint_qc_policy_from_manifest(
+        generation_group.attrs.get("review_qc_policy")
+    )
+    review_qc_policy_digest = str(
+        generation_group.attrs.get("review_qc_policy_digest") or ""
+    )
+    if review_qc_policy.policy_digest != review_qc_policy_digest:
+        raise ValueError("Delta generation keypoint QC policy digest changed.")
+    if len(review_qc_policy.keypoint_labels) != n_keypoints:
+        raise ValueError(
+            "Delta generation keypoint QC skeleton size differs from the base."
+        )
     if (
         generation_group.attrs.get("target_kind") != "keypoints"
         or generation_group.attrs.get("base_run_path") != base_run_path
@@ -572,13 +712,22 @@ def resolve_keypoint_delta_overlay(
         if generation_group.attrs.get("partition_names") != partition_names:
             raise ValueError("Frozen delta generation partition list changed.")
         generation_digest = hashlib.sha256()
+        generation_digest.update(review_qc_policy_digest.encode("ascii"))
         for partition_name in partition_names:
             generation_digest.update(partition_name.encode("utf-8"))
-            generation_digest.update(str(partitions[partition_name].attrs.get("partition_sha256") or "").encode("ascii"))
-        if generation_digest.hexdigest() != generation_group.attrs.get("generation_sha256"):
+            generation_digest.update(
+                str(
+                    partitions[partition_name].attrs.get("partition_sha256") or ""
+                ).encode("ascii")
+            )
+        if generation_digest.hexdigest() != generation_group.attrs.get(
+            "generation_sha256"
+        ):
             raise ValueError("Frozen delta generation digest changed.")
 
-    resolved: dict[tuple[int, int], tuple[tuple[int, int, str, int], ResolvedKeypointDelta]] = {}
+    resolved: dict[
+        tuple[int, int], tuple[tuple[int, int, str, int], ResolvedKeypointDelta]
+    ] = {}
     combined_reason_map: dict[str, int] = {}
     label_by_reason_code: dict[int, str] = {}
     event_count = 0
@@ -587,6 +736,7 @@ def resolve_keypoint_delta_overlay(
     overlay_digest.update(run_name.encode("utf-8"))
     overlay_digest.update(generation_name.encode("utf-8"))
     overlay_digest.update(base_digest.encode("ascii"))
+    overlay_digest.update(review_qc_policy_digest.encode("ascii"))
 
     for partition_name in partition_names:
         arrays, attrs = _read_exact_keypoint_partition(
@@ -597,15 +747,24 @@ def resolve_keypoint_delta_overlay(
             generation_ordinal=generation_ordinal,
             base_run_path=base_run_path,
             base_instance_key_sha256=base_digest,
+            review_qc_policy_digest=review_qc_policy_digest,
         )
         overlay_digest.update(partition_name.encode("utf-8"))
         overlay_digest.update(str(attrs["partition_sha256"]).encode("ascii"))
         for label, code_value in dict(attrs["reason_code_map"]).items():
             label_text = str(label)
             code = int(code_value)
-            if label_text in combined_reason_map and combined_reason_map[label_text] != code:
-                raise ValueError(f"Reason label {label_text!r} changes code across partitions.")
-            if code in label_by_reason_code and label_by_reason_code[code] != label_text:
+            if (
+                label_text in combined_reason_map
+                and combined_reason_map[label_text] != code
+            ):
+                raise ValueError(
+                    f"Reason label {label_text!r} changes code across partitions."
+                )
+            if (
+                code in label_by_reason_code
+                and label_by_reason_code[code] != label_text
+            ):
                 raise ValueError(f"Reason code {code} changes label across partitions.")
             combined_reason_map[label_text] = code
             label_by_reason_code[code] = label_text
@@ -614,13 +773,19 @@ def resolve_keypoint_delta_overlay(
             instance_key = int(arrays["instance_key"][partition_row])
             row_index = row_by_key.get(instance_key)
             if row_index is None:
-                raise ValueError(f"Delta partition {partition_name} targets an unknown instance_key.")
+                raise ValueError(
+                    f"Delta partition {partition_name} targets an unknown instance_key."
+                )
             hint = int(arrays["row_index_hint"][partition_row])
             if hint >= 0 and hint != row_index:
-                raise ValueError(f"Delta partition {partition_name} row hint no longer resolves by key.")
+                raise ValueError(
+                    f"Delta partition {partition_name} row hint no longer resolves by key."
+                )
             keypoint_index = int(arrays["keypoint_index"][partition_row])
             if not 0 <= keypoint_index < n_keypoints:
-                raise ValueError(f"Delta partition {partition_name} keypoint_index {keypoint_index} exceeds skeleton size {n_keypoints}.")
+                raise ValueError(
+                    f"Delta partition {partition_name} keypoint_index {keypoint_index} exceeds skeleton size {n_keypoints}."
+                )
             operation = int(arrays["operation_codes"][partition_row])
             xy = np.asarray(arrays["new_xy"][partition_row], dtype=np.float64)
             valid = bool(arrays["valid"][partition_row])
@@ -630,9 +795,13 @@ def resolve_keypoint_delta_overlay(
             if operation == replace_code and (not np.all(np.isfinite(xy)) or not valid):
                 raise ValueError("Verified replace_xy payload is not finite and valid.")
             if operation == set_valid_code and not np.all(np.isnan(xy)):
-                raise ValueError("Verified set_valid payload has non-placeholder coordinates.")
+                raise ValueError(
+                    "Verified set_valid payload has non-placeholder coordinates."
+                )
             if operation == clear_code and (not np.all(np.isnan(xy)) or valid):
-                raise ValueError("Verified clear_keypoint payload is not clear/invalid.")
+                raise ValueError(
+                    "Verified clear_keypoint payload is not clear/invalid."
+                )
             revision = int(arrays["revision"][partition_row])
             timestamp = int(arrays["timestamp_ns"][partition_row])
             order = (revision, timestamp, partition_name, partition_row)
@@ -656,7 +825,12 @@ def resolve_keypoint_delta_overlay(
             event_count += 1
             max_revision = max(max_revision, revision)
 
-    edits = tuple(item[1] for _target, item in sorted(resolved.items(), key=lambda value: (value[0][0], value[0][1])))
+    edits = tuple(
+        item[1]
+        for _target, item in sorted(
+            resolved.items(), key=lambda value: (value[0][0], value[0][1])
+        )
+    )
     return ResolvedKeypointDeltaOverlay(
         delta_run=run_name,
         generation=generation_name,
@@ -667,6 +841,8 @@ def resolve_keypoint_delta_overlay(
         event_count=event_count,
         max_revision=max_revision,
         overlay_sha256=overlay_digest.hexdigest(),
+        review_qc_policy=review_qc_policy,
+        review_qc_policy_digest=review_qc_policy_digest,
         reason_code_map=dict(sorted(combined_reason_map.items())),
         edits=edits,
     )
@@ -683,21 +859,27 @@ def apply_keypoint_delta_overlay(
     points = np.asarray(base_keypoints_roi[:]).copy()
     keys = np.asarray(instance_keys[:], dtype=np.uint64).reshape(-1)
     if points.ndim != 3 or points.shape[0] != keys.shape[0] or points.shape[2] != 2:
-        raise ValueError("Base keypoint coordinates and instance keys are incompatible.")
+        raise ValueError(
+            "Base keypoint coordinates and instance keys are incompatible."
+        )
     valid = np.all(np.isfinite(points), axis=2)
     replace_code = KEYPOINT_OPERATION_CODE_MAP["replace_xy"]
     set_valid_code = KEYPOINT_OPERATION_CODE_MAP["set_valid"]
     clear_code = KEYPOINT_OPERATION_CODE_MAP["clear_keypoint"]
     for edit in overlay.edits:
         if int(keys[edit.row_index]) != edit.instance_key:
-            raise ValueError("Resolved keypoint edit row no longer matches instance_key.")
+            raise ValueError(
+                "Resolved keypoint edit row no longer matches instance_key."
+            )
         target = (edit.row_index, edit.keypoint_index)
         if edit.operation_code == replace_code:
             points[target] = np.asarray(edit.new_xy, dtype=points.dtype)
             valid[target] = True
         elif edit.operation_code == set_valid_code:
             if edit.valid and not np.all(np.isfinite(points[target])):
-                raise ValueError("set_valid cannot restore a landmark without coordinates.")
+                raise ValueError(
+                    "set_valid cannot restore a landmark without coordinates."
+                )
             if not edit.valid:
                 points[target] = np.asarray([np.nan, np.nan], dtype=points.dtype)
             valid[target] = edit.valid
@@ -727,10 +909,21 @@ def freeze_delta_generation(
     if not partition_names:
         raise ValueError("Cannot freeze an empty delta generation.")
     digest = hashlib.sha256()
+    review_qc_policy_digest = ""
+    if delta.attrs.get("target_kind") == "keypoints":
+        review_policy = manual_keypoint_qc_policy_from_manifest(
+            group.attrs.get("review_qc_policy")
+        )
+        review_qc_policy_digest = str(group.attrs.get("review_qc_policy_digest") or "")
+        if review_policy.policy_digest != review_qc_policy_digest:
+            raise ValueError("Delta generation keypoint QC policy digest changed.")
+        digest.update(review_qc_policy_digest.encode("ascii"))
     for name in partition_names:
         partition = group[f"partitions/{name}"]
         digest.update(name.encode("utf-8"))
-        digest.update(str(partition.attrs.get("partition_sha256") or "").encode("ascii"))
+        digest.update(
+            str(partition.attrs.get("partition_sha256") or "").encode("ascii")
+        )
     frozen_at = _utc_now()
     group.attrs.update(
         {
@@ -744,7 +937,7 @@ def freeze_delta_generation(
     )
     if delta.attrs.get("active_generation") == generation_name:
         delta.attrs["active_generation"] = None
-    return {
+    result = {
         "delta_run": str(delta_run),
         "generation": generation_name,
         "status": "frozen",
@@ -752,6 +945,9 @@ def freeze_delta_generation(
         "generation_sha256": digest.hexdigest(),
         "frozen_at_utc": frozen_at,
     }
+    if review_qc_policy_digest:
+        result["review_qc_policy_digest"] = review_qc_policy_digest
+    return result
 
 
 __all__ = [
@@ -762,6 +958,8 @@ __all__ = [
     "DETECTION_OPERATION_CODE_MAP",
     "KEYPOINT_OPERATION_CODE_MAP",
     "KEYPOINT_DELTA_REASON_CODE_MAP",
+    "KEYPOINT_DELTA_GENERATION_SCHEMA",
+    "KEYPOINT_DELTA_PARTITION_SCHEMA",
     "OPERATION_CODE_SCHEMA",
     "ResolvedKeypointDelta",
     "ResolvedKeypointDeltaOverlay",
