@@ -80,6 +80,24 @@ therefore integration evidence only. Authority activation remains blocked
 until the combined reviewed-publication gate binds and replays the exact
 review-QC policy.
 
+The combined immutable-publication boundary is now implemented by
+`fisheye.utils.publish_reviewed_training_artifact_candidate`. It copies and
+inventories the active review artifact, imports the receipt-bound compacted
+keypoint successor, seals approved dense subject masks only in the copy,
+consolidates the completed immutable artifact, verifies the consolidated
+keypoint and mask declarations, and atomically publishes it without selectors
+or registry changes. It refuses pending masks, non-frozen delta evidence,
+tampered receipts, stale manifests, and concurrent source changes.
+
+A disposable end-to-end smoke published
+`/tmp/palette-reviewed-candidate-smoke.HJh9sg/published/reviewed.zarr` with
+receipt digest
+`8b2c4df5ee2876288e822d9827fa48c3a8f1a10dfce7501dd0cb4f1907233224`.
+The source remained `editable_draft`; the candidate was `sealed_snapshot`,
+`immutable_snapshot`, consolidated, and selector-ineligible. The smoke changed
+approval fields only on its disposable source copy to exercise the gate, so it
+is machinery evidence and not a scientific review or activation decision.
+
 ## Artifact
 
 - Published artifact:
@@ -264,9 +282,13 @@ validated inline metadata result.
       generation; never mutate the strict refined-keypoint base in place.
 - [x] Implement and smoke the keypoint half of compaction into a new immutable,
       selector-ineligible, parent-bound refined snapshot.
-- [ ] Seal accepted dense masks and orchestrate the combined reviewed
-      publication before any authority activation.
+- [x] Seal accepted dense masks only in a copied artifact and orchestrate the
+      compacted-keypoint plus dense-mask publication as one immutable,
+      selector-ineligible candidate.
 - [x] Persist the complete bound crop manifest needed by the strict keypoint
       successor publisher; fail compaction on pre-fix artifacts until migrated.
 - [ ] Keep the benchmark artifact outside production selectors and registry
       activation unless a separate promotion gate authorizes it.
+- [ ] Bind and replay the exact manual keypoint QC policy, obtain real mask
+      approvals, and run the resulting immutable candidate through Crimson
+      before any authority activation.

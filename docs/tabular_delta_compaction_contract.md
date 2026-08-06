@@ -229,6 +229,13 @@ for example:
   activation remains blocked until the reviewed-publication gate binds and
   replays the exact review-QC policy rather than relying on that provisional
   manual-acceptance rule.
+- `fisheye.utils.publish_reviewed_training_artifact_candidate` is the combined
+  training-artifact boundary. It snapshots the mutable review package, imports
+  the receipt-bound compacted keypoint run, seals approved dense subject masks
+  in the copy, consolidates the completed immutable artifact, and atomically
+  publishes it selector-ineligible. The active review package remains mutable
+  and unchanged; pending mask review, stale receipts, non-frozen generations,
+  or concurrent source writes fail closed.
 - `fisheye.utils.finalize_keypoint_shards` now publishes canonical clipped
   keypoints directly as indexed shards.
 - `fisheye.utils.publish_clipped_refined_detect_snapshot` materializes one

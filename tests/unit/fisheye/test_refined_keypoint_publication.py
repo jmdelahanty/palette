@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import numpy as np
 import zarr
@@ -8,8 +9,15 @@ import zarr
 from fisheye.refinement.assemble_refined_subject_masks import (
     _resolve_eye_keypoint_indices,
 )
+from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.pose_model_schema_binding import (
     build_explicit_pose_model_schema_binding,
+)
+from fisheye.shared.refined_subject_mask_mutation import (
+    REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
+    REFINED_SUBJECT_MASK_SEALED_SNAPSHOT,
+    refined_subject_mask_lifecycle_state,
+    stamp_refined_subject_mask_editable_draft,
 )
 from fisheye.shared.zarr.array_factory import array_metadata_declaration_from_plan
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
@@ -76,6 +84,13 @@ from fisheye.shared.zarr.refined_keypoint_publication import (
     publish_selector_ineligible_refined_keypoint_snapshot,
     republish_selector_ineligible_refined_keypoint_snapshot,
     validate_refined_keypoint_shadow_publication,
+)
+from fisheye.shared.zarr.training_review_artifact_publication import (
+    TRAINING_REVIEW_ARTIFACT_SCHEMA_ID,
+)
+from fisheye.shared.zarr.training_review_compaction_publication import (
+    REVIEWED_TRAINING_ARTIFACT_SCHEMA_ID,
+    publish_reviewed_training_artifact_candidate,
 )
 
 REVIEW_STATE_MAP = {0: "unreviewed", 1: "accepted", 2: "rejected"}
@@ -535,6 +550,175 @@ def test_refined_delta_compaction_publishes_complete_successor(
     )
     assert successor.prepared.arrays["reason_codes"][2] == 2
     assert compacted.edited_instance_keys == (201,)
+
+
+def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
+    tmp_path: Path,
+) -> None:
+    parent, _, _, _ = _publish_refined(tmp_path)
+    successor_identity = successor_refined_keypoint_snapshot_identity(
+        parent_manifest=parent.manifest,
+        snapshot_id="77777777-7777-4777-8777-777777777777",
+    )
+    compacted_root = tmp_path / "reviewed_compacted"
+    compacted = publish_selector_ineligible_refined_keypoint_snapshot(
+        parent.prepared,
+        source=parent.source,
+        raw_manifest=parent.raw_manifest,
+        quality_manifest=parent.quality_manifest,
+        crop_manifest=parent.crop_manifest,
+        raw_arrays=parent.raw_arrays,
+        quality_arrays=parent.quality_arrays,
+        source_crop_arrays=parent.source_crop_arrays,
+        identity=successor_identity,
+        review_state_map=parent.review_state_map,
+        reason_code_map=parent.reason_code_map,
+        destination=compacted_root / "compacted.zarr",
+        run_id="refined_v2_reviewed_candidate",
+        shadow_root=compacted_root,
+        created_by="pytest_reviewed_candidate",
+        parent_manifest=parent.manifest,
+        parent_arrays=parent.prepared.arrays,
+        parent_retired_instance_keys=(),
+    )
+
+    source_root = zarr.open_group(
+        str(parent.output_path), mode="a", use_consolidated=False
+    )
+    source_root.attrs.update(
+        {
+            "training_artifact_status": "review_active",
+            "stage_selector_eligible": False,
+        }
+    )
+    review_payload = {"status": "review_active", "test_fixture": True}
+    source_root.attrs["training_review_artifact"] = {
+        "schema_id": TRAINING_REVIEW_ARTIFACT_SCHEMA_ID,
+        "schema_version": 1,
+        "payload_digest": canonical_json_sha256(review_payload),
+        "payload": review_payload,
+    }
+    delta_run = source_root.require_group("edit_delta_runs").create_group(
+        "manual_review"
+    )
+    generation = delta_run.require_group("generations").create_group(
+        "generation_000001"
+    )
+    generation.attrs.update(
+        {
+            "status": "frozen",
+            "generation_sha256": "a" * 64,
+        }
+    )
+    mask_run = source_root.require_group("refined_subject_masks_runs").create_group(
+        "reviewed_masks"
+    )
+    mask_run.attrs.update(
+        {
+            "stage_selector_eligible": False,
+            "mask_labels": [
+                "subject_body",
+                "eye_left",
+                "eye_right",
+                "swim_bladder",
+            ],
+            "component_review_statuses": {
+                label: {"state": "approved"}
+                for label in (
+                    "subject_body",
+                    "eye_left",
+                    "eye_right",
+                    "swim_bladder",
+                )
+            },
+            "refined_subject_mask_review_status": {"state": "approved"},
+        }
+    )
+    stamp_refined_subject_mask_editable_draft(mask_run)
+    mask_run.create_array(
+        "masks_roi",
+        data=np.zeros(
+            (parent.prepared.dimensions.n_instances, 4, 2, 2), dtype=np.uint8
+        ),
+        chunks=(1, 1, 2, 2),
+    )
+
+    compaction_payload = {
+        "status": "complete",
+        "created_at_utc": "2026-08-06T00:00:00+00:00",
+        "created_by": "pytest",
+        "source_archive": str(parent.output_path.resolve()),
+        "base": {
+            "run_path": f"refined_keypoints_runs/{parent.run_id}",
+            "run_id": parent.run_id,
+            "manifest_digest": canonical_json_sha256(parent.manifest),
+            "snapshot_id": parent.identity.snapshot_id,
+        },
+        "delta": {
+            "delta_run": "manual_review",
+            "generation": "generation_000001",
+            "generation_sha256": "a" * 64,
+            "overlay_sha256": "b" * 64,
+            "partition_count": 0,
+            "event_count": 0,
+        },
+        "output": {
+            "path": str(compacted.output_path.resolve()),
+            "run_id": compacted.run_id,
+            "manifest_digest": canonical_json_sha256(compacted.manifest),
+            "snapshot_id": compacted.identity.snapshot_id,
+            "edited_instance_keys": [],
+            "stage_selector_eligible": False,
+        },
+        "production_state_changes": [],
+    }
+    write_json_atomic(
+        compacted.output_path.with_name(
+            compacted.output_path.name + ".compaction_receipt.json"
+        ),
+        {
+            "schema_id": "palette.refined_keypoint.delta_compaction",
+            "schema_version": 1,
+            "payload_digest": canonical_json_sha256(compaction_payload),
+            "payload": compaction_payload,
+        },
+    )
+    scratch = tmp_path / "reviewed_scratch"
+    scratch.mkdir()
+    destination = tmp_path / "reviewed_output" / "reviewed.zarr"
+    result = publish_reviewed_training_artifact_candidate(
+        source_review_archive=parent.output_path,
+        compacted_keypoint_archive=compacted.output_path,
+        compacted_keypoint_run_id=compacted.run_id,
+        refined_subject_mask_run_id="reviewed_masks",
+        destination=destination,
+        scratch_root=scratch,
+        created_by="pytest_reviewed_candidate",
+    )
+
+    source_after = zarr.open_group(
+        str(parent.output_path), mode="r", use_consolidated=False
+    )
+    target = zarr.open_group(str(destination), mode="r", use_consolidated=True)
+    assert (
+        refined_subject_mask_lifecycle_state(
+            source_after["refined_subject_masks_runs/reviewed_masks"]
+        )
+        == REFINED_SUBJECT_MASK_EDITABLE_DRAFT
+    )
+    assert (
+        refined_subject_mask_lifecycle_state(
+            target["refined_subject_masks_runs/reviewed_masks"]
+        )
+        == REFINED_SUBJECT_MASK_SEALED_SNAPSHOT
+    )
+    assert f"refined_keypoints_runs/{compacted.run_id}" in target
+    assert target.attrs["stage_selector_eligible"] is False
+    assert (
+        target.attrs["reviewed_training_artifact"]["schema_id"]
+        == REVIEWED_TRAINING_ARTIFACT_SCHEMA_ID
+    )
+    assert result["source_review_artifact_mutated"] is False
 
 
 def test_republication_adds_only_missing_skeleton_semantics(
