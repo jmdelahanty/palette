@@ -10,6 +10,7 @@ from fisheye.refinement.refine_detect import (
     _reject_deprecated_interpolation_overrides,
     _resolve_detection_quality_labels,
     _select_per_frame_top_k_raw_indices,
+    create_refined_run,
     get_refinement_parameters,
 )
 
@@ -125,6 +126,89 @@ def test_get_sampled_frame_count_reads_strict_instance_offsets(tmp_path) -> None
     )
 
     assert _get_sampled_frame_count(root, detect) == 3
+
+
+def test_create_sampled_refined_seed_from_strict_instances_without_selectors(
+    tmp_path,
+) -> None:
+    zarr_path = tmp_path / "strict_training.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs.update(
+        {
+            "zarr_purpose": "training",
+            "recording_id": "recording-a",
+            "width": 8,
+            "height": 8,
+            "source_video_width": 8,
+            "source_video_height": 8,
+        }
+    )
+    raw = root.create_group("raw_video")
+    raw.attrs.update(
+        {
+            "import_mode": "sampled",
+            "import_purpose": "training_data",
+            "source_frame_count": 100,
+            "total_frames": 3,
+        }
+    )
+    raw.create_array(
+        "images_full",
+        data=np.zeros((3, 8, 8), dtype=np.uint8),
+        overwrite=True,
+    )
+    raw.create_array(
+        "original_frame_indices",
+        data=np.asarray([10, 20, 30], dtype=np.int32),
+        overwrite=True,
+    )
+    detect_parent = root.create_group("detect_runs")
+    detect = detect_parent.create_group("detect_seed")
+    instances = detect.create_group("instances")
+    arrays = {
+        "frame_indices": np.asarray([0, 2], dtype=np.int32),
+        "source_acquisition_frame_index": np.asarray([10, 30], dtype=np.int64),
+        "instance_key": np.asarray([101, 202], dtype=np.uint64),
+        "bbox_norm_coords": np.asarray(
+            [[0.5, 0.5, 0.25, 0.25], [0.25, 0.25, 0.2, 0.2]],
+            dtype=np.float32,
+        ),
+        "bbox_img_xyxy": np.asarray(
+            [[3.0, 3.0, 5.0, 5.0], [1.2, 1.2, 2.8, 2.8]],
+            dtype=np.float32,
+        ),
+        "centers_img_xy": np.asarray([[4.0, 4.0], [2.0, 2.0]], dtype=np.float32),
+        "scores": np.asarray([0.9, 0.8], dtype=np.float32),
+        "class_ids": np.asarray([0, 0], dtype=np.int32),
+        "frame_row_offsets": np.asarray([0, 1, 1, 2], dtype=np.int64),
+    }
+    for name, values in arrays.items():
+        instances.create_array(name, data=values, overwrite=True)
+
+    created = create_refined_run(
+        str(zarr_path),
+        detect_run="detect_seed",
+        config={"refine_detect": {}},
+        require_detect_quality=True,
+        per_frame_top_k=1,
+        refined_run_name="refined_seed",
+        stage_selector_eligible=False,
+        emit_completion_status=False,
+    )
+
+    assert created == "refined_seed"
+    direct = zarr.open_group(
+        str(zarr_path), mode="r", use_consolidated=False
+    )
+    refined_parent = direct["refined_detect_runs"]
+    assert "latest" not in refined_parent.attrs
+    assert "latest_complete" not in refined_parent.attrs
+    assert "latest_pending" not in refined_parent.attrs
+    refined = refined_parent[created]
+    assert refined.attrs["stage_selector_eligible"] is False
+    assert refined.attrs["palette_run_completion_status"] == "complete"
+    assert refined["instances/frame_indices"][:].tolist() == [0, 2]
+    assert refined["instances/instance_key"][:].tolist() == [101, 202]
 
 
 def test_get_refinement_parameters_defaults_max_gap_to_0() -> None:

@@ -43,7 +43,9 @@ Checklist:
 - [x] Atomically publish it under `detect_runs/<run>`.
 - [x] Keep both runs selector-ineligible and unregistered.
 - [x] Keep the still-editable training root unconsolidated.
-- [ ] Initialize a selector-ineligible refined review seed after inspecting
+- [x] Validate the first Batman canary: 178 one-detection frames, 22 misses,
+  zero multi-detection frames; no values were forced or imputed.
+- [ ] Initialize a selector-ineligible mutable refined review seed after inspecting
   zero/one/multiple detector cardinality.
 - [ ] Review/correct detections, approve for training, then publish crop,
   keypoint, and subject-mask training surfaces.
@@ -60,3 +62,22 @@ The compatibility reader resolves modern columns from `instances/` and legacy
 columns from the run root. New writers do not create root aliases. Manual
 curation preserves copied keys and mints new keys using mapped acquisition
 frames, preventing sampled datasets from inventing incompatible identities.
+
+## Batman canary evidence
+
+- Palette commit: `ff03ec4be198cc8a26e6143cff051cc602e2c1b9`
+- LSF job: `153285127`, `gpu_l4`, host `h08u02`
+- Artifact: `detection_artifact_runs/detect_artifact_batman_training_20260806_v1`
+- Bound seed: `detect_runs/detect_batman_training_review_20260806_v1`
+- Manifest payload digest:
+  `dfe46a1c415801b1a4cadcaa0cec0d5ef408eb7358cd8ebb46bcb5de9678e387`
+- Source copy/authentication: 11.23 s for 4,269,644,734 bytes
+- Inference: 27.25 s
+- Artifact publication: 0.69 s
+- Binding and bound publication: 2.36 s
+- Peak process RSS reported by LSF: 2,271 MB
+
+An independent direct-metadata reopen returned `valid=true` with no errors.
+The `detect_runs` parent contains no selector attributes; both run groups are
+complete and selector-ineligible. Root consolidated metadata remains `null`, as
+required while detection review may still add or correct rows.
