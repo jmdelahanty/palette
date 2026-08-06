@@ -142,9 +142,13 @@ from fisheye.shared.selected_calibration import (
 from fisheye.shared.stimulus_coordinate_contract import (
     COORDINATE_CONTRACT_EPOCH,
     SOURCE_COORDINATE_POLICY_METADATA_ONLY,
+    STIMULUS_RENDERER_SNAPSHOT_CAPTURE_PHASE,
+    STIMULUS_RENDERER_SNAPSHOT_SCHEMA_ID,
+    STIMULUS_RENDERER_SNAPSHOT_SCHEMA_VERSION,
     STIMULUS_IMPORT_VERSION,
     StimulusCoordinatePreflight,
     _load_bound_stimulus_coordinate_evidence_before_selection,
+    load_bound_stimulus_coordinate_evidence,
     materialize_stimulus_coordinate_contract,
     preflight_stimulus_coordinate_contract,
     reverify_stimulus_coordinate_contract,
@@ -158,6 +162,7 @@ from fisheye.shared.stimulus_physical_coordinate import (
     STIMULUS_PHYSICAL_COORDINATE_REASON_PARENT_RUN_FAILED,
     STIMULUS_PHYSICAL_COORDINATE_STATUS_ATTR,
     _load_stimulus_physical_coordinate_authority_before_selection,
+    load_stimulus_physical_coordinate_authority,
     publish_stimulus_physical_coordinate_authority,
 )
 from fisheye.shared.source_camera_physical_authority import (
@@ -170,6 +175,7 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
     RUN_NAME_ATTR,
+    RUN_STATUS_COMPLETE,
     RUN_STATUS_FAILED,
     mark_run_complete,
     mark_run_started,
@@ -982,6 +988,45 @@ def _copy_stimulus_coordinates(h5: h5py.File, run_group: zarr.Group, console: Op
     dst = run_group.create_group("stimulus_coordinates")
     _copy_h5_tree(h5["/stimulus_coordinates"], dst)
     _log(console, "[green]✓ Copied H5 stimulus_coordinates into stimulus run[/green]")
+
+
+def _copy_renderer_snapshot(
+    h5: h5py.File,
+    run_group: zarr.Group,
+    *,
+    preflight: StimulusCoordinatePreflight,
+    console: Optional[Console],
+) -> None:
+    """Preserve classified static renderer metadata without a coordinate claim."""
+
+    source_path = preflight.renderer_snapshot_source_path
+    record = preflight.renderer_snapshot
+    digest = preflight.renderer_snapshot_sha256
+    if source_path is None:
+        return
+    if record is None or digest is None or source_path not in h5:
+        raise ValueError("Verified renderer snapshot evidence is incomplete.")
+    _delete_zarr_child_if_exists(run_group, "stimulus_renderer_snapshot")
+    destination = run_group.create_group("stimulus_renderer_snapshot")
+    _copy_h5_tree(h5[source_path], destination)
+    destination.attrs.update(
+        {
+            "schema_id": STIMULUS_RENDERER_SNAPSHOT_SCHEMA_ID,
+            "schema_version": STIMULUS_RENDERER_SNAPSHOT_SCHEMA_VERSION,
+            "capture_phase": STIMULUS_RENDERER_SNAPSHOT_CAPTURE_PHASE,
+            "renderer_snapshot_record": dict(record),
+            "renderer_snapshot_record_sha256": digest,
+            "source_h5_group_path": source_path,
+        }
+    )
+    run_group.attrs["stimulus_renderer_snapshot_ref"] = (
+        f"/{destination.path}"
+    )
+    run_group.attrs["stimulus_renderer_snapshot_sha256"] = digest
+    _log(
+        console,
+        "[green]✓ Preserved classified Citrus renderer snapshot metadata[/green]",
+    )
 
 
 def _write_moving_grating_step_metadata(
@@ -1838,6 +1883,57 @@ def _activate_stimulus_run(
         ) from exc
 
 
+def _consolidate_and_verify_stimulus_publication(
+    zarr_path: Path,
+    *,
+    run_name: str,
+    expect_coordinate_surfaces: bool,
+    expect_physical_authority: bool,
+) -> None:
+    """Publish and verify the final immutable selector metadata generation."""
+
+    consolidate_metadata_capture_expected_warnings(zarr_path)
+    root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=True,
+    )
+    runs_parent = root["analysis/stimulus_runs"]
+    for selector in ("latest_complete", "latest"):
+        if runs_parent.attrs.get(selector) != run_name:
+            raise RuntimeError(
+                "Consolidated stimulus metadata does not expose the selected "
+                f"run through {selector!r}."
+            )
+    run_group = runs_parent[run_name]
+    if (
+        run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or run_group.attrs.get("stage_selector_eligible") is not True
+    ):
+        raise RuntimeError(
+            "Consolidated stimulus metadata does not expose the selected run "
+            "as complete and selector-eligible."
+        )
+    if expect_coordinate_surfaces:
+        chaser_group = run_group["tracking_data/chaser_states"]
+        with proof_verification_scope():
+            load_bound_stimulus_coordinate_evidence(
+                run_group,
+                chaser_group,
+                root_node=root,
+            )
+    with proof_verification_scope():
+        physical_authority = load_stimulus_physical_coordinate_authority(
+            root,
+            stimulus_run=run_name,
+        )
+    if (physical_authority is not None) is not expect_physical_authority:
+        raise RuntimeError(
+            "Consolidated stimulus physical-coordinate authority does not match "
+            "the activated publication."
+        )
+
+
 def import_stimulus_to_zarr(
     stimulus_h5: Optional[Path],
     zarr_path: Path,
@@ -1897,7 +1993,7 @@ def _import_stimulus_from_open_h5(
     resolved_h5 = coordinate_preflight.source_h5
 
     zarr_path.parent.mkdir(parents=True, exist_ok=True)
-    root = zarr.open(zarr_path, mode="a")
+    root = _open_zarr_group_unconsolidated(zarr_path, mode="a")
     validate_stimulus_destination_acquisition_authority(
         root,
         preflight=coordinate_preflight,
@@ -2047,20 +2143,44 @@ def _import_stimulus_from_open_h5(
             if isinstance(dish_name, str) and dish_name:
                 analysis_meta.attrs["dish_design"] = dish_name
 
+        if not metadata_only_coordinates:
+            _copy_renderer_snapshot(
+                h5,
+                run_group,
+                preflight=coordinate_preflight,
+                console=console,
+            )
+
         _copy_enums(h5, run_group, console)
         if "/video_metadata/frame_metadata" not in h5:
             raise ValueError("Stimulus H5 missing /video_metadata/frame_metadata dataset.")
 
         frame_metadata = h5["/video_metadata/frame_metadata"][:]
         stats = analyze_frame_gaps(frame_metadata, console)
-        combined_metadata, interpolation_mask = interpolate_metadata(frame_metadata, stats, console)
+        if coordinate_preflight.has_chaser_states:
+            combined_metadata = frame_metadata
+            interpolation_mask = np.ones(frame_metadata.shape[0], dtype=bool)
+            run_group.attrs["frame_metadata_interpolation_skipped"] = True
+            run_group.attrs["frame_metadata_interpolation_skipped_reason"] = (
+                "canonical_stimulus_state_identity_requires_exact_source_rows"
+            )
+        else:
+            combined_metadata, interpolation_mask = interpolate_metadata(
+                frame_metadata,
+                stats,
+                console,
+            )
         alignment = _compute_camera_alignment(combined_metadata, interpolation_mask)
 
         meta_group = run_group.create_group("video_metadata")
         meta_attrs = {}
         if "/video_metadata/frame_metadata" in h5:
             meta_attrs.update(_collect_attrs(h5["/video_metadata/frame_metadata"]))
-        meta_attrs["interpolated"] = bool(stats.missing_frames > 0 if stats else False)
+        meta_attrs["interpolated"] = bool(
+            stats.missing_frames > 0
+            if stats and not coordinate_preflight.has_chaser_states
+            else False
+        )
         meta_attrs["original_records"] = int(frame_metadata.shape[0])
         meta_attrs["total_records"] = int(combined_metadata.shape[0])
         write_columnar_dataset(
@@ -2353,6 +2473,12 @@ def _import_stimulus_from_open_h5(
             expect_coordinate_surfaces=bool(coordinate_preflight.surfaces),
             expect_physical_authority=physical_authority is not None,
         )
+    _consolidate_and_verify_stimulus_publication(
+        zarr_path,
+        run_name=run_name,
+        expect_coordinate_surfaces=bool(coordinate_preflight.surfaces),
+        expect_physical_authority=physical_authority is not None,
+    )
     _log_after_commit(
         console,
         f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]",

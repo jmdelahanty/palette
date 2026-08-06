@@ -5,6 +5,7 @@ import json
 
 import h5py
 import numpy as np
+from numpy.lib import recfunctions as rfn
 import pytest
 import zarr
 
@@ -86,6 +87,8 @@ from fisheye.shared.stimulus_coordinate_contract import (
     CAMERA_FRAME_IDS_ARRAY,
     CAMERA_MAPPING_RECORD_ATTR,
     CAMERA_MAPPING_RECORD_DIGEST_ATTR,
+    CHASER_STATES_SCHEMA_ID,
+    CHASER_STATES_SCHEMA_VERSION,
     SOURCE_ROW_INDICES_ARRAY,
     SOURCE_ACQUISITION_FRAME_INDEX_ARRAY,
     SOURCE_ACQUISITION_MAPPING_ARRAY_PATH,
@@ -94,10 +97,20 @@ from fisheye.shared.stimulus_coordinate_contract import (
     SOURCE_ACQUISITION_MAPPING_SCHEMA_ID,
     SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION,
     SOURCE_COORDINATE_POLICY_METADATA_ONLY,
+    TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY,
+    TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY,
+    TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH,
+    TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR,
+    TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR,
+    TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_REF_ATTR,
+    TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_ID,
+    TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION,
+    TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH,
     STIMULUS_IMPORT_VERSION,
     StimulusCoordinateContractError,
     arena_geometry_record,
     canonical_mapping_digest,
+    load_bound_stimulus_coordinate_evidence,
     numpy_content_digest,
     source_arena_pixel_frame_record,
 )
@@ -557,6 +570,8 @@ def _write_stimulus_h5_with_arena_relative_chaser_states(
             ds,
             canonical_coordinate_descriptor_v2_attrs(descriptor),
         )
+        ds.attrs["schema_id"] = CHASER_STATES_SCHEMA_ID
+        ds.attrs["schema_version"] = CHASER_STATES_SCHEMA_VERSION
         ds.attrs[COORDINATE_SURFACE_MANIFEST_ATTR] = json.dumps(
             manifest, sort_keys=True
         )
@@ -572,6 +587,108 @@ def _write_stimulus_h5_with_arena_relative_chaser_states(
             ] = "chaser_pos_x,chaser_pos_y,target_pos_x,target_pos_y,target_clamped_pos_x,target_clamped_pos_y"
             ds.attrs["x_axis_direction"] = "right"
             ds.attrs["y_axis_direction"] = "down"
+
+
+def _add_target_source_acquisition_mapping(path: Path) -> None:
+    with h5py.File(path, "a") as h5:
+        tracking = h5["/tracking_data"]
+        old = tracking["chaser_states"]
+        old_attrs = dict(old.attrs)
+        values = old[:]
+        values = rfn.append_fields(
+            values,
+            ("target_source_frame_id", "target_source_camera_id"),
+            (
+                np.asarray([2000, 2000], dtype=np.uint64),
+                np.asarray([0, 0], dtype=np.uint32),
+            ),
+            usemask=False,
+        )
+        del tracking["chaser_states"]
+        chaser = tracking.create_dataset("chaser_states", data=values)
+        chaser.attrs.update(old_attrs)
+        manifest = json.loads(chaser.attrs[COORDINATE_SURFACE_MANIFEST_ATTR])
+        manifest["field_classifications"]["target_source_frame_id"] = "non_spatial"
+        manifest["field_classifications"]["target_source_camera_id"] = "non_spatial"
+        chaser.attrs[COORDINATE_SURFACE_MANIFEST_ATTR] = json.dumps(
+            manifest,
+            sort_keys=True,
+        )
+        chaser.attrs[COORDINATE_SURFACE_MANIFEST_DIGEST_ATTR] = (
+            canonical_mapping_digest(manifest)
+        )
+        identity_values = np.asarray(
+            tracking[STIMULUS_STATE_KEY_ARRAY_REF][:],
+            dtype=np.int64,
+        )
+        identity_contract = build_row_identity_contract(
+            domain=STIMULUS_STATE_DOMAIN,
+            values=identity_values,
+            components=("stimulus_frame_num",),
+        )
+        indices = np.asarray([0, 0], dtype="<i8")
+        valid = np.asarray([True, True], dtype=bool)
+        target_node = tracking.create_dataset(
+            TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY,
+            data=indices,
+            dtype="<i8",
+        )
+        valid_node = tracking.create_dataset(
+            TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY,
+            data=valid,
+            dtype="bool",
+        )
+        record = {
+            "schema_id": TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_ID,
+            "schema_version": TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION,
+            "mapping_method": (
+                "explicit_per_stimulus_state_target_provenance_v1"
+            ),
+            "source_rowset_ref": "/tracking_data/chaser_states",
+            "source_row_identity_ref": "/tracking_data/stimulus_state_key",
+            "source_row_identity_sha256": identity_array_content_sha256(
+                identity_values
+            ),
+            "source_row_identity_contract_sha256": identity_contract.digest(),
+            "source_target_frame_field": (
+                "/tracking_data/chaser_states#target_source_frame_id"
+            ),
+            "source_target_camera_field": (
+                "/tracking_data/chaser_states#target_source_camera_id"
+            ),
+            "acquisition_recording_id": "recording-1",
+            "acquisition_camera_id": "2010093",
+            "source_total_frames": 2,
+            "target_domain": "acquisition_frame_index",
+            "array_ref": TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH,
+            "array_dtype": np.dtype("<i8").str,
+            "array_shape": [2],
+            "array_content_sha256": numpy_content_digest(indices),
+            "validity_array_ref": TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH,
+            "validity_array_dtype": np.dtype("bool").str,
+            "validity_array_shape": [2],
+            "validity_array_content_sha256": numpy_content_digest(valid),
+            "invalid_index_sentinel": -1,
+            "canonicalization": "canonical_json_sort_keys_v1",
+        }
+        digest = canonical_mapping_digest(record)
+        _write_h5_contract_attrs(
+            target_node,
+            {
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR: record,
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR: digest,
+            },
+        )
+        _write_h5_contract_attrs(
+            valid_node,
+            {
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_REF_ATTR: (
+                    f"{TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH}@"
+                    f"{TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR}"
+                ),
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR: digest,
+            },
+        )
 
 
 def _write_stimulus_h5_with_protocol_steps(path: Path) -> None:
@@ -660,7 +777,11 @@ def test_import_sets_source_stimulus_video_path_when_rendered_mp4_exists(tmp_pat
         repair_chaser_gaps=False,
     )
 
-    root = zarr.open_group(str(zarr_path), mode="r")
+    root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=True,
+    )
     run_group = root["analysis"]["stimulus_runs"][run_name]
     assert run_group.attrs.get("source_h5") == str(h5_path.resolve())
     assert run_group.attrs.get("source_stimulus_video_path") == str(rendered_mp4.resolve())
@@ -780,7 +901,11 @@ def test_import_explicitly_omits_physical_authority_without_camera_scale(
         repair_chaser_gaps=False,
     )
 
-    root = zarr.open_group(str(zarr_path), mode="r")
+    root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=True,
+    )
     run = root[f"analysis/stimulus_runs/{run_name}"]
     assert run.attrs[STIMULUS_PHYSICAL_COORDINATE_STATUS_ATTR] == (
         STIMULUS_PHYSICAL_COORDINATE_OMITTED_NO_SCALE_STATUS
@@ -1120,6 +1245,11 @@ def test_import_materializes_canonical_array_specific_chaser_surfaces(tmp_path: 
     assert "coordinate_descriptor" not in chaser_group.attrs
     assert chaser_group.attrs["coordinate_descriptor_status"] == "canonical"
     assert run_group.attrs["chaser_states_coordinate_descriptor_status"] == "canonical"
+    assert run_group.attrs["frame_metadata_interpolation_skipped"] is True
+    assert run_group.attrs["frame_metadata_interpolation_skipped_reason"] == (
+        "canonical_stimulus_state_identity_requires_exact_source_rows"
+    )
+    assert run_group["video_metadata/frame_metadata"].attrs["interpolated"] is False
 
     np.testing.assert_array_equal(
         chaser_group[STIMULUS_STATE_KEY_ARRAY_REF][:],
@@ -1492,7 +1622,9 @@ def test_imported_stimulus_round_trips_through_exact_chaser_handoff(
         verbose=False,
         repair_chaser_gaps=False,
     )
-    assert selected_calibration_checks == 26
+    # Final publication reopens the consolidated metadata generation and
+    # verifies the selected physical authority once more.
+    assert selected_calibration_checks == 30
     bundle = chaser_metrics_loader.load_chaser_metrics(
         zarr_path,
         stimulus_run=run_name,
@@ -3089,6 +3221,126 @@ def test_import_does_not_infer_step_geometry_from_events_or_calibration(
     assert "stimulus_coordinates" not in run
 
 
+def test_import_preserves_separate_target_source_acquisition_provenance(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "target_source.h5"
+    zarr_path = tmp_path / "target_source.zarr"
+    _write_stimulus_h5_with_arena_relative_chaser_states(h5_path)
+    _add_target_source_acquisition_mapping(h5_path)
+    _prepare_acquisition_authority(zarr_path)
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_target_source",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=True,
+    )
+    run = root[f"analysis/stimulus_runs/{run_name}"]
+    chaser = run["tracking_data/chaser_states"]
+    evidence = load_bound_stimulus_coordinate_evidence(
+        run,
+        chaser,
+        root_node=root,
+    )
+    assert evidence.source_acquisition_frame_index.tolist() == [0, 1]
+    assert evidence.target_source_acquisition_frame_index.tolist() == [0, 0]
+    assert evidence.target_source_acquisition_frame_valid.tolist() == [True, True]
+
+
+def test_import_classifies_legacy_static_renderer_snapshot_without_coordinate_claim(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "legacy_renderer.h5"
+    zarr_path = tmp_path / "legacy_renderer.zarr"
+    _write_minimal_stimulus_h5(h5_path)
+    with h5py.File(h5_path, "a") as h5:
+        coords = h5.create_group("stimulus_coordinates")
+        arena = coords.create_group("arena_1")
+        arena.attrs.update(
+            {
+                "active_stimulus_mode": "SOLID_BLACK",
+                "texture_height_px": 344,
+                "texture_origin": "top_left",
+                "texture_width_px": 344,
+            }
+        )
+        custom = arena.create_group("custom_coordinates")
+        custom.attrs.update(
+            {
+                "texture_center_x": 172.0,
+                "texture_center_y": 172.0,
+            }
+        )
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_legacy_renderer",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root[f"analysis/stimulus_runs/{run_name}"]
+    assert "stimulus_coordinates" not in run
+    snapshot = run["stimulus_renderer_snapshot"]
+    assert snapshot.attrs["schema_id"] == "citrus.stimulus_renderer_snapshot"
+    assert snapshot.attrs["renderer_snapshot_record"][
+        "scientific_coordinate_arrays_present"
+    ] is False
+    assert snapshot.attrs["renderer_snapshot_record"][
+        "source_classification"
+    ] == "legacy_static_attribute_only_v1"
+    assert snapshot["arena_1/custom_coordinates"].attrs["texture_center_y"] == 172
+    assert run.attrs["source_coordinate_surface_status"] == "not_present"
+
+
+def test_legacy_renderer_classifier_rejects_any_dataset(tmp_path: Path) -> None:
+    h5_path = tmp_path / "legacy_renderer_with_dataset.h5"
+    zarr_path = tmp_path / "legacy_renderer_with_dataset.zarr"
+    _write_minimal_stimulus_h5(h5_path)
+    with h5py.File(h5_path, "a") as h5:
+        coords = h5.create_group("stimulus_coordinates")
+        arena = coords.create_group("arena_1")
+        arena.attrs.update(
+            {
+                "active_stimulus_mode": "SOLID_BLACK",
+                "texture_height_px": 344,
+                "texture_origin": "top_left",
+                "texture_width_px": 344,
+            }
+        )
+        custom = arena.create_group("custom_coordinates")
+        custom.attrs.update(
+            {"texture_center_x": 172.0, "texture_center_y": 172.0}
+        )
+        custom.create_dataset("trajectory_xy", data=np.zeros((2, 2)))
+
+    with pytest.raises(
+        StimulusCoordinateContractError,
+        match="attribute-only group",
+    ):
+        mod.import_stimulus_to_zarr(
+            stimulus_h5=h5_path,
+            zarr_path=zarr_path,
+            run_name="stimulus_rejected_renderer",
+            overwrite=False,
+            verbose=False,
+            repair_chaser_gaps=False,
+        )
+    assert not zarr_path.exists()
+
+
 def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) -> None:
     h5_path = tmp_path / "session.h5"
     zarr_path = tmp_path / "sample_analysis.zarr"
@@ -3096,7 +3348,7 @@ def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) ->
     _write_stimulus_h5_with_protocol_steps(h5_path)
     with pytest.raises(
         StimulusCoordinateContractError,
-        match="stimulus_coordinates lacks canonical array-specific geometry support",
+        match="attrs must be exactly",
     ):
         mod.import_stimulus_to_zarr(
             stimulus_h5=h5_path,
