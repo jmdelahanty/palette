@@ -26,6 +26,10 @@ from fisheye.shared.keypoint_manual_review_qc import (
     build_default_manual_keypoint_qc_policy,
     manual_keypoint_qc_policy_from_manifest,
 )
+from fisheye.shared.mask_probability_encoding import (
+    PROBABILITY_ENCODING_LINEAR_UINT8,
+    probabilities_encoding_from_attrs,
+)
 from fisheye.shared.refined_subject_mask_mutation import (
     REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
     refined_subject_mask_lifecycle_state,
@@ -269,7 +273,7 @@ def _publish_subject_mask_contract_chain(
                 terminal.attrs.get("label_schema_id") or "subject_v1_union"
             ),
             "method": str(terminal.attrs.get("method") or "terminal_inference"),
-            "probability_encoding": "linear_uint8_0_255",
+            "probabilities_encoding": PROBABILITY_ENCODING_LINEAR_UINT8,
         },
         threshold=0.5,
         include_threshold_cache=False,
@@ -495,6 +499,17 @@ def _validate_review_state(
                 f"Persisted {family}/{run_id} failed validation: "
                 + "; ".join(core_errors)
             )
+    raw_masks = root[f"subject_mask_runs/{raw_mask_run_id}"]
+    raw_encoding = probabilities_encoding_from_attrs(
+        raw_masks.attrs,
+        source_path=f"subject_mask_runs/{raw_mask_run_id}/mask_probs_roi",
+        observed_dtype=raw_masks["mask_probs_roi"].dtype,
+    )
+    if raw_encoding != PROBABILITY_ENCODING_LINEAR_UINT8:
+        raise RuntimeError(
+            "Training review raw subject masks require the exact linear uint8 "
+            "probability encoding."
+        )
     bundle_validation = validate_subject_mask_bundle_candidate(
         analysis_zarr=archive,
         bundle_id=mask_bundle_id,
