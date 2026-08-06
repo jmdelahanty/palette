@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -12,6 +12,14 @@ from typing import Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.zarr.detect_frame_decisions import (
+    FRAME_DECISION_NEGATIVE,
+    FRAME_REVIEW_CONTRACT_ATTR,
+    FRAME_REVIEW_CONTRACT_ID,
+    clear_detect_frame_decision,
+    load_detect_frame_decisions,
+    set_detect_frame_negative,
+)
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name, set_authoritative_run
 from fisheye.tune import detect_review as detect_review_mod
@@ -34,7 +42,19 @@ class DetectReviewSession:
     downsample_preserve_aspect: bool
     manual_score: float
     manual_class_id: int
+    frame_decision_codes: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=np.uint8)
+    )
+    frame_reason_codes: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=np.uint16)
+    )
     review_axis: str = "frame"
+
+    def __post_init__(self) -> None:
+        if self.frame_decision_codes.size == 0:
+            self.frame_decision_codes = np.zeros(self.total_frames, dtype=np.uint8)
+        if self.frame_reason_codes.size == 0:
+            self.frame_reason_codes = np.zeros(self.total_frames, dtype=np.uint16)
 
 
 def _coerce_ints(values: Optional[Sequence[object]]) -> Optional[np.ndarray]:
@@ -377,6 +397,12 @@ def resolve_review_context(
     downsample_preserve_aspect = bool(raw_attrs.get("downsample_preserve_aspect", False))
 
     payload, review_axis = _load_review_payload(refined_group, total_frames=total_frames)
+    refined_group.attrs[FRAME_REVIEW_CONTRACT_ATTR] = FRAME_REVIEW_CONTRACT_ID
+    frame_decisions = load_detect_frame_decisions(
+        root,
+        source_refined_detect_run=str(refined_run_name),
+        n_frames=total_frames,
+    )
     if review_axis not in {"frame", "frame_instances"}:
         raise RuntimeError(
             "Detection web review supports frame and frame_instances refined runs; "
@@ -419,6 +445,8 @@ def resolve_review_context(
         downsample_preserve_aspect=downsample_preserve_aspect,
         manual_score=float(manual_score),
         manual_class_id=int(manual_class_id),
+        frame_decision_codes=frame_decisions.decision_codes,
+        frame_reason_codes=frame_decisions.reason_codes,
         review_axis=review_axis,
     )
 
@@ -440,6 +468,9 @@ def review_session_summary(session: DetectReviewSession) -> dict[str, object]:
             "multi_instance_frames": int(np.count_nonzero(counts > 1)),
             "max_instances_per_frame": int(np.max(counts)) if counts.size else 0,
             "manual_edits": int(np.sum(manual_flags)),
+            "explicit_negative_frames": int(
+                np.sum(session.frame_decision_codes == FRAME_DECISION_NEGATIVE)
+            ),
             "width": session.width,
             "height": session.height,
         }
@@ -454,6 +485,9 @@ def review_session_summary(session: DetectReviewSession) -> dict[str, object]:
         "present_frames": int(np.sum(status_labels == "present")),
         "missing_or_filtered_frames": int(np.sum(status_labels != "present")),
         "manual_edits": int(np.sum(manual_flags)),
+        "explicit_negative_frames": int(
+            np.sum(session.frame_decision_codes == FRAME_DECISION_NEGATIVE)
+        ),
         "width": session.width,
         "height": session.height,
     }
@@ -474,6 +508,21 @@ def _row_status(payload: Mapping[str, object], row_idx: int) -> dict[str, object
             np.asarray(payload["confidence_scores"], dtype=np.float32).reshape(-1)[row_idx]
         ),
         "class_id": int(np.asarray(payload["class_ids"], dtype=np.int32).reshape(-1)[row_idx]),
+    }
+
+
+def _frame_decision_payload(
+    session: DetectReviewSession,
+    *,
+    frame_idx: int,
+) -> dict[str, str]:
+    decision_code = int(session.frame_decision_codes[int(frame_idx)])
+    reason_code = int(session.frame_reason_codes[int(frame_idx)])
+    return {
+        "state": {0: "unreviewed", 1: "negative"}.get(decision_code, "invalid"),
+        "reason": {0: "none", 1: "subject_outside_dish"}.get(
+            reason_code, "invalid"
+        ),
     }
 
 
@@ -504,6 +553,7 @@ def _multi_frame_payload(session: DetectReviewSession, *, position: int) -> dict
         "confidence_score": None,
         "class_id": -1,
     }
+    frame_decision = _frame_decision_payload(session, frame_idx=frame_idx)
     return {
         "position": int(position),
         "total": int(session.review_rows.size),
@@ -516,6 +566,8 @@ def _multi_frame_payload(session: DetectReviewSession, *, position: int) -> dict
         "bbox_norm_coordinate_space": "source_image_xywhn",
         "bbox_display_transform": _bbox_display_transform(session),
         "status": first.get("status") if first else empty_status,
+        "frame_label_state": frame_decision["state"],
+        "frame_label_reason": frame_decision["reason"],
         "frame_image": _image_payload(np.asarray(session.images[frame_idx])),
     }
 
@@ -539,6 +591,7 @@ def load_frame_payload(session: DetectReviewSession, position: int) -> Mapping[s
     )
     image = np.asarray(session.images[frame_idx])
 
+    frame_decision = _frame_decision_payload(session, frame_idx=frame_idx)
     return {
         "position": int(position),
         "total": int(session.review_rows.size),
@@ -561,6 +614,8 @@ def load_frame_payload(session: DetectReviewSession, position: int) -> Mapping[s
         "detection_count": 1 if bbox is not None else 0,
         "review_axis": session.review_axis,
         "status": _row_status(session.payload, row_idx),
+        "frame_label_state": frame_decision["state"],
+        "frame_label_reason": frame_decision["reason"],
         "frame_image": _image_payload(image),
     }
 
@@ -674,6 +729,11 @@ def apply_detection_collection(
     frame_indices = np.asarray(updated["frame_indices"], dtype=np.int32).reshape(-1)
     instance_keys = np.asarray(updated["instance_keys"], dtype=np.uint64).reshape(-1)
     current_rows = np.flatnonzero(frame_indices == frame_idx).astype(np.int32, copy=False)
+    if not requested and current_rows.size == 0:
+        raise ValueError(
+            "An empty unresolved frame is not saved by an empty detection collection. "
+            "Use Mark negative to record an explicit reviewed-negative frame."
+        )
     current_by_key = {int(instance_keys[row]): int(row) for row in current_rows.tolist()}
     foreign_keys = sorted(
         key for key in requested_keys if key is not None and int(key) not in current_by_key
@@ -819,6 +879,15 @@ def apply_detection_collection(
         },
     )
     _reload_payload(session)
+    if requested:
+        decisions = clear_detect_frame_decision(
+            session.root,
+            source_refined_detect_run=session.refined_run_name,
+            n_frames=session.total_frames,
+            frame_index=frame_idx,
+        )
+        session.frame_decision_codes = decisions.decision_codes
+        session.frame_reason_codes = decisions.reason_codes
     frame_payload = _multi_frame_payload(session, position=position)
     return {
         "action": "replace_detection_collection",
@@ -829,6 +898,89 @@ def apply_detection_collection(
         "detection_count": frame_payload["detection_count"],
         "detections": frame_payload["detections"],
         "status": frame_payload["status"],
+        "frame_label_state": frame_payload["frame_label_state"],
+        "frame_label_reason": frame_payload["frame_label_reason"],
+    }
+
+
+def apply_negative_frame_decision(
+    session: DetectReviewSession,
+    *,
+    position: int,
+    reason: str = "subject_outside_dish",
+) -> dict[str, object]:
+    """Mark one already-empty sparse frame as an explicit negative example."""
+
+    if session.review_axis != "frame_instances":
+        raise ValueError(
+            "Explicit negative-frame decisions require the sparse frame_instances contract."
+        )
+    if session.review_rows.size == 0:
+        raise IndexError("No frames are currently loaded for review.")
+    if position < 0 or position >= int(session.review_rows.size):
+        raise IndexError("Review position is out of range.")
+    frame_idx = int(session.review_rows[position])
+    frame_indices = np.asarray(session.payload["frame_indices"], dtype=np.int32).reshape(-1)
+    if np.any(frame_indices == frame_idx):
+        raise ValueError(
+            "Mark negative is only valid when the frame has no retained detections. "
+            "Remove and save false-positive detections first."
+        )
+    decisions = set_detect_frame_negative(
+        session.root,
+        source_refined_detect_run=session.refined_run_name,
+        n_frames=session.total_frames,
+        frame_index=frame_idx,
+        reason=reason,
+    )
+    session.frame_decision_codes = decisions.decision_codes
+    session.frame_reason_codes = decisions.reason_codes
+    frame_payload = _multi_frame_payload(session, position=position)
+    return {
+        "action": "mark_negative_frame",
+        "frame_idx": frame_idx,
+        "detection_count": 0,
+        "frame_label_state": frame_payload["frame_label_state"],
+        "frame_label_reason": frame_payload["frame_label_reason"],
+    }
+
+
+def detect_frame_review_completion_guard(session: DetectReviewSession) -> dict[str, object]:
+    """Require each task frame to be positive or explicitly reviewed negative."""
+
+    target_frames = np.asarray(session.review_rows, dtype=np.int32).reshape(-1)
+    instance_frames = np.asarray(session.payload["frame_indices"], dtype=np.int32).reshape(-1)
+    present = set(int(frame) for frame in instance_frames.tolist())
+    negative = set(
+        int(frame)
+        for frame in np.flatnonzero(
+            session.frame_decision_codes == FRAME_DECISION_NEGATIVE
+        ).tolist()
+    )
+    conflicts = sorted(
+        int(frame)
+        for frame in target_frames.tolist()
+        if int(frame) in present and int(frame) in negative
+    )
+    unresolved = sorted(
+        int(frame)
+        for frame in target_frames.tolist()
+        if int(frame) not in present and int(frame) not in negative
+    )
+    return {
+        "ready": not unresolved and not conflicts,
+        "target_frame_count": int(target_frames.size),
+        "positive_frame_count": int(
+            sum(int(frame) in present for frame in target_frames.tolist())
+        ),
+        "negative_frame_count": int(
+            sum(int(frame) in negative for frame in target_frames.tolist())
+        ),
+        "unresolved_frame_count": len(unresolved),
+        "unresolved_frames": unresolved[:50],
+        "conflicting_frame_count": len(conflicts),
+        "conflicting_frames": conflicts[:50],
+        "source_refined_detect_run": session.refined_run_name,
     }
 
 

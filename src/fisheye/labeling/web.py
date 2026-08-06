@@ -316,6 +316,7 @@ from .web_runtimes import (
     _detect_analysis_promotion_from_scope,
     _detect_bbox_size_hint_payload,
     _detect_runtime_state,
+    _detect_training_completion_guard,
     _get_detect_runtime,
     _get_keypoint_runtime,
     _get_subject_mask_runtime,
@@ -1977,6 +1978,70 @@ def _make_handler(state: ServerState):
                     self._write_json(_format_error("nav_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
                 self._write_json({"ok": True, "state": _detect_runtime_state(runtime, backend_module)})
+                return True
+
+            if detect_path == "/mark-negative":
+                if self._reject_browser_mutation_preflight(session, body, runtime):
+                    return True
+                try:
+                    before = dict(backend_module.load_frame_payload(runtime.review_session, position=runtime.position))
+                    result = backend_module.apply_negative_frame_decision(
+                        runtime.review_session,
+                        position=runtime.position,
+                        reason=str(body.get("reason") or "subject_outside_dish"),
+                    )
+                    mutation_event = state.store.record_event(
+                        task_id=runtime.task_id,
+                        recording_id=runtime.recording_id,
+                        user=user,
+                        event_type="mark_detect_frame_negative",
+                        target={
+                            "frame_idx": result.get("frame_idx"),
+                            "refined_run": str(runtime.review_session.refined_run_name),
+                        },
+                        before={
+                            "frame_idx": before.get("frame_idx"),
+                            "detection_count": before.get("detection_count"),
+                            "frame_label_state": before.get("frame_label_state"),
+                            "frame_label_reason": before.get("frame_label_reason"),
+                        },
+                        after=dict(result),
+                    )
+                    _refresh_registry_for_scope(
+                        store=state.store,
+                        task_id=runtime.task_id,
+                        recording_id=runtime.recording_id,
+                        user=user,
+                        workflow_kind="detect_training",
+                        scope=_session_scope(session),
+                        zarr_path=str(runtime.review_session.zarr_path),
+                        dataset_id=str(session.get("dataset_id") or "") or None,
+                        zarr_use=str(session.get("zarr_use") or "") or None,
+                    )
+                    if bool(body.get("advance", True)):
+                        total = int(runtime.review_session.review_rows.shape[0])
+                        if total <= 0:
+                            runtime.position = 0
+                        elif runtime.position < total - 1:
+                            runtime.position += 1
+                except Exception as exc:
+                    self._write_json(_format_error("negative_frame_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
+                    return True
+                self._write_json(
+                    _redact_labeler_runtime_payload(
+                        {
+                            "ok": True,
+                            "result": result,
+                            "mutation": _browser_mutation_response_metadata(
+                                workflow_kind="detect_training",
+                                session=session,
+                                mutation_event=mutation_event,
+                                operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
+                            ),
+                            "state": _detect_runtime_state(runtime, backend_module),
+                        }
+                    )
+                )
                 return True
 
             if detect_path == "/save":
@@ -4109,6 +4174,49 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.CONFLICT,
                     )
                     return
+                if str(session.get("workflow_kind") or "") == "detect_training":
+                    try:
+                        runtime = _get_detect_runtime(state, session)
+                        detect_completion_guard = _detect_training_completion_guard(runtime)
+                    except Exception as exc:
+                        self._write_json(
+                            _format_error(
+                                "detect_frame_review_status_check_failed",
+                                details=_labeler_safe_error_details(exc),
+                                status=HTTPStatus.BAD_REQUEST,
+                                extra=_task_completion_failure_metadata(
+                                    user=user,
+                                    expected_user=expected_user or user,
+                                    task=task,
+                                    session=session,
+                                    requested_task_id=task_id,
+                                    error="detect_frame_review_status_check_failed",
+                                ),
+                            ),
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    if not bool(detect_completion_guard.get("ready")):
+                        self._write_json(
+                            _format_error(
+                                "detect_frame_review_pending",
+                                details="Every task frame must contain at least one detection or be explicitly marked negative before completion.",
+                                status=HTTPStatus.CONFLICT,
+                                extra={
+                                    **_task_completion_failure_metadata(
+                                        user=user,
+                                        expected_user=expected_user or user,
+                                        task=task,
+                                        session=session,
+                                        requested_task_id=task_id,
+                                        error="detect_frame_review_pending",
+                                    ),
+                                    "detect_frame_completion_guard": detect_completion_guard,
+                                },
+                            ),
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
                 if str(session.get("workflow_kind") or "") == "subject_mask_component":
                     try:
                         runtime = _get_subject_mask_runtime(state, session)
@@ -4403,6 +4511,49 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.CONFLICT,
                     )
                     return
+                if str(session.get("workflow_kind") or "") == "detect_training":
+                    try:
+                        runtime = _get_detect_runtime(state, session)
+                        detect_completion_guard = _detect_training_completion_guard(runtime)
+                    except Exception as exc:
+                        self._write_json(
+                            _format_error(
+                                "detect_frame_review_status_check_failed",
+                                details=_labeler_safe_error_details(exc),
+                                status=HTTPStatus.BAD_REQUEST,
+                                extra=_task_completion_failure_metadata(
+                                    user=user,
+                                    expected_user=user,
+                                    task=task,
+                                    session=session,
+                                    requested_task_id=str(task["task_id"]),
+                                    error="detect_frame_review_status_check_failed",
+                                ),
+                            ),
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    if not bool(detect_completion_guard.get("ready")):
+                        self._write_json(
+                            _format_error(
+                                "detect_frame_review_pending",
+                                details="Every task frame must contain at least one detection or be explicitly marked negative before completion.",
+                                status=HTTPStatus.CONFLICT,
+                                extra={
+                                    **_task_completion_failure_metadata(
+                                        user=user,
+                                        expected_user=user,
+                                        task=task,
+                                        session=session,
+                                        requested_task_id=str(task["task_id"]),
+                                        error="detect_frame_review_pending",
+                                    ),
+                                    "detect_frame_completion_guard": detect_completion_guard,
+                                },
+                            ),
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
                 if str(session.get("workflow_kind") or "") == "subject_mask_component":
                     try:
                         runtime = _get_subject_mask_runtime(state, session)
@@ -4483,6 +4634,7 @@ def _make_handler(state: ServerState):
                     "/keypoints/action",
                     "/keypoints/review-status",
                     "/detect/save",
+                    "/detect/mark-negative",
                     "/detect-analysis/save",
                     "/subject-mask/save",
                     "/subject-mask/apply",
@@ -5079,10 +5231,12 @@ BROWSER_WORKFLOW_CAPABILITIES: tuple[dict[str, object], ...] = (
             "training_zarr_write_mode": "direct",
             "save_method": "POST",
             "save_endpoint": "/api/sessions/{session_id}/detect/save",
+            "negative_frame_endpoint": "/api/sessions/{session_id}/detect/mark-negative",
             "payload_fields": ["detections", "advance", "target_token"],
             "required_fields": ["detections", "target_token"],
             "detection_identity": "instance_key_decimal_string_or_null_for_new",
             "save_semantics": "replace_server_selected_frame_detection_collection",
+            "negative_frame_semantics": "empty_frame_explicit_negative_bound_to_refined_run",
             "response_fields": ["ok", "result", "state"],
             "audit_event": "save_detect_bbox",
             "audit_provenance": dict(BROWSER_MUTATION_AUDIT_PROVENANCE),

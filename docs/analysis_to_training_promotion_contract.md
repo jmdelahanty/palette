@@ -232,11 +232,16 @@ identity updates the existing training row.
 Training rows should represent the current supervised truth, not the full edit
 history.
 
-Allowed per-row label states:
+Allowed per-frame label states:
 
-- `positive`: one valid bbox should be exported as a labeled detection example.
+- `positive`: one or more valid bboxes are exported with the image.
 - `negative`: no valid bbox remains; this is an explicit negative frame.
 - `inactive`: retained for audit but excluded from future exports.
+
+For sparse refined-detection review, an already-empty frame's explicit label is
+stored in the versioned sibling surface defined by
+`docs/detect_frame_decision_storage_contract_v1.md`; it is not represented by a
+fake row in `refined_detect_runs/<run>/instances`.
 
 Policy:
 
@@ -319,18 +324,19 @@ provided.
 
 ## Negative Examples
 
-Explicit negative rows are allowed in the per-recording training Zarr, but the
-unified/exported training artifact decides whether to include them.
+The sparse refined-instance table does not contain negative rows. Explicit
+negative frames live in the bound `detect_frame_decision_runs` surface. The
+unified exporter includes them only after the review scope is complete.
 
 For YOLO detection export:
 
 - `positive` rows produce normal bbox labels.
-- `negative` rows may produce image-only samples with empty labels if the export
-  configuration includes negatives.
+- `negative` frames produce image-only samples with empty labels.
 - `inactive` rows are ignored.
 
-This keeps manual curation flexible while letting each model-training run choose
-its negative-sampling policy.
+The immutable export records positive/negative state for every sample. Later
+model-training runs may deterministically subsample those already identified
+negative frames without changing label authority.
 
 ## Registry Responsibilities
 
@@ -400,12 +406,11 @@ Still deferred:
   - Crimson saves refined detect edit in analysis Zarr.
   - Crimson invokes the same promotion backend for the edited frame.
   - Crimson displays promotion result.
-- Negative-row export policy for YOLO training artifacts. Positive promoted
-  rows are already available through the canonical refined instances surface;
-  explicit negative rows remain represented in the per-recording crop/support
-  surface until the exporter has an explicit negative-sampling policy. New
-  merged detection exports should still use canonical refined instances as the
-  positive label surface and should not forward-write crop-run label mirrors.
+- Region-level hard-negative boxes remain deferred. Frame-level reviewed
+  negatives and multiple positive detections per frame are implemented by the
+  frame-supervision export bridge. New merged detection exports continue to use
+  canonical refined instances as the positive label surface and do not
+  forward-write crop-run label mirrors.
 
 ## Automatic-On-Save Workflow
 

@@ -191,6 +191,7 @@
         "<p><b>Run</b> " + (state.refined_run || "") + "</p>" +
         "<p><b>Selected</b> " + (selectedIndex === null ? "none" : String(selectedIndex + 1)) + "</p>" +
         "<p><b>Status</b> " + (status.status_label || "") + " / " + (status.reason_label || "") + "</p>" +
+        "<p><b>Frame label</b> " + (payload.frame_label_state || "unreviewed") + " / " + (payload.frame_label_reason || "none") + "</p>" +
         "<p><b>Typical box</b> " + hintText + "</p>";
     }
 
@@ -253,6 +254,29 @@
         setStatus("Saved " + result.result.action + "." + mutationStatusSuffix(result));
       } catch (error) {
         showOperatorSupport(error, "session_request_failed");
+      }
+    }
+
+    async function markNegative() {
+      if (detections.length !== 0) {
+        setStatus("Remove and save retained detections before marking this frame negative.", true);
+        return;
+      }
+      try {
+        const result = await api("/mark-negative", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            reason: "subject_outside_dish",
+            advance: true,
+            target_token: payload?.state?.target_token
+          })
+        });
+        const markedFrame = result.result.frame_idx;
+        await loadCurrent();
+        setStatus("Marked frame " + markedFrame + " negative (subject outside dish)." + mutationStatusSuffix(result));
+      } catch (error) {
+        showOperatorSupport(error, "negative_frame_error");
       }
     }
 
@@ -327,6 +351,7 @@
       if (event.key === "n") { event.preventDefault(); nav(1); return; }
       if (event.key === "p") { event.preventDefault(); nav(-1); return; }
       if (event.key === "s") { event.preventDefault(); save(false); return; }
+      if (event.key === "x" || event.key === "X") { event.preventDefault(); markNegative(); return; }
       if (event.key === "t" || event.key === "T") { event.preventDefault(); placeTypicalBox(); return; }
       if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); clearSelectedBox(); return; }
       if (event.key === "f" || event.key === "F") { event.preventDefault(); viewport.fit(); return; }

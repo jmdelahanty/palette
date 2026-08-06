@@ -41,6 +41,15 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.shared.system_metadata import build_invocation_record
 from fisheye.shared.zarr_metadata import get_downsample_array_name, get_downsample_array_path
+from fisheye.training.detection_frame_supervision import (
+    DETECTION_TRAINING_SUPERVISION_GROUP,
+    LABEL_STATE_NEGATIVE,
+    LABEL_STATE_POSITIVE,
+    DetectionFrameSupervisionPlan,
+    build_detection_frame_supervision_plan,
+    validate_exported_frame_supervision,
+    write_exported_frame_supervision,
+)
 
 try:
     from rich.console import Console
@@ -100,6 +109,8 @@ class MergeSourceSpec:
     rgb_source_pixel_contract: Optional[str] = None
     gray_source_pixel_range: Optional[str] = None
     rgb_source_pixel_range: Optional[str] = None
+    instance_count: int = 0
+    supervision_plan: Optional[DetectionFrameSupervisionPlan] = None
 
 
 @dataclass
@@ -115,6 +126,7 @@ class MergeResult:
     source_specs: List[MergeSourceSpec]
     downsample_formats: List[str]
     training_input_format: str
+    total_instances: int = 0
 
 
 _utc_now = utc_now
@@ -599,11 +611,11 @@ def validate_merged_training_zarr(
     raw = root["raw_video"]
     refined_parent = root["refined_detect_runs"]
 
+    training_export = root.attrs.get("training_export")
+    training_export = training_export if isinstance(training_export, dict) else {}
     train_input_format = _normalize_input_format(expected_input_format)
     if train_input_format is None:
-        training_export = root.attrs.get("training_export")
-        if isinstance(training_export, dict):
-            train_input_format = _normalize_input_format(training_export.get("input_format"))
+        train_input_format = _normalize_input_format(training_export.get("input_format"))
 
     if train_input_format == "gray" and "images_ds" not in raw:
         errors.append("missing required array raw_video/images_ds for gray training input.")
@@ -643,7 +655,12 @@ def validate_merged_training_zarr(
 
     if bbox.ndim != 2 or int(bbox.shape[1]) != 4:
         errors.append(f"{bbox_path} must have shape (N, 4), got {tuple(int(v) for v in bbox.shape)}.")
-    total_samples = int(bbox.shape[0]) if bbox.ndim >= 1 else 0
+    total_instances = int(bbox.shape[0]) if bbox.ndim >= 1 else 0
+    sample_axis = str(training_export.get("sample_axis") or "instance").strip().lower()
+    if sample_axis == "frame":
+        total_samples = int(frame_counts.shape[0]) if frame_counts.ndim == 1 else 0
+    else:
+        total_samples = total_instances
 
     if frame_indices.ndim != 1:
         errors.append(f"{frame_idx_path} must be 1D, got ndim={frame_indices.ndim}.")
@@ -655,15 +672,15 @@ def validate_merged_training_zarr(
         errors.append(f"{source_detect_path} must be 1D, got ndim={source_detect_row_index.ndim}.")
     if frame_counts.ndim != 1:
         errors.append(f"{frame_counts_path} must be 1D, got ndim={frame_counts.ndim}.")
-    if frame_indices.ndim == 1 and frame_indices.shape[0] != total_samples:
-        errors.append(f"{frame_idx_path} length mismatch ({frame_indices.shape[0]} != {total_samples}).")
+    if frame_indices.ndim == 1 and frame_indices.shape[0] != total_instances:
+        errors.append(f"{frame_idx_path} length mismatch ({frame_indices.shape[0]} != {total_instances}).")
     for path, arr in (
         (source_kind_path, source_kind_codes),
         (manual_flags_path, manual_edit_flags),
         (source_detect_path, source_detect_row_index),
     ):
-        if arr.ndim == 1 and arr.shape[0] != total_samples:
-            errors.append(f"{path} length mismatch ({arr.shape[0]} != {total_samples}).")
+        if arr.ndim == 1 and arr.shape[0] != total_instances:
+            errors.append(f"{path} length mismatch ({arr.shape[0]} != {total_instances}).")
 
     if frame_indices.ndim == 1 and not np.issubdtype(frame_indices.dtype, np.integer):
         errors.append(f"{frame_idx_path} must be integer dtype, got {frame_indices.dtype}.")
@@ -673,11 +690,15 @@ def validate_merged_training_zarr(
         errors.append(f"{source_detect_path} must be integer dtype, got {source_detect_row_index.dtype}.")
     if manual_edit_flags.ndim == 1 and not np.issubdtype(manual_edit_flags.dtype, np.bool_):
         errors.append(f"{manual_flags_path} must be bool dtype, got {manual_edit_flags.dtype}.")
-    if frame_indices.ndim == 1 and frame_indices.shape[0] == total_samples:
-        expected_local = np.arange(total_samples, dtype=np.int64)
+    if frame_indices.ndim == 1 and frame_indices.shape[0] == total_instances:
         frame_indices_i64 = frame_indices.astype(np.int64, copy=False)
-        if not np.array_equal(frame_indices_i64, expected_local):
-            errors.append(f"{frame_idx_path} must be local 0..N-1 indexing.")
+        if frame_indices_i64.size and (
+            int(frame_indices_i64.min()) < 0
+            or int(frame_indices_i64.max()) >= total_samples
+        ):
+            errors.append(f"{frame_idx_path} contains indices outside the frame sample axis.")
+        if frame_indices_i64.size > 1 and np.any(np.diff(frame_indices_i64) < 0):
+            errors.append(f"{frame_idx_path} must be ordered by nondecreasing frame index.")
     if source_kind_codes.ndim == 1 and source_kind_codes.size > 0:
         source_codes = np.unique(source_kind_codes.astype(np.int64, copy=False))
         valid_codes = {int(value) for value in REFINED_SOURCE_KIND_CODE_MAP.values()}
@@ -691,11 +712,46 @@ def validate_merged_training_zarr(
                 f"{source_kind_path} contains {interpolated_count} interpolated rows; "
                 "new merged exports must be interpolation-free."
             )
-    if frame_counts.ndim == 1 and int(frame_counts.shape[0]) != total_samples:
-        errors.append(f"{frame_counts_path} length must equal merged frame count ({frame_counts.shape[0]} != {total_samples}).")
-    if frame_counts.ndim == 1 and frame_counts.shape[0] == total_samples:
-        if not np.all(frame_counts.astype(np.int64, copy=False) == 1):
-            errors.append(f"{frame_counts_path} must contain exactly one instance per merged training frame.")
+    if frame_counts.ndim == 1 and int(np.sum(frame_counts, dtype=np.int64)) != total_instances:
+        errors.append(
+            f"{frame_counts_path} must sum to instance count "
+            f"({int(np.sum(frame_counts, dtype=np.int64))} != {total_instances})."
+        )
+    if (
+        frame_counts.ndim == 1
+        and frame_indices.ndim == 1
+        and (
+            frame_indices.size == 0
+            or (
+                int(frame_indices.min()) >= 0
+                and int(frame_indices.max()) < int(frame_counts.shape[0])
+            )
+        )
+    ):
+        observed_counts = np.bincount(
+            frame_indices.astype(np.int64, copy=False),
+            minlength=int(frame_counts.shape[0]),
+        ).astype(np.int64, copy=False)
+        if not np.array_equal(
+            observed_counts, frame_counts.astype(np.int64, copy=False)
+        ):
+            errors.append(f"{frame_counts_path} does not exactly index {frame_idx_path}.")
+
+    if sample_axis == "frame":
+        if DETECTION_TRAINING_SUPERVISION_GROUP not in root:
+            errors.append(
+                f"missing required group {DETECTION_TRAINING_SUPERVISION_GROUP}."
+            )
+        elif frame_counts.ndim == 1:
+            try:
+                validate_exported_frame_supervision(
+                    root[DETECTION_TRAINING_SUPERVISION_GROUP],
+                    frame_counts=frame_counts,
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+    elif sample_axis != "instance":
+        errors.append(f"unsupported training sample_axis {sample_axis!r}.")
 
     if expected_total_samples is not None and int(expected_total_samples) != total_samples:
         errors.append(f"total sample mismatch ({total_samples} != expected {int(expected_total_samples)}).")
@@ -800,6 +856,7 @@ def validate_merged_training_zarr(
             errors.append(f"{src_frame_idx_path} must be integer dtype.")
 
         optional_source_vectors = (
+            ("source_index/source_instance_dataset_idx", np.integer, True),
             ("source_index/source_roi_idx", np.integer, True),
             ("source_index/source_refined_row_ids", np.integer, False),
             ("source_index/source_detect_row_index", np.integer, False),
@@ -808,8 +865,11 @@ def validate_merged_training_zarr(
             if opt_path not in root:
                 continue
             opt_arr = np.asarray(root[opt_path][:])
-            if opt_arr.ndim != 1 or opt_arr.shape[0] != total_samples:
-                errors.append(f"{opt_path} must be 1D length N ({total_samples}), got {opt_arr.shape}.")
+            if opt_arr.ndim != 1 or opt_arr.shape[0] != total_instances:
+                errors.append(
+                    f"{opt_path} must be 1D length N ({total_instances}), "
+                    f"got {opt_arr.shape}."
+                )
                 continue
             if not np.issubdtype(opt_arr.dtype, dtype_kind):
                 errors.append(f"{opt_path} must be integer dtype, got {opt_arr.dtype}.")
@@ -827,6 +887,8 @@ def validate_merged_training_zarr(
         "instances_path": instances_path,
         "training_input_format": train_input_format,
         "total_samples": int(total_samples),
+        "total_instances": int(total_instances),
+        "sample_axis": sample_axis,
         "split_counts": {
             "train": int(train_idx.shape[0]),
             "val": int(val_idx.shape[0]),
@@ -1323,10 +1385,28 @@ def _discover_merge_sources(
         bbox = root[dataset.bbox_array_path]
         if len(bbox.shape) != 2 or int(bbox.shape[1]) != 4:
             raise ValueError(f"{source_zarr}: bbox array '{dataset.bbox_array_path}' must have shape (N, 4).")
-        sample_count = int(bbox.shape[0])
+        instance_count = int(bbox.shape[0])
 
         frame_indices_path = _resolve_frame_indices_path(root, dataset)
         detection_source_path = _resolve_detection_source_path(root, dataset)
+
+        image_frame_counts = []
+        if has_gray:
+            image_frame_counts.append(int(raw["images_ds"].shape[0]))
+        if has_rgb:
+            image_frame_counts.append(int(raw["images_ds_rgb"].shape[0]))
+        if not image_frame_counts or len(set(image_frame_counts)) != 1:
+            raise ValueError(
+                f"{source_zarr}: gray/RGB image axes must resolve to one frame count; "
+                f"observed {image_frame_counts}."
+            )
+        supervision_plan = build_detection_frame_supervision_plan(
+            root,
+            bbox_path=dataset.bbox_array_path,
+            frame_indices_path=frame_indices_path,
+            n_frames=image_frame_counts[0],
+        )
+        sample_count = supervision_plan.frame_count
 
         dataset_gray_shape = tuple(int(dim) for dim in raw["images_ds"].shape[1:]) if has_gray else None
         dataset_rgb_shape = tuple(int(dim) for dim in raw["images_ds_rgb"].shape[1:]) if has_rgb else None
@@ -1457,6 +1537,8 @@ def _discover_merge_sources(
                 detection_source_path=detection_source_path,
                 detection_source_type=dataset.detection_source_type,
                 sample_count=sample_count,
+                instance_count=instance_count,
+                supervision_plan=supervision_plan,
                 has_gray=has_gray,
                 has_rgb=has_rgb,
                 gray_shape=dataset_gray_shape,
@@ -1491,6 +1573,26 @@ def _discover_merge_sources(
         "fps_values": fps_values,
     }
     return specs, layout
+
+
+def _supervision_plans_equal(
+    left: DetectionFrameSupervisionPlan,
+    right: DetectionFrameSupervisionPlan,
+) -> bool:
+    return (
+        left.source_decision_run_path == right.source_decision_run_path
+        and left.source_decision_digest == right.source_decision_digest
+        and np.array_equal(left.source_frame_indices, right.source_frame_indices)
+        and np.array_equal(left.label_state_codes, right.label_state_codes)
+        and np.array_equal(left.reason_codes, right.reason_codes)
+        and np.array_equal(
+            left.source_instance_row_indices, right.source_instance_row_indices
+        )
+        and np.array_equal(
+            left.instance_output_frame_indices,
+            right.instance_output_frame_indices,
+        )
+    )
 
 
 def _ensure_writable_destination(path: Path, *, overwrite: bool) -> None:
@@ -1533,6 +1635,7 @@ def _export_merged(
         required_pixel_contract_name=required_pixel_contract_name,
     )
     total_samples = int(sum(spec.sample_count for spec in source_specs))
+    total_instances = int(sum(spec.instance_count for spec in source_specs))
 
     _ensure_writable_destination(out_zarr, overwrite=overwrite)
     out_root = zarr.open_group(str(out_zarr), mode="w")
@@ -1545,49 +1648,60 @@ def _export_merged(
     refined_run = refined_parent.require_group(run_name)
     mark_run_started(refined_run, run_name=run_name, stage="refined_detect")
 
-    vector_chunks = (max(1, min(8192, total_samples)),)
+    frame_vector_chunks = (max(1, min(8192, total_samples)),)
+    instance_vector_chunks = (max(1, min(8192, total_instances)),)
 
-    merged_bbox_norm = np.empty((total_samples, 4), dtype=np.float32)
-    merged_source_kind_labels = np.empty((total_samples,), dtype=object)
-    merged_reason_labels = np.empty((total_samples,), dtype=object)
-    merged_manual_edit_flags = np.zeros((total_samples,), dtype=bool)
-    merged_source_detect_row_index = np.full((total_samples,), -1, dtype=np.int32)
+    merged_bbox_norm = np.empty((total_instances, 4), dtype=np.float32)
+    merged_source_kind_labels = np.empty((total_instances,), dtype=object)
+    merged_reason_labels = np.empty((total_instances,), dtype=object)
+    merged_manual_edit_flags = np.zeros((total_instances,), dtype=bool)
+    merged_source_detect_row_index = np.full((total_instances,), -1, dtype=np.int32)
+    merged_instance_frame_indices = np.empty((total_instances,), dtype=np.int32)
     merged_confidence_scores: Optional[np.ndarray] = None
     merged_class_ids: Optional[np.ndarray] = None
+    merged_label_state_codes = np.empty((total_samples,), dtype=np.uint8)
+    merged_frame_reason_codes = np.empty((total_samples,), dtype=np.uint16)
 
     src_dataset_idx_dest = source_index_group.require_array(
         "source_dataset_idx",
         shape=(total_samples,),
         dtype=np.int32,
-        chunks=vector_chunks,
+        chunks=frame_vector_chunks,
         overwrite=True,
     )
     src_frame_idx_dest = source_index_group.require_array(
         "source_frame_idx",
         shape=(total_samples,),
         dtype=np.int64,
-        chunks=vector_chunks,
+        chunks=frame_vector_chunks,
+        overwrite=True,
+    )
+    src_instance_dataset_idx_dest = source_index_group.require_array(
+        "source_instance_dataset_idx",
+        shape=(total_instances,),
+        dtype=np.int32,
+        chunks=instance_vector_chunks,
         overwrite=True,
     )
     src_roi_idx_dest = source_index_group.require_array(
         "source_roi_idx",
-        shape=(total_samples,),
+        shape=(total_instances,),
         dtype=np.int64,
-        chunks=vector_chunks,
+        chunks=instance_vector_chunks,
         overwrite=True,
     )
     src_refined_row_ids_dest = source_index_group.require_array(
         "source_refined_row_ids",
-        shape=(total_samples,),
+        shape=(total_instances,),
         dtype=np.int64,
-        chunks=vector_chunks,
+        chunks=instance_vector_chunks,
         overwrite=True,
     )
     src_detect_row_index_dest = source_index_group.require_array(
         "source_detect_row_index",
-        shape=(total_samples,),
+        shape=(total_instances,),
         dtype=np.int32,
-        chunks=vector_chunks,
+        chunks=instance_vector_chunks,
         overwrite=True,
     )
 
@@ -1671,41 +1785,84 @@ def _export_merged(
         if copy_progress is not None and copy_task_id is not None:
             copy_progress.advance(copy_task_id, count)
 
-    offset = 0
+    frame_offset = 0
+    instance_offset = 0
     try:
         for spec in source_specs:
             if copy_progress is not None and copy_task_id is not None:
                 copy_progress.update(copy_task_id, description=f"Copying {spec.dataset_name}")
 
             root = open_zarr_group_direct(spec.source_zarr, mode="r")
-            bbox = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
-            local_total = int(bbox.shape[0])
+            plan = spec.supervision_plan
+            if plan is None:
+                raise RuntimeError(
+                    f"{spec.source_zarr}: missing detection frame-supervision plan."
+                )
+            bbox_all = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
+            source_image_axis = int(
+                root[
+                    "raw_video/images_ds"
+                    if spec.has_gray
+                    else "raw_video/images_ds_rgb"
+                ].shape[0]
+            )
+            current_plan = build_detection_frame_supervision_plan(
+                root,
+                bbox_path=spec.bbox_path,
+                frame_indices_path=spec.frame_indices_path,
+                n_frames=source_image_axis,
+            )
+            if not _supervision_plans_equal(plan, current_plan):
+                raise ValueError(
+                    f"{spec.source_zarr}: detection review changed after export planning; "
+                    "restart from a stable completed review."
+                )
+            local_instance_total = int(bbox_all.shape[0])
+            source_rows = plan.source_instance_row_indices
+            bbox = bbox_all[source_rows]
+            local_instance_count = int(source_rows.shape[0])
+            local_frame_count = int(plan.frame_count)
+            if local_instance_count != local_instance_total:
+                raise ValueError(
+                    f"{spec.source_zarr}: supervision plan omitted canonical positive instances."
+                )
             source_refined_row_ids, source_detect_row_index = _resolve_source_row_identity(
                 root,
                 bbox_path=spec.bbox_path,
                 frame_indices_path=spec.frame_indices_path,
-                total_rows=local_total,
+                total_rows=local_instance_total,
             )
+            source_refined_row_ids = source_refined_row_ids[source_rows]
+            source_detect_row_index = source_detect_row_index[source_rows]
 
             if spec.frame_indices_path:
-                src_frame_indices = np.asarray(root[spec.frame_indices_path][:], dtype=np.int64)
+                instance_source_frames = np.asarray(
+                    root[spec.frame_indices_path][:], dtype=np.int64
+                )
             else:
-                src_frame_indices = np.arange(local_total, dtype=np.int64)
-            if src_frame_indices.shape[0] != local_total:
+                instance_source_frames = np.arange(
+                    local_instance_total, dtype=np.int64
+                )
+            if instance_source_frames.shape[0] != local_instance_total:
                 raise ValueError(
                     f"{spec.source_zarr}: frame_indices length mismatch "
-                    f"({src_frame_indices.shape[0]} != {local_total})."
+                    f"({instance_source_frames.shape[0]} != {local_instance_total})."
                 )
+            instance_source_frames = instance_source_frames[source_rows]
+            supervised_source_frames = plan.source_frame_indices
 
             if spec.detection_source_path:
-                detection_source = np.asarray(root[spec.detection_source_path][:], dtype=np.int8)
-                if detection_source.shape[0] != local_total:
+                detection_source_all = np.asarray(
+                    root[spec.detection_source_path][:], dtype=np.int8
+                )
+                if detection_source_all.shape[0] != local_instance_total:
                     raise ValueError(
                         f"{spec.source_zarr}: detection_source length mismatch "
-                        f"({detection_source.shape[0]} != {local_total})."
+                        f"({detection_source_all.shape[0]} != {local_instance_total})."
                     )
+                detection_source = detection_source_all[source_rows]
             else:
-                detection_source = np.zeros(local_total, dtype=np.int8)
+                detection_source = np.zeros(local_instance_count, dtype=np.int8)
 
             source_group = _resolve_bbox_parent_group(root, spec.bbox_path)
             (
@@ -1720,15 +1877,15 @@ def _export_merged(
                 spec=spec,
                 source_group=source_group,
                 detection_source=detection_source,
-                row_count=local_total,
+                row_count=local_instance_count,
             )
 
             if need_gray and gray_dest is not None:
                 src_gray = root["raw_video/images_ds"]
                 frame_limit = int(src_gray.shape[0])
-                if src_frame_indices.size > 0:
-                    min_idx = int(np.min(src_frame_indices))
-                    max_idx = int(np.max(src_frame_indices))
+                if supervised_source_frames.size > 0:
+                    min_idx = int(np.min(supervised_source_frames))
+                    max_idx = int(np.max(supervised_source_frames))
                     if min_idx < 0 or max_idx >= frame_limit:
                         raise IndexError(
                             f"{spec.source_zarr}: frame_indices out of bounds for images_ds "
@@ -1736,9 +1893,9 @@ def _export_merged(
                         )
                 _copy_indexed_frames(
                     src_gray,
-                    src_frame_indices,
+                    supervised_source_frames,
                     gray_dest,
-                    offset,
+                    frame_offset,
                     batch_size=copy_batch_size,
                     on_copied=_advance_copy,
                 )
@@ -1746,9 +1903,9 @@ def _export_merged(
             if need_rgb and rgb_dest is not None:
                 src_rgb = root["raw_video/images_ds_rgb"]
                 frame_limit = int(src_rgb.shape[0])
-                if src_frame_indices.size > 0:
-                    min_idx = int(np.min(src_frame_indices))
-                    max_idx = int(np.max(src_frame_indices))
+                if supervised_source_frames.size > 0:
+                    min_idx = int(np.min(supervised_source_frames))
+                    max_idx = int(np.max(supervised_source_frames))
                     if min_idx < 0 or max_idx >= frame_limit:
                         raise IndexError(
                             f"{spec.source_zarr}: frame_indices out of bounds for images_ds_rgb "
@@ -1756,47 +1913,90 @@ def _export_merged(
                         )
                 _copy_indexed_frames(
                     src_rgb,
-                    src_frame_indices,
+                    supervised_source_frames,
                     rgb_dest,
-                    offset,
+                    frame_offset,
                     batch_size=copy_batch_size,
                     on_copied=_advance_copy,
                 )
 
-            merged_bbox_norm[offset : offset + local_total] = bbox
-            merged_source_kind_labels[offset : offset + local_total] = source_kind_labels
-            merged_reason_labels[offset : offset + local_total] = reason_labels
-            merged_manual_edit_flags[offset : offset + local_total] = manual_edit_flags
-            merged_source_detect_row_index[offset : offset + local_total] = source_detect_row_index
+            instance_slice = slice(
+                instance_offset, instance_offset + local_instance_count
+            )
+            frame_slice = slice(frame_offset, frame_offset + local_frame_count)
+            merged_bbox_norm[instance_slice] = bbox
+            merged_source_kind_labels[instance_slice] = source_kind_labels
+            merged_reason_labels[instance_slice] = reason_labels
+            merged_manual_edit_flags[instance_slice] = manual_edit_flags
+            merged_source_detect_row_index[instance_slice] = source_detect_row_index
+            merged_instance_frame_indices[instance_slice] = (
+                plan.instance_output_frame_indices + frame_offset
+            )
+            merged_label_state_codes[frame_slice] = (
+                plan.label_state_codes
+            )
+            merged_frame_reason_codes[frame_slice] = plan.reason_codes
             if confidence_scores is not None and merged_confidence_scores is None:
-                merged_confidence_scores = np.full((total_samples,), np.nan, dtype=np.float32)
+                merged_confidence_scores = np.full(
+                    (total_instances,), np.nan, dtype=np.float32
+                )
             if merged_confidence_scores is not None and confidence_scores is not None:
-                merged_confidence_scores[offset : offset + local_total] = confidence_scores
+                merged_confidence_scores[instance_slice] = confidence_scores
             if class_ids is not None and merged_class_ids is None:
-                merged_class_ids = np.full((total_samples,), -1, dtype=np.int32)
+                merged_class_ids = np.zeros((total_instances,), dtype=np.int32)
             if merged_class_ids is not None and class_ids is not None:
-                merged_class_ids[offset : offset + local_total] = class_ids
+                merged_class_ids[instance_slice] = class_ids
 
-            src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
-            src_frame_idx_dest[offset : offset + local_total] = src_frame_indices
-            src_roi_idx_dest[offset : offset + local_total] = np.arange(local_total, dtype=np.int64)
-            src_refined_row_ids_dest[offset : offset + local_total] = source_refined_row_ids
-            src_detect_row_index_dest[offset : offset + local_total] = source_detect_row_index
+            src_dataset_idx_dest[frame_slice] = int(spec.ordinal)
+            src_frame_idx_dest[frame_slice] = supervised_source_frames
+            src_instance_dataset_idx_dest[instance_slice] = int(spec.ordinal)
+            src_roi_idx_dest[instance_slice] = source_rows
+            src_refined_row_ids_dest[instance_slice] = source_refined_row_ids
+            src_detect_row_index_dest[instance_slice] = source_detect_row_index
 
             for key, count in local_source_kind_counts.items():
                 merged_source_kind_counts[key] = merged_source_kind_counts.get(key, 0) + int(count)
-            total_real += int(local_total)
+            total_real += int(local_instance_count)
 
-            offset += local_total
+            final_bbox = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
+            final_plan = build_detection_frame_supervision_plan(
+                root,
+                bbox_path=spec.bbox_path,
+                frame_indices_path=spec.frame_indices_path,
+                n_frames=source_image_axis,
+            )
+            if not np.array_equal(bbox_all, final_bbox) or not _supervision_plans_equal(
+                plan, final_plan
+            ):
+                raise ValueError(
+                    f"{spec.source_zarr}: detection review changed while images were "
+                    "being copied; the partial destination is not publishable."
+                )
+
+            frame_offset += local_frame_count
+            instance_offset += local_instance_count
     finally:
         if copy_progress is not None:
             copy_progress.stop()
+
+    if frame_offset != total_samples or instance_offset != total_instances:
+        raise RuntimeError(
+            "Merged detection export axis accounting mismatch: "
+            f"frames={frame_offset}/{total_samples}, "
+            f"instances={instance_offset}/{total_instances}."
+        )
+
+    write_exported_frame_supervision(
+        out_root,
+        label_state_codes=merged_label_state_codes,
+        reason_codes=merged_frame_reason_codes,
+    )
 
     write_curated_refined_detect_surfaces(
         out_root,
         zarr_path=out_zarr,
         refined_run_name=run_name,
-        instance_frame_indices=np.arange(total_samples, dtype=np.int32),
+        instance_frame_indices=merged_instance_frame_indices,
         instance_bbox_norm_coords=merged_bbox_norm,
         instance_source_kind_labels=merged_source_kind_labels,
         instance_reason_labels=merged_reason_labels,
@@ -1925,13 +2125,20 @@ def _export_merged(
     _write_string_array(source_index_group, "source_zarr_path", [str(spec.source_zarr) for spec in source_specs])
     source_index_group.attrs.update(
         {
-            "mapping_version": 1,
+            "mapping_version": 2,
             "source_count": int(len(source_specs)),
+            "frame_axis_arrays": ["source_dataset_idx", "source_frame_idx"],
+            "instance_axis_arrays": [
+                "source_instance_dataset_idx",
+                "source_roi_idx",
+                "source_refined_row_ids",
+                "source_detect_row_index",
+            ],
         }
     )
 
     training_export = {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "task": str(manifest.task),
         "set_id": manifest.set_id,
         "set_name": manifest.set_name,
@@ -1939,6 +2146,26 @@ def _export_merged(
         "source_type_requested": str(manifest.source_type),
         "source_type_resolved": "refined",
         "canonical_label_path": f"refined_detect_runs/{run_name}/instances",
+        "sample_axis": "frame",
+        "zero_instance_frame_semantics": "explicit_reviewed_negative",
+        "total_supervised_frames": int(total_samples),
+        "total_instances": int(total_instances),
+        "positive_frame_count": int(
+            np.count_nonzero(merged_label_state_codes == LABEL_STATE_POSITIVE)
+        ),
+        "negative_frame_count": int(
+            np.count_nonzero(merged_label_state_codes == LABEL_STATE_NEGATIVE)
+        ),
+        "source_frame_decisions": [
+            {
+                "dataset_id": spec.dataset_id,
+                "path": spec.supervision_plan.source_decision_run_path,
+                "digest": spec.supervision_plan.source_decision_digest,
+            }
+            for spec in source_specs
+            if spec.supervision_plan is not None
+            and spec.supervision_plan.source_decision_run_path is not None
+        ],
         "interpolation_policy": "forbidden_for_merged_training_export",
         "input_format": "both" if (need_gray and need_rgb) else train_input_format,
         "include_rgb": bool(need_rgb),
@@ -2006,6 +2233,7 @@ def _export_merged(
     return MergeResult(
         run_name=run_name,
         total_samples=total_samples,
+        total_instances=total_instances,
         total_real=total_real,
         total_interpolated=total_interpolated,
         source_kind_counts=merged_source_kind_counts,
@@ -2035,6 +2263,11 @@ def _build_merged_manifest_payload(
     test_ratio: float,
     seed: int,
 ) -> Dict[str, Any]:
+    total_instances = int(
+        merge_result.total_instances
+        if merge_result.total_instances > 0 or merge_result.total_real == 0
+        else merge_result.total_real
+    )
     def _clean_text(value: Any) -> Optional[str]:
         if value is None:
             return None
@@ -2099,6 +2332,17 @@ def _build_merged_manifest_payload(
                 "dataset_id": spec.dataset_id,
                 "zarr_path": str(spec.source_zarr),
                 "sample_count": int(spec.sample_count),
+                "instance_count": int(spec.instance_count),
+                "positive_frame_count": (
+                    int(spec.supervision_plan.positive_frame_count)
+                    if spec.supervision_plan is not None
+                    else int(spec.sample_count)
+                ),
+                "negative_frame_count": (
+                    int(spec.supervision_plan.negative_frame_count)
+                    if spec.supervision_plan is not None
+                    else 0
+                ),
                 "gray_pixel_contract_name": spec.gray_pixel_contract_name,
                 "rgb_pixel_contract_name": spec.rgb_pixel_contract_name,
                 "gray_decode_backend": spec.gray_decode_backend,
@@ -2149,7 +2393,7 @@ def _build_merged_manifest_payload(
         "input_format": merge_result.training_input_format,
         "pixel_contract_name": selected_pixel_contract_name,
         "images_ds_shape": spatial_shape,
-        "total_bboxes": int(merge_result.total_samples),
+        "total_bboxes": total_instances,
         "invalid_bboxes": 0,
         "invalid_bbox_sample": [],
         "source_kind_counts": merge_result.source_kind_counts,
@@ -2172,6 +2416,8 @@ def _build_merged_manifest_payload(
         "pixel_contract_names_by_format": raw_metadata["pixel_contract_names_by_format"],
         "decode_backends_by_format": raw_metadata["decode_backends_by_format"],
         "canonical_label_path": f"refined_detect_runs/{run_name}/instances",
+        "sample_axis": "frame",
+        "zero_instance_frame_semantics": "explicit_reviewed_negative",
         "interpolation_policy": "forbidden_for_merged_training_export",
         "split": {
             "train_ratio": float(train_ratio),
@@ -2181,6 +2427,7 @@ def _build_merged_manifest_payload(
         },
         "counts": {
             "total_samples": int(merge_result.total_samples),
+            "total_instances": total_instances,
             "real": int(merge_result.total_real),
             "interpolated": int(merge_result.total_interpolated),
             "train": int(merge_result.train_indices.shape[0]),
@@ -2277,6 +2524,11 @@ def _write_merge_summary(
         "decode_backends_by_format": raw_metadata["decode_backends_by_format"],
         "counts": {
             "total_samples": int(merge_result.total_samples),
+            "total_instances": int(
+                merge_result.total_instances
+                if merge_result.total_instances > 0 or merge_result.total_real == 0
+                else merge_result.total_real
+            ),
             "real": int(merge_result.total_real),
             "interpolated": int(merge_result.total_interpolated),
             "source_kind_counts": merge_result.source_kind_counts,
@@ -2296,6 +2548,11 @@ def _write_merge_summary(
                 "dataset_id": spec.dataset_id,
                 "zarr_path": str(spec.source_zarr),
                 "sample_count": int(spec.sample_count),
+                "instance_count": int(
+                    spec.instance_count
+                    if spec.instance_count > 0
+                    else spec.sample_count
+                ),
             }
             for spec in merge_result.source_specs
         ],
