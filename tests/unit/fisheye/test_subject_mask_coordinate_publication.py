@@ -973,6 +973,38 @@ def test_subject_mask_preflight_accepts_direct_scientific_model_rehash(
     assert context.inference_authority.record["model_artifact"] == artifact
 
 
+def test_subject_mask_publication_accepts_zero_unavailable_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _parent, run = _subject_fixture(monkeypatch, fresh=True)
+    run["available_channels"].data[1] = False
+    _prepare_context(root)
+
+    pending = _publish(root)
+
+    assert pending.interpretations["available_channels"].record[
+        "availability_semantics"
+    ] == (
+        "true_means_model_output_component_is_materialized_for_every_row;"
+        "false_means_authenticated_exact_zero_placeholder"
+    )
+
+
+def test_subject_mask_publication_rejects_nonzero_unavailable_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _parent, run = _subject_fixture(monkeypatch, fresh=True)
+    run["available_channels"].data[1] = False
+    run["mask_probs_roi"].data[0, 1, 0, 0] = np.uint8(1)
+    _prepare_context(root)
+
+    with pytest.raises(
+        SubjectMaskCoordinatePublicationError,
+        match="Unavailable subject-mask component channels",
+    ):
+        _publish(root)
+
+
 @pytest.mark.parametrize(
     ("attr_name", "replacement"),
     (

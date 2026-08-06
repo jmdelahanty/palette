@@ -2000,10 +2000,10 @@ def _validate_companion_metadata_and_values(
         available,
         label="available_channels",
     )
-    if not np.all(available):
+    if not np.any(available):
         _fail(
-            "Canonical raw subject-mask output must explicitly mark every persisted "
-            "model component channel available."
+            "Canonical raw subject-mask output must retain at least one available "
+            "model component channel."
         )
 
     h = int(context.continuous_frame.endpoint.height)
@@ -2035,6 +2035,15 @@ def _validate_companion_metadata_and_values(
                 label=name,
             )
             blocks[name] = block
+
+        unavailable = ~available
+        if np.any(unavailable):
+            for name, block in blocks.items():
+                if np.any(block[:, unavailable, ...] != 0):
+                    _fail(
+                        "Unavailable subject-mask component channels must contain "
+                        f"exact zero placeholders in {name}."
+                    )
 
         expected = _derive_thresholded_probability_metrics(
             blocks["mask_probs_roi"],
@@ -2202,7 +2211,8 @@ def _companion_interpretation_record(
         }
     if name == "available_channels":
         record["availability_semantics"] = (
-            "true_means_model_output_component_is_materialized_for_every_row"
+            "true_means_model_output_component_is_materialized_for_every_row;"
+            "false_means_authenticated_exact_zero_placeholder"
         )
     return record
 
