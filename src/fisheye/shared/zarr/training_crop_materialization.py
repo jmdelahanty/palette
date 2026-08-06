@@ -19,7 +19,13 @@ import numpy as np
 import zarr
 
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
-from fisheye.shared.zarr.crop_schema import CROP_GEOMETRY_SCHEMA_V1
+from fisheye.shared.zarr.crop_schema import (
+    CROP_GEOMETRY_SCHEMA_V1,
+    derive_crop_placement_geometry,
+)
+from fisheye.shared.zarr.detection_schema import (
+    derive_canonical_detection_geometry,
+)
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_sha256,
@@ -37,16 +43,24 @@ TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_ID = (
     "palette.training_crop_materialization_binding"
 )
 TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_VERSION = 1
+SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER = (
+    "sampled_training_images_full"
+)
+SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_ID = (
+    "palette.sampled_training_crop_geometry"
+)
+SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_VERSION = 1
 TRAINING_CROP_MATERIALIZATION_PROVIDERS = (
     "source_video_pynvvc_luma",
     "verified_flat_roi_cache",
+    SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER,
 )
 
-_IDENTITY_ARRAYS = (
+_BASE_IDENTITY_ARRAYS = (
     *CROP_GEOMETRY_SCHEMA_V1.binding_paths,
-    "source_crop_row_ids",
     "source_frame_indices",
 )
+_SOURCE_CROP_IDENTITY_ARRAYS = ("source_crop_row_ids",)
 _OPTIONAL_CLIPPED_IDENTITY_ARRAYS = (
     "source_clip_local_frame_indices",
     "source_clip_indices",
@@ -88,6 +102,240 @@ def _identity_digest(array: Any) -> str:
     return sha256_array(np.asarray(array[:]))
 
 
+def _exact_array(
+    run: zarr.Group,
+    name: str,
+    *,
+    dtype: np.dtype[Any],
+    shape: tuple[int, ...],
+) -> np.ndarray:
+    node = run[name]
+    if np.dtype(node.dtype) != dtype or tuple(int(v) for v in node.shape) != shape:
+        raise TrainingCropMaterializationError(
+            f"{name} must have exact {dtype} shape {shape}; "
+            f"got dtype={node.dtype}, shape={node.shape}."
+        )
+    return np.asarray(node[:], dtype=dtype)
+
+
+def validate_sampled_training_images_full_materialization(
+    run: zarr.Group,
+) -> None:
+    """Require the explicit local-frame/acquisition-frame sampled geometry.
+
+    Recording crop-v1 uses the complete acquisition frame axis. A sampled
+    training artifact instead owns a compact local image axis and maps it to
+    acquisition frames. This validator freezes that distinction rather than
+    weakening or falsely relabelling the recording-level crop contract.
+    """
+
+    raw_shape = run.attrs.get("source_images_shape")
+    if (
+        not isinstance(raw_shape, list)
+        or len(raw_shape) != 3
+        or any(type(value) is not int or value <= 0 for value in raw_shape)
+    ):
+        raise TrainingCropMaterializationError(
+            "sampled images_full provider requires source_images_shape=[F,H,W]."
+        )
+    frame_count, source_height, source_width = (int(v) for v in raw_shape)
+    if run.attrs.get("source_images_path") != "raw_video/images_full":
+        raise TrainingCropMaterializationError(
+            "sampled provider source_images_path must be raw_video/images_full."
+        )
+    if str(run.attrs.get("source_images_dtype") or "") not in {"uint8", "|u1"}:
+        raise TrainingCropMaterializationError(
+            "sampled images_full provider requires exact uint8 source pixels."
+        )
+    if int(run.attrs.get("height") or 0) != source_height or int(
+        run.attrs.get("width") or 0
+    ) != source_width:
+        raise TrainingCropMaterializationError(
+            "sampled provider source dimensions differ from source_images_shape."
+        )
+    source_refined_run = str(
+        run.attrs.get("source_refined_detect_run") or ""
+    ).strip()
+    if not source_refined_run or "/" in source_refined_run:
+        raise TrainingCropMaterializationError(
+            "sampled provider requires one safe source refined-detect run name."
+        )
+    if run.attrs.get("source_frame_decision_path") != (
+        f"detect_frame_decision_runs/{source_refined_run}"
+    ):
+        raise TrainingCropMaterializationError(
+            "source frame-decision path must bind the selected refined run."
+        )
+    row_count = int(run["roi_images"].shape[0])
+    keys = _exact_array(
+        run,
+        "instance_key",
+        dtype=np.dtype(np.uint64),
+        shape=(row_count,),
+    )
+    if np.unique(keys).shape[0] != row_count:
+        raise TrainingCropMaterializationError("instance_key values must be unique.")
+    local_frames = _exact_array(
+        run,
+        "frame_indices",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    acquisition_frames = _exact_array(
+        run,
+        "source_acquisition_frame_index",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    source_frames = _exact_array(
+        run,
+        "source_frame_indices",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    if not np.array_equal(source_frames, acquisition_frames):
+        raise TrainingCropMaterializationError(
+            "source_frame_indices must equal source acquisition-frame identity."
+        )
+    if row_count and (
+        int(local_frames.min()) < 0
+        or int(local_frames.max()) >= frame_count
+        or np.any(local_frames[1:] < local_frames[:-1])
+    ):
+        raise TrainingCropMaterializationError(
+            "frame_indices must be sorted within the sampled images_full axis."
+        )
+    if np.any(acquisition_frames < 0):
+        raise TrainingCropMaterializationError(
+            "source acquisition-frame identities must be nonnegative."
+        )
+    expected_offsets = np.zeros(frame_count + 1, dtype=np.int64)
+    expected_offsets[1:] = np.cumsum(
+        np.bincount(local_frames, minlength=frame_count), dtype=np.int64
+    )
+    offsets = _exact_array(
+        run,
+        "frame_row_offsets",
+        dtype=np.dtype(np.int64),
+        shape=(frame_count + 1,),
+    )
+    if not np.array_equal(offsets, expected_offsets):
+        raise TrainingCropMaterializationError(
+            "frame_row_offsets does not exactly index sampled local frames."
+        )
+
+    bbox_norm = _exact_array(
+        run,
+        "bbox_norm_coords",
+        dtype=np.dtype(np.float32),
+        shape=(row_count, 4),
+    )
+    if row_count:
+        half = np.float32(0.5)
+        if (
+            not np.isfinite(bbox_norm).all()
+            or np.any(bbox_norm[:, 2:] <= 0)
+            or np.any(bbox_norm[:, :2] - bbox_norm[:, 2:] * half < 0)
+            or np.any(bbox_norm[:, :2] + bbox_norm[:, 2:] * half > 1)
+        ):
+            raise TrainingCropMaterializationError(
+                "bbox_norm_coords must be finite, positive-area, and contained."
+            )
+    expected_bbox_img, expected_centers = derive_canonical_detection_geometry(
+        bbox_norm,
+        source_width=source_width,
+        source_height=source_height,
+    )
+    bbox_img = _exact_array(
+        run,
+        "bbox_img_xyxy",
+        dtype=np.dtype(np.float32),
+        shape=(row_count, 4),
+    )
+    centers = _exact_array(
+        run,
+        "centers_img_xy",
+        dtype=np.dtype(np.float32),
+        shape=(row_count, 2),
+    )
+    if not np.array_equal(bbox_img, expected_bbox_img) or not np.array_equal(
+        centers, expected_centers
+    ):
+        raise TrainingCropMaterializationError(
+            "Sampled crop pixel geometry is not the exact float32 bbox projection."
+        )
+    sizes = _exact_array(
+        run,
+        "roi_sizes_full",
+        dtype=np.dtype(np.int32),
+        shape=(row_count, 2),
+    )
+    if np.any(sizes <= 0):
+        raise TrainingCropMaterializationError("roi_sizes_full must be positive.")
+    expected_coordinates, expected_source_crop, expected_bbox_roi = (
+        derive_crop_placement_geometry(centers, bbox_img, sizes)
+    )
+    for name, expected, dtype in (
+        ("roi_coordinates_full", expected_coordinates, np.dtype(np.int32)),
+        ("source_crop_xywh", expected_source_crop, np.dtype(np.float32)),
+        ("bbox_roi_xyxy", expected_bbox_roi, np.dtype(np.float32)),
+    ):
+        observed = _exact_array(
+            run,
+            name,
+            dtype=dtype,
+            shape=tuple(int(v) for v in expected.shape),
+        )
+        if not np.array_equal(observed, expected):
+            raise TrainingCropMaterializationError(
+                f"{name} differs from the sampled crop placement rule."
+            )
+    roi_images = run["roi_images"]
+    if np.dtype(roi_images.dtype) != np.dtype(np.uint8) or len(roi_images.shape) != 3:
+        raise TrainingCropMaterializationError(
+            "roi_images must be one rank-3 uint8 crop payload."
+        )
+    roi_height, roi_width = (int(v) for v in roi_images.shape[1:])
+    if row_count and not np.array_equal(
+        sizes,
+        np.repeat(
+            np.asarray([[roi_width, roi_height]], dtype=np.int32),
+            row_count,
+            axis=0,
+        ),
+    ):
+        raise TrainingCropMaterializationError(
+            "roi_images extent must equal every persisted roi_sizes_full row."
+        )
+    _exact_array(
+        run,
+        "source_refined_row_ids",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    _exact_array(
+        run,
+        "source_row_signature",
+        dtype=np.dtype(np.uint8),
+        shape=(row_count, 32),
+    )
+    digest = str(run.attrs.get("source_frame_decision_digest") or "")
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise TrainingCropMaterializationError(
+            "source_frame_decision_digest must be one lowercase SHA-256."
+        )
+    if run.attrs.get("padding_mode") != "zero_outside_source_frame":
+        raise TrainingCropMaterializationError(
+            "sampled images_full crops require explicit zero padding semantics."
+        )
+    if run.attrs.get("pixel_verification") != (
+        "all_rows_byte_equal_to_source_window_v1"
+    ):
+        raise TrainingCropMaterializationError(
+            "sampled images_full publication requires all-row pixel verification."
+        )
+
+
 def build_training_crop_materialization_binding(
     run: zarr.Group,
 ) -> dict[str, Any]:
@@ -104,7 +352,14 @@ def build_training_crop_materialization_binding(
         raise TrainingCropMaterializationError(
             "Training crop materialization schema identity is missing or wrong."
         )
-    missing = [name for name in (*_IDENTITY_ARRAYS, "roi_images") if name not in run]
+    required_identity_arrays = (
+        _BASE_IDENTITY_ARRAYS
+        if provider == SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER
+        else (*_BASE_IDENTITY_ARRAYS, *_SOURCE_CROP_IDENTITY_ARRAYS)
+    )
+    missing = [
+        name for name in (*required_identity_arrays, "roi_images") if name not in run
+    ]
     if missing:
         raise TrainingCropMaterializationError(
             f"Training crop materialization is missing required arrays: {missing}."
@@ -115,10 +370,16 @@ def build_training_crop_materialization_binding(
         raise TrainingCropMaterializationError(
             "roi_images must be a rank-3 uint8 array."
         )
+    if provider == SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER:
+        validate_sampled_training_images_full_materialization(run)
     row_count = int(roi_images.shape[0])
     declarations: dict[str, dict[str, Any]] = {}
     identity_sha256: dict[str, str] = {}
-    for name in (*_IDENTITY_ARRAYS, *_OPTIONAL_CLIPPED_IDENTITY_ARRAYS):
+    for name in (
+        *_BASE_IDENTITY_ARRAYS,
+        *_SOURCE_CROP_IDENTITY_ARRAYS,
+        *_OPTIONAL_CLIPPED_IDENTITY_ARRAYS,
+    ):
         if name not in run:
             continue
         array = run[name]
@@ -143,6 +404,23 @@ def build_training_crop_materialization_binding(
             "payload_sha256": run.attrs.get("source_roi_cache_payload_sha256"),
             "verified": run.attrs.get("source_roi_cache_verified"),
             "runtime_dependency": run.attrs.get("source_roi_cache_independence"),
+        }
+    elif provider == SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER:
+        provider_evidence = {
+            "source_images_path": run.attrs.get("source_images_path"),
+            "source_images_dtype": run.attrs.get("source_images_dtype"),
+            "source_images_shape": run.attrs.get("source_images_shape"),
+            "source_refined_detect_run": run.attrs.get(
+                "source_refined_detect_run"
+            ),
+            "source_frame_decision_path": run.attrs.get(
+                "source_frame_decision_path"
+            ),
+            "source_frame_decision_digest": run.attrs.get(
+                "source_frame_decision_digest"
+            ),
+            "padding_mode": run.attrs.get("padding_mode"),
+            "pixel_verification": run.attrs.get("pixel_verification"),
         }
     else:
         provider_evidence = {
@@ -296,8 +574,12 @@ __all__ = [
     "TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_VERSION",
     "TRAINING_CROP_MATERIALIZATION_PROVIDERS",
     "TRAINING_CROP_MATERIALIZATION_SCHEMA_ID",
+    "SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER",
+    "SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_ID",
+    "SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_VERSION",
     "BoundTrainingCropMaterialization",
     "TrainingCropMaterializationError",
     "bind_training_crop_materialization",
     "build_training_crop_materialization_binding",
+    "validate_sampled_training_images_full_materialization",
 ]

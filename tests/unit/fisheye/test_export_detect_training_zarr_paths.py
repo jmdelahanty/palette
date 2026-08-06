@@ -110,6 +110,11 @@ def _write_detect_source_zarr(path: Path) -> None:
         data=np.array([200, -1, 202, 203], dtype=np.int32),
         chunks=(4,),
     )
+    instances.create_array(
+        "instance_key",
+        data=np.array([1000, 1001, 1002, 1003], dtype=np.uint64),
+        chunks=(4,),
+    )
 
 
 def _write_multi_instance_negative_source_zarr(path: Path) -> None:
@@ -176,6 +181,11 @@ def _write_multi_instance_negative_source_zarr(path: Path) -> None:
     instances.create_array(
         "class_ids",
         data=np.asarray([0, 1, 2], dtype=np.int32),
+        chunks=(3,),
+    )
+    instances.create_array(
+        "instance_key",
+        data=np.asarray([2000, 2001, 2002], dtype=np.uint64),
         chunks=(3,),
     )
     for frame_index in (1, 3):
@@ -298,6 +308,12 @@ def test_export_merged_detect_training_zarr_preserves_source_row_lineage(tmp_pat
         202,
         203,
     ]
+    assert np.asarray(instances["instance_key"][:], dtype=np.uint64).tolist() == [
+        1000,
+        1001,
+        1002,
+        1003,
+    ]
 
 
 def test_export_bridge_preserves_negative_and_multi_instance_frames(tmp_path: Path) -> None:
@@ -367,6 +383,11 @@ def test_export_bridge_preserves_negative_and_multi_instance_frames(tmp_path: Pa
     assert np.asarray(instances["frame_counts"][:]).tolist() == [1, 0, 2, 0]
     assert np.asarray(instances["frame_offsets"][:]).tolist() == [0, 1, 1, 3, 3]
     assert np.asarray(instances["frame_indices"][:]).tolist() == [0, 2, 2]
+    assert np.asarray(instances["instance_key"][:], dtype=np.uint64).tolist() == [
+        2000,
+        2001,
+        2002,
+    ]
     assert np.asarray(out["detection_training_supervision/label_state_codes"][:]).tolist() == [
         1,
         2,
@@ -445,6 +466,59 @@ def test_export_bridge_rejects_unresolved_review_frame(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unresolved frames"):
         _discover_merge_sources(manifest, need_gray=True, need_rgb=False)
+
+
+def test_export_bridge_rejects_missing_stable_instance_keys(tmp_path: Path) -> None:
+    source_zarr = tmp_path / "missing_keys.zarr"
+    out_zarr = tmp_path / "merged.zarr"
+    manifest_path = tmp_path / "detect.manifest.json"
+    _write_multi_instance_negative_source_zarr(source_zarr)
+    root = zarr.open_group(str(source_zarr), mode="a", use_consolidated=False)
+    del root["refined_detect_runs/reviewed/instances/instance_key"]
+    manifest_path.write_text("{}", encoding="utf-8")
+    manifest = TrainingManifest(
+        created_at_utc="2026-08-06T00:00:00+00:00",
+        task="detect",
+        source_type="refined",
+        input_format="gray",
+        imgsz=[8, 8],
+        datasets=[
+            DatasetManifest(
+                name="reviewed",
+                zarr_path=str(source_zarr),
+                dataset_id="reviewed",
+                session_uuid="reviewed",
+                crop_run=None,
+                bbox_array_path=(
+                    "refined_detect_runs/reviewed/instances/bbox_norm_coords"
+                ),
+                detection_source_type="refined",
+                detection_source_path="refined_detect_runs/reviewed/instances",
+                includes_interpolated=False,
+                input_format="gray",
+                images_ds_shape=[8, 8],
+                total_bboxes=3,
+                invalid_bboxes=0,
+            )
+        ],
+        provenance_policy="strict",
+    )
+
+    with pytest.raises(ValueError, match="requires source instance_key"):
+        _export_merged(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            out_zarr=out_zarr,
+            merged_dataset_id=None,
+            overwrite=True,
+            train_ratio=0.5,
+            val_ratio=0.5,
+            test_ratio=0.0,
+            seed=42,
+            include_rgb=False,
+            copy_batch_size=2,
+            invocation={},
+        )
 
 
 def test_export_merged_detect_training_zarr_rejects_interpolated_source_rows(tmp_path: Path) -> None:

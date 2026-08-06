@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from fisheye.shared.zarr.training_crop_materialization_publication import (
+    create_sampled_images_full_training_crop_artifact,
     create_training_crop_artifact,
     enrich_sampled_training_dataset,
 )
@@ -33,13 +34,28 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Required with --create-artifact; must contain sampled frames and detection review.",
     )
-    parser.add_argument("--source-zarr", type=Path, required=True)
-    parser.add_argument("--source-crop-run", required=True)
+    parser.add_argument("--source-zarr", type=Path)
+    parser.add_argument("--source-crop-run")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--scratch-root", type=Path, required=True)
     provider = parser.add_mutually_exclusive_group(required=True)
     provider.add_argument("--video-path", type=Path)
     provider.add_argument("--roi-cache-manifest", type=Path)
+    provider.add_argument(
+        "--sampled-images-full",
+        action="store_true",
+        help=(
+            "Materialize reviewed positive detections from the copied "
+            "raw_video/images_full surface. Requires --create-artifact and "
+            "--refined-detect-run."
+        ),
+    )
+    parser.add_argument(
+        "--roi-size",
+        type=int,
+        default=348,
+        help="Square sampled-images-full crop extent in pixels (default: 348).",
+    )
     parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
     parser.add_argument("--cache-copy-batch-rows", type=int, default=1024)
     parser.add_argument("--decode-mode", choices=("auto", "sequential", "indexed"), default="auto")
@@ -66,6 +82,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     if bool(args.create_artifact) != (args.base_training_zarr is not None):
         raise SystemExit(
             "--create-artifact and --base-training-zarr must be supplied together."
+        )
+    if args.sampled_images_full:
+        if not args.create_artifact:
+            raise SystemExit(
+                "--sampled-images-full requires --create-artifact and publishes a new whole artifact."
+            )
+        if args.refined_detect_run is None:
+            raise SystemExit(
+                "--sampled-images-full requires --refined-detect-run."
+            )
+        if args.source_zarr is not None or args.source_crop_run is not None:
+            raise SystemExit(
+                "--sampled-images-full derives directly from the base artifact; "
+                "do not pass --source-zarr or --source-crop-run."
+            )
+        if source_instance_keys is not None:
+            raise SystemExit(
+                "--sampled-images-full always materializes the complete reviewed positive rowset."
+            )
+        result = create_sampled_images_full_training_crop_artifact(
+            destination=args.destination,
+            base_training_zarr=args.base_training_zarr,
+            run_id=args.run_id,
+            refined_run_id=args.refined_detect_run,
+            scratch_root=args.scratch_root,
+            roi_size_wh=(int(args.roi_size), int(args.roi_size)),
+            copy_backend=args.copy_backend,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.source_zarr is None or args.source_crop_run is None:
+        raise SystemExit(
+            "Video/cache providers require --source-zarr and --source-crop-run."
         )
     publisher = (
         create_training_crop_artifact

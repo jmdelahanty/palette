@@ -18,13 +18,26 @@ from fisheye.shared.roi_pixel_contract import (
 )
 from fisheye.utils import regenerate_training_crops_pynvvc as mod
 from fisheye.shared.zarr.training_crop_materialization import (
+    SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER,
     TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE,
+    TrainingCropMaterializationError,
     bind_training_crop_materialization,
+    build_training_crop_materialization_binding,
 )
 from fisheye.shared.zarr.training_crop_materialization_publication import (
+    create_sampled_images_full_training_crop_artifact,
     create_training_crop_artifact,
     enrich_sampled_training_dataset,
     publish_training_crop_materialization,
+)
+from fisheye.shared.zarr.detect_frame_decisions import (
+    FRAME_REVIEW_CONTRACT_ATTR,
+    FRAME_REVIEW_CONTRACT_ID,
+    set_detect_frame_negative,
+)
+from fisheye.shared.zarr.crop_schema import derive_crop_placement_geometry
+from fisheye.shared.zarr.detection_schema import (
+    derive_canonical_detection_geometry,
 )
 from fisheye.shared.zarr.training_dataset_composition import (
     TRAINING_DATASET_COMPOSITION_ATTRIBUTE,
@@ -613,6 +626,254 @@ def test_materialize_training_crops_from_external_verified_flat_cache(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     (manifest_path.parent / manifest["array"]["bin_path"]).unlink()
     np.testing.assert_array_equal(target["roi_images"][:], pixels)
+
+
+def test_sampled_images_full_binding_requires_no_external_crop_row_ids(
+    tmp_path: Path,
+) -> None:
+    target_path = tmp_path / "sampled_training.zarr"
+    root = zarr.open_group(str(target_path), mode="a", use_consolidated=False)
+    root.attrs["zarr_purpose"] = "training"
+    run = root.require_group("crop_runs").create_group("sampled_images_full")
+    frames = np.asarray([0, 2, 2], dtype=np.int64)
+    acquisition_frames = np.asarray([10, 20, 20], dtype=np.int64)
+    boxes = np.asarray(
+        [
+            [0.25, 0.25, 0.25, 1 / 3],
+            [0.5, 0.5, 0.25, 1 / 3],
+            [0.75, 0.75, 0.25, 1 / 3],
+        ],
+        dtype=np.float32,
+    )
+    bbox_img, centers = derive_canonical_detection_geometry(
+        boxes,
+        source_width=8,
+        source_height=6,
+    )
+    sizes = np.repeat(np.asarray([[3, 2]], dtype=np.int32), 3, axis=0)
+    coordinates, source_crop, bbox_roi = derive_crop_placement_geometry(
+        centers,
+        bbox_img,
+        sizes,
+    )
+    arrays = {
+        "instance_key": np.asarray([101, 102, 103], dtype=np.uint64),
+        "source_refined_row_ids": np.asarray([7, 8, 9], dtype=np.int64),
+        "frame_indices": frames,
+        "source_acquisition_frame_index": acquisition_frames,
+        "frame_row_offsets": np.asarray([0, 1, 1, 3], dtype=np.int64),
+        "bbox_norm_coords": boxes,
+        "bbox_img_xyxy": bbox_img,
+        "centers_img_xy": centers,
+        "roi_coordinates_full": coordinates,
+        "roi_sizes_full": sizes,
+        "source_crop_xywh": source_crop,
+        "bbox_roi_xyxy": bbox_roi,
+        "source_row_signature": np.arange(3 * 32, dtype=np.uint8).reshape(3, 32),
+        "source_frame_indices": acquisition_frames,
+    }
+    for name, values in arrays.items():
+        run.create_array(name, data=values, overwrite=True)
+    pixels = np.arange(3 * 2 * 3, dtype=np.uint8).reshape(3, 2, 3)
+    run.create_array("roi_images", data=pixels, overwrite=True)
+    run.attrs.update(
+        {
+            "status": "completed",
+            "stage_selector_eligible": False,
+            "training_materialization_schema": mod.TRAINING_CROP_MATERIALIZATION_SCHEMA,
+            "training_materialization_provider": (
+                SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER
+            ),
+            "source_crop_archive_path": str(target_path),
+            "source_crop_run": "reviewed",
+            "source_crop_path": "refined_detect_runs/reviewed/instances",
+            "source_crop_manifest_binding": {
+                "authority_kind": "sampled_detection_review",
+                "source_refined_detect_run": "reviewed",
+                "source_frame_decision_digest": "a" * 64,
+            },
+            "height": 6,
+            "width": 8,
+            "source_images_path": "raw_video/images_full",
+            "source_images_dtype": "uint8",
+            "source_images_shape": [3, 6, 8],
+            "source_refined_detect_run": "reviewed",
+            "source_frame_decision_path": (
+                "detect_frame_decision_runs/reviewed"
+            ),
+            "source_frame_decision_digest": "a" * 64,
+            "padding_mode": "zero_outside_source_frame",
+            "pixel_verification": "all_rows_byte_equal_to_source_window_v1",
+        }
+    )
+    binding = build_training_crop_materialization_binding(run)
+    run.attrs[TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE] = binding
+    zarr.consolidate_metadata(str(target_path))
+
+    bound = bind_training_crop_materialization(
+        target_path,
+        run_id="sampled_images_full",
+    )
+    assert bound.row_count == 3
+    assert "source_crop_row_ids" not in bound.run_group
+    assert bound.binding["payload"]["provider"] == (
+        SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER
+    )
+
+    mutable = zarr.open_group(str(target_path), mode="a", use_consolidated=False)[
+        "crop_runs/sampled_images_full"
+    ]
+    mutable["source_frame_indices"][0] = np.int64(999)
+    with pytest.raises(
+        TrainingCropMaterializationError,
+        match="source_frame_indices must equal source acquisition-frame identity",
+    ):
+        build_training_crop_materialization_binding(mutable)
+
+
+def _make_reviewed_sampled_images_full_base(tmp_path: Path) -> Path:
+    path = tmp_path / "reviewed_sampled_base.zarr"
+    root = zarr.open_group(str(path), mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "zarr_purpose": "training",
+            "training_artifact_status": "review_complete",
+            "stage_selector_eligible": False,
+        }
+    )
+    raw = root.create_group("raw_video")
+    images = np.stack(
+        [
+            np.arange(6 * 8, dtype=np.uint8).reshape(6, 8),
+            np.full((6, 8), 100, dtype=np.uint8),
+            np.arange(6 * 8, dtype=np.uint8).reshape(6, 8) + np.uint8(50),
+        ]
+    )
+    raw.create_array("images_full", data=images)
+    raw.create_array(
+        "original_frame_indices",
+        data=np.asarray([10, 20, 30], dtype=np.int32),
+    )
+    refined = root.require_group("refined_detect_runs").create_group("reviewed")
+    refined.attrs.update(
+        {
+            "status": "completed",
+            "stage_selector_eligible": False,
+            FRAME_REVIEW_CONTRACT_ATTR: FRAME_REVIEW_CONTRACT_ID,
+        }
+    )
+    instances = refined.create_group("instances")
+    instances.create_array(
+        "frame_indices",
+        data=np.asarray([0, 2, 2], dtype=np.int32),
+    )
+    # Intentionally float64: the sampled publication boundary freezes the
+    # canonical output as float32 without mutating the reviewed source run.
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.asarray(
+            [
+                [0.125, 1 / 6, 0.125, 1 / 6],
+                [0.5, 0.5, 0.25, 1 / 3],
+                [0.75, 0.75, 0.25, 1 / 3],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    instances.create_array(
+        "instance_key",
+        data=np.asarray([101, 102, 103], dtype=np.uint64),
+    )
+    instances.create_array(
+        "refined_row_ids",
+        data=np.asarray([7, 8, 9], dtype=np.int64),
+    )
+    set_detect_frame_negative(
+        root,
+        source_refined_detect_run="reviewed",
+        n_frames=3,
+        frame_index=1,
+    )
+    zarr.consolidate_metadata(str(path))
+    return path
+
+
+def test_sampled_images_full_artifact_publishes_reviewed_rows_atomically(
+    tmp_path: Path,
+) -> None:
+    base = _make_reviewed_sampled_images_full_base(tmp_path)
+    destination = tmp_path / "reviewed_sampled_crops.zarr"
+    scratch = tmp_path / "node-local" / "job"
+    scratch.mkdir(parents=True)
+
+    result = create_sampled_images_full_training_crop_artifact(
+        destination=destination,
+        base_training_zarr=base,
+        run_id="reviewed_4px",
+        refined_run_id="reviewed",
+        scratch_root=scratch,
+        roi_size_wh=(4, 4),
+    )
+
+    assert result["status"] == "complete"
+    assert result["row_count"] == 3
+    assert result["materialization"]["positive_frame_count"] == 2
+    assert result["materialization"]["negative_frame_count"] == 1
+    assert result["materialization"]["pixel_rows_verified"] == 3
+    root = zarr.open_group(str(destination), mode="r", use_consolidated=True)
+    run = root["crop_runs/reviewed_4px"]
+    assert run.attrs["training_materialization_provider"] == (
+        SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER
+    )
+    assert run.attrs["summary_statistics"]["padded_rows"] == 1
+    np.testing.assert_array_equal(run["frame_indices"][:], [0, 2, 2])
+    np.testing.assert_array_equal(
+        run["frame_row_offsets"][:], [0, 1, 1, 3]
+    )
+    np.testing.assert_array_equal(
+        run["source_frame_indices"][:], [10, 30, 30]
+    )
+    np.testing.assert_array_equal(run["instance_key"][:], [101, 102, 103])
+    assert run["bbox_norm_coords"].dtype == np.dtype(np.float32)
+    expected_padded = np.zeros((4, 4), dtype=np.uint8)
+    expected_padded[1:, 1:] = np.asarray(
+        root["raw_video/images_full"][0, :3, :3]
+    )
+    np.testing.assert_array_equal(run["roi_images"][0], expected_padded)
+    assert root.attrs["stage_selector_eligible"] is False
+    assert root.attrs["registry_activation"] == "deferred"
+    assert "crop_runs" not in zarr.open_group(
+        str(base), mode="r", use_consolidated=True
+    )
+    assert not list(destination.parent.glob(f".{destination.name}.publish_tmp.*"))
+
+
+def test_sampled_images_full_artifact_fails_closed_on_unreviewed_frame(
+    tmp_path: Path,
+) -> None:
+    base = _make_reviewed_sampled_images_full_base(tmp_path)
+    direct = zarr.open_group(str(base), mode="a", use_consolidated=False)
+    decisions = direct["detect_frame_decision_runs/reviewed"]
+    decisions["decision_codes"][1] = np.uint8(0)
+    decisions["reason_codes"][1] = np.uint16(0)
+    destination = tmp_path / "must_not_publish.zarr"
+    scratch = tmp_path / "node-local" / "invalid"
+    scratch.mkdir(parents=True)
+
+    with pytest.raises(
+        ValueError,
+        match="incomplete|complete bound positive/negative",
+    ):
+        create_sampled_images_full_training_crop_artifact(
+            destination=destination,
+            base_training_zarr=base,
+            run_id="reviewed_4px",
+            refined_run_id="reviewed",
+            scratch_root=scratch,
+            roi_size_wh=(4, 4),
+        )
+
+    assert not destination.exists()
 
 
 def test_publish_training_crop_materialization_atomically_from_cache(
