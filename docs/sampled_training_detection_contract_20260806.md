@@ -47,7 +47,12 @@ Checklist:
   zero multi-detection frames; no values were forced or imputed.
 - [x] Initialize a selector-ineligible mutable refined review seed after inspecting
   zero/one/multiple detector cardinality.
-- [ ] Review/correct detections, approve for training, then publish crop,
+- [ ] Finish review/correction of all assigned frames.
+- [x] Implement the frame-supervision export bridge: sparse positive instances
+  remain instance rows, explicit reviewed negatives become image samples with
+  empty targets, multiple detections per frame are preserved, and unresolved
+  review state fails closed.
+- [ ] Export and validate the completed Batman review, then publish crop,
   keypoint, and subject-mask training surfaces.
 - [ ] Consolidate only when the complete training artifact becomes immutable
   and selector-visible.

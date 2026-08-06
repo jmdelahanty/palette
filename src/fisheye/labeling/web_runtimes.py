@@ -698,6 +698,16 @@ def _detect_runtime_state(runtime: DetectRuntimeSession, backend_module: Any) ->
         "auto_advance_on_save": bool(runtime.auto_advance_on_save),
     }))
 
+
+def _detect_training_completion_guard(
+    runtime: DetectRuntimeSession,
+) -> dict[str, object]:
+    from fisheye.tune import detect_review_backend as backend_module
+
+    return dict(
+        backend_module.detect_frame_review_completion_guard(runtime.review_session)
+    )
+
 def _positive_bbox_size_hint(width_norm: object, height_norm: object) -> tuple[float, float] | None:
     try:
         width = float(width_norm)  # type: ignore[arg-type]

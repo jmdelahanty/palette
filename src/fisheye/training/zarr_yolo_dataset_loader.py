@@ -29,6 +29,10 @@ from ..shared.refined_detect_curation import (
 )
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from ..shared.zarr_metadata import get_downsample_array_path, get_downsample_formats
+from .detection_frame_supervision import (
+    DETECTION_TRAINING_SUPERVISION_GROUP,
+    validate_exported_frame_supervision,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -279,6 +283,10 @@ class DatasetMetadata:
     uses_crop_data: bool = True
     input_format: str = "gray"
     frame_array_path: str = "raw_video/images_ds"
+    sample_axis: str = "instance"
+    frame_counts_path: Optional[str] = None
+    frame_offsets_path: Optional[str] = None
+    class_ids_path: Optional[str] = None
 
 
 class GlobalIndexManager:
@@ -381,6 +389,10 @@ class GlobalIndexManager:
                 status_codes_path: Optional[str] = None
                 artifact_train_indices_path: Optional[str] = None
                 artifact_val_indices_path: Optional[str] = None
+                sample_axis = "instance"
+                frame_counts_path: Optional[str] = None
+                frame_offsets_path: Optional[str] = None
+                class_ids_path: Optional[str] = None
                 actual_source_type = requested_source
                 has_interpolated = False
                 n_real_rois = 0
@@ -519,6 +531,43 @@ class GlobalIndexManager:
                         status_codes_path = f"{selected_group_path}/status_codes"
                     if "detection_source" in selected_group:
                         detection_source_path = f"{selected_group_path}/detection_source"
+                    if "class_ids" in selected_group:
+                        class_ids_path = f"{selected_group_path}/class_ids"
+
+                    training_export = root.attrs.get("training_export")
+                    if isinstance(training_export, dict):
+                        sample_axis = str(
+                            training_export.get("sample_axis") or "instance"
+                        ).strip().lower()
+                    if sample_axis == "frame":
+                        if str(root.attrs.get("zarr_purpose") or "").strip().lower() != "training":
+                            raise ValueError(
+                                f"{Path(path_str).name}: frame-axis detection samples "
+                                "are valid only in an immutable training artifact."
+                            )
+                        frame_counts_path = f"{selected_group_path}/frame_counts"
+                        frame_offsets_path = f"{selected_group_path}/frame_offsets"
+                        if frame_counts_path not in root or frame_offsets_path not in root:
+                            raise KeyError(
+                                f"{Path(path_str).name}: frame-axis detection training "
+                                "requires exact frame_counts and frame_offsets arrays."
+                            )
+                        if DETECTION_TRAINING_SUPERVISION_GROUP not in root:
+                            raise KeyError(
+                                f"{Path(path_str).name}: frame-axis detection training "
+                                f"requires {DETECTION_TRAINING_SUPERVISION_GROUP}."
+                            )
+                        validate_exported_frame_supervision(
+                            root[DETECTION_TRAINING_SUPERVISION_GROUP],
+                            frame_counts=np.asarray(
+                                root[frame_counts_path][:], dtype=np.int32
+                            ),
+                        )
+                    elif sample_axis != "instance":
+                        raise ValueError(
+                            f"{Path(path_str).name}: unsupported detection sample_axis "
+                            f"{sample_axis!r}."
+                        )
 
                     if frame_array_path is None and uses_crop_data and "roi_images" in crop_group:
                         frame_array_path = f"crop_runs/{latest_crop}/roi_images"
@@ -564,7 +613,11 @@ class GlobalIndexManager:
                         actual_source_type == "interpolated" or n_interpolated_rois > 0
                     )
                     roi_shape = (0, 0)
-                    total_frames = n_total
+                    total_frames = (
+                        int(root[frame_counts_path].shape[0])
+                        if sample_axis == "frame" and frame_counts_path
+                        else n_total
+                    )
                 elif uses_crop_data:
                     actual_source_type = crop_group.attrs.get('detection_source_type', 'detect')
                     has_interpolated = crop_group.attrs.get('includes_interpolated', False)
@@ -674,6 +727,8 @@ class GlobalIndexManager:
                     valid_mask = valid_mask & success_arr
 
                 valid_frames = int(np.sum(valid_mask))
+                if self.config.task == "detect" and sample_axis == "frame":
+                    valid_frames = int(total_frames)
 
                 metadata = DatasetMetadata(
                     path=path_str,
@@ -699,6 +754,10 @@ class GlobalIndexManager:
                         uses_crop_data=uses_crop_data,
                     input_format=requested_input_format,
                     frame_array_path=frame_array_path,
+                    sample_axis=sample_axis,
+                    frame_counts_path=frame_counts_path,
+                    frame_offsets_path=frame_offsets_path,
+                    class_ids_path=class_ids_path,
                 )
                 
                 # Log crop source info
@@ -822,6 +881,20 @@ class GlobalIndexManager:
         if not metadata.bbox_array_path:
             raise KeyError(f"No bbox path recorded for dataset '{metadata.name}'.")
 
+        if self.config.task == "detect" and metadata.sample_axis == "frame":
+            if not metadata.frame_counts_path:
+                raise KeyError(
+                    f"{metadata.name}: frame-axis training metadata lacks frame_counts_path."
+                )
+            frame_counts = np.asarray(
+                root[metadata.frame_counts_path][:], dtype=np.int64
+            ).reshape(-1)
+            validate_exported_frame_supervision(
+                root[DETECTION_TRAINING_SUPERVISION_GROUP],
+                frame_counts=frame_counts,
+            )
+            return np.arange(frame_counts.shape[0], dtype=int)
+
         coords = root[metadata.bbox_array_path][:]
         if coords.size == 0:
             return np.empty(0, dtype=int)
@@ -881,7 +954,13 @@ class GlobalIndexManager:
             raise ValueError(f"{metadata.name}: {path} must be integer dtype, got {raw_values.dtype}.")
         values = raw_values.astype(np.int64, copy=False)
 
-        row_count = int(root[metadata.bbox_array_path].shape[0])
+        row_count = (
+            int(root[metadata.frame_counts_path].shape[0])
+            if self.config.task == "detect"
+            and metadata.sample_axis == "frame"
+            and metadata.frame_counts_path
+            else int(root[metadata.bbox_array_path].shape[0])
+        )
         if values.size > 0:
             min_idx = int(values.min())
             max_idx = int(values.max())
@@ -890,7 +969,11 @@ class GlobalIndexManager:
                     f"{metadata.name}: {path} contains out-of-bounds sample indices "
                     f"(min={min_idx}, max={max_idx}, rows={row_count})."
                 )
-        if self.config.task == 'detect' and values.size > 0:
+        if (
+            self.config.task == "detect"
+            and metadata.sample_axis != "frame"
+            and values.size > 0
+        ):
             frame_mask = self._get_frame_index_in_bounds_mask(root, metadata, row_count)
             values = values[frame_mask[values]]
         return values
@@ -1227,7 +1310,10 @@ class ZarrYOLODataset(Dataset):
         
         # Cache metadata per task
         self.bbox_cache = {}
+        self.class_id_cache = {}
         self.frame_index_cache = {}
+        self.frame_offset_cache = {}
+        self.detect_sample_axis = {}
         self.kp_roi_norm_cache = {}
         self.kp_success_cache = {}
         self.kp_box_only_cache = {}
@@ -1245,8 +1331,50 @@ class ZarrYOLODataset(Dataset):
 
                 self.bbox_cache[zarr_path] = root[metadata.bbox_array_path][:]
 
-                frame_indices = None
-                if metadata.frame_indices_path:
+                if metadata.class_ids_path and metadata.class_ids_path in root:
+                    class_ids = np.asarray(
+                        root[metadata.class_ids_path][:], dtype=np.int64
+                    ).reshape(-1)
+                    if class_ids.shape[0] != self.bbox_cache[zarr_path].shape[0]:
+                        raise ValueError(
+                            f"{Path(zarr_path).name}: class_ids length does not match bbox rows."
+                        )
+                    self.class_id_cache[zarr_path] = class_ids
+                else:
+                    self.class_id_cache[zarr_path] = np.zeros(
+                        self.bbox_cache[zarr_path].shape[0], dtype=np.int64
+                    )
+
+                self.detect_sample_axis[zarr_path] = metadata.sample_axis
+                if metadata.sample_axis == "frame":
+                    if not metadata.frame_offsets_path or not metadata.frame_counts_path:
+                        raise KeyError(
+                            f"{Path(zarr_path).name}: frame-axis metadata is incomplete."
+                        )
+                    frame_counts = np.asarray(
+                        root[metadata.frame_counts_path][:], dtype=np.int64
+                    ).reshape(-1)
+                    frame_offsets = np.asarray(
+                        root[metadata.frame_offsets_path][:], dtype=np.int64
+                    ).reshape(-1)
+                    if frame_offsets.shape != (frame_counts.shape[0] + 1,):
+                        raise ValueError(
+                            f"{Path(zarr_path).name}: frame_offsets must have F+1 entries."
+                        )
+                    if (
+                        int(frame_offsets[0]) != 0
+                        or int(frame_offsets[-1]) != self.bbox_cache[zarr_path].shape[0]
+                        or np.any(np.diff(frame_offsets) != frame_counts)
+                    ):
+                        raise ValueError(
+                            f"{Path(zarr_path).name}: frame_offsets do not exactly index bbox rows."
+                        )
+                    self.frame_offset_cache[zarr_path] = frame_offsets
+                    frame_indices = np.arange(frame_counts.shape[0], dtype=np.int64)
+                else:
+                    frame_indices = None
+
+                if frame_indices is None and metadata.frame_indices_path:
                     try:
                         frame_indices = root[metadata.frame_indices_path][:]
                     except KeyError:
@@ -1264,7 +1392,10 @@ class ZarrYOLODataset(Dataset):
                 if frame_indices is None:
                     frame_count = self.bbox_cache[zarr_path].shape[0]
                     frame_indices = np.arange(frame_count, dtype=np.int64)
-                elif frame_indices.shape[0] != self.bbox_cache[zarr_path].shape[0]:
+                elif (
+                    metadata.sample_axis != "frame"
+                    and frame_indices.shape[0] != self.bbox_cache[zarr_path].shape[0]
+                ):
                     frame_count = self.bbox_cache[zarr_path].shape[0]
                     raise ValueError(
                         f"{Path(zarr_path).name}: frame_indices length mismatch during dataset initialization "
@@ -1621,14 +1752,35 @@ class ZarrYOLODataset(Dataset):
 
     def _get_bbox_data(self, zarr_path: str, det_idx: int) -> Dict:
         bbox_coords = self.bbox_cache.get(zarr_path)
-        
+
+        if self.detect_sample_axis.get(zarr_path) == "frame":
+            offsets = self.frame_offset_cache.get(zarr_path)
+            if bbox_coords is None or offsets is None or not 0 <= det_idx < offsets.shape[0] - 1:
+                return {
+                    "cls": np.zeros((0,), dtype=np.float32),
+                    "bboxes": np.zeros((0, 4), dtype=np.float32),
+                }
+            start = int(offsets[det_idx])
+            stop = int(offsets[det_idx + 1])
+            boxes = np.asarray(bbox_coords[start:stop], dtype=np.float32).reshape(-1, 4)
+            if boxes.size and not np.isfinite(boxes).all():
+                raise ValueError(
+                    f"{Path(zarr_path).name}: frame {det_idx} contains non-finite bbox rows."
+                )
+            classes = np.asarray(
+                self.class_id_cache[zarr_path][start:stop], dtype=np.float32
+            ).reshape(-1)
+            return {"cls": classes, "bboxes": boxes}
+
         if bbox_coords is not None and det_idx < bbox_coords.shape[0]:
             bbox = bbox_coords[det_idx]
             bbox_x, bbox_y, bbox_w, bbox_h = bbox
             
             if not any(np.isnan([bbox_x, bbox_y, bbox_w, bbox_h])):
                 return {
-                    "cls": np.array([0]), 
+                    "cls": np.asarray(
+                        [self.class_id_cache[zarr_path][det_idx]], dtype=np.float32
+                    ),
                     "bboxes": np.array([[bbox_x, bbox_y, bbox_w, bbox_h]])
                 }
         

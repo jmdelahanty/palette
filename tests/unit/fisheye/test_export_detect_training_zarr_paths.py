@@ -4,12 +4,21 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import zarr
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.diagnostics.prepare_detect_training import DatasetManifest, TrainingManifest
+from fisheye.shared.zarr.detect_frame_decisions import (
+    clear_detect_frame_decision,
+    set_detect_frame_negative,
+)
+from fisheye.training.zarr_yolo_dataset_loader import (
+    ZarrDatasetConfig,
+    create_zarr_dataset,
+)
 from fisheye.utils.export_detect_training_zarr import (
     MergeResult,
     MergeSourceSpec,
@@ -101,6 +110,81 @@ def _write_detect_source_zarr(path: Path) -> None:
         data=np.array([200, -1, 202, 203], dtype=np.int32),
         chunks=(4,),
     )
+
+
+def _write_multi_instance_negative_source_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w", zarr_format=3)
+    root.attrs.update({"width": 8, "height": 8, "n_frames": 4})
+    raw = root.create_group("raw_video")
+    raw.attrs.update(
+        {"pixel_contract_name": "legacy_gray_uint8_v1", "decode_backend": "test"}
+    )
+    raw.create_array(
+        "images_ds",
+        data=np.stack(
+            [np.full((8, 8), value, dtype=np.uint8) for value in range(4)],
+            axis=0,
+        ),
+        chunks=(2, 8, 8),
+    )
+    raw.create_array(
+        "original_frame_indices",
+        data=np.asarray([100, 101, 102, 103], dtype=np.int64),
+        chunks=(4,),
+    )
+    parent = root.create_group("refined_detect_runs")
+    parent.attrs["latest"] = "reviewed"
+    refined = parent.create_group("reviewed")
+    instances = refined.create_group("instances")
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.asarray(
+            [
+                [0.25, 0.25, 0.2, 0.2],
+                [0.40, 0.40, 0.2, 0.2],
+                [0.70, 0.70, 0.1, 0.1],
+            ],
+            dtype=np.float32,
+        ),
+        chunks=(3, 4),
+    )
+    instances.create_array(
+        "frame_indices",
+        data=np.asarray([0, 2, 2], dtype=np.int32),
+        chunks=(3,),
+    )
+    instances.create_array(
+        "source_kind_codes",
+        data=np.asarray([3, 3, 3], dtype=np.int8),
+        chunks=(3,),
+    )
+    instances.create_array(
+        "manual_edit_flags",
+        data=np.asarray([True, True, True], dtype=bool),
+        chunks=(3,),
+    )
+    instances.create_array(
+        "refined_row_ids",
+        data=np.asarray([10, 11, 12], dtype=np.int64),
+        chunks=(3,),
+    )
+    instances.create_array(
+        "source_detect_row_index",
+        data=np.asarray([-1, -1, -1], dtype=np.int32),
+        chunks=(3,),
+    )
+    instances.create_array(
+        "class_ids",
+        data=np.asarray([0, 1, 2], dtype=np.int32),
+        chunks=(3,),
+    )
+    for frame_index in (1, 3):
+        set_detect_frame_negative(
+            root,
+            source_refined_detect_run="reviewed",
+            n_frames=4,
+            frame_index=frame_index,
+        )
 
 
 def test_resolve_detection_source_path_ignores_group_path_and_uses_crop_array(tmp_path: Path) -> None:
@@ -214,6 +298,153 @@ def test_export_merged_detect_training_zarr_preserves_source_row_lineage(tmp_pat
         202,
         203,
     ]
+
+
+def test_export_bridge_preserves_negative_and_multi_instance_frames(tmp_path: Path) -> None:
+    source_zarr = tmp_path / "reviewed_source.zarr"
+    out_zarr = tmp_path / "frame_supervised.zarr"
+    manifest_path = tmp_path / "detect.manifest.json"
+    _write_multi_instance_negative_source_zarr(source_zarr)
+    manifest_path.write_text("{}", encoding="utf-8")
+    manifest = TrainingManifest(
+        created_at_utc="2026-08-06T00:00:00+00:00",
+        task="detect",
+        source_type="refined",
+        input_format="gray",
+        imgsz=[8, 8],
+        datasets=[
+            DatasetManifest(
+                name="reviewed",
+                zarr_path=str(source_zarr),
+                dataset_id="reviewed",
+                session_uuid="reviewed",
+                crop_run=None,
+                bbox_array_path=(
+                    "refined_detect_runs/reviewed/instances/bbox_norm_coords"
+                ),
+                detection_source_type="refined",
+                detection_source_path="refined_detect_runs/reviewed/instances",
+                includes_interpolated=False,
+                input_format="gray",
+                images_ds_shape=[8, 8],
+                total_bboxes=3,
+                invalid_bboxes=0,
+            )
+        ],
+        provenance_policy="strict",
+        set_name="reviewed",
+        set_version=1,
+        set_id="reviewed_v001",
+    )
+
+    result = _export_merged(
+        manifest=manifest,
+        manifest_path=manifest_path,
+        out_zarr=out_zarr,
+        merged_dataset_id=None,
+        overwrite=True,
+        train_ratio=0.5,
+        val_ratio=0.5,
+        test_ratio=0.0,
+        seed=42,
+        include_rgb=False,
+        copy_batch_size=2,
+        invocation={},
+    )
+
+    assert result.total_samples == 4
+    assert result.total_instances == 3
+    summary = validate_merged_training_zarr(
+        out_zarr,
+        expected_input_format="gray",
+        expected_total_samples=4,
+    )
+    assert summary["sample_axis"] == "frame"
+    assert summary["total_instances"] == 3
+    out = zarr.open_group(str(out_zarr), mode="r")
+    run = out["refined_detect_runs"].attrs["latest"]
+    instances = out[f"refined_detect_runs/{run}/instances"]
+    assert np.asarray(instances["frame_counts"][:]).tolist() == [1, 0, 2, 0]
+    assert np.asarray(instances["frame_offsets"][:]).tolist() == [0, 1, 1, 3, 3]
+    assert np.asarray(instances["frame_indices"][:]).tolist() == [0, 2, 2]
+    assert np.asarray(out["detection_training_supervision/label_state_codes"][:]).tolist() == [
+        1,
+        2,
+        1,
+        2,
+    ]
+    assert np.asarray(out["source_index/source_frame_idx"][:]).tolist() == [0, 1, 2, 3]
+    assert np.asarray(out["source_index/source_roi_idx"][:]).tolist() == [0, 1, 2]
+
+    config = ZarrDatasetConfig(
+        datasets={
+            "reviewed": {
+                "zarr_path": str(out_zarr),
+                "source_type": "refined",
+                "input_format": "gray",
+                "split": {"train": 0.5, "val": 0.5},
+            }
+        },
+        task="detect",
+        sampling_strategy="proportional",
+    )
+    train = create_zarr_dataset(config, mode="train")
+    val = create_zarr_dataset(config, mode="val")
+    datasets = (train, val)
+    observed = {}
+    for dataset in datasets:
+        for _path, frame_index in dataset.indices:
+            label = dataset._get_bbox_data(str(out_zarr), int(frame_index))
+            observed[int(frame_index)] = (
+                int(label["bboxes"].shape[0]),
+                label["cls"].astype(int).tolist(),
+            )
+    assert observed == {0: (1, [0]), 1: (0, []), 2: (2, [1, 2]), 3: (0, [])}
+
+
+def test_export_bridge_rejects_unresolved_review_frame(tmp_path: Path) -> None:
+    source_zarr = tmp_path / "incomplete_review.zarr"
+    _write_multi_instance_negative_source_zarr(source_zarr)
+    root = zarr.open_group(str(source_zarr), mode="a", use_consolidated=False)
+    clear_detect_frame_decision(
+        root,
+        source_refined_detect_run="reviewed",
+        n_frames=4,
+        frame_index=3,
+    )
+    manifest = TrainingManifest(
+        created_at_utc="2026-08-06T00:00:00+00:00",
+        task="detect",
+        source_type="refined",
+        input_format="gray",
+        imgsz=[8, 8],
+        datasets=[
+            DatasetManifest(
+                name="reviewed",
+                zarr_path=str(source_zarr),
+                dataset_id="reviewed",
+                session_uuid="reviewed",
+                crop_run=None,
+                bbox_array_path=(
+                    "refined_detect_runs/reviewed/instances/bbox_norm_coords"
+                ),
+                detection_source_type="refined",
+                detection_source_path="refined_detect_runs/reviewed/instances",
+                includes_interpolated=False,
+                input_format="gray",
+                images_ds_shape=[8, 8],
+                total_bboxes=3,
+                invalid_bboxes=0,
+            )
+        ],
+        provenance_policy="strict",
+        set_name="reviewed",
+        set_version=1,
+        set_id="reviewed_v001",
+    )
+
+    with pytest.raises(ValueError, match="unresolved frames"):
+        _discover_merge_sources(manifest, need_gray=True, need_rgb=False)
 
 
 def test_export_merged_detect_training_zarr_rejects_interpolated_source_rows(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -241,9 +242,51 @@ def test_resolve_context_loads_complete_multi_detection_frame(monkeypatch) -> No
     assert empty_payload["frame_idx"] == 1
     assert empty_payload["detections"] == []
     assert empty_payload["status"]["status_label"] == "missing"
+    assert empty_payload["frame_label_state"] == "unreviewed"
+    assert empty_payload["frame_label_reason"] == "none"
     assert summary["total_instances"] == 3
     assert summary["multi_instance_frames"] == 1
     assert summary["max_instances_per_frame"] == 2
+
+
+def test_empty_collection_does_not_implicitly_review_empty_frame(monkeypatch) -> None:
+    root = _make_multi_instance_root()
+    monkeypatch.setattr(backend, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
+    session = backend.resolve_review_context("/tmp/multi.zarr", include_all=True)
+
+    with np.testing.assert_raises_regex(ValueError, "Use Mark negative"):
+        backend.apply_detection_collection(session, position=1, detections=[])
+
+
+def test_mark_negative_and_completion_guard(monkeypatch) -> None:
+    root = _make_multi_instance_root()
+    monkeypatch.setattr(backend, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
+
+    def _mark(*_args, n_frames, frame_index, **_kwargs):
+        decision_codes = np.zeros(n_frames, dtype=np.uint8)
+        reason_codes = np.zeros(n_frames, dtype=np.uint16)
+        decision_codes[frame_index] = 1
+        reason_codes[frame_index] = 1
+        return SimpleNamespace(decision_codes=decision_codes, reason_codes=reason_codes)
+
+    monkeypatch.setattr(backend, "set_detect_frame_negative", _mark)
+    session = backend.resolve_review_context("/tmp/multi.zarr", include_all=True)
+
+    before = backend.detect_frame_review_completion_guard(session)
+    result = backend.apply_negative_frame_decision(session, position=1)
+    after = backend.detect_frame_review_completion_guard(session)
+
+    assert before["ready"] is False
+    assert before["unresolved_frames"] == [1]
+    assert result == {
+        "action": "mark_negative_frame",
+        "frame_idx": 1,
+        "detection_count": 0,
+        "frame_label_state": "negative",
+        "frame_label_reason": "subject_outside_dish",
+    }
+    assert after["ready"] is True
+    assert after["negative_frame_count"] == 1
 
 
 def test_apply_detection_collection_preserves_keys_adds_and_deletes(monkeypatch) -> None:

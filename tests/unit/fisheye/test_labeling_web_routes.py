@@ -2940,6 +2940,62 @@ def test_session_complete_route_closes_session_and_marks_task_complete(tmp_path)
         store.close()
 
 
+def test_detect_completion_requires_positive_or_explicit_negative_frames(tmp_path, monkeypatch):
+    ready = {"value": False}
+    _fake_module(
+        monkeypatch,
+        "fisheye.tune.detect_review_backend",
+        detect_frame_review_completion_guard=lambda _session: {
+            "ready": ready["value"],
+            "target_frame_count": 1,
+            "positive_frame_count": 0,
+            "negative_frame_count": int(ready["value"]),
+            "unresolved_frame_count": 0 if ready["value"] else 1,
+            "unresolved_frames": [] if ready["value"] else [87],
+            "conflicting_frame_count": 0,
+            "conflicting_frames": [],
+        },
+    )
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(task_id="task-a", recording_id="rec-a", workflow_kind="detect_training")
+        lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+
+        def configure(state):
+            state.detect_sessions[lease.session_id] = labeling_web.DetectRuntimeSession(
+                session_id=lease.session_id,
+                task_id="task-a",
+                recording_id="rec-a",
+                user="alice",
+                review_session=SimpleNamespace(),
+            )
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            pending_status, pending_payload = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/complete",
+                method="POST",
+                payload={},
+            )
+            ready["value"] = True
+            complete_status, complete_payload = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/complete",
+                method="POST",
+                payload={},
+            )
+
+        assert pending_status == 409
+        assert pending_payload["error"] == "detect_frame_review_pending"
+        assert pending_payload["detect_frame_completion_guard"]["unresolved_frames"] == [87]
+        assert complete_status == 200
+        assert complete_payload["task"]["state"] == "complete"
+    finally:
+        store.close()
+
+
 def test_stale_session_api_errors_include_closure_event_support(tmp_path):
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
@@ -4981,6 +5037,13 @@ def test_detect_nav_and_collection_save_routes_record_audit_event_without_real_z
             "target_zarr": "/tmp/fake.zarr",
             "source_path": "/tmp/detect-source.json",
         },
+        apply_negative_frame_decision=lambda session, position=0, reason=None: {
+            "frame_idx": int(session.frame_indices[int(position)]),
+            "action": "mark_negative_frame",
+            "detection_count": 0,
+            "frame_label_state": "negative",
+            "frame_label_reason": reason,
+        },
     )
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
@@ -5051,8 +5114,19 @@ def test_detect_nav_and_collection_save_routes_record_audit_event_without_real_z
                     "target_token": nav_payload["state"]["target_token"],
                 },
             )
+            negative_status, negative_payload = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/detect/mark-negative",
+                method="POST",
+                payload={
+                    "reason": "subject_outside_dish",
+                    "advance": True,
+                    "target_token": save_payload["state"]["target_token"],
+                },
+            )
 
         events = store.list_events(event_type="save_detect_bbox", limit=10)
+        negative_events = store.list_events(event_type="mark_detect_frame_negative", limit=10)
 
         assert nav_status == 200
         assert nav_payload["state"]["position"] == 1
@@ -5074,6 +5148,11 @@ def test_detect_nav_and_collection_save_routes_record_audit_event_without_real_z
         assert save_payload["result"]["detections"][0]["instance_key"] == "18446744073709551600"
         assert "target_zarr" not in save_payload["result"]
         assert "source_path" not in save_payload["result"]
+        assert negative_status == 200
+        assert negative_payload["result"]["action"] == "mark_negative_frame"
+        assert negative_payload["result"]["frame_label_state"] == "negative"
+        assert len(negative_events) == 1
+        assert negative_events[0]["after"]["frame_label_reason"] == "subject_outside_dish"
         assert "/tmp/fake.zarr" not in json.dumps(save_payload)
         assert "/tmp/detect-source.json" not in json.dumps(save_payload)
         assert len(events) == 1
