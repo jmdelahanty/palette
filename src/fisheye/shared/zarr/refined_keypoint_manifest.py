@@ -467,6 +467,36 @@ def initial_refined_keypoint_snapshot_identity(
     )
 
 
+def successor_refined_keypoint_snapshot_identity(
+    *,
+    parent_manifest: Mapping[str, Any],
+    snapshot_id: str,
+    retired_instance_keys: Sequence[int] = (),
+) -> RefinedKeypointSnapshotIdentity:
+    """Build one exact successor identity bound to its immediate parent."""
+
+    parent_errors = validate_refined_keypoint_run_manifest(parent_manifest)
+    if parent_errors:
+        raise ValueError(
+            "Parent refined-keypoint manifest is invalid: "
+            + "; ".join(parent_errors)
+        )
+    payload = _manifest_payload(parent_manifest, name="parent refined keypoint manifest")
+    parent = refined_keypoint_snapshot_identity_from_manifest(parent_manifest)
+    retired = normalized_retired_instance_keys(retired_instance_keys)
+    return RefinedKeypointSnapshotIdentity(
+        recording_identity=parent.recording_identity,
+        lineage_id=parent.lineage_id,
+        snapshot_id=snapshot_id,
+        parent_run_id=_require_run_id(payload.get("run_id"), name="parent run_id"),
+        parent_manifest_digest=canonical_json_sha256(parent_manifest),
+        parent_snapshot_id=parent.snapshot_id,
+        ancestry_snapshot_ids=(*parent.ancestry_snapshot_ids, parent.snapshot_id),
+        retired_instance_key_count=int(retired.size),
+        retired_instance_keys_digest=sha256_array(retired),
+    )
+
+
 def _source_bindings_from_manifest(
     value: Mapping[str, Any],
 ) -> RefinedKeypointSourceBindings:
@@ -1262,6 +1292,9 @@ def validate_refined_keypoint_snapshot_identity(
     arrays: Mapping[str, Any],
     raw_arrays: Mapping[str, Any],
     retired_instance_keys: Sequence[int],
+    parent_manifest: Mapping[str, Any] | None = None,
+    parent_arrays: Mapping[str, Any] | None = None,
+    parent_retired_instance_keys: Sequence[int] | None = None,
 ) -> tuple[str, ...]:
     errors: list[str] = []
     retired = normalized_retired_instance_keys(retired_instance_keys)
@@ -1278,10 +1311,54 @@ def validate_refined_keypoint_snapshot_identity(
         errors.append("initial refined instance_key must exactly preserve raw order")
     if np.intersect1d(keys, retired).size:
         errors.append("live and retired instance keys overlap")
-    if identity.parent_run_id is not None:
-        errors.append(
-            "successor identity validation is deferred to the delta compactor"
+    parent_evidence = (parent_manifest, parent_arrays, parent_retired_instance_keys)
+    if identity.parent_run_id is None:
+        if any(value is not None for value in parent_evidence):
+            errors.append("initial snapshot cannot receive parent evidence")
+        return tuple(errors)
+    if any(value is None for value in parent_evidence):
+        errors.append("successor snapshot requires complete parent evidence")
+        return tuple(errors)
+    assert parent_manifest is not None
+    assert parent_arrays is not None
+    assert parent_retired_instance_keys is not None
+    parent_manifest_errors = validate_refined_keypoint_run_manifest(parent_manifest)
+    if parent_manifest_errors:
+        errors.append("parent refined-keypoint manifest is invalid")
+        return tuple(errors)
+    try:
+        parent_identity = refined_keypoint_snapshot_identity_from_manifest(parent_manifest)
+        parent_payload = _manifest_payload(
+            parent_manifest, name="parent refined keypoint manifest"
         )
+    except (TypeError, ValueError) as exc:
+        errors.append(f"parent refined-keypoint identity is invalid: {exc}")
+        return tuple(errors)
+    if identity.recording_identity != parent_identity.recording_identity:
+        errors.append("successor recording identity differs from parent")
+    if identity.lineage_id != parent_identity.lineage_id:
+        errors.append("successor lineage_id differs from parent")
+    if identity.snapshot_id == parent_identity.snapshot_id:
+        errors.append("successor snapshot_id reuses parent snapshot_id")
+    if identity.parent_run_id != parent_payload.get("run_id"):
+        errors.append("successor parent run_id mismatch")
+    if identity.parent_manifest_digest != canonical_json_sha256(parent_manifest):
+        errors.append("successor parent manifest digest mismatch")
+    if identity.parent_snapshot_id != parent_identity.snapshot_id:
+        errors.append("successor parent snapshot_id mismatch")
+    expected_ancestry = (*parent_identity.ancestry_snapshot_ids, parent_identity.snapshot_id)
+    if identity.ancestry_snapshot_ids != expected_ancestry:
+        errors.append("successor ancestry does not extend its immediate parent")
+    parent_retired = normalized_retired_instance_keys(parent_retired_instance_keys)
+    if not np.array_equal(retired, parent_retired):
+        errors.append("keypoint successor cannot change retired instance keys")
+    try:
+        parent_keys = _array_values(parent_arrays["instance_key"])
+    except KeyError:
+        errors.append("parent snapshot is missing instance_key")
+    else:
+        if not np.array_equal(keys, parent_keys):
+            errors.append("successor instance_key order differs from parent")
     return tuple(errors)
 
 
@@ -1310,11 +1387,6 @@ def validate_refined_keypoint_publication(
         for value in (payload, dimensions, source, identity, review, reason)
     ):
         return (*errors, "refined-keypoint manifest components are invalid")
-    if any(
-        value is not None
-        for value in (parent_manifest, parent_arrays, parent_retired_instance_keys)
-    ):
-        errors.append("successor publication is deferred to the delta compactor")
     try:
         observed_source = build_refined_keypoint_source_bindings(
             raw_manifest=raw_manifest,
@@ -1332,6 +1404,9 @@ def validate_refined_keypoint_publication(
             arrays=arrays,
             raw_arrays=raw_arrays,
             retired_instance_keys=retired_instance_keys,
+            parent_manifest=parent_manifest,
+            parent_arrays=parent_arrays,
+            parent_retired_instance_keys=parent_retired_instance_keys,
         )
     )
     try:
@@ -1457,6 +1532,7 @@ __all__ = [
     "refined_keypoint_snapshot_identity_from_manifest",
     "refined_keypoint_source_bindings_from_manifest",
     "retired_instance_keys_digest",
+    "successor_refined_keypoint_snapshot_identity",
     "validate_refined_keypoint_publication",
     "validate_refined_keypoint_run_manifest",
     "validate_refined_keypoint_snapshot_identity",

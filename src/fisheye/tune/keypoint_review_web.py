@@ -609,6 +609,7 @@ def _resolve_review_session_for_state(
         include_all=state.include_all_arg,
         target_frames=state.target_frames,
         target_roi_indices=state.target_roi_indices,
+        editor=state.reviewer,
     )
 
 
@@ -939,6 +940,7 @@ def run_server(config: _ServerConfig) -> int:
         include_all=config.include_all,
         target_frames=config.target_frames,
         target_roi_indices=config.target_roi_indices,
+        editor=config.reviewer,
     )
     state = _ServerState(
         session=session,

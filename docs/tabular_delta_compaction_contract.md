@@ -2,8 +2,9 @@
 
 **Status:** keypoint/general v1 partition prototype retained; its detection
 payload is superseded for future work by
-`refined_detection_delta_v2_contract.md`. Crimson overlay reads,
-review-writer routing, and compaction scheduling remain follow-up integration
+`refined_detection_delta_v2_contract.md`. The maintained Palette keypoint
+reviewer now resolves and appends verified keypoint-v1 partitions. Crimson
+overlay reads and keypoint compaction/scheduling remain follow-up integration
 work.
 
 The v1 detection payload below is historical implementation context. It cannot
@@ -201,7 +202,21 @@ for example:
   by default and promotes only after decoded SHA-256 validation.
 - `fisheye.shared.tabular_deltas` creates base-bound generations, writes
   immutable keypoint/detection partitions, validates key/hint identity, and
-  freezes generations.
+  freezes generations. Its keypoint resolver additionally validates the exact
+  partition envelope, recomputes payload digests, enforces landmark operation
+  semantics, and applies the frozen deterministic merge order.
+- `fisheye.tune.keypoint_review_backend` treats an
+  `artifact_mutability=immutable_snapshot` run as read-only, requires one bound
+  open keypoint generation, renders base plus the verified overlay, and writes
+  one immutable partition per accepted review action. It refuses in-place
+  approval until compaction publishes a successor snapshot. The existing
+  direct writer remains only for non-immutable compatibility runs.
+- `fisheye.shared.zarr.refined_keypoint_manifest` now validates exact
+  successor ancestry: recording and lineage identity, a new snapshot UUID,
+  immediate-parent run/manifest/snapshot binding, unchanged instance-key
+  order, and unchanged retired-key evidence. This removes the former
+  manifest-gate blocker to a keypoint compactor; the compaction command and
+  generation rollover are still pending.
 - `fisheye.utils.finalize_keypoint_shards` now publishes canonical clipped
   keypoints directly as indexed shards.
 - `fisheye.utils.publish_clipped_refined_detect_snapshot` materializes one
@@ -212,9 +227,10 @@ for example:
   additive mask-key repair only after exact blockwise equality across the ten
   shared keypoint/mask lineage arrays.
 
-Until Crimson and the review backends are routed through this layer, existing
-in-place review writers remain compatibility paths and must not be used to edit
-an `artifact_mutability=immutable_snapshot` run.
+Crimson still needs its own overlay reader, and the keypoint compactor remains
+required before review approval. Existing in-place review writers remain
+compatibility paths and must not be used to edit an
+`artifact_mutability=immutable_snapshot` run.
 
 ## Sleepyfish Production Snapshot Canary (2026-07-15)
 

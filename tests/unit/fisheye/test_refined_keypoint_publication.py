@@ -55,6 +55,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.refined_keypoint_manifest import (
     build_refined_keypoint_source_bindings,
     initial_refined_keypoint_snapshot_identity,
+    successor_refined_keypoint_snapshot_identity,
     validate_refined_keypoint_publication,
     validate_refined_keypoint_run_manifest,
 )
@@ -414,6 +415,40 @@ def test_refined_publication_round_trip_is_exact_and_selector_ineligible(
     assert _resolve_eye_keypoint_indices(run, publication.run_id) == (1, 2)
     assert np.asarray(run["keypoint_edit_flags"][:])[2, 0]
     assert not np.asarray(run["refined_success"][:])[3]
+
+
+def test_refined_successor_binds_exact_parent_identity(tmp_path: object) -> None:
+    parent, _, _, _ = _publish_refined(tmp_path)
+    identity = successor_refined_keypoint_snapshot_identity(
+        parent_manifest=parent.manifest,
+        snapshot_id="55555555-5555-4555-8555-555555555555",
+    )
+    destination_root = tmp_path / "successor_root"  # type: ignore[operator]
+
+    successor = publish_selector_ineligible_refined_keypoint_snapshot(
+        parent.prepared,
+        source=parent.source,
+        raw_manifest=parent.raw_manifest,
+        quality_manifest=parent.quality_manifest,
+        crop_manifest=parent.crop_manifest,
+        raw_arrays=parent.raw_arrays,
+        quality_arrays=parent.quality_arrays,
+        source_crop_arrays=parent.source_crop_arrays,
+        identity=identity,
+        review_state_map=parent.review_state_map,
+        reason_code_map=parent.reason_code_map,
+        destination=destination_root / "successor.zarr",
+        run_id="refined_v2_002",
+        shadow_root=destination_root,
+        created_by="pytest_successor",
+        parent_manifest=parent.manifest,
+        parent_arrays=parent.prepared.arrays,
+        parent_retired_instance_keys=(),
+    )
+
+    assert successor.identity.parent_run_id == parent.run_id
+    assert successor.identity.parent_snapshot_id == parent.identity.snapshot_id
+    assert successor.identity.ancestry_snapshot_ids == (parent.identity.snapshot_id,)
 
 
 def test_republication_adds_only_missing_skeleton_semantics(

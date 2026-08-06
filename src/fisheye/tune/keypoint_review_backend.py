@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import time_ns
 from typing import Mapping, Optional, Sequence
+from uuid import uuid4
 
 import base64
 import numpy as np
@@ -17,9 +19,29 @@ from ..refinement.keypoint_quality import (
     select_head_triangle_points,
 )
 from ..shared.detect_reason_codec import MutableReasonColumn, open_mutable_reason_column
-from ..shared.frame_flags import append_flagged_frame, load_row_identity_arrays, row_identity_payload
+from ..shared.frame_flags import (
+    append_flagged_frame,
+    load_row_identity_arrays,
+    row_identity_payload,
+)
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
-from ..shared.zarr_run_completion import resolve_latest_complete_run_name, set_authoritative_run
+from ..shared.tabular_deltas import (
+    KEYPOINT_DELTA_REASON_CODE_MAP,
+    KEYPOINT_OPERATION_CODE_MAP,
+    ResolvedKeypointDeltaOverlay,
+    apply_keypoint_delta_overlay,
+    resolve_keypoint_delta_overlay,
+    write_delta_partition,
+)
+from ..shared.zarr.refined_keypoint_manifest import (
+    REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE,
+    refined_keypoint_code_maps_from_manifest,
+    validate_refined_keypoint_run_manifest,
+)
+from ..shared.zarr_run_completion import (
+    resolve_latest_complete_run_name,
+    set_authoritative_run,
+)
 from ..shared.zarr_io import open_zarr_root
 from .keypoint_failure_review import (
     _DEFAULT_CONFIDENCE_THRESHOLD,
@@ -140,6 +162,13 @@ class ReviewSession:
     head_triangle_indices: object
     derived_metric_storage: Optional[object]
 
+    immutable_base: bool = False
+    delta_run: Optional[str] = None
+    delta_generation: Optional[str] = None
+    delta_editor: str = "unknown"
+    instance_keys: Optional[np.ndarray] = None
+    delta_overlay: Optional[ResolvedKeypointDeltaOverlay] = None
+
 
 def _coerce_ints(values: Optional[Sequence[object]]) -> list[int]:
     if not values:
@@ -163,9 +192,180 @@ def _build_reason_array(refined: zarr.Group) -> Optional[MutableReasonColumn]:
     )
 
 
+def _resolve_active_keypoint_delta(
+    root: zarr.Group,
+    *,
+    base_run_path: str,
+) -> tuple[str, str]:
+    parent = root.get("edit_delta_runs")
+    if parent is None:
+        raise RuntimeError("Immutable refined keypoints require a bound edit_delta_runs generation.")
+    matches: list[tuple[str, str]] = []
+    for run_name, run in parent.groups():
+        if run.attrs.get("target_kind") != "keypoints" or run.attrs.get("base_run_path") != base_run_path:
+            continue
+        generation = run.attrs.get("active_generation")
+        if generation:
+            matches.append((str(run_name), str(generation)))
+    if len(matches) != 1:
+        raise RuntimeError(f"Immutable refined keypoints require exactly one active, bound keypoint delta generation; found {matches!r}.")
+    return matches[0]
+
+
+def _refined_reason_labels(refined: zarr.Group) -> dict[int, str]:
+    manifest = refined.attrs.get(REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest, Mapping):
+        raise RuntimeError("Immutable refined-keypoint base is missing its run manifest.")
+    _review_map, reason_map = refined_keypoint_code_maps_from_manifest(manifest)
+    return reason_map
+
+
+def _immutable_keypoint_labels(refined: zarr.Group) -> list[str]:
+    manifest = refined.attrs.get(REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest, Mapping):
+        raise RuntimeError("Immutable refined-keypoint base is missing its run manifest.")
+    payload = manifest.get("payload")
+    source = payload.get("source_bindings") if isinstance(payload, Mapping) else None
+    skeleton = source.get("skeleton") if isinstance(source, Mapping) else None
+    semantics = skeleton.get("semantics") if isinstance(skeleton, Mapping) else None
+    labels = semantics.get("keypoint_labels") if isinstance(semantics, Mapping) else None
+    if not isinstance(labels, list) or any(not isinstance(label, str) or not label for label in labels):
+        raise RuntimeError("Immutable refined-keypoint manifest has no exact skeleton label order.")
+    return list(labels)
+
+
+def _copy_optional(refined: zarr.Group, name: str) -> Optional[np.ndarray]:
+    array = refined.get(name)
+    return None if array is None else np.asarray(array[:]).copy()
+
+
+def _overlay_reason_array(
+    refined: zarr.Group,
+    *,
+    overlay: ResolvedKeypointDeltaOverlay,
+    row_count: int,
+) -> np.ndarray:
+    base_reason_map = _refined_reason_labels(refined)
+    reason_codes = np.asarray(refined["reason_codes"][:], dtype=np.uint16)
+    values = np.asarray(
+        ["" if base_reason_map[int(code)] == "none" else base_reason_map[int(code)] for code in reason_codes],
+        dtype=object,
+    )
+    if values.shape != (row_count,):
+        raise RuntimeError("Immutable refined-keypoint reason column has the wrong shape.")
+    label_by_code = {int(code): label for label, code in overlay.reason_code_map.items()}
+    newest_by_row: dict[int, tuple[tuple[int, int, str, int], int]] = {}
+    for edit in overlay.edits:
+        order = (
+            edit.revision,
+            edit.timestamp_ns,
+            edit.partition,
+            edit.partition_row_index,
+        )
+        previous = newest_by_row.get(edit.row_index)
+        if previous is None or order > previous[0]:
+            newest_by_row[edit.row_index] = (order, edit.reason_code)
+    for row, (_order, reason_code) in newest_by_row.items():
+        if reason_code == 0:
+            values[row] = ""
+        elif reason_code in label_by_code:
+            values[row] = label_by_code[reason_code]
+        else:  # pragma: no cover - verified delta resolver rejects this
+            raise RuntimeError(f"Resolved delta reason code {reason_code} is undeclared.")
+    return values
+
+
+def _apply_overlay_status_arrays(
+    refined: zarr.Group,
+    *,
+    points_roi: np.ndarray,
+    overlay: ResolvedKeypointDeltaOverlay,
+) -> dict[str, Optional[np.ndarray]]:
+    arrays = {
+        name: _copy_optional(refined, name)
+        for name in (
+            "keypoints_img",
+            "keypoint_confidences",
+            "refined_success",
+            "flip_corrected",
+            "confidence_valid",
+            "geometry_valid",
+            "usable_keypoints",
+        )
+    }
+    base_edit_flags = _copy_optional(refined, "keypoint_edit_flags")
+    edited_rows = np.any(base_edit_flags, axis=1) if base_edit_flags is not None else np.zeros(points_roi.shape[0], dtype=bool)
+    valid = np.all(np.isfinite(points_roi), axis=2)
+    for edit in overlay.edits:
+        edited_rows[edit.row_index] = True
+        confidence = arrays["keypoint_confidences"]
+        if confidence is not None:
+            confidence[edit.row_index, edit.keypoint_index] = np.float32(1.0) if edit.valid else np.float32(np.nan)
+    if arrays["refined_success"] is not None:
+        arrays["refined_success"][edited_rows] = np.any(valid[edited_rows], axis=1)
+    if arrays["flip_corrected"] is not None:
+        arrays["flip_corrected"][edited_rows] = False
+    if arrays["confidence_valid"] is not None:
+        arrays["confidence_valid"][edited_rows] = np.all(valid[edited_rows], axis=1)
+    if arrays["geometry_valid"] is not None:
+        arrays["geometry_valid"][edited_rows] = np.any(valid[edited_rows], axis=1)
+    if arrays["usable_keypoints"] is not None:
+        confidence_valid = arrays["confidence_valid"]
+        geometry_valid = arrays["geometry_valid"]
+        refined_success = arrays["refined_success"]
+        if confidence_valid is not None and geometry_valid is not None and refined_success is not None:
+            arrays["usable_keypoints"][edited_rows] = confidence_valid[edited_rows] & geometry_valid[edited_rows] & refined_success[edited_rows]
+    arrays["edit_applied"] = edited_rows
+    return arrays
+
+
+def _refresh_immutable_overlay_qc(
+    *,
+    points_roi: np.ndarray,
+    overlay: ResolvedKeypointDeltaOverlay,
+    head_triangle_indices: object,
+    confidences: Optional[np.ndarray],
+    refined_success: Optional[np.ndarray],
+    confidence_valid: Optional[np.ndarray],
+    geometry_valid: Optional[np.ndarray],
+    usable: Optional[np.ndarray],
+    confidence_threshold: float,
+    min_triangle_angle: float,
+    min_triangle_area: float,
+    max_triangle_area: Optional[float],
+) -> None:
+    for row in sorted({edit.row_index for edit in overlay.edits}):
+        points = np.asarray(points_roi[row], dtype=np.float64)
+        point_valid = np.all(np.isfinite(points), axis=1)
+        success = bool(np.any(point_valid))
+        conf_ok = False
+        if confidences is not None:
+            values = np.asarray(confidences[row], dtype=np.float64)
+            conf_ok = bool(np.all(point_valid) and np.all(np.isfinite(values)) and np.all(values >= float(confidence_threshold)))
+        triangle = compute_geometry_metrics(select_head_triangle_points(points, head_triangle_indices))
+        max_ok = max_triangle_area is None or triangle.area <= float(max_triangle_area)
+        geom_ok = bool(
+            np.isfinite(triangle.min_angle)
+            and np.isfinite(triangle.area)
+            and triangle.min_angle >= float(min_triangle_angle)
+            and triangle.area >= float(min_triangle_area)
+            and max_ok
+        )
+        if refined_success is not None:
+            refined_success[row] = success
+        if confidence_valid is not None:
+            confidence_valid[row] = conf_ok
+        if geometry_valid is not None:
+            geometry_valid[row] = geom_ok
+        if usable is not None:
+            usable[row] = success and conf_ok and geom_ok
+
+
 def _resolve_session_geometry(
     refined: zarr.Group,
     roi_images: zarr.Array,
+    *,
+    allow_storage_mutation: bool = True,
 ) -> tuple[float, float, Optional[float], float, Optional[float], object]:
     summary_raw = refined.attrs.get("summary_statistics", {})
     summary = summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
@@ -190,12 +390,14 @@ def _resolve_session_geometry(
         chunk_len = int(heading.chunks[0])
     else:
         chunk_len = max(1, min(1024, rows))
-    derived_metric_storage = _ensure_review_derived_metric_storage(
-        refined,
-        row_count=rows,
-        chunk_len=chunk_len,
-        roi_diagonal=roi_diagonal,
-    )
+    derived_metric_storage = None
+    if allow_storage_mutation:
+        derived_metric_storage = _ensure_review_derived_metric_storage(
+            refined,
+            row_count=rows,
+            chunk_len=chunk_len,
+            roi_diagonal=roi_diagonal,
+        )
 
     return (
         min_triangle_angle,
@@ -444,6 +646,7 @@ def resolve_review_session(
     include_all: bool = False,
     target_frames: Optional[Sequence[int]] = None,
     target_roi_indices: Optional[Sequence[int]] = None,
+    editor: Optional[str] = None,
 ) -> ReviewSession:
     root, refined, crop, resolved_refined_run, resolved_crop_run = resolve_latest_refined_and_crop(
         zarr_path,
@@ -480,44 +683,132 @@ def resolve_review_session(
         target_roi_indices=target_roi_indices,
     )
 
-    kp_roi_arr = refined["keypoints_roi"]
-    kp_img_arr = refined.get("keypoints_img")
-    kp_norm_arr = refined.get("keypoints_norm")
-    heading_arr = refined.get("heading")
-    confidence_arr = refined.get("confidence")
-    conf_arr = refined.get("keypoint_confidences")
-    triangle_area_arr = refined.get("triangle_area")
-    min_angle_arr = refined.get("min_angle")
-    triangle_angles_arr = refined.get("triangle_angles")
-    refined_success_arr = refined.get("refined_success")
-    flip_corrected_arr = refined.get("flip_corrected")
-    quality_labels_arr = refined.get("quality_labels")
-    confidence_valid_arr = refined.get("confidence_valid")
-    geometry_valid_arr = refined.get("geometry_valid")
-    usable_arr = refined.get("usable_keypoints")
-    edit_applied_arr = refined.get("edit_applied")
-    reason_arr = _build_reason_array(refined)
-    heading_finite_arr = refined.get("heading_finite")
-    heading_usable_arr = refined.get("heading_usable")
-    detection_source_arr = refined.get("detection_source")
-
-    keypoint_count = int(kp_roi_arr.shape[1])
-    labels = list(refined.attrs.get("keypoint_labels", _DEFAULT_LABELS))
-    if len(labels) != keypoint_count:
-        raise ValueError(
-            "Refined keypoint run keypoint_labels count does not match keypoints_roi K "
-            f"({len(labels)} vs {keypoint_count})."
+    immutable_base = str(refined.attrs.get("artifact_mutability") or "") == "immutable_snapshot"
+    delta_run: Optional[str] = None
+    delta_generation: Optional[str] = None
+    delta_overlay: Optional[ResolvedKeypointDeltaOverlay] = None
+    instance_keys: Optional[np.ndarray] = None
+    keypoint_count = int(refined["keypoints_roi"].shape[1])
+    if immutable_base:
+        manifest = refined.attrs.get(REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
+        if not isinstance(manifest, Mapping):
+            raise RuntimeError(
+                "Immutable refined-keypoint base is missing its run manifest."
+            )
+        manifest_errors = validate_refined_keypoint_run_manifest(manifest)
+        if manifest_errors:
+            raise RuntimeError(
+                "Immutable refined-keypoint run manifest is invalid: "
+                + "; ".join(manifest_errors)
+            )
+        base_run_path = f"refined_keypoints_runs/{resolved_refined_run}"
+        delta_run, delta_generation = _resolve_active_keypoint_delta(
+            root,
+            base_run_path=base_run_path,
         )
+        delta_overlay = resolve_keypoint_delta_overlay(
+            root,
+            delta_run=delta_run,
+            generation=delta_generation,
+            n_keypoints=keypoint_count,
+        )
+        instance_keys = np.asarray(refined["instance_key"][:], dtype=np.uint64)
+        kp_roi_arr, _keypoint_valid = apply_keypoint_delta_overlay(
+            refined["keypoints_roi"],
+            instance_keys=refined["instance_key"],
+            overlay=delta_overlay,
+        )
+        overlay_arrays = _apply_overlay_status_arrays(
+            refined,
+            points_roi=kp_roi_arr,
+            overlay=delta_overlay,
+        )
+        kp_img_arr = overlay_arrays["keypoints_img"]
+        if kp_img_arr is not None and delta_overlay.edits:
+            origins = np.asarray(roi_coordinates_full[:], dtype=np.float32)
+            if origins.shape != (kp_roi_arr.shape[0], 2):
+                raise RuntimeError("Immutable keypoint review requires one [x,y] crop origin per row.")
+            edited_rows = sorted({edit.row_index for edit in delta_overlay.edits})
+            kp_img_arr[edited_rows] = kp_roi_arr[edited_rows] + origins[edited_rows, None, :]
+        kp_norm_arr = None
+        heading_arr = None
+        confidence_arr = None
+        conf_arr = overlay_arrays["keypoint_confidences"]
+        triangle_area_arr = None
+        min_angle_arr = None
+        triangle_angles_arr = None
+        refined_success_arr = overlay_arrays["refined_success"]
+        flip_corrected_arr = overlay_arrays["flip_corrected"]
+        quality_labels_arr = None
+        confidence_valid_arr = overlay_arrays["confidence_valid"]
+        geometry_valid_arr = overlay_arrays["geometry_valid"]
+        usable_arr = overlay_arrays["usable_keypoints"]
+        edit_applied_arr = overlay_arrays["edit_applied"]
+        reason_arr = _overlay_reason_array(
+            refined,
+            overlay=delta_overlay,
+            row_count=int(kp_roi_arr.shape[0]),
+        )
+        heading_finite_arr = None
+        heading_usable_arr = None
+        detection_source_arr = None
+    else:
+        kp_roi_arr = refined["keypoints_roi"]
+        kp_img_arr = refined.get("keypoints_img")
+        kp_norm_arr = refined.get("keypoints_norm")
+        heading_arr = refined.get("heading")
+        confidence_arr = refined.get("confidence")
+        conf_arr = refined.get("keypoint_confidences")
+        triangle_area_arr = refined.get("triangle_area")
+        min_angle_arr = refined.get("min_angle")
+        triangle_angles_arr = refined.get("triangle_angles")
+        refined_success_arr = refined.get("refined_success")
+        flip_corrected_arr = refined.get("flip_corrected")
+        quality_labels_arr = refined.get("quality_labels")
+        confidence_valid_arr = refined.get("confidence_valid")
+        geometry_valid_arr = refined.get("geometry_valid")
+        usable_arr = refined.get("usable_keypoints")
+        edit_applied_arr = refined.get("edit_applied")
+        reason_arr = _build_reason_array(refined)
+        heading_finite_arr = refined.get("heading_finite")
+        heading_usable_arr = refined.get("heading_usable")
+        detection_source_arr = refined.get("detection_source")
+    labels = _immutable_keypoint_labels(refined) if immutable_base else list(refined.attrs.get("keypoint_labels", _DEFAULT_LABELS))
+    if len(labels) != keypoint_count:
+        raise ValueError(f"Refined keypoint run keypoint_labels count does not match keypoints_roi K ({len(labels)} vs {keypoint_count}).")
 
-    min_triangle_angle, min_triangle_area, max_triangle_area, confidence_threshold, roi_diagonal, derived_metric_storage = _resolve_session_geometry(
+    (
+        min_triangle_angle,
+        min_triangle_area,
+        max_triangle_area,
+        confidence_threshold,
+        roi_diagonal,
+        derived_metric_storage,
+    ) = _resolve_session_geometry(
         refined,
         roi_images,
+        allow_storage_mutation=not immutable_base,
     )
     head_triangle_indices = resolve_head_triangle_for_labels(
         labels,
         keypoint_count=keypoint_count,
         allow_legacy_3point_fallback=True,
     )
+    if immutable_base and delta_overlay is not None:
+        _refresh_immutable_overlay_qc(
+            points_roi=np.asarray(kp_roi_arr),
+            overlay=delta_overlay,
+            head_triangle_indices=head_triangle_indices,
+            confidences=conf_arr,
+            refined_success=refined_success_arr,
+            confidence_valid=confidence_valid_arr,
+            geometry_valid=geometry_valid_arr,
+            usable=usable_arr,
+            confidence_threshold=confidence_threshold,
+            min_triangle_angle=min_triangle_angle,
+            min_triangle_area=min_triangle_area,
+            max_triangle_area=max_triangle_area,
+        )
 
     full_h, full_w = _resolve_full_frame_dimensions(root)
     norm_factor = np.array([full_w, full_h], dtype=np.float64)
@@ -565,6 +856,12 @@ def resolve_review_session(
         confidence_threshold=confidence_threshold,
         head_triangle_indices=head_triangle_indices,
         derived_metric_storage=derived_metric_storage,
+        immutable_base=immutable_base,
+        delta_run=delta_run,
+        delta_generation=delta_generation,
+        delta_editor=str(editor or "unknown"),
+        instance_keys=instance_keys,
+        delta_overlay=delta_overlay,
     )
 
 
@@ -611,6 +908,77 @@ def load_roi_payload(session: ReviewSession, position: int) -> Mapping[str, obje
     }
 
 
+def _append_immutable_keypoint_delta(
+    session: ReviewSession,
+    *,
+    roi_idx: int,
+    operation_codes: Sequence[int],
+    keypoint_indices: Sequence[int],
+    new_xy: Sequence[Sequence[float]],
+    valid: Sequence[bool],
+    reason_code: int,
+) -> Mapping[str, object]:
+    if not session.immutable_base or session.delta_run is None or session.delta_generation is None or session.instance_keys is None:
+        raise RuntimeError("Immutable keypoint delta session binding is incomplete.")
+    count = len(operation_codes)
+    lengths = {
+        count,
+        len(keypoint_indices),
+        len(new_xy),
+        len(valid),
+    }
+    if len(lengths) != 1 or count <= 0:
+        raise ValueError("One immutable keypoint edit must contain aligned delta rows.")
+    # Re-read and verify the generation immediately before choosing a revision.
+    # This incorporates partitions appended by another reviewer since the
+    # session opened; revision is ordering evidence, never a shared counter.
+    current = resolve_keypoint_delta_overlay(
+        session.root,
+        delta_run=session.delta_run,
+        generation=session.delta_generation,
+        n_keypoints=session.keypoint_count,
+    )
+    if current.generation_status != "open":
+        raise RuntimeError("The bound keypoint delta generation is no longer open.")
+    revision = current.max_revision + 1
+    timestamp = time_ns()
+    partition = f"review_{timestamp}_{uuid4().hex}"
+    row = int(roi_idx)
+    instance_key = int(session.instance_keys[row])
+    attrs = write_delta_partition(
+        session.root,
+        delta_run=session.delta_run,
+        generation=session.delta_generation,
+        partition=partition,
+        editor=session.delta_editor,
+        instance_keys=[instance_key] * count,
+        row_index_hints=[row] * count,
+        operation_codes=operation_codes,
+        revisions=[revision] * count,
+        timestamp_ns=[timestamp] * count,
+        reason_codes=[int(reason_code)] * count,
+        keypoint_index=keypoint_indices,
+        new_xy=new_xy,
+        valid=valid,
+        reason_code_map=KEYPOINT_DELTA_REASON_CODE_MAP,
+    )
+    session.delta_overlay = resolve_keypoint_delta_overlay(
+        session.root,
+        delta_run=session.delta_run,
+        generation=session.delta_generation,
+        n_keypoints=session.keypoint_count,
+    )
+    return {
+        "partition": partition,
+        "partition_sha256": attrs["partition_sha256"],
+        "revision": revision,
+        "timestamp_ns": timestamp,
+        "instance_key": instance_key,
+        "delta_run": session.delta_run,
+        "delta_generation": session.delta_generation,
+    }
+
+
 def save_roi_correction(
     session: ReviewSession,
     *,
@@ -624,17 +992,36 @@ def save_roi_correction(
 
     points_arr = np.asarray(points, dtype=np.float64)
     if points_arr.shape != (session.keypoint_count, 2):
-        raise ValueError(
-            f"Expected points shape ({session.keypoint_count}, 2), got {points_arr.shape}."
-        )
+        raise ValueError(f"Expected points shape ({session.keypoint_count}, 2), got {points_arr.shape}.")
     if not np.isfinite(points_arr).all():
         missing = [label for label, point in zip(session.keypoint_labels, points_arr) if not np.isfinite(point).all()]
         detail = ", ".join(missing)
-        raise ValueError(
-            f"Cannot save incomplete keypoints. Missing: {detail}" if detail else "Cannot save incomplete keypoints."
-        )
+        raise ValueError(f"Cannot save incomplete keypoints. Missing: {detail}" if detail else "Cannot save incomplete keypoints.")
 
     roi_idx = int(session.failures[position])
+    delta_write: Optional[Mapping[str, object]] = None
+    if session.immutable_base:
+        delta_write = _append_immutable_keypoint_delta(
+            session,
+            roi_idx=roi_idx,
+            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["replace_xy"]] * session.keypoint_count,
+            keypoint_indices=list(range(session.keypoint_count)),
+            new_xy=points_arr.tolist(),
+            valid=[True] * session.keypoint_count,
+            reason_code=KEYPOINT_DELTA_REASON_CODE_MAP["manual_correction"],
+        )
+        # All session arrays for an immutable base are private in-memory
+        # overlays. Reuse the established derived/status update path only after
+        # the authoritative partition is durably complete.
+        session.immutable_base = False
+        try:
+            result = save_roi_correction(session, position=position, points=points)
+        finally:
+            session.immutable_base = True
+        result["delta_write"] = dict(delta_write)
+        result["immutable_base_unchanged"] = True
+        return result
+
     frame_idx = int(session.frame_indices[roi_idx])
     changed = False
 
@@ -775,6 +1162,33 @@ def _clear_keypoint_solution(
     stale_reason: str,
 ) -> dict[str, object]:
     idx = int(roi_idx)
+    if session.immutable_base:
+        reason_code = KEYPOINT_DELTA_REASON_CODE_MAP.get(reason_tag)
+        if reason_code is None:
+            raise RuntimeError(f"No frozen keypoint delta reason for {reason_tag!r}.")
+        delta_write = _append_immutable_keypoint_delta(
+            session,
+            roi_idx=idx,
+            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["clear_keypoint"]] * session.keypoint_count,
+            keypoint_indices=list(range(session.keypoint_count)),
+            new_xy=[[np.nan, np.nan]] * session.keypoint_count,
+            valid=[False] * session.keypoint_count,
+            reason_code=reason_code,
+        )
+        session.immutable_base = False
+        try:
+            result = _clear_keypoint_solution(
+                session,
+                roi_idx=idx,
+                reason_tag=reason_tag,
+                stale_reason=stale_reason,
+            )
+        finally:
+            session.immutable_base = True
+        result["delta_write"] = dict(delta_write)
+        result["immutable_base_unchanged"] = True
+        return result
+
     frame_idx = int(session.frame_indices[idx])
     changed = False
 
@@ -870,6 +1284,28 @@ def clear_failure_label(session: ReviewSession, *, position: int) -> dict[str, o
         raise RuntimeError("Cannot clear failure label: reason labels are unavailable.")
 
     roi_idx = int(session.failures[position])
+    delta_write: Optional[Mapping[str, object]] = None
+    if session.immutable_base:
+        current_points = np.asarray(session.kp_roi_arr[roi_idx], dtype=np.float64)
+        current_valid = np.all(np.isfinite(current_points), axis=1)
+        delta_write = _append_immutable_keypoint_delta(
+            session,
+            roi_idx=roi_idx,
+            operation_codes=[KEYPOINT_OPERATION_CODE_MAP["set_valid"]] * session.keypoint_count,
+            keypoint_indices=list(range(session.keypoint_count)),
+            new_xy=[[np.nan, np.nan]] * session.keypoint_count,
+            valid=current_valid.tolist(),
+            reason_code=0,
+        )
+        session.immutable_base = False
+        try:
+            result = clear_failure_label(session, position=position)
+        finally:
+            session.immutable_base = True
+        result["delta_write"] = dict(delta_write)
+        result["immutable_base_unchanged"] = True
+        return result
+
     frame_idx = int(session.frame_indices[roi_idx])
     existing = _reason_at(session, roi_idx)
     tags = {token.strip() for token in existing.split("|") if token.strip()}
@@ -997,6 +1433,10 @@ def apply_review_status(
     reviewer: Optional[str] = None,
     notes: Optional[str] = None,
 ) -> dict[str, object]:
+    if session.immutable_base:
+        raise RuntimeError(
+            "An immutable refined-keypoint base plus review deltas cannot be approved in place. Freeze and compact the delta generation into a new validated immutable snapshot first."
+        )
     refined_parent = session.root.get("refined_keypoints_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_keypoints_runs found in archive.")

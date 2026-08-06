@@ -35,12 +35,22 @@ resulting root, every new base, and the editable mask run remained
 selector-ineligible; no registry or production selector was modified. This
 local smoke is implementation evidence, not a durable published canary.
 
-The storage-side keypoint edit generation is not yet a reviewer handoff. The
-maintained keypoint review backend still writes corrections directly into
-`refined_keypoints_runs/<run>` arrays. It must gain a delta-aware adapter that
-reads the immutable base plus existing partitions and writes new immutable
-partitions before reviewers use this artifact. The subject-mask reviewer can
+The maintained keypoint review backend is now delta-aware for strict immutable
+bases. It requires exactly one active generation bound to the selected base,
+verifies partition schemas, payload digests, key/hint identity, operation
+semantics, and deterministic merge order, and builds a private in-memory
+overlay. Saves publish a complete immutable partition before changing that
+overlay. Legacy non-immutable runs retain their compatibility writer, but an
+immutable base cannot be approved in place: its generation must first be
+frozen and compacted into a new strict snapshot. The subject-mask reviewer can
 use the dense editable draft after its task/session metadata is created.
+
+A synthetic correction against an ordinary-copy Batman artifact proved the
+boundary on 2026-08-06. The reviewer appended five landmark events, reopened
+the artifact to reconstruct the same correction, and retained the refined-base
+tree SHA-256 unchanged at
+`0110866252e2c2ed3ccf1cbd5f7dc395e23aca150a6c5db70dfae3f6faae82b7`.
+This is local integration evidence, not an accepted scientific edit.
 
 ## Artifact
 
@@ -222,7 +232,7 @@ validated inline metadata result.
       surfaces without relabelling the sampled frame axis as crop-v2.
 - [ ] Publish the review artifact from an immutable Palette revision and hand
       its exact run paths to the maintained review clients.
-- [ ] Route maintained keypoint review reads and writes through the bound delta
+- [x] Route maintained keypoint review reads and writes through the bound delta
       generation; never mutate the strict refined-keypoint base in place.
 - [ ] Compact accepted keypoint deltas and seal accepted dense masks into new
       immutable reviewed snapshots before any authority activation.

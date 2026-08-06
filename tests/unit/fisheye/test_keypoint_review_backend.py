@@ -19,6 +19,10 @@ from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR, mark_run_
 from fisheye.tune import keypoint_review_backend as mod
 from fisheye.tune import keypoint_review_web as web
 from fisheye.shared import zarr_io
+from fisheye.shared.tabular_deltas import (
+    create_delta_generation,
+    resolve_keypoint_delta_overlay,
+)
 
 
 class _FakeArray:
@@ -485,6 +489,64 @@ def test_save_roi_correction_updates_keypoint_rows_and_flags(keypoint_count: int
 
     if session.derived_metric_storage is not None:
         assert bool(np.asarray(session.derived_metric_storage.valid[0], dtype=bool).any())
+
+
+def test_immutable_review_save_appends_delta_without_mutating_base(
+    tmp_path: Path,
+) -> None:
+    root = zarr.open_group(tmp_path / "immutable_review.zarr", mode="w", zarr_format=3)
+    base = root.require_group("refined_keypoints_runs").create_group("snapshot")
+    instance_keys = np.asarray([101, 102, 103, 104], dtype=np.uint64)
+    base.create_array("instance_key", data=instance_keys, chunks=(4,))
+    base.attrs["artifact_mutability"] = "immutable_snapshot"
+    create_delta_generation(
+        root,
+        delta_run="review",
+        generation="generation_000001",
+        generation_ordinal=1,
+        target_kind="keypoints",
+        base_run_path="refined_keypoints_runs/snapshot",
+        created_by="test",
+    )
+    session = _build_session(keypoint_count=5)
+    session.root = root
+    session.refined_run = "snapshot"
+    session.immutable_base = True
+    session.delta_run = "review"
+    session.delta_generation = "generation_000001"
+    session.delta_editor = "reviewer@example.org"
+    session.instance_keys = instance_keys
+    points = np.asarray(
+        [[2.0, 3.0], [4.0, 5.0], [6.0, 7.0], [8.0, 9.0], [10.0, 11.0]],
+        dtype=np.float64,
+    )
+
+    result = mod.save_roi_correction(session, position=0, points=points)
+
+    assert result["immutable_base_unchanged"] is True
+    assert result["delta_write"]["instance_key"] == 101
+    assert list(name for name, _array in base.arrays()) == ["instance_key"]
+    overlay = resolve_keypoint_delta_overlay(
+        root,
+        delta_run="review",
+        generation="generation_000001",
+        n_keypoints=5,
+    )
+    assert overlay.event_count == 5
+    assert len(overlay.edits) == 5
+    assert overlay.reason_code_map["manual_correction"] == 1
+    np.testing.assert_allclose(np.asarray(session.kp_roi_arr[0]), points)
+
+
+def test_immutable_review_cannot_approve_base_in_place() -> None:
+    session = _build_session(keypoint_count=5)
+    session.immutable_base = True
+    with pytest.raises(RuntimeError, match="compact"):
+        mod.apply_review_status(
+            session,
+            state="approved",
+            reviewer="reviewer@example.org",
+        )
 
 
 def test_save_roi_correction_no_change_does_not_mark_stale_or_edit() -> None:
