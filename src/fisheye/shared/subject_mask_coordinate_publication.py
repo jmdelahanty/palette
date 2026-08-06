@@ -715,7 +715,12 @@ def _model_artifact(value: Mapping[str, Any]) -> dict[str, Any]:
         or result["mtime_ns"] <= 0
     ):
         _fail("Subject-mask model artifact requires positive exact stat evidence.")
-    if result["source"] not in {"computed", "sidecar", "registry"}:
+    if result["source"] not in {
+        "computed",
+        "sidecar",
+        "registry",
+        "direct_scientific_commit_rehash",
+    }:
         _fail("Subject-mask model artifact has an unsupported fingerprint source.")
     return result
 

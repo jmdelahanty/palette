@@ -958,6 +958,21 @@ def test_subject_mask_preflight_rejects_wrong_model_input_dimensions_or_padding(
         _prepare_context(root, model_input_transform=transform)
 
 
+def test_subject_mask_preflight_accepts_direct_scientific_model_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _parent, run = _subject_fixture(monkeypatch)
+    artifact = {
+        **MODEL_ARTIFACT,
+        "source": "direct_scientific_commit_rehash",
+    }
+    run.attrs["subject_mask_model_artifact"] = copy.deepcopy(artifact)
+
+    context = _prepare_context(root, model_artifact=artifact)
+
+    assert context.inference_authority.record["model_artifact"] == artifact
+
+
 @pytest.mark.parametrize(
     ("attr_name", "replacement"),
     (
