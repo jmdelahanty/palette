@@ -2,8 +2,11 @@
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
     let payload = null;
-    let bbox = null;
+    let detections = [];
+    let selectedIndex = null;
     let dragStart = null;
+    let dragTargetIndex = null;
+    let dragMoved = false;
     let drawing = false;
     let lastImagePoint = null;
 
@@ -125,22 +128,43 @@
       const height = Math.max(0.001, Math.min(1.0, hint.height));
       const cx = Math.max(width / 2, Math.min(1.0 - width / 2, rawCx));
       const cy = Math.max(height / 2, Math.min(1.0 - height / 2, rawCy));
-      bbox = [cx, cy, width, height];
+      detections.push({instance_key: null, bbox_norm: [cx, cy, width, height], class_id: 0});
+      selectedIndex = detections.length - 1;
       draw();
-      setStatus("Placed typical " + (width * 100).toFixed(2) + "% x " + (height * 100).toFixed(2) + "% box from " + hint.source + ". Save to persist.");
+      setStatus("Added typical " + (width * 100).toFixed(2) + "% x " + (height * 100).toFixed(2) + "% box from " + hint.source + ". Save to persist.");
+    }
+
+    function detectionAtPoint(point) {
+      for (let index = detections.length - 1; index >= 0; index -= 1) {
+        const rect = bboxToRect(detections[index].bbox_norm);
+        if (!rect) continue;
+        const x0 = Math.min(rect.x, rect.x + rect.w);
+        const x1 = Math.max(rect.x, rect.x + rect.w);
+        const y0 = Math.min(rect.y, rect.y + rect.h);
+        const y1 = Math.max(rect.y, rect.y + rect.h);
+        if (point[0] >= x0 && point[0] <= x1 && point[1] >= y0 && point[1] <= y1) return index;
+      }
+      return null;
     }
 
     function draw() {
       if (!payload) return;
       viewport.drawImage();
-      const rect = bboxToRect(bbox);
-      if (rect) {
+      detections.forEach((detection, index) => {
+        const rect = bboxToRect(detection.bbox_norm);
+        if (!rect) return;
         const [x0, y0] = viewport.imageToCanvas(rect.x, rect.y);
         const [x1, y1] = viewport.imageToCanvas(rect.x + rect.w, rect.y + rect.h);
         ctx.lineWidth = Math.max(2, canvas.width / 160);
-        ctx.strokeStyle = "#f28f3b";
+        ctx.strokeStyle = index === selectedIndex ? "#f28f3b" : "#22d3ee";
         ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-      }
+        ctx.fillStyle = index === selectedIndex ? "rgba(242,143,59,0.16)" : "rgba(34,211,238,0.08)";
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+        ctx.fillStyle = index === selectedIndex ? "#f28f3b" : "#22d3ee";
+        ctx.font = Math.max(12, canvas.width / 90) + "px sans-serif";
+        const identity = detection.instance_key ? String(detection.instance_key).slice(-6) : "new";
+        ctx.fillText(String(index + 1) + ":" + identity, x0 + 4, Math.max(14, y0 - 4));
+      });
       const display = bboxDisplayTransform();
       if (display.x > 0 || display.y > 0 || display.w < viewport.imageWidth || display.h < viewport.imageHeight) {
         const [x0, y0] = viewport.imageToCanvas(display.x, display.y);
@@ -162,9 +186,10 @@
         ? (hint.width * 100).toFixed(2) + "% x " + (hint.height * 100).toFixed(2) + "% (" + hint.source + ")"
         : "unavailable";
       document.getElementById("summary").innerHTML =
-        "<p><b>Frame</b> " + payload.frame_idx + " / <b>row</b> " + payload.row_idx + "</p>" +
+        "<p><b>Frame</b> " + payload.frame_idx + " / <b>detections</b> " + detections.length + "</p>" +
         "<p><b>Position</b> " + (state.position + 1) + " of " + state.total + "</p>" +
         "<p><b>Run</b> " + (state.refined_run || "") + "</p>" +
+        "<p><b>Selected</b> " + (selectedIndex === null ? "none" : String(selectedIndex + 1)) + "</p>" +
         "<p><b>Status</b> " + (status.status_label || "") + " / " + (status.reason_label || "") + "</p>" +
         "<p><b>Typical box</b> " + hintText + "</p>";
     }
@@ -179,7 +204,14 @@
     async function loadCurrent() {
       try {
         payload = await api("/frame/current");
-        bbox = payload.bbox_norm ? payload.bbox_norm.slice() : null;
+        detections = Array.isArray(payload.detections)
+          ? payload.detections.filter((item) => Array.isArray(item?.bbox_norm)).map((item) => ({
+              instance_key: item.instance_key === null || item.instance_key === undefined ? null : String(item.instance_key),
+              bbox_norm: item.bbox_norm.slice(),
+              class_id: Number(item?.status?.class_id ?? item?.class_id ?? 0)
+            }))
+          : (payload.bbox_norm ? [{instance_key: null, bbox_norm: payload.bbox_norm.slice(), class_id: 0}] : []);
+        selectedIndex = detections.length ? 0 : null;
         viewport.setImageData(decodeRawImage(payload.frame_image), {resetView: true});
         renderSummary();
         draw();
@@ -207,7 +239,15 @@
         const result = await api("/save", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({bbox_norm: bbox, advance, target_token: payload?.state?.target_token})
+          body: JSON.stringify({
+            detections: detections.map((item) => ({
+              instance_key: item.instance_key,
+              bbox_norm: item.bbox_norm,
+              class_id: item.class_id
+            })),
+            advance,
+            target_token: payload?.state?.target_token
+          })
         });
         await loadCurrent();
         setStatus("Saved " + result.result.action + "." + mutationStatusSuffix(result));
@@ -216,10 +256,16 @@
       }
     }
 
-    function clearBox() {
-      bbox = null;
+    function clearSelectedBox() {
+      if (selectedIndex === null || selectedIndex < 0 || selectedIndex >= detections.length) {
+        setStatus("Select a detection before removing it.", true);
+        return;
+      }
+      detections.splice(selectedIndex, 1);
+      selectedIndex = detections.length ? Math.min(selectedIndex, detections.length - 1) : null;
       draw();
-      setStatus("Box cleared locally. Save to persist.");
+      renderSummary();
+      setStatus("Selected detection removed locally. Save to persist.");
     }
 
     async function completeTask() {
@@ -239,17 +285,41 @@
       const p = imagePointFromEvent(event);
       lastImagePoint = p;
       dragStart = p;
+      dragTargetIndex = detectionAtPoint(p);
+      if (dragTargetIndex !== null) selectedIndex = dragTargetIndex;
+      dragMoved = false;
       drawing = true;
+      draw();
+      renderSummary();
     });
     canvas.addEventListener("mousemove", (event) => {
       if (viewport.panMove(event)) return;
       const p = imagePointFromEvent(event);
       lastImagePoint = p;
       if (!drawing || !dragStart) return;
-      bbox = rectToBbox({x: dragStart[0], y: dragStart[1], w: p[0] - dragStart[0], h: p[1] - dragStart[1]});
+      const nextBox = rectToBbox({x: dragStart[0], y: dragStart[1], w: p[0] - dragStart[0], h: p[1] - dragStart[1]});
+      if (!nextBox) return;
+      dragMoved = true;
+      if (dragTargetIndex === null) {
+        detections.push({instance_key: null, bbox_norm: nextBox, class_id: 0});
+        dragTargetIndex = detections.length - 1;
+        selectedIndex = dragTargetIndex;
+      } else {
+        detections[dragTargetIndex].bbox_norm = nextBox;
+      }
       draw();
     });
-    window.addEventListener("mouseup", () => { drawing = false; dragStart = null; viewport.endPan(); });
+    window.addEventListener("mouseup", () => {
+      if (drawing && dragMoved) {
+        renderSummary();
+        setStatus("Detection collection changed locally. Save to persist.");
+      }
+      drawing = false;
+      dragStart = null;
+      dragTargetIndex = null;
+      dragMoved = false;
+      viewport.endPan();
+    });
     canvas.addEventListener("wheel", viewport.handleWheel, {passive: false});
     window.addEventListener("keydown", (event) => {
       const targetTag = event.target?.tagName?.toLowerCase();
@@ -258,7 +328,7 @@
       if (event.key === "p") { event.preventDefault(); nav(-1); return; }
       if (event.key === "s") { event.preventDefault(); save(false); return; }
       if (event.key === "t" || event.key === "T") { event.preventDefault(); placeTypicalBox(); return; }
+      if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); clearSelectedBox(); return; }
       if (event.key === "f" || event.key === "F") { event.preventDefault(); viewport.fit(); return; }
     });
     loadCurrent();
-  

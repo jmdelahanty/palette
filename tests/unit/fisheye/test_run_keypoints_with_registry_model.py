@@ -23,6 +23,7 @@ def test_registry_model_runner_defaults_to_keypoint_sharding() -> None:
         params["keypoint_frame_shard_rows"].default
         == mod.DEFAULT_KEYPOINT_FRAME_SHARD_ROWS
     )
+    assert params["require_training_materialization_binding"].default is False
 
 
 def test_pick_best_candidate_enforces_unique_when_tied() -> None:
@@ -401,6 +402,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
             str(tmp_path / "roi-cache"),
             "--roi-cache-manifest",
             str(tmp_path / "flat-cache" / "sample.flat_roi_cache.json"),
+            "--require-training-materialization-binding",
         ]
     )
 
@@ -432,6 +434,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert detect_kwargs.get("roi_cache_manifest") == (tmp_path / "flat-cache" / "sample.flat_roi_cache.json").resolve()
     assert detect_kwargs.get("roi_cache_staged_to_node_scratch") is False
     assert detect_kwargs.get("roi_cache_source_tier") == "node_scratch"
+    assert detect_kwargs.get("require_training_materialization_binding") is True
     staging_details = detect_kwargs.get("roi_cache_staging_details")
     assert isinstance(staging_details, dict)
     assert staging_details.get("staged") is False

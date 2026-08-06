@@ -509,6 +509,7 @@ def run_keypoints_with_registry_model(
     input_mode: str = "numpy-list",
     model_input_transform_mode: str = "auto",
     coordinate_contract_mode: str = "canonical",
+    require_training_materialization_binding: bool = False,
     keypoint_roi_shard_rows: Optional[int] = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     cpu: bool = False,
@@ -556,6 +557,9 @@ def run_keypoints_with_registry_model(
         input_mode=input_mode,
         model_input_transform_mode=model_input_transform_mode,
         coordinate_contract_mode=coordinate_contract_mode,
+        require_training_materialization_binding=bool(
+            require_training_materialization_binding
+        ),
         keypoint_roi_shard_rows=keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
         cpu=bool(cpu),
@@ -747,6 +751,9 @@ def run_keypoints_with_registry_model(
             input_mode=input_mode,
             model_input_transform_mode=model_input_transform_mode,
             coordinate_contract_mode=coordinate_contract_mode,
+            require_training_materialization_binding=bool(
+                require_training_materialization_binding
+            ),
             keypoint_roi_shard_rows=keypoint_roi_shard_rows,
             keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
             profile_timings=bool(profile_timings),
@@ -966,6 +973,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             "compute output for a later strict v2 finalizer."
         ),
     )
+    parser.add_argument(
+        "--require-training-materialization-binding",
+        action="store_true",
+        help=(
+            "Require the explicit training crop-materialization v1 binding and "
+            "write only a non-authoritative terminal keypoint shard."
+        ),
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output.")
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
@@ -1006,6 +1021,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         input_mode=args.input_mode,
         model_input_transform_mode=args.model_input_transform,
         coordinate_contract_mode=args.coordinate_contract_mode,
+        require_training_materialization_binding=bool(
+            args.require_training_materialization_binding
+        ),
         keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=args.keypoint_frame_shard_rows,
         cpu=bool(args.cpu),

@@ -1,16 +1,18 @@
-"""Regenerate training crop ROI pixels from Orange mono videos via PyNvVideoCodec.
+"""Materialize training crop ROI pixels from video or a verified flat cache.
 
 This utility creates a new materialized ``crop_runs/<target>`` group with the
 same row geometry as an existing crop run, but rewrites ``roi_images`` from the
-source MP4 using the PyNvVideoCodec NV12 Y/luma plane. It is intended for the
-training crop-representation migration and does not change ``crop_runs/latest``
-unless explicitly requested.
+source MP4 using the PyNvVideoCodec NV12 Y/luma plane, or copies them from an
+exact SHA-256-verified flat ROI cache.  Cache bytes are copied into the Zarr;
+the resulting training artifact never depends on the cache at read time.  It
+does not change ``crop_runs/latest`` unless explicitly requested.
 """
 
 from __future__ import annotations
 
 from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -29,7 +31,11 @@ from fisheye.shared.crop_roi_layout import (
     build_crop_roi_create_kwargs,
     crop_roi_layout_attrs,
 )
-from fisheye.shared.flat_roi_cache import _crop_pynvvc_luma_frame
+from fisheye.shared.flat_roi_cache import (
+    _crop_pynvvc_luma_frame,
+    load_flat_roi_cache_manifest,
+    open_flat_roi_cache,
+)
 from fisheye.shared.roi_pixel_contract import (
     APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
     CENTER_ROUNDING_NP_ROUND,
@@ -39,11 +45,21 @@ from fisheye.shared.roi_pixel_contract import (
     orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from fisheye.shared.zarr.training_crop_materialization import (
+    TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE,
+    TRAINING_CROP_MATERIALIZATION_PROVIDERS,
+    TRAINING_CROP_MATERIALIZATION_SCHEMA_ID,
+    build_training_crop_materialization_binding,
+)
+from fisheye.shared.zarr.crop_schema import CROP_GEOMETRY_SCHEMA_V1
 
 
 SOURCE_FRAME_INDEX_MODES = ("auto", "direct", "original_frame_indices", "source_frame_index_parquet")
 DECODE_MODES = ("auto", "sequential", "indexed")
 MODULE_NAME = "fisheye.utils.regenerate_training_crops_pynvvc"
+TRAINING_CROP_MATERIALIZATION_SCHEMA = TRAINING_CROP_MATERIALIZATION_SCHEMA_ID
+SOURCE_VIDEO_MATERIALIZATION_PROVIDER = "source_video_pynvvc_luma"
+VERIFIED_CACHE_MATERIALIZATION_PROVIDER = "verified_flat_roi_cache"
 
 
 def _json_safe(value: Any) -> Any:
@@ -58,6 +74,21 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return str(value)
+
+
+def _parse_instance_keys(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+    keys = [int(token.strip()) for token in value.split(",") if token.strip()]
+    if not keys:
+        raise argparse.ArgumentTypeError(
+            "--source-instance-keys requires at least one comma-separated uint64."
+        )
+    if any(key < 0 or key > np.iinfo(np.uint64).max for key in keys):
+        raise argparse.ArgumentTypeError(
+            "--source-instance-keys values must be valid uint64 integers."
+        )
+    return keys
 
 
 def _valid_attr_text(value: Any) -> str | None:
@@ -479,9 +510,28 @@ def _choose_decode_mode(
     return "indexed" if frames_with_rois / float(frames_to_scan) < 0.5 else "sequential"
 
 
-def _copy_source_array(source_group: Any, target_group: Any, name: str) -> None:
+def _copy_source_array(
+    source_group: Any,
+    target_group: Any,
+    name: str,
+    *,
+    source_row_ids: np.ndarray,
+    source_row_count: int,
+    selected_frame_indices: np.ndarray,
+) -> None:
     source = source_group[name]
     data = np.asarray(source[:])
+    if name == "frame_row_offsets":
+        n_frames = int(data.shape[0]) - 1
+        counts = np.bincount(
+            np.asarray(selected_frame_indices, dtype=np.int64),
+            minlength=max(0, n_frames),
+        )
+        data = np.zeros(n_frames + 1, dtype=np.int64)
+        if n_frames:
+            data[1:] = np.cumsum(counts[:n_frames], dtype=np.int64)
+    elif data.ndim >= 1 and int(data.shape[0]) == int(source_row_count):
+        data = data[source_row_ids]
     chunks = getattr(source, "chunks", None)
     kwargs: dict[str, Any] = {"data": data, "overwrite": True}
     if chunks is not None:
@@ -489,12 +539,26 @@ def _copy_source_array(source_group: Any, target_group: Any, name: str) -> None:
     target_group.create_array(name, **kwargs)
 
 
-def _copy_crop_arrays(source_group: Any, target_group: Any) -> list[str]:
+def _copy_crop_arrays(
+    source_group: Any,
+    target_group: Any,
+    *,
+    source_row_ids: np.ndarray,
+    source_row_count: int,
+    selected_frame_indices: np.ndarray,
+) -> list[str]:
     copied: list[str] = []
     for name in sorted(str(k) for k in source_group.array_keys()):
         if name == "roi_images":
             continue
-        _copy_source_array(source_group, target_group, name)
+        _copy_source_array(
+            source_group,
+            target_group,
+            name,
+            source_row_ids=source_row_ids,
+            source_row_count=source_row_count,
+            selected_frame_indices=selected_frame_indices,
+        )
         copied.append(name)
     return copied
 
@@ -505,12 +569,67 @@ def _set_latest_pointers(crop_parent: Any, target_run: str) -> None:
     crop_parent.attrs["latest_any"] = target_run
 
 
+def _sha256_file(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _cache_pixel_contract(manifest: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    builder = manifest.get("builder")
+    if not isinstance(builder, Mapping):
+        raise ValueError("Flat ROI cache manifest is missing builder provenance.")
+    raw_contract = builder.get("pixel_contract")
+    if not isinstance(raw_contract, Mapping):
+        raise ValueError("Flat ROI cache manifest is missing builder.pixel_contract.")
+    contract = dict(raw_contract)
+    name = str(builder.get("pixel_contract_name") or contract.get("name") or "")
+    if name != ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME:
+        raise ValueError(
+            "Training crop materialization requires the canonical Orange mono "
+            f"PyNvVC-luma pixel contract; got {name!r}."
+        )
+    if contract.get("name") != name:
+        raise ValueError(
+            "Flat ROI cache pixel-contract name disagrees with its contract payload."
+        )
+    expected_contract = orange_mono_pynvvc_luma_pixel_contract()
+    if _json_safe(contract) != _json_safe(expected_contract):
+        raise ValueError(
+            "Flat ROI cache pixel contract does not exactly match the canonical "
+            "Orange mono PyNvVC-luma contract."
+        )
+    return contract, name
+
+
+def _source_crop_manifest_binding(source_group: Any) -> dict[str, Any]:
+    raw = source_group.attrs.get("run_manifest")
+    if not isinstance(raw, Mapping):
+        return {
+            "available": False,
+            "reason": "source_crop_run_has_no_run_manifest",
+        }
+    envelope = dict(raw)
+    digest = envelope.get("payload_digest")
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise ValueError("Source crop run_manifest lacks one exact payload_digest.")
+    return {
+        "available": True,
+        "schema_id": envelope.get("schema_id"),
+        "schema_version": envelope.get("schema_version"),
+        "payload_digest": digest,
+    }
+
+
 def regenerate_training_crops_pynvvc(
     *,
     zarr_path: str | Path,
+    source_zarr_path: str | Path | None = None,
     source_crop_run: str | None = None,
     target_crop_run: str | None = None,
     video_path: str | Path | None = None,
+    roi_cache_manifest: str | Path | None = None,
+    cache_copy_batch_rows: int = 1024,
+    source_instance_keys: Sequence[int] | None = None,
     source_frame_index_mode: str = "auto",
     decode_mode: str = "auto",
     decode_chunk_frames: int = 1,
@@ -521,53 +640,184 @@ def regenerate_training_crops_pynvvc(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     archive_path = Path(zarr_path).expanduser().resolve()
+    if not archive_path.exists():
+        raise FileNotFoundError(
+            "Training crop materialization extends an existing training Zarr; "
+            f"destination does not exist: {archive_path}"
+        )
+    source_archive_path = (
+        Path(source_zarr_path).expanduser().resolve()
+        if source_zarr_path is not None
+        else archive_path
+    )
+    cache_manifest_path = (
+        Path(roi_cache_manifest).expanduser().resolve()
+        if roi_cache_manifest is not None
+        else None
+    )
+    if cache_manifest_path is not None and video_path is not None:
+        raise ValueError(
+            "--roi-cache-manifest and --video-path are mutually exclusive."
+        )
+    if type(cache_copy_batch_rows) is not int or cache_copy_batch_rows <= 0:
+        raise ValueError("cache_copy_batch_rows must be a positive exact integer.")
+    materialization_provider = (
+        VERIFIED_CACHE_MATERIALIZATION_PROVIDER
+        if cache_manifest_path is not None
+        else SOURCE_VIDEO_MATERIALIZATION_PROVIDER
+    )
     started = time.perf_counter()
-    root = zarr.open_group(str(archive_path), mode="a", use_consolidated=False)
+    root = zarr.open_group(
+        str(archive_path),
+        mode="r" if dry_run else "a",
+        use_consolidated=False,
+    )
+    if str(root.attrs.get("zarr_purpose") or "").strip().lower() != "training":
+        raise ValueError(
+            "Training crop materialization requires zarr_purpose='training' on the "
+            "destination archive."
+        )
     crop_parent = root.get("crop_runs")
-    if crop_parent is None:
-        raise KeyError("Zarr archive is missing crop_runs.")
-    resolved_source_crop = _resolve_crop_run(root, source_crop_run)
-    source_group = crop_parent[resolved_source_crop]
+    source_root = (
+        root
+        if source_archive_path == archive_path
+        else zarr.open_group(str(source_archive_path), mode="r", use_consolidated=False)
+    )
+    resolved_source_crop = _resolve_crop_run(source_root, source_crop_run)
+    source_crop_parent = source_root.get("crop_runs")
+    if source_crop_parent is None:
+        raise KeyError("Source Zarr archive is missing crop_runs.")
+    source_group = source_crop_parent[resolved_source_crop]
     if "frame_indices" not in source_group:
         raise ValueError(f"crop_runs/{resolved_source_crop} is missing frame_indices.")
     if "roi_coordinates_full" not in source_group:
         raise ValueError(f"crop_runs/{resolved_source_crop} is missing roi_coordinates_full.")
 
     resolved_target_crop = target_crop_run or _default_target_run(resolved_source_crop)
-    if resolved_target_crop in crop_parent and not overwrite:
+    if (
+        crop_parent is not None
+        and resolved_target_crop in crop_parent
+        and not overwrite
+    ):
         raise FileExistsError(
             f"Target crop run already exists: crop_runs/{resolved_target_crop}. "
             "Pass --overwrite to replace it."
         )
 
-    frame_indices = np.asarray(source_group["frame_indices"][:], dtype=np.int64).reshape(-1)
-    roi_coordinates_full = np.asarray(source_group["roi_coordinates_full"][:], dtype=np.int32)
+    all_frame_indices = np.asarray(
+        source_group["frame_indices"][:], dtype=np.int64
+    ).reshape(-1)
+    all_roi_coordinates_full = np.asarray(
+        source_group["roi_coordinates_full"][:], dtype=np.int32
+    )
     roi_shape = _resolve_roi_shape(source_group)
-    total_rois = int(frame_indices.shape[0])
-    if int(roi_coordinates_full.shape[0]) != total_rois:
+    source_total_rois = int(all_frame_indices.shape[0])
+    if int(all_roi_coordinates_full.shape[0]) != source_total_rois:
         raise ValueError(
             "roi_coordinates_full length "
-            f"{roi_coordinates_full.shape[0]} does not match frame_indices rows {total_rois}."
+            f"{all_roi_coordinates_full.shape[0]} does not match frame_indices rows {source_total_rois}."
         )
-    if "roi_images" in source_group and int(source_group["roi_images"].shape[0]) != total_rois:
+    if "roi_images" in source_group and int(source_group["roi_images"].shape[0]) != source_total_rois:
         raise ValueError(
             f"source roi_images rows {source_group['roi_images'].shape[0]} "
-            f"do not match frame_indices rows {total_rois}."
+            f"do not match frame_indices rows {source_total_rois}."
         )
+    source_row_ids = np.arange(source_total_rois, dtype=np.int64)
+    requested_instance_keys: list[int] | None = None
+    if source_instance_keys is not None:
+        requested_instance_keys = sorted({int(value) for value in source_instance_keys})
+        if not requested_instance_keys:
+            raise ValueError("source_instance_keys cannot be empty when supplied.")
+        if "instance_key" not in source_group:
+            raise ValueError(
+                "Instance-key training selection requires source crop instance_key."
+            )
+        available_keys = np.asarray(
+            source_group["instance_key"][:], dtype=np.uint64
+        ).reshape(-1)
+        if (
+            available_keys.shape[0] != source_total_rois
+            or np.unique(available_keys).shape[0] != available_keys.shape[0]
+        ):
+            raise ValueError("Source crop instance_key must be complete and unique.")
+        row_by_key = {
+            int(key): int(row) for row, key in enumerate(available_keys.tolist())
+        }
+        missing_keys = [key for key in requested_instance_keys if key not in row_by_key]
+        if missing_keys:
+            raise KeyError(
+                f"Requested instance_key values are absent from the crop source: {missing_keys[:10]}."
+            )
+        source_row_ids = np.asarray(
+            sorted(row_by_key[key] for key in requested_instance_keys),
+            dtype=np.int64,
+        )
+    frame_indices = all_frame_indices[source_row_ids]
+    roi_coordinates_full = all_roi_coordinates_full[source_row_ids]
+    total_rois = int(source_row_ids.shape[0])
+
+    cache_manifest: dict[str, Any] | None = None
+    cache_array: Any | None = None
+    cache_manifest_sha256: str | None = None
+    cache_payload_sha256: str | None = None
+    cache_pixel_contract: dict[str, Any] | None = None
+    cache_pixel_contract_name: str | None = None
+    if cache_manifest_path is not None:
+        cache_manifest = load_flat_roi_cache_manifest(cache_manifest_path)
+        cache_pixel_contract, cache_pixel_contract_name = _cache_pixel_contract(
+            cache_manifest
+        )
+        cache_array = open_flat_roi_cache(
+            cache_manifest_path,
+            expected_archive_path=source_archive_path,
+            expected_crop_run=resolved_source_crop,
+            expected_shape=(source_total_rois, int(roi_shape[0]), int(roi_shape[1])),
+            require_payload_sha256=not bool(dry_run),
+        )
+        cache_manifest_sha256 = _sha256_file(cache_manifest_path)
+        raw_cache_array = cache_manifest.get("array")
+        if not isinstance(raw_cache_array, Mapping):
+            raise ValueError("Flat ROI cache manifest is missing array provenance.")
+        cache_payload_sha256 = str(raw_cache_array.get("sha256") or "")
 
     clipped_mapping = None
-    if video_path is None:
+    if cache_manifest_path is None and video_path is None:
         clipped_mapping = _load_clipped_source_frame_mapping(
-            root=root,
-            archive_path=archive_path,
+            root=source_root,
+            archive_path=source_archive_path,
             crop_frame_indices=frame_indices,
             mode=source_frame_index_mode,
         )
 
-    if clipped_mapping is not None:
+    if cache_manifest_path is not None:
+        resolved_video_path = None
+        video_shape = _resolve_video_shape(source_root, source_group, None)
+        if "source_acquisition_frame_index" in source_group:
+            source_frame_indices = np.asarray(
+                source_group["source_acquisition_frame_index"][:], dtype=np.int64
+            ).reshape(-1)[source_row_ids]
+        else:
+            source_frame_indices = np.asarray(frame_indices, dtype=np.int64)
+        if source_frame_indices.shape[0] != total_rois:
+            raise ValueError(
+                "Source acquisition-frame identity length does not match crop rows."
+            )
+        frame_mapping = {
+            "mode": "source_crop_acquisition_identity",
+            "source_array": (
+                "source_acquisition_frame_index"
+                if "source_acquisition_frame_index" in source_group
+                else "frame_indices"
+            ),
+            "source_archive_path": str(source_archive_path),
+        }
+        frame_to_rows = _frame_to_roi_indices(source_frame_indices)
+        max_frame = int(max(frame_to_rows)) if frame_to_rows else -1
+        decode_mode_effective = "flat_roi_cache"
+    elif clipped_mapping is not None:
         resolved_video_path = None
         first_video = Path(str(clipped_mapping["video_paths"][0]))
-        video_shape = _resolve_video_shape(root, source_group, first_video)
+        video_shape = _resolve_video_shape(source_root, source_group, first_video)
         source_frame_indices = np.asarray(clipped_mapping["source_frame_indices"], dtype=np.int64)
         frame_mapping = {
             "mode": "source_frame_index_parquet",
@@ -577,17 +827,27 @@ def regenerate_training_crops_pynvvc(
         }
         frame_to_rows: dict[int, list[int]] = {}
         max_frame = max(
-            (max(frame_rows) for frame_rows in clipped_mapping["video_frame_to_rows"].values() if frame_rows),
+            (
+                max(frame_rows)
+                for frame_rows in clipped_mapping["video_frame_to_rows"].values()
+                if frame_rows
+            ),
             default=-1,
         )
         decode_mode_effective = "indexed" if decode_mode == "auto" else str(decode_mode)
         if decode_mode_effective == "sequential":
-            raise ValueError("Clipped source_frame_index_parquet decoding currently requires indexed decode mode.")
+            raise ValueError(
+                "Clipped source_frame_index_parquet decoding currently requires indexed decode mode."
+            )
     else:
-        resolved_video_path = _resolve_video_path(root, source_group, video_path, archive_path)
-        video_shape = _resolve_video_shape(root, source_group, resolved_video_path)
+        resolved_video_path = _resolve_video_path(
+            source_root, source_group, video_path, source_archive_path
+        )
+        video_shape = _resolve_video_shape(
+            source_root, source_group, resolved_video_path
+        )
         source_frame_indices, frame_mapping = _map_source_frame_indices(
-            root=root,
+            root=source_root,
             crop_frame_indices=frame_indices,
             mode=source_frame_index_mode,
         )
@@ -598,7 +858,16 @@ def regenerate_training_crops_pynvvc(
             frame_to_rows=frame_to_rows,
             max_frame=max_frame,
         )
-    contract = orange_mono_pynvvc_luma_pixel_contract()
+    contract = (
+        dict(cache_pixel_contract)
+        if cache_pixel_contract is not None
+        else orange_mono_pynvvc_luma_pixel_contract()
+    )
+    pixel_contract_name = (
+        str(cache_pixel_contract_name)
+        if cache_pixel_contract_name is not None
+        else ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+    )
     layout = build_canonical_crop_roi_layout(
         total_rois=total_rois,
         preferred_chunk_len=int(roi_chunk_len),
@@ -608,6 +877,7 @@ def regenerate_training_crops_pynvvc(
     plan: dict[str, Any] = {
         "status": "dry_run" if dry_run else "planned",
         "zarr_path": str(archive_path),
+        "source_zarr_path": str(source_archive_path),
         "source_crop_run": str(resolved_source_crop),
         "target_crop_run": str(resolved_target_crop),
         "video_path": str(resolved_video_path) if resolved_video_path is not None else None,
@@ -615,6 +885,17 @@ def regenerate_training_crops_pynvvc(
         "video_shape": [int(video_shape[0]), int(video_shape[1])],
         "roi_shape": [int(roi_shape[0]), int(roi_shape[1])],
         "total_rois": int(total_rois),
+        "source_total_rois": int(source_total_rois),
+        "source_row_selection": {
+            "mode": (
+                "instance_key_subset" if requested_instance_keys is not None else "all"
+            ),
+            "row_count": int(total_rois),
+            "source_row_ids_sha256": hashlib.sha256(
+                np.ascontiguousarray(source_row_ids).view(np.uint8)
+            ).hexdigest(),
+            "requested_instance_keys": requested_instance_keys,
+        },
         "source_frame_index_mapping": frame_mapping,
         "source_frame_min": int(source_frame_indices.min()) if source_frame_indices.size else None,
         "source_frame_max": int(source_frame_indices.max()) if source_frame_indices.size else None,
@@ -623,57 +904,149 @@ def regenerate_training_crops_pynvvc(
         "decode_chunk_frames": int(decode_chunk_frames),
         "roi_chunk_len": int(layout.roi_chunk_len),
         "pixel_contract": contract,
-        "pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+        "pixel_contract_name": pixel_contract_name,
+        "materialization_provider": materialization_provider,
+        "materialization_provider_contract": list(
+            TRAINING_CROP_MATERIALIZATION_PROVIDERS
+        ),
+        "roi_cache": (
+            {
+                "manifest_path": str(cache_manifest_path),
+                "manifest_sha256": cache_manifest_sha256,
+                "payload_sha256": cache_payload_sha256,
+                "payload_verification": (
+                    "direct_sha256_before_use_v1" if not dry_run else "deferred_apply"
+                ),
+            }
+            if cache_manifest_path is not None
+            else None
+        ),
+        "source_crop_manifest": _source_crop_manifest_binding(source_group),
         "set_latest": bool(set_latest),
         "consolidate_metadata": bool(consolidate_metadata),
     }
     if dry_run:
+        if cache_array is not None:
+            cache_array.close()
         return plan
 
+    if crop_parent is None:
+        crop_parent = root.require_group("crop_runs")
     target_group = crop_parent.create_group(resolved_target_crop, overwrite=bool(overwrite))
-    target_group.attrs.update(dict(source_group.attrs))
-    target_group.attrs.update(
-        {
-            "status": "running",
-            "created_at_utc": _utc_now(),
-            "generated_by": MODULE_NAME,
-            "source_crop_run": str(resolved_source_crop),
-            "source_crop_path": f"crop_runs/{resolved_source_crop}",
-            "crop_storage_mode": "materialized",
-            "roi_size": [int(roi_shape[0]), int(roi_shape[1])],
-            "source_video_path": str(resolved_video_path) if resolved_video_path is not None else "multiple_clips",
-            "height": int(video_shape[0]),
-            "width": int(video_shape[1]),
-            "source_pixels": SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
-            "source_pixel_contract": "orange.camera.mono8.full_frame.v1",
-            "source_pixel_range": "0_255",
-            "decode_backend": DECODE_BACKEND_PYNVVC_LUMA,
-            "decode_backend_family": "PyNvVideoCodec",
-            "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
-            "source_decode_surface": "nv12_y_plane_uint8",
-            "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
-            "container_color_range_observed": "tv",
-            "container_color_range_handling": contract.get("container_color_range_handling"),
-            "center_rounding": CENTER_ROUNDING_NP_ROUND,
-            "decode_mode_requested": str(decode_mode),
-            "decode_mode_effective": str(decode_mode_effective),
-            "crop_pixel_migration_version": "training_orange_mono_pynvvc_luma_v1",
-            "roi_image_representation": contract.get("image_representation"),
-            "roi_pixel_contract": contract,
-            "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
-            "source_frame_index_mapping": frame_mapping,
-            "source_frame_index_mode_requested": str(source_frame_index_mode),
-            "source_frame_indices_min": int(source_frame_indices.min()) if source_frame_indices.size else None,
-            "source_frame_indices_max": int(source_frame_indices.max()) if source_frame_indices.size else None,
-        }
-    )
+    if cache_manifest_path is None and source_archive_path == archive_path:
+        target_group.attrs.update(dict(source_group.attrs))
+    else:
+        # Source crop-v2 manifests and coordinate proofs bind the source archive
+        # and exact source path.  Copying those attrs to another archive would
+        # create a convincing but invalid authority.  The training surface keeps
+        # an explicit source binding and is not relabelled as crop-v2.
+        for key in (
+            "crop_signature",
+            "crop_revision",
+            "roi_size",
+            "width",
+            "height",
+            "source_video_path",
+            "video_source_path",
+            "source_pixels",
+            "source_pixel_contract",
+        ):
+            if key in source_group.attrs:
+                target_group.attrs[key] = source_group.attrs[key]
+    target_attrs: dict[str, Any] = {
+        "status": "running",
+        "created_at_utc": _utc_now(),
+        "generated_by": MODULE_NAME,
+        "training_materialization_schema": TRAINING_CROP_MATERIALIZATION_SCHEMA,
+        "training_materialization_provider": materialization_provider,
+        "training_materialization_provider_contract": list(
+            TRAINING_CROP_MATERIALIZATION_PROVIDERS
+        ),
+        "stage_selector_eligible": False,
+        "source_crop_run": str(resolved_source_crop),
+        "source_crop_path": f"crop_runs/{resolved_source_crop}",
+        "source_crop_archive_path": str(source_archive_path),
+        "source_crop_manifest_binding": _source_crop_manifest_binding(source_group),
+        "crop_storage_mode": "materialized",
+        "roi_size": [int(roi_shape[0]), int(roi_shape[1])],
+        "height": int(video_shape[0]),
+        "width": int(video_shape[1]),
+        "source_pixels": SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+        "source_pixel_contract": "orange.camera.mono8.full_frame.v1",
+        "source_pixel_range": "0_255",
+        "decode_backend": DECODE_BACKEND_PYNVVC_LUMA,
+        "decode_backend_family": "PyNvVideoCodec",
+        "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
+        "source_decode_surface": "nv12_y_plane_uint8",
+        "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+        "container_color_range_observed": "tv",
+        "container_color_range_handling": contract.get(
+            "container_color_range_handling"
+        ),
+        "center_rounding": CENTER_ROUNDING_NP_ROUND,
+        "decode_mode_requested": str(decode_mode),
+        "decode_mode_effective": str(decode_mode_effective),
+        "crop_pixel_migration_version": "training_orange_mono_pynvvc_luma_v1",
+        "roi_image_representation": contract.get("image_representation"),
+        "roi_pixel_contract": contract,
+        "roi_pixel_contract_name": pixel_contract_name,
+        "source_frame_index_mapping": frame_mapping,
+        "source_frame_index_mode_requested": str(source_frame_index_mode),
+        "source_frame_indices_min": int(source_frame_indices.min())
+        if source_frame_indices.size
+        else None,
+        "source_frame_indices_max": int(source_frame_indices.max())
+        if source_frame_indices.size
+        else None,
+    }
+    if resolved_video_path is not None:
+        target_attrs["source_video_path"] = str(resolved_video_path)
+    elif clipped_mapping is not None:
+        target_attrs["source_video_path"] = "multiple_clips"
+    elif cache_manifest is not None:
+        cache_source = cache_manifest.get("source")
+        if isinstance(cache_source, Mapping):
+            cache_frame_source_path = _valid_attr_text(
+                cache_source.get("frame_source_path")
+            )
+            if cache_frame_source_path is not None:
+                target_attrs["source_video_path"] = cache_frame_source_path
+    target_group.attrs.update(target_attrs)
+    if cache_manifest_path is not None:
+        target_group.attrs.update(
+            {
+                "coordinate_contract": "training_materialized_from_crop_v2_v1",
+                "source_roi_cache_manifest": str(cache_manifest_path),
+                "source_roi_cache_manifest_sha256": cache_manifest_sha256,
+                "source_roi_cache_payload_sha256": cache_payload_sha256,
+                "source_roi_cache_verified": True,
+                "source_roi_cache_backend": "flat_bin_v1",
+                "source_roi_cache_independence": (
+                    "roi_images_copied_into_training_zarr_no_runtime_cache_dependency"
+                ),
+            }
+        )
     if clipped_mapping is not None:
         target_group.attrs["source_video_paths"] = clipped_mapping["video_paths"]
-        target_group.attrs["source_frame_index_path"] = clipped_mapping["source_frame_index_path"]
+        target_group.attrs["source_frame_index_path"] = clipped_mapping[
+            "source_frame_index_path"
+        ]
         target_group.attrs["source_layout"] = "rolling_clips"
     target_group.attrs.update(crop_roi_layout_attrs(layout))
 
-    copied_arrays = _copy_crop_arrays(source_group, target_group)
+    copied_arrays = _copy_crop_arrays(
+        source_group,
+        target_group,
+        source_row_ids=source_row_ids,
+        source_row_count=source_total_rois,
+        selected_frame_indices=frame_indices,
+    )
+    target_group.create_array(
+        "source_crop_row_ids",
+        data=source_row_ids,
+        chunks=(max(1, min(4096, total_rois)),),
+        overwrite=True,
+    )
     target_group.create_array(
         "source_frame_indices",
         data=np.asarray(source_frame_indices, dtype=np.int64),
@@ -705,6 +1078,7 @@ def regenerate_training_crops_pynvvc(
 
     timing: dict[str, Any] = {
         "video_open_seconds": 0.0,
+        "cache_read_seconds": 0.0,
         "decode_seconds": 0.0,
         "crop_seconds": 0.0,
         "contiguous_seconds": 0.0,
@@ -779,15 +1153,41 @@ def regenerate_training_crops_pynvvc(
 
             for decoded_frame_index, frame in zip(batch_frame_indices, decoded_frames):
                 frame_tensor = torch.from_dlpack(frame)
-                _write_frame_crops(frame_tensor, requested_by_frame[int(decoded_frame_index)])
+                _write_frame_crops(
+                    frame_tensor, requested_by_frame[int(decoded_frame_index)]
+                )
 
     try:
-        if clipped_mapping is not None:
+        if cache_array is not None:
+            for start in range(0, total_rois, int(cache_copy_batch_rows)):
+                end = min(start + int(cache_copy_batch_rows), total_rois)
+                read_started = time.perf_counter()
+                batch = np.ascontiguousarray(
+                    cache_array[source_row_ids[start:end]], dtype=np.uint8
+                )
+                timing["cache_read_seconds"] += float(
+                    time.perf_counter() - read_started
+                )
+                if batch.shape != (end - start, int(roi_shape[0]), int(roi_shape[1])):
+                    raise ValueError(
+                        "Flat ROI cache returned a batch with an unexpected shape: "
+                        f"{batch.shape}."
+                    )
+                write_started = time.perf_counter()
+                roi_images[start:end] = batch
+                timing["write_seconds"] += float(time.perf_counter() - write_started)
+                rows_written_mask[start:end] = True
+                timing["rows_written"] = int(end)
+        elif clipped_mapping is not None:
             expected_height, expected_width = int(video_shape[0]), int(video_shape[1])
-            for clip_video_path, clip_frame_to_rows in clipped_mapping["video_frame_to_rows"].items():
+            for clip_video_path, clip_frame_to_rows in clipped_mapping[
+                "video_frame_to_rows"
+            ].items():
                 video_open_started = time.perf_counter()
                 reader = _open_pynvvc_luma_indexed_decoder(Path(clip_video_path))
-                timing["video_open_seconds"] += float(time.perf_counter() - video_open_started)
+                timing["video_open_seconds"] += float(
+                    time.perf_counter() - video_open_started
+                )
                 source_height, source_width = _decoder_dimensions(reader)
                 if (source_height, source_width) != (expected_height, expected_width):
                     raise ValueError(
@@ -860,15 +1260,33 @@ def regenerate_training_crops_pynvvc(
             "roi_size": [int(roi_shape[0]), int(roi_shape[1])],
             "roi_pixels_materialized": True,
             "source_crop_run": str(resolved_source_crop),
-            "pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+            "pixel_contract_name": pixel_contract_name,
+            "materialization_provider": materialization_provider,
         }
+        target_group.attrs["timing"] = _json_safe(timing)
+        missing_binding_arrays = sorted(
+            set(CROP_GEOMETRY_SCHEMA_V1.binding_paths) - set(target_group.array_keys())
+        )
+        if missing_binding_arrays:
+            target_group.attrs["training_crop_materialization_binding_status"] = (
+                "legacy_source_missing_crop_v2_identity"
+            )
+            target_group.attrs["training_crop_materialization_binding_missing_arrays"] = (
+                missing_binding_arrays
+            )
+        else:
+            target_group.attrs[TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE] = (
+                build_training_crop_materialization_binding(target_group)
+            )
+            target_group.attrs["training_crop_materialization_binding_status"] = (
+                "strict_v1"
+            )
         if set_latest:
             _set_latest_pointers(crop_parent, resolved_target_crop)
         if consolidate_metadata:
             consolidate_started = time.perf_counter()
             consolidate_metadata_capture_expected_warnings(archive_path)
             timing["consolidate_metadata_seconds"] = float(time.perf_counter() - consolidate_started)
-        target_group.attrs["timing"] = _json_safe(timing)
 
         return {
             **plan,
@@ -885,16 +1303,50 @@ def regenerate_training_crops_pynvvc(
         raise
     finally:
         _close_reader(reader)
+        if cache_array is not None:
+            cache_array.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Regenerate a training crop run's roi_images from PyNvVideoCodec luma."
+        description=(
+            "Materialize a training crop run's roi_images from PyNvVideoCodec "
+            "luma or a verified flat ROI cache."
+        )
     )
     parser.add_argument("zarr_path", type=Path)
+    parser.add_argument(
+        "--source-zarr-path",
+        type=Path,
+        help=(
+            "Optional external analysis Zarr that owns the exact source crop run. "
+            "Use either its source video or an exactly bound flat ROI cache."
+        ),
+    )
     parser.add_argument("--source-crop-run", help="Existing crop_runs/<run> to copy geometry from.")
     parser.add_argument("--target-crop-run", help="New crop_runs/<run> name to create.")
     parser.add_argument("--video-path", type=Path, help="Source MP4 path. Overrides zarr metadata.")
+    parser.add_argument(
+        "--roi-cache-manifest",
+        type=Path,
+        help=(
+            "Verified flat-bin ROI cache to copy into the training crop. This is "
+            "mutually exclusive with --video-path."
+        ),
+    )
+    parser.add_argument(
+        "--cache-copy-batch-rows",
+        type=int,
+        default=1024,
+        help="Rows per cache-to-Zarr copy batch (default: 1024).",
+    )
+    parser.add_argument(
+        "--source-instance-keys",
+        help=(
+            "Optional comma-separated stable crop instance_key selection. "
+            "Multiple keys from the same frame remain distinct rows."
+        ),
+    )
     parser.add_argument(
         "--source-frame-index-mode",
         choices=SOURCE_FRAME_INDEX_MODES,
@@ -938,9 +1390,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     report = regenerate_training_crops_pynvvc(
         zarr_path=args.zarr_path,
+        source_zarr_path=args.source_zarr_path,
         source_crop_run=args.source_crop_run,
         target_crop_run=args.target_crop_run,
         video_path=args.video_path,
+        roi_cache_manifest=args.roi_cache_manifest,
+        cache_copy_batch_rows=args.cache_copy_batch_rows,
+        source_instance_keys=_parse_instance_keys(args.source_instance_keys),
         source_frame_index_mode=args.source_frame_index_mode,
         decode_mode=args.decode_mode,
         decode_chunk_frames=args.decode_chunk_frames,
@@ -962,7 +1418,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"source_crop_run: {report['source_crop_run']}\n"
             f"target_crop_run: {report['target_crop_run']}\n"
             f"total_rois: {report['total_rois']}\n"
-            f"pixel_contract: {ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME}"
+            f"pixel_contract: {report['pixel_contract_name']}"
         )
     return 0
 

@@ -268,6 +268,30 @@ def test_promote_positive_frame_appends_then_no_changes(tmp_path: Path) -> None:
     assert dry_run["items"][0]["target_row"] == 0
 
 
+def test_frame_axis_promotion_rejects_duplicate_frames_before_identity_collapse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "analysis.zarr"), mode="w")
+    refined = root.create_group("refined")
+    payload = {
+        "review_axis": np.asarray(["frame"], dtype=object),
+        "frame_indices": np.asarray([4, 4], dtype=np.int32),
+    }
+    monkeypatch.setattr(
+        promotion_backend.detect_review_mod,
+        "_load_dense_curated_edit_payload",
+        lambda _group, total_frames: payload,
+    )
+
+    with pytest.raises(RuntimeError, match="stable instance-key identity"):
+        promotion_backend._load_refined_payload(
+            root,
+            refined_group=refined,
+            frames=[4],
+        )
+
+
 def test_promotion_completion_routes_authority_through_approve(tmp_path: Path) -> None:
     analysis = tmp_path / "analysis.zarr"
     training = tmp_path / "training.zarr"

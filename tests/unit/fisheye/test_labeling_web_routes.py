@@ -3805,6 +3805,23 @@ def test_admin_summary_includes_dashboard_user_readiness(tmp_path):
         assert browser_workflows["detect_training"]["write_contract"]["save_endpoint"] == (
             "/api/sessions/{session_id}/detect/save"
         )
+        assert browser_workflows["detect_training"]["write_contract"]["payload_fields"] == [
+            "detections",
+            "advance",
+            "target_token",
+        ]
+        assert browser_workflows["detect_training"]["write_contract"]["required_fields"] == [
+            "detections",
+            "target_token",
+        ]
+        assert (
+            browser_workflows["detect_training"]["write_contract"]["detection_identity"]
+            == "instance_key_decimal_string_or_null_for_new"
+        )
+        assert (
+            browser_workflows["detect_training"]["write_contract"]["save_semantics"]
+            == "replace_server_selected_frame_detection_collection"
+        )
         assert browser_workflows["detect_training"]["write_contract"]["audit_event"] == "save_detect_bbox"
         assert browser_workflows["detect_analysis"]["write_scope"] == (
             "Reviewable by default; editable only when task scope enables analysis-box edits."
@@ -4933,7 +4950,7 @@ def test_session_save_rechecks_current_assignment_after_reassignment(tmp_path, m
         store.close()
 
 
-def test_detect_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_path, monkeypatch):
+def test_detect_nav_and_collection_save_routes_record_audit_event_without_real_zarr(tmp_path, monkeypatch):
     _fake_module(
         monkeypatch,
         "fisheye.tune.detect_review_backend",
@@ -4949,6 +4966,17 @@ def test_detect_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_pat
             "frame_idx": int(session.frame_indices[int(position)]),
             "action": "update",
             "bbox_norm": bbox_norm,
+            "status": "reviewed",
+            "target_zarr": "/tmp/fake.zarr",
+            "source_path": "/tmp/detect-source.json",
+        },
+        apply_detection_collection=lambda session, position=0, detections=None: {
+            "frame_idx": int(session.frame_indices[int(position)]),
+            "action": "replace_detection_collection",
+            "detections": detections,
+            "added": 1,
+            "updated": 1,
+            "removed": 0,
             "status": "reviewed",
             "target_zarr": "/tmp/fake.zarr",
             "source_path": "/tmp/detect-source.json",
@@ -5008,7 +5036,18 @@ def test_detect_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_pat
                 f"/api/sessions/{lease.session_id}/detect/save",
                 method="POST",
                 payload={
-                    "bbox_norm": [0.2, 0.3, 0.4, 0.5],
+                    "detections": [
+                        {
+                            "instance_key": "18446744073709551600",
+                            "bbox_norm": [0.2, 0.3, 0.4, 0.5],
+                            "class_id": 0,
+                        },
+                        {
+                            "instance_key": None,
+                            "bbox_norm": [0.7, 0.6, 0.1, 0.2],
+                            "class_id": 0,
+                        },
+                    ],
                     "target_token": nav_payload["state"]["target_token"],
                 },
             )
@@ -5030,6 +5069,9 @@ def test_detect_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_pat
         assert save_status == 200
         assert save_payload["ok"] is True
         assert save_payload["result"]["status"] == "reviewed"
+        assert save_payload["result"]["action"] == "replace_detection_collection"
+        assert len(save_payload["result"]["detections"]) == 2
+        assert save_payload["result"]["detections"][0]["instance_key"] == "18446744073709551600"
         assert "target_zarr" not in save_payload["result"]
         assert "source_path" not in save_payload["result"]
         assert "/tmp/fake.zarr" not in json.dumps(save_payload)
@@ -5051,6 +5093,7 @@ def test_detect_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_pat
             event_type="save_detect_bbox",
         )
         assert events[0]["target"]["frame_idx"] == 34
+        assert events[0]["target"]["instance_keys"] == ["18446744073709551600", None]
     finally:
         store.close()
 

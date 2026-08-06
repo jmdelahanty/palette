@@ -37,6 +37,9 @@ from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.zarr.crop_consumer import strict_crop_source_dimensions
+from ..shared.zarr.training_crop_materialization import (
+    bind_training_crop_materialization,
+)
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from ..shared.keypoint_summary import build_frame_keypoint_counts
@@ -1769,6 +1772,7 @@ def detect_keypoints_yolo(
     input_mode: str = "numpy-list",
     model_input_transform_mode: str = "auto",
     coordinate_contract_mode: str = "canonical",
+    require_training_materialization_binding: bool = False,
     profile_timings: bool = False,
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
@@ -1835,10 +1839,25 @@ def detect_keypoints_yolo(
             "Crop pixel work packages may write only to keypoint_shard_runs; "
             "finalize shards before publishing a canonical keypoint run."
         )
+    if require_training_materialization_binding and canonical_coordinates:
+        raise ValueError(
+            "A training-materialized crop may feed only non-authoritative terminal "
+            "keypoint arrays. Canonical keypoint-v2 publication must finalize against "
+            "the bound source crop-v2 authority."
+        )
+    if require_training_materialization_binding and not crop_run:
+        raise ValueError(
+            "Strict training materialization input requires an explicit crop_run."
+        )
 
     zarr_path = Path(zarr_path)
     if not zarr_path.exists():
         raise FileNotFoundError(f"Zarr path not found: {zarr_path}")
+    training_materialization = (
+        bind_training_crop_materialization(zarr_path, run_id=str(crop_run))
+        if require_training_materialization_binding
+        else None
+    )
 
     model_path = Path(model_path)
     if not model_path.exists():
@@ -1967,6 +1986,19 @@ def detect_keypoints_yolo(
     crop_group = crop_source.crop_group
     latest_crop = crop_source.crop_run_name
     selected_crop_rows = getattr(crop_source, "source_crop_row_ids", None)
+    if training_materialization is not None:
+        if (
+            latest_crop != training_materialization.run_id
+            or int(crop_source.total_rois) != training_materialization.row_count
+            or tuple(int(value) for value in crop_source.roi_shape)
+            != training_materialization.roi_shape
+            or getattr(crop_source, "frame_source_kind", None) != "roi_images"
+            or bool(getattr(crop_source, "roi_cache_used", False))
+        ):
+            raise ValueError(
+                "Active keypoint pixel source differs from the strict training "
+                "crop materialization binding."
+            )
 
     canonical_crop_source = None
     canonical_selected_rows: Optional[np.ndarray] = None
@@ -2895,6 +2927,13 @@ def detect_keypoints_yolo(
         run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
     if crop_source.roi_cache_path:
         run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
+    if training_materialization is not None:
+        run_group.attrs["source_training_crop_materialization_binding"] = dict(
+            training_materialization.binding
+        )
+        run_group.attrs["source_training_crop_materialization_binding_digest"] = (
+            training_materialization.binding["payload_digest"]
+        )
     if roi_cache_staging_payload is not None:
         run_group.attrs["source_roi_cache_staging"] = roi_cache_staging_payload
     if source_refined_run:
@@ -3451,6 +3490,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "as legacy_noncanonical."
         ),
     )
+    parser.add_argument(
+        "--require-training-materialization-binding",
+        action="store_true",
+        help=(
+            "Require --crop-run to be an exact self-contained training crop "
+            "materialization. This is a terminal inference path; canonical v2 "
+            "finalization still binds the source crop-v2 authority."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -3487,6 +3535,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_mode=args.input_mode,
         model_input_transform_mode=args.model_input_transform,
         coordinate_contract_mode=args.coordinate_contract_mode,
+        require_training_materialization_binding=bool(
+            args.require_training_materialization_binding
+        ),
         profile_timings=args.profile_timings,
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,

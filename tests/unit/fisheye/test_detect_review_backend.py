@@ -166,6 +166,49 @@ def _make_root() -> _FakeGroup:
     return root
 
 
+def _make_multi_instance_root() -> _FakeGroup:
+    root = _FakeGroup()
+    root.attrs.update({"width": 5, "height": 4, "total_frames": 3})
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.arange(3 * 4 * 5, dtype=np.uint8).reshape(3, 4, 5))
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_multi"
+    refined = refined_parent.create_group("refined_detect_multi")
+    instances = refined.create_group("instances")
+    for name, data in (
+        ("refined_row_ids", np.asarray([10, 11, 20], dtype=np.int64)),
+        ("frame_indices", np.asarray([0, 0, 2], dtype=np.int32)),
+        ("frame_offsets", np.asarray([0, 2, 2, 3], dtype=np.int64)),
+        ("bbox_img_xyxy", np.asarray([[0, 0, 1, 1], [2, 0, 3, 1], [1, 2, 2, 3]], dtype=np.float64)),
+        ("bbox_norm_coords", np.asarray([[0.2, 0.2, 0.2, 0.2], [0.6, 0.2, 0.2, 0.2], [0.4, 0.7, 0.2, 0.2]], dtype=np.float64)),
+        ("source_kind_codes", np.asarray([1, 1, 3], dtype=np.int8)),
+        ("manual_edit_flags", np.asarray([False, False, True], dtype=bool)),
+        ("source_detect_row_index", np.asarray([0, 1, -1], dtype=np.int32)),
+        ("frame_counts", np.asarray([2, 0, 1], dtype=np.int32)),
+        ("confidence_scores", np.asarray([0.9, 0.8, 1.0], dtype=np.float32)),
+        ("class_ids", np.asarray([0, 0, 0], dtype=np.int32)),
+        ("instance_key", np.asarray([101, 102, 201], dtype=np.uint64)),
+        ("instance_key_origin_codes", np.asarray([1, 1, 2], dtype=np.int8)),
+        ("reason", np.asarray(["clean", "clean", "manual_correction"], dtype=object)),
+    ):
+        instances.create_array(name, data=data, overwrite=True)
+    source = refined.create_group("source_detections")
+    for name, data in (
+        ("source_detect_row_index", np.asarray([0, 1], dtype=np.int32)),
+        ("frame_indices", np.asarray([0, 0], dtype=np.int32)),
+        ("bbox_img_xyxy", np.asarray([[0, 0, 1, 1], [2, 0, 3, 1]], dtype=np.float64)),
+        ("bbox_norm_coords", np.asarray([[0.2, 0.2, 0.2, 0.2], [0.6, 0.2, 0.2, 0.2]], dtype=np.float64)),
+        ("decision_codes", np.asarray([0, 0], dtype=np.int8)),
+        ("resolved_refined_row_id", np.asarray([10, 11], dtype=np.int64)),
+        ("confidence_scores", np.asarray([0.9, 0.8], dtype=np.float32)),
+        ("class_ids", np.asarray([0, 0], dtype=np.int32)),
+        ("review_notes", np.asarray(["", ""], dtype=object)),
+        ("reason", np.asarray(["clean", "clean"], dtype=object)),
+    ):
+        source.create_array(name, data=data, overwrite=True)
+    return root
+
+
 def test_resolve_context_loads_default_failure_frame(monkeypatch) -> None:
     root = _make_root()
     monkeypatch.setattr(backend, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
@@ -179,6 +222,159 @@ def test_resolve_context_loads_default_failure_frame(monkeypatch) -> None:
     assert payload["status"]["status_label"] == "filtered_out"
     assert payload["frame_image"]["shape"] == [4, 5]
     assert payload["frame_image"]["encoding"] == "base64_raw"
+
+
+def test_resolve_context_loads_complete_multi_detection_frame(monkeypatch) -> None:
+    root = _make_multi_instance_root()
+    monkeypatch.setattr(backend, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
+
+    session = backend.resolve_review_context("/tmp/multi.zarr", include_all=True)
+    payload = backend.load_frame_payload(session, 0)
+    empty_payload = backend.load_frame_payload(session, 1)
+    summary = backend.review_session_summary(session)
+
+    assert session.review_axis == "frame_instances"
+    assert session.review_rows.tolist() == [0, 1, 2]
+    assert payload["frame_idx"] == 0
+    assert payload["detection_count"] == 2
+    assert [item["instance_key"] for item in payload["detections"]] == ["101", "102"]
+    assert empty_payload["frame_idx"] == 1
+    assert empty_payload["detections"] == []
+    assert empty_payload["status"]["status_label"] == "missing"
+    assert summary["total_instances"] == 3
+    assert summary["multi_instance_frames"] == 1
+    assert summary["max_instances_per_frame"] == 2
+
+
+def test_apply_detection_collection_preserves_keys_adds_and_deletes(monkeypatch) -> None:
+    root = _make_multi_instance_root()
+    monkeypatch.setattr(backend, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
+    captured: dict[str, Any] = {}
+
+    def _capture_write(*_args: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(backend.detect_review_mod, "_write_dense_curated_edit_payload", _capture_write)
+    monkeypatch.setattr(
+        backend,
+        "_reload_payload",
+        lambda session: setattr(session, "payload", captured["payload"]),
+    )
+
+    session = backend.resolve_review_context("/tmp/multi.zarr", include_all=True)
+    result = backend.apply_detection_collection(
+        session,
+        position=0,
+        detections=[
+            {"instance_key": "101", "bbox_norm": [0.25, 0.25, 0.2, 0.2], "class_id": 0},
+            {"instance_key": None, "bbox_norm": [0.8, 0.25, 0.1, 0.1], "class_id": 0},
+        ],
+    )
+
+    written = captured["payload"]
+    frame_zero = np.asarray(written["frame_indices"]) == 0
+    assert result["action"] == "replace_detection_collection"
+    assert result["added"] == 1
+    assert result["updated"] == 1
+    assert result["removed"] == 1
+    assert np.asarray(written["refined_row_ids"])[frame_zero].tolist() == [10, -1]
+    assert np.asarray(written["instance_keys"], dtype=np.uint64)[frame_zero].tolist() == [101, 0]
+    assert np.asarray(written["source_surface_decision_labels"], dtype=object).tolist() == [
+        "accepted",
+        "manual_clear",
+    ]
+    assert captured["source_context"]["edit_mode"] == "frame_instance_collection"
+
+
+def test_apply_detection_collection_rejects_key_from_another_frame(monkeypatch) -> None:
+    root = _make_multi_instance_root()
+    monkeypatch.setattr(backend, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
+    session = backend.resolve_review_context("/tmp/multi.zarr", include_all=True)
+
+    with np.testing.assert_raises_regex(ValueError, "not present in the current"):
+        backend.apply_detection_collection(
+            session,
+            position=0,
+            detections=[
+                {"instance_key": "201", "bbox_norm": [0.4, 0.7, 0.2, 0.2], "class_id": 0}
+            ],
+        )
+
+
+def test_apply_detection_collection_real_zarr_mints_new_key_and_preserves_survivor(
+    tmp_path, monkeypatch
+) -> None:
+    from fisheye.shared.refined_detect_curation import write_curated_refined_detect_surfaces
+
+    zarr_path = tmp_path / "multi_review.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs.update({"width": 100, "height": 80, "total_frames": 3, "recording_id": "multi-test"})
+    raw = root.create_group("raw_video")
+    raw.attrs["original_resolution"] = [80, 100]
+    raw.create_array("images_ds", data=np.zeros((3, 80, 100), dtype=np.uint8))
+    detect_parent = root.create_group("detect_runs")
+    detect = detect_parent.create_group("detect_001")
+    detect.create_array("instance_key", data=np.asarray([101, 102], dtype=np.uint64))
+    refined_parent = root.create_group("refined_detect_runs")
+    refined = refined_parent.create_group("refined_multi")
+    refined.attrs["source_detect_run"] = "detect_001"
+
+    boxes = np.asarray(
+        [[0.2, 0.2, 0.2, 0.2], [0.6, 0.2, 0.2, 0.2], [0.4, 0.7, 0.2, 0.2]],
+        dtype=np.float64,
+    )
+    write_curated_refined_detect_surfaces(
+        root,
+        zarr_path=zarr_path,
+        refined_run_name="refined_multi",
+        instance_frame_indices=np.asarray([0, 0, 2], dtype=np.int32),
+        instance_bbox_norm_coords=boxes,
+        instance_source_kind_labels=["raw_detect", "raw_detect", "manual"],
+        instance_reason_labels=["clean", "clean", "manual_correction"],
+        instance_source_detect_row_index=np.asarray([0, 1, -1], dtype=np.int32),
+        instance_manual_edit_flags=np.asarray([False, False, True], dtype=bool),
+        instance_confidence_scores=np.asarray([0.9, 0.8, 1.0], dtype=np.float32),
+        instance_class_ids=np.asarray([0, 0, 0], dtype=np.int32),
+        source_detection_source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+        source_detection_frame_indices=np.asarray([0, 0], dtype=np.int32),
+        source_detection_bbox_norm_coords=boxes[:2],
+        source_detection_decision_labels=["accepted", "accepted"],
+        source_detection_reason_labels=["clean", "clean"],
+        source_detection_confidence_scores=np.asarray([0.9, 0.8], dtype=np.float32),
+        source_detection_class_ids=np.asarray([0, 0], dtype=np.int32),
+        source_detection_instance_key=np.asarray([101, 102], dtype=np.uint64),
+    )
+    monkeypatch.setattr(backend, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(backend.detect_review_mod, "get_environment_info", lambda **_kwargs: {})
+
+    session = backend.resolve_review_context(
+        str(zarr_path), refined_run="refined_multi", include_all=True
+    )
+    result = backend.apply_detection_collection(
+        session,
+        position=0,
+        detections=[
+            {"instance_key": "101", "bbox_norm": [0.25, 0.25, 0.2, 0.2], "class_id": 0},
+            {"instance_key": None, "bbox_norm": [0.8, 0.25, 0.1, 0.1], "class_id": 0},
+        ],
+    )
+
+    instances = root["refined_detect_runs/refined_multi/instances"]
+    frame_indices = np.asarray(instances["frame_indices"][:], dtype=np.int32)
+    keys = np.asarray(instances["instance_key"][:], dtype=np.uint64)
+    frame_zero_keys = keys[frame_indices == 0]
+    decisions = np.asarray(
+        root["refined_detect_runs/refined_multi/source_detections/decision_codes"][:],
+        dtype=np.int8,
+    )
+
+    assert result["added"] == 1
+    assert result["updated"] == 1
+    assert result["removed"] == 1
+    assert int(frame_zero_keys[0]) == 101
+    assert int(frame_zero_keys[1]) not in {0, 101, 102, 201}
+    assert np.unique(keys).shape[0] == keys.shape[0]
+    assert decisions.tolist() == [0, 3]
 
 
 def test_apply_manual_edit_writes_present_box(monkeypatch) -> None:
