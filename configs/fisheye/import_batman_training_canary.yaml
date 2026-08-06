@@ -1,0 +1,18 @@
+import:
+  resolutions: both
+  use_kvikio_zarr: true
+  use_sharding: false
+  # Full Batman camera frames are 4512x4512 uint8 (~20.3 MiB each), so one
+  # frame is already the smallest useful whole-image access unit.
+  chunk_size: 1
+  chunks_per_shard: 1
+  batch_size: 1
+  gpu_fp16: true
+  full: true
+  downsampled:
+    preserve_aspect: true
+    size: [768, 1280]
+    method: area
+    formats: [gray]
+    # One downsampled frame is ~0.94 MiB and is the online review unit.
+    chunk_size: 1
