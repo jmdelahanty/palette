@@ -33,6 +33,9 @@ from fisheye.cohorts.spec import (
     SubjectSelector,
     load_cohort_spec,
 )
+from fisheye.analytics_exports.chaser_authority import (
+    load_chaser_export_authority_set,
+)
 
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -201,6 +204,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--palette-repo", type=Path, default=DEFAULT_PALETTE_REPO)
+    parser.add_argument(
+        "--chaser-authority-manifest",
+        type=Path,
+        required=True,
+        help="Immutable exact chaser export authority-set JSON.",
+    )
+    parser.add_argument("--chaser-authority-sha256")
     parser.add_argument("--submit-host", default="login1-citrus-poller")
     parser.add_argument(
         "--protocol-profile", type=Path, default=DEFAULT_PROTOCOL_PROFILE
@@ -243,6 +253,12 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise CohortReleaseError(
                 "--protocol-hash must be a 64-character SHA-256 hex value"
             )
+    if args.chaser_authority_sha256 is not None and not re.fullmatch(
+        r"[0-9a-f]{64}", str(args.chaser_authority_sha256)
+    ):
+        raise CohortReleaseError(
+            "--chaser-authority-sha256 must be a lowercase SHA-256 digest"
+        )
 
 
 def _submission_preflight(script_repo: Path, cluster_repo: Path) -> str:
@@ -305,6 +321,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             "".join(f"{member['zarr_path']}\n" for member in cohort["members"]),
             encoding="utf-8",
         )
+        authority = load_chaser_export_authority_set(
+            args.chaser_authority_manifest,
+            expected_file_sha256=args.chaser_authority_sha256,
+        )
+        cohort_sources = {
+            str(Path(member["zarr_path"]).expanduser().resolve())
+            for member in cohort["members"]
+        }
+        authority_sources = set(authority.sources_by_path)
+        if authority_sources != cohort_sources:
+            raise CohortReleaseError(
+                "chaser authority source set must exactly match the frozen cohort "
+                f"(missing={sorted(cohort_sources - authority_sources)!r}, "
+                f"unexpected={sorted(authority_sources - cohort_sources)!r})"
+            )
 
         palette_commit = _git(cluster_repo, "rev-parse", "HEAD")
         if args.submit:
@@ -337,6 +368,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "frozen_cohort_manifest_sha256": cohort["manifest_sha256"],
             "zarr_list_path": str(zarr_list),
             "zarr_list_sha256": _sha256_file(zarr_list),
+            "chaser_authority_manifest_path": str(authority.path),
+            "chaser_authority_file_sha256": authority.file_sha256,
+            "chaser_authority_record_sha256": authority.record["record_sha256"],
             "member_count": cohort["member_count"],
             "expected_artifacts": {
                 "collection_manifest": str(collection_manifest),
@@ -439,6 +473,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(script_repo / "scripts" / "submit_analytics_export_bsub.sh"),
             "--collection-manifest",
             str(collection_manifest),
+            "--chaser-authority-manifest",
+            str(authority.path),
+            "--chaser-authority-sha256",
+            authority.file_sha256,
             "--export-run-id",
             str(args.release_id),
             "--output-root",

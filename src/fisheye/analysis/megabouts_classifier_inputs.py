@@ -638,6 +638,7 @@ def build_megabouts_classifier_input_pack(
     track_scope: str = "offline",
     track_id: int = 0,
     swim_bout_run: str = "latest",
+    swim_bout_legacy_compatibility: bool = False,
     speed_level: str = "default",
     heading_source: str = DEFAULT_HEADING_SOURCE,
     bout_duration_s: float = DEFAULT_BOUT_DURATION_S,
@@ -683,6 +684,7 @@ def build_megabouts_classifier_input_pack(
         root,
         run_name=swim_bout_run,
         speed_level=requested_speed_level,
+        legacy_compatibility=swim_bout_legacy_compatibility,
     )
     bout_run_name = swim_payload.run_name
     resolved_level = swim_payload.signal.speed_level
@@ -862,6 +864,9 @@ def build_megabouts_classifier_input_pack(
         "track_kinematics_run": track_name,
         "track_id": int(track_id),
         "swim_bout_run": bout_run_name,
+        "swim_bout_legacy_compatibility": bool(
+            swim_bout_legacy_compatibility
+        ),
         "speed_level": resolved_level,
         "swim_bout_candidate_id": int(swim_payload.candidate.candidate_id),
         "swim_bout_signal_id": int(swim_payload.signal.signal_id),
@@ -1237,6 +1242,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-scope", default="offline", help="Track kinematics scope for non-path run names.")
     parser.add_argument("--track-id", type=int, default=0, help="Track id to use.")
     parser.add_argument("--swim-bout-run", default="latest", help="analysis/swim_bout_runs/<run>.")
+    parser.add_argument(
+        "--legacy-swim-bout-compatibility",
+        action="store_true",
+        help="Explicitly allow historical swim-bout layouts for compatibility-only reads.",
+    )
     parser.add_argument("--speed-level", default="default", help="Swim-bout speed level or 'default'.")
     parser.add_argument("--heading-source", default=DEFAULT_HEADING_SOURCE, help="Track heading array in radians.")
     parser.add_argument("--bout-duration-s", type=float, default=DEFAULT_BOUT_DURATION_S)
@@ -1269,6 +1279,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "track_scope": args.track_scope,
         "track_id": int(args.track_id),
         "swim_bout_run": args.swim_bout_run,
+        "swim_bout_legacy_compatibility": bool(
+            args.legacy_swim_bout_compatibility
+        ),
         "speed_level": args.speed_level,
         "heading_source": args.heading_source,
         "bout_duration_s": float(args.bout_duration_s),

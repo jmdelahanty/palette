@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from fisheye.analysis.megabouts_classifier_inputs import build_megabouts_classifier_input_pack
 from fisheye.analysis.megabouts_preprocessing_comparison import (
     MegaboutsPreprocessingRuntime,
     _array_stats,
@@ -17,6 +16,7 @@ from tests.unit.fisheye.test_megabouts_classifier_inputs import (
     _install_verified_source_readers,
     _reason_bytes,
     _replace_array,
+    build_megabouts_classifier_input_pack,
 )
 
 
@@ -206,6 +206,7 @@ def test_compare_megabouts_preprocessing_reports_input_similarity() -> None:
     report = compare_megabouts_preprocessing_with_palette(
         root,
         runtime=_fake_preprocessing_runtime(),
+        swim_bout_legacy_compatibility=True,
         bout_duration_frames=4,
         min_tail_valid_fraction=0.75,
         min_traj_valid_fraction=0.75,

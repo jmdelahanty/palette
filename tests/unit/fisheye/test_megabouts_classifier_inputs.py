@@ -9,10 +9,17 @@ import zarr
 import fisheye.analysis.megabouts_classifier_inputs as classifier_inputs_module
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.megabouts_classifier_inputs import (
-    build_megabouts_classifier_input_pack,
+    build_megabouts_classifier_input_pack as _build_megabouts_classifier_input_pack,
     diagnose_input_pack_invalid_windows,
     summarize_input_pack,
 )
+
+
+def build_megabouts_classifier_input_pack(*args, **kwargs):
+    """Read this module's intentionally historical swim-bout fixture explicitly."""
+
+    kwargs.setdefault("swim_bout_legacy_compatibility", True)
+    return _build_megabouts_classifier_input_pack(*args, **kwargs)
 
 
 def _reason_bytes(values: list[str], width: int = 32) -> np.ndarray:

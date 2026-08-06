@@ -3225,6 +3225,10 @@ class Registry(RegistryMigrationMixin):
                 "subject_count": subject_count,
             }
         )
+        recording_exists = self.conn.execute(
+            "SELECT 1 FROM recordings WHERE recording_id = ?;",
+            (recording_id,),
+        ).fetchone() is not None
 
         if cross_id:
             self.conn.execute(
@@ -3280,6 +3284,8 @@ class Registry(RegistryMigrationMixin):
                 """,
                 (subject_id, dish_id, species, sex, source_payload, now, now),
             )
+            if not recording_exists:
+                continue
             self.conn.execute(
                 """
                 INSERT INTO recording_subjects (

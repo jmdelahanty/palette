@@ -233,6 +233,12 @@ def sealed_chaser_component_writer(
                 raise ChaserComponentWriterError(
                     "Verified chaser-distance base changed before component staging."
                 )
+            expected_path = f"{run_path}/{relative_path}"
+            if not bool(kwargs.get("overwrite", False)) and expected_path in source_root:
+                raise FileExistsError(
+                    f"Refusing to replace existing immutable component {expected_path!r} "
+                    "without overwrite=True."
+                )
 
             with tempfile.TemporaryDirectory(
                 prefix=f"palette-{component_family}-{component_name}-"
@@ -256,7 +262,6 @@ def sealed_chaser_component_writer(
                     _chaser_component_staging_capability=_STAGING_CAPABILITY,
                     **kwargs,
                 )
-                expected_path = f"{run_path}/{relative_path}"
                 if str(staged_path).strip("/") != expected_path:
                     raise ChaserComponentWriterError(
                         "Private component builder returned a different component path."

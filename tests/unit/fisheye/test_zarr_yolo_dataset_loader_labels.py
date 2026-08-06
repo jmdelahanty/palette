@@ -38,6 +38,9 @@ class _FakeGroup:
         except KeyError:
             return default
 
+    def keys(self):
+        return self._members.keys()
+
 
 class _FakeIndexManager:
     metadata_rows: list[mod.DatasetMetadata] = []

@@ -38,7 +38,14 @@ from fisheye.visualization.chaser_visit_trajectories import (
     render_per_visit_png,
     write_gif,
 )
-from tests.unit.fisheye.test_chaser_bout_response import CX, CY, _bouts_every, _build_archive, _orbit
+from tests.unit.fisheye.test_chaser_bout_response import (
+    CX,
+    CY,
+    _bouts_every,
+    _build_archive,
+    _egocentric_handle,
+    _orbit,
+)
 from tests.unit.fisheye.test_chaser_response_regimes import (
     _install_verified_track_reader,
 )
@@ -87,7 +94,13 @@ def _archive_with_components(tmp_path: Path, *, aggressive_chaser_index: int = 0
         root["analysis/chaser_distance_runs/chaser_distance_1"].attrs["recording_id"] = recording_id
     _add_object_roles(z, aggressive_chaser_index=aggressive_chaser_index)
 
-    r = build_chaser_bout_response_result(z, chaser_distance_run="chaser_distance_1", min_bin_bouts=5)
+    r = build_chaser_bout_response_result(
+        z,
+        chaser_distance_run="chaser_distance_1",
+        egocentric_dependency_handle=_egocentric_handle(z),
+        swim_bout_legacy_compatibility=True,
+        min_bin_bouts=5,
+    )
     write_chaser_bout_response_component(z, r, overwrite=True, write_png=False, write_interactive_spec=False)
     g = build_chaser_response_regimes_result(
         z,
@@ -244,7 +257,9 @@ def test_cohort_figure_skips_unusable_archives(tmp_path: Path) -> None:
 def test_visit_trajectories_render(tmp_path: Path) -> None:
     z = _archive_with_components(tmp_path, name="visits.zarr")
     scenes, meta = collect_visits(z, chaser_distance_run="chaser_distance_1",
-                                  epochs_wanted=("post_event",), virtual_rotations_deg=(120.0, 240.0))
+                                  epochs_wanted=("post_event",), virtual_rotations_deg=(120.0, 240.0),
+                                  egocentric_dependency_handle=_egocentric_handle(z),
+                                  swim_bout_legacy_compatibility=True)
     assert scenes
     objects = [s for s in scenes if s.is_object]
     controls = [s for s in scenes if not s.is_object]
@@ -258,7 +273,9 @@ def test_visit_trajectories_render(tmp_path: Path) -> None:
 def test_visit_animation_writes_a_file(tmp_path: Path) -> None:
     z = _archive_with_components(tmp_path, name="anim.zarr")
     scenes, meta = collect_visits(z, chaser_distance_run="chaser_distance_1",
-                                  epochs_wanted=("post_event",), virtual_rotations_deg=(180.0,))
+                                  epochs_wanted=("post_event",), virtual_rotations_deg=(180.0,),
+                                  egocentric_dependency_handle=_egocentric_handle(z),
+                                  swim_bout_legacy_compatibility=True)
     out = write_gif(scenes, meta, tmp_path / "visits.gif", fps=10, stride=20)
     assert out.exists()
     assert out.read_bytes().startswith(b"GIF")

@@ -121,7 +121,7 @@ def classify_gate_results(
         raise ValueError("signed-distance arrays must be finite")
     palette_inside = palette >= 0.0
     acquisition_inside = acquisition >= 0.0
-    result = np.full(palette.shape, "both_outside", dtype="<U16")
+    result = np.full(palette.shape, "both_outside", dtype=object)
     result[palette_inside & acquisition_inside] = "both_inside"
     result[palette_inside & ~acquisition_inside] = "palette_only"
     result[~palette_inside & acquisition_inside] = "acquisition_only"

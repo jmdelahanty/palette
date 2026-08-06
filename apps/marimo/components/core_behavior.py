@@ -571,6 +571,7 @@ class CoreBehaviorSource:
         option: InteractiveSpecOption | CoreBehaviorOption,
         *,
         legacy_eye_angle_compatibility: bool = False,
+        legacy_swim_bout_compatibility: bool = False,
     ):
         if not is_core_behavior_option(option):
             raise ValueError("Not a core-behavior source")
@@ -582,7 +583,10 @@ class CoreBehaviorSource:
         self.track_id = int(self.option.track_id)
         if type(legacy_eye_angle_compatibility) is not bool:
             raise TypeError("legacy_eye_angle_compatibility must be an exact bool")
+        if type(legacy_swim_bout_compatibility) is not bool:
+            raise TypeError("legacy_swim_bout_compatibility must be an exact bool")
         self.legacy_eye_angle_compatibility = legacy_eye_angle_compatibility
+        self.legacy_swim_bout_compatibility = legacy_swim_bout_compatibility
         self._time_seconds_cache: np.ndarray | None = None
         self._swim_bout_selection_cache: tuple[Any, Any] | None = None
         self._swim_bout_events_cache: Any = None
@@ -828,6 +832,7 @@ class CoreBehaviorSource:
             track_run_name=track_run_name,
             track_id=self.track_id,
             include_bout_counts=False,
+            legacy_compatibility=self.legacy_swim_bout_compatibility,
         )
         if not candidates:
             return None
@@ -847,6 +852,7 @@ class CoreBehaviorSource:
             self._root(),
             candidate=candidate,
             signal=signal,
+            legacy_compatibility=self.legacy_swim_bout_compatibility,
         )
         return self._swim_bout_events_cache
 

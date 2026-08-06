@@ -543,6 +543,7 @@ def test_load_track_kinematics_interactive_data_reads_canonical_swim_bouts(tmp_p
         run_path="analysis/track_kinematics_runs/offline/track_kinematics_1",
         swim_bout_run="latest",
         speed_level="smoothed",
+        swim_bout_legacy_compatibility=True,
     )
     swim_bouts = to_swim_bout_dataframe(data)
     inter_bout_intervals = to_inter_bout_interval_dataframe(data)
@@ -571,6 +572,7 @@ def test_load_track_kinematics_interactive_data_merges_aligned_peak_event_bounda
         run_path="analysis/track_kinematics_runs/offline/track_kinematics_1",
         swim_bout_run="latest",
         speed_level="smoothed",
+        swim_bout_legacy_compatibility=True,
     )
     swim_bouts = to_swim_bout_dataframe(data)
 
@@ -599,6 +601,7 @@ def test_discover_track_and_derived_swim_bout_options(tmp_path: Path) -> None:
         zarr_path,
         track_run_path=track_options[0].run_path,
         track_id=track_options[0].track_id,
+        legacy_compatibility=True,
     )
 
     assert len(swim_options) == 4
@@ -630,6 +633,7 @@ def test_discover_compact_swim_bout_options_exposes_logical_identity(tmp_path: P
         zarr_path,
         track_run_path=track_options[0].run_path,
         track_id=track_options[0].track_id,
+        legacy_compatibility=True,
     )
 
     assert len(swim_options) == 2
@@ -654,6 +658,7 @@ def test_discover_compact_bout_kinematics_options_uses_logical_tables(tmp_path: 
         zarr_path,
         track_run_path=track.run_path,
         track_id=track.track_id,
+        legacy_compatibility=True,
     )[0]
     options = discover_bout_kinematics_run_options(
         zarr_path,
@@ -661,6 +666,7 @@ def test_discover_compact_bout_kinematics_options_uses_logical_tables(tmp_path: 
         track_id=track.track_id,
         swim_bout_run=swim.run_name,
         speed_level=swim.speed_level,
+        legacy_compatibility=True,
     )
 
     assert len(options) == 1
@@ -676,7 +682,11 @@ def test_discover_compact_bout_kinematics_options_uses_logical_tables(tmp_path: 
     assert "movement" in option.label
     assert "eye gaze" in option.label
 
-    records, _attrs = load_bout_kinematics_records(zarr_path, run_name=option.run_name)
+    records, _attrs = load_bout_kinematics_records(
+        zarr_path,
+        run_name=option.run_name,
+        legacy_compatibility=True,
+    )
     assert set(records) == {"movement", "heading_smoothed", "heading_raw", "eye_gaze"}
     assert len(records["eye_gaze"]) == 2
 

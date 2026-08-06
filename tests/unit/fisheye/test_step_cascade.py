@@ -74,6 +74,7 @@ def test_get_transitive_dependents_detect() -> None:
         "detect_quality",
         "crop",
         "keypoints",
+        "keypoint_quality",
         "refined_keypoints",
         "subject_masks",
         "refined_subject_masks",
@@ -112,6 +113,7 @@ def test_get_transitive_dependents_keypoints() -> None:
     result = get_transitive_dependents("keypoints")
     expected = frozenset({
         "refined_keypoints",
+        "keypoint_quality",
         "arena_assignment",
         "tracks",
         "track_kinematics",
@@ -158,6 +160,7 @@ def test_get_transitive_dependents_detect_quality_uses_catalog_flow() -> None:
         "refined_detect",
         "crop",
         "keypoints",
+        "keypoint_quality",
         "refined_keypoints",
         "subject_masks",
         "refined_subject_masks",
@@ -249,6 +252,7 @@ def test_get_transitive_dependents_crop_includes_subject_masks() -> None:
     result = get_transitive_dependents("crop")
     expected = frozenset({
         "keypoints",
+        "keypoint_quality",
         "refined_keypoints",
         "subject_masks",
         "refined_subject_masks",

@@ -57,6 +57,7 @@ def _build_canonical_sealed_source(tmp_path: Path) -> Path:
     root, detection_run, _declaration = _complete_canonical_detection_observation(
         tmp_path,
         row_count=2,
+        normalized_dtype=np.float32,
     )
     detection = load_persisted_detection_observation_geometry(
         root,
@@ -220,8 +221,8 @@ def _build_canonical_sealed_source(tmp_path: Path) -> Path:
     track_mod._seal_and_load_track_motion_run_before_selection(
         root, run
     )  # noqa: SLF001
-    # Sealing deliberately resolves a fresh run handle.  Reacquire that handle
-    # before the selector transition so a stale attrs cache cannot replace the
+    # Sealing deliberately resolves a fresh run handle. Reacquire it before
+    # the selector transition so a stale attrs cache cannot replace the
     # just-persisted full-motion manifest.
     run = root[SOURCE_RUN_PATH]
     run.attrs["stage_selector_eligible"] = True

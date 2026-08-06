@@ -1129,8 +1129,16 @@ def write_chaser_escape_events_component(
         {
             "row_axis": "chase_trial",
             "segmentation_source": result.trial_segmentation_source,
-            "habituation_slope_escapes_per_valid_s_per_trial": float(result.habituation_slope_per_trial),
-            "habituation_slope_any_escape_per_trial": float(result.habituation_slope_any_escape),
+            "habituation_slope_escapes_per_valid_s_per_trial": (
+                float(result.habituation_slope_per_trial)
+                if np.isfinite(result.habituation_slope_per_trial)
+                else None
+            ),
+            "habituation_slope_any_escape_per_trial": (
+                float(result.habituation_slope_any_escape)
+                if np.isfinite(result.habituation_slope_any_escape)
+                else None
+            ),
             "trial_definition": result.diagnostics.get("trial_definition"),
             "habituation": result.diagnostics.get("habituation"),
             "wall_confound": result.diagnostics.get("wall_confound"),

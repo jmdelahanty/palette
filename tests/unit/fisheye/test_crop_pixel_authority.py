@@ -304,6 +304,8 @@ def test_refined_handoff_supplies_exact_source_dimensions(
         instances_group=None,
         logical_content_digest="3" * 64,
         handoff_manifest={},
+        parent_manifest=None,
+        parent_arrays=None,
     )
     sentinel = object()
     captured = {}

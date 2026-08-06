@@ -29,6 +29,7 @@ from fisheye.visualization.chaser_ring_traversal import (
     render_ring_entries_png,
     write_ring_traversal_gif,
 )
+from tests.unit.fisheye.test_chaser_bout_response import _egocentric_handle
 from tests.unit.fisheye.test_chaser_visualization import _archive_with_components
 
 
@@ -69,7 +70,10 @@ def _set_bout_turns(zarr_path: Path, high_turn_every: int = 2) -> None:
 
 def _collect(zarr_path: Path, **kw):
     return collect_ring_entries(zarr_path, chaser_distance_run="chaser_distance_1",
-                                epochs_wanted=("post_event",), **kw)
+                                epochs_wanted=("post_event",),
+                                egocentric_dependency_handle=_egocentric_handle(zarr_path),
+                                swim_bout_legacy_compatibility=True,
+                                **kw)
 
 
 # --------------------------------------------------------------------------------------
@@ -141,7 +145,10 @@ def test_escapes_split_into_turn_and_dash_tiers(tmp_path: Path) -> None:
     _set_bout_turns(z, high_turn_every=4)   # every 4th bout has a 90 deg turn
 
     scenes, meta = collect_ring_entries(z, chaser_distance_run="chaser_distance_1",
-                                        epochs_wanted=("post_event",), high_turn_threshold_deg=45.0)
+                                        epochs_wanted=("post_event",),
+                                        egocentric_dependency_handle=_egocentric_handle(z),
+                                        swim_bout_legacy_compatibility=True,
+                                        high_turn_threshold_deg=45.0)
     bouts = [b for s in scenes for v in s.visits for b in v["bouts"]]
     turn = [b for b in bouts if b["is_high_turn"]]
     dash = [b for b in bouts if b["is_escape"] and not b["is_high_turn"]]
@@ -329,7 +336,8 @@ def _arrow_follows_motion(scenes) -> float:
     cs = []
     for s in scenes:
         for v in s.visits:
-            xy = np.asarray(v["xy"]); h = np.asarray(v["heading_deg"])
+            xy = np.asarray(v["xy"])
+            h = np.asarray(v["heading_deg"])
             if xy.shape[0] < 8:
                 continue
             mv = np.gradient(xy, axis=0)

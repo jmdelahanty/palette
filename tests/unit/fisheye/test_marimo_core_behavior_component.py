@@ -237,7 +237,11 @@ def test_core_source_exposes_only_lineage_compatible_swim_bouts(
 ) -> None:
     zarr_path = _make_archive_with_interactive_artifact(tmp_path)
     _add_hierarchical_swim_bouts(zarr_path)
-    source = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
+    source = CoreBehaviorSource(
+        zarr_path,
+        _core_option(zarr_path),
+        legacy_swim_bout_compatibility=True,
+    )
 
     assert "swim_bouts" in source.available_analysis_ids()
     projection = source.project_swim_bouts()
@@ -341,7 +345,11 @@ def test_core_source_projects_tail_surfaces_bouts_and_positions(tmp_path) -> Non
     zarr_path = _make_archive_with_interactive_artifact(tmp_path)
     _add_tail_kinematics_run(zarr_path)
     _add_hierarchical_swim_bouts(zarr_path)
-    source = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
+    source = CoreBehaviorSource(
+        zarr_path,
+        _core_option(zarr_path),
+        legacy_swim_bout_compatibility=True,
+    )
 
     assert "tail_kinematics" in source.available_analysis_ids()
     assert source.tail_time_bounds("tail_1") == (0.0, 0.025)

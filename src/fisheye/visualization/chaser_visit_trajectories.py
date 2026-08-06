@@ -43,6 +43,7 @@ import numpy as np  # noqa: E402
 from fisheye.analysis.chaser_bout_response import (
     DEFAULT_VISIT_ENTER_MM,
     DEFAULT_VISIT_EXIT_MM,
+    _resolve_heading,
     _segment_visits,
 )
 from fisheye.analysis.swim_bout_io import resolve_swim_bout_run_name
@@ -54,7 +55,6 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _resolve_arena_geometry,
     _resolve_chaser_distance_run,
 )
-from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 
 DEFAULT_EPOCHS = ("pre_event", "post_event")
@@ -126,6 +126,8 @@ def _collect_visits_unsealed_inspection(
     visit_enter_mm: float = DEFAULT_VISIT_ENTER_MM,
     visit_exit_mm: float = DEFAULT_VISIT_EXIT_MM,
     pad_s: float = 1.0,
+    egocentric_dependency_handle: dict[str, Any] | None = None,
+    swim_bout_legacy_compatibility: bool = False,
 ) -> tuple[list[VisitScene], dict[str, Any]]:
     root = _open_root(zarr_path, mode="r")
     distance, run_name, run_path = _resolve_chaser_distance_run(
@@ -164,29 +166,22 @@ def _collect_visits_unsealed_inspection(
         motion_spread_threshold_mm=1.0,
     )
 
-    # heading, for the arrow in the animation
-    ego = root[run_path].get("egocentric_bearing")
-    if ego is None:
-        raise ValueError("Visit trajectories require egocentric_bearing.")
-    resolved_ego = resolve_authoritative_run_name(
-        ego,
-        legacy_default=False,
+    # Explicit candidate handles allow inspection of sealed selector-ineligible
+    # components without weakening ordinary selector resolution.
+    heading, _heading_valid, resolved_ego, _ego_manifest_sha256 = _resolve_heading(
+        root,
+        snapshot=distance,
+        run_group=root[run_path],
+        total_frames=total_frames,
+        dependency_handle=egocentric_dependency_handle,
     )
-    if not resolved_ego:
-        raise ValueError(
-            "Visit trajectories require a stable complete selector-eligible "
-            "egocentric_bearing component."
-        )
-    frames = ego[resolved_ego].get("frames")
-    if frames is None or "fish_heading_deg" not in frames:
-        raise ValueError("Selected egocentric_bearing component lacks fish_heading_deg.")
-    heading = np.asarray(frames["fish_heading_deg"][:], dtype=np.float64).reshape(-1)
 
     # bout onsets, to mark where the fish re-aims
     bout_start = np.zeros(0, dtype=np.int64)
     swim_bout_name = resolve_swim_bout_run_name(
         root,
         run_name=swim_bout_run,
+        legacy_compatibility=swim_bout_legacy_compatibility,
     )
     swim_bout_group = root[f"analysis/swim_bout_runs/{swim_bout_name}"]
     tables = swim_bout_group.get("tables")

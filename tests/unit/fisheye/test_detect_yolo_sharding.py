@@ -34,6 +34,8 @@ from fisheye.shared.import_video_metadata import (
     publish_external_video_acquisition_authority,
 )
 from fisheye.shared.observation_coordinate_publication import (
+    DETECTION_OBSERVATION_CARDINALITY_LEGACY_FLOAT64_SCHEMA_VERSION,
+    DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION,
     derive_detection_source_camera_geometry,
     load_persisted_detection_observation_geometry,
     load_persisted_source_camera_position_surface,
@@ -1069,6 +1071,7 @@ def _complete_canonical_detection_observation(
     tmp_path,
     *,
     row_count: int,
+    normalized_dtype: np.dtype | type[np.floating] = np.float64,
 ):
     root, _zarr_path, _video = _canonical_acquisition_root(tmp_path)
     acquisition = mod._load_published_detection_acquisition_frame(root)  # noqa: SLF001
@@ -1084,7 +1087,7 @@ def _complete_canonical_detection_observation(
     )
     frame_indices = np.arange(row_count, dtype=np.int32)
     normalized = np.tile(
-        np.asarray([[0.5, 0.5, 0.25, 0.25]], dtype=np.float64),
+        np.asarray([[0.5, 0.5, 0.25, 0.25]], dtype=normalized_dtype),
         (row_count, 1),
     )
     bbox_img, centers = derive_detection_source_camera_geometry(
@@ -1336,6 +1339,37 @@ def test_public_detection_loader_forbids_empty_declaration_on_nonempty_output(
             root,
             "detect_runs/nonempty",
         )
+
+
+@pytest.mark.parametrize(
+    ("normalized_dtype", "schema_version"),
+    (
+        (
+            np.float64,
+            DETECTION_OBSERVATION_CARDINALITY_LEGACY_FLOAT64_SCHEMA_VERSION,
+        ),
+        (np.float32, DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION),
+    ),
+)
+def test_detection_cardinality_versions_bind_exact_geometry_dtype(
+    tmp_path,
+    normalized_dtype,
+    schema_version: int,
+) -> None:
+    root, run, _declaration = _complete_canonical_detection_observation(
+        tmp_path,
+        row_count=1,
+        normalized_dtype=normalized_dtype,
+    )
+
+    geometry = load_persisted_detection_observation_geometry(
+        root,
+        "detect_runs/nonempty",
+    )
+
+    cardinality = run.attrs[mod.DETECTION_OBSERVATION_CARDINALITY_ATTR]
+    assert cardinality["schema_version"] == schema_version
+    assert geometry.centers_image.coordinate_node.dtype == np.dtype(normalized_dtype)
 
 
 @pytest.mark.parametrize(

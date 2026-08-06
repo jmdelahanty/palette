@@ -43,7 +43,7 @@ from fisheye.shared.zarr.manifest_digest import (
 )
 from fisheye.shared.zarr.keypoint_manifest import KeypointPreprocessingReference
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
-from fisheye.shared.zarr_run_completion import is_run_complete
+from fisheye.shared.zarr_run_completion import is_run_complete, require_runs_parent
 from fisheye.utils.run_keypoints_with_registry_model import (
     run_keypoints_with_registry_model,
 )
@@ -101,7 +101,7 @@ def _stage_crop_shell(
         raise FileNotFoundError(f"Crop run not found: {source}")
     local = destination / "analysis.zarr"
     root = zarr.open_group(str(local), mode="w-", zarr_format=3)
-    root.create_group("crop_runs")
+    require_runs_parent(root, "crop_runs")
     shutil.copytree(source, local / "crop_runs" / crop_run, copy_function=shutil.copy2)
     return local
 
@@ -165,7 +165,7 @@ def _publish_terminal_tree(
                 "registry_registered": False,
             }
         )
-        root.create_group("keypoint_terminal_runs")
+        require_runs_parent(root, "keypoint_terminal_runs")
         shutil.copytree(
             local_archive / "keypoint_shard_runs" / source_run,
             temporary / "keypoint_terminal_runs" / source_run,

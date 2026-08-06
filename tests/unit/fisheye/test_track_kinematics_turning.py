@@ -701,6 +701,7 @@ def test_swim_bout_mirror_only_writes_matching_track_id() -> None:
         "bout_run",
         _quiet_console(),
         expected_track_kinematics_run="kin_run",
+        legacy_compatibility=True,
     )
 
     assert result == "bout_run"
@@ -727,6 +728,7 @@ def test_swim_bout_mirror_skips_unscoped_legacy_run_with_multiple_tracks() -> No
         "legacy_bout",
         _quiet_console(),
         expected_track_kinematics_run="kin_run",
+        legacy_compatibility=True,
     )
 
     assert result is None
@@ -747,6 +749,7 @@ def test_swim_bout_mirror_reads_compact_v2_logical_signals() -> None:
         "compact_bout",
         _quiet_console(),
         expected_track_kinematics_run="kin_run",
+        legacy_compatibility=True,
     )
 
     assert result == "compact_bout"

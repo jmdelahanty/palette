@@ -165,7 +165,8 @@ DETECTION_OBSERVATION_CARDINALITY_ATTR = "detection_observation_cardinality"
 DETECTION_OBSERVATION_CARDINALITY_SCHEMA_ID = (
     "palette.detection_observation_cardinality"
 )
-DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION = 1
+DETECTION_OBSERVATION_CARDINALITY_LEGACY_FLOAT64_SCHEMA_VERSION = 1
+DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION = 2
 
 EMPTY_OBSERVATION_DECLARATION_ATTR = "empty_observation_declaration"
 EMPTY_OBSERVATION_DECLARATION_SCHEMA_ID = (
@@ -2725,16 +2726,46 @@ def _detection_observation_cardinality_record(
     rowset: Any,
     *,
     acquisition_frame: BoundAcquisitionCameraFrame,
+    schema_version: int | None = None,
 ) -> dict[str, Any]:
     """Build an exact all-row/all-frame cardinality and payload seal."""
 
     acquisition = require_bound_acquisition_camera_frame(acquisition_frame)
+    try:
+        geometry_dtype = np.dtype(rowset["bbox_norm_coords"].dtype)
+    except Exception as exc:
+        _fail(f"Detection normalized geometry dtype is unavailable: {exc}.")
+    if schema_version is None:
+        if geometry_dtype == np.dtype("<f8"):
+            resolved_schema_version = (
+                DETECTION_OBSERVATION_CARDINALITY_LEGACY_FLOAT64_SCHEMA_VERSION
+            )
+        elif geometry_dtype == np.dtype("<f4"):
+            resolved_schema_version = DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION
+        else:
+            _fail(
+                "Detection cardinality geometry must use exact float32 v2 or "
+                "legacy float64 v1."
+            )
+    else:
+        resolved_schema_version = schema_version
+    expected_geometry_dtype = {
+        DETECTION_OBSERVATION_CARDINALITY_LEGACY_FLOAT64_SCHEMA_VERSION: np.dtype(
+            "<f8"
+        ),
+        DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION: np.dtype("<f4"),
+    }.get(resolved_schema_version)
+    if expected_geometry_dtype is None or geometry_dtype != expected_geometry_dtype:
+        _fail(
+            "Detection cardinality schema version does not match the exact "
+            "persisted geometry dtype."
+        )
     row_specs = {
         "frame_indices": (np.dtype("<i4"), ()),
         "source_acquisition_frame_index": (np.dtype("<i8"), ()),
-        "bbox_norm_coords": (np.dtype("<f8"), (4,)),
-        "bbox_img_xyxy": (np.dtype("<f8"), (4,)),
-        "centers_img_xy": (np.dtype("<f8"), (2,)),
+        "bbox_norm_coords": (expected_geometry_dtype, (4,)),
+        "bbox_img_xyxy": (expected_geometry_dtype, (4,)),
+        "centers_img_xy": (expected_geometry_dtype, (2,)),
         "scores": (np.dtype("<f4"), ()),
         "class_ids": (np.dtype("<i4"), ()),
         "instance_key": (np.dtype("<u8"), ()),
@@ -2872,7 +2903,7 @@ def _detection_observation_cardinality_record(
 
     return {
         "schema_id": DETECTION_OBSERVATION_CARDINALITY_SCHEMA_ID,
-        "schema_version": DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION,
+        "schema_version": resolved_schema_version,
         "observation_row_count": row_count,
         "source_total_frames": source_total_frames,
         "row_arrays": {
@@ -2930,9 +2961,13 @@ def _require_detection_observation_cardinality(
         rowset,
         attr_name=DETECTION_OBSERVATION_CARDINALITY_ATTR,
     )
+    persisted_schema_version = cardinality.record.get("schema_version")
+    if type(persisted_schema_version) is not int:
+        _fail("Persisted detection cardinality schema version is not exact.")
     expected = _detection_observation_cardinality_record(
         rowset,
         acquisition_frame=acquisition_frame,
+        schema_version=persisted_schema_version,
     )
     if not _raw_equal(cardinality.record, expected):
         _fail(
@@ -4249,6 +4284,7 @@ __all__ = [
     "DETECTION_INSTANCE_KEY_DERIVATION_SCHEMA_VERSION",
     "DETECTION_OBSERVATION_CARDINALITY_ATTR",
     "DETECTION_OBSERVATION_CARDINALITY_SCHEMA_ID",
+    "DETECTION_OBSERVATION_CARDINALITY_LEGACY_FLOAT64_SCHEMA_VERSION",
     "DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION",
     "EMPTY_OBSERVATION_DECLARATION_ATTR",
     "EMPTY_OBSERVATION_DECLARATION_SCHEMA_ID",

@@ -926,6 +926,7 @@ def load_bout_data(
     *,
     bout_run: Optional[str] = None,
     console: Optional[Console] = None,
+    legacy_compatibility: bool = False,
 ) -> Tuple[Dict[int, List[BoutEntry]], str]:
     """Load swim bouts from the selected logical swim-bout candidate.
 
@@ -941,7 +942,11 @@ def load_bout_data(
     """
     console = console or Console()
 
-    payload = load_default_swim_bout_tables(root, run_name=bout_run or "latest")
+    payload = load_default_swim_bout_tables(
+        root,
+        run_name=bout_run or "latest",
+        legacy_compatibility=legacy_compatibility,
+    )
     run_name = payload.run_name
     speed_level = payload.signal.speed_level
     track_id = payload.candidate.track_id

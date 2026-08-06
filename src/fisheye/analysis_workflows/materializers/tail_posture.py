@@ -336,11 +336,11 @@ def snapshot_tail_posture_sources(
         name: np.asarray(values).copy() for name, values in lineage.items()
     }
     staged_root = open_zarr_root(plan.staged_source_zarr, mode="a")
-    staged_shape = (
-        staged_root.require_group("analysis")
-        .require_group("subject_shape_runs")
-        .create_group(plan.subject_shape_run)
+    staged_shape_parent = require_runs_parent(
+        staged_root.require_group("analysis"),
+        "subject_shape_runs",
     )
+    staged_shape = staged_shape_parent.create_group(plan.subject_shape_run)
     staged_shape.attrs.update(
         {
             "source_refined_subject_masks_run": shape_group.attrs.get(

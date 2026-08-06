@@ -48,6 +48,7 @@ from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import require_runs_parent
 
 FIXTURE_SCHEMA_ID = "palette.activity_spatial.source_fixture"
 FIXTURE_SCHEMA_VERSION = 2
@@ -664,8 +665,9 @@ def _seed_track_authority(
     local_root.attrs.put(root_attrs)
     local_analysis = local_root.create_group("analysis")
     _copy_group_attrs(source_analysis, local_analysis)
-    local_tracks = local_analysis.create_group("track_kinematics_runs")
+    local_tracks = require_runs_parent(local_analysis, "track_kinematics_runs")
     _copy_group_attrs(source_tracks, local_tracks)
+    require_runs_parent(local_analysis, "track_kinematics_runs")
     local_offline = local_tracks.create_group("offline")
     _copy_group_attrs(source_offline, local_offline)
     local_offline.attrs["latest"] = track_run
@@ -738,8 +740,9 @@ def _seed_lossless_swim_bout_projection(
 
     root = open_zarr_root(local_archive, mode="a")
     analysis = root["analysis"]
-    parent = analysis.create_group("swim_bout_runs")
+    parent = require_runs_parent(analysis, "swim_bout_runs")
     _copy_group_attrs(source_parent, parent)
+    require_runs_parent(analysis, "swim_bout_runs")
     parent.attrs["latest"] = projected_run_name
     parent.attrs["latest_complete"] = projected_run_name
     target_run_path = local_archive / "analysis" / "swim_bout_runs" / projected_run_name

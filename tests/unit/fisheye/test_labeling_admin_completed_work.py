@@ -80,6 +80,10 @@ def _fake_module(monkeypatch, name: str, **attrs: object) -> ModuleType:
     for key, value in attrs.items():
         setattr(module, key, value)
     monkeypatch.setitem(sys.modules, name, module)
+    parent_name, _, child_name = name.rpartition(".")
+    parent = sys.modules.get(parent_name)
+    if parent is not None and child_name:
+        monkeypatch.setattr(parent, child_name, module, raising=False)
     return module
 
 

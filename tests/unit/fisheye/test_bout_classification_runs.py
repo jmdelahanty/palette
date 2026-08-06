@@ -20,14 +20,12 @@ from fisheye.analysis.megabouts_classifier import (
     classify_megabouts_input_pack,
     write_megabouts_classification_run,
 )
-from fisheye.analysis.megabouts_classifier_inputs import (
-    build_megabouts_classifier_input_pack,
-)
 from tests.unit.fisheye.test_megabouts_classifier import (
     _build_classifier_root,
     _fake_runtime,
 )
 from tests.unit.fisheye.test_megabouts_classifier_inputs import (
+    build_megabouts_classifier_input_pack,
     _install_verified_source_readers,
 )
 

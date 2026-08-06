@@ -1090,7 +1090,11 @@ def test_load_bout_data_reads_current_physical_peak_schema() -> None:
     bouts.create_array("peak_detection_signal_mm_s", data=np.array([3.0], dtype=np.float32))
     bouts.create_array("peak_physical_speed_mm_s", data=np.array([8.0], dtype=np.float32))
 
-    loaded, run_name = load_bout_data(root, bout_run="bouts_v6")
+    loaded, run_name = load_bout_data(
+        root,
+        bout_run="bouts_v6",
+        legacy_compatibility=True,
+    )
 
     assert run_name == "bouts_v6"
     assert loaded[0][0].mean_speed == pytest.approx(4.0)

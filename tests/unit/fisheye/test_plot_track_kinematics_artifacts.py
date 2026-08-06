@@ -193,6 +193,7 @@ def test_resolve_swim_bout_spans_uses_resolver_for_selected_level(tmp_path: Path
         "latest",
         Console(record=True),
         speed_level="smoothed",
+        legacy_compatibility=True,
     )
 
     assert spans == [(0.10, 0.20), (0.30, 0.45)]
@@ -212,6 +213,7 @@ def test_resolve_swim_bout_spans_falls_back_to_default_and_converts_frames(
         "swim_bout_1",
         console,
         speed_level="smoothed",
+        legacy_compatibility=True,
     )
 
     assert spans == [(0.10, 0.20), (0.30, 0.45)]
@@ -229,6 +231,7 @@ def test_resolve_swim_bout_spans_keeps_flat_legacy_support(tmp_path: Path) -> No
         "latest",
         Console(record=True),
         speed_level="smoothed",
+        legacy_compatibility=True,
     )
 
     assert spans == [(0.05, 0.15)]
@@ -384,6 +387,7 @@ def test_plot_track_kinematics_accepts_exponential_swim_bout_overlay(tmp_path: P
             "peak_event_bouts",
             "--speed-level",
             "exponential",
+            "--legacy-swim-bout-compatibility",
             "--write-zarr-artifacts",
         ]
     )

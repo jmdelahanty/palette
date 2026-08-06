@@ -47,6 +47,9 @@ from fisheye.shared.zarr_run_completion import (
     resolve_latest_complete_run_name_from_attrs,
     set_authoritative_run,
 )
+from tests.unit.fisheye.test_check_recording_steps import (
+    _populate_exact_eye_angle_v7_run,
+)
 
 
 class FakeGroup(dict[str, object]):
@@ -2860,10 +2863,13 @@ def test_emit_stage_completion_resolves_nested_analysis_run_parents(
     add_surface,
     expected_stage: str,
 ) -> None:
-    root = FakeGroup()
+    root = zarr.group() if expected_stage == "eye_angle" else FakeGroup()
     parent = root.require_group(parent_path)
     run = parent.require_group(run_name)
-    add_surface(run)
+    if expected_stage == "eye_angle":
+        _populate_exact_eye_angle_v7_run(run)
+    else:
+        add_surface(run)
     mark_run_started(run, run_name=run_name, stage=step_name)
     mark_run_complete(
         run,

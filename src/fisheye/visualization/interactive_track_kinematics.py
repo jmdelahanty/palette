@@ -1064,6 +1064,7 @@ def discover_swim_bout_run_options(
     *,
     track_run_path: str,
     track_id: int,
+    legacy_compatibility: bool = False,
 ) -> list[SwimBoutRunOption]:
     """Return swim-bout runs derived from the selected track-kinematics run."""
 
@@ -1073,6 +1074,7 @@ def discover_swim_bout_run_options(
         root,
         track_run_name=track_run_name,
         track_id=track_id,
+        legacy_compatibility=legacy_compatibility,
     )
     options: list[SwimBoutRunOption] = []
     for candidate in candidates:
@@ -1153,6 +1155,7 @@ def discover_bout_kinematics_run_options(
     track_id: int,
     swim_bout_run: Optional[str],
     speed_level: Optional[str],
+    legacy_compatibility: bool = False,
 ) -> list[BoutKinematicsRunOption]:
     """Return bout-kinematics runs derived from the selected bout candidate."""
 
@@ -1204,7 +1207,10 @@ def discover_bout_kinematics_run_options(
         parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
         pre_post_mode = parameters.get("pre_post_mode")
         try:
-            records_by_level, _level_attrs, _table_attrs = resolve_bout_kinematics_tables(run_group)
+            records_by_level, _level_attrs, _table_attrs = resolve_bout_kinematics_tables(
+                run_group,
+                legacy_compatibility=legacy_compatibility,
+            )
         except Exception:
             records_by_level = {}
         n_rows_by_level = {
@@ -1336,6 +1342,7 @@ def _load_global_swim_bout_payload(
     spec: Mapping[str, Any],
     requested_run: Optional[str],
     speed_level: Optional[str],
+    legacy_compatibility: bool,
 ) -> _SwimBoutPayload:
     run_name = requested_run
     if isinstance(run_name, str) and run_name.lower() == "none":
@@ -1346,6 +1353,7 @@ def _load_global_swim_bout_payload(
             root,
             run_name=run_name or "latest",
             speed_level=speed_level,
+            legacy_compatibility=legacy_compatibility,
         )
     except SwimBoutIOError:
         return _empty_swim_bout_payload()
@@ -1397,6 +1405,7 @@ def _load_swim_bout_payload(
     *,
     requested_run: Optional[str],
     speed_level: Optional[str],
+    legacy_compatibility: bool,
 ) -> _SwimBoutPayload:
     overlays = spec.get("overlays")
     swim_overlay = overlays.get("swim_bouts") if isinstance(overlays, Mapping) else {}
@@ -1423,6 +1432,7 @@ def _load_swim_bout_payload(
         spec=spec,
         requested_run=run_selector,
         speed_level=level_selector,
+        legacy_compatibility=legacy_compatibility,
     )
 
 
@@ -1649,6 +1659,7 @@ def load_track_kinematics_interactive_data(
     artifact_name: str = DEFAULT_INTERACTIVE_ARTIFACT,
     swim_bout_run: Optional[str] = None,
     speed_level: Optional[str] = None,
+    swim_bout_legacy_compatibility: bool = False,
 ) -> TrackKinematicsInteractiveData:
     """Load a persisted track-kinematics interactive spec and source arrays."""
 
@@ -1703,6 +1714,7 @@ def load_track_kinematics_interactive_data(
         spec,
         requested_run=swim_bout_run,
         speed_level=speed_level,
+        legacy_compatibility=swim_bout_legacy_compatibility,
     )
     validity_spans, validity_labels, validity_source = _verified_validity_spans(
         tables,
@@ -1808,6 +1820,7 @@ def load_bout_kinematics_records(
     *,
     run_name: str,
     heading_level: Optional[str] = None,
+    legacy_compatibility: bool = False,
 ) -> tuple[dict[str, np.ndarray], Mapping[str, Any]]:
     """Load per-bout kinematics records from one analysis run."""
 
@@ -1821,6 +1834,7 @@ def load_bout_kinematics_records(
     records_by_level, _level_attrs, _table_attrs = resolve_bout_kinematics_tables(
         run_group,
         heading_level=heading_level,
+        legacy_compatibility=legacy_compatibility,
     )
     return records_by_level, dict(run_group.attrs)
 

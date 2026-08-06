@@ -157,7 +157,12 @@ def test_visualization_loader_uses_resolver_for_exponential_speed(tmp_path: Path
     zarr_path = tmp_path / "analysis.zarr"
     _make_archive(zarr_path)
 
-    attrs, datasets = _load_swim_bout_run(zarr_path, None, speed_level="exponential")
+    attrs, datasets = _load_swim_bout_run(
+        zarr_path,
+        None,
+        speed_level="exponential",
+        legacy_compatibility=True,
+    )
 
     assert attrs["run_name"] == "bouts_canary (speed_exponential)"
     assert attrs["speed_level"] == "speed_exponential"
@@ -174,7 +179,12 @@ def test_visualization_loader_falls_back_to_default_speed(tmp_path: Path) -> Non
     zarr_path = tmp_path / "analysis.zarr"
     _make_archive(zarr_path)
 
-    attrs, datasets = _load_swim_bout_run(zarr_path, "bouts_canary", speed_level="smoothed")
+    attrs, datasets = _load_swim_bout_run(
+        zarr_path,
+        "bouts_canary",
+        speed_level="smoothed",
+        legacy_compatibility=True,
+    )
 
     assert attrs["speed_level"] == "speed_exponential"
     assert datasets["bouts"]["bout_id"].tolist() == [0, 1]
@@ -210,7 +220,12 @@ def test_visualization_loader_reads_flat_legacy_run(tmp_path: Path) -> None:
 def test_dashboard_accepts_modern_bout_fields(tmp_path: Path) -> None:
     zarr_path = tmp_path / "analysis.zarr"
     _make_archive(zarr_path)
-    attrs, datasets = _load_swim_bout_run(zarr_path, None, speed_level="exponential")
+    attrs, datasets = _load_swim_bout_run(
+        zarr_path,
+        None,
+        speed_level="exponential",
+        legacy_compatibility=True,
+    )
 
     fig = create_swim_bout_dashboard(attrs, datasets, title="test")
 

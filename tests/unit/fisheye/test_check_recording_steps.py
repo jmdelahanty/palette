@@ -84,6 +84,11 @@ def _populate_exact_eye_angle_v7_run(run: zarr.Group) -> None:
             "layout": "compact_dense_v2",
             "method": "ellipse_and_centroid_eye_angles",
             "method_version": "eye_angle_analysis.v5",
+            "provenance": {
+                "method": "ellipse_and_centroid_eye_angles",
+                "method_version": "eye_angle_analysis.v5",
+                "source": "unit_test_fixture",
+            },
             "row_axis": "keypoint_detection_rows",
             "report_version": "2.0",
             "fps": 100.0,

@@ -1100,6 +1100,7 @@ def run_megabouts_classifier(
     track_scope: str = "offline",
     track_id: int = 0,
     swim_bout_run: str = "latest",
+    swim_bout_legacy_compatibility: bool = False,
     speed_level: str = "default",
     heading_source: str = DEFAULT_HEADING_SOURCE,
     bout_duration_s: float = DEFAULT_BOUT_DURATION_S,
@@ -1127,6 +1128,9 @@ def run_megabouts_classifier(
         "track_scope": track_scope,
         "track_id": track_id,
         "swim_bout_run": swim_bout_run,
+        "swim_bout_legacy_compatibility": bool(
+            swim_bout_legacy_compatibility
+        ),
         "speed_level": speed_level,
         "heading_source": heading_source,
         "bout_duration_s": bout_duration_s,
@@ -1278,6 +1282,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-scope", default="offline")
     parser.add_argument("--track-id", type=int, default=0)
     parser.add_argument("--swim-bout-run", default="latest")
+    parser.add_argument(
+        "--legacy-swim-bout-compatibility",
+        action="store_true",
+        help="Explicitly allow historical swim-bout layouts for compatibility-only reads.",
+    )
     parser.add_argument("--speed-level", default="default")
     parser.add_argument("--heading-source", default=DEFAULT_HEADING_SOURCE)
     parser.add_argument(
@@ -1352,6 +1361,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         track_scope=args.track_scope,
         track_id=int(args.track_id),
         swim_bout_run=args.swim_bout_run,
+        swim_bout_legacy_compatibility=bool(
+            args.legacy_swim_bout_compatibility
+        ),
         speed_level=args.speed_level,
         heading_source=args.heading_source,
         bout_duration_s=float(args.bout_duration_s),

@@ -55,6 +55,7 @@ from fisheye.shared.zarr_helpers import (
 )
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
     require_runs_parent,
 )
 
@@ -615,6 +616,11 @@ def publish_selector_ineligible_crop_geometry_snapshot(
         phase_seconds["validate_decoded_values"] = time.perf_counter() - phase_started
 
         run.attrs["status"] = "complete"
+        mark_run_complete(
+            run,
+            parent_group=family,
+            run_name=str(run_id),
+        )
         phase_started = time.perf_counter()
         first_consolidation = consolidate_metadata_capture_expected_warnings(
             output_path

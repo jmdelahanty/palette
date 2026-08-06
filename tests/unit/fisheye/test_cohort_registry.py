@@ -8,6 +8,11 @@ import sys
 
 import pytest
 
+from fisheye.analytics_exports.chaser_authority import (
+    build_chaser_export_authority_set,
+    build_chaser_export_source_authority,
+    write_chaser_export_authority_set,
+)
 from fisheye.cohorts.registry import (
     CohortSelectionError,
     build_cohort_plan,
@@ -459,6 +464,21 @@ def test_release_render_freezes_membership_and_wires_dependency_dag(
     cluster_repo = tmp_path / "cluster-palette"
     _build_clean_palette_checkout(cluster_repo)
     output_root = tmp_path / "analytics"
+    authority_path = write_chaser_export_authority_set(
+        tmp_path / "chaser_authority.json",
+        build_chaser_export_authority_set(
+            [
+                build_chaser_export_source_authority(
+                    zarr_path=tmp_path / f"release_{suffix}.zarr",
+                    recording_id=f"release_recording_{suffix}",
+                    base_run_name="chaser_distance_release_v1",
+                    base_publication_seal_sha256="d" * 64,
+                    component_handles={},
+                )
+                for suffix in ("a", "b")
+            ]
+        ),
+    )
 
     result = cohort_release_main(
         [
@@ -472,6 +492,8 @@ def test_release_render_freezes_membership_and_wires_dependency_dag(
             str(output_root),
             "--palette-repo",
             str(cluster_repo),
+            "--chaser-authority-manifest",
+            str(authority_path),
             "--skip-report",
         ]
     )
@@ -509,6 +531,10 @@ def test_release_render_freezes_membership_and_wires_dependency_dag(
         for stage in submission["stages"]
         if stage["name"] == "analytics_export_and_statistics"
     )
+    assert submission["chaser_authority_manifest_path"] == str(authority_path)
+    assert submission["chaser_authority_file_sha256"]
+    assert "--chaser-authority-manifest" in export_submission["command"]
+    assert "--chaser-authority-sha256" in export_submission["command"]
     assert export_submission["command"][-2:] == [
         "--dependency-done",
         "900002",

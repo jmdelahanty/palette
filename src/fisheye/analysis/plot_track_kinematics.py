@@ -253,16 +253,27 @@ def resolve_swim_bout_spans(
     requested: Optional[str],
     console: Console,
     speed_level: str = "smoothed",
+    *,
+    legacy_compatibility: bool = False,
 ) -> Tuple[List[Tuple[float, float]], Optional[str]]:
     requested_level = f"speed_{speed_level}" if not str(speed_level).startswith("speed_") else str(speed_level)
     used_level_fallback = False
     try:
-        swim_payload = load_swim_bout_tables(root, run_name=requested or "latest", speed_level=speed_level)
+        swim_payload = load_swim_bout_tables(
+            root,
+            run_name=requested or "latest",
+            speed_level=speed_level,
+            legacy_compatibility=legacy_compatibility,
+        )
     except SwimBoutIOError as exc:
         if "Speed level" not in str(exc):
             raise ValueError(str(exc)) from exc
         try:
-            swim_payload = load_swim_bout_tables(root, run_name=requested or "latest")
+            swim_payload = load_swim_bout_tables(
+                root,
+                run_name=requested or "latest",
+                legacy_compatibility=legacy_compatibility,
+            )
         except SwimBoutIOError as fallback_exc:
             raise ValueError(str(fallback_exc)) from fallback_exc
         if swim_payload.signal.speed_level:
@@ -1746,6 +1757,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         ),
     )
     parser.add_argument(
+        "--legacy-swim-bout-compatibility",
+        action="store_true",
+        help="Explicitly allow historical swim-bout layouts for compatibility-only overlays.",
+    )
+    parser.add_argument(
         "--write-zarr-artifacts",
         dest="write_zarr_artifacts",
         action="store_true",
@@ -1808,7 +1824,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     # Allow disabling swim bout overlay with empty string or 'none'
     if args.swim_bout_run and args.swim_bout_run.lower() not in ("", "none"):
         try:
-            swim_spans, swim_label = resolve_swim_bout_spans(root, args.swim_bout_run, console, speed_level=args.speed_level)
+            swim_spans, swim_label = resolve_swim_bout_spans(
+                root,
+                args.swim_bout_run,
+                console,
+                speed_level=args.speed_level,
+                legacy_compatibility=bool(args.legacy_swim_bout_compatibility),
+            )
             if swim_spans:
                 console.print(
                     f"[dim]Overlaying {len(swim_spans)} swim bouts from swim_bout_runs/{swim_label}.[/dim]"

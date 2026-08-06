@@ -46,6 +46,9 @@ class _FakeGroup:
         except Exception:
             return None
 
+    def keys(self):
+        return self._children.keys()
+
     def create_array(
         self,
         name: str,
