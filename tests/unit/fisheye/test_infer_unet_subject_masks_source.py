@@ -25,7 +25,21 @@ def test_parser_defaults_to_probability_shards_and_accepts_regular_override() ->
     )
 
     assert default_args.mask_probs_shard_rois == mod.DEFAULT_MASK_PROBS_SHARD_ROIS
+    assert default_args.require_training_materialization_binding is False
     assert regular_args.mask_probs_shard_rois is None
+
+
+def test_training_materialization_requires_terminal_shard_output() -> None:
+    with pytest.raises(ValueError, match="non-authoritative terminal"):
+        mod.main(
+            [
+                "missing.zarr",
+                "missing.pt",
+                "--crop-run",
+                "crop_v2_training",
+                "--require-training-materialization-binding",
+            ]
+        )
 
 
 def _complete_partition_contract_fixture() -> tuple[object, object, object]:

@@ -553,6 +553,8 @@ BROWSER_MUTATION_TARGET_SELECTOR_KEYS: tuple[str, ...] = (
     "position",
     "roi_idx",
     "row_idx",
+    "instance_key",
+    "refined_row_id",
     "frame_idx",
     "parent_frame_index",
     "source_frame_index",
@@ -665,6 +667,12 @@ def _detect_runtime_state(runtime: DetectRuntimeSession, backend_module: Any) ->
                 "position": int(runtime.position),
                 "row_idx": payload.get("row_idx"),
                 "frame_idx": payload.get("frame_idx"),
+                "detection_count": payload.get("detection_count"),
+                "instance_keys": [
+                    item.get("instance_key")
+                    for item in payload.get("detections", [])
+                    if isinstance(item, Mapping)
+                ],
             }
         except Exception:
             current = {"position": int(runtime.position)}
@@ -679,6 +687,7 @@ def _detect_runtime_state(runtime: DetectRuntimeSession, backend_module: Any) ->
         "user": runtime.user,
         "zarr_path": str(session.zarr_path),
         "refined_run": str(session.refined_run_name),
+        "review_axis": str(getattr(session, "review_axis", "frame")),
         "position": int(runtime.position),
         "target_token": _browser_runtime_target_token(runtime),
         "total": total,

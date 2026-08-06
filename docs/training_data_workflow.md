@@ -45,6 +45,35 @@ recording publication. See `docs/recording_analysis_pipeline_contract.md` and
 
 ## Recommended Workflow
 
+Training crop pixels have two first-class materialization providers: direct
+source-video PyNvVideoCodec-luma decode and exact verified flat-cache reuse.
+The cache is optional and never remains a runtime dependency of the resulting
+training Zarr. Crop-v2 rows may be selected by stable `instance_key`, including
+multiple observations from one frame. Detection review remains first-class:
+the composed path requires sampled full/downsampled frames plus complete
+canonical and refined detection-review runs, with refined review approved for
+training, before it accepts crop enrichment.
+Every crop row must match refined detection review by `instance_key`, original
+frame, and normalized box. New artifacts are copied from a sampled
+detection-review base, built on node-local scratch, and published as a checked
+atomic directory; existing sampled training Zarrs retain the direct-video path
+and may receive an atomic materialized crop run. See
+`docs/training_crop_materialization_providers_20260805.md` for the shared
+output contract and current activation gates.
+
+The maintained online `detect_training` labeler presents every observation in
+the current frame, including empty and multi-detection frames. Existing boxes
+are edited or removed by stable `instance_key`; new boxes are keyless until the
+server-side curation writer allocates their immutable identity. A save replaces
+the current frame's collection atomically and records the before/after
+collection in the labeling audit event. The older standalone detector reviewer
+remains a single-box compatibility surface.
+
+Generated detection-review tasks continue to queue missing or non-accepted
+frames by default. Use `generate-detect-training-tasks --include-all` when the
+assignment must inspect every sampled frame, including accepted frames where a
+second observation may need to be added.
+
 ### 1) Sampled import for training frames (full + downsampled)
 Use the batch wrapper for new sampled training Zarrs. PyNvVC luma is the only
 supported import backend; it decodes with PyNvVideoCodec, stores raw

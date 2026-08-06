@@ -1984,11 +1984,21 @@ def _make_handler(state: ServerState):
                     return True
                 try:
                     before = dict(backend_module.load_frame_payload(runtime.review_session, position=runtime.position))
-                    result = backend_module.apply_manual_edit(
-                        runtime.review_session,
-                        position=runtime.position,
-                        bbox_norm=body.get("bbox_norm"),  # type: ignore[arg-type]
-                    )
+                    if "detections" in body:
+                        raw_detections = body.get("detections")
+                        if not isinstance(raw_detections, list):
+                            raise ValueError("detections must be a JSON array.")
+                        result = backend_module.apply_detection_collection(
+                            runtime.review_session,
+                            position=runtime.position,
+                            detections=raw_detections,
+                        )
+                    else:
+                        result = backend_module.apply_manual_edit(
+                            runtime.review_session,
+                            position=runtime.position,
+                            bbox_norm=body.get("bbox_norm"),  # type: ignore[arg-type]
+                        )
                     mutation_event = state.store.record_event(
                         task_id=runtime.task_id,
                         recording_id=runtime.recording_id,
@@ -1998,16 +2008,26 @@ def _make_handler(state: ServerState):
                             "row_idx": result.get("row_idx"),
                             "frame_idx": result.get("frame_idx"),
                             "refined_run": str(runtime.review_session.refined_run_name),
+                            "instance_keys": [
+                                item.get("instance_key")
+                                for item in result.get("detections", [])
+                                if isinstance(item, Mapping)
+                            ],
                         },
                         before={
                             "row_idx": before.get("row_idx"),
                             "frame_idx": before.get("frame_idx"),
                             "bbox_norm": before.get("bbox_norm"),
+                            "detections": before.get("detections"),
                             "status": before.get("status"),
                         },
                         after={
                             "action": result.get("action"),
                             "bbox_norm": result.get("bbox_norm"),
+                            "detections": result.get("detections"),
+                            "added": result.get("added"),
+                            "updated": result.get("updated"),
+                            "removed": result.get("removed"),
                             "status": result.get("status"),
                         },
                     )
@@ -5059,8 +5079,10 @@ BROWSER_WORKFLOW_CAPABILITIES: tuple[dict[str, object], ...] = (
             "training_zarr_write_mode": "direct",
             "save_method": "POST",
             "save_endpoint": "/api/sessions/{session_id}/detect/save",
-            "payload_fields": ["bbox_norm", "advance", "target_token"],
-            "required_fields": ["bbox_norm", "target_token"],
+            "payload_fields": ["detections", "advance", "target_token"],
+            "required_fields": ["detections", "target_token"],
+            "detection_identity": "instance_key_decimal_string_or_null_for_new",
+            "save_semantics": "replace_server_selected_frame_detection_collection",
             "response_fields": ["ok", "result", "state"],
             "audit_event": "save_detect_bbox",
             "audit_provenance": dict(BROWSER_MUTATION_AUDIT_PROVENANCE),

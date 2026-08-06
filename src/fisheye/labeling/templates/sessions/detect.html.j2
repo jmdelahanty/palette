@@ -130,13 +130,13 @@
         <div class="buttons">
           <button type="button" onclick="nav(-1)">Previous</button>
           <button type="button" onclick="nav(1)">Next</button>
-          <button type="button" onclick="save(false)">Save box</button>
+          <button type="button" onclick="save(false)">Save detections</button>
           <button type="button" onclick="save(true)">Save + next</button>
-          <button type="button" class="secondary" onclick="clearBox()">Clear box</button>
-          <button type="button" class="secondary" onclick="placeTypicalBox()">Place typical box</button>
+          <button type="button" class="secondary" onclick="clearSelectedBox()">Remove selected</button>
+          <button type="button" class="secondary" onclick="placeTypicalBox()">Add typical box</button>
           <button type="button" class="warn" onclick="completeTask()">Complete task</button>
         </div>
-        <p class="meta">Drag on the image to draw or replace the bbox. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits, <b>t</b> places a typical box, <b>s</b> saves, <b>n</b>/<b>p</b> navigate.</p>
+        <p class="meta">Drag empty image space to add a box. Click a box to select it; drag from the selected box to redraw it. Delete removes only the selected observation. Stable instance identities are assigned and checked by the server. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits, <b>t</b> adds a typical box, <b>Delete</b> removes selected, <b>s</b> saves, <b>n</b>/<b>p</b> navigate.</p>
       </aside>
     </section>
   </main>

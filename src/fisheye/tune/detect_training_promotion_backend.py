@@ -17,7 +17,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import zarr
@@ -165,6 +165,13 @@ def _load_refined_payload(
     axis = detect_review_mod._payload_review_axis(payload)  # type: ignore[attr-defined]
     if axis != "frame":
         raise RuntimeError(f"Promotion supports only frame-axis refined detections; got {axis!r}.")
+    frame_indices = np.asarray(payload.get("frame_indices"), dtype=np.int64).reshape(-1)
+    if frame_indices.size != np.unique(frame_indices).size:
+        raise RuntimeError(
+            "Frame-axis detection promotion requires exactly one review row per "
+            "frame. Multi-instance promotion must use stable instance-key identity; "
+            "refusing to collapse duplicate frames by row order."
+        )
     return dict(payload)
 
 

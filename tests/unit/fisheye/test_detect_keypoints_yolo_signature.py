@@ -43,6 +43,8 @@ def test_detect_keypoints_yolo_accepts_mask_threshold() -> None:
     assert "expected_model_stride" in params
     assert "coordinate_contract_mode" in params
     assert params["coordinate_contract_mode"].default == "canonical"
+    assert "require_training_materialization_binding" in params
+    assert params["require_training_materialization_binding"].default is False
     assert "profile_timings" in params
     assert "keypoint_roi_shard_rows" in params
     assert "keypoint_frame_shard_rows" in params
@@ -96,6 +98,16 @@ def test_final_keypoint_parent_rejects_legacy_mode_before_io() -> None:
             "missing.zarr",
             "missing.pt",
             coordinate_contract_mode="legacy_noncanonical",
+        )
+
+
+def test_training_materialization_requires_terminal_noncanonical_output() -> None:
+    with pytest.raises(ValueError, match="non-authoritative terminal"):
+        detect_keypoints_yolo(
+            "missing.zarr",
+            "missing.pt",
+            crop_run="crop_v2_training",
+            require_training_materialization_binding=True,
         )
 
 

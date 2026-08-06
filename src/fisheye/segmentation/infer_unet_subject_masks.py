@@ -97,6 +97,9 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
 )
 from ..shared.zarr.manifest_digest import canonical_json_bytes
+from ..shared.zarr.training_crop_materialization import (
+    bind_training_crop_materialization,
+)
 from ..shared.zarr.subject_mask_validation_receipt import (
     SubjectMaskArrayUnitAccumulator,
     streaming_array_sha256,
@@ -2528,6 +2531,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--crop-run",
         help="Explicit crop run providing ROI images (default: latest/auto).",
     )
+    parser.add_argument(
+        "--require-training-materialization-binding",
+        action="store_true",
+        help=(
+            "Require --crop-run to be an exact self-contained training crop "
+            "materialization. This may write only terminal subject-mask shards; "
+            "canonical publication remains bound to source crop-v2."
+        ),
+    )
     parser.add_argument("--run-name", help="Optional name for the output run.")
     parser.add_argument(
         "--attempt-id",
@@ -2827,6 +2839,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "Canonical subject-mask inference requires direct persisted crop "
             "roi_images and rejects ROI cache manifests."
         )
+    if args.require_training_materialization_binding and canonical_output:
+        raise ValueError(
+            "A training-materialized crop may feed only non-authoritative terminal "
+            "subject-mask arrays. Canonical publication must finalize against the "
+            "bound source crop-v2 authority."
+        )
+    if args.require_training_materialization_binding and not args.crop_run:
+        raise ValueError(
+            "Strict training materialization input requires an explicit --crop-run."
+        )
+    zarr_path = Path(args.zarr_path).expanduser().resolve()
+    training_materialization = (
+        bind_training_crop_materialization(zarr_path, run_id=str(args.crop_run))
+        if args.require_training_materialization_binding
+        else None
+    )
 
     checkpoint_value = args.checkpoint_option or args.checkpoint
     if checkpoint_value and args.resolve_model_from_registry:
@@ -2895,7 +2923,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     label_schema_id, mask_labels = _resolve_checkpoint_schema(checkpoint)
 
-    zarr_path = Path(args.zarr_path).expanduser().resolve()
     root = zarr.open(str(zarr_path), mode="a", use_consolidated=False)
 
     if args.roi_work_package_manifest is not None:
@@ -2927,6 +2954,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     crop_run_name = crop_source.crop_run_name
     selected_crop_rows = getattr(crop_source, "source_crop_row_ids", None)
     total_rois = int(crop_source.total_rois)
+    if training_materialization is not None:
+        if (
+            crop_run_name != training_materialization.run_id
+            or total_rois != training_materialization.row_count
+            or tuple(int(value) for value in crop_source.roi_shape)
+            != training_materialization.roi_shape
+            or getattr(crop_source, "frame_source_kind", None) != "roi_images"
+            or bool(getattr(crop_source, "roi_cache_used", False))
+        ):
+            raise ValueError(
+                "Active subject-mask pixel source differs from the strict training "
+                "crop materialization binding."
+            )
     if total_rois == 0:
         if boundary is not None:
             boundary.close_crop_source()
@@ -3312,6 +3352,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
     if crop_source.roi_cache_path is not None:
         run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
+    if training_materialization is not None:
+        run_group.attrs["source_training_crop_materialization_binding"] = dict(
+            training_materialization.binding
+        )
+        run_group.attrs["source_training_crop_materialization_binding_digest"] = (
+            training_materialization.binding["payload_digest"]
+        )
     if args.mask_probs_chunk_rois is not None:
         run_group.attrs["mask_probs_chunk_rois"] = int(args.mask_probs_chunk_rois)
     if args.mask_probs_shard_rois is not None:
