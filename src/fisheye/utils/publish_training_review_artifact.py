@@ -26,7 +26,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--body-frame-run", required=True)
     parser.add_argument("--keypoint-delta-run", required=True)
     parser.add_argument("--keypoint-delta-generation", default="generation_000001")
-    parser.add_argument("--refined-subject-mask-run", required=True)
+    parser.add_argument("--raw-subject-mask-run", required=True)
+    parser.add_argument("--canonical-refined-subject-mask-run", required=True)
+    parser.add_argument("--subject-mask-quality-run", required=True)
+    parser.add_argument("--subject-mask-bundle", required=True)
+    parser.add_argument("--editable-refined-subject-mask-run", required=True)
     parser.add_argument("--created-by", required=True)
     parser.add_argument("--result-json", type=Path)
     return parser
@@ -47,7 +51,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         body_frame_run_id=args.body_frame_run,
         keypoint_delta_run_id=args.keypoint_delta_run,
         keypoint_delta_generation=args.keypoint_delta_generation,
-        refined_subject_mask_run_id=args.refined_subject_mask_run,
+        raw_subject_mask_run_id=args.raw_subject_mask_run,
+        canonical_refined_subject_mask_run_id=(args.canonical_refined_subject_mask_run),
+        subject_mask_quality_run_id=args.subject_mask_quality_run,
+        subject_mask_bundle_id=args.subject_mask_bundle,
+        editable_refined_subject_mask_run_id=(args.editable_refined_subject_mask_run),
         created_by=args.created_by,
     )
     text = json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n"

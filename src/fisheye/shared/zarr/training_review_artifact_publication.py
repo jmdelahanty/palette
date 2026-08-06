@@ -32,7 +32,7 @@ from fisheye.shared.refined_subject_mask_mutation import (
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.tabular_deltas import create_delta_generation
-from fisheye.shared.zarr.benchmark_runtime import sha256_file, utc_now
+from fisheye.shared.zarr.benchmark_runtime import sha256_array, sha256_file, utc_now
 from fisheye.shared.zarr.keypoint_bundle_production_publication import (
     publish_keypoint_v2_production_candidate_chain,
 )
@@ -43,6 +43,27 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
 from fisheye.shared.zarr.training_keypoint_review_publication import (
     publish_training_keypoint_review_candidate_chain,
 )
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_FAMILY,
+    SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE,
+    publish_subject_mask_bundle_candidate,
+    validate_subject_mask_bundle_candidate,
+)
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    publish_selector_ineligible_subject_mask_core_snapshot,
+    validate_persisted_subject_mask_core_publication,
+)
+from fisheye.shared.zarr.subject_mask_quality_publication import (
+    publish_selector_ineligible_subject_mask_quality_snapshot,
+)
+from fisheye.shared.zarr.subject_mask_quality_schema import (
+    SubjectMaskQualitySourceReference,
+)
+from fisheye.shared.zarr.subject_mask_schema import (
+    SubjectMaskComponentRegistry,
+    derive_subject_mask_frame_row_offsets,
+    derive_subject_mask_metrics,
+)
 from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
@@ -52,7 +73,7 @@ from fisheye.shared.zarr_run_completion import is_run_complete
 
 
 TRAINING_REVIEW_ARTIFACT_SCHEMA_ID = "palette.training_review_artifact"
-TRAINING_REVIEW_ARTIFACT_SCHEMA_VERSION = 1
+TRAINING_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
 TRAINING_REVIEW_ARTIFACT_RECEIPT = "training_review_artifact_receipt.json"
 TRAINING_REVIEW_ARTIFACT_POLICY = (
     "node_local_candidate_bases_plus_editable_surfaces_then_atomic_tree_v1"
@@ -125,6 +146,259 @@ def _initial_refined_identity(
     )
 
 
+def _publish_subject_mask_contract_chain(
+    *,
+    archive: Path,
+    working_root: Path,
+    recording_identity: str,
+    crop_run_id: str,
+    terminal_run_id: str,
+    terminal_metadata_sha256: str,
+    raw_run_id: str,
+    canonical_refined_run_id: str,
+    quality_run_id: str,
+    bundle_id: str,
+    editable_refined_run_id: str,
+    created_by: str,
+) -> dict[str, Any]:
+    """Publish raw/refined/quality authorities beside one editable draft."""
+
+    root = open_zarr_group_direct(archive, mode="r")
+    crop = root[f"crop_runs/{crop_run_id}"]
+    terminal = root[f"subject_mask_shard_runs/{terminal_run_id}"]
+    editable = root[f"refined_subject_masks_runs/{editable_refined_run_id}"]
+    raw_labels = tuple(str(value) for value in terminal.attrs.get("mask_labels", ()))
+    refined_labels = tuple(
+        str(value) for value in editable.attrs.get("mask_labels", ())
+    )
+    if not raw_labels or not refined_labels:
+        raise ValueError("Subject-mask terminal/refined component labels are absent.")
+    raw_components = SubjectMaskComponentRegistry(raw_labels)
+    refined_components = SubjectMaskComponentRegistry(refined_labels)
+
+    source_frames = np.asarray(
+        crop["source_acquisition_frame_index"][:], dtype=np.int64
+    )
+    source_frame_count = int(root["raw_video"].attrs.get("source_frame_count") or 0)
+    if source_frame_count <= 0 or (
+        source_frames.size and int(source_frames.max()) >= source_frame_count
+    ):
+        raise ValueError(
+            "Training artifact lacks a valid source-video frame domain for masks."
+        )
+    source_crop_row_ids = np.asarray(terminal["source_crop_row_ids"][:], dtype=np.int64)
+    instance_keys = np.asarray(terminal["instance_key"][:], dtype=np.uint64)
+    crop_instance_keys = np.asarray(crop["instance_key"][:], dtype=np.uint64)
+    source_crop_xywh = np.asarray(crop["source_crop_xywh"][:], dtype=np.float32)
+    if not np.array_equal(instance_keys, crop_instance_keys):
+        raise ValueError(
+            "Terminal masks and crop geometry have different instance keys."
+        )
+    if not np.array_equal(
+        source_frames,
+        np.asarray(terminal["source_acquisition_frame_index"][:], dtype=np.int64),
+    ):
+        raise ValueError(
+            "Terminal masks and crop geometry have different source frames."
+        )
+    if not np.array_equal(
+        source_crop_row_ids,
+        np.arange(instance_keys.shape[0], dtype=np.int64),
+    ):
+        raise ValueError(
+            "Training review mask publication requires terminal rows to cover the "
+            "complete crop rowset in exact order."
+        )
+    frame_row_offsets = derive_subject_mask_frame_row_offsets(
+        source_frames,
+        n_frames=source_frame_count,
+    )
+    crop_arrays = {
+        "instance_key": instance_keys,
+        "source_acquisition_frame_index": source_frames,
+        "source_crop_xywh": source_crop_xywh,
+    }
+    common_arrays = {
+        "source_crop_row_ids": source_crop_row_ids,
+        "instance_key": instance_keys,
+        "source_acquisition_frame_index": source_frames,
+        "frame_row_offsets": frame_row_offsets,
+        "source_crop_xywh": source_crop_xywh,
+    }
+
+    probabilities = np.asarray(terminal["mask_probs_roi"][:], dtype=np.uint8)
+    raw_available = np.asarray(terminal["available_channels"][:], dtype=bool)
+    decoded = probabilities.astype(np.float32) / np.float32(255.0)
+    thresholded = (decoded >= np.float32(0.5)).astype(np.uint8)
+    raw_metrics = derive_subject_mask_metrics(thresholded)
+    raw_arrays = {
+        **common_arrays,
+        "mask_probs_roi": probabilities,
+        "available_channels": raw_available,
+        "metrics/prob_max": np.max(probabilities, axis=(2, 3)).astype(
+            np.float32,
+            copy=False,
+        )
+        / np.float32(255.0),
+        **{f"metrics/{name}": values for name, values in raw_metrics.items()},
+    }
+    terminal_source_manifest = {
+        "schema_id": "palette.training_terminal_subject_mask_source",
+        "schema_version": 1,
+        "run_path": f"subject_mask_shard_runs/{terminal_run_id}",
+        "metadata_sha256": terminal_metadata_sha256,
+        "recording_identity": recording_identity,
+        "crop_run_path": f"crop_runs/{crop_run_id}",
+        "row_count": int(instance_keys.shape[0]),
+    }
+    raw_snapshot_root = working_root / "subject_mask_raw_snapshot.zarr"
+    raw_publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        raw_arrays,
+        source_crop_arrays=crop_arrays,
+        source_manifest=terminal_source_manifest,
+        n_frames=source_frame_count,
+        components=raw_components,
+        destination=raw_snapshot_root,
+        run_id=raw_run_id,
+        kind="raw_probability_uint8",
+        source_run_path=f"subject_mask_shard_runs/{terminal_run_id}",
+        source_attributes={
+            "source_crop_run": crop_run_id,
+            "mask_labels": list(raw_labels),
+            "label_schema_id": str(
+                terminal.attrs.get("label_schema_id") or "subject_v1_union"
+            ),
+            "method": str(terminal.attrs.get("method") or "terminal_inference"),
+            "probability_encoding": "linear_uint8_0_255",
+        },
+        threshold=0.5,
+        include_threshold_cache=False,
+        created_by=created_by,
+    )
+
+    dense_masks = np.asarray(editable["masks_roi"][:], dtype=np.uint8)
+    refined_available = np.asarray(editable["available_channels"][:], dtype=bool)
+    refined_metrics = derive_subject_mask_metrics(dense_masks)
+    refined_arrays = {
+        **common_arrays,
+        "masks_roi": dense_masks,
+        "available_channels": refined_available,
+        **{f"metrics/{name}": values for name, values in refined_metrics.items()},
+    }
+    refined_snapshot_root = working_root / "subject_mask_refined_snapshot.zarr"
+    refined_publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        refined_arrays,
+        source_crop_arrays=crop_arrays,
+        source_manifest=raw_publication.manifest,
+        n_frames=source_frame_count,
+        components=refined_components,
+        destination=refined_snapshot_root,
+        run_id=canonical_refined_run_id,
+        kind="refined_dense_core",
+        source_run_path=f"subject_mask_runs/{raw_run_id}",
+        source_attributes={
+            "source_crop_run": crop_run_id,
+            "source_subject_mask_run": raw_run_id,
+            "mask_labels": list(refined_labels),
+            "label_schema_id": "subject_v1_lr",
+            "method": "smart_finalize_subject_masks_v1",
+        },
+        created_by=created_by,
+    )
+
+    quality_source_paths = (
+        "masks_roi",
+        "instance_key",
+        "source_crop_row_ids",
+        "source_acquisition_frame_index",
+        "frame_row_offsets",
+        "available_channels",
+    )
+    quality_source = SubjectMaskQualitySourceReference(
+        run_name=canonical_refined_run_id,
+        manifest_digest=canonical_json_sha256(refined_publication.manifest),
+        dense_array_values_sha256=sha256_array(dense_masks),
+        component_registry_digest=canonical_json_sha256(
+            refined_components.as_manifest()
+        ),
+        source_array_values_sha256={
+            path: sha256_array(refined_arrays[path]) for path in quality_source_paths
+        },
+    )
+    quality_shadow_root = working_root / "subject_mask_quality_snapshots"
+    quality_publication = publish_selector_ineligible_subject_mask_quality_snapshot(
+        refined_arrays,
+        n_frames=source_frame_count,
+        components=refined_components,
+        source=quality_source,
+        source_manifest=refined_publication.manifest,
+        destination=quality_shadow_root / "quality.zarr",
+        run_id=quality_run_id,
+        shadow_root=quality_shadow_root,
+        scratch_root=working_root,
+        created_by=created_by,
+    )
+    bundle_receipt = publish_subject_mask_bundle_candidate(
+        analysis_zarr=archive,
+        recording_identity=recording_identity,
+        raw_snapshot_root=raw_publication.output_path,
+        raw_run_id=raw_run_id,
+        refined_snapshot_root=refined_publication.output_path,
+        refined_run_id=canonical_refined_run_id,
+        quality_snapshot_root=quality_publication.output_path,
+        quality_run_id=quality_run_id,
+        bundle_id=bundle_id,
+    )
+
+    writable = open_zarr_group_direct(archive, mode="a")
+    editable = writable[f"refined_subject_masks_runs/{editable_refined_run_id}"]
+    component_sources = editable.attrs.get("source_component_sources")
+    normalized_sources: dict[str, dict[str, object]] = {}
+    for label in refined_labels:
+        prior = (
+            component_sources.get(label)
+            if isinstance(component_sources, Mapping)
+            else None
+        )
+        normalized_sources[label] = {
+            **(dict(prior) if isinstance(prior, Mapping) else {}),
+            "source_stage": "subject_mask_runs",
+            "source_run": raw_run_id,
+        }
+        provenance_path = f"components/{label}/provenance"
+        if provenance_path in editable:
+            provenance = editable[provenance_path]
+            provenance.attrs.update(
+                {
+                    "source_stage": "subject_mask_runs",
+                    "source_run": raw_run_id,
+                    "source_surface_path": (
+                        f"subject_mask_runs/{raw_run_id}/mask_probs_roi"
+                    ),
+                    "source_probability_path": (
+                        f"subject_mask_runs/{raw_run_id}/mask_probs_roi"
+                    ),
+                }
+            )
+    editable.attrs.update(
+        {
+            "source_subject_mask_run": raw_run_id,
+            "source_component_sources": normalized_sources,
+            "source_canonical_refined_subject_mask_run": canonical_refined_run_id,
+            "source_subject_mask_bundle_id": bundle_id,
+        }
+    )
+    return {
+        "raw_manifest_digest": canonical_json_sha256(raw_publication.manifest),
+        "refined_manifest_digest": canonical_json_sha256(refined_publication.manifest),
+        "quality_manifest_digest": canonical_json_sha256(quality_publication.manifest),
+        "bundle_manifest_digest": bundle_receipt["bundle_manifest_digest"],
+        "source_frame_count": source_frame_count,
+        "raw_components": list(raw_labels),
+        "refined_components": list(refined_labels),
+    }
+
+
 def _validate_review_state(
     archive: Path,
     *,
@@ -135,7 +409,11 @@ def _validate_review_state(
     body_frame_run_id: str,
     delta_run_id: str,
     delta_generation: str,
-    refined_mask_run_id: str,
+    raw_mask_run_id: str,
+    canonical_refined_mask_run_id: str,
+    mask_quality_run_id: str,
+    mask_bundle_id: str,
+    editable_refined_mask_run_id: str,
 ) -> dict[str, Any]:
     root = open_zarr_group_direct(archive, mode="r")
     if root.attrs.get("stage_selector_eligible") is not False:
@@ -203,7 +481,39 @@ def _validate_review_state(
         raise RuntimeError(
             "Keypoint edit generation QC policy differs from the refined skeleton."
         )
-    masks = root[f"refined_subject_masks_runs/{refined_mask_run_id}"]
+    for family, run_id in (
+        ("subject_mask_runs", raw_mask_run_id),
+        ("refined_subject_masks_runs", canonical_refined_mask_run_id),
+    ):
+        core_errors = validate_persisted_subject_mask_core_publication(
+            archive,
+            family=family,
+            run_id=run_id,
+        )
+        if core_errors:
+            raise RuntimeError(
+                f"Persisted {family}/{run_id} failed validation: "
+                + "; ".join(core_errors)
+            )
+    bundle_validation = validate_subject_mask_bundle_candidate(
+        analysis_zarr=archive,
+        bundle_id=mask_bundle_id,
+    )
+    bundle = root[f"{SUBJECT_MASK_BUNDLE_FAMILY}/{mask_bundle_id}"]
+    bundle_manifest = bundle.attrs.get(SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE)
+    if not isinstance(bundle_manifest, Mapping):
+        raise RuntimeError("Training review artifact lacks its subject-mask bundle.")
+    bundle_members = bundle_manifest["payload"]["members"]
+    if (
+        bundle_members["raw"]["run_id"] != raw_mask_run_id
+        or bundle_members["refined"]["run_id"] != canonical_refined_mask_run_id
+        or bundle_members["quality"]["run_id"] != mask_quality_run_id
+    ):
+        raise RuntimeError(
+            "Subject-mask bundle members differ from the review receipt."
+        )
+
+    masks = root[f"refined_subject_masks_runs/{editable_refined_mask_run_id}"]
     if (
         refined_subject_mask_lifecycle_state(masks)
         != REFINED_SUBJECT_MASK_EDITABLE_DRAFT
@@ -215,6 +525,15 @@ def _validate_review_state(
     ):
         raise RuntimeError(
             "Editable subject masks require dense, selector-ineligible masks_roi."
+        )
+    if (
+        masks.attrs.get("source_subject_mask_run") != raw_mask_run_id
+        or masks.attrs.get("source_canonical_refined_subject_mask_run")
+        != canonical_refined_mask_run_id
+        or masks.attrs.get("source_subject_mask_bundle_id") != mask_bundle_id
+    ):
+        raise RuntimeError(
+            "Editable subject-mask draft is not bound to its canonical bundle."
         )
     masks_roi = masks["masks_roi"]
     refined_keys = np.asarray(refined["instance_key"][:], dtype=np.uint64)
@@ -243,8 +562,15 @@ def _validate_review_state(
         ),
         "manual_keypoint_qc_policy_digest": review_policy.policy_digest,
         "refined_subject_mask_path": (
-            f"refined_subject_masks_runs/{refined_mask_run_id}"
+            f"refined_subject_masks_runs/{editable_refined_mask_run_id}"
         ),
+        "subject_mask_contract_chain": {
+            "raw": f"subject_mask_runs/{raw_mask_run_id}",
+            "refined": (f"refined_subject_masks_runs/{canonical_refined_mask_run_id}"),
+            "quality": f"subject_mask_quality_runs/{mask_quality_run_id}",
+            "bundle": f"{SUBJECT_MASK_BUNDLE_FAMILY}/{mask_bundle_id}",
+            "bundle_manifest_digest": bundle_validation["bundle_manifest_digest"],
+        },
         "row_count": int(refined_keys.shape[0]),
         "dense_masks_roi_shape": [int(value) for value in masks_roi.shape],
         "dense_masks_roi_dtype": str(np.dtype(masks_roi.dtype)),
@@ -267,7 +593,11 @@ def publish_training_review_artifact(
     body_frame_run_id: str,
     keypoint_delta_run_id: str,
     keypoint_delta_generation: str,
-    refined_subject_mask_run_id: str,
+    raw_subject_mask_run_id: str,
+    canonical_refined_subject_mask_run_id: str,
+    subject_mask_quality_run_id: str,
+    subject_mask_bundle_id: str,
+    editable_refined_subject_mask_run_id: str,
     created_by: str,
     copy_backend: str = "python",
 ) -> Mapping[str, Any]:
@@ -306,8 +636,22 @@ def publish_training_review_artifact(
         "keypoint_delta_generation": _safe_run_id(
             keypoint_delta_generation, name="keypoint_delta_generation"
         ),
-        "refined_subject_masks": _safe_run_id(
-            refined_subject_mask_run_id, name="refined_subject_mask_run_id"
+        "raw_subject_masks": _safe_run_id(
+            raw_subject_mask_run_id, name="raw_subject_mask_run_id"
+        ),
+        "canonical_refined_subject_masks": _safe_run_id(
+            canonical_refined_subject_mask_run_id,
+            name="canonical_refined_subject_mask_run_id",
+        ),
+        "subject_mask_quality": _safe_run_id(
+            subject_mask_quality_run_id, name="subject_mask_quality_run_id"
+        ),
+        "subject_mask_bundle": _safe_run_id(
+            subject_mask_bundle_id, name="subject_mask_bundle_id"
+        ),
+        "editable_refined_subject_masks": _safe_run_id(
+            editable_refined_subject_mask_run_id,
+            name="editable_refined_subject_mask_run_id",
         ),
     }
     recording_identity = _recording_identity(source)
@@ -379,7 +723,7 @@ def publish_training_review_artifact(
             local_archive,
             subject_shard_runs=(run_ids["terminal_subject_masks"],),
             target_crop_run=run_ids["crop"],
-            refined_run=run_ids["refined_subject_masks"],
+            refined_run=run_ids["editable_refined_subject_masks"],
             components=("subject_body", "eyes_union", "swim_bladder"),
             metric_level="cheap",
             write_eye_geometry=False,
@@ -395,6 +739,20 @@ def publish_training_review_artifact(
             review_draft=True,
             defer_registry_status=True,
             overwrite=False,
+        )
+        subject_mask_contract_chain = _publish_subject_mask_contract_chain(
+            archive=local_archive,
+            working_root=working_root,
+            recording_identity=recording_identity,
+            crop_run_id=run_ids["crop"],
+            terminal_run_id=run_ids["terminal_subject_masks"],
+            terminal_metadata_sha256=terminal_mask_metadata_sha256,
+            raw_run_id=run_ids["raw_subject_masks"],
+            canonical_refined_run_id=run_ids["canonical_refined_subject_masks"],
+            quality_run_id=run_ids["subject_mask_quality"],
+            bundle_id=run_ids["subject_mask_bundle"],
+            editable_refined_run_id=run_ids["editable_refined_subject_masks"],
+            created_by=created_by,
         )
         local_root = open_zarr_group_direct(local_archive, mode="a")
         payload = json_attr_safe(
@@ -427,6 +785,7 @@ def publish_training_review_artifact(
                     "rows": mask_summary.get("roi_count"),
                     "mask_storage": mask_summary.get("mask_storage"),
                 },
+                "subject_mask_contract_chain": subject_mask_contract_chain,
                 "keypoint_review_authority": (
                     "immutable_refined_snapshot_plus_instance_key_delta_generation"
                 ),
@@ -479,7 +838,11 @@ def publish_training_review_artifact(
             body_frame_run_id=run_ids["body_frame"],
             delta_run_id=run_ids["keypoint_delta"],
             delta_generation=run_ids["keypoint_delta_generation"],
-            refined_mask_run_id=run_ids["refined_subject_masks"],
+            raw_mask_run_id=run_ids["raw_subject_masks"],
+            canonical_refined_mask_run_id=run_ids["canonical_refined_subject_masks"],
+            mask_quality_run_id=run_ids["subject_mask_quality"],
+            mask_bundle_id=run_ids["subject_mask_bundle"],
+            editable_refined_mask_run_id=run_ids["editable_refined_subject_masks"],
         )
         local_inventory = tree_inventory(local_archive, hash_content=True)
 
@@ -508,7 +871,15 @@ def publish_training_review_artifact(
                     body_frame_run_id=run_ids["body_frame"],
                     delta_run_id=run_ids["keypoint_delta"],
                     delta_generation=run_ids["keypoint_delta_generation"],
-                    refined_mask_run_id=run_ids["refined_subject_masks"],
+                    raw_mask_run_id=run_ids["raw_subject_masks"],
+                    canonical_refined_mask_run_id=run_ids[
+                        "canonical_refined_subject_masks"
+                    ],
+                    mask_quality_run_id=run_ids["subject_mask_quality"],
+                    mask_bundle_id=run_ids["subject_mask_bundle"],
+                    editable_refined_mask_run_id=run_ids[
+                        "editable_refined_subject_masks"
+                    ],
                 )
                 if target.exists():
                     raise FileExistsError(
@@ -529,7 +900,11 @@ def publish_training_review_artifact(
         body_frame_run_id=run_ids["body_frame"],
         delta_run_id=run_ids["keypoint_delta"],
         delta_generation=run_ids["keypoint_delta_generation"],
-        refined_mask_run_id=run_ids["refined_subject_masks"],
+        raw_mask_run_id=run_ids["raw_subject_masks"],
+        canonical_refined_mask_run_id=run_ids["canonical_refined_subject_masks"],
+        mask_quality_run_id=run_ids["subject_mask_quality"],
+        mask_bundle_id=run_ids["subject_mask_bundle"],
+        editable_refined_mask_run_id=run_ids["editable_refined_subject_masks"],
     )
     return json_attr_safe(
         {
