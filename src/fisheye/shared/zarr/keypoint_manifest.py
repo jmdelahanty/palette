@@ -36,6 +36,10 @@ from fisheye.shared.zarr.manifest_digest import (
     metadata_without_empty_group_consolidation,
 )
 from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
+from fisheye.shared.zarr.training_keypoint_crop_source import (
+    TRAINING_KEYPOINT_CROP_SOURCE_SCHEMA_ID,
+    validate_training_keypoint_crop_source_manifest,
+)
 
 
 KEYPOINT_RUN_MANIFEST_SCHEMA_ID = "palette.keypoint.run_manifest"
@@ -148,6 +152,25 @@ class KeypointCropSourceReference:
 def keypoint_crop_source_from_manifest(
     manifest: Mapping[str, Any],
 ) -> KeypointCropSourceReference:
+    if manifest.get("schema_id") == TRAINING_KEYPOINT_CROP_SOURCE_SCHEMA_ID:
+        errors = validate_training_keypoint_crop_source_manifest(manifest)
+        if errors:
+            raise ValueError(
+                "Training crop source manifest is invalid: " + "; ".join(errors)
+            )
+        payload = manifest["payload"]
+        dimensions = payload["dimensions"]
+        return KeypointCropSourceReference(
+            run_id=payload["run_id"],
+            manifest_digest=canonical_json_sha256(manifest),
+            logical_content_digest=payload["logical_content"]["digest"],
+            row_signatures_digest=payload["row_signatures_digest"],
+            coordinate_catalog_digest=payload["coordinate_contract"]["digest"],
+            n_frames=dimensions["n_frames"],
+            n_instances=dimensions["n_instances"],
+            source_width=dimensions["source_width"],
+            source_height=dimensions["source_height"],
+        )
     errors = validate_crop_run_manifest(manifest)
     if errors:
         raise ValueError("Crop manifest is invalid: " + "; ".join(errors))

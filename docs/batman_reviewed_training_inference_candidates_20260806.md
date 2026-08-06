@@ -7,6 +7,41 @@ lossless crop pixels to the existing terminal keypoint and subject-mask
 producers. It does not approve either model output as training labels and does
 not activate any production selector or registry row.
 
+## Review-artifact bridge checkpoint
+
+The sampled-training candidates now have an exact bridge into reviewable
+surfaces without rerunning inference or misrepresenting their compact frame
+axis as recording-level crop-v2:
+
+- the crop materialization is wrapped in
+  `palette.keypoint.training_crop_source_manifest` and retains separate
+  sampled-local and acquisition-camera frame domains;
+- raw keypoints, keypoint quality, refined keypoints, and body frame are
+  republished through the existing strict v2 schemas and byte planner;
+- the strict refined-keypoint output is an immutable snapshot, while an open
+  `edit_delta_runs` generation binds edits by `instance_key`;
+- terminal probability masks are finalized into dense `uint8 masks_roi` under
+  an explicit selector-ineligible `editable_draft` lifecycle; and
+- the complete copied training artifact is built on bounded node-local
+  scratch, verified, copied to a hidden sibling, and made visible by atomic
+  rename.
+
+A real 181-row, 4.0 GiB local end-to-end smoke passed on 2026-08-06. It
+preserved the 19 rowless negative-frame decisions, created all four strict
+keypoint surfaces, created one open keypoint delta generation, and created the
+dense four-component refined-mask draft (`subject_body`, `eye_left`,
+`eye_right`, and `swim_bladder`) from the three raw model channels. The
+resulting root, every new base, and the editable mask run remained
+selector-ineligible; no registry or production selector was modified. This
+local smoke is implementation evidence, not a durable published canary.
+
+The storage-side keypoint edit generation is not yet a reviewer handoff. The
+maintained keypoint review backend still writes corrections directly into
+`refined_keypoints_runs/<run>` arrays. It must gain a delta-aware adapter that
+reads the immutable base plus existing partitions and writes new immutable
+partitions before reviewers use this artifact. The subject-mask reviewer can
+use the dense editable draft after its task/session metadata is created.
+
 ## Artifact
 
 - Published artifact:
@@ -182,7 +217,14 @@ validated inline metadata result.
       training labels.
 - [ ] Export accepted keypoints and masks into the training authorities; do not
       promote these terminal predictions directly.
-- [ ] Use strict finalizers to produce canonical float32 keypoint-v2 and dense
-      refined subject-mask surfaces when accepted labels exist.
+- [x] Use strict finalizers to produce float32 keypoint-v2 immutable bases,
+      an instance-key edit generation, and dense editable refined subject-mask
+      surfaces without relabelling the sampled frame axis as crop-v2.
+- [ ] Publish the review artifact from an immutable Palette revision and hand
+      its exact run paths to the maintained review clients.
+- [ ] Route maintained keypoint review reads and writes through the bound delta
+      generation; never mutate the strict refined-keypoint base in place.
+- [ ] Compact accepted keypoint deltas and seal accepted dense masks into new
+      immutable reviewed snapshots before any authority activation.
 - [ ] Keep the benchmark artifact outside production selectors and registry
       activation unless a separate promotion gate authorizes it.

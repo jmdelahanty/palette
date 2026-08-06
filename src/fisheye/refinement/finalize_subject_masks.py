@@ -2975,6 +2975,7 @@ def _create_refined_run_shell(
     create_bitpacked_masks: bool = False,
     publication_owner: str | None = None,
     selector_eligible: bool = True,
+    editable_draft: bool = False,
 ) -> zarr.Group:
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
@@ -3181,7 +3182,7 @@ def _create_refined_run_shell(
         intended_use=DEFAULT_REVIEW_INTENDED_USE,
         notes="auto_initialized_from_components",
     )
-    if future_canonical:
+    if future_canonical or editable_draft:
         stamp_refined_subject_mask_editable_draft(run_group)
 
     git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
@@ -6118,6 +6119,7 @@ def finalize_subject_mask_run(
     retry_of_attempt_id: str | None = None,
     supersedes_run: str | None = None,
     require_production_proof: bool = False,
+    review_draft: bool = False,
     progress_jsonl: str | Path | None = None,
 ) -> dict[str, object]:
     """Finalize one subject-mask run into a canonical refined-subject run."""
@@ -6343,6 +6345,7 @@ def finalize_subject_mask_run(
         **execution_metadata,
         "source_surface_kind": source.mask_surface_kind,
         "canonical_coordinate_publication": future_canonical,
+        "review_draft": bool(review_draft),
     }
     if shard_collection is not None:
         summary.update(
@@ -6641,7 +6644,10 @@ def finalize_subject_mask_run(
                 create_dense_masks=not direct_bitpacked_output,
                 create_bitpacked_masks=direct_bitpacked_output,
                 publication_owner=canonical_publication_owner,
-                selector_eligible=not bool(require_production_proof),
+                selector_eligible=not bool(
+                    require_production_proof or review_draft
+                ),
+                editable_draft=bool(review_draft),
             )
 
     if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND:
@@ -7862,6 +7868,7 @@ def finalize_subject_masks(
     retry_of_attempt_id: str | None = None,
     supersedes_run: str | None = None,
     require_production_proof: bool = False,
+    review_draft: bool = False,
     registry: str | Path | None = None,
     defer_registry_status: bool = False,
     progress_jsonl: str | Path | None = None,
@@ -7900,6 +7907,7 @@ def finalize_subject_masks(
         retry_of_attempt_id=retry_of_attempt_id,
         supersedes_run=supersedes_run,
         require_production_proof=bool(require_production_proof),
+        review_draft=bool(review_draft),
         progress_jsonl=progress_jsonl,
     )
     if not dry_run and not defer_registry_status:
@@ -8164,6 +8172,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--review-draft",
+        action="store_true",
+        help=(
+            "Create the refined run selector-ineligible with an editable-draft "
+            "lifecycle from its first write. Intended for explicit training/review "
+            "artifacts; approval and sealing remain separate operations."
+        ),
+    )
+    parser.add_argument(
         "--registry",
         type=Path,
         help="Registry database to update when emitting refined_subject_masks completion status.",
@@ -8229,6 +8246,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         retry_of_attempt_id=args.retry_of_attempt_id,
         supersedes_run=args.supersedes_run,
         require_production_proof=bool(args.require_production_proof),
+        review_draft=bool(args.review_draft),
         registry=args.registry,
         defer_registry_status=bool(args.defer_registry_status),
         progress_jsonl=args.progress_jsonl,

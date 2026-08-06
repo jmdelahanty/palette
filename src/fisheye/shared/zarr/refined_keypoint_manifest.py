@@ -37,6 +37,9 @@ from fisheye.shared.zarr.refined_keypoint_storage import (
     plan_refined_keypoint_storage,
 )
 from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
+from fisheye.shared.zarr.training_keypoint_crop_source import (
+    TRAINING_KEYPOINT_CROP_SOURCE_SCHEMA_ID,
+)
 
 REFINED_KEYPOINT_RUN_MANIFEST_SCHEMA_ID = "palette.refined_keypoint.run_manifest"
 REFINED_KEYPOINT_RUN_MANIFEST_SCHEMA_VERSION = 1
@@ -750,15 +753,22 @@ def build_refined_keypoint_source_bindings(
         "arrays", {}
     ).get("keypoint_row_signature", {}).get("sha256"):
         raise ValueError("Quality and raw row-signature identities differ.")
-    crop_refined = crop_payload.get("source_refined_snapshot")
-    crop_pixel = crop_payload.get("source_pixel_authority")
-    if not isinstance(crop_refined, Mapping) or not isinstance(crop_pixel, Mapping):
-        raise ValueError("Crop recording identity evidence is incomplete.")
-    recording = _require_text(
-        crop_refined.get("recording_identity"), name="recording_identity"
-    )
-    if crop_pixel.get("recording_identity") != recording:
-        raise ValueError("Crop refined and pixel recording identities differ.")
+    if crop_manifest.get("schema_id") == TRAINING_KEYPOINT_CROP_SOURCE_SCHEMA_ID:
+        recording = _require_text(
+            crop_payload.get("recording_identity"), name="recording_identity"
+        )
+    else:
+        crop_refined = crop_payload.get("source_refined_snapshot")
+        crop_pixel = crop_payload.get("source_pixel_authority")
+        if not isinstance(crop_refined, Mapping) or not isinstance(
+            crop_pixel, Mapping
+        ):
+            raise ValueError("Crop recording identity evidence is incomplete.")
+        recording = _require_text(
+            crop_refined.get("recording_identity"), name="recording_identity"
+        )
+        if crop_pixel.get("recording_identity") != recording:
+            raise ValueError("Crop refined and pixel recording identities differ.")
     pose_schema = pose_binding.get("pose_schema")
     if not isinstance(pose_schema, Mapping):
         raise ValueError("Raw pose schema is missing.")

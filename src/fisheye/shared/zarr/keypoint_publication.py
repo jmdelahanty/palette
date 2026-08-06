@@ -493,6 +493,7 @@ def publish_selector_ineligible_keypoint_snapshot(
             "status": "running",
             **disposition.run_attributes(),
             "artifact_class": "raw_keypoint_observations",
+            "artifact_mutability": "raw_immutable",
             "keypoint_authority": False,
             "logical_schema": KEYPOINT_SCHEMA_V2.as_manifest(
                 dimensions=prepared.dimensions

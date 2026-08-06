@@ -247,9 +247,12 @@ masks.
 The exact materialized training input is wired into the maintained producers
 with `--require-training-materialization-binding`. That option intentionally
 permits only terminal `keypoint_shard_runs` or `subject_mask_shard_runs` output.
-Canonical keypoint-v2 and subject-mask publication must still finalize against
-the original crop-v2 authority; copied training pixels do not become a second
-coordinate authority.
+Recording-level analysis publication still finalizes against the original
+crop-v2 authority. Sampled training review instead uses an exact training-crop
+source manifest: it preserves the local sampled-frame axis and acquisition
+frame lineage without declaring the copied geometry to be crop-v2. The strict
+keypoint logical schema, dtypes, storage planner, and identity rules are shared
+across both source profiles.
 
 ## Fail-Closed Boundaries
 
@@ -269,9 +272,10 @@ coordinate authority.
   Zarr.
 - Crop enrichment is refused when sampled full frames or complete detection
   review runs are missing, or when any crop key/frame/box join differs.
-- Strict keypoint/mask training input produces terminal candidates only. A
-  source-authority-bound finalization step is still required before those runs
-  become reviewable canonical/refined surfaces.
+- Strict keypoint/mask training input produces terminal candidates only. The
+  review-artifact publisher must then create immutable strict keypoint bases,
+  an instance-key-bound edit generation, and a dense editable subject-mask
+  draft. Terminal arrays never become review authorities directly.
 
 ## Implementation Checklist
 
@@ -302,8 +306,14 @@ coordinate authority.
       training-artifact publication CLI, with bounded node-local construction,
       complete positive/negative supervision, exhaustive crop-byte checks,
       consolidated binding validation, and checked hidden-sibling rename.
-- [ ] Add reviewed canonical/refined keypoint and subject-mask finalization for
-      the training archive; do not relabel copied crop geometry as crop-v2.
+- [x] Add strict keypoint/refined/body-frame finalization for sampled training
+      crops without relabelling copied crop geometry as crop-v2.
+- [x] Add an instance-key-bound keypoint edit generation and dense editable
+      refined subject-mask draft to a new atomically published training-review
+      artifact.
+- [ ] Add the maintained review-client adapter for immutable keypoint base plus
+      delta overlays; the existing direct-array editor remains incompatible
+      with this lifecycle.
 - [ ] Register only a completed canary artifact after its review surfaces pass.
 - [ ] Run one selector-ineligible Batman training canary through detection,
       keypoint, and subject-mask review before production activation.

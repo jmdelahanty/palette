@@ -3077,6 +3077,37 @@ def test_production_proof_finalizer_binds_draft_audit_and_stays_inactive(
         assert "row_update_reason_bytes" in component
 
 
+def test_explicit_review_draft_starts_inactive_with_dense_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+
+    summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_review_draft",
+        chunk_size=1,
+        execution_backend="serial_driver",
+        review_draft=True,
+        defer_registry_status=True,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    parent = root["refined_subject_masks_runs"]
+    run = parent["refined_review_draft"]
+    assert summary["review_draft"] is True
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs[REFINED_SUBJECT_MASK_LIFECYCLE_ATTR]["state"] == (
+        REFINED_SUBJECT_MASK_EDITABLE_DRAFT
+    )
+    assert "masks_roi" in run
+    assert parent.attrs.get("latest") != "refined_review_draft"
+    assert parent.attrs.get("latest_complete") != "refined_review_draft"
+
+
 def test_finalize_subject_masks_process_shards_reuses_collection_worker_plan(
     monkeypatch,
     tmp_path: Path,

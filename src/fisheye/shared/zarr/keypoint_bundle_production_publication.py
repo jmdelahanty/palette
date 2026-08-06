@@ -46,6 +46,13 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
 from fisheye.shared.zarr.refined_keypoint_publication import (
     refined_keypoint_metadata_declaration_maps,
 )
+from fisheye.shared.zarr.training_crop_materialization import (
+    TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE,
+    bind_training_crop_materialization,
+)
+from fisheye.shared.zarr.training_keypoint_crop_source import (
+    build_training_keypoint_crop_source_manifest,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -177,13 +184,31 @@ def _require_exact_crop_source(
         raise RuntimeError(f"Destination archive lacks crop_runs/{chain.crop.run_id}.")
     run = parent[chain.crop.run_id]
     if not is_run_complete_in_parent(parent, run):
-        raise RuntimeError("Destination crop-v2 source is not strictly complete.")
+        raise RuntimeError("Destination crop source is not strictly complete.")
     persisted = run.attrs.get(CROP_RUN_MANIFEST_ATTRIBUTE)
-    if not isinstance(persisted, Mapping) or dict(persisted) != dict(
-        chain.crop.manifest
+    if isinstance(persisted, Mapping):
+        observed_manifest: Mapping[str, Any] = persisted
+    elif isinstance(
+        run.attrs.get(TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE), Mapping
     ):
+        bound = bind_training_crop_materialization(
+            analysis_zarr,
+            run_id=chain.crop.run_id,
+            require_consolidated=True,
+        )
+        observed_manifest = build_training_keypoint_crop_source_manifest(
+            run_id=bound.run_id,
+            recording_identity=str(root.attrs.get("recording_id") or ""),
+            training_crop_binding=bound.binding,
+        )
+    else:
         raise RuntimeError(
-            "Destination crop-v2 manifest differs from finalization input."
+            "Destination crop source lacks a crop-v2 manifest or exact training "
+            "materialization binding."
+        )
+    if dict(observed_manifest) != dict(chain.crop.manifest):
+        raise RuntimeError(
+            "Destination crop source manifest differs from finalization input."
         )
     return validate_direct_consolidated_subtree(
         analysis_zarr, subtree_path=f"crop_runs/{chain.crop.run_id}"
