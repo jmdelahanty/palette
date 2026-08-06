@@ -166,8 +166,15 @@ def publish_subject_metadata(
     metadata: Mapping[str, Any],
     *,
     source_h5_path: str | Path | None = None,
+    source_artifact: Mapping[str, Any] | None = None,
+    provenance_command: str = "import_recording_analysis:publish_subject_metadata",
 ) -> ResolvedSubjectMetadata:
     """Idempotently publish and select an immutable subject snapshot."""
+
+    if source_h5_path is not None and source_artifact is not None:
+        raise SubjectMetadataError(
+            "Provide source_h5_path or source_artifact, not both"
+        )
 
     record = _validate_record(build_subject_metadata_record(metadata))
     digest = subject_metadata_sha256(record)
@@ -208,27 +215,31 @@ def publish_subject_metadata(
         str(run.attrs[SUBJECT_METADATA_SHA256_ATTR]),
     )
     run.attrs["stage_selector_eligible"] = True
-    fingerprint = None
-    if source_h5_path is not None:
-        fingerprint = optional_source_stat_fingerprint_attrs(
-            source_h5_path,
-            attr_prefix="source_h5",
-        ).get("source_h5_fingerprint")
+    if source_artifact is not None:
+        input_artifacts = [json_attr_safe_mapping(source_artifact)]
+    else:
+        fingerprint = None
+        if source_h5_path is not None:
+            fingerprint = optional_source_stat_fingerprint_attrs(
+                source_h5_path,
+                attr_prefix="source_h5",
+            ).get("source_h5_fingerprint")
+        input_artifacts = [
+            {
+                "kind": "source_h5",
+                "path": str(source_h5_path) if source_h5_path is not None else None,
+                "stat_fingerprint": fingerprint,
+            }
+        ]
     mark_run_complete(
         run,
         parent_group=parent,
         run_name=run_name,
         run_provenance=build_writer_run_provenance(
-            command="import_recording_analysis:publish_subject_metadata",
+            command=provenance_command,
             params={"schema_id": SUBJECT_METADATA_SCHEMA_ID, "record_sha256": digest},
             input_run_ids={},
-            input_artifacts=[
-                {
-                    "kind": "source_h5",
-                    "path": str(source_h5_path) if source_h5_path is not None else None,
-                    "stat_fingerprint": fingerprint,
-                }
-            ],
+            input_artifacts=input_artifacts,
         ),
     )
     return resolve_subject_metadata(root, allow_legacy=False)

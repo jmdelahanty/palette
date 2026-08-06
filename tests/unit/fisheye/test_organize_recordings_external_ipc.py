@@ -152,6 +152,9 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: P
     assert video_streams["streams"]["full"]["video"] == (
         "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4"
     )
+    assert video_streams["streams"]["full"]["frame_clock_metadata"] == (
+        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv"
+    )
     assert video_streams["streams"]["crop"]["role"] == "runtime_derived_acquisition_input"
     assert video_streams["streams"]["crop"]["video_pixel_coordinate_space"] == "crop_frame_pixels"
     assert (
@@ -226,6 +229,23 @@ def test_external_ipc_recording_only_full_video_without_crop_meta_is_valid(tmp_p
     ]
     assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
     assert "crop" not in plan.meta["video_streams"]["streams"]
+
+
+def test_external_ipc_h5_plan_does_not_declare_missing_compat_clock_csv(tmp_path: Path) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    (batch / "Cam2010093_crop_meta.csv").unlink()
+
+    plans = organize_recordings._build_external_ipc_plans(
+        batch,
+        dest_root=tmp_path / "recordings",
+        rename_cams=True,
+    )
+
+    assert len(plans) == 1
+    plan = plans[0]
+    assert "Cam2010093_crop_meta.csv (compatibility camera metadata)" in plan.missing
+    assert not any(item.dest_name.endswith("_meta.csv") for item in plan.cam_files)
+    assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
 
 
 def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, monkeypatch) -> None:

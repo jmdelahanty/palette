@@ -888,9 +888,10 @@ def _append_external_ipc_video_artifacts(
         cam_base=cam_base,
         full_output=full_output,
         crop_output=crop_output,
-        has_frame_clock_metadata=(
-            require_compat_camera_metadata or bool(crop_output) or crop_meta is not None
-        ),
+        # A declared clock path is fail-closed at import time.  Preserve the
+        # compatibility declaration when Orange actually supplied the CSV,
+        # but never author a pointer to a sidecar that is absent from staging.
+        has_frame_clock_metadata=bool(crop_meta is not None and crop_meta.is_file()),
     )
 
     _append_planned_if_present(

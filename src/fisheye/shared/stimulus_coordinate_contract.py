@@ -151,6 +151,65 @@ SOURCE_ACQUISITION_MAPPING_ARRAY_PATH = (
     f"/tracking_data/{SOURCE_ACQUISITION_FRAME_INDEX_ARRAY}"
 )
 
+TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY = (
+    "target_source_acquisition_frame_index"
+)
+TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY = (
+    "target_source_acquisition_frame_valid"
+)
+TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH = (
+    f"/tracking_data/{TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY}"
+)
+TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH = (
+    f"/tracking_data/{TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY}"
+)
+TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR = (
+    "target_source_acquisition_mapping_record"
+)
+TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR = (
+    f"{TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR}_sha256"
+)
+TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_REF_ATTR = (
+    f"{TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR}_ref"
+)
+TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_ID = (
+    "citrus.stimulus_target_source_acquisition_mapping"
+)
+TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION = 1
+
+CHASER_STATES_SCHEMA_ID = "citrus.tracking.chaser_states"
+CHASER_STATES_SCHEMA_VERSION = 5
+# Version 5 is the immutable Batman-derivative wire contract.  Version 6 is
+# intentionally *not* a permissive extension of that reader: it is consumed
+# only by the explicit lossless adapter below.
+CHASER_STATES_V6_SCHEMA_VERSION = 6
+
+STIMULUS_COORDINATE_V6_RECEIPT_PATH = "/stimulus_coordinate_v6"
+STIMULUS_COORDINATE_V6_RECEIPT_SCHEMA_ID = (
+    "citrus.stimulus_coordinate_v6.receipt"
+)
+STIMULUS_COORDINATE_V6_RECEIPT_SCHEMA_VERSION = 1
+STIMULUS_COORDINATE_V6_SOURCE_RECORD_PATH = (
+    "/stimulus_coordinate_v6/source_semantic_record_json"
+)
+STIMULUS_COORDINATE_V6_NORMALIZED_RECORD_PATH = (
+    "/stimulus_coordinate_v6/normalized_semantic_record_json"
+)
+STIMULUS_COORDINATE_V6_FRAME_METADATA_PATH = "/video_metadata/frame_metadata"
+STIMULUS_COORDINATE_V6_TARGET_VALID_ARRAY = (
+    "target_source_acquisition_frame_valid"
+)
+
+STIMULUS_RENDERER_SNAPSHOT_PATH = "/stimulus_renderer_snapshot"
+LEGACY_STIMULUS_RENDERER_SNAPSHOT_PATH = "/stimulus_coordinates"
+STIMULUS_RENDERER_SNAPSHOT_SCHEMA_ID = (
+    "citrus.stimulus_renderer_snapshot"
+)
+STIMULUS_RENDERER_SNAPSHOT_SCHEMA_VERSION = 1
+STIMULUS_RENDERER_SNAPSHOT_CAPTURE_PHASE = (
+    "experiment_start_after_arena_initialization"
+)
+
 SOURCE_CALIBRATION_SCHEMA_ID = "citrus.selected_calibration_source"
 SOURCE_CALIBRATION_SCHEMA_VERSION = 1
 SOURCE_CALIBRATION_GROUP = "/calibration_snapshot"
@@ -259,20 +318,64 @@ class StimulusCoordinatePreflight:
     )
     source_acquisition_mapping_record: Mapping[str, Any] | None = None
     source_acquisition_mapping_record_sha256: str | None = None
+    target_source_acquisition_frame_index: np.ndarray | None = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    target_source_acquisition_frame_valid: np.ndarray | None = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    target_source_acquisition_mapping_record: Mapping[str, Any] | None = None
+    target_source_acquisition_mapping_record_sha256: str | None = None
+    renderer_snapshot: Mapping[str, Any] | None = None
+    renderer_snapshot_source_path: str | None = None
+    renderer_snapshot_sha256: str | None = None
     source_coordinate_policy: str = SOURCE_COORDINATE_POLICY_CANONICAL
     omitted_coordinate_source_paths: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class V6StimulusCoordinateArtifact:
+    """Read-only validation result for the producer-native v6 golden wire.
+
+    This is intentionally not a ``StimulusCoordinatePreflight``.  Normal
+    import cannot accept a v6 artifact until its complete calibration and
+    transform normalization path is implemented end-to-end.
+    """
+
+    source_h5: Path
+    source_file_identity: Mapping[str, Any]
+    source_contract_sha256: str
+    status: str
+    source_semantic_record: Mapping[str, Any]
+    source_semantic_record_sha256: str
+    normalized_semantic_record: Mapping[str, Any]
+    normalized_semantic_record_sha256: str
+    stimulus_state_key: np.ndarray = dataclass_field(repr=False, compare=False)
+    source_acquisition_frame_index: np.ndarray = dataclass_field(repr=False, compare=False)
+    target_source_acquisition_frame_index: np.ndarray = dataclass_field(repr=False, compare=False)
+    target_source_acquisition_frame_valid: np.ndarray = dataclass_field(repr=False, compare=False)
+
+
 def _present_coordinate_source_paths(h5: h5py.File) -> tuple[str, ...]:
     paths: list[str] = []
+    if STIMULUS_COORDINATE_V6_RECEIPT_PATH in h5:
+        paths.append(STIMULUS_COORDINATE_V6_RECEIPT_PATH)
     if "/stimulus_coordinates" in h5:
         paths.append("/stimulus_coordinates")
+    if STIMULUS_RENDERER_SNAPSHOT_PATH in h5:
+        paths.append(STIMULUS_RENDERER_SNAPSHOT_PATH)
     for path in (
         "/tracking_data/bounding_boxes",
         "/tracking_data/chaser_states",
         f"/tracking_data/{STIMULUS_STATE_KEY_ARRAY}",
         f"/tracking_data/{LEGACY_SOURCE_ROW_IDENTITY_ARRAY}",
         f"/tracking_data/{SOURCE_ACQUISITION_FRAME_INDEX_ARRAY}",
+        TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH,
+        TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH,
     ):
         if path in h5:
             paths.append(path)
@@ -305,6 +408,16 @@ class BoundStimulusCoordinateEvidence:
         compare=False,
     )
     source_row_indices: np.ndarray = dataclass_field(repr=False, compare=False)
+    target_source_acquisition_frame_index: np.ndarray | None = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    target_source_acquisition_frame_valid: np.ndarray | None = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 def canonical_mapping_digest(value: Mapping[str, Any]) -> str:
@@ -404,6 +517,169 @@ def _mapping_attr(value: Any, *, label: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise StimulusCoordinateContractError(f"{label} must be a JSON object.")
     return dict(value)
+
+
+def _renderer_snapshot_text(value: Any, *, label: str) -> str:
+    normalized = _normalize_attr(value)
+    if not isinstance(normalized, str) or not normalized.strip():
+        raise StimulusCoordinateContractError(f"{label} must be non-empty text.")
+    return normalized.strip()
+
+
+def _classify_renderer_snapshot(
+    h5: h5py.File,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Accept only the exact attribute-only Citrus renderer snapshot shapes."""
+
+    present = [
+        path
+        for path in (
+            LEGACY_STIMULUS_RENDERER_SNAPSHOT_PATH,
+            STIMULUS_RENDERER_SNAPSHOT_PATH,
+        )
+        if path in h5
+    ]
+    if not present:
+        return None, None, None
+    if len(present) != 1:
+        raise StimulusCoordinateContractError(
+            "Source must not contain both stimulus_coordinates and "
+            "stimulus_renderer_snapshot."
+        )
+    path = present[0]
+    root = h5[path]
+    if not isinstance(root, h5py.Group):
+        raise StimulusCoordinateContractError(f"{path} must be an H5 group.")
+
+    root_attrs = {
+        str(name): _normalize_attr(value) for name, value in root.attrs.items()
+    }
+    if path == LEGACY_STIMULUS_RENDERER_SNAPSHOT_PATH:
+        if root_attrs:
+            raise StimulusCoordinateContractError(
+                "Legacy stimulus_coordinates is accepted only as the exact "
+                "attribute-only renderer snapshot; root attrs are forbidden."
+            )
+        source_classification = "legacy_static_attribute_only_v1"
+    else:
+        expected_root_attrs = {
+            "schema_id": STIMULUS_RENDERER_SNAPSHOT_SCHEMA_ID,
+            "schema_version": STIMULUS_RENDERER_SNAPSHOT_SCHEMA_VERSION,
+            "capture_phase": STIMULUS_RENDERER_SNAPSHOT_CAPTURE_PHASE,
+        }
+        if root_attrs != expected_root_attrs:
+            raise StimulusCoordinateContractError(
+                "stimulus_renderer_snapshot root attrs do not exactly match "
+                "citrus.stimulus_renderer_snapshot v1."
+            )
+        source_classification = "canonical_renderer_snapshot_v1"
+
+    arena_names = list(root.keys())
+    if (
+        len(arena_names) != 1
+        or re.fullmatch(r"arena_[1-9][0-9]*", arena_names[0]) is None
+    ):
+        raise StimulusCoordinateContractError(
+            f"{path} must contain exactly one arena_<positive integer> group."
+        )
+    arena_name = arena_names[0]
+    arena = root[arena_name]
+    if not isinstance(arena, h5py.Group):
+        raise StimulusCoordinateContractError(
+            f"{path}/{arena_name} must be an H5 group."
+        )
+    arena_attrs = {
+        str(name): _normalize_attr(value) for name, value in arena.attrs.items()
+    }
+    expected_arena_attrs = {
+        "active_stimulus_mode",
+        "texture_height_px",
+        "texture_origin",
+        "texture_width_px",
+    }
+    if set(arena_attrs) != expected_arena_attrs:
+        raise StimulusCoordinateContractError(
+            f"{path}/{arena_name} attrs must be exactly "
+            f"{sorted(expected_arena_attrs)!r}."
+        )
+    active_mode = _renderer_snapshot_text(
+        arena_attrs["active_stimulus_mode"],
+        label=f"{path}/{arena_name}@active_stimulus_mode",
+    )
+    texture_origin = _renderer_snapshot_text(
+        arena_attrs["texture_origin"],
+        label=f"{path}/{arena_name}@texture_origin",
+    )
+    if texture_origin != "top_left":
+        raise StimulusCoordinateContractError(
+            f"{path}/{arena_name}@texture_origin must be 'top_left'."
+        )
+    width = _positive_number(
+        arena_attrs["texture_width_px"],
+        label=f"{path}/{arena_name}@texture_width_px",
+    )
+    height = _positive_number(
+        arena_attrs["texture_height_px"],
+        label=f"{path}/{arena_name}@texture_height_px",
+    )
+    if type(width) is not int or type(height) is not int:
+        raise StimulusCoordinateContractError(
+            "Renderer snapshot texture extents must be exact integers."
+        )
+
+    if list(arena.keys()) != ["custom_coordinates"]:
+        raise StimulusCoordinateContractError(
+            f"{path}/{arena_name} must contain only custom_coordinates."
+        )
+    custom = arena["custom_coordinates"]
+    if not isinstance(custom, h5py.Group) or list(custom.keys()):
+        raise StimulusCoordinateContractError(
+            f"{path}/{arena_name}/custom_coordinates must be an attribute-only group."
+        )
+    custom_attrs = {
+        str(name): _normalize_attr(value) for name, value in custom.attrs.items()
+    }
+    if set(custom_attrs) != {"texture_center_x", "texture_center_y"}:
+        raise StimulusCoordinateContractError(
+            f"{path}/{arena_name}/custom_coordinates attrs must be exactly "
+            "texture_center_x and texture_center_y."
+        )
+    center_x = _finite_number(
+        custom_attrs["texture_center_x"],
+        label=f"{path}/{arena_name}/custom_coordinates@texture_center_x",
+    )
+    center_y = _finite_number(
+        custom_attrs["texture_center_y"],
+        label=f"{path}/{arena_name}/custom_coordinates@texture_center_y",
+    )
+    if not (0 <= float(center_x) <= width and 0 <= float(center_y) <= height):
+        raise StimulusCoordinateContractError(
+            "Renderer snapshot texture center lies outside its declared extent."
+        )
+
+    record = {
+        "schema_id": STIMULUS_RENDERER_SNAPSHOT_SCHEMA_ID,
+        "schema_version": STIMULUS_RENDERER_SNAPSHOT_SCHEMA_VERSION,
+        "capture_phase": STIMULUS_RENDERER_SNAPSHOT_CAPTURE_PHASE,
+        "source_classification": source_classification,
+        "source_path": path,
+        "arena_id": arena_name,
+        "active_stimulus_mode": active_mode,
+        "texture_extent": {
+            "width": width,
+            "height": height,
+            "units": "px",
+        },
+        "texture_origin": "top_left",
+        "texture_center": {
+            "x": center_x,
+            "y": center_y,
+            "units": "px",
+        },
+        "scientific_coordinate_arrays_present": False,
+        "canonicalization": "canonical_json_sort_keys_v1",
+    }
+    return record, path, canonical_mapping_digest(record)
 
 
 def _positive_number(value: Any, *, label: str) -> int | float:
@@ -990,6 +1266,172 @@ def _load_source_acquisition_mapping(
     return values, expected, digest
 
 
+def _load_target_source_acquisition_mapping(
+    h5: h5py.File,
+    *,
+    row_count: int,
+    row_identity_sha256: str,
+    row_identity_contract_sha256: str,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any], str]:
+    """Load target-detection provenance separately from state acquisition time."""
+
+    index_path = TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH
+    valid_path = TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH
+    for path in (index_path, valid_path):
+        if path not in h5 or not isinstance(h5[path], h5py.Dataset):
+            raise StimulusCoordinateContractError(
+                "Chaser rows carrying target_source_frame_id require separate "
+                f"canonical target provenance arrays; missing {path}."
+            )
+    index_node = h5[index_path]
+    valid_node = h5[valid_path]
+    expected_shape = (row_count,)
+    if (
+        index_node.dtype != np.dtype("<i8")
+        or tuple(int(value) for value in index_node.shape) != expected_shape
+    ):
+        raise StimulusCoordinateContractError(
+            f"{index_path} must be exact little-endian signed int64 shape "
+            f"{expected_shape}."
+        )
+    if (
+        valid_node.dtype != np.dtype("bool")
+        or tuple(int(value) for value in valid_node.shape) != expected_shape
+    ):
+        raise StimulusCoordinateContractError(
+            f"{valid_path} must be exact boolean shape {expected_shape}."
+        )
+    indices = np.asarray(index_node[:], dtype=np.int64)
+    valid = np.asarray(valid_node[:], dtype=bool)
+    if np.any(indices[~valid] != -1) or np.any(indices[valid] < 0):
+        raise StimulusCoordinateContractError(
+            "Target-source acquisition indices must be nonnegative when valid "
+            "and exactly -1 when invalid."
+        )
+
+    index_attrs = {
+        str(key): _normalize_attr(value) for key, value in index_node.attrs.items()
+    }
+    if set(index_attrs) != {
+        TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR,
+        TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR,
+    }:
+        raise StimulusCoordinateContractError(
+            f"{index_path} attrs must contain only the sealed target-source "
+            "acquisition mapping record."
+        )
+    record = _mapping_attr(
+        index_attrs[TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR],
+        label=(
+            f"{index_path}@{TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR}"
+        ),
+    )
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "mapping_method",
+        "source_rowset_ref",
+        "source_row_identity_ref",
+        "source_row_identity_sha256",
+        "source_row_identity_contract_sha256",
+        "source_target_frame_field",
+        "source_target_camera_field",
+        "acquisition_recording_id",
+        "acquisition_camera_id",
+        "source_total_frames",
+        "target_domain",
+        "array_ref",
+        "array_dtype",
+        "array_shape",
+        "array_content_sha256",
+        "validity_array_ref",
+        "validity_array_dtype",
+        "validity_array_shape",
+        "validity_array_content_sha256",
+        "invalid_index_sentinel",
+        "canonicalization",
+    }
+    if set(record) != expected_fields:
+        raise StimulusCoordinateContractError(
+            "Target-source acquisition mapping record fields are not closed."
+        )
+    recording_id = _required_text(
+        record.get("acquisition_recording_id"),
+        label="target acquisition_recording_id",
+    )
+    camera_id = _required_text(
+        record.get("acquisition_camera_id"),
+        label="target acquisition_camera_id",
+    )
+    total_frames = record.get("source_total_frames")
+    if (
+        isinstance(total_frames, bool)
+        or not isinstance(total_frames, int)
+        or total_frames <= 0
+    ):
+        raise StimulusCoordinateContractError(
+            "Target source_total_frames must be a positive integer."
+        )
+    if np.any(indices[valid] >= total_frames):
+        raise StimulusCoordinateContractError(
+            f"{index_path} contains values outside its acquisition frame domain."
+        )
+    expected = {
+        "schema_id": TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_ID,
+        "schema_version": TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION,
+        "mapping_method": "explicit_per_stimulus_state_target_provenance_v1",
+        "source_rowset_ref": "/tracking_data/chaser_states",
+        "source_row_identity_ref": f"/tracking_data/{STIMULUS_STATE_KEY_ARRAY}",
+        "source_row_identity_sha256": row_identity_sha256,
+        "source_row_identity_contract_sha256": row_identity_contract_sha256,
+        "source_target_frame_field": (
+            "/tracking_data/chaser_states#target_source_frame_id"
+        ),
+        "source_target_camera_field": (
+            "/tracking_data/chaser_states#target_source_camera_id"
+        ),
+        "acquisition_recording_id": recording_id,
+        "acquisition_camera_id": camera_id,
+        "source_total_frames": total_frames,
+        "target_domain": "acquisition_frame_index",
+        "array_ref": index_path,
+        "array_dtype": np.dtype("<i8").str,
+        "array_shape": [row_count],
+        "array_content_sha256": numpy_content_digest(indices),
+        "validity_array_ref": valid_path,
+        "validity_array_dtype": np.dtype("bool").str,
+        "validity_array_shape": [row_count],
+        "validity_array_content_sha256": numpy_content_digest(valid),
+        "invalid_index_sentinel": -1,
+        "canonicalization": "canonical_json_sort_keys_v1",
+    }
+    digest = canonical_mapping_digest(expected)
+    if (
+        record != expected
+        or index_attrs.get(TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR)
+        != digest
+    ):
+        raise StimulusCoordinateContractError(
+            "Target-source acquisition mapping record or digest is stale."
+        )
+    valid_attrs = {
+        str(key): _normalize_attr(value) for key, value in valid_node.attrs.items()
+    }
+    expected_valid_attrs = {
+        TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_REF_ATTR: (
+            f"{index_path}@{TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR}"
+        ),
+        TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR: digest,
+    }
+    if valid_attrs != expected_valid_attrs:
+        raise StimulusCoordinateContractError(
+            "Target-source validity metadata does not bind the sealed mapping record."
+        )
+    indices.setflags(write=False)
+    valid.setflags(write=False)
+    return indices, valid, expected, digest
+
+
 def _validate_source_arena(
     h5: h5py.File,
     *,
@@ -1256,6 +1698,668 @@ def _preflight_selected_calibration(
     )
 
 
+def _v6_canonical_json(value: Mapping[str, Any]) -> str:
+    """The named v6 JSON canonicalization, deliberately separate from v5."""
+
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _v6_sha256(value: bytes) -> str:
+    return f"sha256:{sha256(value).hexdigest()}"
+
+
+def _v6_mapping_attr(value: Any, *, label: str) -> dict[str, Any]:
+    """Parse a v6 JSON attribute without accepting alternate encodings."""
+
+    return _mapping_attr(value, label=label)
+
+
+def _v6_read_scalar_utf8(
+    h5: h5py.File,
+    *,
+    path: str,
+    attr_name: str,
+    expected_attr_value: str,
+) -> tuple[bytes, dict[str, Any]]:
+    if path not in h5 or not isinstance(h5[path], h5py.Dataset):
+        raise StimulusCoordinateContractError(f"v6 receipt requires {path}.")
+    node = h5[path]
+    if node.shape != ():
+        raise StimulusCoordinateContractError(f"{path} must be a scalar UTF-8 dataset.")
+    string_info = h5py.check_string_dtype(node.dtype)
+    if string_info is None or string_info.encoding != "utf-8" or string_info.length is not None:
+        raise StimulusCoordinateContractError(
+            f"{path} must use variable-length UTF-8 HDF5 string storage."
+        )
+    raw = node[()]
+    if isinstance(raw, str):
+        payload = raw.encode("utf-8")
+    elif isinstance(raw, bytes):
+        payload = raw
+        try:
+            payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise StimulusCoordinateContractError(
+                f"{path} must contain UTF-8 payload bytes."
+            ) from exc
+    else:
+        raise StimulusCoordinateContractError(f"{path} must contain UTF-8 text.")
+    attrs = {str(key): _normalize_attr(value) for key, value in node.attrs.items()}
+    if attrs.get(attr_name) != expected_attr_value:
+        raise StimulusCoordinateContractError(
+            f"{path}@{attr_name} must be {expected_attr_value!r}."
+        )
+    checksum_name = (
+        "observed_checksum_sha256" if attr_name == "serialization" else "checksum_sha256"
+    )
+    if attrs.get(checksum_name) != _v6_sha256(payload):
+        raise StimulusCoordinateContractError(f"{path} {checksum_name} is stale.")
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StimulusCoordinateContractError(f"{path} is not valid UTF-8 JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise StimulusCoordinateContractError(f"{path} must contain a JSON object.")
+    return payload, parsed
+
+
+def _v6_require_sha256(value: Any, *, label: str) -> str:
+    value = _required_text(value, label=label)
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise StimulusCoordinateContractError(f"{label} must be a lowercase sha256 digest.")
+    return value
+
+
+def _v6_validate_orange_source_record(
+    record: Mapping[str, Any],
+    *,
+    recording_id: str,
+    camera_serial: str,
+) -> int:
+    """Validate the closed Orange v1 map; no frame-ID aliases are accepted."""
+
+    expected_root = {
+        "camera_streams", "canonicalization", "frame_identity_contract_ref",
+        "frame_identity_contract_sha256", "recording_id", "schema_id",
+        "schema_version", "status",
+    }
+    if set(record) != expected_root:
+        raise StimulusCoordinateContractError("v6 Orange source record is not closed.")
+    if (
+        record.get("schema_id") != "orange.recording.acquisition_index_mapping"
+        or record.get("schema_version") != 1
+        or record.get("status") != "finalized"
+        or record.get("canonicalization")
+        != "canonical_json_utf8_sort_keys_compact_v1"
+        or record.get("recording_id") != recording_id
+    ):
+        raise StimulusCoordinateContractError("v6 Orange source record is unsupported or unsealed.")
+    _required_text(record.get("frame_identity_contract_ref"), label="v6 frame_identity_contract_ref")
+    _v6_require_sha256(record.get("frame_identity_contract_sha256"), label="v6 frame_identity_contract_sha256")
+    streams = record.get("camera_streams")
+    if not isinstance(streams, Mapping) or not streams or camera_serial not in streams:
+        raise StimulusCoordinateContractError("v6 Orange source record camera stream is not exact.")
+
+    def validate_stream(serial: str, stream: Any) -> int:
+        if not isinstance(serial, str) or not serial or not isinstance(stream, Mapping):
+            raise StimulusCoordinateContractError("v6 Orange camera streams are malformed.")
+        if set(stream) != {
+            "camera_serial", "coverage", "conversion", "destination_identity",
+            "producer_identity", "source_metadata_artifact",
+        } or stream.get("camera_serial") != serial:
+            raise StimulusCoordinateContractError("v6 Orange camera stream is not closed.")
+        producer = stream["producer_identity"]
+        destination = stream["destination_identity"]
+        conversion = stream["conversion"]
+        coverage = stream["coverage"]
+        artifact = stream["source_metadata_artifact"]
+        if not all(isinstance(value, Mapping) for value in (producer, destination, conversion, coverage, artifact)):
+            raise StimulusCoordinateContractError("v6 Orange camera stream has malformed nested records.")
+        relative_path = artifact.get("relative_path")
+        normalized_path = (
+            isinstance(relative_path, str)
+            and relative_path
+            and "\\" not in relative_path
+            and "//" not in relative_path
+            and not relative_path.startswith("/")
+            and all(part not in {"", ".", ".."} for part in relative_path.split("/"))
+        )
+        if (
+            set(producer) != {"assignment_event", "dtype", "field", "index_base", "scope"}
+            or producer != {
+                "assignment_event": "orange_acquisition_recording_frame_sequence",
+                "dtype": "uint64", "field": "recording_frame_id", "index_base": 1,
+                "scope": "recording_session_and_camera_stream",
+            }
+            or set(destination) != {"dtype", "field", "index_base"}
+            or destination != {"field": "source_acquisition_frame_index", "dtype": "int64", "index_base": 0}
+            or set(conversion) != {"constant", "expression", "method"}
+            or conversion != {
+                "method": "subtract_constant_v1",
+                "expression": "source_acquisition_frame_index = recording_frame_id - 1",
+                "constant": 1,
+            }
+            or set(coverage) != {
+                "first_recording_frame_id", "gap_count", "last_recording_frame_id",
+                "metadata_row_count", "total_acquisitions", "gap_policy",
+            }
+            or set(artifact) != {"media_type", "relative_path", "sha256"}
+            or artifact.get("media_type") != "text/csv"
+            or not normalized_path
+        ):
+            raise StimulusCoordinateContractError("v6 Orange conversion or artifact path is unsupported.")
+        _v6_require_sha256(artifact.get("sha256"), label=f"v6 {serial} source_metadata_artifact.sha256")
+        total = coverage.get("total_acquisitions")
+        if (
+            isinstance(total, bool) or not isinstance(total, int) or total <= 0
+            or coverage.get("first_recording_frame_id") != 1
+            or coverage.get("last_recording_frame_id") != total
+            or coverage.get("metadata_row_count") != total
+            or coverage.get("gap_count") != 0
+            or coverage.get("gap_policy") != "none"
+        ):
+            raise StimulusCoordinateContractError("v6 Orange coverage is unsealed or contains gaps.")
+        return total
+
+    totals = {serial: validate_stream(serial, stream) for serial, stream in streams.items()}
+    return totals[camera_serial]
+
+
+def _v6_exact_dataset(
+    h5: h5py.File, path: str, *, dtype: np.dtype, shape: tuple[int, ...]
+) -> tuple[h5py.Dataset, np.ndarray]:
+    if path not in h5 or not isinstance(h5[path], h5py.Dataset):
+        raise StimulusCoordinateContractError(f"v6 requires dataset {path}.")
+    node = h5[path]
+    if node.dtype != dtype or tuple(int(item) for item in node.shape) != shape:
+        raise StimulusCoordinateContractError(
+            f"v6 dataset {path} must be {dtype.str} with shape {shape!r}."
+        )
+    return node, np.asarray(node[:])
+
+
+def _v6_validate_array_digest(
+    node: h5py.Dataset, values: np.ndarray, *, expected_attrs: Mapping[str, Any],
+    dtype_descriptor: Any | None = None,
+) -> str:
+    attrs = {str(key): _normalize_attr(value) for key, value in node.attrs.items()}
+    if attrs != dict(expected_attrs):
+        raise StimulusCoordinateContractError(f"v6 dataset {node.name} attributes are not closed.")
+    digest = _v6_sha256(_v6_array_bytes(values, dtype_descriptor=dtype_descriptor))
+    if attrs.get("content_sha256") != digest:
+        raise StimulusCoordinateContractError(f"v6 dataset {node.name} content digest is stale.")
+    return digest
+
+
+def _v6_array_bytes(values: np.ndarray, *, dtype_descriptor: Any | None = None) -> bytes:
+    array = np.ascontiguousarray(np.asarray(values))
+    header = _v6_canonical_json({
+        "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "dtype": (
+            np.lib.format.dtype_to_descr(array.dtype)
+            if dtype_descriptor is None else dtype_descriptor
+        ),
+        "shape": [int(item) for item in array.shape],
+    }).encode("utf-8")
+    return header + b"\x00" + array.tobytes(order="C")
+
+
+def _v6_validate_compound_dataset_contract(
+    node: h5py.Dataset,
+    values: np.ndarray,
+    *,
+    schema_id: str,
+    field_order: tuple[str, ...],
+    dtype_fields: Mapping[str, str],
+) -> None:
+    """Verify v6's explicit LE row serialization, never host struct bytes."""
+
+    attrs = {str(key): _normalize_attr(value) for key, value in node.attrs.items()}
+    contract = _v6_mapping_attr(attrs.get("dataset_contract"), label=f"{node.name}@dataset_contract")
+    expected_keys = {"schema_id", "schema_version", "dtype", "field_order", "shape", "rows_packed_le_sha256"}
+    if (
+        set(contract) != expected_keys
+        or contract.get("schema_id") != schema_id or contract.get("schema_version") != 1
+        or contract.get("dtype") != dict(dtype_fields)
+        or contract.get("field_order") != list(field_order)
+        or contract.get("shape") != [int(values.shape[0])]
+        or attrs.get("dataset_contract_sha256") != _v6_sha256(_v6_canonical_json(contract).encode("utf-8"))
+    ):
+        raise StimulusCoordinateContractError(f"v6 dataset contract for {node.name} is stale or unsupported.")
+    header = _v6_canonical_json({
+        "canonicalization": "packed_row_fields_little_endian_v1",
+        "dtype": dict(dtype_fields), "shape": [int(values.shape[0])],
+    }).encode("utf-8")
+    payload = bytearray(header + b"\x00")
+    for row in values:
+        for name in field_order:
+            payload.extend(np.asarray(row[name], dtype=np.dtype(dtype_fields[name])).tobytes())
+    if contract["rows_packed_le_sha256"] != _v6_sha256(bytes(payload)):
+        raise StimulusCoordinateContractError(f"v6 packed-row digest for {node.name} is stale.")
+
+
+def validate_citrus_stimulus_coordinate_v6_artifact(
+    h5: h5py.File,
+    *,
+    source_h5: Path,
+) -> V6StimulusCoordinateArtifact:
+    """Validate the producer-native v6 golden representation losslessly.
+
+    This route deliberately shares no v5 wire assumptions.  It preserves the
+    exact Orange bytes and validates a separately canonicalized normalized
+    record before inspecting the scientific arrays.
+    """
+
+    file_identity = _source_file_identity(h5, source_h5=source_h5)
+    if STIMULUS_COORDINATE_V6_RECEIPT_PATH not in h5:
+        raise StimulusCoordinateContractError("v6 artifact lacks /stimulus_coordinate_v6 receipt.")
+    receipt = h5[STIMULUS_COORDINATE_V6_RECEIPT_PATH]
+    if not isinstance(receipt, h5py.Group):
+        raise StimulusCoordinateContractError("v6 receipt must be an H5 group.")
+    receipt_attrs = {str(key): _normalize_attr(value) for key, value in receipt.attrs.items()}
+    required_receipt = {
+        "schema_id", "schema_version", "status", "reason_code", "recording_id",
+        "camera_serial", "source_record_observed_sha256",
+        "source_record_declared_sha256", "normalized_record_sha256",
+    }
+    if set(receipt_attrs) != required_receipt:
+        raise StimulusCoordinateContractError("v6 receipt attributes are not closed.")
+    if (
+        receipt_attrs.get("schema_id") != STIMULUS_COORDINATE_V6_RECEIPT_SCHEMA_ID
+        or receipt_attrs.get("schema_version") != STIMULUS_COORDINATE_V6_RECEIPT_SCHEMA_VERSION
+        or receipt_attrs.get("status") != "sealed"
+        or receipt_attrs.get("reason_code") != "sealed"
+    ):
+        raise StimulusCoordinateContractError("v6 receipt is unsealed or unsupported.")
+    recording_id = _required_text(receipt_attrs.get("recording_id"), label="v6 receipt recording_id")
+    camera_serial = _required_text(receipt_attrs.get("camera_serial"), label="v6 receipt camera_serial")
+    source_digest = _v6_require_sha256(receipt_attrs.get("source_record_observed_sha256"), label="v6 receipt source_record_observed_sha256")
+    declared_source_digest = _v6_require_sha256(receipt_attrs.get("source_record_declared_sha256"), label="v6 receipt source_record_declared_sha256")
+    normalized_digest = _v6_require_sha256(receipt_attrs.get("normalized_record_sha256"), label="v6 receipt normalized_record_sha256")
+    source_bytes, source_record = _v6_read_scalar_utf8(
+        h5, path=STIMULUS_COORDINATE_V6_SOURCE_RECORD_PATH,
+        attr_name="serialization", expected_attr_value="exact_source_bytes",
+    )
+    if _v6_sha256(source_bytes) != source_digest:
+        raise StimulusCoordinateContractError("v6 receipt source-record digest is stale.")
+    if source_bytes != _v6_canonical_json(source_record).encode("utf-8"):
+        raise StimulusCoordinateContractError("v6 source semantic record is not canonical JSON bytes.")
+    source_node_attrs = {str(key): _normalize_attr(value) for key, value in h5[STIMULUS_COORDINATE_V6_SOURCE_RECORD_PATH].attrs.items()}
+    if source_node_attrs != {
+        "observed_checksum_sha256": source_digest,
+        "declared_checksum_sha256": declared_source_digest,
+        "serialization": "exact_source_bytes",
+    } or declared_source_digest != source_digest:
+        raise StimulusCoordinateContractError("v6 source record declared/observed digest binding is invalid.")
+    source_total_frames = _v6_validate_orange_source_record(
+        source_record, recording_id=recording_id, camera_serial=camera_serial
+    )
+    normalized_bytes, normalized_record = _v6_read_scalar_utf8(
+        h5, path=STIMULUS_COORDINATE_V6_NORMALIZED_RECORD_PATH,
+        attr_name="canonicalization",
+        expected_attr_value="canonical_json_utf8_sort_keys_compact_v1",
+    )
+    expected_normalized = {
+        "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+        "orange_source_record": source_record,
+        "orange_source_record_sha256": source_digest,
+        "schema_id": "citrus.stimulus_coordinate_v6.mapping_normalized",
+        "schema_version": 1,
+    }
+    normalized_node_attrs = {
+        str(key): _normalize_attr(value)
+        for key, value in h5[STIMULUS_COORDINATE_V6_NORMALIZED_RECORD_PATH].attrs.items()
+    }
+    if (
+        normalized_node_attrs != {
+            "checksum_sha256": normalized_digest,
+            "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+        }
+        or normalized_record != expected_normalized
+        or normalized_bytes != _v6_canonical_json(expected_normalized).encode("utf-8")
+        or _v6_sha256(normalized_bytes) != normalized_digest
+    ):
+        raise StimulusCoordinateContractError(
+            "v6 normalized semantic record is not the exact lossless adapter record."
+        )
+
+    renderer_snapshot, renderer_path, renderer_digest = _classify_renderer_snapshot(h5)
+    if renderer_path != STIMULUS_RENDERER_SNAPSHOT_PATH:
+        raise StimulusCoordinateContractError("v6 requires the canonical renderer snapshot.")
+    if LEGACY_STIMULUS_RENDERER_SNAPSHOT_PATH in h5:
+        raise StimulusCoordinateContractError("v6 must not contain legacy stimulus_coordinates.")
+
+    state_path = "/tracking_data/chaser_states"
+    if state_path not in h5 or not isinstance(h5[state_path], h5py.Dataset):
+        raise StimulusCoordinateContractError("sealed v6 receipt requires chaser_states.")
+    states = h5[state_path]
+    state_values = np.asarray(states[:])
+    expected_state_dtype = np.dtype([
+        ("stimulus_frame_num", "<u8"), ("chaser_index", "<i8"),
+        ("chaser_pos_x", "<f4"), ("chaser_pos_y", "<f4"),
+        ("target_pos_x", "<f4"), ("target_pos_y", "<f4"),
+        ("target_clamped_pos_x", "<f4"), ("target_clamped_pos_y", "<f4"),
+    ])
+    if states.dtype != expected_state_dtype or states.ndim != 1 or states.shape[0] <= 0:
+        raise StimulusCoordinateContractError("v6 chaser_states dtype or shape is unsupported.")
+    if not all(
+        np.all(np.isfinite(state_values[field]))
+        for field in (
+            "chaser_pos_x", "chaser_pos_y", "target_pos_x", "target_pos_y",
+            "target_clamped_pos_x", "target_clamped_pos_y",
+        )
+    ):
+        raise StimulusCoordinateContractError("v6 chaser coordinate rows contain non-finite values.")
+    state_attrs = {str(key): _normalize_attr(value) for key, value in states.attrs.items()}
+    expected_state_attr_names = {
+        "schema_id", "schema_version", "coordinate_descriptor",
+        "coordinate_descriptor_sha256", "coordinate_surface_manifest",
+        "coordinate_surface_manifest_sha256", "source_acquisition_mapping_record",
+        "source_acquisition_mapping_record_sha256", "target_source_acquisition_mapping_record",
+        "target_source_acquisition_mapping_record_sha256", "dataset_contract",
+        "dataset_contract_sha256",
+    }
+    if set(state_attrs) != expected_state_attr_names or (
+        state_attrs.get("schema_id") != CHASER_STATES_SCHEMA_ID
+        or state_attrs.get("schema_version") != CHASER_STATES_V6_SCHEMA_VERSION
+    ):
+        raise StimulusCoordinateContractError("v6 chaser_states schema or attributes are unsupported.")
+    _v6_validate_compound_dataset_contract(
+        states, state_values,
+        schema_id="citrus.tracking.chaser_states.dataset_contract",
+        field_order=(
+            "stimulus_frame_num", "chaser_index", "chaser_pos_x", "chaser_pos_y",
+            "target_pos_x", "target_pos_y", "target_clamped_pos_x", "target_clamped_pos_y",
+        ),
+        dtype_fields={
+            "stimulus_frame_num": "<u8", "chaser_index": "<i8",
+            "chaser_pos_x": "<f4", "chaser_pos_y": "<f4",
+            "target_pos_x": "<f4", "target_pos_y": "<f4",
+            "target_clamped_pos_x": "<f4", "target_clamped_pos_y": "<f4",
+        },
+    )
+    descriptor = _v6_mapping_attr(state_attrs["coordinate_descriptor"], label="v6 coordinate_descriptor")
+    expected_descriptor = {
+        "schema_id": "citrus.tracking.chaser_states.coordinate_descriptor",
+        "schema_version": 1,
+        "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+        "coordinate_space": "arena_relative_canvas_px",
+        "origin": "top_left_of_active_arena", "units": "px",
+        "x_axis": "right", "y_axis": "down",
+    }
+    if descriptor != expected_descriptor or state_attrs["coordinate_descriptor_sha256"] != _v6_sha256(_v6_canonical_json(descriptor).encode("utf-8")):
+        raise StimulusCoordinateContractError("v6 coordinate descriptor is stale or unsupported.")
+    v6_manifest = _v6_mapping_attr(state_attrs["coordinate_surface_manifest"], label="v6 coordinate_surface_manifest")
+    expected_v6_manifest = {
+        "schema_id": "citrus.tracking.chaser_states.surface_manifest",
+        "schema_version": 1,
+        "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+        "row_identity": ["chaser_index", "stimulus_frame_num"],
+        "surfaces": {
+            "chaser_position_xy": ["chaser_pos_x", "chaser_pos_y"],
+            "target_position_xy": ["target_pos_x", "target_pos_y"],
+            "target_clamped_position_xy": ["target_clamped_pos_x", "target_clamped_pos_y"],
+        },
+    }
+    if v6_manifest != expected_v6_manifest or state_attrs["coordinate_surface_manifest_sha256"] != _v6_sha256(_v6_canonical_json(v6_manifest).encode("utf-8")):
+        raise StimulusCoordinateContractError("v6 coordinate surface manifest is stale or unsupported.")
+
+    row_count = int(states.shape[0])
+    key_node, key_values = _v6_exact_dataset(
+        h5, "/tracking_data/stimulus_state_key", dtype=np.dtype("<i8"), shape=(row_count, 2)
+    )
+    key_digest = _v6_validate_array_digest(
+        key_node, key_values, expected_attrs={
+            "row_identity_contract": _normalize_attr(key_node.attrs.get("row_identity_contract")),
+            "row_identity_contract_sha256": _normalize_attr(key_node.attrs.get("row_identity_contract_sha256")),
+            "content_sha256": _normalize_attr(key_node.attrs.get("content_sha256")),
+        },
+    )
+    row_contract = _v6_mapping_attr(key_node.attrs["row_identity_contract"], label="v6 row_identity_contract")
+    expected_row_contract = {
+        "schema_id": "citrus.tracking.chaser_states.row_identity", "schema_version": 1,
+        "components": ["chaser_index", "stimulus_frame_num"],
+        "key_array_ref": "/tracking_data/stimulus_state_key", "key_array_sha256": key_digest,
+    }
+    if (
+        row_contract != expected_row_contract
+        or key_node.attrs.get("row_identity_contract_sha256") != _v6_sha256(_v6_canonical_json(row_contract).encode("utf-8"))
+        or not np.array_equal(key_values[:, 0], state_values["chaser_index"])
+        or not np.array_equal(key_values[:, 1], state_values["stimulus_frame_num"].astype(np.int64))
+        or np.any(key_values < 0)
+        or np.unique(key_values, axis=0).shape[0] != row_count
+    ):
+        raise StimulusCoordinateContractError("v6 composite stimulus-state key is invalid.")
+
+    source_node, source_values = _v6_exact_dataset(
+        h5, SOURCE_ACQUISITION_MAPPING_ARRAY_PATH, dtype=np.dtype("<i8"), shape=(row_count,)
+    )
+    source_array_digest = _v6_validate_array_digest(
+        source_node, source_values, expected_attrs={
+            "content_sha256": _normalize_attr(source_node.attrs.get("content_sha256")),
+            "logical_name": "current_orange_recording_acquisition",
+        },
+    )
+    target_node, target_values = _v6_exact_dataset(
+        h5, TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH, dtype=np.dtype("<i8"), shape=(row_count,)
+    )
+    target_array_digest = _v6_validate_array_digest(
+        target_node, target_values, expected_attrs={
+            "content_sha256": _normalize_attr(target_node.attrs.get("content_sha256")),
+            "logical_name": "held_target_orange_recording_acquisition",
+        },
+    )
+    valid_path = f"/tracking_data/{STIMULUS_COORDINATE_V6_TARGET_VALID_ARRAY}"
+    valid_node, valid_values = _v6_exact_dataset(
+        h5, valid_path, dtype=np.dtype("u1"), shape=(row_count,)
+    )
+    valid_digest = _v6_validate_array_digest(
+        valid_node, valid_values, expected_attrs={
+            "content_sha256": _normalize_attr(valid_node.attrs.get("content_sha256")),
+            "invalid_sentinel": -1, "logical_type": "bool",
+        }, dtype_descriptor="|u1",
+    )
+    if np.any((valid_values != 0) & (valid_values != 1)):
+        raise StimulusCoordinateContractError("v6 target validity must use only logical 0/1 values.")
+    target_valid = valid_values.astype(bool)
+    if np.any(target_values[~target_valid] != -1) or np.any(target_values[target_valid] < 0):
+        raise StimulusCoordinateContractError("v6 target index and validity are inconsistent.")
+    if np.any(source_values < 0) or np.any(source_values >= source_total_frames) or np.any(target_values[target_valid] >= source_total_frames):
+        raise StimulusCoordinateContractError("v6 acquisition index is outside Orange coverage.")
+    source_mapping = _v6_mapping_attr(state_attrs["source_acquisition_mapping_record"], label="v6 source acquisition mapping")
+    expected_source_mapping = {
+        "schema_id": "citrus.stimulus_source_acquisition_mapping", "schema_version": 2,
+        "array_ref": SOURCE_ACQUISITION_MAPPING_ARRAY_PATH, "array_sha256": source_array_digest,
+        "camera_serial": camera_serial, "orange_source_record_sha256": source_digest,
+        "recording_id": recording_id, "row_identity_ref": "/tracking_data/stimulus_state_key",
+        "source_total_frames": source_total_frames,
+    }
+    if source_mapping != expected_source_mapping or state_attrs["source_acquisition_mapping_record_sha256"] != _v6_sha256(_v6_canonical_json(source_mapping).encode("utf-8")):
+        raise StimulusCoordinateContractError("v6 source acquisition mapping is stale or unsupported.")
+    target_mapping = _v6_mapping_attr(state_attrs["target_source_acquisition_mapping_record"], label="v6 target acquisition mapping")
+    expected_target_mapping = {
+        "schema_id": "citrus.stimulus_target_source_acquisition_mapping", "schema_version": 2,
+        "array_ref": TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH, "array_sha256": target_array_digest,
+        "validity_array_ref": valid_path, "validity_array_sha256": valid_digest,
+        "invalid_sentinel": -1,
+        "recording_id": recording_id, "camera_serial": camera_serial,
+        "source_total_frames": source_total_frames,
+        "row_identity_ref": "/tracking_data/stimulus_state_key",
+        "orange_source_record_sha256": source_digest,
+    }
+    if target_mapping != expected_target_mapping or state_attrs["target_source_acquisition_mapping_record_sha256"] != _v6_sha256(_v6_canonical_json(target_mapping).encode("utf-8")):
+        raise StimulusCoordinateContractError("v6 target acquisition mapping is stale or unsupported.")
+
+    frame_node = h5.get(STIMULUS_COORDINATE_V6_FRAME_METADATA_PATH)
+    frame_dtype = np.dtype([
+        ("stimulus_frame_num", "<u8"), ("source_recording_frame_id", "<u8"),
+        ("source_acquisition_frame_index", "<i8"),
+    ])
+    if not isinstance(frame_node, h5py.Dataset) or frame_node.dtype != frame_dtype or frame_node.ndim != 1:
+        raise StimulusCoordinateContractError("v6 frame metadata dtype or shape is unsupported.")
+    frames = np.asarray(frame_node[:])
+    frame_attrs = {str(key): _normalize_attr(value) for key, value in frame_node.attrs.items()}
+    if frame_attrs != {
+        "schema_id": "citrus.stimulus_frame_metadata", "schema_version": 2,
+        "source_acquisition_mapping_ref": STIMULUS_COORDINATE_V6_SOURCE_RECORD_PATH,
+        "dataset_contract": _normalize_attr(frame_node.attrs.get("dataset_contract")),
+        "dataset_contract_sha256": _normalize_attr(frame_node.attrs.get("dataset_contract_sha256")),
+    } or frames.size == 0:
+        raise StimulusCoordinateContractError("v6 frame metadata attributes are unsupported.")
+    _v6_validate_compound_dataset_contract(
+        frame_node, frames,
+        schema_id="citrus.stimulus_frame_metadata.contract",
+        field_order=("stimulus_frame_num", "source_recording_frame_id", "source_acquisition_frame_index"),
+        dtype_fields={"stimulus_frame_num": "<u8", "source_recording_frame_id": "<u8", "source_acquisition_frame_index": "<i8"},
+    )
+    frame_keys = frames["stimulus_frame_num"].astype(np.int64)
+    frame_indices = frames["source_acquisition_frame_index"]
+    frame_recording_ids = frames["source_recording_frame_id"]
+    if (
+        np.any(frame_keys < 0) or np.unique(frame_keys).size != frame_keys.size
+        or np.any(frame_indices < 0) or np.any(frame_indices >= source_total_frames)
+        or not np.array_equal(frame_recording_ids.astype(np.int64), frame_indices + 1)
+    ):
+        raise StimulusCoordinateContractError("v6 frame metadata does not honor the sealed Orange conversion.")
+    frame_lookup = {int(key): int(index) for key, index in zip(frame_keys, frame_indices, strict=True)}
+    if any(int(key) not in frame_lookup for key in key_values[:, 1]) or not np.array_equal(
+        source_values, np.asarray([frame_lookup[int(key)] for key in key_values[:, 1]], dtype=np.int64)
+    ):
+        raise StimulusCoordinateContractError("v6 chaser rows contain a terminal orphan or stale current-frame mapping.")
+
+    # The transform/authority chain is source evidence.  The v6 adapter does
+    # not manufacture a v5 calibration object when the fixture lacks one.
+    arena = h5.get("/calibration_snapshot/arena_geometry")
+    if not isinstance(arena, h5py.Group):
+        raise StimulusCoordinateContractError("v6 requires arena_geometry authority.")
+    arena_attrs = {str(key): _normalize_attr(value) for key, value in arena.attrs.items()}
+    required_arena_attrs = {
+        "arena_region_width_px", "arena_region_height_px",
+        "arena_origin_in_canvas_x_px", "arena_origin_in_canvas_y_px",
+        "coordinate_frame_authority", "coordinate_frame_authority_sha256",
+    }
+    if set(arena_attrs) != required_arena_attrs:
+        raise StimulusCoordinateContractError("v6 arena geometry authority is not closed.")
+    authority = _v6_mapping_attr(arena_attrs["coordinate_frame_authority"], label="v6 coordinate_frame_authority")
+    expected_authority_keys = {
+        "arena_id", "calibration_authority_ref", "calibration_authority_sha256", "camera_serial",
+        "coordinate_frame", "final_display_extent_px", "native_source_extent_px", "origin",
+        "runtime_geometry_contract_ref", "runtime_geometry_contract_sha256", "units", "x_axis", "y_axis",
+    }
+    if (
+        set(authority) != expected_authority_keys
+        or authority.get("arena_id") != (renderer_snapshot or {}).get("arena_id")
+        or authority.get("camera_serial") != camera_serial
+        or authority.get("coordinate_frame") != "arena_relative_canvas_px"
+        or authority.get("origin") != "top_left_of_active_arena"
+        or authority.get("units") != "px" or authority.get("x_axis") != "right" or authority.get("y_axis") != "down"
+        or arena_attrs["coordinate_frame_authority_sha256"] != _v6_sha256(_v6_canonical_json(authority).encode("utf-8"))
+    ):
+        raise StimulusCoordinateContractError("v6 coordinate-frame authority is stale or unsupported.")
+    def positive_integer_pair(value: Any, *, label: str) -> tuple[int, int]:
+        if not isinstance(value, list) or len(value) != 2:
+            raise StimulusCoordinateContractError(f"v6 {label} must be a two-element integer extent.")
+        result: list[int] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+                raise StimulusCoordinateContractError(f"v6 {label} must contain positive integers.")
+            result.append(item)
+        return result[0], result[1]
+
+    native_width, native_height = positive_integer_pair(
+        authority.get("native_source_extent_px"), label="native_source_extent_px"
+    )
+    display_width, display_height = positive_integer_pair(
+        authority.get("final_display_extent_px"), label="final_display_extent_px"
+    )
+    _ = native_width, native_height
+    for name in ("runtime_geometry_contract_ref", "calibration_authority_ref"):
+        _required_text(authority.get(name), label=f"v6 {name}")
+    for name in ("runtime_geometry_contract_sha256", "calibration_authority_sha256"):
+        _v6_require_sha256(authority.get(name), label=f"v6 {name}")
+    origin_x = arena_attrs["arena_origin_in_canvas_x_px"]
+    origin_y = arena_attrs["arena_origin_in_canvas_y_px"]
+    if (
+        isinstance(origin_x, bool) or isinstance(origin_y, bool)
+        or not isinstance(origin_x, (int, float)) or not isinstance(origin_y, (int, float))
+        or not math.isfinite(float(origin_x)) or not math.isfinite(float(origin_y))
+        or float(origin_x) < 0 or float(origin_y) < 0
+        or isinstance(arena_attrs["arena_region_width_px"], bool)
+        or isinstance(arena_attrs["arena_region_height_px"], bool)
+        or not isinstance(arena_attrs["arena_region_width_px"], int)
+        or not isinstance(arena_attrs["arena_region_height_px"], int)
+        or arena_attrs["arena_region_width_px"] <= 0
+        or arena_attrs["arena_region_height_px"] <= 0
+        or float(origin_x) + arena_attrs["arena_region_width_px"] > display_width
+        or float(origin_y) + arena_attrs["arena_region_height_px"] > display_height
+        or renderer_snapshot is None
+        or renderer_snapshot["texture_extent"] != {
+            "width": arena_attrs["arena_region_width_px"],
+            "height": arena_attrs["arena_region_height_px"],
+            "units": "px",
+        }
+    ):
+        raise StimulusCoordinateContractError("v6 arena extent does not match its authority.")
+    homographies: dict[str, np.ndarray] = {}
+    for name, direction, source_space, destination_space in (
+        ("source_camera_to_final_display_homography", "source_camera_to_final_display", "source_camera_px", "final_display_canvas_px"),
+        ("final_display_to_source_camera_homography", "final_display_to_source_camera", "final_display_canvas_px", "source_camera_px"),
+    ):
+        node, values = _v6_exact_dataset(h5, f"/calibration_snapshot/arena_geometry/{name}", dtype=np.dtype("<f8"), shape=(3, 3))
+        _v6_validate_array_digest(node, values, expected_attrs={
+            "content_sha256": _normalize_attr(node.attrs.get("content_sha256")),
+            "transform_direction": direction, "source_space": source_space,
+            "destination_space": destination_space,
+        })
+        if not np.all(np.isfinite(values)):
+            raise StimulusCoordinateContractError("v6 homography contains non-finite values.")
+        if abs(float(np.linalg.det(values))) <= 1e-12:
+            raise StimulusCoordinateContractError("v6 homography is singular.")
+        homographies[name] = values
+    if not np.allclose(
+        homographies["source_camera_to_final_display_homography"]
+        @ homographies["final_display_to_source_camera_homography"],
+        np.eye(3), rtol=1e-9, atol=1e-9,
+    ):
+        raise StimulusCoordinateContractError("v6 homographies are not mutual inverses.")
+    if not np.allclose(
+        homographies["final_display_to_source_camera_homography"]
+        @ homographies["source_camera_to_final_display_homography"],
+        np.eye(3), rtol=1e-9, atol=1e-9,
+    ):
+        raise StimulusCoordinateContractError("v6 inverse homography does not round-trip.")
+
+    source_dataset_digest = _h5_dataset_content_digest(states)
+    evidence = {
+        "source_file_identity": dict(file_identity), "source_schema_version": 6,
+        "v6_source_semantic_record_sha256": source_digest,
+        "v6_normalized_semantic_record_sha256": normalized_digest,
+        "v6_chaser_states_sha256": source_dataset_digest,
+        "v6_stimulus_state_key_sha256": key_digest,
+        "v6_renderer_snapshot_sha256": renderer_digest,
+    }
+    for values in (key_values, source_values, target_values, target_valid):
+        values.setflags(write=False)
+    return V6StimulusCoordinateArtifact(
+        source_h5=source_h5.expanduser().resolve(), source_file_identity=file_identity,
+        source_contract_sha256=canonical_mapping_digest(evidence),
+        status="pre_materialization_only",
+        source_semantic_record=source_record, source_semantic_record_sha256=source_digest,
+        normalized_semantic_record=normalized_record,
+        normalized_semantic_record_sha256=normalized_digest,
+        stimulus_state_key=key_values,
+        source_acquisition_frame_index=source_values,
+        target_source_acquisition_frame_index=target_values,
+        target_source_acquisition_frame_valid=target_valid,
+    )
+
+
 def preflight_stimulus_coordinate_contract(
     h5: h5py.File,
     *,
@@ -1298,10 +2402,11 @@ def preflight_stimulus_coordinate_contract(
             source_coordinate_policy=SOURCE_COORDINATE_POLICY_METADATA_ONLY,
             omitted_coordinate_source_paths=omitted_paths,
         )
-    if "/stimulus_coordinates" in h5:
-        raise StimulusCoordinateContractError(
-            "stimulus_coordinates lacks canonical array-specific geometry support."
-        )
+    (
+        renderer_snapshot,
+        renderer_snapshot_source_path,
+        renderer_snapshot_sha256,
+    ) = _classify_renderer_snapshot(h5)
     if "/tracking_data/bounding_boxes" in h5:
         bboxes = h5["/tracking_data/bounding_boxes"]
         if isinstance(bboxes, h5py.Dataset) and int(bboxes.size) > 0:
@@ -1331,6 +2436,7 @@ def preflight_stimulus_coordinate_contract(
                 selected_calibration.source_evidence_sha256
             ),
             "has_chaser_states": False,
+            "renderer_snapshot_sha256": renderer_snapshot_sha256,
         }
         return StimulusCoordinatePreflight(
             source_h5=source,
@@ -1338,6 +2444,9 @@ def preflight_stimulus_coordinate_contract(
             selected_calibration=selected_calibration,
             source_contract_sha256=canonical_mapping_digest(evidence),
             has_chaser_states=False,
+            renderer_snapshot=renderer_snapshot,
+            renderer_snapshot_source_path=renderer_snapshot_source_path,
+            renderer_snapshot_sha256=renderer_snapshot_sha256,
         )
     dataset = h5[path]
     if not isinstance(dataset, h5py.Dataset):
@@ -1354,6 +2463,15 @@ def preflight_stimulus_coordinate_contract(
             "use an explicit historical migration workflow."
         )
     attrs = {str(key): _normalize_attr(value) for key, value in dataset.attrs.items()}
+    if (
+        attrs.get("schema_id") != CHASER_STATES_SCHEMA_ID
+        or attrs.get("schema_version") != CHASER_STATES_SCHEMA_VERSION
+    ):
+        raise StimulusCoordinateContractError(
+            "Canonical chaser_states requires schema_id "
+            f"{CHASER_STATES_SCHEMA_ID!r} and schema_version "
+            f"{CHASER_STATES_SCHEMA_VERSION}."
+        )
     manifest, row_fields, surfaces = _load_manifest(attrs)
     structured_rows = _validate_source_rows_and_fields(
         dataset,
@@ -1377,6 +2495,42 @@ def preflight_stimulus_coordinate_contract(
         row_identity_sha256=row_digest,
         row_identity_contract_sha256=row_contract.digest(),
     )
+    target_field_names = {"target_source_frame_id", "target_source_camera_id"}
+    source_field_names = set(dataset.dtype.names or ())
+    target_mapping_paths_present = {
+        path
+        for path in (
+            TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH,
+            TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH,
+        )
+        if path in h5
+    }
+    target_source_frames: np.ndarray | None = None
+    target_source_valid: np.ndarray | None = None
+    target_source_record: dict[str, Any] | None = None
+    target_source_digest: str | None = None
+    if source_field_names.intersection(target_field_names):
+        if not target_field_names.issubset(source_field_names):
+            raise StimulusCoordinateContractError(
+                "Canonical target provenance requires both target_source_frame_id "
+                "and target_source_camera_id fields."
+            )
+        (
+            target_source_frames,
+            target_source_valid,
+            target_source_record,
+            target_source_digest,
+        ) = _load_target_source_acquisition_mapping(
+            h5,
+            row_count=int(dataset.shape[0]),
+            row_identity_sha256=row_digest,
+            row_identity_contract_sha256=row_contract.digest(),
+        )
+    elif target_mapping_paths_present:
+        raise StimulusCoordinateContractError(
+            "Orphan target-source acquisition arrays exist without target-source "
+            "fields in chaser_states."
+        )
     descriptor = _load_descriptor(
         attrs,
         row_identity_contract=row_contract,
@@ -1405,7 +2559,19 @@ def preflight_stimulus_coordinate_contract(
             source_acquisition_frames
         ),
         "source_acquisition_mapping_record_sha256": source_acquisition_digest,
+        "target_source_acquisition_frame_index_sha256": (
+            numpy_content_digest(target_source_frames)
+            if target_source_frames is not None
+            else None
+        ),
+        "target_source_acquisition_frame_valid_sha256": (
+            numpy_content_digest(target_source_valid)
+            if target_source_valid is not None
+            else None
+        ),
+        "target_source_acquisition_mapping_record_sha256": target_source_digest,
         "arena_geometry_sha256": arena_digest,
+        "renderer_snapshot_sha256": renderer_snapshot_sha256,
     }
     return StimulusCoordinatePreflight(
         source_h5=source,
@@ -1428,6 +2594,13 @@ def preflight_stimulus_coordinate_contract(
         source_acquisition_frame_index=source_acquisition_frames,
         source_acquisition_mapping_record=source_acquisition_record,
         source_acquisition_mapping_record_sha256=source_acquisition_digest,
+        target_source_acquisition_frame_index=target_source_frames,
+        target_source_acquisition_frame_valid=target_source_valid,
+        target_source_acquisition_mapping_record=target_source_record,
+        target_source_acquisition_mapping_record_sha256=target_source_digest,
+        renderer_snapshot=renderer_snapshot,
+        renderer_snapshot_source_path=renderer_snapshot_source_path,
+        renderer_snapshot_sha256=renderer_snapshot_sha256,
     )
 
 
@@ -1747,6 +2920,39 @@ def _coordinate_output_array_entries(
         semantic_role=None,
         components=("acquisition_frame_index",),
     )
+    target_source_node = chaser_group.get(
+        TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY
+    )
+    target_source_valid_node = chaser_group.get(
+        TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY
+    )
+    if (target_source_node is None) != (target_source_valid_node is None):
+        raise StimulusCoordinateContractError(
+            "Target-source acquisition index and validity arrays must be paired."
+        )
+    if target_source_node is not None and target_source_valid_node is not None:
+        if not isinstance(target_source_node, zarr.Array) or not isinstance(
+            target_source_valid_node, zarr.Array
+        ):
+            raise StimulusCoordinateContractError(
+                "Target-source acquisition provenance must use arrays."
+            )
+        entries[TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY] = (
+            _array_manifest_entry(
+                target_source_node,
+                kind="target_source_temporal_mapping",
+                semantic_role=None,
+                components=("acquisition_frame_index",),
+            )
+        )
+        entries[TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY] = (
+            _array_manifest_entry(
+                target_source_valid_node,
+                kind="target_source_temporal_mapping_validity",
+                semantic_role=None,
+                components=("valid",),
+            )
+        )
     for surface in manifest["surfaces"]:
         name = str(surface["array_name"])
         role = str(surface["semantic_role"])
@@ -1893,6 +3099,8 @@ def materialize_stimulus_coordinate_contract(
             CAMERA_FRAME_IDS_ARRAY,
             SOURCE_ROW_INDICES_ARRAY,
             SOURCE_ACQUISITION_FRAME_INDEX_ARRAY,
+            TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY,
+            TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY,
         )
         if name in chaser
     ]
@@ -2030,6 +3238,88 @@ def materialize_stimulus_coordinate_contract(
             f"Unable to seal stimulus acquisition-frame authority: {exc}."
         ) from exc
 
+    target_source_node: zarr.Array | None = None
+    target_source_valid_node: zarr.Array | None = None
+    bound_target_source_mapping: BoundCoordinateRecord | None = None
+    target_source_values = preflight.target_source_acquisition_frame_index
+    target_source_valid = preflight.target_source_acquisition_frame_valid
+    target_source_record = preflight.target_source_acquisition_mapping_record
+    target_parts_present = (
+        target_source_values is not None,
+        target_source_valid is not None,
+        target_source_record is not None,
+    )
+    if any(target_parts_present) and not all(target_parts_present):
+        raise StimulusCoordinateContractError(
+            "Verified target-source acquisition provenance is incomplete."
+        )
+    if all(target_parts_present):
+        assert target_source_values is not None
+        assert target_source_valid is not None
+        assert target_source_record is not None
+        if (
+            target_source_values.shape != (row_count,)
+            or target_source_valid.shape != (row_count,)
+            or target_source_record.get("acquisition_recording_id")
+            != source_acquisition_record.get("acquisition_recording_id")
+            or target_source_record.get("acquisition_camera_id")
+            != source_acquisition_record.get("acquisition_camera_id")
+            or target_source_record.get("source_total_frames")
+            != source_acquisition_record.get("source_total_frames")
+        ):
+            raise StimulusCoordinateContractError(
+                "Target-source provenance does not bind the same acquisition "
+                "authority and stimulus rows as state acquisition time."
+            )
+        target_source_node = store_array(
+            chaser,
+            TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY,
+            np.asarray(target_source_values, dtype=np.int64),
+            {},
+        )
+        target_source_valid_node = store_array(
+            chaser,
+            TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY,
+            np.asarray(target_source_valid, dtype=bool),
+            {},
+        )
+        target_source_node.attrs.update(
+            {
+                "temporal_role": "target_detection_source_acquisition_frame_index",
+                "target_domain": "acquisition_frame",
+                "primary_row_identity": False,
+            }
+        )
+        bound_target_source_mapping = (
+            stamp_and_bind_persisted_coordinate_record(
+                target_source_node,
+                dict(target_source_record),
+                attr_name=TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR,
+                digest_attr_name=(
+                    TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR
+                ),
+            )
+        )
+        if (
+            bound_target_source_mapping.record_sha256
+            != preflight.target_source_acquisition_mapping_record_sha256
+        ):
+            raise StimulusCoordinateContractError(
+                "Persisted target-source mapping differs from preflight."
+            )
+        target_source_valid_node.attrs.update(
+            {
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_REF_ATTR: (
+                    bound_target_source_mapping.record_ref
+                ),
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR: (
+                    bound_target_source_mapping.record_sha256
+                ),
+                "temporal_role": "target_detection_source_mapping_validity",
+                "primary_row_identity": False,
+            }
+        )
+
     surface_nodes: dict[str, zarr.Array] = {}
     component_nodes: dict[str, zarr.Array] = {}
     component_fields: list[str] = []
@@ -2081,6 +3371,11 @@ def materialize_stimulus_coordinate_contract(
         {},
     )
     try:
+        optional_target_nodes = tuple(
+            node
+            for node in (target_source_node, target_source_valid_node)
+            if node is not None
+        )
         require_same_archive(
             run_group,
             chaser,
@@ -2088,6 +3383,7 @@ def materialize_stimulus_coordinate_contract(
             camera_node,
             source_rows_node,
             source_acquisition_node,
+            *optional_target_nodes,
             *mapping_nodes,
         )
     except ArchiveIdentityError as exc:
@@ -2207,12 +3503,42 @@ def materialize_stimulus_coordinate_contract(
         ),
         "interpolation": interpolation,
     }
+    if bound_target_source_mapping is not None:
+        lineage["target_source_acquisition_mapping_record_ref"] = (
+            bound_target_source_mapping.record_ref
+        )
+        lineage["target_source_acquisition_mapping_record_sha256"] = (
+            bound_target_source_mapping.record_sha256
+        )
     bound_lineage = stamp_and_bind_persisted_coordinate_record(
         chaser,
         lineage,
         attr_name=COORDINATE_IMPORT_LINEAGE_ATTR,
         digest_attr_name=COORDINATE_IMPORT_LINEAGE_DIGEST_ATTR,
     )
+    output_records = {
+        "surface_manifest": {
+            "record_ref": surface_manifest_record.record_ref,
+            "record_sha256": surface_manifest_record.record_sha256,
+        },
+        "camera_mapping": {
+            "record_ref": bound_camera_mapping.record_ref,
+            "record_sha256": bound_camera_mapping.record_sha256,
+        },
+        "frame_transform": {
+            "record_ref": frame_transform.manifest.record_ref,
+            "record_sha256": frame_transform.manifest.record_sha256,
+        },
+        "import_lineage": {
+            "record_ref": bound_lineage.record_ref,
+            "record_sha256": bound_lineage.record_sha256,
+        },
+    }
+    if bound_target_source_mapping is not None:
+        output_records["target_source_acquisition_mapping"] = {
+            "record_ref": bound_target_source_mapping.record_ref,
+            "record_sha256": bound_target_source_mapping.record_sha256,
+        }
     output_manifest = {
         "schema_id": COORDINATE_OUTPUT_MANIFEST_SCHEMA_ID,
         "schema_version": COORDINATE_OUTPUT_MANIFEST_SCHEMA_VERSION,
@@ -2230,24 +3556,7 @@ def materialize_stimulus_coordinate_contract(
             "height": reference_extent.height,
             "units": reference_extent.units,
         },
-        "records": {
-            "surface_manifest": {
-                "record_ref": surface_manifest_record.record_ref,
-                "record_sha256": surface_manifest_record.record_sha256,
-            },
-            "camera_mapping": {
-                "record_ref": bound_camera_mapping.record_ref,
-                "record_sha256": bound_camera_mapping.record_sha256,
-            },
-            "frame_transform": {
-                "record_ref": frame_transform.manifest.record_ref,
-                "record_sha256": frame_transform.manifest.record_sha256,
-            },
-            "import_lineage": {
-                "record_ref": bound_lineage.record_ref,
-                "record_sha256": bound_lineage.record_sha256,
-            },
-        },
+        "records": output_records,
         "arrays": output_entries,
     }
     bound_output_manifest = stamp_and_bind_persisted_coordinate_record(
@@ -2263,6 +3572,11 @@ def materialize_stimulus_coordinate_contract(
         frame_transform.manifest,
         bound_lineage,
         bound_output_manifest,
+        *(
+            (bound_target_source_mapping,)
+            if bound_target_source_mapping is not None
+            else ()
+        ),
     )
     descriptor_bindings: list[BoundCanonicalCoordinateDescriptor] = []
     for surface in preflight.surfaces:
@@ -2414,6 +3728,27 @@ def _load_bound_stimulus_coordinate_evidence_impl(
     source_acquisition_node = chaser_group.get(
         SOURCE_ACQUISITION_FRAME_INDEX_ARRAY
     )
+    target_source_node = chaser_group.get(
+        TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY
+    )
+    target_source_valid_node = chaser_group.get(
+        TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY
+    )
+    if (target_source_node is None) != (target_source_valid_node is None):
+        raise StimulusCoordinateContractError(
+            "Target-source acquisition index and validity arrays must be paired."
+        )
+    target_nodes = tuple(
+        node
+        for node in (target_source_node, target_source_valid_node)
+        if node is not None
+    )
+    if target_nodes and not all(
+        isinstance(node, zarr.Array) for node in target_nodes
+    ):
+        raise StimulusCoordinateContractError(
+            "Target-source acquisition provenance must use arrays."
+        )
     calibration = run_group.get("calibration")
     arena = calibration.get("arena_geometry") if isinstance(calibration, zarr.Group) else None
     if not all(
@@ -2437,6 +3772,7 @@ def _load_bound_stimulus_coordinate_evidence_impl(
             camera_node,
             source_rows_node,
             source_acquisition_node,
+            *target_nodes,
             arena,
         )
         bound_identity = load_bound_row_identity_contract(chaser_group, key_node)
@@ -2468,6 +3804,17 @@ def _load_bound_stimulus_coordinate_evidence_impl(
             attr_name=SOURCE_ACQUISITION_MAPPING_RECORD_ATTR,
             digest_attr_name=SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR,
         )
+        target_source_mapping = (
+            bind_persisted_coordinate_record(
+                target_source_node,
+                attr_name=TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR,
+                digest_attr_name=(
+                    TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR
+                ),
+            )
+            if isinstance(target_source_node, zarr.Array)
+            else None
+        )
         import_lineage = bind_persisted_coordinate_record(
             chaser_group,
             attr_name=COORDINATE_IMPORT_LINEAGE_ATTR,
@@ -2496,6 +3843,7 @@ def _load_bound_stimulus_coordinate_evidence_impl(
         source_acquisition_mapping,
         import_lineage,
         output_manifest_record,
+        *((target_source_mapping,) if target_source_mapping is not None else ()),
     )
     if (
         bound_identity.archive_identity != common_archive
@@ -2512,6 +3860,24 @@ def _load_bound_stimulus_coordinate_evidence_impl(
     if surface_manifest_record.record != manifest:
         raise StimulusCoordinateContractError(
             "Bound coordinate surface manifest differs from canonical parsed content."
+        )
+    output_target_fields_present = {
+        name
+        for name in ("target_source_frame_id", "target_source_camera_id")
+        if name in chaser_group
+    }
+    if output_target_fields_present and (
+        output_target_fields_present
+        != {"target_source_frame_id", "target_source_camera_id"}
+        or target_source_mapping is None
+    ):
+        raise StimulusCoordinateContractError(
+            "Canonical chaser target-source fields require their separate "
+            "acquisition provenance mapping."
+        )
+    if not output_target_fields_present and target_source_mapping is not None:
+        raise StimulusCoordinateContractError(
+            "Orphan target-source acquisition provenance is present."
         )
     contract = bound_identity.contract
     if (
@@ -2635,6 +4001,92 @@ def _load_bound_stimulus_coordinate_evidence_impl(
             "Persisted source acquisition mapping is stale or does not bind "
             "the exact row and acquisition authorities."
         )
+
+    target_source_values: np.ndarray | None = None
+    target_source_valid: np.ndarray | None = None
+    if target_source_mapping is not None:
+        assert isinstance(target_source_node, zarr.Array)
+        assert isinstance(target_source_valid_node, zarr.Array)
+        target_source_values = np.asarray(target_source_node[:])
+        target_source_valid = np.asarray(target_source_valid_node[:])
+        if (
+            np.dtype(target_source_node.dtype) != np.dtype("<i8")
+            or target_source_values.shape != (row_count,)
+            or np.dtype(target_source_valid_node.dtype) != np.dtype("bool")
+            or target_source_valid.shape != (row_count,)
+        ):
+            raise StimulusCoordinateContractError(
+                "Persisted target-source acquisition arrays have invalid dtype or shape."
+            )
+        target_source_values = np.asarray(target_source_values, dtype=np.int64)
+        target_source_valid = np.asarray(target_source_valid, dtype=bool)
+        target_record = target_source_mapping.record
+        expected_target_record = {
+            "schema_id": TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_ID,
+            "schema_version": TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION,
+            "mapping_method": (
+                "explicit_per_stimulus_state_target_provenance_v1"
+            ),
+            "source_rowset_ref": "/tracking_data/chaser_states",
+            "source_row_identity_ref": (
+                f"/tracking_data/{STIMULUS_STATE_KEY_ARRAY}"
+            ),
+            "source_row_identity_sha256": identity_array_content_sha256(
+                key_values
+            ),
+            "source_row_identity_contract_sha256": contract.digest(),
+            "source_target_frame_field": (
+                "/tracking_data/chaser_states#target_source_frame_id"
+            ),
+            "source_target_camera_field": (
+                "/tracking_data/chaser_states#target_source_camera_id"
+            ),
+            "acquisition_recording_id": acquisition_record.recording_id,
+            "acquisition_camera_id": acquisition_record.camera_id,
+            "source_total_frames": acquisition_record.source_total_frames,
+            "target_domain": "acquisition_frame_index",
+            "array_ref": TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH,
+            "array_dtype": np.dtype("<i8").str,
+            "array_shape": [row_count],
+            "array_content_sha256": numpy_content_digest(target_source_values),
+            "validity_array_ref": TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH,
+            "validity_array_dtype": np.dtype("bool").str,
+            "validity_array_shape": [row_count],
+            "validity_array_content_sha256": numpy_content_digest(
+                target_source_valid
+            ),
+            "invalid_index_sentinel": -1,
+            "canonicalization": "canonical_json_sort_keys_v1",
+        }
+        if (
+            target_record != expected_target_record
+            or np.any(target_source_values[~target_source_valid] != -1)
+            or np.any(target_source_values[target_source_valid] < 0)
+            or np.any(
+                target_source_values[target_source_valid]
+                >= acquisition_record.source_total_frames
+            )
+            or target_source_node.attrs.get("temporal_role")
+            != "target_detection_source_acquisition_frame_index"
+            or target_source_node.attrs.get("target_domain")
+            != "acquisition_frame"
+            or target_source_node.attrs.get("primary_row_identity") is not False
+            or target_source_valid_node.attrs.get(
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_REF_ATTR
+            )
+            != target_source_mapping.record_ref
+            or target_source_valid_node.attrs.get(
+                TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR
+            )
+            != target_source_mapping.record_sha256
+            or target_source_valid_node.attrs.get("temporal_role")
+            != "target_detection_source_mapping_validity"
+            or target_source_valid_node.attrs.get("primary_row_identity") is not False
+        ):
+            raise StimulusCoordinateContractError(
+                "Persisted target-source acquisition mapping is stale or does "
+                "not bind the exact row and acquisition authorities."
+            )
     expected_source_rows = np.arange(row_count, dtype=np.int64)
     if not np.array_equal(source_row_indices, expected_source_rows):
         raise StimulusCoordinateContractError(
@@ -2715,11 +4167,39 @@ def _load_bound_stimulus_coordinate_evidence_impl(
             name: entry["content_sha256"]
             for name, entry in output_entries.items()
         }
+        or (
+            target_source_mapping is None
+            and (
+                "target_source_acquisition_mapping_record_ref" in lineage
+                or "target_source_acquisition_mapping_record_sha256" in lineage
+            )
+        )
+        or (
+            target_source_mapping is not None
+            and (
+                lineage.get("target_source_acquisition_mapping_record_ref")
+                != target_source_mapping.record_ref
+                or lineage.get(
+                    "target_source_acquisition_mapping_record_sha256"
+                )
+                != target_source_mapping.record_sha256
+            )
+        )
     ):
         raise StimulusCoordinateContractError(
             "Coordinate import lineage does not bind the exact published output."
         )
 
+    expected_output_records = {
+        "surface_manifest": _record_pointer(surface_manifest_record),
+        "camera_mapping": _record_pointer(camera_mapping),
+        "frame_transform": _record_pointer(frame_transform.manifest),
+        "import_lineage": _record_pointer(import_lineage),
+    }
+    if target_source_mapping is not None:
+        expected_output_records["target_source_acquisition_mapping"] = (
+            _record_pointer(target_source_mapping)
+        )
     expected_output_manifest = {
         "schema_id": COORDINATE_OUTPUT_MANIFEST_SCHEMA_ID,
         "schema_version": COORDINATE_OUTPUT_MANIFEST_SCHEMA_VERSION,
@@ -2737,12 +4217,7 @@ def _load_bound_stimulus_coordinate_evidence_impl(
             "height": reference_extent.height,
             "units": reference_extent.units,
         },
-        "records": {
-            "surface_manifest": _record_pointer(surface_manifest_record),
-            "camera_mapping": _record_pointer(camera_mapping),
-            "frame_transform": _record_pointer(frame_transform.manifest),
-            "import_lineage": _record_pointer(import_lineage),
-        },
+        "records": expected_output_records,
         "arrays": output_entries,
     }
     if output_manifest_record.record != expected_output_manifest:
@@ -2756,6 +4231,7 @@ def _load_bound_stimulus_coordinate_evidence_impl(
         frame_transform.manifest,
         import_lineage,
         output_manifest_record,
+        *((target_source_mapping,) if target_source_mapping is not None else ()),
     )
     for surface in surfaces:
         point_name = str(surface["array_name"])
@@ -2819,6 +4295,10 @@ def _load_bound_stimulus_coordinate_evidence_impl(
         source_acquisition_values,
     ):
         values.setflags(write=False)
+    if target_source_values is not None:
+        target_source_values.setflags(write=False)
+    if target_source_valid is not None:
+        target_source_valid.setflags(write=False)
     return BoundStimulusCoordinateEvidence(
         archive_identity=archive_identity(run_group),
         row_identity=bound_identity,
@@ -2833,6 +4313,8 @@ def _load_bound_stimulus_coordinate_evidence_impl(
         camera_frame_ids=camera_values,
         source_acquisition_frame_index=source_acquisition_values,
         source_row_indices=source_row_indices,
+        target_source_acquisition_frame_index=target_source_values,
+        target_source_acquisition_frame_valid=target_source_valid,
     )
 
 
@@ -2885,6 +4367,9 @@ __all__ = [
     "CAMERA_MAPPING_RECORD_DIGEST_ATTR",
     "CAMERA_MAPPING_SCHEMA_ID",
     "CAMERA_MAPPING_SCHEMA_VERSION",
+    "CHASER_STATES_SCHEMA_ID",
+    "CHASER_STATES_SCHEMA_VERSION",
+    "CHASER_STATES_V6_SCHEMA_VERSION",
     "COORDINATE_CONTRACT_EPOCH",
     "COORDINATE_IMPORT_LINEAGE_ATTR",
     "COORDINATE_IMPORT_LINEAGE_DIGEST_ATTR",
@@ -2902,14 +4387,30 @@ __all__ = [
     "SOURCE_ACQUISITION_MAPPING_ARRAY_PATH",
     "SOURCE_ACQUISITION_MAPPING_RECORD_ATTR",
     "SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR",
+    "SOURCE_ACQUISITION_MAPPING_SCHEMA_ID",
+    "SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION",
     "SOURCE_ROW_INDICES_ARRAY",
     "SOURCE_ARENA_FRAME_ID",
     "SOURCE_COORDINATE_POLICY_CANONICAL",
     "SOURCE_COORDINATE_POLICY_METADATA_ONLY",
+    "STIMULUS_RENDERER_SNAPSHOT_CAPTURE_PHASE",
+    "STIMULUS_RENDERER_SNAPSHOT_PATH",
+    "STIMULUS_RENDERER_SNAPSHOT_SCHEMA_ID",
+    "STIMULUS_RENDERER_SNAPSHOT_SCHEMA_VERSION",
+    "TARGET_SOURCE_ACQUISITION_FRAME_INDEX_ARRAY",
+    "TARGET_SOURCE_ACQUISITION_FRAME_VALID_ARRAY",
+    "TARGET_SOURCE_ACQUISITION_MAPPING_ARRAY_PATH",
+    "TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_ATTR",
+    "TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR",
+    "TARGET_SOURCE_ACQUISITION_MAPPING_RECORD_REF_ATTR",
+    "TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_ID",
+    "TARGET_SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION",
+    "TARGET_SOURCE_ACQUISITION_VALID_ARRAY_PATH",
     "LEGACY_SOURCE_ROW_IDENTITY_ARRAY",
     "SourceSelectedCalibration",
     "StimulusCoordinateContractError",
     "StimulusCoordinatePreflight",
+    "V6StimulusCoordinateArtifact",
     "arena_geometry_record",
     "canonical_mapping_digest",
     "load_bound_stimulus_coordinate_evidence",
@@ -2919,4 +4420,5 @@ __all__ = [
     "reverify_stimulus_coordinate_contract",
     "source_arena_pixel_frame_record",
     "validate_stimulus_destination_acquisition_authority",
+    "validate_citrus_stimulus_coordinate_v6_artifact",
 ]

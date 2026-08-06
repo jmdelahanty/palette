@@ -1,0 +1,80 @@
+{
+  "orange_mapping": {
+    "camera_streams": {
+      "CAM-42": {
+        "camera_serial": "CAM-42",
+        "coverage": {
+          "first_recording_frame_id": 1,
+          "gap_count": 0,
+          "gap_policy": "none",
+          "last_recording_frame_id": 2,
+          "metadata_row_count": 2,
+          "total_acquisitions": 2
+        },
+        "conversion": {
+          "constant": 1,
+          "expression": "source_acquisition_frame_index = recording_frame_id - 1",
+          "method": "subtract_constant_v1"
+        },
+        "destination_identity": {
+          "dtype": "int64",
+          "field": "source_acquisition_frame_index",
+          "index_base": 0
+        },
+        "producer_identity": {
+          "assignment_event": "orange_acquisition_recording_frame_sequence",
+          "dtype": "uint64",
+          "field": "recording_frame_id",
+          "index_base": 1,
+          "scope": "recording_session_and_camera_stream"
+        },
+        "source_metadata_artifact": {
+          "media_type": "text/csv",
+          "relative_path": "raw/CAM-42_meta.csv",
+          "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      }
+    },
+    "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+    "frame_identity_contract_ref": "#/frame_identity_contract",
+    "frame_identity_contract_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "recording_id": "recording-42",
+    "schema_id": "orange.recording.acquisition_index_mapping",
+    "schema_version": 1,
+    "status": "finalized"
+  },
+  "oracle": {
+    "chaser_state_keys": [[0, 0], [1, 0], [0, 1], [1, 1]],
+    "source_acquisition_frame_index": [0, 0, 1, 1],
+    "target_source_acquisition_frame_index": [0, 0, 0, -1],
+    "target_source_acquisition_frame_valid": [1, 1, 1, 0]
+  },
+  "request": {
+    "camera_serial": "CAM-42",
+    "chaser_states": [
+      {"chaser_index": 0, "chaser_pos": [10.0, 11.0], "source_recording_frame_id": 1, "stimulus_frame_num": 0, "target_clamped_pos": [50.0, 51.0], "target_pos": [50.0, 51.0], "target_recording_frame_id": 1, "target_recording_frame_valid": true},
+      {"chaser_index": 1, "chaser_pos": [20.0, 21.0], "source_recording_frame_id": 1, "stimulus_frame_num": 0, "target_clamped_pos": [50.0, 51.0], "target_pos": [50.0, 51.0], "target_recording_frame_id": 1, "target_recording_frame_valid": true},
+      {"chaser_index": 0, "chaser_pos": [12.0, 13.0], "source_recording_frame_id": 2, "stimulus_frame_num": 1, "target_clamped_pos": [50.0, 51.0], "target_pos": [50.0, 51.0], "target_recording_frame_id": 1, "target_recording_frame_valid": true},
+      {"chaser_index": 1, "chaser_pos": [22.0, 23.0], "source_recording_frame_id": 2, "stimulus_frame_num": 1, "target_clamped_pos": [0.0, 0.0], "target_pos": [0.0, 0.0], "target_recording_frame_id": 0, "target_recording_frame_valid": false}
+    ],
+    "coordinate_authority": {
+      "arena_id": "arena_1",
+      "calibration_authority_ref": "/calibration_snapshot",
+      "calibration_authority_sha256": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      "camera_serial": "CAM-42",
+      "effective_arena_origin_px": [0.0, 0.0],
+      "final_display_extent_px": [348, 348],
+      "final_display_to_source_camera_homography": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+      "native_source_extent_px": [1920, 1080],
+      "runtime_geometry_contract_ref": "/runtime_geometry_contract",
+      "runtime_geometry_contract_sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "source_camera_to_final_display_homography": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    },
+    "frames": [
+      {"recording_frame_id": 1, "stimulus_frame_num": 0},
+      {"recording_frame_id": 2, "stimulus_frame_num": 1}
+    ],
+    "recording_id": "recording-42",
+    "renderer_snapshot": {"active_stimulus_mode": "chaser", "arena_id": "arena_1", "texture_center": [174.0, 174.0], "texture_extent_px": [348, 348]}
+  }
+}

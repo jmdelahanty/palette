@@ -120,6 +120,7 @@ def build_experiment_setup_record(
     subject_metadata: Mapping[str, Any],
     *,
     source_h5_path: str | Path | None = None,
+    source: Mapping[str, Any] | None = None,
     subject_metadata_sha256: str | None = None,
     subject_metadata_ref: str | None = None,
 ) -> dict[str, Any]:
@@ -179,13 +180,20 @@ def build_experiment_setup_record(
         else "multi_subject_single_arena"
     )
 
-    source: dict[str, Any] = {
-        "kind": "h5_subject_metadata",
-        "group_path": "/subject_metadata",
-        "count_field": "subject_count",
-    }
-    if source_h5_path is not None:
-        source["file_name"] = Path(source_h5_path).name
+    if source is None:
+        source_record: dict[str, Any] = {
+            "kind": "h5_subject_metadata",
+            "group_path": "/subject_metadata",
+            "count_field": "subject_count",
+        }
+        if source_h5_path is not None:
+            source_record["file_name"] = Path(source_h5_path).name
+    else:
+        source_record = json_attr_safe_mapping(source)
+        if not str(source_record.get("kind") or "").strip():
+            raise ExperimentSetupError("Experiment setup source requires kind")
+        if not str(source_record.get("count_field") or "").strip():
+            raise ExperimentSetupError("Experiment setup source requires count_field")
 
     population = _positive_int(
         metadata.get("source_dish_population_count", metadata.get("fish_count")),
@@ -203,7 +211,7 @@ def build_experiment_setup_record(
         "subject_assignment_status": assignment_status,
         "subject_metadata_ref": str(subject_metadata_ref),
         "subject_metadata_sha256": str(subject_metadata_sha256),
-        "source": source,
+        "source": source_record,
     }
     if population is not None:
         record["source_dish_population_count"] = population
@@ -253,8 +261,15 @@ def publish_experiment_setup(
     record: Mapping[str, Any],
     *,
     source_h5_path: str | Path | None = None,
+    source_artifact: Mapping[str, Any] | None = None,
+    provenance_command: str = "import_recording_analysis:publish_experiment_setup",
 ) -> ResolvedExperimentSetup:
     """Idempotently publish and select one immutable setup run."""
+
+    if source_h5_path is not None and source_artifact is not None:
+        raise ExperimentSetupError(
+            "Provide source_h5_path or source_artifact, not both"
+        )
 
     canonical = _validate_record(record)
     digest = experiment_setup_sha256(canonical)
@@ -300,30 +315,34 @@ def publish_experiment_setup(
     if validated != canonical:
         raise ValueError("Experiment setup did not round-trip through Zarr attrs")
     run.attrs["stage_selector_eligible"] = True
-    source_fingerprint = None
-    if source_h5_path is not None:
-        source_fingerprint = optional_source_stat_fingerprint_attrs(
-            source_h5_path,
-            attr_prefix="source_h5",
-        ).get("source_h5_fingerprint")
+    if source_artifact is not None:
+        input_artifacts = [json_attr_safe_mapping(source_artifact)]
+    else:
+        source_fingerprint = None
+        if source_h5_path is not None:
+            source_fingerprint = optional_source_stat_fingerprint_attrs(
+                source_h5_path,
+                attr_prefix="source_h5",
+            ).get("source_h5_fingerprint")
+        input_artifacts = [
+            {
+                "kind": "source_h5",
+                "path": str(source_h5_path) if source_h5_path is not None else None,
+                "stat_fingerprint": source_fingerprint,
+            }
+        ]
     mark_run_complete(
         run,
         parent_group=parent,
         run_name=run_name,
         run_provenance=build_writer_run_provenance(
-            command="import_recording_analysis:publish_experiment_setup",
+            command=provenance_command,
             params={
                 "schema_id": EXPERIMENT_SETUP_SCHEMA_ID,
                 "record_sha256": digest,
             },
             input_run_ids={},
-            input_artifacts=[
-                {
-                    "kind": "source_h5",
-                    "path": str(source_h5_path) if source_h5_path is not None else None,
-                    "stat_fingerprint": source_fingerprint,
-                }
-            ],
+            input_artifacts=input_artifacts,
         ),
     )
 
