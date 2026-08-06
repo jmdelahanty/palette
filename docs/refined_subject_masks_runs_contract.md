@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-07-19
+last_verified: 2026-08-06
 -->
 
 Purpose: define the runtime/storage contract for refined subject-mask working
@@ -219,11 +219,51 @@ components as future-only.
 
 An ineligible draft `refined_subject_masks_runs/<run>` may be the editable Zarr
 surface for subject-mask review, but browser paint/lasso interactions should
-not require a Zarr rewrite for every small UI action. A run becomes a canonical
-scientific snapshot only after publication, completion, and selector
-activation. Published `coordinate_contract = "canonical_v2"` runs are
-immutable: later edits create a new run/revision and republish; they never
-mutate an eligible snapshot in place.
+not require a Zarr rewrite for every small UI action. The coordinate schema and
+the publication lifecycle are independent. `coordinate_contract =
+"canonical_v2"` says how arrays are interpreted; it does **not** by itself say
+that the run is approved or immutable.
+
+Modern runs carry this exact lifecycle envelope:
+
+```json
+{
+  "refined_subject_mask_lifecycle": {
+    "schema_id": "palette.refined_subject_mask_lifecycle",
+    "schema_version": 1,
+    "state": "editable_draft"
+  }
+}
+```
+
+Allowed states are:
+
+- `editable_draft`: canonical-schema dense masks may be changed through the
+  review writer, and `stage_selector_eligible` must be exactly `false`;
+- `sealed_snapshot`: every component and the aggregate review are approved,
+  scientific/derived receipts have been freshly regenerated, the child is
+  immutable, and selector activation may make it visible.
+
+Legacy canonical-v2 runs without this envelope remain immutable fail-closed.
+That compatibility rule prevents old publications from accidentally becoming
+editable merely because they predate the lifecycle field.
+
+An unapproved run that an older finalizer mistakenly made eligible may be
+demoted without rewriting scientific arrays:
+
+```bash
+scripts/py -m fisheye.utils.migrate_refined_subject_mask_editable_draft \
+  /path/to/training.zarr --run <run> --apply
+```
+
+The migration refuses approved or authoritative targets, clears eligibility
+before other metadata changes, removes same-run `latest`/`latest_complete`,
+sets `latest_pending`, stamps the explicit draft lifecycle, and reconsolidates
+metadata as the final visibility step.
+
+A run becomes a canonical scientific snapshot only after explicit approval,
+fresh sealing, and selector activation. Later edits create a new editable
+revision and republish; they never mutate an eligible sealed snapshot in place.
 
 ## Mask Storage Authority And Chunking
 
@@ -240,8 +280,14 @@ The edit/publish boundary is strict:
 
 - draft runs remain `stage_selector_eligible = false` and may mark derived
   products stale after dense edits;
-- publication requires all relevant stale flags explicitly false, seals exact
-  array payloads and producer attrs, then completes and activates the child;
+- finalization creates a completed `editable_draft`, leaves
+  `latest_pending` pointing to it, and does not activate it merely because its
+  canonical coordinate publication succeeded;
+- approval is component-scoped; the final component approval records review
+  completion but does not silently activate the draft;
+- publication requires all relevant stale flags explicitly false, regenerates
+  exact array payload and provenance receipts, changes the lifecycle to
+  `sealed_snapshot`, and only then performs selector activation;
 - a complete eligible canonical-v2 child must not be edited, refreshed, or
   backfilled in place; maintenance produces a new child with new provenance;
 - future-recording readers use the strict canonical loader and do not invoke a
@@ -464,10 +510,10 @@ Minimum browser-specific tests:
 ## Assembly And Finalization Semantics
 
 `refined_subject_masks_runs/<run>` is not merely a bag of assembled component
-masks. Before publication it is a refined/editable working artifact; after
-publication it is an immutable canonical snapshot. It should be treated as
-scientifically valid only after refinement/finalization has materialized the
-canonical QA surface and strict publication has succeeded.
+masks. Before publication it is an explicit selector-ineligible
+`editable_draft`; after approval, receipt refresh, sealing, and activation it
+is an immutable canonical snapshot. Canonical-schema finalization alone does
+not confer scientific authority.
 
 Required behavior:
 

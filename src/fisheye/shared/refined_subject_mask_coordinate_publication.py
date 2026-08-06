@@ -98,6 +98,12 @@ from fisheye.shared.proof_verification import (
     finish_proof_verification,
     proof_verification_operation,
 )
+from fisheye.shared.refined_subject_mask_mutation import (
+    REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
+    refined_subject_mask_lifecycle_state,
+    stamp_refined_subject_mask_editable_draft,
+    stamp_refined_subject_mask_sealed_snapshot,
+)
 from fisheye.shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_COORDINATE_DERIVATION_ATTR,
     SUBJECT_MASK_SURFACE_INVENTORY_ATTR,
@@ -1953,6 +1959,7 @@ def _load_refined_subject_mask_coordinate_context(
     run_path: str,
     *,
     require_complete: bool,
+    require_activation_receipt: bool | None = None,
     expected_selector_eligible: bool,
     expected_publication_owner: str | None = None,
 ) -> BoundRefinedSubjectMaskCoordinateContext:
@@ -2043,7 +2050,11 @@ def _load_refined_subject_mask_coordinate_context(
         labels=labels,
     ):
         _fail("Persisted refinement authority differs from live provenance.")
-    if require_complete:
+    if require_activation_receipt is None:
+        require_activation_receipt = require_complete
+    if require_activation_receipt and not require_complete:
+        _fail("Activation receipts are valid only for completed refined runs.")
+    if require_activation_receipt:
         activation_receipt = bind_persisted_coordinate_record(
             run,
             attr_name=REFINED_SUBJECT_MASK_ACTIVATION_RECEIPT_ATTR,
@@ -4384,6 +4395,7 @@ def _load_refined_subject_mask_coordinate_surfaces(
     run_path: str,
     *,
     require_complete: bool,
+    require_activation_receipt: bool | None = None,
     expected_selector_eligible: bool,
     expected_publication_owner: str | None = None,
 ) -> BoundRefinedSubjectMaskCoordinateSurfaces:
@@ -4391,6 +4403,7 @@ def _load_refined_subject_mask_coordinate_surfaces(
         root,
         run_path,
         require_complete=require_complete,
+        require_activation_receipt=require_activation_receipt,
         expected_selector_eligible=expected_selector_eligible,
         expected_publication_owner=expected_publication_owner,
     )
@@ -4556,12 +4569,16 @@ def _load_completed_ineligible_refined_subject_mask_coordinate_surfaces(
     root: Any,
     run_path: str,
     *,
+    require_activation_receipt: bool = False,
     expected_publication_owner: str | None = None,
 ) -> BoundRefinedSubjectMaskCoordinateSurfaces:
+    """Validate a completed editable draft before its activation receipt exists."""
+
     return _load_refined_subject_mask_coordinate_surfaces(
         root,
         run_path,
         require_complete=True,
+        require_activation_receipt=require_activation_receipt,
         expected_selector_eligible=False,
         expected_publication_owner=expected_publication_owner,
     )
@@ -4682,6 +4699,11 @@ def _activate_validated_refined_subject_mask_coordinate_surfaces(
     ):
         _fail("Refined activation proof does not name the exact ineligible child.")
     _publication_owner(context._run_group, expected=publication_owner_token)
+    if (
+        refined_subject_mask_lifecycle_state(context._run_group)
+        != REFINED_SUBJECT_MASK_EDITABLE_DRAFT
+    ):
+        _fail("Refined activation requires one explicit editable draft.")
 
     def fresh_parent() -> Any:
         parent = _node(root, "refined_subject_masks_runs", label="refined parent")
@@ -4696,12 +4718,11 @@ def _activate_validated_refined_subject_mask_coordinate_surfaces(
         name: _snapshot_value(selector_snapshot, name)
         for name in _ACTIVATION_BASELINE_ATTRS
     }
-    pending_snapshot = _snapshot_value(selector_snapshot, "latest_pending")
-    if pending_snapshot == (True, str(run_name)):
-        _fail(
-            "Refined activation cannot prove ownership of a pre-existing same-run "
-            "latest_pending selector."
-        )
+    # The snapshot may contain an older pending run (an activation attempt has
+    # already installed this child) or this same durable editable draft. Exact
+    # live-state validation below still requires latest_pending == run_name;
+    # rollback restores whichever prior value the caller captured.
+    _snapshot_value(selector_snapshot, "latest_pending")
     expected_parent_states["latest_pending"] = (True, str(run_name))
 
     def write_attr(parent: Any, name: str, value: Any) -> Any:
@@ -4737,6 +4758,7 @@ def _activate_validated_refined_subject_mask_coordinate_surfaces(
         current = _load_completed_ineligible_refined_subject_mask_coordinate_surfaces(
             root,
             expected_path,
+            require_activation_receipt=True,
             expected_publication_owner=publication_owner_token,
         )
         if current.inventory.record_sha256 != value.inventory.record_sha256:
@@ -4802,6 +4824,7 @@ def _activate_validated_refined_subject_mask_coordinate_surfaces(
             statuses=(RUN_STATUS_COMPLETE,),
             label="Refined activation target",
         )
+        stamp_refined_subject_mask_sealed_snapshot(child)
         # Commit point: there must be no fallible store operation after this
         # selector-eligibility write.  Readers independently revalidate every
         # parent selector, receipt, payload, and descriptor before use.
@@ -4825,6 +4848,14 @@ def _activate_validated_refined_subject_mask_coordinate_surfaces(
                     owner=publication_owner_token,
                     attempt_owned_states=attempt_owned_states,
                 )
+                child = _fresh_owned_ineligible_run(
+                    root,
+                    expected_path,
+                    owner=publication_owner_token,
+                    statuses=(RUN_STATUS_COMPLETE,),
+                    label="Refined activation rollback target",
+                )
+                stamp_refined_subject_mask_editable_draft(child)
             except BaseException as rollback_exc:  # pragma: no cover - hostile store
                 raise RefinedSubjectMaskCoordinatePublicationError(
                     "Refined activation failed and rollback was incomplete: "

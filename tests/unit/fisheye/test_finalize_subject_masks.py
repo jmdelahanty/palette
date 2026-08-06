@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -30,6 +31,18 @@ from fisheye.shared.mask_store import (
 from fisheye.shared.refined_subject_masks_io import (
     RefinedSubjectMasksIOError,
     load_canonical_refined_subject_masks_run_tables,
+)
+from fisheye.shared.proof_verification import proof_verification_scope
+from fisheye.shared.refined_subject_mask_coordinate_publication import (
+    REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+    REFINED_SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+    REFINED_SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+    _activate_validated_refined_subject_mask_coordinate_surfaces,
+    _load_completed_ineligible_refined_subject_mask_coordinate_surfaces,
+)
+from fisheye.shared.refined_subject_mask_mutation import (
+    REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
+    REFINED_SUBJECT_MASK_LIFECYCLE_ATTR,
 )
 from fisheye.shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
@@ -492,7 +505,6 @@ def test_finalizer_routes_canonical_source_through_strict_publication_lifecycle(
         lambda *_args, **_kwargs: (source, None),
     )
     events: list[str] = []
-    pending = object()
 
     def prepare(*_args, **kwargs):
         run = root["refined_subject_masks_runs/canonical_refined"]
@@ -508,32 +520,11 @@ def test_finalizer_routes_canonical_source_through_strict_publication_lifecycle(
         assert run.attrs["palette_run_completion_status"] == "running"
         run.attrs["coordinate_contract"] = "canonical_v2"
         events.append("publish")
-        return pending
-
-    def activate(_root, parent, value, **kwargs):
-        run = root["refined_subject_masks_runs/canonical_refined"]
-        assert value is pending
-        assert run.attrs["palette_run_completion_status"] == "complete"
-        assert run.attrs["stage_selector_eligible"] is False
-        assert parent.attrs["latest_pending"] == "canonical_refined"
-        assert (
-            kwargs["publication_owner_token"]
-            == run.attrs[mod.REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR]
-        )
-        parent.attrs["latest_complete"] = "canonical_refined"
-        parent.attrs["latest"] = "canonical_refined"
-        del parent.attrs["latest_pending"]
-        run.attrs["stage_selector_eligible"] = True
-        events.append("activate")
+        return object()
 
     monkeypatch.setattr(mod, "prepare_refined_subject_mask_coordinate_context", prepare)
     monkeypatch.setattr(
         mod, "publish_refined_subject_mask_coordinate_surfaces", publish
-    )
-    monkeypatch.setattr(
-        mod,
-        "_activate_validated_refined_subject_mask_coordinate_surfaces",
-        activate,
     )
 
     summary = mod.finalize_subject_mask_run(
@@ -549,8 +540,14 @@ def test_finalizer_routes_canonical_source_through_strict_publication_lifecycle(
 
     run = root["refined_subject_masks_runs/canonical_refined"]
     assert summary["canonical_coordinate_publication"] is True
-    assert events == ["prepare", "publish", "activate"]
-    assert run.attrs["stage_selector_eligible"] is True
+    assert events == ["prepare", "publish"]
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs[REFINED_SUBJECT_MASK_LIFECYCLE_ATTR]["state"] == (
+        REFINED_SUBJECT_MASK_EDITABLE_DRAFT
+    )
+    assert root["refined_subject_masks_runs"].attrs["latest_pending"] == (
+        "canonical_refined"
+    )
     assert len(run.attrs[mod.REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR]) == 32
     assert run.attrs["bbox_xyxy_convention"] == "pixel_edge_half_open"
     assert "detection_source" not in run
@@ -631,6 +628,46 @@ def test_real_finalizer_publication_activation_and_strict_reader_integration(
         write_component_contours=False,
         write_sampled_component_contours=False,
     )
+    parent = root["refined_subject_masks_runs"]
+    run = parent["r1"]
+    with pytest.raises(RefinedSubjectMasksIOError, match="selector|eligible"):
+        load_canonical_refined_subject_masks_run_tables(root, run_name="r1")
+    run.attrs["component_review_statuses"] = {
+        component_name: {"state": "approved"}
+        for component_name in run.attrs["mask_labels"]
+    }
+    run.attrs["refined_subject_mask_review_status"] = {"state": "approved"}
+    selector_snapshot = {
+        name: (name in parent.attrs, copy.deepcopy(parent.attrs.get(name)))
+        for name in (
+            "latest",
+            "latest_complete",
+            "latest_pending",
+            "authoritative_run",
+            "authoritative_run_provenance",
+            REFINED_SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+            REFINED_SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+            REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+        )
+    }
+    with proof_verification_scope():
+        pending = _load_completed_ineligible_refined_subject_mask_coordinate_surfaces(
+            root,
+            "refined_subject_masks_runs/r1",
+            expected_publication_owner=run.attrs[
+                mod.REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
+            ],
+        )
+        _activate_validated_refined_subject_mask_coordinate_surfaces(
+            root,
+            parent,
+            pending,
+            run_name="r1",
+            publication_owner_token=run.attrs[
+                mod.REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
+            ],
+            selector_snapshot=selector_snapshot,
+        )
     loaded = load_canonical_refined_subject_masks_run_tables(root)
 
     assert summary["canonical_coordinate_publication"] is True

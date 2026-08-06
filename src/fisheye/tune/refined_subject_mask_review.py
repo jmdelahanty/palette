@@ -57,6 +57,8 @@ from ..shared.provenance_attrs import (
 )
 from ..shared.refined_subject_component_contours import mark_component_rows_updated
 from ..shared.refined_subject_mask_mutation import (
+    REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
+    refined_subject_mask_lifecycle_state,
     require_mutable_refined_subject_mask_group,
     resolve_mutable_refined_subject_mask_run,
 )
@@ -2455,14 +2457,29 @@ def apply_component_review_status(
         reviewer=reviewer,
         notes="auto_aggregated_from_component_review_statuses",
     )
-    authoritative_approval = _approve_authoritative_refined_subject_masks(
-        zarr_path,
-        refined_run=refined_run,
-        run_state=run_state,
-        reviewer=reviewer,
-        notes=notes,
+    editable_draft = (
+        refined_subject_mask_lifecycle_state(refined)
+        == REFINED_SUBJECT_MASK_EDITABLE_DRAFT
+        and refined.attrs.get("refined_subject_mask_lifecycle") is not None
     )
-    if run_state == "approved" and not _authoritative_approval_ok(authoritative_approval):
+    if editable_draft:
+        authoritative_approval = {
+            "attempted": False,
+            "reason": "editable_draft_requires_explicit_seal",
+        }
+    else:
+        authoritative_approval = _approve_authoritative_refined_subject_masks(
+            zarr_path,
+            refined_run=refined_run,
+            run_state=run_state,
+            reviewer=reviewer,
+            notes=notes,
+        )
+    if (
+        run_state == "approved"
+        and not editable_draft
+        and not _authoritative_approval_ok(authoritative_approval)
+    ):
         existing_run_payload = dict(refined.attrs.get("refined_subject_mask_review_status") or {})
         existing_run_payload["authoritative_approval"] = authoritative_approval
         existing_component_payload = dict(existing_component_reviews.get(str(component_name)) or {})

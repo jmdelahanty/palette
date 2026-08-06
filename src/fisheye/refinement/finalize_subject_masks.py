@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import hashlib
 import json
@@ -54,6 +53,7 @@ from ..shared.row_lineage import (
 )
 from ..shared.refined_subject_mask_mutation import (
     resolve_mutable_refined_subject_mask_run,
+    stamp_refined_subject_mask_editable_draft,
 )
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -136,11 +136,7 @@ from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geom
 from ..shared.refined_subject_eye_geometry import EYE_GEOMETRY_SCHEMA_ID
 from ..shared.refined_subject_eye_geometry import EYE_PAIR_RELATION_SCHEMA_ID
 from ..shared.refined_subject_mask_coordinate_publication import (
-    REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
-    REFINED_SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
     REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
-    REFINED_SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
-    _activate_validated_refined_subject_mask_coordinate_surfaces,
     prepare_refined_subject_mask_coordinate_context,
     publish_refined_subject_mask_coordinate_surfaces,
 )
@@ -237,16 +233,6 @@ _CANONICAL_REFINED_SOURCE_ARRAYS = (
     "instance_key",
     "source_acquisition_frame_index",
     "source_crop_xywh",
-)
-_CANONICAL_REFINED_SELECTOR_ATTRS = (
-    "latest",
-    "latest_complete",
-    "latest_pending",
-    "authoritative_run",
-    "authoritative_run_provenance",
-    REFINED_SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
-    REFINED_SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
-    REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
 )
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
@@ -2722,32 +2708,6 @@ def _copy_exact_canonical_source_arrays(
         )
 
 
-def _canonical_refined_selector_snapshot(
-    parent: zarr.Group,
-) -> dict[str, tuple[bool, Any]]:
-    return {
-        name: (name in parent.attrs, copy.deepcopy(parent.attrs.get(name)))
-        for name in _CANONICAL_REFINED_SELECTOR_ATTRS
-    }
-
-
-def _restore_attempt_pending_selector(
-    parent: zarr.Group,
-    snapshot: Mapping[str, tuple[bool, Any]],
-    *,
-    run_name: str,
-) -> None:
-    """Restore only an attempt-owned pending selector after pre-activation failure."""
-
-    if parent.attrs.get("latest_pending") != str(run_name):
-        return
-    present, value = snapshot["latest_pending"]
-    if present:
-        parent.attrs["latest_pending"] = copy.deepcopy(value)
-    else:
-        del parent.attrs["latest_pending"]
-
-
 def _stamp_non_authoritative_refined_mask_caches(run_group: zarr.Group) -> None:
     for name in ("mask_bitpacked", "mask_rle"):
         cache = run_group.get(name)
@@ -3221,6 +3181,8 @@ def _create_refined_run_shell(
         intended_use=DEFAULT_REVIEW_INTENDED_USE,
         notes="auto_initialized_from_components",
     )
+    if future_canonical:
+        stamp_refined_subject_mask_editable_draft(run_group)
 
     git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
     env_info = get_environment_info(
@@ -7766,16 +7728,14 @@ def finalize_subject_mask_run(
             )
             run_group = root[f"refined_subject_masks_runs/{target_run}"]
             _stamp_non_authoritative_refined_mask_caches(run_group)
-            pending_coordinate_surfaces = (
-                publish_refined_subject_mask_coordinate_surfaces(
-                    root,
-                    f"refined_subject_masks_runs/{target_run}",
-                    expected_publication_owner=canonical_publication_owner,
-                )
+            publish_refined_subject_mask_coordinate_surfaces(
+                root,
+                f"refined_subject_masks_runs/{target_run}",
+                expected_publication_owner=canonical_publication_owner,
             )
             # Close the running-child proof phase before completion changes the
-            # lifecycle record. Activation starts a fresh completed-child phase
-            # and closes it before touching parent selectors.
+            # lifecycle record. The completed child remains an editable,
+            # selector-ineligible draft until an explicit approval/seal step.
             finish_proof_verification()
             run_group = root[f"refined_subject_masks_runs/{target_run}"]
             mark_run_complete(
@@ -7785,28 +7745,20 @@ def finalize_subject_mask_run(
                 run_provenance=run_provenance,
             )
             restart_proof_verification()
-            selector_snapshot = _canonical_refined_selector_snapshot(refined_parent)
-            try:
-                refined_parent.attrs["latest_pending"] = target_run
-                if refined_parent.attrs.get("latest_pending") != target_run:
-                    raise RuntimeError(
-                        "Canonical refined latest_pending did not persist exactly."
-                    )
-                _activate_validated_refined_subject_mask_coordinate_surfaces(
-                    root,
-                    refined_parent,
-                    pending_coordinate_surfaces,
-                    run_name=target_run,
-                    publication_owner_token=canonical_publication_owner,
-                    selector_snapshot=selector_snapshot,
+            refined_parent.attrs["latest_pending"] = target_run
+            if refined_parent.attrs.get("latest_pending") != target_run:
+                raise RuntimeError(
+                    "Canonical refined latest_pending did not persist exactly."
                 )
-            except BaseException:
-                _restore_attempt_pending_selector(
-                    refined_parent,
-                    selector_snapshot,
-                    run_name=target_run,
-                )
-                raise
+            refined_parent.attrs["refined_subject_mask_review_status_latest"] = (
+                target_run
+            )
+            # Coordinate publication proves that the editable draft uses the
+            # canonical schema. It does not authorize selection. Review edits
+            # may now mutate dense masks_roi and invalidate derived receipts;
+            # an explicit approval/sealing operation must republish and activate
+            # a fresh immutable snapshot later.
+            finish_proof_verification()
     else:
         mark_run_complete(
             run_group,

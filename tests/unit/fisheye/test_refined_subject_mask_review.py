@@ -22,6 +22,10 @@ from fisheye.shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
 )
+from fisheye.shared.refined_subject_mask_mutation import (
+    REFINED_SUBJECT_MASK_LIFECYCLE_ATTR,
+    stamp_refined_subject_mask_editable_draft,
+)
 from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR
 from fisheye.tune import refined_subject_mask_review as mod
 
@@ -1604,6 +1608,49 @@ def test_apply_component_review_status_sets_authoritative_when_run_approved(tmp_
     assert run_payload["authoritative_approval"]["status"] == "ok"
     reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     assert reopened["refined_subject_masks_runs"].attrs[AUTHORITATIVE_RUN_ATTR] == refined.run_name
+
+
+def test_editable_canonical_draft_records_approval_without_selecting_it(
+    tmp_path,
+) -> None:
+    zarr_path = tmp_path / "subject_mask_editable_draft_approval.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    refined.group.attrs["coordinate_contract"] = "canonical_v2"
+    refined.group.attrs["refined_subject_mask_publication_owner"] = "a" * 32
+    refined.group.attrs["stage_selector_eligible"] = False
+    stamp_refined_subject_mask_editable_draft(refined.group)
+
+    run_payload: dict[str, object] = {}
+    for component_name in refined.component_names:
+        _component_payload, run_payload = mod.apply_component_review_status(
+            refined.parent,
+            refined.run_name,
+            refined.group,
+            component_name=component_name,
+            state="approved",
+            method="manual",
+            intended_use="training",
+            reviewer="tester",
+            notes=f"{component_name} approved",
+            zarr_path=zarr_path,
+        )
+
+    assert run_payload["state"] == "approved"
+    assert run_payload["authoritative_approval"] == {
+        "attempted": False,
+        "reason": "editable_draft_requires_explicit_seal",
+    }
+    assert refined.group.attrs[REFINED_SUBJECT_MASK_LIFECYCLE_ATTR]["state"] == (
+        "editable_draft"
+    )
+    assert refined.group.attrs["stage_selector_eligible"] is False
+    assert AUTHORITATIVE_RUN_ATTR not in refined.parent.attrs
 
 
 def test_apply_component_review_status_final_approval_is_fail_closed_when_authoritative_approval_fails(

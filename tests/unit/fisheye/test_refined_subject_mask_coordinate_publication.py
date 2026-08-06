@@ -31,6 +31,9 @@ from fisheye.shared.refined_subject_mask_coordinate_publication import (
     publish_refined_subject_mask_coordinate_surfaces,
     require_bound_refined_subject_mask_coordinate_surfaces,
 )
+from fisheye.shared.refined_subject_mask_mutation import (
+    stamp_refined_subject_mask_editable_draft,
+)
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started
 from tests.publication_fixture_clone import sealed_fixture_copy_memo
 from tests.unit.fisheye.test_keypoint_coordinate_publication import _MutableGroup
@@ -70,6 +73,15 @@ def _snapshot(parent: Any) -> dict[str, tuple[bool, Any]]:
             REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
         )
     }
+
+
+def _stamp_approved_editable_lifecycle(run: Any) -> None:
+    labels = tuple(str(item) for item in run.attrs["mask_labels"])
+    run.attrs["component_review_statuses"] = {
+        component_name: {"state": "approved"} for component_name in labels
+    }
+    run.attrs["refined_subject_mask_review_status"] = {"state": "approved"}
+    stamp_refined_subject_mask_editable_draft(run)
 
 
 def _activate_raw(root: Any, parent: Any, run: Any) -> None:
@@ -198,6 +210,7 @@ def _build_refined_fixture(
         }
     )
     mark_run_started(run, run_name="r1", stage="refine_subject_masks")
+    _stamp_approved_editable_lifecycle(run)
     parent.attrs["latest_pending"] = "r1"
     for name in (
         "source_crop_row_ids",
@@ -463,6 +476,7 @@ def _add_minimal_refined_run(
         }
     )
     mark_run_started(run, run_name=run_name, stage="refine_subject_masks")
+    _stamp_approved_editable_lifecycle(run)
     for name in (
         "source_crop_row_ids",
         "instance_key",
