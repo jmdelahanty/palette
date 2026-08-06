@@ -45,7 +45,7 @@ Checklist:
 - [x] Keep the still-editable training root unconsolidated.
 - [x] Validate the first Batman canary: 178 one-detection frames, 22 misses,
   zero multi-detection frames; no values were forced or imputed.
-- [ ] Initialize a selector-ineligible mutable refined review seed after inspecting
+- [x] Initialize a selector-ineligible mutable refined review seed after inspecting
   zero/one/multiple detector cardinality.
 - [ ] Review/correct detections, approve for training, then publish crop,
   keypoint, and subject-mask training surfaces.
@@ -81,3 +81,32 @@ An independent direct-metadata reopen returned `valid=true` with no errors.
 The `detect_runs` parent contains no selector attributes; both run groups are
 complete and selector-ineligible. Root consolidated metadata remains `null`, as
 required while detection review may still add or correct rows.
+
+The mutable review seed was then initialized at Palette commit
+`dbbfc2f56cd68c6c3a77a2f6b76c2e1ee2374631` by LSF job `153285133`:
+
+- `refined_detect_runs/refined_detect_batman_training_review_20260806_v1`
+- 178 presented instance rows and 178 source-audit rows
+- exact instance-key equality with the bound detector snapshot
+- top-1 policy enabled, with zero duplicate rows removed
+- 89% coverage and 22 intentionally unresolved sampled frames
+- complete but selector-ineligible; no `latest`, `latest_complete`, or pending
+  selector was written
+- no registry/status projection and no root consolidation
+
+The missing local review frames are `87, 88, 91..109, 113`, corresponding to
+acquisition frames `60552, 61248, 63336..75864` in steps of 696, and `78648`.
+They should be inspected as a contiguous failure episode rather than silently
+filled. The explicit review command is:
+
+```bash
+scripts/py -m fisheye.tune.detect_review \
+  /path/to/2026-07-21T19-38-32Z_arena_2_Batman_training_base.zarr \
+  --refined-run refined_detect_batman_training_review_20260806_v1 \
+  --frames 87,88,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,113 \
+  --use-full-res
+```
+
+This mutable review surface is staging, not the final immutable refined-v1
+publication. Accepted edits must later be compacted and validated into the
+strict refined snapshot contract before training activation.
