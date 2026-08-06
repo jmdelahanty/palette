@@ -87,8 +87,25 @@ The first Batman canary used 200 reviewed full-resolution frames and passed:
 - direct and consolidated materialization-binding validation; and
 - no crop selector or registry activation.
 
-The canary remains a node-local `/tmp` artifact. It is compatibility and
-machinery evidence, not a registered training publication.
+The initial explicit assembly remained node-local. The reusable publisher was
+then exercised from clean implementation commit
+`2540817883d7122acbb26a72e3b8d09249f73b3b` and published the checked,
+selector-ineligible artifact at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/
+batman_training_canary_20260806_v1/
+2026-07-21T19-38-32Z_arena_2_Batman_reviewed_crops_training_v1.zarr
+```
+
+The final strict materialization-binding digest is
+`e73d1b84de3a7e9eb77de3007a53acc82c8eee565983eed9595e477dc415a3b7`.
+The final direct/consolidated reopen confirmed 181 unique keys, terminal offset
+181, the final archive path as the self-contained source identity, no crop
+selectors, `training_artifact_status = complete`, and deferred registry
+activation. No hidden publication sibling or node-local temporary artifact
+remained. This is benchmark/canary evidence, not a registered or selected
+training publication.
 
 ## First-Class Detection Review
 
