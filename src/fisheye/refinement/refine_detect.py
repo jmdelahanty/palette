@@ -31,6 +31,10 @@ from ..shared.dish_mask_boundary import (
     apply_dish_mask_boundary_tolerance,
     resolve_dish_mask_boundary_tolerance,
 )
+from ..shared.detection_tables import (
+    read_detection_frame_counts,
+    resolve_detection_instance_table,
+)
 from ..shared.metadata import get_total_frames, get_detection_method
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.refined_detect_curation import write_curated_refined_detect_surfaces
@@ -203,11 +207,19 @@ def _get_sampled_frame_count(root: zarr.Group, detect_group: Optional[zarr.Group
             return int(raw["images_ds"].shape[0])
         if "images_full" in raw:
             return int(raw["images_full"].shape[0])
-    if detect_group is not None and "frame_counts" in detect_group:
-        try:
-            return int(FrameDomains(root=root, run_group=detect_group).count(FrameDomain.RUN_FRAME))
-        except FrameDomainError:
-            return int(detect_group["frame_counts"].shape[0])
+    if detect_group is not None:
+        detect_table = resolve_detection_instance_table(detect_group)
+        if "frame_row_offsets" in detect_table:
+            return int(detect_table["frame_row_offsets"].shape[0]) - 1
+        if "frame_counts" in detect_table:
+            try:
+                return int(
+                    FrameDomains(root=root, run_group=detect_table).count(
+                        FrameDomain.RUN_FRAME
+                    )
+                )
+            except FrameDomainError:
+                return int(detect_table["frame_counts"].shape[0])
     return None
 
 
@@ -473,6 +485,7 @@ def _modern_quality_slice(
     detect_group: zarr.Group,
     total_detections: int,
 ) -> np.ndarray:
+    detect_table = resolve_detection_instance_table(detect_group)
     if not is_run_complete(quality_group):
         raise ValueError(f"modern quality run is incomplete: {quality_group_path}")
     missing = [
@@ -482,9 +495,9 @@ def _modern_quality_slice(
     ]
     if missing:
         raise ValueError(f"modern quality run is missing arrays: {missing}")
-    if "instance_key" not in detect_group:
+    if "instance_key" not in detect_table:
         raise ValueError("modern keyed quality requires source detect instance_key")
-    if np.dtype(detect_group["instance_key"].dtype) != np.dtype(np.uint64):
+    if np.dtype(detect_table["instance_key"].dtype) != np.dtype(np.uint64):
         raise ValueError("source detect instance_key must be uint64 for modern quality")
 
     source_group_path = normalize_attr(
@@ -522,7 +535,7 @@ def _modern_quality_slice(
     quality_keys = np.asarray(
         quality_group["instance_key"][start:stop], dtype=np.uint64
     ).reshape(-1)
-    detect_keys = np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+    detect_keys = np.asarray(detect_table["instance_key"][:], dtype=np.uint64).reshape(-1)
     if not np.array_equal(quality_keys, detect_keys):
         raise ValueError(
             "modern quality instance_key slice does not exactly match the source detect run"
@@ -1307,8 +1320,6 @@ def create_refined_run(
     if filters_config.get('remove_blips', False):
         filters.append('remove_blips')
     
-    max_gap_val = 0
-    interp_method = 'disabled'
     refine_mode = "standard"
     
     # Open mutable stores directly so a newly written run is not hidden by stale consolidated metadata.
@@ -1322,14 +1333,15 @@ def create_refined_run(
     
     source_detect_path = _join_group_path(detect_family_path, detect_run)
     detect_group = root[source_detect_path]
+    detect_table = resolve_detection_instance_table(detect_group)
     console.print(f"Source detect run: [cyan]{detect_run}[/cyan]")
     if detect_family_path != DEFAULT_DETECT_FAMILY_PATH:
         console.print(f"Source detect family: [cyan]{detect_family_path}[/cyan]")
     
     # Load detection data
     console.print("\nLoading detection data...")
-    bbox_coords = detect_group['bbox_norm_coords'][:]
-    frame_indices = detect_group['frame_indices'][:]
+    bbox_coords = detect_table['bbox_norm_coords'][:]
+    frame_indices = detect_table['frame_indices'][:]
 
     sampled_import, sampled_meta = _read_sampled_import_meta(root)
     require_quality_for_run = bool(require_detect_quality and not sampled_import)
@@ -1433,27 +1445,24 @@ def create_refined_run(
         console.print(f"Using {num_frames} frames from metadata")
     
     # Get frame counts
-    if 'frame_counts' in detect_group:
-        frame_counts = detect_group['frame_counts'][:]
-    else:
-        frame_counts = np.bincount(frame_indices, minlength=num_frames).astype('i4')
+    frame_counts = read_detection_frame_counts(detect_table, n_frames=num_frames)
     
     # Scores may not exist for blob detection - create placeholder if missing
-    if 'scores' in detect_group:
-        scores = detect_group['scores'][:]
+    if 'scores' in detect_table:
+        scores = detect_table['scores'][:]
     else:
         # Create placeholder scores (all 1.0 for blob detections)
         scores = np.ones(len(bbox_coords), dtype='f4')
         console.print("  [yellow]Note: No scores array found, using placeholder values[/yellow]")
 
-    if 'class_ids' in detect_group:
-        class_ids = detect_group['class_ids'][:].astype('i4', copy=False)
+    if 'class_ids' in detect_table:
+        class_ids = detect_table['class_ids'][:].astype('i4', copy=False)
     else:
         class_ids = np.zeros(len(bbox_coords), dtype='i4')
         console.print("  [yellow]Note: No class_ids array found, defaulting to 0[/yellow]")
     raw_instance_keys = (
-        np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
-        if "instance_key" in detect_group
+        np.asarray(detect_table["instance_key"][:], dtype=np.uint64).reshape(-1)
+        if "instance_key" in detect_table
         else None
     )
     if raw_instance_keys is not None and raw_instance_keys.shape[0] != len(bbox_coords):
@@ -1463,7 +1472,7 @@ def create_refined_run(
     console.print(f"  Total frames: {num_frames}")
     
     # Step 1: Filter
-    console.print(f"\n[bold]Step 1: Filtering[/bold]")
+    console.print("\n[bold]Step 1: Filtering[/bold]")
     console.print(f"  Filters: {filters}")
     
     (filtered_bboxes, filtered_scores, filtered_counts,
@@ -1522,7 +1531,7 @@ def create_refined_run(
         console.print(f"    - {reason}: {count}")
     
     # Step 2: Build sparse curated surfaces
-    console.print(f"\n[bold]Step 2: Sparse Curated Surfaces[/bold]")
+    console.print("\n[bold]Step 2: Sparse Curated Surfaces[/bold]")
     console.print("  Interpolation: disabled")
 
     sparse_refined = _build_sparse_refined_inputs_from_filtered(
@@ -1560,7 +1569,7 @@ def create_refined_run(
     }
     
     # Step 3: Save
-    console.print(f"\n[bold]Step 3: Saving Refined Run[/bold]")
+    console.print("\n[bold]Step 3: Saving Refined Run[/bold]")
     
     # Calculate processing time
     duration = time.perf_counter() - start_time
@@ -1759,12 +1768,12 @@ def create_refined_run(
     console.print(f"[green]✓[/green] Refined run saved: {refined_group.path}")
     console.print(f"[green]✓[/green] Processing completed in {duration:.2f} seconds")
     
-    console.print(f"\n[bold green]Coverage Comparison:[/bold green]")
+    console.print("\n[bold green]Coverage Comparison:[/bold green]")
     console.print(f"  Original:     {comparison_stats['original']['frames_with_detections']:5d} frames ({comparison_stats['original']['coverage_percent']:.2f}%)")
     console.print(f"  Refined:      {comparison_stats['refined']['frames_with_detections']:5d} frames ({comparison_stats['refined']['coverage_percent']:.2f}%) "
                  f"[red]{comparison_stats['refined']['coverage_delta']:+.2f}%[/red]")
     
-    console.print(f"\n[bold green]Detection Summary:[/bold green]")
+    console.print("\n[bold green]Detection Summary:[/bold green]")
     console.print(f"  Refined present detections: {len(filtered_bboxes)}")
     console.print(f"  Filtered out detections: {drop_stats['total_dropped']}")
 

@@ -67,25 +67,28 @@ Keyboard shortcuts in the UI: **n** / **p** (next/previous), **c** (clear
 detection for this frame/slot), **r** (reset current edit), **a** (approve),
 **q** (save changes and quit).
 
-For a sampled training Zarr that starts from raw frames only, create unbound
-prediction evidence first:
+For a sampled training Zarr that starts from raw frames only, use the combined
+node-local inference and sampled-training binding path:
 
 ```bash
-scripts/py -m fisheye.utils.predict_training_detections \
+scripts/py -m fisheye.utils.run_sampled_training_detection_canary \
   /path/to/training.zarr \
+  --scratch-root /node/local/bounded-scratch \
   --registry /nvme1/palette_registry.sqlite \
   --model-run-id <registered_detect_run_id> \
-  --run-name detect_seed_<model_or_date> \
+  --artifact-run-id detect_artifact_<model_or_date> \
+  --detect-run-id detect_training_review_<model_or_date> \
   --apply
 ```
 
-This command writes immutable, selector-free
-`detection_artifact_runs/<run>`. It does not publish `detect_runs`, and its
-training/model-frame boxes are not source-camera coordinate authority. Do not
-pass the artifact to `refine_detect --detect-run` or copy/relabel it under
-`detect_runs`. An explicit canonical binding/promotion path must validate its
-frame-source lineage and publish a distinct canonical detect run first. If that
-path is unavailable, stop before review.
+This writes two immutable runs with different roles. The selector-free
+`detection_artifact_runs/<run>` is unbound model evidence and is never a review
+authority. The distinct selector-ineligible `detect_runs/<run>/instances`
+snapshot binds every local sampled row to
+`raw_video/original_frame_indices`, derives stable keys from acquisition-frame
+identity, and uses the access-aware storage profile. Do not pass or relabel the
+artifact as a detect run. Explicitly select the bound run for the canary review;
+production selectors and registry activation remain deferred.
 
 After canonical binding, `refine_detect` can use sampled-import passthrough to
 write the canonical `refined_detect_runs/<run>/instances` surface, disable
