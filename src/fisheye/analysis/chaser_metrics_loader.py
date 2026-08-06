@@ -130,6 +130,7 @@ class CanonicalOnlineCoordinateHandoff:
                 fresh_root = zarr.open_group(
                     store=store,
                     mode="r",
+                    use_consolidated=False,
                 )
                 fresh_run = fresh_root[self._run_group.path]
             fresh_chaser = fresh_run["tracking_data"]["chaser_states"]
