@@ -98,6 +98,33 @@ The comparison artifact records:
 All row identities, frame counters, failure fills, and coordinate bounds passed.
 The v1 artifact was not modified; v2 is a separate immutable derivative.
 
+## Preprocessing contract decision
+
+The comparison is now encoded as pose model-input contract v2 rather than as
+an informal command-line choice. The model-specific contract is checked in at
+`docs/diagnostics/batman_keypoint_v2_candidate_20260805/pose_model_input_contract_v2.json`.
+It retains the immutable training evidence and exact weights digest from v1,
+then adds two evidence-bound profiles for native 348x348 inputs:
+
+- accepted: prepared tensor, centered zero pad to 352x352, `imgsz=352`, stride
+  32, no Ultralytics spatial preprocessing;
+- rejected: numpy-list, centered zero pad to 512x512, Ultralytics resize to
+  256x256.
+
+The accepted profile is limited to selector-ineligible candidate inference
+because the comparison establishes detection yield, not landmark accuracy.
+The whole-recording planner selects a profile by the exact native cache shape.
+The terminal worker independently reconstructs that selection, reproduces a
+digest-bound preprocessing probe, and rejects command-line geometry or mode
+overrides. A model/native-shape pair without one exact accepted profile now
+fails closed; training-source dimensions are no longer used to invent a
+runtime transform.
+
+Contract builders remain generic. Future trained models should publish their
+reviewed native, submitted, and network extents with the model package. The
+runtime consumes those dimensions from the contract rather than using a
+Batman-, crop-, or stride-specific conditional.
+
 ## Subject-mask terminal
 
 - Run:
@@ -147,6 +174,8 @@ validated inline metadata result.
       while preserving the explicit 348-to-model transform contract.
 - [x] Rerun the keypoint terminal with the v005 352-tensor profile and require
       nonzero, reviewable successes; 136/181 passed inference.
+- [x] Freeze the accepted and rejected profiles in a digest-bound v2 model
+      contract and make exact native-shape selection fail closed.
 - [ ] Review the 136 successful keypoint predictions before accepting any as
       training labels.
 - [ ] Review sampled subject-mask predictions before accepting them as dense

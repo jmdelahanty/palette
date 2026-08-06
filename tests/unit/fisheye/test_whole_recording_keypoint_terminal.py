@@ -76,7 +76,7 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
     monkeypatch.setattr(
         mod,
         "validate_pose_runtime_compatibility",
-        lambda _binding: {
+        lambda _binding, _runtime_plan: {
             "runtime_ultralytics_version": "8.3.214",
             "approved_runtime_ultralytics_versions": ["8.3.169", "8.3.214"],
             "preprocessing_probe": {"output_sha256": "a" * 64},

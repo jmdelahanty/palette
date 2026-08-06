@@ -278,13 +278,16 @@ Multi-scale augmentation may improve robustness, but it does not by itself
 resolve a change in source field of view, anatomical scale, or acquisition
 domain.
 
-## Contract-bound scale diagnostic implementation
+## Contract-bound preprocessing implementation
 
-Palette now implements `palette.pose_model_input_contract` v1. The historical
+Palette supports `palette.pose_model_input_contract` v1 for historical
+compatibility and v2 for evidence-backed runtime selection. The historical
 builder hashes and cross-validates weights, the training manifest, training
-report, and training arguments. The whole-recording planner derives runtime
-shape, mode, and stride from that document; manual CLI values are assertions
-only. The terminal worker revalidates the contract and installed Ultralytics
+report, and training arguments. V2 adds an ordered set of accepted and rejected
+profiles keyed by exact native ROI shape. The whole-recording planner derives
+runtime shape, mode, and stride from the selected accepted profile; manual CLI
+values are assertions only. The terminal worker revalidates the contract,
+selected profile, deterministic preprocessing probe, and installed Ultralytics
 version before staging pixels, then checks the selected model and persisted
 runtime attributes after inference.
 
@@ -310,6 +313,18 @@ The contract also verifies the package's training-time `rect=false` and
 `multi_scale=false` settings. Runtime records the submitted extent separately
 from network `imgsz`; the Batman worker therefore passes `model_input_size=512`
 and `imgsz=256` rather than overloading one value with both meanings.
+
+That v1 348-to-512-to-256 profile is now retained as rejected evidence. The
+reviewed current candidate contract is
+`docs/diagnostics/batman_keypoint_v2_candidate_20260805/pose_model_input_contract_v2.json`
+(SHA-256 `d94cd51c2e66c433cb1b9bc0f4800a5ee040c2f6c472f1ce81dcb46c7bbab88a`,
+payload digest
+`68550536b18d36c32073c9aeb0bfcab321123af4c02620cf94f07b27fe8f8226`).
+For native 348x348 pixels it selects prepared-tensor input padded to 352x352,
+with `imgsz=352`, stride 32, and no second spatial resize. Shapes without an
+exact accepted profile fail closed instead of inheriting training-source
+geometry. This candidate is selector-ineligible until landmark accuracy is
+reviewed; its 75.14% yield establishes machinery and model response only.
 
 The first `v006` submission failed closed before cache staging because the L4
 environment provides Ultralytics `8.3.169`, not training version `8.3.214`.
@@ -482,7 +497,7 @@ explicitly rejecting the current model/input pairing for scientific promotion.
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --model-set-id pose_all_registry_reviewed_v2_keypoints_20260520_v001 \
   --model-run-id pose_all_registry_reviewed_v2_kpt5_warm_v2_20260520_retry2 \
-  --model-input-contract "${PALETTE_GROUPS_REPO}/docs/diagnostics/batman_keypoint_v2_candidate_20260805/pose_model_input_contract.json" \
+  --model-input-contract "${PALETTE_GROUPS_REPO}/docs/diagnostics/batman_keypoint_v2_candidate_20260805/pose_model_input_contract_v2.json" \
   --pose-schema traditional_v2 \
   --min-roi-size 348 \
   --dry-run

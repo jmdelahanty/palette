@@ -242,7 +242,10 @@ def run_whole_recording_keypoint_terminal(
         raise ValueError(
             "Worker arguments disagree with the digest-bound model-input runtime plan."
         )
-    runtime_compatibility = validate_pose_runtime_compatibility(model_contract)
+    runtime_compatibility = validate_pose_runtime_compatibility(
+        model_contract,
+        runtime_plan,
+    )
     runtime_ultralytics_version = str(
         runtime_compatibility["runtime_ultralytics_version"]
     )
@@ -317,8 +320,7 @@ def run_whole_recording_keypoint_terminal(
             or parameters.get("imgsz") != int(network_input_size)
             or parameters.get("model_input_size") != int(model_input_size)
             or parameters.get("model_predict_rect") is not False
-            or run.attrs.get("ultralytics_version")
-            != runtime_ultralytics_version
+            or run.attrs.get("ultralytics_version") != runtime_ultralytics_version
         ):
             raise RuntimeError(
                 "Terminal model-side preprocessing differs from its input contract."
@@ -392,16 +394,12 @@ def run_whole_recording_keypoint_terminal(
             },
         ).as_manifest()
         detection_success = np.asarray(run["detection_success"][:], dtype=bool)
-        pose_failure_codes = np.asarray(
-            run["pose_failure_codes"][:], dtype=np.uint8
-        )
+        pose_failure_codes = np.asarray(run["pose_failure_codes"][:], dtype=np.uint8)
         validate_pose_inference_failure_codes(
             pose_failure_codes,
             pose_success=detection_success,
         )
-        failure_code_histogram = pose_inference_failure_histogram(
-            pose_failure_codes
-        )
+        failure_code_histogram = pose_inference_failure_histogram(pose_failure_codes)
         payload = {
             "status": "complete",
             "created_at_utc": utc_now(),
