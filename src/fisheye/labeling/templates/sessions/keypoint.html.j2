@@ -159,15 +159,22 @@
           <button type="button" class="secondary" onclick="action('mark_no_keypoints')">No keypoints</button>
           <button type="button" class="secondary" onclick="action('mark_detection_issue')">Detection issue</button>
         </div>
-        <label for="review-state">Review state</label>
-        <select id="review-state">
-          <option value="approved">approved</option>
-          <option value="pending">pending</option>
-          <option value="needs_review">needs_review</option>
-          <option value="rejected">rejected</option>
-        </select>
+        <div id="mutable-review-controls">
+          <label for="review-state">Review state</label>
+          <select id="review-state">
+            <option value="approved">approved</option>
+            <option value="pending">pending</option>
+            <option value="needs_review">needs_review</option>
+            <option value="rejected">rejected</option>
+          </select>
+          <div class="buttons">
+            <button type="button" onclick="setReviewStatus()">Set review</button>
+          </div>
+        </div>
+        <p id="immutable-delta-review-note" class="muted" hidden>
+          Edits are being recorded in a task-bound delta generation. Complete the task when review is finished; an operator will freeze, validate, and compact those edits into a new immutable candidate before approval.
+        </p>
         <div class="buttons">
-          <button type="button" onclick="setReviewStatus()">Set review</button>
           <button type="button" class="warn" onclick="completeTask()">Complete task</button>
         </div>
         <p class="muted">Hotkeys: wheel zooms, middle-drag pans, f fits, n/p move ROI, s saves, Shift+s saves + next, t toggles text, [/ ] cycles points, 1-9 selects keypoints 1-9, 0 selects keypoint 10, r resets, x marks no-keypoints.</p>

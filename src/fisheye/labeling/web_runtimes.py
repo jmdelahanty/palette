@@ -9,11 +9,14 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 
 from .web_responses import _decode_uint8_payload, _raw_array_payload
+
+if TYPE_CHECKING:
+    from .assignment_store import LabelingStore
 
 
 @dataclass
@@ -634,6 +637,14 @@ def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any
         "current": current,
         "summary": summary,
         "review_status": dict(review_status) if isinstance(review_status, Mapping) else None,
+        "immutable_base": bool(session.immutable_base),
+        "edit_storage": "delta_generation" if session.immutable_base else "in_place",
+        "delta_run": str(session.delta_run) if session.delta_run is not None else None,
+        "delta_generation": (
+            str(session.delta_generation)
+            if session.delta_generation is not None
+            else None
+        ),
         "auto_advance_on_save": bool(runtime.auto_advance_on_save),
     }))
 

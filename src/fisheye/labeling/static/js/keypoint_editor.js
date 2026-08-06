@@ -123,10 +123,19 @@
 
     function renderSummary() {
       const state = payload.state || {};
+      const immutableDeltaReview = Boolean(state.immutable_base) && state.edit_storage === "delta_generation";
+      const mutableReviewControls = document.getElementById("mutable-review-controls");
+      const immutableReviewNote = document.getElementById("immutable-delta-review-note");
+      if (mutableReviewControls) mutableReviewControls.hidden = immutableDeltaReview;
+      if (immutableReviewNote) immutableReviewNote.hidden = !immutableDeltaReview;
+      const editStorage = immutableDeltaReview
+        ? `delta ${state.delta_run || ""}/${state.delta_generation || ""}`
+        : "mutable run";
       document.getElementById("summary").innerHTML = `
         <p><b>ROI</b> ${payload.roi_idx} / <b>frame</b> ${payload.frame_idx}</p>
         <p><b>Position</b> ${state.position + 1} of ${state.total}</p>
         <p><b>Run</b> ${state.refined_run || ""}</p>
+        <p><b>Edit storage</b> ${editStorage}</p>
         <p><b>Reason</b> ${payload.reason || ""}</p>
       `;
     }
@@ -332,4 +341,3 @@
       if (event.key === "x" || event.key === "X") { event.preventDefault(); action("mark_no_keypoints"); return; }
     });
     loadCurrent();
-  
