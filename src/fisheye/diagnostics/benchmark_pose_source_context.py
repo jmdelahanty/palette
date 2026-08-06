@@ -204,9 +204,12 @@ def benchmark_pose_source_context(
         expected_run_id=model_run_id,
         expected_model_sha256=model_sha256,
     )
-    runtime_compatibility = validate_pose_runtime_compatibility(contract)
     native_shape = (int(binding.shape[1]), int(binding.shape[2]))
     runtime_plan = contract.plan_for_native_shape(native_shape)
+    runtime_compatibility = validate_pose_runtime_compatibility(
+        contract,
+        runtime_plan,
+    )
     if runtime_plan.transform.is_identity:
         raise ValueError("Context benchmark requires a smaller native crop extent.")
 
@@ -219,9 +222,7 @@ def benchmark_pose_source_context(
     if float(prediction_floor) > min(thresholds_tuple):
         raise ValueError("Prediction floor must not exceed a reported threshold.")
 
-    indices = select_sample_indices(
-        binding.shape[0], sample_count, mode=sample_mode
-    )
+    indices = select_sample_indices(binding.shape[0], sample_count, mode=sample_mode)
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     crop = root["crop_runs"][crop_run]
     expected_rows = int(binding.shape[0])
