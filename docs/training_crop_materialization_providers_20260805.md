@@ -12,19 +12,24 @@ A materialized training crop is defined by its logical arrays, pixel contract,
 geometry binding, and stable row identity. It is not defined by how its pixels
 were obtained.
 
-Palette supports two first-class pixel-materialization providers:
+Palette supports three first-class pixel-materialization providers:
 
 1. `source_video_pynvvc_luma` decodes the authoritative source video with the
    canonical PyNvVideoCodec luma contract and crops the requested rows.
 2. `verified_flat_roi_cache` verifies an exact flat-cache manifest, source
    crop binding, shape, pixel contract, and payload SHA-256 before copying its
    rows.
+3. `sampled_training_images_full` crops the reviewed positive instances from
+   the training Zarr's own lossless `raw_video/images_full` surface. It binds
+   the compact sampled-frame axis, sparse acquisition-frame mapping, stable
+   `instance_key`, and complete frame-decision digest without pretending that
+   an external crop-v2 row already exists.
 
 The cache provider is an optimization. It is not an authority, and it is not a
 required input. New training Zarrs may be built directly from source videos
 without ever creating a flat cache.
 
-Both providers produce a self-contained `crop_runs/<run>/roi_images` array.
+All providers produce a self-contained `crop_runs/<run>/roi_images` array.
 After successful materialization, readers and training jobs do not need the
 source cache or source video to read those pixels. The selected provider and
 its exact inputs remain recorded as provenance.
@@ -36,13 +41,13 @@ Every output written by either provider has:
 - `zarr_purpose = "training"` on the destination archive;
 - `crop_storage_mode = "materialized"`;
 - dense `uint8` `roi_images` with the canonical crop ROI layout;
-- the source crop geometry and lineage arrays;
+- exact geometry and lineage arrays for the selected source observations;
 - stable `instance_key` values when the source crop contract provides them;
-- `source_crop_row_ids`, preserving the exact row in the crop-v2 authority;
+- `source_crop_row_ids` for providers backed by an external crop-v2 authority;
 - `source_frame_indices` binding crop rows to source acquisition frames;
 - `training_materialization_schema =
   "palette.training_crop_materialization.v1"`;
-- `training_materialization_provider` equal to one of the two exact provider
+- `training_materialization_provider` equal to one of the three exact provider
   identifiers above;
 - the canonical Orange mono PyNvVideoCodec-luma pixel contract;
 - `stage_selector_eligible = false` until the enclosing training publication
@@ -52,13 +57,38 @@ The cache provider additionally records the cache manifest and payload
 digests. Cache bytes are copied into the destination Zarr; deleting the
 ephemeral cache after publication cannot invalidate the training artifact.
 
-Strict crop-v2 inputs also carry the digest-protected
+Strict materialized inputs also carry the digest-protected
 `training_crop_materialization_binding`. It declares every copied geometry
 array, hashes the lightweight identity arrays, records the exact provider
 evidence, and is checked through both direct and consolidated metadata. Opening
 the binding does not reread and hash all ROI pixels. Atomic publication hashes
 the physical files, while the cache provider has already authenticated its
 logical flat payload.
+
+The sampled-images provider has a separate logical geometry validator because
+recording crop-v1 and sampled training data intentionally have different frame
+axes. `frame_indices` indexes the compact training image axis;
+`source_acquisition_frame_index` and `source_frame_indices` carry the sparse
+acquisition identity. Its F+1 offset array indexes the compact local axis. The
+provider validates these mappings, exact float32 detection projections, crop
+placement, fixed ROI extent, zero-padding policy, decision digest, and all
+identity dtypes without weakening recording-level crop-v1.
+
+## 2026-08-06 Sampled-Images Canary
+
+The first Batman canary used 200 reviewed full-resolution frames and passed:
+
+- 181 reviewed positive instances and 19 explicit negative frames;
+- 181 unique source-preserved `uint64 instance_key` values;
+- dense `uint8 [181,348,348]` crop pixels;
+- three explicitly zero-padded edge crops;
+- zero byte differences across an exhaustive crop-to-`images_full` check;
+- exact local-frame to acquisition-frame mapping;
+- direct and consolidated materialization-binding validation; and
+- no crop selector or registry activation.
+
+The canary remains a node-local `/tmp` artifact. It is compatibility and
+machinery evidence, not a registered training publication.
 
 ## First-Class Detection Review
 
@@ -135,6 +165,28 @@ scripts/py -m fisheye.utils.publish_training_crop_materialization \
   --source-instance-keys 101,102,205
 ```
 
+When the reviewed sampled artifact already contains lossless full-resolution
+frames, materialize its complete positive rowset directly and retain explicit
+negative frames only in frame supervision:
+
+```bash
+scripts/py -m fisheye.utils.publish_training_crop_materialization \
+  /path/to/batman_reviewed_crops_training.zarr \
+  --create-artifact \
+  --base-training-zarr /path/to/batman_reviewed_training_base.zarr \
+  --sampled-images-full \
+  --refined-detect-run refined_detect_reviewed \
+  --run-id crop_reviewed_348_images_full_v1 \
+  --roi-size 348 \
+  --scratch-root /scratch/$USER/palette-training/job-002
+```
+
+This route refuses incomplete frame decisions, preserves every positive
+`instance_key` (including multiple rows in one frame), writes no placeholder
+crop for a negative frame, validates every crop byte against
+`raw_video/images_full`, consolidates once after all writes, verifies the
+hidden destination copy, and leaves the crop family unselected.
+
 Omit `--source-instance-keys` only when the sampled full-frame base covers the
 complete crop-v2 rowset. For an ordinary sampled training Zarr, pass the keys
 belonging to its sampled and reviewed detections. Selection is by stable
@@ -208,6 +260,10 @@ coordinate authority.
 
 - [x] Preserve direct source-video PyNvVideoCodec materialization.
 - [x] Add verified external flat-cache materialization.
+- [x] Add sampled `images_full` provider identity and strict sampled-axis
+      binding validation.
+- [x] Require canonical merged detection exports to preserve exact stable
+      `instance_key` values and fail closed when they are missing or collide.
 - [x] Use one provider-neutral training materialization schema.
 - [x] Record an exact provider identifier and the supported-provider contract.
 - [x] Copy cache pixels into the destination Zarr.
@@ -223,6 +279,12 @@ coordinate authority.
 - [x] Preserve sampled full/downsampled frames and detection review as
       first-class surfaces in whole-artifact publication.
 - [x] Bind detection review and crops by instance key, source frame, and box.
+- [x] Run one exhaustive selector-ineligible Batman sampled-images crop
+      canary on node-local scratch.
+- [x] Route the sampled-images writer through the reusable atomic whole-
+      training-artifact publication CLI, with bounded node-local construction,
+      complete positive/negative supervision, exhaustive crop-byte checks,
+      consolidated binding validation, and checked hidden-sibling rename.
 - [ ] Add reviewed canonical/refined keypoint and subject-mask finalization for
       the training archive; do not relabel copied crop geometry as crop-v2.
 - [ ] Register only a completed canary artifact after its review surfaces pass.

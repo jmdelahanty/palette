@@ -23,6 +23,9 @@ from fisheye.shared.zarr.training_crop_materialization import (
     bind_training_crop_materialization,
     build_training_crop_materialization_binding,
 )
+from fisheye.shared.zarr.sampled_training_crop_materialization import (
+    write_sampled_training_crops_from_images_full,
+)
 from fisheye.shared.zarr.training_dataset_composition import (
     TRAINING_DATASET_COMPOSITION_ATTRIBUTE,
     bind_training_dataset_composition,
@@ -527,6 +530,181 @@ def create_training_crop_artifact(
     }
 
 
+def create_sampled_images_full_training_crop_artifact(
+    *,
+    destination: str | Path,
+    base_training_zarr: str | Path,
+    run_id: str,
+    refined_run_id: str,
+    scratch_root: str | Path,
+    roi_size_wh: tuple[int, int] = (348, 348),
+    copy_backend: str = "python",
+) -> dict[str, Any]:
+    """Copy, crop embedded reviewed pixels locally, and publish one artifact.
+
+    Unlike :func:`create_training_crop_artifact`, this route does not consume
+    an external recording crop-v2 authority.  Its strict source is the copied
+    sampled training artifact's refined detection, complete frame decisions,
+    and ``raw_video/images_full`` pixels.
+    """
+
+    target = Path(destination).expanduser().resolve()
+    base_archive = Path(base_training_zarr).expanduser().resolve()
+    scratch = _require_node_local_scratch(Path(scratch_root))
+    candidate = str(run_id).strip()
+    source_refined = str(refined_run_id).strip()
+    if target.suffix != ".zarr":
+        raise ValueError("Training artifact destination must end in .zarr.")
+    if copy_backend != "python":
+        raise ValueError(
+            "Whole training-artifact publication currently supports copy_backend='python' only."
+        )
+    if target.exists():
+        raise FileExistsError(f"Training artifact already exists: {target}")
+    if not base_archive.is_dir() or base_archive.suffix != ".zarr":
+        raise FileNotFoundError(
+            f"Base sampled training Zarr not found: {base_archive}"
+        )
+    if not candidate or "/" in candidate or candidate.startswith("."):
+        raise ValueError("run_id must be one safe non-hidden child-group name.")
+    if not source_refined or "/" in source_refined or source_refined.startswith("."):
+        raise ValueError(
+            "refined_run_id must be one safe non-hidden child-group name."
+        )
+    base_root = open_zarr_group_direct(base_archive, mode="r")
+    if str(base_root.attrs.get("zarr_purpose") or "").strip().lower() != "training":
+        raise ValueError("Base sampled artifact must be a training-purpose Zarr.")
+
+    with tempfile.TemporaryDirectory(
+        prefix=f"palette-sampled-training-artifact-{candidate}-",
+        dir=str(scratch),
+    ) as temporary:
+        local_archive = Path(temporary) / target.name
+        shutil.copytree(base_archive, local_archive)
+        local_root = open_zarr_group_direct(local_archive, mode="a")
+        local_root.attrs.update(
+            {
+                "zarr_purpose": "training",
+                "training_artifact_status": "building",
+                "stage_selector_eligible": False,
+                "registry_activation": "deferred",
+            }
+        )
+        local_root.require_group("crop_runs")
+        materialization = write_sampled_training_crops_from_images_full(
+            local_archive,
+            run_id=candidate,
+            refined_run_id=source_refined,
+            roi_size_wh=roi_size_wh,
+            published_archive_path=target,
+        )
+        local_root = open_zarr_group_direct(local_archive, mode="a")
+        local_root.attrs["training_artifact_status"] = "complete"
+        local_root.attrs["training_artifact_publication"] = {
+            "schema_id": TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID,
+            "schema_version": TRAINING_ARTIFACT_PUBLICATION_SCHEMA_VERSION,
+            "policy": "node_local_build_then_checked_hidden_sibling_rename_v1",
+            "base_training_zarr": str(base_archive),
+            "materialization_provider": "sampled_training_images_full",
+            "source_images_path": "raw_video/images_full",
+            "source_refined_detect_run": source_refined,
+            "source_frame_decision_path": (
+                f"detect_frame_decision_runs/{source_refined}"
+            ),
+            "crop_run": candidate,
+            "roi_size_wh": [int(roi_size_wh[0]), int(roi_size_wh[1])],
+            "stage_selector_eligible": False,
+            "registry_activation": "deferred",
+            "run_provenance": build_writer_run_provenance(
+                command=(
+                    "fisheye.utils.publish_training_crop_materialization "
+                    "--create-artifact --sampled-images-full"
+                ),
+                params={
+                    "publication_schema_id": (
+                        TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID
+                    ),
+                    "materialization_provider": "sampled_training_images_full",
+                    "roi_size_wh": [
+                        int(roi_size_wh[0]),
+                        int(roi_size_wh[1]),
+                    ],
+                    "stage_selector_eligible": False,
+                    "registry_activation": "deferred",
+                },
+                input_run_ids={
+                    "base_training_zarr": str(base_archive),
+                    "source_refined_detect_run": source_refined,
+                    "source_frame_decision_path": (
+                        f"detect_frame_decision_runs/{source_refined}"
+                    ),
+                },
+            ),
+        }
+        consolidate_metadata_capture_expected_warnings(local_archive)
+        local_bound = bind_training_crop_materialization(
+            local_archive,
+            run_id=candidate,
+        )
+        if local_bound.binding["payload_digest"] != materialization["binding_digest"]:
+            raise RuntimeError(
+                "Final sampled crop binding differs from the writer receipt."
+            )
+        local_inventory = tree_inventory(local_archive, hash_content=True)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        hidden = target.with_name(
+            f".{target.name}.publish_tmp.{os.getpid()}.{uuid.uuid4().hex}"
+        )
+        with archive_metadata_publication_lock(target):
+            if target.exists() or hidden.exists():
+                raise FileExistsError(
+                    f"Training artifact publication target became occupied: {target}"
+                )
+            try:
+                shutil.copytree(local_archive, hidden)
+                hidden_inventory = tree_inventory(hidden, hash_content=True)
+                if hidden_inventory != local_inventory:
+                    raise RuntimeError(
+                        "Training artifact physical copy differs from node-local source."
+                    )
+                hidden_bound = bind_training_crop_materialization(
+                    hidden,
+                    run_id=candidate,
+                )
+                if hidden_bound.binding != local_bound.binding:
+                    raise RuntimeError(
+                        "Hidden sampled crop binding differs from node-local source."
+                    )
+                if target.exists():
+                    raise FileExistsError(
+                        f"Training artifact appeared during publication: {target}"
+                    )
+                os.replace(hidden, target)
+            except Exception:
+                if hidden.exists():
+                    shutil.rmtree(hidden)
+                raise
+
+    final_bound = bind_training_crop_materialization(target, run_id=candidate)
+    return {
+        "schema_id": TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID,
+        "schema_version": TRAINING_ARTIFACT_PUBLICATION_SCHEMA_VERSION,
+        "status": "complete",
+        "destination": str(target),
+        "run_id": candidate,
+        "run_path": final_bound.run_path,
+        "row_count": final_bound.row_count,
+        "roi_shape": list(final_bound.roi_shape),
+        "binding_digest": final_bound.binding["payload_digest"],
+        "source_refined_detect_run": source_refined,
+        "physical_inventory": local_inventory.to_json(),
+        "materialization": materialization,
+        "stage_selector_eligible": False,
+        "registry_activation": "deferred",
+    }
+
+
 __all__ = [
     "TRAINING_CROP_PUBLICATION_POLICY",
     "TRAINING_CROP_PUBLICATION_ROLLBACK_POLICY",
@@ -537,6 +715,7 @@ __all__ = [
     "TRAINING_DATASET_ENRICHMENT_SCHEMA_ID",
     "TRAINING_DATASET_ENRICHMENT_SCHEMA_VERSION",
     "create_training_crop_artifact",
+    "create_sampled_images_full_training_crop_artifact",
     "enrich_sampled_training_dataset",
     "publish_training_crop_materialization",
 ]

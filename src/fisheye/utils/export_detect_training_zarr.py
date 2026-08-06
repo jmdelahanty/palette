@@ -639,7 +639,16 @@ def validate_merged_training_zarr(
     manual_flags_path = f"{instances_path}/manual_edit_flags"
     frame_counts_path = f"{instances_path}/frame_counts"
     source_detect_path = f"{instances_path}/source_detect_row_index"
-    for path in (bbox_path, frame_idx_path, source_kind_path, manual_flags_path, frame_counts_path, source_detect_path):
+    instance_key_path = f"{instances_path}/instance_key"
+    for path in (
+        bbox_path,
+        frame_idx_path,
+        source_kind_path,
+        manual_flags_path,
+        frame_counts_path,
+        source_detect_path,
+        instance_key_path,
+    ):
         if path not in root:
             errors.append(f"missing required array {path}.")
 
@@ -652,6 +661,7 @@ def validate_merged_training_zarr(
     manual_edit_flags = np.asarray(root[manual_flags_path][:])
     frame_counts = np.asarray(root[frame_counts_path][:])
     source_detect_row_index = np.asarray(root[source_detect_path][:])
+    instance_keys = np.asarray(root[instance_key_path][:])
 
     if bbox.ndim != 2 or int(bbox.shape[1]) != 4:
         errors.append(f"{bbox_path} must have shape (N, 4), got {tuple(int(v) for v in bbox.shape)}.")
@@ -670,6 +680,17 @@ def validate_merged_training_zarr(
         errors.append(f"{manual_flags_path} must be 1D, got ndim={manual_edit_flags.ndim}.")
     if source_detect_row_index.ndim != 1:
         errors.append(f"{source_detect_path} must be 1D, got ndim={source_detect_row_index.ndim}.")
+    if instance_keys.shape != (total_instances,):
+        errors.append(
+            f"{instance_key_path} must have exact shape ({total_instances},), "
+            f"got {instance_keys.shape}."
+        )
+    elif instance_keys.dtype != np.dtype(np.uint64):
+        errors.append(
+            f"{instance_key_path} must use exact uint64 dtype, got {instance_keys.dtype}."
+        )
+    elif np.unique(instance_keys).shape[0] != total_instances:
+        errors.append(f"{instance_key_path} values must be unique.")
     if frame_counts.ndim != 1:
         errors.append(f"{frame_counts_path} must be 1D, got ndim={frame_counts.ndim}.")
     if frame_indices.ndim == 1 and frame_indices.shape[0] != total_instances:
@@ -961,6 +982,41 @@ def _read_optional_source_vector(
     if int(arr.shape[0]) != int(expected_len):
         raise ValueError(f"{name} length mismatch ({arr.shape[0]} != {expected_len}).")
     return arr
+
+
+def _read_required_source_instance_keys(
+    group: Optional[zarr.Group],
+    *,
+    expected_len: int,
+    source_zarr: Path,
+) -> np.ndarray:
+    """Read the exact stable observation identities for one merged source.
+
+    A merged export is a new physical artifact, not a new observation lineage.
+    Positional row numbers therefore are not an acceptable replacement for the
+    source ``instance_key`` values, especially when a frame may contain more
+    than one reviewed detection.
+    """
+
+    if group is None or "instance_key" not in group:
+        raise ValueError(
+            f"{source_zarr}: canonical merged export requires source instance_key."
+        )
+    node = group["instance_key"]
+    if np.dtype(node.dtype) != np.dtype(np.uint64):
+        raise ValueError(
+            f"{source_zarr}: source instance_key must use exact uint64 dtype; "
+            f"got {node.dtype}."
+        )
+    keys = np.asarray(node[:], dtype=np.uint64).reshape(-1)
+    if keys.shape != (int(expected_len),):
+        raise ValueError(
+            f"{source_zarr}: instance_key length mismatch "
+            f"({keys.shape[0]} != {expected_len})."
+        )
+    if np.unique(keys).shape[0] != keys.shape[0]:
+        raise ValueError(f"{source_zarr}: source instance_key values are not unique.")
+    return keys
 
 
 def _source_kind_payload_for_merge(
@@ -1657,6 +1713,7 @@ def _export_merged(
     merged_manual_edit_flags = np.zeros((total_instances,), dtype=bool)
     merged_source_detect_row_index = np.full((total_instances,), -1, dtype=np.int32)
     merged_instance_frame_indices = np.empty((total_instances,), dtype=np.int32)
+    merged_instance_keys = np.empty((total_instances,), dtype=np.uint64)
     merged_confidence_scores: Optional[np.ndarray] = None
     merged_class_ids: Optional[np.ndarray] = None
     merged_label_state_codes = np.empty((total_samples,), dtype=np.uint8)
@@ -1865,6 +1922,11 @@ def _export_merged(
                 detection_source = np.zeros(local_instance_count, dtype=np.int8)
 
             source_group = _resolve_bbox_parent_group(root, spec.bbox_path)
+            source_instance_keys = _read_required_source_instance_keys(
+                source_group,
+                expected_len=local_instance_total,
+                source_zarr=spec.source_zarr,
+            )[source_rows]
             (
                 source_kind_labels,
                 manual_edit_flags,
@@ -1929,6 +1991,7 @@ def _export_merged(
             merged_reason_labels[instance_slice] = reason_labels
             merged_manual_edit_flags[instance_slice] = manual_edit_flags
             merged_source_detect_row_index[instance_slice] = source_detect_row_index
+            merged_instance_keys[instance_slice] = source_instance_keys
             merged_instance_frame_indices[instance_slice] = (
                 plan.instance_output_frame_indices + frame_offset
             )
@@ -1985,6 +2048,11 @@ def _export_merged(
             f"frames={frame_offset}/{total_samples}, "
             f"instances={instance_offset}/{total_instances}."
         )
+    if np.unique(merged_instance_keys).shape[0] != total_instances:
+        raise ValueError(
+            "Merged source instance_key values collide across input datasets; "
+            "refusing to replace stable observation identity with row position."
+        )
 
     write_exported_frame_supervision(
         out_root,
@@ -2004,6 +2072,7 @@ def _export_merged(
         instance_manual_edit_flags=merged_manual_edit_flags,
         instance_confidence_scores=merged_confidence_scores,
         instance_class_ids=merged_class_ids,
+        instance_key=merged_instance_keys,
         command="fisheye.utils.export_detect_training_zarr --merge",
         source_context={
             "source_type_requested": str(manifest.source_type),
