@@ -1049,6 +1049,32 @@ def test_write_curated_refined_detect_root_mints_keys_for_manual_rows() -> None:
     assert present_rows["instance_key_origin_codes"].tolist() == [0, 1, 0]
 
 
+def test_sampled_manual_instance_key_uses_acquisition_frame_identity() -> None:
+    from fisheye.shared.instance_keys import mint_manual_curation_instance_keys
+
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+    raw_video = root.create_group("raw_video")
+    raw_video.create_array(
+        "original_frame_indices",
+        data=np.asarray([100, 150, 200, 250, 300], dtype=np.int64),
+        overwrite=True,
+    )
+
+    write_curated_refined_detect_root(root, **_dense_root_kwargs_with_manual_row())  # type: ignore[arg-type]
+
+    expected = mint_manual_curation_instance_keys(
+        recording_identity="unknown_recording",
+        refined_row_ids=np.asarray([2], dtype=np.int64),
+        frame_indices=np.asarray([200], dtype=np.int64),
+        bbox_norm_coords=np.asarray([[0.3, 0.6, 0.1, 0.1]], dtype=np.float64),
+        class_ids=np.asarray([-1], dtype=np.int64),
+    )
+    instances = root["refined_detect_runs/refined_detect_001/instances"]
+    assert instances["frame_indices"][:].tolist() == [1, 2, 3]
+    assert instances["instance_key"][:].tolist() == [111, int(expected[0]), 222]
+
+
 def test_write_curated_refined_detect_root_minted_keys_are_deterministic_across_rewrites() -> None:
     root = _build_root()
     _add_detect_instance_keys(root, keys=[111, 222])

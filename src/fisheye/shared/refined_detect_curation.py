@@ -11,6 +11,7 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from .crop_geometry import bbox_norm_cxcywh_to_img_xyxy
 from .detect_reason_codec import read_reason_labels, write_reason_columns
+from .detection_tables import resolve_detection_instance_table
 from .frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from .instance_keys import (
     INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
@@ -882,19 +883,22 @@ def _resolve_bbox_norm_reference_dimensions(
 def _resolved_total_frames(root: zarr.Group, refined_run: zarr.Group) -> int:
     detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
     if detect_group is not None:
+        detect_table = resolve_detection_instance_table(detect_group)
         total_frames = as_int(detect_group.attrs.get("total_frames"))
         if total_frames is None:
             total_frames = as_int(detect_group.attrs.get("n_frames"))
         if total_frames is not None and total_frames >= 0:
             return int(total_frames)
+        if "frame_row_offsets" in detect_table:
+            return int(detect_table["frame_row_offsets"].shape[0]) - 1
         for name in ("frame_counts", "n_detections"):
-            if name in detect_group:
+            if name in detect_table:
                 if name == "frame_counts":
                     try:
-                        return int(FrameDomains(root=root, run_group=detect_group).count(FrameDomain.RUN_FRAME))
+                        return int(FrameDomains(root=root, run_group=detect_table).count(FrameDomain.RUN_FRAME))
                     except FrameDomainError:
                         pass
-                return int(detect_group[name].shape[0])
+                return int(detect_table[name].shape[0])
 
     total_frames = as_int(root.attrs.get("total_frames"))
     if total_frames is None:
@@ -1049,8 +1053,9 @@ def _write_source_detections_projection(
             subgroup.attrs["source_detect_run"] = source_detect_run
         return
 
-    raw_frame_indices = np.asarray(detect_group["frame_indices"][:], dtype=np.int32).reshape(-1)
-    raw_bbox_norm = np.asarray(detect_group["bbox_norm_coords"][:], dtype=np.float64).reshape(-1, 4)
+    detect_table = resolve_detection_instance_table(detect_group)
+    raw_frame_indices = np.asarray(detect_table["frame_indices"][:], dtype=np.int32).reshape(-1)
+    raw_bbox_norm = np.asarray(detect_table["bbox_norm_coords"][:], dtype=np.float64).reshape(-1, 4)
     row_count = int(raw_frame_indices.shape[0])
     raw_bbox_img = _bbox_norm_to_img_xyxy_with_missing(raw_bbox_norm, width=int(width), height=int(height))
     decision_labels = np.full(row_count, "filtered", dtype=object)
@@ -1106,8 +1111,8 @@ def _write_source_detections_projection(
     _write_common_array(subgroup, "frame_indices", raw_frame_indices)
     _write_common_array(subgroup, "bbox_img_xyxy", raw_bbox_img)
     _write_common_array(subgroup, "bbox_norm_coords", raw_bbox_norm)
-    if "instance_key" in detect_group:
-        raw_instance_key = np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+    if "instance_key" in detect_table:
+        raw_instance_key = np.asarray(detect_table["instance_key"][:], dtype=np.uint64).reshape(-1)
         if raw_instance_key.shape[0] != row_count:
             raise ValueError("detect instance_key length does not match source detection row count.")
         _write_common_array(subgroup, "instance_key", raw_instance_key)
@@ -1122,19 +1127,19 @@ def _write_source_detections_projection(
         overwrite=True,
     )
 
-    if "scores" in detect_group:
+    if "scores" in detect_table:
         _write_common_array(
             subgroup,
             "confidence_scores",
-            np.asarray(detect_group["scores"][:], dtype=np.float32).reshape(-1),
+            np.asarray(detect_table["scores"][:], dtype=np.float32).reshape(-1),
         )
     else:
         _delete_if_present(subgroup, "confidence_scores")
-    if "class_ids" in detect_group:
+    if "class_ids" in detect_table:
         _write_common_array(
             subgroup,
             "class_ids",
-            np.asarray(detect_group["class_ids"][:], dtype=np.int32).reshape(-1),
+            np.asarray(detect_table["class_ids"][:], dtype=np.int32).reshape(-1),
         )
     else:
         _delete_if_present(subgroup, "class_ids")
@@ -2384,7 +2389,21 @@ def resolve_curated_instance_keys(
                 int(source_keys.shape[0]),
             )
         recording_identity = resolve_recording_identity(root.attrs, fallback_path=zarr_path)
-        minted_frames = np.asarray(instance_frame_indices, dtype=np.int64).reshape(-1)[minted_mask]
+        local_frames = np.asarray(instance_frame_indices, dtype=np.int64).reshape(-1)
+        minted_frames = local_frames[minted_mask]
+        raw_video = root.get("raw_video")
+        if raw_video is not None and "original_frame_indices" in raw_video:
+            source_frames = np.asarray(
+                raw_video["original_frame_indices"][:], dtype=np.int64
+            ).reshape(-1)
+            if local_frames.size and (
+                np.any(local_frames < 0)
+                or np.any(local_frames >= source_frames.shape[0])
+            ):
+                raise ValueError(
+                    "Curated local frame_indices exceed raw_video/original_frame_indices."
+                )
+            minted_frames = source_frames[local_frames[minted_mask]]
         minted_bboxes = np.asarray(instance_bbox_norm_coords, dtype=np.float64).reshape(-1, 4)[minted_mask]
         minted_classes = (
             np.asarray(instance_class_ids, dtype=np.int64).reshape(-1)[minted_mask]
@@ -2639,9 +2658,14 @@ def write_curated_refined_detect_surfaces(
         resolved_source_keys: Optional[np.ndarray] = None
         resolved_source_rows: Optional[np.ndarray] = None
         detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
-        if detect_group is not None and "instance_key" in detect_group:
+        detect_table = (
+            resolve_detection_instance_table(detect_group)
+            if detect_group is not None
+            else None
+        )
+        if detect_table is not None and "instance_key" in detect_table:
             resolved_source_keys = np.asarray(
-                detect_group["instance_key"][:],
+                detect_table["instance_key"][:],
                 dtype=np.uint64,
             ).reshape(-1)
         elif source_detection_instance_key_arr is not None:
@@ -3195,8 +3219,9 @@ def write_curated_refined_detect_root(
 
     detect_group, _ = _resolve_bound_source_detect_group(root, refined_run)
     if detect_group is not None:
-        source_detection_frame_indices = np.asarray(detect_group["frame_indices"][:], dtype=np.int32).reshape(-1)
-        source_detection_bbox_norm_coords = np.asarray(detect_group["bbox_norm_coords"][:], dtype=np.float64).reshape(-1, 4)
+        detect_table = resolve_detection_instance_table(detect_group)
+        source_detection_frame_indices = np.asarray(detect_table["frame_indices"][:], dtype=np.int32).reshape(-1)
+        source_detection_bbox_norm_coords = np.asarray(detect_table["bbox_norm_coords"][:], dtype=np.float64).reshape(-1, 4)
         source_detection_source_detect_row_index = np.arange(source_detection_frame_indices.shape[0], dtype=np.int32)
         source_detection_decision_labels = np.full(source_detection_frame_indices.shape[0], "filtered", dtype=object)
         source_detection_reason_labels = np.full(source_detection_frame_indices.shape[0], "filtered", dtype=object)
@@ -3219,18 +3244,18 @@ def write_curated_refined_detect_root(
                 source_detection_decision_labels[raw_idx] = "filtered"
                 source_detection_reason_labels[raw_idx] = str(reason_label) or "filtered"
         source_detection_confidence_scores = (
-            np.asarray(detect_group["scores"][:], dtype=np.float32).reshape(-1)
-            if "scores" in detect_group
+            np.asarray(detect_table["scores"][:], dtype=np.float32).reshape(-1)
+            if "scores" in detect_table
             else None
         )
         source_detection_class_ids = (
-            np.asarray(detect_group["class_ids"][:], dtype=np.int32).reshape(-1)
-            if "class_ids" in detect_group
+            np.asarray(detect_table["class_ids"][:], dtype=np.int32).reshape(-1)
+            if "class_ids" in detect_table
             else None
         )
         source_detection_instance_key = (
-            np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
-            if "instance_key" in detect_group
+            np.asarray(detect_table["instance_key"][:], dtype=np.uint64).reshape(-1)
+            if "instance_key" in detect_table
             else None
         )
         if (

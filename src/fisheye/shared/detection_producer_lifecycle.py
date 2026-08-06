@@ -895,6 +895,20 @@ def _require_selector_free_artifact_parent(
         )
 
 
+def require_detection_artifact_parent(root: Any) -> Any:
+    """Return the one selector-free parent allowed to contain artifacts.
+
+    Artifact publication adapters use this public boundary when importing an
+    already completed node-local attempt.  It deliberately exposes only the
+    family invariant; it cannot create or select a canonical ``detect_runs``
+    child.
+    """
+
+    parent = require_runs_parent(root, DETECTION_ARTIFACT_RUN_FAMILY)
+    _require_selector_free_artifact_parent(parent, stamp_missing=True)
+    return parent
+
+
 def _owned_child(
     parent: Any,
     run_name: str,
@@ -2959,6 +2973,7 @@ __all__ = [
     "build_unbound_artifact_run_binding",
     "publish_artifact_payload_inventory_seal",
     "publish_empty_artifact_observation_proof",
+    "require_detection_artifact_parent",
     "stamp_unbound_artifact_numeric_semantics",
     "validate_artifact_payload_inventory_seal",
     "validate_empty_artifact_observation_proof",

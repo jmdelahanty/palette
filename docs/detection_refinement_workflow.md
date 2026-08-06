@@ -1,10 +1,13 @@
 # Detection Refinement Workflow
 
-This is the current detect workflow as of 2026-07-19.
+This is the current detect workflow as of 2026-08-06.
 
 ## Contract
 
-- `detect_runs/<run>` is raw detector output.
+- `detect_runs/<run>` is a bound raw detector snapshot. Recording-level runs
+  use the acquisition frame axis. Sampled training runs use the distinct
+  sampled-training v1 contract: local review frame rows are joined exactly to
+  acquisition frames by `raw_video/original_frame_indices`.
 - `detection_artifact_runs/<run>` is selector-free, unbound numeric evidence.
   It is not a raw-detect authority and cannot be passed directly to
   `detect_quality` or `refine_detect`.
@@ -47,22 +50,28 @@ This is the current detect workflow as of 2026-07-19.
    This writes `detection_artifact_runs/<run>` and stops; it cannot proceed
    directly to detect quality or refinement.
 
-   A sampled training Zarr prediction is likewise an unbound artifact only:
+   A sampled training Zarr prediction is likewise unbound until it passes the
+   sampled-training binder. The maintained combined path performs inference
+   on a content-authenticated node-local copy, imports the unbound artifact,
+   and publishes a separate access-aware bound review seed atomically:
 
    ```bash
-   scripts/py -m fisheye.utils.predict_training_detections \
+   scripts/py -m fisheye.utils.run_sampled_training_detection_canary \
      /path/to/training.zarr \
+     --scratch-root /node/local/bounded-scratch \
      --registry /nvme1/palette_registry.sqlite \
      --model-run-id <registered_detect_run_id> \
-     --run-name detect_seed_<model_or_date> \
+     --artifact-run-id detect_artifact_<model_or_date> \
+     --detect-run-id detect_training_review_<model_or_date> \
      --apply
    ```
 
-   This writes `detection_artifact_runs/<run>`, never `detect_runs/<run>`.
-   Before continuing with detect quality or refinement, an explicit canonical
-   binding/promotion step must validate the training-frame lineage and publish
-   a new canonical detect run. If that path is unavailable, stop here; do not
-   relabel or copy the artifact into `detect_runs`.
+   The first run remains quarantined under `detection_artifact_runs`; the
+   second is a strict `detect_runs/<run>/instances` table. It stores local
+   `frame_indices`, exact acquisition `source_acquisition_frame_index`,
+   acquisition-derived `instance_key`, and local F+1 `frame_row_offsets`.
+   Neither run changes selectors or the registry. The mutable training root is
+   not consolidated. Never relabel or copy the artifact into `detect_runs`.
 2. Run detect quality.
    ```bash
    scripts/py -m fisheye.refinement.detect_quality /path/to/zarr
@@ -71,8 +80,8 @@ This is the current detect workflow as of 2026-07-19.
    `detection_quality_labels`) for the selected detect run. It is distinct from
    later refined-detect review approval. A sampled training Zarr may skip this
    only after an explicit canonical binding/promotion path has produced a
-   supported `detect_runs/<run>` for sampled-import passthrough. The unbound
-   prediction artifact itself is not accepted.
+   supported sampled-training `detect_runs/<run>` for sampled-import
+   passthrough. The unbound prediction artifact itself is not accepted.
 
    For fixed multi-subject recordings, pass the expected total subject count:
    ```bash
@@ -97,8 +106,8 @@ This is the current detect workflow as of 2026-07-19.
    `refined_detect_runs/<latest>`.
    Interpolation is no longer part of the normal detect-refinement workflow.
    Do not pass a `predict_training_detections` artifact as `--detect-run`.
-   Refinement requires the distinct canonical detect run produced by an
-   approved binding/promotion path.
+   Refinement requires the distinct bound detect run produced by the
+   sampled-training publication path.
    If a tuned `analysis_metadata.attrs["dish_mask"]` is present, refinement
    applies it as a spatial gate for any source detect run: raw detect candidates
    remain in `source_detections`, but clean candidates whose bbox center falls

@@ -104,6 +104,29 @@ def test_get_sampled_frame_count_matches_legacy_frame_axis_resolution(tmp_path) 
     assert _get_sampled_frame_count(root, detect) == _legacy_get_sampled_frame_count(root, detect)
 
 
+def test_get_sampled_frame_count_reads_strict_instance_offsets(tmp_path) -> None:
+    root = zarr.open_group(str(tmp_path / "strict_sampled.zarr"), mode="w")
+    detect = root.create_group("detect_runs").create_group("detect_001")
+    instances = detect.create_group("instances")
+    instances.create_array(
+        "frame_indices",
+        data=np.asarray([0, 2, 2], dtype=np.int32),
+        overwrite=True,
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.zeros((3, 4), dtype=np.float32),
+        overwrite=True,
+    )
+    instances.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 1, 1, 3], dtype=np.int64),
+        overwrite=True,
+    )
+
+    assert _get_sampled_frame_count(root, detect) == 3
+
+
 def test_get_refinement_parameters_defaults_max_gap_to_0() -> None:
     params, source = get_refinement_parameters(config={})
     assert source == "config"
