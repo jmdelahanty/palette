@@ -215,8 +215,20 @@ for example:
   successor ancestry: recording and lineage identity, a new snapshot UUID,
   immediate-parent run/manifest/snapshot binding, unchanged instance-key
   order, and unchanged retired-key evidence. This removes the former
-  manifest-gate blocker to a keypoint compactor; the compaction command and
-  generation rollover are still pending.
+  manifest-gate blocker to a keypoint compactor; live-generation rollover and
+  final reviewed-publication orchestration are still pending.
+- `fisheye.utils.compact_refined_keypoint_deltas_v2` consumes one already
+  frozen, digest-verified keypoint generation, regenerates every dependent
+  refined array, and publishes a selector-ineligible sharded successor plus a
+  sidecar receipt. It deliberately does not freeze a live generation, mutate
+  the source archive, import the output, or activate selectors. Generation
+  rollover and reviewed publication orchestration remain pending.
+  Manual coordinate replacements receive confidence `1.0`; cleared landmarks
+  receive `NaN`. The current selector-ineligible compactor treats a complete
+  finite manually reviewed pose as confidence- and geometry-valid. Production
+  activation remains blocked until the reviewed-publication gate binds and
+  replays the exact review-QC policy rather than relying on that provisional
+  manual-acceptance rule.
 - `fisheye.utils.finalize_keypoint_shards` now publishes canonical clipped
   keypoints directly as indexed shards.
 - `fisheye.utils.publish_clipped_refined_detect_snapshot` materializes one

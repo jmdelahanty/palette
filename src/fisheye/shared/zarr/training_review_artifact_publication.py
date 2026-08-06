@@ -124,6 +124,7 @@ def _initial_refined_identity(
 def _validate_review_state(
     archive: Path,
     *,
+    crop_run_id: str,
     raw_run_id: str,
     quality_run_id: str,
     refined_run_id: str,
@@ -155,6 +156,25 @@ def _validate_review_state(
     refined = root[run_paths["refined_keypoints"]]
     if refined.attrs.get("artifact_mutability") != "immutable_snapshot":
         raise RuntimeError("Refined keypoint base is not an immutable snapshot.")
+    crop_run = root[f"crop_runs/{crop_run_id}"]
+    crop_manifest = crop_run.attrs.get("run_manifest")
+    refined_manifest = refined.attrs.get("run_manifest")
+    if not isinstance(crop_manifest, Mapping) or not isinstance(
+        refined_manifest, Mapping
+    ):
+        raise RuntimeError(
+            "Review artifact is missing a persisted crop/refined manifest."
+        )
+    expected_crop_digest = (
+        refined_manifest.get("payload", {})
+        .get("source_bindings", {})
+        .get("crop_snapshot", {})
+        .get("manifest_digest")
+    )
+    if canonical_json_sha256(crop_manifest) != expected_crop_digest:
+        raise RuntimeError(
+            "Persisted crop manifest differs from refined source binding."
+        )
     generation = root[f"edit_delta_runs/{delta_run_id}/generations/{delta_generation}"]
     if (
         generation.attrs.get("status") != "open"
@@ -309,6 +329,8 @@ def publish_training_review_artifact(
             copy_backend=copy_backend,
         )
         local_root = open_zarr_group_direct(local_archive, mode="a")
+        local_crop = local_root[f"crop_runs/{run_ids['crop']}"]
+        local_crop.attrs["run_manifest"] = dict(chain.crop.manifest)
         local_root.attrs.update(
             {
                 "training_artifact_status": "building_review_surfaces",
@@ -423,6 +445,7 @@ def publish_training_review_artifact(
         )
         _validate_review_state(
             local_archive,
+            crop_run_id=run_ids["crop"],
             raw_run_id=run_ids["raw_keypoints"],
             quality_run_id=run_ids["keypoint_quality"],
             refined_run_id=run_ids["refined_keypoints"],
@@ -451,6 +474,7 @@ def publish_training_review_artifact(
                     )
                 _validate_review_state(
                     hidden,
+                    crop_run_id=run_ids["crop"],
                     raw_run_id=run_ids["raw_keypoints"],
                     quality_run_id=run_ids["keypoint_quality"],
                     refined_run_id=run_ids["refined_keypoints"],
@@ -471,6 +495,7 @@ def publish_training_review_artifact(
 
     final_state = _validate_review_state(
         target,
+        crop_run_id=run_ids["crop"],
         raw_run_id=run_ids["raw_keypoints"],
         quality_run_id=run_ids["keypoint_quality"],
         refined_run_id=run_ids["refined_keypoints"],

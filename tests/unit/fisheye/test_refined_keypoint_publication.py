@@ -52,6 +52,14 @@ from fisheye.shared.zarr.keypoint_schema import (
     derive_keypoint_row_signatures,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.tabular_deltas import (
+    KEYPOINT_OPERATION_CODE_MAP,
+    ResolvedKeypointDelta,
+    ResolvedKeypointDeltaOverlay,
+)
+from fisheye.shared.zarr.refined_keypoint_compaction import (
+    prepare_refined_keypoint_compaction,
+)
 from fisheye.shared.zarr.refined_keypoint_manifest import (
     build_refined_keypoint_source_bindings,
     initial_refined_keypoint_snapshot_identity,
@@ -449,6 +457,84 @@ def test_refined_successor_binds_exact_parent_identity(tmp_path: object) -> None
     assert successor.identity.parent_run_id == parent.run_id
     assert successor.identity.parent_snapshot_id == parent.identity.snapshot_id
     assert successor.identity.ancestry_snapshot_ids == (parent.identity.snapshot_id,)
+
+
+def test_refined_delta_compaction_publishes_complete_successor(
+    tmp_path: object,
+) -> None:
+    parent, _, _, _ = _publish_refined(tmp_path)
+    overlay = ResolvedKeypointDeltaOverlay(
+        delta_run="manual_review",
+        generation="generation_000001",
+        generation_status="frozen",
+        base_run_path=f"refined_keypoints_runs/{parent.run_id}",
+        base_instance_key_sha256="a" * 64,
+        partition_count=1,
+        event_count=1,
+        max_revision=1,
+        overlay_sha256="b" * 64,
+        reason_code_map={"manual_correction": 1},
+        edits=(
+            ResolvedKeypointDelta(
+                instance_key=201,
+                row_index=2,
+                keypoint_index=1,
+                operation_code=KEYPOINT_OPERATION_CODE_MAP["replace_xy"],
+                revision=1,
+                timestamp_ns=123,
+                partition="reviewer_batch_1",
+                partition_row_index=0,
+                reason_code=1,
+                new_xy=(7.0, 12.0),
+                valid=True,
+            ),
+        ),
+    )
+    compacted = prepare_refined_keypoint_compaction(
+        parent.prepared.arrays,
+        raw_arrays=parent.raw_arrays,
+        dimensions=parent.prepared.dimensions,
+        source_crop_arrays=parent.source_crop_arrays,
+        skeleton_digest=parent.source.skeleton_digest,
+        quality_dimensions=parent.prepared.quality_dimensions,
+        quality_profile=parent.prepared.quality_profile,
+        parent_review_state_map=parent.review_state_map,
+        parent_reason_code_map=parent.reason_code_map,
+        overlay=overlay,
+    )
+    identity = successor_refined_keypoint_snapshot_identity(
+        parent_manifest=parent.manifest,
+        snapshot_id="66666666-6666-4666-8666-666666666666",
+    )
+    destination_root = tmp_path / "compacted_root"  # type: ignore[operator]
+    successor = publish_selector_ineligible_refined_keypoint_snapshot(
+        compacted.prepared,
+        source=parent.source,
+        raw_manifest=parent.raw_manifest,
+        quality_manifest=parent.quality_manifest,
+        crop_manifest=parent.crop_manifest,
+        raw_arrays=parent.raw_arrays,
+        quality_arrays=parent.quality_arrays,
+        source_crop_arrays=parent.source_crop_arrays,
+        identity=identity,
+        review_state_map=compacted.review_state_map,
+        reason_code_map=compacted.reason_code_map,
+        destination=destination_root / "compacted.zarr",
+        run_id="refined_v2_compacted_002",
+        shadow_root=destination_root,
+        created_by="pytest_compactor",
+        parent_manifest=parent.manifest,
+        parent_arrays=parent.prepared.arrays,
+        parent_retired_instance_keys=(),
+    )
+
+    assert successor.prepared.arrays["keypoints_roi"][2, 1].tolist() == [7.0, 12.0]
+    assert (
+        successor.prepared.arrays["keypoints_roi"][0].tolist()
+        == parent.prepared.arrays["keypoints_roi"][0].tolist()
+    )
+    assert successor.prepared.arrays["reason_codes"][2] == 2
+    assert compacted.edited_instance_keys == (201,)
 
 
 def test_republication_adds_only_missing_skeleton_semantics(

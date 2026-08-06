@@ -52,6 +52,34 @@ tree SHA-256 unchanged at
 `0110866252e2c2ed3ccf1cbd5f7dc395e23aca150a6c5db70dfae3f6faae82b7`.
 This is local integration evidence, not an accepted scientific edit.
 
+Compaction additionally requires the full crop run manifest, not only its
+digest in downstream keypoint manifests. The review-artifact publisher now
+persists that manifest on `crop_runs/<run>.attrs.run_manifest` and validates
+its digest against the refined-keypoint source binding. Review artifacts made
+before this fix, including the local smoke above, require a metadata-only
+republish/migration before they can be compacted; the compactor fails closed
+instead of reconstructing missing provenance.
+
+A full ordinary-copy republish exercised the corrected publisher across all
+review surfaces. It completed with 181 review rows and receipt digest
+`bd42c6029372e71f1b4b850d016c3f33111a034fa3728563ce218294a7896bdb`;
+the persisted crop manifest's canonical digest was exactly the refined run's
+bound digest
+`9c6e55ad5443553952c1c49959f07c4b9d472fe6733b77edcd807e2d75dce8b3`.
+
+After rebuilding that exact manifest for an ordinary-copy fixture and proving
+its digest matched the already-bound value, a frozen-generation compaction
+smoke passed. The selector-ineligible successor changed exactly landmark 4 of
+row 0, preserved every other coordinate, bound the immediate parent manifest
+and snapshot IDs, and recorded five events from one partition. Its local
+receipt digest is
+`e7d4bac8156bbe9485a0ca7963d53e9d16bf06ea18fdae7a8bc97e558ab4da79`.
+No source selector, registry row, or production artifact changed.
+The smoke uses the compactor's provisional manual-acceptance QC rule and is
+therefore integration evidence only. Authority activation remains blocked
+until the combined reviewed-publication gate binds and replays the exact
+review-QC policy.
+
 ## Artifact
 
 - Published artifact:
@@ -234,7 +262,11 @@ validated inline metadata result.
       its exact run paths to the maintained review clients.
 - [x] Route maintained keypoint review reads and writes through the bound delta
       generation; never mutate the strict refined-keypoint base in place.
-- [ ] Compact accepted keypoint deltas and seal accepted dense masks into new
-      immutable reviewed snapshots before any authority activation.
+- [x] Implement and smoke the keypoint half of compaction into a new immutable,
+      selector-ineligible, parent-bound refined snapshot.
+- [ ] Seal accepted dense masks and orchestrate the combined reviewed
+      publication before any authority activation.
+- [x] Persist the complete bound crop manifest needed by the strict keypoint
+      successor publisher; fail compaction on pre-fix artifacts until migrated.
 - [ ] Keep the benchmark artifact outside production selectors and registry
       activation unless a separate promotion gate authorizes it.
