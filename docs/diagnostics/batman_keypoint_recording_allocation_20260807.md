@@ -116,5 +116,7 @@ publisher rather than retaining a non-atomic compatibility path.
 
 The no-write four-recording plan resolved 139,385 source frames per camera,
 `frame_step=696`, and exactly 200 sampled rows for cameras 2010093 through
-2010096. At this checkpoint no training Zarr, registry row, selector, or LSF job
-had been created.
+2010096. The LSF submission manifest records the absolute immutable Palette
+worktree and full commit, and every array task verifies that commit before
+decoding. At this checkpoint no training Zarr, registry row, selector, or LSF
+job had been created.
