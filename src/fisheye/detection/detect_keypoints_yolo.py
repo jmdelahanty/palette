@@ -106,7 +106,12 @@ from ..shared.zarr_run_completion import (
 )
 from ..pose.heading import compute_heading_from_spec
 from ..shared.system_metadata import get_environment_info, get_git_info
-from ..pose.schema import PoseSchema, normalize_kpt_shape, schema_payload_from_package
+from ..pose.schema import (
+    PoseSchema,
+    normalize_kpt_shape,
+    schema_payload_from_package,
+    undirected_edge_topology,
+)
 from ultralytics import YOLO, __version__ as ultralytics_version
 
 DEFAULT_POSE_SCHEMA_NAME = "traditional_v1"
@@ -1902,7 +1907,8 @@ def detect_keypoints_yolo(
                 asserted_attrs.get("skeleton_id") != pose_schema_attrs.get("skeleton_id")
                 or asserted_attrs.get("keypoint_labels")
                 != pose_schema_attrs.get("keypoint_labels")
-                or asserted_attrs.get("edges") != pose_schema_attrs.get("edges")
+                or undirected_edge_topology(asserted_attrs.get("edges"))
+                != undirected_edge_topology(pose_schema_attrs.get("edges"))
             ):
                 raise ValueError(
                     "Explicit pose_schema package disagrees with the digest-bound "

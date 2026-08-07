@@ -17,43 +17,21 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import Dict, Any, List, Tuple
+from typing import List
 
 import numpy as np
 import zarr
 
 from .config import PoseConfig
-from .zarr_yolo_dataset_loader import ZarrDatasetConfig, GlobalIndexManager
+from .zarr_yolo_dataset_loader import (
+    GlobalIndexManager,
+    ZarrDatasetConfig,
+    build_pose_zarr_dataset_config,
+)
 
 
 def build_zarr_config(full_config: PoseConfig) -> ZarrDatasetConfig:
-    datasets_dict: Dict[str, Dict[str, Any]] = {}
-    for name, ds_cfg in full_config.datasets.items():
-        split_dict = None
-        if ds_cfg.split is not None:
-            split_dict = {"train": ds_cfg.split.train, "val": ds_cfg.split.val}
-        datasets_dict[name] = {
-            "zarr_path": str(ds_cfg.zarr_path),
-            "source_type": ds_cfg.source_type.value if hasattr(ds_cfg.source_type, "value") else ds_cfg.source_type,
-            "input_format": ds_cfg.input_format,
-            "keypoint_run": ds_cfg.keypoint_run,
-            "split": split_dict,
-        }
-
-    default_split = 0.8
-    if full_config.datasets:
-        first_ds = next(iter(full_config.datasets.values()))
-        if first_ds.split is not None:
-            default_split = first_ds.split.train
-
-    return ZarrDatasetConfig(
-        datasets=datasets_dict,
-        task=full_config.task,
-        sampling_strategy=full_config.sampling_strategy.value if hasattr(full_config.sampling_strategy, "value") else full_config.sampling_strategy,
-        random_seed=full_config.random_seed,
-        dataset_weights=full_config.dataset_weights,
-        split_ratio=default_split,
-    )
+    return build_pose_zarr_dataset_config(full_config)
 
 
 @dataclass

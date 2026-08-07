@@ -6,12 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 
+import pytest
 from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.training.config import PoseConfig
+from fisheye.training.zarr_yolo_dataset_loader import build_pose_zarr_dataset_config
 from fisheye.training.train_keypoints import (
     _build_default_run_name,
     _infer_set_slug,
@@ -79,6 +81,87 @@ def test_pose_config_accepts_keypoint_run(tmp_path: Path) -> None:
 
     cfg = PoseConfig.from_yaml(cfg_path)
     assert cfg.datasets["arena1"].keypoint_run == "latest_traditional"
+    loader_config = build_pose_zarr_dataset_config(cfg)
+    assert loader_config.model_input_shape_hw == (256, 256)
+    assert loader_config.model_input_transform_mode == "auto"
+    assert loader_config.augmentation_enabled is False
+
+
+def test_pose_config_rejects_unknown_training_hyperparameter(tmp_path: Path) -> None:
+    zarr_dir = tmp_path / "sample.zarr"
+    zarr_dir.mkdir(parents=True)
+    (zarr_dir / "zarr.json").write_text(
+        '{"zarr_format": 3, "node_type": "group"}', encoding="utf-8"
+    )
+    cfg_path = tmp_path / "pose_unknown.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "train: ./dummy_train.txt",
+                "val: ./dummy_val.txt",
+                "nc: 1",
+                "names: [fish]",
+                "task: pose",
+                "kpt_shape: [3, 3]",
+                "datasets:",
+                "  arena1:",
+                f"    zarr_path: {zarr_dir}",
+                "training_params:",
+                "  model: yolov8n-pose.pt",
+                "  epochs: 1",
+                "  batch: 1",
+                "  imgsz: 512",
+                "  lr0: 0.001",
+                "  momentum: 0.9",
+                "  weight_decay: 0.0005",
+                "  patience: 1",
+                "  device: '0'",
+                "  posee: 18.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="posee"):
+        PoseConfig.from_yaml(cfg_path)
+
+
+def test_pose_config_requires_explicit_augmentation_switch(tmp_path: Path) -> None:
+    zarr_dir = tmp_path / "sample.zarr"
+    zarr_dir.mkdir(parents=True)
+    (zarr_dir / "zarr.json").write_text(
+        '{"zarr_format": 3, "node_type": "group"}', encoding="utf-8"
+    )
+    payload = {
+        "train": Path("dummy_train.txt"),
+        "val": Path("dummy_val.txt"),
+        "nc": 1,
+        "names": ["fish"],
+        "task": "pose",
+        "kpt_shape": (3, 3),
+        "datasets": {"arena1": {"zarr_path": zarr_dir}},
+        "training_params": {
+            "model": "yolov8n-pose.pt",
+            "epochs": 1,
+            "batch": 1,
+            "imgsz": 512,
+            "lr0": 0.001,
+            "momentum": 0.9,
+            "weight_decay": 0.0005,
+            "patience": 1,
+            "device": "0",
+            "augment": False,
+            "fliplr": 0.5,
+        },
+    }
+
+    with pytest.raises(ValueError, match="augment"):
+        PoseConfig.model_validate(payload)
+
+    payload["training_params"]["augment"] = True
+    config = PoseConfig.model_validate(payload)
+    assert config.training_params.fliplr == 0.5
 
 
 def test_record_registry_training_run_upserts_status(tmp_path: Path) -> None:

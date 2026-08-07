@@ -62,8 +62,207 @@ from .training_console import (
     print_training_hyperparameters,
     print_training_start,
 )
-from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
+from .zarr_yolo_dataset_loader import (
+    build_pose_zarr_dataset_config,
+    create_zarr_dataset,
+)
 from ..shared.system_metadata import build_invocation_record, get_git_info
+from ..shared.zarr.manifest_digest import canonical_json_sha256
+
+
+POSE_EFFECTIVE_ARGUMENT_KEYS = (
+    "imgsz",
+    "pose",
+    "kobj",
+    "box",
+    "cls",
+    "dfl",
+    "lr0",
+    "momentum",
+    "weight_decay",
+    "rect",
+    "augment",
+    "hsv_h",
+    "hsv_s",
+    "hsv_v",
+    "degrees",
+    "translate",
+    "scale",
+    "shear",
+    "perspective",
+    "fliplr",
+    "flipud",
+    "erasing",
+    "mosaic",
+    "mixup",
+    "copy_paste",
+    "cutmix",
+    "auto_augment",
+    "multi_scale",
+    "workers",
+    "seed",
+)
+
+
+def _jsonable_runtime_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_jsonable_runtime_value(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable_runtime_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            str(key): _jsonable_runtime_value(item) for key, item in value.items()
+        }
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _runtime_arg_value(args: Any, key: str) -> Any:
+    if isinstance(args, Mapping):
+        return args.get(key)
+    return getattr(args, key, None)
+
+
+def _runtime_values_equal(key: str, requested: Any, effective: Any) -> bool:
+    if key == "imgsz":
+        return _normalize_imgsz(requested) == _normalize_imgsz(effective)
+    if isinstance(requested, (int, float)) and not isinstance(requested, bool):
+        try:
+            return bool(np.isclose(float(requested), float(effective), rtol=0.0, atol=1e-12))
+        except Exception:
+            return False
+    return _jsonable_runtime_value(requested) == _jsonable_runtime_value(effective)
+
+
+def _validate_pose_effective_arguments(
+    requested: Mapping[str, Any],
+    effective_args: Any,
+) -> dict[str, Any]:
+    effective = {
+        key: _jsonable_runtime_value(_runtime_arg_value(effective_args, key))
+        for key in POSE_EFFECTIVE_ARGUMENT_KEYS
+    }
+    normalized_requested = {
+        key: _jsonable_runtime_value(requested.get(key))
+        for key in POSE_EFFECTIVE_ARGUMENT_KEYS
+    }
+    mismatches = {
+        key: {
+            "requested": normalized_requested[key],
+            "effective": effective[key],
+        }
+        for key in POSE_EFFECTIVE_ARGUMENT_KEYS
+        if not _runtime_values_equal(
+            key,
+            requested.get(key),
+            _runtime_arg_value(effective_args, key),
+        )
+    }
+    if mismatches:
+        raise ValueError(
+            "Effective Ultralytics pose arguments disagree with the requested "
+            f"contract: {json.dumps(mismatches, sort_keys=True)}"
+        )
+    return {
+        "requested": normalized_requested,
+        "effective": effective,
+        "status": "exact_match",
+    }
+
+
+def _write_pose_runtime_receipt(state: dict[str, Any]) -> Optional[Path]:
+    run_dir_raw = state.get("run_dir")
+    if run_dir_raw is None:
+        return None
+    run_dir = Path(run_dir_raw)
+    payload = {
+        key: _jsonable_runtime_value(value)
+        for key, value in state.items()
+        if key not in {"run_dir", "receipt_path", "receipt_sha256"}
+    }
+    document = {
+        "schema_id": "palette.pose_training_runtime_receipt.v1",
+        "payload": payload,
+        "payload_sha256": canonical_json_sha256(payload),
+    }
+    path = run_dir / "pose_training_runtime_receipt.json"
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    state["receipt_path"] = str(path)
+    state["receipt_sha256"] = _shared_safe_sha256_file(path)
+    return path
+
+
+def _observe_pose_runtime_batch(
+    state: dict[str, Any],
+    *,
+    raw_batch: torch.Tensor,
+    normalized_batch: torch.Tensor,
+) -> None:
+    expected_hw = tuple(int(value) for value in state["model_input_shape_hw"])
+    if raw_batch.ndim != 4 or tuple(raw_batch.shape[-2:]) != expected_hw:
+        raise ValueError(
+            "Pose loader emitted a batch that disagrees with the model-input contract: "
+            f"expected NCHW with HW={expected_hw}, got {tuple(raw_batch.shape)}."
+        )
+    if int(raw_batch.shape[1]) != 3 or raw_batch.dtype != torch.uint8:
+        raise ValueError(
+            "Pose loader must emit three-channel uint8 tensors before normalization; "
+            f"got shape={tuple(raw_batch.shape)} dtype={raw_batch.dtype}."
+        )
+    if normalized_batch.dtype != torch.float32:
+        raise ValueError(
+            "Pose trainer must normalize input to float32; "
+            f"got {normalized_batch.dtype}."
+        )
+    min_value = float(normalized_batch.min().detach().cpu())
+    max_value = float(normalized_batch.max().detach().cpu())
+    if min_value < 0.0 or max_value > 1.0:
+        raise ValueError(
+            "Pose normalized tensor values must remain in [0, 1]; "
+            f"observed [{min_value}, {max_value}]."
+        )
+    if "first_batch" not in state:
+        state["first_batch"] = {
+            "raw_shape_nchw": [int(value) for value in raw_batch.shape],
+            "raw_dtype": str(raw_batch.dtype).removeprefix("torch."),
+            "normalized_shape_nchw": [int(value) for value in normalized_batch.shape],
+            "normalized_dtype": str(normalized_batch.dtype).removeprefix("torch."),
+            "normalized_min": min_value,
+            "normalized_max": max_value,
+            "status": "verified",
+        }
+        state["status"] = "runtime_batch_verified"
+        _write_pose_runtime_receipt(state)
+
+
+def _pose_starting_model_receipt(model: YOLO, requested: str) -> dict[str, Any]:
+    raw_path = getattr(model, "ckpt_path", None) or requested
+    path = Path(str(raw_path)).expanduser()
+    digest = _shared_safe_sha256_file(path)
+    model_object = getattr(model, "model", None)
+    yaml_payload = getattr(model_object, "yaml", None)
+    parameter_count = None
+    if model_object is not None:
+        try:
+            parameter_count = int(sum(parameter.numel() for parameter in model_object.parameters()))
+        except Exception:
+            parameter_count = None
+    return {
+        "requested": str(requested),
+        "resolved_path": str(path.resolve()) if path.exists() else str(path),
+        "sha256": digest,
+        "status": "content_verified" if digest is not None else "unresolved_reference",
+        "model_class": (
+            f"{type(model_object).__module__}.{type(model_object).__name__}"
+            if model_object is not None
+            else None
+        ),
+        "parameter_count": parameter_count,
+        "architecture": _jsonable_runtime_value(yaml_payload),
+    }
 
 
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface
@@ -294,6 +493,22 @@ class ZarrPoseValidator(PoseValidator):
 
 class ZarrPoseTrainer(PoseTrainer):
     """Custom pose trainer that uses Zarr dataset loader."""
+
+    runtime_contract_state: Optional[dict[str, Any]] = None
+
+    def preprocess_batch(self, batch: dict) -> dict:
+        raw_images = batch.get("img")
+        if not isinstance(raw_images, torch.Tensor):
+            raise ValueError("Pose training batch is missing its image tensor.")
+        processed = super().preprocess_batch(batch)
+        state = self.runtime_contract_state
+        if state is not None:
+            _observe_pose_runtime_batch(
+                state,
+                raw_batch=raw_images,
+                normalized_batch=processed["img"],
+            )
+        return processed
     
     def get_validator(self):
         """Return custom validator with proper loss names."""
@@ -1389,8 +1604,17 @@ def _apply_pose_loader_training_param_overrides(training_params: dict) -> tuple[
     loader_cfg["val_num_workers"] = (
         None if val_workers_raw is None else max(0, int(val_workers_raw or 0))
     )
-    # Prevent Ultralytics defaults from fighting custom loader behavior.
-    params.pop("workers", None)
+    # Record the custom loader's effective train worker count in Ultralytics'
+    # args.yaml even though Palette owns DataLoader construction.
+    params["workers"] = int(loader_cfg["num_workers"])
+    # These Ultralytics transforms cannot run through the custom Zarr loader.
+    # Set them explicitly so checkpoint args never imply that they were active.
+    params["mosaic"] = 0.0
+    params["mixup"] = 0.0
+    params["copy_paste"] = 0.0
+    params["cutmix"] = 0.0
+    params["auto_augment"] = None
+    params["multi_scale"] = False
     params.pop("deterministic", None)
     return params, loader_cfg
 
@@ -1490,37 +1714,7 @@ def main(args) -> int:
                     "Pose training manifest set_id disagrees with the selected training set."
                 )
 
-        datasets_dict = {}
-        for name, ds_cfg in full_config.datasets.items():
-            split_dict = None
-            if ds_cfg.split is not None:
-                split_dict = {
-                    'train': ds_cfg.split.train,
-                    'val': ds_cfg.split.val
-                }
-            datasets_dict[name] = {
-                'zarr_path': str(ds_cfg.zarr_path),
-                'source_type': ds_cfg.source_type.value if hasattr(ds_cfg.source_type, 'value') else ds_cfg.source_type,
-                'input_format': ds_cfg.input_format,
-                'keypoint_run': ds_cfg.keypoint_run,
-                'split': split_dict
-            }
-
-        default_split = 0.8
-        if full_config.datasets:
-            first_ds = next(iter(full_config.datasets.values()))
-            if first_ds.split is not None:
-                default_split = first_ds.split.train
-
-        config = ZarrDatasetConfig(
-            datasets=datasets_dict,
-            task=full_config.task,
-            sampling_strategy=full_config.sampling_strategy.value if hasattr(full_config.sampling_strategy, 'value') else full_config.sampling_strategy,
-            random_seed=full_config.random_seed,
-            dataset_weights=full_config.dataset_weights,
-            split_ratio=default_split,
-            allow_source_mismatch=bool(full_config.allow_source_mismatch),
-        )
+        config = build_pose_zarr_dataset_config(full_config)
         # Seed from the exact manifest so every registry lifecycle row binds the
         # same ordered schema before live-source consistency checks run.
         pose_schema = _infer_pose_schema(
@@ -1634,6 +1828,7 @@ def main(args) -> int:
    
     # Get training params
     training_params = full_config.training_params.model_dump(exclude_none=True)
+    training_params["seed"] = int(full_config.random_seed)
     _resolve_project_dir(
         args=args,
         training_params=training_params,
@@ -1643,6 +1838,60 @@ def main(args) -> int:
     )
     training_params, loader_cfg = _apply_pose_loader_training_param_overrides(training_params)
     model_name = training_params.get('model', 'yolov8n-pose.pt')
+    pose_runtime_state: dict[str, Any] = {
+        "status": "declared",
+        "model_input_shape_hw": list(_normalize_imgsz(training_params.get("imgsz"))),
+        "requested_training_params": _jsonable_runtime_value(training_params),
+        "preprocessing_contract": full_config.preprocessing.model_dump(),
+        "augmentation_contract": {
+            "enabled": bool(full_config.training_params.augment),
+            "parameters": {
+                key: _jsonable_runtime_value(training_params.get(key))
+                for key in (
+                    "hsv_h",
+                    "hsv_s",
+                    "hsv_v",
+                    "degrees",
+                    "translate",
+                    "scale",
+                    "shear",
+                    "perspective",
+                    "fliplr",
+                    "flipud",
+                    "erasing",
+                )
+            },
+            "semantic_pairs": full_config.augmentation.model_dump(),
+            "implementation": {
+                "algorithm": "palette_single_sample_pose_augmentation_v1",
+                "geometry_order": "model_input_transform_then_augmentation",
+                "affine_border_value_uint8": 114,
+                "erasing_fill_value_uint8": 114,
+                "keypoint_out_of_bounds_policy": "visibility_zero_coordinates_clipped",
+            },
+            "unsupported_ultralytics_transforms": {
+                "mosaic": 0.0,
+                "mixup": 0.0,
+                "copy_paste": 0.0,
+                "cutmix": 0.0,
+                "auto_augment": None,
+                "multi_scale": False,
+            },
+        },
+        "loader": {
+            "requested_train_workers": int(loader_cfg["num_workers"]),
+            "deterministic_validation": bool(loader_cfg["deterministic_val"]),
+            "requested_val_workers": loader_cfg["val_num_workers"],
+            "modes": {},
+        },
+        "datasets": {},
+        "pose_schema": _jsonable_runtime_value(pose_schema),
+        "training_manifest": {
+            "path": str(manifest_path) if manifest_path is not None else None,
+            "sha256": manifest_authority_sha256,
+        },
+    }
+    ZarrPoseTrainer.runtime_contract_state = pose_runtime_state
     
     # Display hyperparameters
     print_training_hyperparameters(
@@ -1656,6 +1905,14 @@ def main(args) -> int:
     console.print(f"[bold]Loading model:[/bold] {model_name}")
     try:
         model = YOLO(model_name)
+        pose_runtime_state["starting_model"] = _pose_starting_model_receipt(
+            model, str(model_name)
+        )
+        if args.log_registry and pose_runtime_state["starting_model"]["sha256"] is None:
+            raise ValueError(
+                "Registry-backed pose training requires a content-addressed starting "
+                "model artifact after model initialization."
+            )
     except Exception as exc:
         if args.log_registry:
             _record_registry_training_run(
@@ -1694,6 +1951,15 @@ def main(args) -> int:
                 prefetch_factor = max(1, int(prefetch_factor))
             except Exception:
                 prefetch_factor = None
+        pose_runtime_state["datasets"][mode] = dataset.pose_preprocessing_receipt()
+        pose_runtime_state["loader"]["modes"][mode] = {
+            "workers": int(workers),
+            "batch_size": int(batch_size),
+            "shuffle": bool(mode == "train"),
+            "persistent_workers": bool(persistent_workers),
+            "prefetch_factor": prefetch_factor if workers > 0 else None,
+        }
+        _write_pose_runtime_receipt(pose_runtime_state)
         return YoloCompatibleDataLoader(
             dataset,
             batch_size=batch_size,
@@ -1719,6 +1985,11 @@ def main(args) -> int:
         snapshot_state["done"] = True
         try:
             run_dir = Path(trainer.save_dir)
+            pose_runtime_state["run_dir"] = str(run_dir)
+            pose_runtime_state["effective_arguments"] = (
+                _validate_pose_effective_arguments(training_params, trainer.args)
+            )
+            pose_runtime_state["status"] = "effective_arguments_verified"
             written = _snapshot_training_inputs(
                 run_dir=run_dir,
                 config_path=config_path,
@@ -1727,8 +1998,13 @@ def main(args) -> int:
             )
             if written:
                 console.print(f"[cyan]Snapshotted run inputs:[/cyan] {run_dir / 'inputs'}")
+            receipt = _write_pose_runtime_receipt(pose_runtime_state)
+            if receipt is not None:
+                console.print(f"[cyan]Pose runtime receipt:[/cyan] {receipt}")
         except Exception as exc:
-            console.print(f"[yellow]Warning: failed to snapshot run inputs: {exc}[/yellow]")
+            raise RuntimeError(
+                "Pose runtime contract validation failed before training."
+            ) from exc
 
     model.add_callback("on_train_start", _on_train_start)
     
@@ -1787,6 +2063,13 @@ def main(args) -> int:
             )
         return 1
     
+    if "first_batch" not in pose_runtime_state:
+        raise RuntimeError(
+            "Pose training finished without verifying an effective runtime batch."
+        )
+    pose_runtime_state["status"] = "verified"
+    runtime_receipt_path = _write_pose_runtime_receipt(pose_runtime_state)
+    runtime_receipt_sha256 = _shared_safe_sha256_file(runtime_receipt_path)
     training_duration_seconds = time.time() - training_start_time
     
     # Log training metadata
@@ -1825,6 +2108,15 @@ def main(args) -> int:
             'torch_version': str(torch.__version__),
             'ultralytics_version': str(ultralytics_version),
             'cuda_available': torch.cuda.is_available(),
+            'pose_runtime_receipt_path': str(runtime_receipt_path),
+            'pose_runtime_receipt_sha256': runtime_receipt_sha256,
+            'effective_pose_training_contract': {
+                'preprocessing': pose_runtime_state.get('preprocessing_contract'),
+                'augmentation': pose_runtime_state.get('augmentation_contract'),
+                'arguments': pose_runtime_state.get('effective_arguments'),
+                'first_batch': pose_runtime_state.get('first_batch'),
+                'loader': pose_runtime_state.get('loader'),
+            },
             'final_training_losses': {
                 'box_loss': float(last_epoch_metrics.get('train/box_loss', 0)),
                 'pose_loss': float(last_epoch_metrics.get('train/pose_loss', 0)),
@@ -1876,6 +2168,12 @@ def main(args) -> int:
         trained_metrics_payload = dict(final_validation_metrics or {})
         trained_metrics_payload["stage"] = "trained"
         trained_metrics_payload["status_detail"] = "model_checkpoint_ready"
+        trained_metrics_payload["pose_runtime_receipt_path"] = str(
+            runtime_receipt_path
+        )
+        trained_metrics_payload["pose_runtime_receipt_sha256"] = (
+            runtime_receipt_sha256
+        )
         _record_registry_training_run(
             args=args,
             console=console,
@@ -1899,6 +2197,12 @@ def main(args) -> int:
         checkpoint_metrics_payload = dict(final_validation_metrics or {})
         checkpoint_metrics_payload["stage"] = stage_name
         checkpoint_metrics_payload["status_detail"] = f"{stage_name}_complete"
+        checkpoint_metrics_payload["pose_runtime_receipt_path"] = str(
+            runtime_receipt_path
+        )
+        checkpoint_metrics_payload["pose_runtime_receipt_sha256"] = (
+            runtime_receipt_sha256
+        )
         if artifacts.get("errors"):
             checkpoint_metrics_payload["export_errors"] = artifacts.get("errors")
         if artifacts.get("onnx_path"):
@@ -1950,6 +2254,12 @@ def main(args) -> int:
         final_metrics_payload.setdefault("imgsz_h", int(effective_img_h))
         final_metrics_payload.setdefault("imgsz_w", int(effective_img_w))
         final_metrics_payload.setdefault("effective_imgsz", [int(effective_img_h), int(effective_img_w)])
+        final_metrics_payload["pose_runtime_receipt_path"] = str(
+            runtime_receipt_path
+        )
+        final_metrics_payload["pose_runtime_receipt_sha256"] = (
+            runtime_receipt_sha256
+        )
         if export_artifacts:
             final_metrics_payload["export_onnx"] = bool(export_artifacts.get("onnx_path"))
             final_metrics_payload["export_trt"] = bool(export_artifacts.get("engine_path"))

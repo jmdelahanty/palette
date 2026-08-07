@@ -18,43 +18,17 @@ import torch
 from torch.utils.data import DataLoader
 
 from .config import PoseConfig
-from .zarr_yolo_dataset_loader import ZarrDatasetConfig, create_zarr_dataset
+from .zarr_yolo_dataset_loader import (
+    ZarrDatasetConfig,
+    build_pose_zarr_dataset_config,
+    create_zarr_dataset,
+)
 from .train_keypoints import pose_collate_fn
 
 
 def build_zarr_config(full_config: PoseConfig) -> ZarrDatasetConfig:
-    """Build ZarrDatasetConfig from PoseConfig, mirroring train_keypoints.py."""
-    datasets_dict: Dict[str, Dict[str, Any]] = {}
-    for name, ds_cfg in full_config.datasets.items():
-        split_dict = None
-        if ds_cfg.split is not None:
-            split_dict = {"train": ds_cfg.split.train, "val": ds_cfg.split.val}
-        datasets_dict[name] = {
-            "zarr_path": str(ds_cfg.zarr_path),
-            "source_type": ds_cfg.source_type.value if hasattr(ds_cfg.source_type, "value") else ds_cfg.source_type,
-            "input_format": ds_cfg.input_format,
-            "keypoint_run": ds_cfg.keypoint_run,
-            "split": split_dict,
-        }
-
-    default_split = 0.8
-    if full_config.datasets:
-        first_ds = next(iter(full_config.datasets.values()))
-        if first_ds.split is not None:
-            default_split = first_ds.split.train
-
-    # Set target_size to training imgsz to avoid surprises
-    target_size = getattr(full_config.training_params, "imgsz", None)
-
-    return ZarrDatasetConfig(
-        datasets=datasets_dict,
-        task=full_config.task,
-        sampling_strategy=full_config.sampling_strategy.value if hasattr(full_config.sampling_strategy, "value") else full_config.sampling_strategy,
-        random_seed=full_config.random_seed,
-        dataset_weights=full_config.dataset_weights,
-        split_ratio=default_split,
-        target_size=target_size,
-    )
+    """Build the exact same loader configuration used by pose training."""
+    return build_pose_zarr_dataset_config(full_config)
 
 
 def summarize_dataset(ds) -> Dict[str, Any]:

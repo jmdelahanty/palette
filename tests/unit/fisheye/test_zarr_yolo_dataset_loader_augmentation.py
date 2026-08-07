@@ -387,6 +387,134 @@ def test_pose_loader_supports_box_only_rows_with_visibility_zero(tmp_path: Path)
     assert np.allclose(full_vis, np.full((3,), 2.0, dtype=np.float32))
 
 
+def test_pose_loader_pads_pixels_boxes_and_keypoints_to_declared_input(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "pose_pad.zarr"
+    _write_pose_merged_zarr_with_box_only(zarr_path)
+    cfg = ZarrDatasetConfig(
+        datasets={
+            "pose": {
+                "zarr_path": str(zarr_path),
+                "source_type": "filtered",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            }
+        },
+        task="pose",
+        random_seed=11,
+        sampling_strategy="proportional",
+        model_input_shape_hw=(64, 64),
+        model_input_transform_mode="pad_to_size",
+        augmentation_enabled=False,
+    )
+    dataset = create_zarr_dataset(cfg, mode="train")
+    full_pos = next(
+        index
+        for index, (_path, row) in enumerate(dataset.indices)
+        if int(row) == 0
+    )
+    sample = dataset[full_pos]
+
+    assert sample["img"].shape == (3, 64, 64)
+    assert sample["ori_shape"] == (32, 32)
+    assert sample["ratio_pad"] == ((1.0, 1.0), (16.0, 16.0))
+    points = sample["keypoints"].reshape(1, 3, 3)[0]
+    assert np.allclose(
+        points[:, :2],
+        np.array(
+            [[26.0 / 64.0, 26.0 / 64.0],
+             [28.0 / 64.0, 28.0 / 64.0],
+             [30.0 / 64.0, 30.0 / 64.0]],
+            dtype=np.float32,
+        ),
+    )
+    receipt = dataset.pose_preprocessing_receipt()
+    source = receipt["sources"][str(zarr_path)]
+    assert source["native_shape_hw"] == [32, 32]
+    assert source["model_shape_hw"] == [64, 64]
+
+
+def test_pose_train_fliplr_transforms_and_semantically_swaps_keypoints(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "pose_flip.zarr"
+    _write_pose_merged_zarr_with_box_only(zarr_path)
+
+    def _pose_config(*, flip: bool) -> ZarrDatasetConfig:
+        return ZarrDatasetConfig(
+            datasets={
+                "pose": {
+                    "zarr_path": str(zarr_path),
+                    "source_type": "filtered",
+                    "input_format": "gray",
+                    "split": {"train": 1.0, "val": 0.0},
+                }
+            },
+            task="pose",
+            random_seed=11,
+            sampling_strategy="proportional",
+            model_input_shape_hw=(32, 32),
+            model_input_transform_mode="identity",
+            augmentation_enabled=flip,
+            augmentation=(
+                {
+                    "fliplr": 1.0,
+                    "fliplr_keypoint_pairs": (("eye_left", "eye_right"),),
+                }
+                if flip
+                else {}
+            ),
+        )
+
+    baseline = create_zarr_dataset(_pose_config(flip=False), mode="train")
+    flipped = create_zarr_dataset(_pose_config(flip=True), mode="train")
+    baseline_pos = next(
+        index
+        for index, (_path, row) in enumerate(baseline.indices)
+        if int(row) == 0
+    )
+    flipped_pos = next(
+        index
+        for index, (_path, row) in enumerate(flipped.indices)
+        if int(row) == 0
+    )
+    base_sample = baseline[baseline_pos]
+    flip_sample = flipped[flipped_pos]
+    base_points = base_sample["keypoints"].reshape(1, 3, 3)[0]
+    flip_points = flip_sample["keypoints"].reshape(1, 3, 3)[0]
+
+    assert np.allclose(flip_points[0, 0], 1.0 - base_points[0, 0])
+    assert np.allclose(flip_points[1, 0], 1.0 - base_points[2, 0])
+    assert np.allclose(flip_points[2, 0], 1.0 - base_points[1, 0])
+    assert np.allclose(flip_points[:, 1:], base_points[[0, 2, 1], 1:])
+    assert np.allclose(
+        flip_sample["bboxes"][:, 0], 1.0 - base_sample["bboxes"][:, 0]
+    )
+
+
+def test_pose_fliplr_rejects_unbound_directional_labels(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_flip_unbound.zarr"
+    _write_pose_merged_zarr_with_box_only(zarr_path)
+    cfg = ZarrDatasetConfig(
+        datasets={
+            "pose": {
+                "zarr_path": str(zarr_path),
+                "source_type": "filtered",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            }
+        },
+        task="pose",
+        sampling_strategy="proportional",
+        augmentation_enabled=True,
+        augmentation={"fliplr": 1.0},
+    )
+
+    with pytest.raises(ValueError, match="explicit semantic pairs"):
+        create_zarr_dataset(cfg, mode="train")
+
+
 def test_pose_loader_honors_training_artifact_splits(tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_training_splits.zarr"
     _write_pose_merged_zarr_with_box_only(zarr_path)

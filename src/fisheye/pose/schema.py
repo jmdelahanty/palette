@@ -77,6 +77,29 @@ class ResolvedHeadTriangleIndices:
         return (self.swim_bladder, self.eye_left, self.eye_right)
 
 
+def undirected_edge_topology(value: object) -> tuple[tuple[int, int], ...]:
+    """Return an order- and direction-independent skeleton topology signature."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    normalized: list[tuple[int, int]] = []
+    for edge in value:
+        if (
+            not isinstance(edge, Sequence)
+            or isinstance(edge, (str, bytes, bytearray))
+            or len(edge) != 2
+        ):
+            return ()
+        try:
+            source = int(edge[0])
+            target = int(edge[1])
+        except (TypeError, ValueError):
+            return ()
+        if source == target or source < 0 or target < 0:
+            return ()
+        normalized.append((min(source, target), max(source, target)))
+    return tuple(sorted(normalized))
+
+
 def _normalize_text(value: object) -> Optional[str]:
     if value is None:
         return None

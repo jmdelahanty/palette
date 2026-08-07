@@ -55,6 +55,60 @@ def test_pick_best_candidate_enforces_unique_when_tied() -> None:
         mod.pick_best_keypoint_candidate(candidates, require_unique=True)
 
 
+def test_pose_candidates_are_schema_validated_before_ranking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid = mod.Candidate(
+        run_id="invalid_high_score",
+        set_id="pose_invalid",
+        model_path="/tmp/invalid.pt",
+        created_utc="2026-03-01T00:00:00+00:00",
+        status="success",
+        dataset_count=10,
+        weighted_score=0.99,
+        feature_match_counts={},
+        feature_weights_used=1.0,
+    )
+    valid = mod.Candidate(
+        run_id="valid_five_point",
+        set_id="pose_valid",
+        model_path="/tmp/valid.pt",
+        created_utc="2026-05-01T00:00:00+00:00",
+        status="success",
+        dataset_count=10,
+        weighted_score=0.80,
+        feature_match_counts={},
+        feature_weights_used=1.0,
+    )
+    expected_schema = {
+        "keypoint_labels": [
+            "swim_bladder",
+            "eye_left",
+            "eye_right",
+            "snout_tip",
+            "tail_tip",
+        ],
+        "edges": [[0, 1], [0, 2], [1, 2], [1, 3], [2, 3], [0, 4]],
+    }
+
+    def _resolve(_registry, *, run_id: str, **_kwargs: object) -> dict[str, object]:
+        if run_id == invalid.run_id:
+            raise ValueError("five keypoints but only three labels")
+        return {"pose_schema": expected_schema, "binding_sha256": "a" * 64}
+
+    monkeypatch.setattr(mod, "resolve_registered_pose_model_schema_binding", _resolve)
+    compatible, bindings, rejected = mod.validate_pose_candidate_bindings(
+        object(),
+        [invalid, valid],
+        expected_pose_schema="traditional_v2",
+    )
+
+    assert compatible == [valid]
+    assert bindings[valid.run_id]["pose_schema"] == expected_schema
+    assert rejected[0]["run_id"] == invalid.run_id
+    assert rejected[0]["reason"] == "pose_schema_binding_invalid"
+
+
 def test_default_roi_cache_staging_dir_falls_back_when_user_scratch_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -343,6 +397,16 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     model_pose_schema_binding = {
         "schema_id": "palette.pose_model_schema_binding",
         "binding_sha256": "f" * 64,
+        "pose_schema": {
+            "keypoint_labels": [
+                "swim_bladder",
+                "eye_left",
+                "eye_right",
+                "snout_tip",
+                "tail_tip",
+            ],
+            "edges": [[0, 1], [0, 2], [1, 2], [3, 1], [3, 2], [0, 4]],
+        },
     }
     monkeypatch.setattr(
         mod,
