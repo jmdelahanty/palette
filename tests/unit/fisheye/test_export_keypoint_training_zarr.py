@@ -46,6 +46,7 @@ def _write_source_pose_zarr(
     refined_runtime_kpt_shape: tuple[int, int] | None = None,
     refined_keypoint_count: int | None = None,
     refined_pose_schema_name: str | None = None,
+    strict_v2_names: bool = False,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
 
@@ -98,7 +99,7 @@ def _write_source_pose_zarr(
         chunks=(4, int(keypoint_count), 2),
     )
     kp.create_array(
-        "detection_success",
+        "pose_success" if strict_v2_names else "detection_success",
         data=np.array([True, True, False, True], dtype=np.bool_),
         chunks=(4,),
     )
@@ -112,7 +113,18 @@ def _write_source_pose_zarr(
         refined_parent = root.create_group("refined_keypoints_runs")
         refined_parent.attrs["latest"] = refined_run_name
         refined = refined_parent.create_group(refined_run_name)
-        refined.attrs["source_keypoints_run"] = "kp_pose_001"
+        if strict_v2_names:
+            refined.attrs["source_bindings"] = {
+                "schema_id": "palette.refined_keypoint.source_bindings",
+                "schema_version": 2,
+                "raw_keypoint_snapshot": {
+                    "stage": "keypoints",
+                    "run_id": "kp_pose_001",
+                    "run_path": "keypoints_runs/kp_pose_001",
+                },
+            }
+        else:
+            refined.attrs["source_keypoints_run"] = "kp_pose_001"
         refined.attrs["source_crop_run"] = "crop_pose_001"
         refined.attrs["created_utc"] = "2026-02-27T00:00:00+00:00"
         resolved_refined_keypoint_count = int(
@@ -402,6 +414,85 @@ def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(tmp
     assert spec.kpt_shape == (5, 3)
     assert layout["skeleton_id"] == "pose_skel_traditional_v2"
     assert tuple(layout["kpt_shape"]) == (5, 3)
+
+
+def test_discover_merge_sources_supports_strict_v2_success_and_source_binding(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "source_refined_strict_v2.zarr"
+    _write_source_pose_zarr(
+        zarr_path,
+        skeleton_id="pose_skel_traditional_v2",
+        kpt_shape=(5, 3),
+        keypoint_count=5,
+        refined_run_name="refined_kp_pose_v2_001",
+        refined_skeleton_id="pose_skel_traditional_v2",
+        refined_runtime_kpt_shape=(5, 2),
+        refined_keypoint_count=5,
+        refined_pose_schema_name="traditional_v2",
+        strict_v2_names=True,
+    )
+    annotation_zarr = tmp_path / "reviewed_compaction.zarr"
+    annotation_root = zarr.open_group(str(annotation_zarr), mode="w")
+    annotation_parent = annotation_root.create_group("refined_keypoints_runs")
+    annotation = annotation_parent.create_group("refined_kp_pose_v2_001")
+    annotation.attrs.update(
+        {
+            "source_bindings": {
+                "schema_id": "palette.refined_keypoint.source_bindings",
+                "schema_version": 2,
+                "raw_keypoint_snapshot": {
+                    "stage": "keypoints",
+                    "run_id": "kp_pose_001",
+                    "run_path": "keypoints_runs/kp_pose_001",
+                },
+            },
+            "skeleton_id": "pose_skel_traditional_v2",
+            "kpt_shape": [5, 2],
+            "pose_schema": {
+                "name": "traditional_v2",
+                "skeleton_id": "pose_skel_traditional_v2",
+                "kpt_shape": [5, 2],
+            },
+            "keypoint_labels": [f"refined_kpt_{idx}" for idx in range(5)],
+        }
+    )
+    annotation.create_array(
+        "keypoints_roi",
+        data=np.zeros((4, 5, 2), dtype=np.float32),
+        chunks=(4, 5, 2),
+    )
+    annotation.create_array(
+        "usable_keypoints",
+        data=np.array([True, False, False, True], dtype=np.bool_),
+        chunks=(4,),
+    )
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["pose_schema"] = {
+        "skeleton_id": "pose_skel_traditional_v2",
+        "kpt_shape": [5, 3],
+    }
+    manifest["datasets"][0]["refined_keypoint_run"] = "refined_kp_pose_v2_001"
+    manifest["datasets"][0]["annotation_zarr_path"] = str(annotation_zarr)
+
+    specs, _layout = _discover_merge_sources(
+        manifest,
+        expected_input_format="gray",
+        row_gate_policy="refined_usable",
+    )
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.annotation_zarr == annotation_zarr
+    assert spec.sample_count == 2
+    assert spec.row_gate_policy == "refined_usable"
+    assert spec.row_gate_refined_run == "refined_kp_pose_v2_001"
+    assert spec.keypoints_path == (
+        "refined_keypoints_runs/refined_kp_pose_v2_001/keypoints_roi"
+    )
+    assert spec.success_path == (
+        "refined_keypoints_runs/refined_kp_pose_v2_001/usable_keypoints"
+    )
 
 
 def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: Path) -> None:

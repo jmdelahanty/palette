@@ -80,6 +80,7 @@ POSE_EFFECTIVE_ARGUMENT_KEYS = (
     "lr0",
     "momentum",
     "weight_decay",
+    "optimizer",
     "rect",
     "augment",
     "hsv_h",
@@ -170,6 +171,57 @@ def _validate_pose_effective_arguments(
         "requested": normalized_requested,
         "effective": effective,
         "status": "exact_match",
+    }
+
+
+def _observe_pose_runtime_optimizer(
+    state: Mapping[str, Any],
+    trainer: Any,
+) -> dict[str, Any]:
+    """Record the instantiated optimizer rather than trusting trainer arguments."""
+    optimizer = getattr(trainer, "optimizer", None)
+    if optimizer is None:
+        raise ValueError("Pose trainer has no instantiated optimizer at train start.")
+    requested_params = state.get("requested_training_params")
+    if not isinstance(requested_params, Mapping):
+        raise ValueError("Pose runtime state is missing requested training parameters.")
+    requested_name = str(requested_params.get("optimizer") or "").strip()
+    optimizer_name = type(optimizer).__name__
+    if not requested_name or optimizer_name.lower() != requested_name.lower():
+        raise ValueError(
+            "Instantiated pose optimizer disagrees with the requested contract: "
+            f"requested={requested_name!r}, effective={optimizer_name!r}."
+        )
+
+    groups = []
+    for index, group in enumerate(getattr(optimizer, "param_groups", ())):
+        groups.append(
+            {
+                "index": int(index),
+                "lr": float(group["lr"]),
+                "initial_lr": (
+                    float(group["initial_lr"])
+                    if group.get("initial_lr") is not None
+                    else None
+                ),
+                "weight_decay": float(group.get("weight_decay", 0.0)),
+                "momentum": (
+                    float(group["momentum"])
+                    if group.get("momentum") is not None
+                    else None
+                ),
+                "betas": (
+                    [float(value) for value in group["betas"]]
+                    if group.get("betas") is not None
+                    else None
+                ),
+            }
+        )
+    return {
+        "requested_class": requested_name,
+        "effective_class": optimizer_name,
+        "parameter_groups": groups,
+        "status": "verified",
     }
 
 
@@ -1080,8 +1132,6 @@ def _infer_pose_schema(
             break
 
     kpt_dims = list(kpt_shape) if isinstance(kpt_shape, tuple) else None
-    n_keypoints = int(kpt_dims[0]) if kpt_dims and len(kpt_dims) >= 1 else None
-
     return {
         "kpt_shape": kpt_dims,
         "keypoint_labels": labels,
@@ -1600,6 +1650,7 @@ def _apply_pose_loader_training_param_overrides(training_params: dict) -> tuple[
     loader_cfg["persistent_workers"] = bool(params.pop("persistent_workers", False))
     loader_cfg["prefetch_factor"] = params.pop("prefetch_factor", None)
     loader_cfg["deterministic_val"] = bool(params.pop("deterministic_val", True))
+    loader_cfg["augmentation_enabled"] = bool(params.pop("augment", False))
     val_workers_raw = params.pop("val_num_workers", None)
     loader_cfg["val_num_workers"] = (
         None if val_workers_raw is None else max(0, int(val_workers_raw or 0))
@@ -1615,6 +1666,10 @@ def _apply_pose_loader_training_param_overrides(training_params: dict) -> tuple[
     params["cutmix"] = 0.0
     params["auto_augment"] = None
     params["multi_scale"] = False
+    # Palette's loader owns training augmentation. Ultralytics' augment flag
+    # instead enables test-time augmentation during final validation, which is
+    # a separate operation and unsupported by these pose checkpoints.
+    params["augment"] = False
     params.pop("deterministic", None)
     return params, loader_cfg
 
@@ -1822,13 +1877,19 @@ def main(args) -> int:
     missing_tracking = [name for name, meta in zarr_metadata.items() 
                        if 'warning' in meta.get('tracking_info', {})]
     if missing_tracking:
-        console.print(f"[bold yellow]⚠ The following datasets are missing precomputed keypoint metadata:[/bold yellow]")
+        console.print(
+            "[bold yellow]⚠ The following datasets are missing precomputed "
+            "keypoint metadata:[/bold yellow]"
+        )
         for name in missing_tracking:
             console.print(f"  - {name}")
    
     # Get training params
-    training_params = full_config.training_params.model_dump(exclude_none=True)
-    training_params["seed"] = int(full_config.random_seed)
+    declared_training_params = full_config.training_params.model_dump(
+        exclude_none=True
+    )
+    declared_training_params["seed"] = int(full_config.random_seed)
+    training_params = dict(declared_training_params)
     _resolve_project_dir(
         args=args,
         training_params=training_params,
@@ -1841,7 +1902,10 @@ def main(args) -> int:
     pose_runtime_state: dict[str, Any] = {
         "status": "declared",
         "model_input_shape_hw": list(_normalize_imgsz(training_params.get("imgsz"))),
-        "requested_training_params": _jsonable_runtime_value(training_params),
+        "requested_training_params": _jsonable_runtime_value(
+            declared_training_params
+        ),
+        "trainer_argument_request": _jsonable_runtime_value(training_params),
         "preprocessing_contract": full_config.preprocessing.model_dump(),
         "augmentation_contract": {
             "enabled": bool(full_config.training_params.augment),
@@ -1882,6 +1946,7 @@ def main(args) -> int:
             "requested_train_workers": int(loader_cfg["num_workers"]),
             "deterministic_validation": bool(loader_cfg["deterministic_val"]),
             "requested_val_workers": loader_cfg["val_num_workers"],
+            "augmentation_enabled": bool(loader_cfg["augmentation_enabled"]),
             "modes": {},
         },
         "datasets": {},
@@ -1988,6 +2053,9 @@ def main(args) -> int:
             pose_runtime_state["run_dir"] = str(run_dir)
             pose_runtime_state["effective_arguments"] = (
                 _validate_pose_effective_arguments(training_params, trainer.args)
+            )
+            pose_runtime_state["optimizer_runtime"] = (
+                _observe_pose_runtime_optimizer(pose_runtime_state, trainer)
             )
             pose_runtime_state["status"] = "effective_arguments_verified"
             written = _snapshot_training_inputs(
@@ -2114,6 +2182,7 @@ def main(args) -> int:
                 'preprocessing': pose_runtime_state.get('preprocessing_contract'),
                 'augmentation': pose_runtime_state.get('augmentation_contract'),
                 'arguments': pose_runtime_state.get('effective_arguments'),
+                'optimizer': pose_runtime_state.get('optimizer_runtime'),
                 'first_batch': pose_runtime_state.get('first_batch'),
                 'loader': pose_runtime_state.get('loader'),
             },

@@ -39,6 +39,7 @@ training_params:
   momentum: 0.9
   weight_decay: 0.0005
   patience: 10
+  optimizer: AdamW
 
   # Explicit controlled baseline matching the effective historical run.
   pose: 12.0

@@ -69,6 +69,7 @@ class PoseMergeSourceSpec:
     dataset_name: str
     dataset_id: str
     source_zarr: Path
+    annotation_zarr: Path
     source_crop_run: str
     keypoint_run: str
     source_type_resolved: str
@@ -597,6 +598,7 @@ def _resolve_row_gate_selection(
     success_arr: zarr.Array,
     row_gate_policy: str,
     source_zarr: Path,
+    refined_root: Optional[zarr.Group] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     policy = str(row_gate_policy).strip().lower()
     if policy not in {"auto", "refined_usable", "raw_success", "raw_success_plus_box_only"}:
@@ -609,7 +611,10 @@ def _resolve_row_gate_selection(
             f"({raw_success.shape[0]} != {sample_count})."
         )
 
-    refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
+    resolved_refined_root = refined_root if refined_root is not None else root
+    refined_parent = resolved_refined_root.get(
+        "refined_keypoints_runs"
+    ) or resolved_refined_root.get("keypoints_refined_runs")
     refined_candidates: List[Tuple[str, str, zarr.Group]] = []
     if refined_parent is not None:
         requested_refined = _as_text(
@@ -618,9 +623,7 @@ def _resolve_row_gate_selection(
         )
         if requested_refined and requested_refined in refined_parent:
             refined_group = refined_parent[requested_refined]
-            source_run = _as_text(
-                refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
-            )
+            source_run = _resolve_refined_source_keypoint_run(refined_group)
             if source_run == keypoint_run:
                 ts = _as_text(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")) or ""
                 refined_candidates.append((ts, requested_refined, refined_group))
@@ -628,9 +631,7 @@ def _resolve_row_gate_selection(
         if not refined_candidates:
             for run_name in refined_parent.group_keys():
                 refined_group = refined_parent[run_name]
-                source_run = _as_text(
-                    refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
-                )
+                source_run = _resolve_refined_source_keypoint_run(refined_group)
                 if source_run != keypoint_run:
                     continue
                 ts = _as_text(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")) or ""
@@ -702,6 +703,26 @@ def _resolve_row_gate_selection(
     return selected_indices, selected_box_only_mask, stats
 
 
+def _resolve_refined_source_keypoint_run(refined_group: zarr.Group) -> Optional[str]:
+    """Resolve the raw keypoint run bound by legacy or strict-v2 metadata."""
+    direct = _as_text(
+        refined_group.attrs.get("source_keypoints_run")
+        or refined_group.attrs.get("source_keypoint_run")
+    )
+    if direct:
+        return direct
+
+    source_bindings = refined_group.attrs.get("source_bindings")
+    if not isinstance(source_bindings, Mapping):
+        return None
+    raw_snapshot = source_bindings.get("raw_keypoint_snapshot")
+    if not isinstance(raw_snapshot, Mapping):
+        return None
+    if _as_text(raw_snapshot.get("stage")) not in {None, "keypoints"}:
+        return None
+    return _as_text(raw_snapshot.get("run_id"))
+
+
 def _discover_merge_sources(
     manifest_payload: Dict[str, Any],
     *,
@@ -742,12 +763,23 @@ def _discover_merge_sources(
             raise ValueError(f"datasets[{ordinal}] is missing zarr_path.")
         source_zarr = Path(str(zarr_path_raw))
         root = zarr.open_group(str(source_zarr), mode="r", use_consolidated=False)
+        annotation_zarr_raw = dataset.get("annotation_zarr_path")
+        annotation_zarr = (
+            Path(str(annotation_zarr_raw)) if annotation_zarr_raw else source_zarr
+        )
+        annotation_root = (
+            root
+            if annotation_zarr == source_zarr
+            else zarr.open_group(
+                str(annotation_zarr), mode="r", use_consolidated=False
+            )
+        )
 
         kp_parent = root.get("keypoints_runs")
         refined_parent_name: Optional[str] = None
-        if "refined_keypoints_runs" in root:
+        if "refined_keypoints_runs" in annotation_root:
             refined_parent_name = "refined_keypoints_runs"
-        elif "keypoints_refined_runs" in root:
+        elif "keypoints_refined_runs" in annotation_root:
             refined_parent_name = "keypoints_refined_runs"
 
         keypoint_run = _as_text(dataset.get("keypoint_run_resolved") or dataset.get("keypoint_run"))
@@ -766,7 +798,13 @@ def _discover_merge_sources(
         success_path: Optional[str] = None
         if kp_group is not None:
             keypoints_path = f"keypoints_runs/{keypoint_run}/keypoints_roi"
-            success_path = f"keypoints_runs/{keypoint_run}/detection_success"
+            if "detection_success" in kp_group:
+                success_path = f"keypoints_runs/{keypoint_run}/detection_success"
+            elif "pose_success" in kp_group:
+                success_path = f"keypoints_runs/{keypoint_run}/pose_success"
+            else:
+                # Retain the legacy path in the eventual fail-closed error.
+                success_path = f"keypoints_runs/{keypoint_run}/detection_success"
         else:
             keypoints_path = _as_text(dataset.get("keypoints_array_path"))
             success_path = _as_text(dataset.get("detection_success_path"))
@@ -782,9 +820,11 @@ def _discover_merge_sources(
                     "manifest does not provide refined annotation paths."
                 )
             group_path = f"{annotation_parent_name}/{annotation_run}"
-            if group_path not in root:
-                raise ValueError(f"{source_zarr}: annotation group '{group_path}' not found.")
-            annotation_group = root[group_path]
+            if group_path not in annotation_root:
+                raise ValueError(
+                    f"{annotation_zarr}: annotation group '{group_path}' not found."
+                )
+            annotation_group = annotation_root[group_path]
         dataset_id = (
             _as_text(dataset.get("dataset_id"))
             or _as_text(dataset.get("session_uuid"))
@@ -873,6 +913,7 @@ def _discover_merge_sources(
             success_arr=success_arr,
             row_gate_policy=row_gate_policy,
             source_zarr=source_zarr,
+            refined_root=annotation_root,
         )
 
         if roi_shape is None:
@@ -918,7 +959,9 @@ def _discover_merge_sources(
             and refined_parent_name is not None
         ):
             refined_run_name = str(gate_stats["refined_run"])
-            refined_group = root[f"{refined_parent_name}/{refined_run_name}"]
+            refined_group = annotation_root[
+                f"{refined_parent_name}/{refined_run_name}"
+            ]
             if "keypoints_roi" in refined_group:
                 refined_keypoints_arr = refined_group["keypoints_roi"]
                 if int(refined_keypoints_arr.shape[0]) != source_sample_count:
@@ -1014,6 +1057,12 @@ def _discover_merge_sources(
                 dataset_name=str(dataset.get("name") or source_zarr.stem),
                 dataset_id=dataset_id,
                 source_zarr=source_zarr,
+                annotation_zarr=(
+                    annotation_zarr
+                    if annotation_parent_name
+                    in {"refined_keypoints_runs", "keypoints_refined_runs"}
+                    else source_zarr
+                ),
                 source_crop_run=source_crop_run,
                 keypoint_run=keypoint_run,
                 source_type_resolved=str(source_type_resolved),
@@ -1310,14 +1359,25 @@ def _export_merged(
                 copy_progress.update(copy_task_id, description=f"Copying {spec.dataset_name}")
 
             root = zarr.open_group(str(spec.source_zarr), mode="r", use_consolidated=False)
+            annotation_root = (
+                root
+                if spec.annotation_zarr == spec.source_zarr
+                else zarr.open_group(
+                    str(spec.annotation_zarr), mode="r", use_consolidated=False
+                )
+            )
             roi_src = root[spec.roi_path]
             crop_source_group = root[f"crop_runs/{spec.source_crop_run}"]
             selected = np.asarray(spec.selected_indices, dtype=np.int64)
             bbox_all = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
-            keypoints_all = np.asarray(root[spec.keypoints_path][:], dtype=keypoint_dtype)
-            success_all = np.asarray(root[spec.success_path][:], dtype=np.bool_)
+            keypoints_all = np.asarray(
+                annotation_root[spec.keypoints_path][:], dtype=keypoint_dtype
+            )
+            success_all = np.asarray(
+                annotation_root[spec.success_path][:], dtype=np.bool_
+            )
             annotation_group_path = spec.keypoints_path.rsplit("/", 1)[0]
-            annotation_group = root[annotation_group_path]
+            annotation_group = annotation_root[annotation_group_path]
             source_refined_row_ids, source_detect_row_index = resolve_row_identity_arrays(
                 annotation_group,
                 crop_source_group,
@@ -1465,7 +1525,12 @@ def _export_merged(
 
     _write_string_array(source_index_group, "source_dataset_id", [spec.dataset_id for spec in source_specs])
     _write_string_array(source_index_group, "source_zarr_path", [str(spec.source_zarr) for spec in source_specs])
-    source_index_group.attrs.update({"mapping_version": 1, "source_count": int(len(source_specs))})
+    _write_string_array(
+        source_index_group,
+        "source_annotation_zarr_path",
+        [str(spec.annotation_zarr) for spec in source_specs],
+    )
+    source_index_group.attrs.update({"mapping_version": 2, "source_count": int(len(source_specs))})
 
     crop_group.attrs.update(
         {
@@ -1519,6 +1584,9 @@ def _export_merged(
         "invocation": invocation,
         "source_dataset_ids": [spec.dataset_id for spec in source_specs],
         "source_zarr_paths": [str(spec.source_zarr) for spec in source_specs],
+        "source_annotation_zarr_paths": [
+            str(spec.annotation_zarr) for spec in source_specs
+        ],
         "skeleton_id": merged_skeleton_id,
         "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
         "skeleton_signature": merged_skeleton_signature,
@@ -2081,6 +2149,7 @@ def _build_merged_manifest_payload(
                 "name": spec.dataset_name,
                 "dataset_id": spec.dataset_id,
                 "zarr_path": str(spec.source_zarr),
+                "annotation_zarr_path": str(spec.annotation_zarr),
                 "sample_count": int(spec.sample_count),
                 "source_sample_count": int(spec.source_sample_count),
                 "row_gate_policy": spec.row_gate_policy,
@@ -2304,6 +2373,7 @@ def _write_merge_summary(
                 "dataset_name": spec.dataset_name,
                 "dataset_id": spec.dataset_id,
                 "zarr_path": str(spec.source_zarr),
+                "annotation_zarr_path": str(spec.annotation_zarr),
                 "sample_count": int(spec.sample_count),
                 "source_sample_count": int(spec.source_sample_count),
                 "row_gate_policy": spec.row_gate_policy,
