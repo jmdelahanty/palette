@@ -89,5 +89,6 @@ a model, activate a production selector, or alter any source artifact.
 - [x] Census the complete approved historical five-point corpus and the
   reviewed Batman candidate; see
   `docs/keypoint_training_source_census_2026-08-06.md`.
-- [ ] Add dual frame-domain lineage and subject/cohort-grouped splits before
-  rematerializing the complete 61-source cohort.
+- [x] Add dual frame-domain lineage and subject/cohort-grouped splits before
+  rematerializing the complete 61-source cohort; implemented as the immutable
+  v3 successor in `docs/task_specific_merged_keypoint_training_v3_20260807.md`.

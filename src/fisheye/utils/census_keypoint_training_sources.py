@@ -22,6 +22,7 @@ import numpy as np
 
 from fisheye.registry.db import RegistryPaths
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.training_leakage_groups import resolve_training_leakage_group
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.utils.export_keypoint_training_zarr import _resolve_roi_pixel_contract
 
@@ -52,26 +53,7 @@ def _source_mount(path: str) -> str:
     return "other"
 
 
-def _leakage_group_id(
-    *,
-    recording_id: str,
-    subject_ids: Sequence[str],
-    started_utc: str | None,
-) -> tuple[str, str]:
-    """Return a conservative biological/cohort split group.
-
-    Exact subjects take priority.  Historical camera collections without
-    subject registration fall back to acquisition start time so sibling
-    cameras from one collection cannot straddle train and validation.
-    """
-
-    subjects = tuple(sorted({str(value) for value in subject_ids if str(value)}))
-    if subjects:
-        prefix = "subject" if len(subjects) == 1 else "subjects"
-        return f"{prefix}:{','.join(subjects)}", "registered_subject"
-    if started_utc:
-        return f"acquisition_cohort:{started_utc}", "acquisition_start_fallback"
-    return f"recording:{recording_id}", "recording_fallback"
+_leakage_group_id = resolve_training_leakage_group
 
 
 def _frame_domain(

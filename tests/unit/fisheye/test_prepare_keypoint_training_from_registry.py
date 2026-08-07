@@ -146,7 +146,9 @@ def _create_minimal_pose_zarr(
     crop_group.attrs["detection_source_type"] = detection_source_type
     if source_roi_pixel_contract_name is not None:
         crop_group.attrs["roi_pixel_contract_name"] = source_roi_pixel_contract_name
-        crop_group.attrs["roi_pixel_contract"] = {"name": source_roi_pixel_contract_name}
+        crop_group.attrs["roi_pixel_contract"] = {
+            "name": source_roi_pixel_contract_name
+        }
     crop_group.create_array(
         "roi_images",
         data=np.zeros((roi_rows, 64, 64), dtype=np.uint8),
@@ -158,7 +160,9 @@ def _create_minimal_pose_zarr(
     kp_group = kp_parent.create_group("kp_pose_001")
     kp_group.attrs["method"] = "traditional_pose"
     kp_group.attrs["keypoints_timestamp_utc"] = "2026-02-06T00:00:00+00:00"
-    kp_group.attrs["keypoint_labels"] = [f"kpt_{idx}" for idx in range(int(keypoint_count))]
+    kp_group.attrs["keypoint_labels"] = [
+        f"kpt_{idx}" for idx in range(int(keypoint_count))
+    ]
     if skeleton_id is not None:
         kp_group.attrs["skeleton_id"] = skeleton_id
     if kpt_shape is not None:
@@ -175,8 +179,12 @@ def _create_minimal_pose_zarr(
     if include_source_crop_run:
         kp_group.attrs["source_crop_run"] = "crop_pose_001"
     if source_roi_pixel_contract_name is not None:
-        kp_group.attrs["source_roi_pixel_contract_name"] = source_roi_pixel_contract_name
-        kp_group.attrs["source_roi_pixel_contract"] = {"name": source_roi_pixel_contract_name}
+        kp_group.attrs["source_roi_pixel_contract_name"] = (
+            source_roi_pixel_contract_name
+        )
+        kp_group.attrs["source_roi_pixel_contract"] = {
+            "name": source_roi_pixel_contract_name
+        }
     if source_roi_read_mode is not None:
         kp_group.attrs["source_roi_read_mode"] = source_roi_read_mode
     if source_roi_cache_backend is not None:
@@ -204,7 +212,9 @@ def _create_minimal_pose_zarr(
         refined_group.attrs["source_keypoints_run"] = "kp_pose_001"
         refined_group.attrs["created_utc"] = "2026-02-07T00:00:00+00:00"
         resolved_refined_keypoint_count = int(
-            refined_keypoint_count if refined_keypoint_count is not None else keypoint_count
+            refined_keypoint_count
+            if refined_keypoint_count is not None
+            else keypoint_count
         )
         resolved_refined_shape = (
             refined_runtime_kpt_shape
@@ -223,12 +233,17 @@ def _create_minimal_pose_zarr(
                 int(resolved_refined_shape[0]),
                 int(resolved_refined_shape[1]),
             ]
-        if resolved_refined_schema_name is not None or resolved_refined_shape is not None:
+        if (
+            resolved_refined_schema_name is not None
+            or resolved_refined_shape is not None
+        ):
             refined_pose_schema_payload = {}
             if resolved_refined_schema_name is not None:
                 refined_pose_schema_payload["name"] = str(resolved_refined_schema_name)
             if resolved_refined_skeleton_id is not None:
-                refined_pose_schema_payload["skeleton_id"] = str(resolved_refined_skeleton_id)
+                refined_pose_schema_payload["skeleton_id"] = str(
+                    resolved_refined_skeleton_id
+                )
             if resolved_refined_shape is not None:
                 refined_pose_schema_payload["kpt_shape"] = [
                     int(resolved_refined_shape[0]),
@@ -249,14 +264,19 @@ def _create_minimal_pose_zarr(
             }
         refined_group.create_array(
             "keypoints_roi",
-            data=np.zeros((keypoints_rows, resolved_refined_keypoint_count, 2), dtype=np.float32),
+            data=np.zeros(
+                (keypoints_rows, resolved_refined_keypoint_count, 2), dtype=np.float32
+            ),
             chunks=(1, resolved_refined_keypoint_count, 2),
         )
         usable = np.array(
-            [True] * max(refined_usable_rows, 0) + [False] * max(keypoints_rows - refined_usable_rows, 0),
+            [True] * max(refined_usable_rows, 0)
+            + [False] * max(keypoints_rows - refined_usable_rows, 0),
             dtype=np.bool_,
         )
-        refined_group.create_array("usable_keypoints", data=usable, chunks=(max(keypoints_rows, 1),))
+        refined_group.create_array(
+            "usable_keypoints", data=usable, chunks=(max(keypoints_rows, 1),)
+        )
 
 
 def _seed_registry(registry_path: Path, zarr_path: Path) -> None:
@@ -282,7 +302,9 @@ def _seed_registry(registry_path: Path, zarr_path: Path) -> None:
     db.close()
 
 
-def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(zarr_path)
     # Historical writers sometimes persisted percentage-valued success_rate
@@ -315,8 +337,14 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
     )
     assert rc == 0
 
-    out_config = dataset_root / "pose_pose_smoke_set_v001" / "pose_pose_smoke_set_v001.yaml"
-    out_manifest = dataset_root / "pose_pose_smoke_set_v001" / "pose_pose_smoke_set_v001.manifest.json"
+    out_config = (
+        dataset_root / "pose_pose_smoke_set_v001" / "pose_pose_smoke_set_v001.yaml"
+    )
+    out_manifest = (
+        dataset_root
+        / "pose_pose_smoke_set_v001"
+        / "pose_pose_smoke_set_v001.manifest.json"
+    )
     assert out_config.exists()
     assert out_manifest.exists()
 
@@ -333,13 +361,26 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
     assert manifest["datasets"][0]["keypoints_successful"] == 3
     assert manifest["datasets"][0]["dish_design"] == "cedar"
     assert manifest["datasets"][0]["canvas_name"] == "DefaultScreen"
-    assert manifest["required_roi_pixel_contract_name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert (
+        manifest["required_roi_pixel_contract_name"]
+        == "orange_mono_pynvvc_luma_uint8_v1"
+    )
     assert manifest["keypoint_contract_policy"]["status"] == "single_contract"
     assert manifest["keypoint_contract_policy"]["contract_counts"] == {
         "orange_mono_pynvvc_luma_uint8_v1": 1
     }
-    assert manifest["datasets"][0]["source_roi_pixel_contract_name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert (
+        manifest["datasets"][0]["source_roi_pixel_contract_name"]
+        == "orange_mono_pynvvc_luma_uint8_v1"
+    )
     assert manifest["datasets"][0]["source_roi_read_mode"] == "materialized_crop_run"
+    assert manifest["datasets"][0]["recording_id"] == "session_pose_001"
+    assert manifest["datasets"][0]["leakage_group"] == {
+        "id": "recording:session_pose_001",
+        "source": "recording_fallback",
+        "subject_ids": [],
+        "recording_started_utc": None,
+    }
 
     db = Registry(registry_path)
     row = db.conn.execute(
@@ -352,7 +393,9 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
     assert json.loads(row["dataset_ids_json"]) == ["session_pose_001"]
 
 
-def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsys, monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(zarr_path)
     registry_path = tmp_path / "registry.sqlite"
@@ -381,7 +424,9 @@ def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsy
     assert "--- Training Manifest (JSON) ---" in captured
 
 
-def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(zarr_path)
     registry_path = tmp_path / "registry.sqlite"
@@ -616,7 +661,9 @@ def test_prepare_keypoint_from_registry_rejects_non_refined_crop_lineage(
     _mock_invocation_sources(monkeypatch)
     monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
 
-    with pytest.raises(ValueError, match=r"crop lineage detection_source_type in .*manual.*refined"):
+    with pytest.raises(
+        ValueError, match=r"crop lineage detection_source_type in .*manual.*refined"
+    ):
         wrapper.main(
             [
                 "--registry",
@@ -630,7 +677,9 @@ def test_prepare_keypoint_from_registry_rejects_non_refined_crop_lineage(
         )
 
 
-def test_prepare_keypoint_from_registry_requires_source_crop_run(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_requires_source_crop_run(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(zarr_path, include_source_crop_run=False)
     registry_path = tmp_path / "registry.sqlite"
@@ -654,7 +703,9 @@ def test_prepare_keypoint_from_registry_requires_source_crop_run(monkeypatch, tm
         )
 
 
-def test_prepare_keypoint_from_registry_fails_on_roi_keypoint_row_mismatch(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_fails_on_roi_keypoint_row_mismatch(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(zarr_path, keypoints_rows=4, roi_rows=3)
     registry_path = tmp_path / "registry.sqlite"
@@ -678,7 +729,9 @@ def test_prepare_keypoint_from_registry_fails_on_roi_keypoint_row_mismatch(monke
         )
 
 
-def test_prepare_keypoint_from_registry_fails_on_detection_success_row_mismatch(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_fails_on_detection_success_row_mismatch(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(
         zarr_path,
@@ -708,7 +761,9 @@ def test_prepare_keypoint_from_registry_fails_on_detection_success_row_mismatch(
         )
 
 
-def test_prepare_keypoint_from_registry_enforces_review_status_and_quality(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_enforces_review_status_and_quality(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(
         zarr_path,
@@ -748,7 +803,9 @@ def test_prepare_keypoint_from_registry_enforces_review_status_and_quality(monke
     assert rc == 0
 
 
-def test_prepare_keypoint_from_registry_fails_when_review_status_missing(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_fails_when_review_status_missing(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(
         zarr_path,
@@ -768,7 +825,9 @@ def test_prepare_keypoint_from_registry_fails_when_review_status_missing(monkeyp
     _mock_invocation_sources(monkeypatch)
     monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
 
-    with pytest.raises(SystemExit, match="No datasets remain after keypoint quality filtering"):
+    with pytest.raises(
+        SystemExit, match="No datasets remain after keypoint quality filtering"
+    ):
         wrapper.main(
             [
                 "--registry",
@@ -784,7 +843,9 @@ def test_prepare_keypoint_from_registry_fails_when_review_status_missing(monkeyp
         )
 
 
-def test_prepare_keypoint_from_registry_exclusion_is_nonfatal(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_exclusion_is_nonfatal(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(
         zarr_path,
@@ -804,7 +865,9 @@ def test_prepare_keypoint_from_registry_exclusion_is_nonfatal(monkeypatch, tmp_p
     _mock_invocation_sources(monkeypatch)
     monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
 
-    with pytest.raises(SystemExit, match="No datasets remain after keypoint quality filtering"):
+    with pytest.raises(
+        SystemExit, match="No datasets remain after keypoint quality filtering"
+    ):
         wrapper.main(
             [
                 "--registry",
@@ -942,7 +1005,9 @@ def test_prepare_keypoint_from_registry_review_gate_is_strict_without_fallback_f
     _mock_invocation_sources(monkeypatch)
     monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
 
-    with pytest.raises(SystemExit, match="No datasets remain after keypoint quality filtering"):
+    with pytest.raises(
+        SystemExit, match="No datasets remain after keypoint quality filtering"
+    ):
         wrapper.main(
             [
                 "--registry",
@@ -962,7 +1027,9 @@ def test_prepare_keypoint_from_registry_review_gate_is_strict_without_fallback_f
         )
 
 
-def test_prepare_keypoint_from_registry_accepts_legacy_refined_group_name(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_keypoint_from_registry_accepts_legacy_refined_group_name(
+    monkeypatch, tmp_path: Path
+) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(
         zarr_path,
@@ -1082,7 +1149,9 @@ def test_prepare_keypoint_from_registry_fails_closed_on_quality_divergence(
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     db = Registry(registry_path)
-    db.conn.execute("UPDATE keypoint_quality SET usable_keypoints = usable_keypoints - 1;")
+    db.conn.execute(
+        "UPDATE keypoint_quality SET usable_keypoints = usable_keypoints - 1;"
+    )
     db.conn.commit()
     db.close()
 
@@ -1231,8 +1300,14 @@ def test_prepare_keypoint_from_registry_prefers_refined_annotation_source_skelet
     assert dataset["annotation_source_kind"] == "refined"
     assert dataset["annotation_source_parent"] == "refined_keypoints_runs"
     assert dataset["annotation_source_run"] == "refined_pose_v2_001"
-    assert dataset["keypoints_array_path"] == "refined_keypoints_runs/refined_pose_v2_001/keypoints_roi"
-    assert dataset["detection_success_path"] == "refined_keypoints_runs/refined_pose_v2_001/usable_keypoints"
+    assert (
+        dataset["keypoints_array_path"]
+        == "refined_keypoints_runs/refined_pose_v2_001/keypoints_roi"
+    )
+    assert (
+        dataset["detection_success_path"]
+        == "refined_keypoints_runs/refined_pose_v2_001/usable_keypoints"
+    )
     assert dataset["skeleton_id"] == "pose_skel_traditional_v2"
     assert dataset["kpt_shape"] == [5, 3]
 
@@ -1314,7 +1389,9 @@ def test_prepare_keypoint_from_registry_filters_to_requested_skeleton(
         "refined_kpt_3",
         "refined_kpt_4",
     ]
-    assert [dataset["dataset_id"] for dataset in manifest["datasets"]] == ["session_pose_v2"]
+    assert [dataset["dataset_id"] for dataset in manifest["datasets"]] == [
+        "session_pose_v2"
+    ]
     assert manifest["quality_exclusions"] == [
         {
             "dataset_id": "session_pose_v1",

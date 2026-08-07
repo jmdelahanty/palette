@@ -1,6 +1,6 @@
 # Five-keypoint training-source census — 2026-08-06
 
-Status: **READ-ONLY CENSUS COMPLETE; FULL MERGE DEFERRED PENDING TWO CONTRACT FIXES**
+Status: **READ-ONLY CENSUS COMPLETE; V3 CONTRACT FIXES AND EXACT PREFLIGHT COMPLETE**
 
 No source Zarr, registry row, selector, training artifact, or model was changed.
 The census explicitly used direct, unconsolidated metadata because the source
@@ -136,9 +136,10 @@ that distinction rather than silently calling `-1` a complete lineage join.
 - [x] Quantify old split leakage and mixed frame-index semantics.
 - [x] Derive conservative subject/cohort split groups.
 - [x] Separate pose-only usability from complete detection lineage.
-- [ ] Add dual frame-domain arrays to the merged storage schema and writer.
-- [ ] Add leakage-grouped splitting and hostile overlap tests.
-- [ ] Add the explicit pose-only incomplete-detection-lineage policy.
+- [x] Add dual frame-domain arrays to the merged storage schema and writer.
+- [x] Add leakage-grouped splitting and hostile overlap tests.
+- [x] Add the explicit pose-only incomplete-detection-lineage policy.
+- [x] Compose and preflight the exact 61-source, 12,704-row v3 manifest.
 - [ ] Publish a new selector-ineligible 61-source merged candidate.
 - [ ] Validate exact decoded equality, group-disjoint splits, storage plans,
   direct/consolidated metadata, and the training reader.

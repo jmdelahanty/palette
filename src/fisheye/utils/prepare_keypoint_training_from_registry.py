@@ -19,6 +19,7 @@ import zarr
 
 from fisheye.pose.schema import resolve_ordered_skeleton_edges_from_attrs
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.training_leakage_groups import resolve_training_leakage_group
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.training.config import PoseConfig
 from fisheye.shared.system_metadata import build_invocation_record
@@ -67,6 +68,49 @@ def _looks_like_training_artifact_path(zarr_path: Path) -> bool:
     if stem.endswith("_merged"):
         return True
     return False
+
+
+def _registry_leakage_group(
+    registry: Registry,
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    values = dict(row)
+    recording_id = str(
+        values.get("recording_id")
+        or values.get("session_uuid")
+        or values.get("dataset_id")
+        or ""
+    ).strip()
+    if not recording_id:
+        raise ValueError("Registry dataset row has no recording identity.")
+    subject_ids = [
+        str(subject["subject_id"])
+        for subject in registry.conn.execute(
+            "SELECT subject_id FROM recording_subjects "
+            "WHERE recording_id = ? ORDER BY subject_id",
+            (recording_id,),
+        )
+    ]
+    recording = registry.conn.execute(
+        "SELECT started_utc FROM recordings WHERE recording_id = ?",
+        (recording_id,),
+    ).fetchone()
+    started_utc = (
+        str(recording["started_utc"]).strip()
+        if recording is not None and recording["started_utc"] is not None
+        else None
+    )
+    group_id, source = resolve_training_leakage_group(
+        recording_id=recording_id,
+        subject_ids=subject_ids,
+        started_utc=started_utc,
+    )
+    return {
+        "id": group_id,
+        "source": source,
+        "subject_ids": subject_ids,
+        "recording_started_utc": started_utc,
+    }
 
 
 def _next_version_from_dataset_root(
@@ -150,7 +194,9 @@ def _contract_count_value(value: Any) -> str:
 
 
 def _contract_counts(rows: Sequence[Mapping[str, Any]], key: str) -> Dict[str, int]:
-    return dict(sorted(Counter(_contract_count_value(row.get(key)) for row in rows).items()))
+    return dict(
+        sorted(Counter(_contract_count_value(row.get(key)) for row in rows).items())
+    )
 
 
 def _query_keypoint_performance_rows(
@@ -158,8 +204,14 @@ def _query_keypoint_performance_rows(
     *,
     dataset_ids: Sequence[str],
 ) -> Dict[str, Dict[str, Mapping[str, Any]]]:
-    ids = [str(dataset_id) for dataset_id in dict.fromkeys(dataset_ids) if str(dataset_id).strip()]
-    rows_by_dataset: Dict[str, Dict[str, Mapping[str, Any]]] = {dataset_id: {} for dataset_id in ids}
+    ids = [
+        str(dataset_id)
+        for dataset_id in dict.fromkeys(dataset_ids)
+        if str(dataset_id).strip()
+    ]
+    rows_by_dataset: Dict[str, Dict[str, Mapping[str, Any]]] = {
+        dataset_id: {} for dataset_id in ids
+    }
     if not ids:
         return rows_by_dataset
 
@@ -249,9 +301,14 @@ def _build_keypoint_contract_policy(
 
     if missing_count:
         missing_datasets = [
-            str(dataset.get("dataset_id") or dataset.get("name") or dataset.get("zarr_path"))
+            str(
+                dataset.get("dataset_id")
+                or dataset.get("name")
+                or dataset.get("zarr_path")
+            )
             for dataset in datasets
-            if _contract_count_value(dataset.get("source_roi_pixel_contract_name")) == MISSING_CONTRACT_LABEL
+            if _contract_count_value(dataset.get("source_roi_pixel_contract_name"))
+            == MISSING_CONTRACT_LABEL
         ]
         raise ValueError(
             "Keypoint training selection contains missing keypoint ROI pixel contracts "
@@ -285,7 +342,9 @@ def _build_keypoint_contract_policy(
         "mixed_contracts_require_explicit_compatibility": True,
         "compatible_contracts": list(compatible_contracts),
         "explicit_contracts": explicit_contracts,
-        "required_roi_pixel_contract_name": explicit_contracts[0] if len(explicit_contracts) == 1 else None,
+        "required_roi_pixel_contract_name": (
+            explicit_contracts[0] if len(explicit_contracts) == 1 else None
+        ),
         "contract_counts": contract_counts,
         "read_mode_counts": read_mode_counts,
         "cache_backend_counts": cache_backend_counts,
@@ -293,7 +352,9 @@ def _build_keypoint_contract_policy(
     }
 
 
-def _build_set_name_query_signature(args: argparse.Namespace, *, model_input: str) -> Dict[str, Any]:
+def _build_set_name_query_signature(
+    args: argparse.Namespace, *, model_input: str
+) -> Dict[str, Any]:
     return {
         "dish_design": args.dish_design,
         "dish_design_like": args.dish_design_like,
@@ -332,7 +393,9 @@ def _build_set_name_query_signature(args: argparse.Namespace, *, model_input: st
 
 def _query_hash(args: argparse.Namespace, *, model_input: str) -> str:
     signature = _build_set_name_query_signature(args, model_input=model_input)
-    canonical = json.dumps(signature, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    canonical = json.dumps(
+        signature, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:8]
 
 
@@ -347,8 +410,12 @@ def _default_set_name(
     elif args.dish_design_like:
         dish_raw = f"like_{args.dish_design_like}"
     else:
-        dish_raw = _infer_row_value(rows, "dish_design", fallback="all_dishes", mixed="mixed_dishes")
-    canvas_raw = _infer_row_value(rows, "canvas_name", fallback="unknown_canvas", mixed="mixed_canvas")
+        dish_raw = _infer_row_value(
+            rows, "dish_design", fallback="all_dishes", mixed="mixed_dishes"
+        )
+    canvas_raw = _infer_row_value(
+        rows, "canvas_name", fallback="unknown_canvas", mixed="mixed_canvas"
+    )
     query_hash = _query_hash(args, model_input=model_input)
     return "_".join(
         [
@@ -478,7 +545,9 @@ def _format_kpt_shape(value: Optional[Tuple[int, int]]) -> str:
     return f"[{value[0]},{value[1]}]"
 
 
-def _format_skeleton_signature(*, skeleton_id: Optional[str], kpt_shape: Optional[Tuple[int, int]]) -> str:
+def _format_skeleton_signature(
+    *, skeleton_id: Optional[str], kpt_shape: Optional[Tuple[int, int]]
+) -> str:
     return f"skeleton_id={skeleton_id or 'missing'}, kpt_shape={_format_kpt_shape(kpt_shape)}"
 
 
@@ -558,7 +627,8 @@ def _resolve_effective_annotation_source(
 
     refined_group = refined_parent[refined_run_name]
     refined_source_run = _decode_attr(
-        refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
+        refined_group.attrs.get("source_keypoints_run")
+        or refined_group.attrs.get("source_keypoint_run")
     )
     if refined_source_run != source_keypoint_run:
         if source is None:
@@ -658,14 +728,19 @@ def _parse_ts(value: Any) -> datetime:
         return datetime.min
 
 
-def _resolve_latest_by_method(parent: zarr.Group, method: Optional[str]) -> Optional[str]:
+def _resolve_latest_by_method(
+    parent: zarr.Group, method: Optional[str]
+) -> Optional[str]:
     candidates: List[Tuple[datetime, str]] = []
     for run_name in parent.group_keys():
         run_group = parent[run_name]
         run_method = _decode_attr(run_group.attrs.get("method"))
         if method and run_method != method:
             continue
-        ts = _parse_ts(run_group.attrs.get("keypoints_timestamp_utc") or run_group.attrs.get("timestamp_utc"))
+        ts = _parse_ts(
+            run_group.attrs.get("keypoints_timestamp_utc")
+            or run_group.attrs.get("timestamp_utc")
+        )
         candidates.append((ts, str(run_name)))
     if not candidates:
         return None
@@ -673,7 +748,9 @@ def _resolve_latest_by_method(parent: zarr.Group, method: Optional[str]) -> Opti
     return candidates[0][1]
 
 
-def _resolve_keypoint_run(root: zarr.Group, requested: Optional[str]) -> Tuple[str, Optional[str]]:
+def _resolve_keypoint_run(
+    root: zarr.Group, requested: Optional[str]
+) -> Tuple[str, Optional[str]]:
     parent = root.get("keypoints_runs")
     if parent is None:
         raise ValueError("Missing 'keypoints_runs' group.")
@@ -682,9 +759,13 @@ def _resolve_keypoint_run(root: zarr.Group, requested: Optional[str]) -> Tuple[s
     if selector is None:
         latest = _decode_attr(parent.attrs.get("latest"))
         if not latest:
-            raise ValueError("keypoints_runs group missing 'latest' attribute; pass --keypoint-run explicitly.")
+            raise ValueError(
+                "keypoints_runs group missing 'latest' attribute; pass --keypoint-run explicitly."
+            )
         if latest not in parent:
-            raise ValueError(f"keypoints_runs latest run '{latest}' not found in group keys.")
+            raise ValueError(
+                f"keypoints_runs latest run '{latest}' not found in group keys."
+            )
         return latest, "latest"
 
     if selector == "latest_traditional":
@@ -801,7 +882,9 @@ def _resolve_review_status_sources(
     disk_checked = zarr_path is not None and refined_parent_name is not None
     disk_status: Optional[Dict[str, Any]] = None
     if disk_checked and zarr_path is not None and refined_parent_name is not None:
-        on_disk_attrs = _load_group_attrs_from_disk(zarr_path / refined_parent_name / refined_run_name)
+        on_disk_attrs = _load_group_attrs_from_disk(
+            zarr_path / refined_parent_name / refined_run_name
+        )
         disk_status = _coerce_mapping(on_disk_attrs.get("keypoint_review_status"))
 
     effective_status = attrs_status if attrs_status is not None else disk_status
@@ -809,7 +892,9 @@ def _resolve_review_status_sources(
     if not disk_checked:
         divergence = "disk_not_checked"
     elif attrs_status is not None and disk_status is not None:
-        if _canonicalize_mapping_payload(attrs_status) == _canonicalize_mapping_payload(disk_status):
+        if _canonicalize_mapping_payload(attrs_status) == _canonicalize_mapping_payload(
+            disk_status
+        ):
             divergence = "in_sync"
         else:
             divergence = "conflict"
@@ -862,11 +947,14 @@ def _resolve_refined_keypoint_quality(
     for run_name in refined_parent.group_keys():
         run_group = refined_parent[run_name]
         source_run = _decode_attr(
-            run_group.attrs.get("source_keypoints_run") or run_group.attrs.get("source_keypoint_run")
+            run_group.attrs.get("source_keypoints_run")
+            or run_group.attrs.get("source_keypoint_run")
         )
         if source_run != source_keypoint_run:
             continue
-        ts = _parse_ts(run_group.attrs.get("created_utc") or run_group.attrs.get("timestamp_utc"))
+        ts = _parse_ts(
+            run_group.attrs.get("created_utc") or run_group.attrs.get("timestamp_utc")
+        )
         candidates.append((ts, str(run_name)))
 
     if not candidates:
@@ -908,7 +996,11 @@ def _resolve_refined_keypoint_quality(
             if usable_keypoints_rate is None:
                 numerator = _as_int(candidate.get("usable_keypoints"))
                 denominator = _as_int(candidate.get("total_rois"))
-                if numerator is not None and denominator is not None and denominator > 0:
+                if (
+                    numerator is not None
+                    and denominator is not None
+                    and denominator > 0
+                ):
                     usable_keypoints_rate = float(numerator) / float(denominator)
 
     return {
@@ -938,14 +1030,17 @@ def _resolve_reviewed_keypoint_run(
     for refined_run_name in refined_parent.group_keys():
         refined_group = refined_parent[refined_run_name]
         source_keypoint_run = _decode_attr(
-            refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
+            refined_group.attrs.get("source_keypoints_run")
+            or refined_group.attrs.get("source_keypoint_run")
         )
         if not source_keypoint_run:
             continue
         if method_hint is not None:
             if keypoints_parent is None or source_keypoint_run not in keypoints_parent:
                 continue
-            source_method = _decode_attr(keypoints_parent[source_keypoint_run].attrs.get("method"))
+            source_method = _decode_attr(
+                keypoints_parent[source_keypoint_run].attrs.get("method")
+            )
             if source_method != method_hint:
                 continue
         review_sources = _resolve_review_status_sources(
@@ -967,8 +1062,13 @@ def _resolve_reviewed_keypoint_run(
             continue
         if required_intended_use is not None and intended_use != required_intended_use:
             continue
-        ts = _parse_ts(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc"))
-        candidates.append((ts, str(refined_run_name), str(source_keypoint_run), review_status))
+        ts = _parse_ts(
+            refined_group.attrs.get("created_utc")
+            or refined_group.attrs.get("timestamp_utc")
+        )
+        candidates.append(
+            (ts, str(refined_run_name), str(source_keypoint_run), review_status)
+        )
 
     if not candidates:
         return None
@@ -1029,7 +1129,9 @@ def _format_ratio(numerator: Optional[int], denominator: int) -> Optional[float]
     return float(numerator) / float(denominator)
 
 
-def _quality_rate_matches(expected: Optional[float], observed: Optional[float], *, tol: float = 1e-9) -> bool:
+def _quality_rate_matches(
+    expected: Optional[float], observed: Optional[float], *, tol: float = 1e-9
+) -> bool:
     if expected is None and observed is None:
         return True
     if expected is None or observed is None:
@@ -1057,7 +1159,9 @@ def _print_summary(
         print(f"  Zarr: {dataset['zarr_path']}")
         print(f"  Source crop run: {dataset.get('source_crop_run') or 'N/A'}")
         print(f"  Crop source type: {dataset.get('source_type_resolved')}")
-        print(f"  ROI pixel contract: {dataset.get('source_roi_pixel_contract_name') or 'missing'}")
+        print(
+            f"  ROI pixel contract: {dataset.get('source_roi_pixel_contract_name') or 'missing'}"
+        )
         print(f"  ROI read mode: {dataset.get('source_roi_read_mode') or 'missing'}")
         print(f"  Keypoint run: {dataset.get('keypoint_run_resolved')}")
         if dataset.get("refined_keypoint_run"):
@@ -1074,7 +1178,9 @@ def _print_summary(
         review_status = dataset.get("keypoint_review_status")
         if isinstance(review_status, Mapping) and review_status:
             state = _decode_attr(review_status.get("state")) or "unknown"
-            intended_use = _decode_attr(review_status.get("intended_use")) or "unspecified"
+            intended_use = (
+                _decode_attr(review_status.get("intended_use")) or "unspecified"
+            )
             print(f"  Review status: {state} ({intended_use})")
         for warning in dataset.get("warnings", []):
             print(f"  ⚠ {warning}")
@@ -1084,7 +1190,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, help="Registry SQLite path.")
     parser.add_argument("--dish-design", type=str, help="Exact dish design match.")
-    parser.add_argument("--dish-design-like", type=str, help="Substring match for dish design.")
+    parser.add_argument(
+        "--dish-design-like", type=str, help="Substring match for dish design."
+    )
     parser.add_argument("--fps-min", type=float)
     parser.add_argument("--fps-max", type=float)
     parser.add_argument("--exposure-min", type=float)
@@ -1095,14 +1203,30 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--gain-max", type=float)
     parser.add_argument("--video-codec", type=str)
     parser.add_argument("--video-pix-fmt", type=str)
-    parser.add_argument("--format-encoder", type=str, help="Exact match on container encoder tag.")
-    parser.add_argument("--format-title", type=str, help="Exact match on container title tag.")
-    parser.add_argument("--format-comment", type=str, help="Exact match on container comment tag.")
-    parser.add_argument("--encoder-name", type=str, help="Exact match on encoder name in comment.")
-    parser.add_argument("--encoder-codec", type=str, help="Exact match on encoder codec in comment.")
-    parser.add_argument("--encoder-preset", type=str, help="Exact match on encoder preset in comment.")
-    parser.add_argument("--encoder-tuning", type=str, help="Exact match on encoder tuning in comment.")
-    parser.add_argument("--encoder-rc", type=str, help="Exact match on encoder rate control in comment.")
+    parser.add_argument(
+        "--format-encoder", type=str, help="Exact match on container encoder tag."
+    )
+    parser.add_argument(
+        "--format-title", type=str, help="Exact match on container title tag."
+    )
+    parser.add_argument(
+        "--format-comment", type=str, help="Exact match on container comment tag."
+    )
+    parser.add_argument(
+        "--encoder-name", type=str, help="Exact match on encoder name in comment."
+    )
+    parser.add_argument(
+        "--encoder-codec", type=str, help="Exact match on encoder codec in comment."
+    )
+    parser.add_argument(
+        "--encoder-preset", type=str, help="Exact match on encoder preset in comment."
+    )
+    parser.add_argument(
+        "--encoder-tuning", type=str, help="Exact match on encoder tuning in comment."
+    )
+    parser.add_argument(
+        "--encoder-rc", type=str, help="Exact match on encoder rate control in comment."
+    )
     parser.add_argument("--compression", type=str)
     parser.add_argument("--camera-model", type=str)
     parser.add_argument("--camera-serial", type=str)
@@ -1111,7 +1235,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--arena-id", type=str)
     parser.add_argument("--path-contains", type=str)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
+    parser.add_argument(
+        "--output-file-list", type=Path, help="Write matched zarr paths to file."
+    )
 
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
@@ -1133,7 +1259,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "(for example pose_skel_traditional_v2)."
         ),
     )
-    parser.add_argument("--base-config", type=Path, default=Path("configs/fisheye/pose_config.yaml"))
+    parser.add_argument(
+        "--base-config", type=Path, default=Path("configs/fisheye/pose_config.yaml")
+    )
     parser.add_argument("--out-config", type=Path)
     parser.add_argument("--out-manifest", type=Path)
     parser.add_argument(
@@ -1178,23 +1306,35 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--register", action="store_true", help="Record training set metadata in the registry.")
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="Record training set metadata in the registry.",
+    )
     parser.add_argument(
         "--register-registry",
         type=Path,
         help="Registry path to use when --register is set (defaults to --registry).",
     )
 
-    cli_argv = [str(token) for token in (list(argv) if argv is not None else list(sys.argv[1:]))]
+    cli_argv = [
+        str(token) for token in (list(argv) if argv is not None else list(sys.argv[1:]))
+    ]
     args = parser.parse_args(cli_argv)
     args.input_format = _normalize_input_format(args.input_format)
-    args.compatible_keypoint_contracts = _parse_csv_values(args.compatible_keypoint_contract)
-    if args.min_usable_keypoints_rate is not None and not (0.0 <= args.min_usable_keypoints_rate <= 1.0):
+    args.compatible_keypoint_contracts = _parse_csv_values(
+        args.compatible_keypoint_contract
+    )
+    if args.min_usable_keypoints_rate is not None and not (
+        0.0 <= args.min_usable_keypoints_rate <= 1.0
+    ):
         raise ValueError("--min-usable-keypoints-rate must be between 0 and 1.")
 
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
-        raise SystemExit("--model-input must match --input-format for keypoint training selection.")
+        raise SystemExit(
+            "--model-input must match --input-format for keypoint training selection."
+        )
 
     registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
     registry = Registry(registry_path)
@@ -1239,7 +1379,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     for row in rows:
         purpose = _decode_attr(row["zarr_use"])
         zarr_path = Path(str(row["zarr_path"]))
-        if str(purpose or "").lower() == "training" and _looks_like_training_artifact_path(zarr_path):
+        if str(
+            purpose or ""
+        ).lower() == "training" and _looks_like_training_artifact_path(zarr_path):
             skipped_training_rows.append(
                 (
                     str(row["dataset_id"]),
@@ -1269,7 +1411,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         selector_method_hint = "traditional_pose"
     elif normalized_selector == "latest_yolo":
         selector_method_hint = "yolo_pose"
-    selector_is_dynamic = normalized_selector in {None, "latest_traditional", "latest_yolo"}
+    selector_is_dynamic = normalized_selector in {
+        None,
+        "latest_traditional",
+        "latest_yolo",
+    }
     quality_gate_active = (
         args.require_review_state is not None
         or args.require_review_intended_use is not None
@@ -1282,7 +1428,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if quality_gate_active:
         dataset_ids_all = [str(row["dataset_id"]) for row in rows if row["dataset_id"]]
         strict_method = None
-        if selector_is_dynamic and selector_method_hint and not args.allow_cross_method_review_fallback:
+        if (
+            selector_is_dynamic
+            and selector_method_hint
+            and not args.allow_cross_method_review_fallback
+        ):
             strict_method = selector_method_hint
 
         selected_quality_rows = registry.query_keypoint_quality_current(
@@ -1293,10 +1443,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             min_usable_keypoints_rate=args.min_usable_keypoints_rate,
         )
         selected_quality_rows_by_dataset = {
-            str(row["dataset_id"]): dict(row) for row in selected_quality_rows if row["dataset_id"]
+            str(row["dataset_id"]): dict(row)
+            for row in selected_quality_rows
+            if row["dataset_id"]
         }
 
-        all_quality_rows = registry.query_keypoint_quality_current(dataset_ids=dataset_ids_all)
+        all_quality_rows = registry.query_keypoint_quality_current(
+            dataset_ids=dataset_ids_all
+        )
         all_quality_by_dataset: Dict[str, List[Mapping[str, Any]]] = {}
         for quality_row in all_quality_rows:
             dataset_id = str(quality_row["dataset_id"])
@@ -1309,7 +1463,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             )
             for quality_row in method_rows:
                 dataset_id = str(quality_row["dataset_id"])
-                method_quality_by_dataset.setdefault(dataset_id, []).append(dict(quality_row))
+                method_quality_by_dataset.setdefault(dataset_id, []).append(
+                    dict(quality_row)
+                )
 
         filtered_rows: List[Mapping[str, Any]] = []
         for row in rows:
@@ -1328,7 +1484,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                     }
                 )
                 continue
-            if strict_method is not None and not method_quality_by_dataset.get(dataset_id):
+            if strict_method is not None and not method_quality_by_dataset.get(
+                dataset_id
+            ):
                 quality_exclusions.append(
                     {
                         "dataset_id": dataset_id,
@@ -1345,7 +1503,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             review_state = _decode_attr(candidate.get("review_state"))
             review_use = _decode_attr(candidate.get("review_intended_use"))
             usable_rate = _as_float(candidate.get("usable_keypoints_rate"))
-            if args.require_review_state is not None and review_state != args.require_review_state:
+            if (
+                args.require_review_state is not None
+                and review_state != args.require_review_state
+            ):
                 quality_exclusions.append(
                     {
                         "dataset_id": dataset_id,
@@ -1395,11 +1556,17 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         rows = filtered_rows
 
         if quality_exclusions:
-            print(f"Keypoint quality SQL filter excluded {len(quality_exclusions)} dataset(s):")
+            print(
+                f"Keypoint quality SQL filter excluded {len(quality_exclusions)} dataset(s):"
+            )
             for exclusion in quality_exclusions[:20]:
-                print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
+                print(
+                    f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}"
+                )
             if len(quality_exclusions) > 20:
-                print(f"  ... {len(quality_exclusions) - 20} more exclusion(s) omitted.")
+                print(
+                    f"  ... {len(quality_exclusions) - 20} more exclusion(s) omitted."
+                )
 
     rows, duplicate_zarr_path_exclusions = _dedupe_rows_by_zarr_path(rows)
     if duplicate_zarr_path_exclusions:
@@ -1414,16 +1581,26 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 f"[{exclusion['reason']}] {exclusion['zarr_path']}"
             )
         if len(duplicate_zarr_path_exclusions) > 20:
-            print(f"  ... {len(duplicate_zarr_path_exclusions) - 20} more duplicate(s) omitted.")
+            print(
+                f"  ... {len(duplicate_zarr_path_exclusions) - 20} more duplicate(s) omitted."
+            )
 
     keypoint_performance_by_dataset = _query_keypoint_performance_rows(
         registry,
         dataset_ids=[str(row["dataset_id"]) for row in rows if row["dataset_id"]],
     )
+    leakage_group_by_zarr_path = {
+        str(
+            Path(str(row["zarr_path"])).expanduser().resolve()
+        ): _registry_leakage_group(registry, row)
+        for row in rows
+    }
 
     registry.close()
     if not rows:
-        raise SystemExit("No datasets remain after keypoint quality filtering and zarr-path deduplication.")
+        raise SystemExit(
+            "No datasets remain after keypoint quality filtering and zarr-path deduplication."
+        )
 
     zarr_paths = [Path(row["zarr_path"]) for row in rows]
     resolved_set_name: Optional[str] = None
@@ -1464,7 +1641,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     if args.output_file_list:
         args.output_file_list.parent.mkdir(parents=True, exist_ok=True)
-        args.output_file_list.write_text("\n".join(str(path) for path in zarr_paths) + "\n", encoding="utf-8")
+        args.output_file_list.write_text(
+            "\n".join(str(path) for path in zarr_paths) + "\n", encoding="utf-8"
+        )
         print(f"Wrote {len(zarr_paths)} paths to {args.output_file_list}")
     print(f"Registry query matched {len(zarr_paths)} dataset(s).")
 
@@ -1513,10 +1692,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             )
         ds_shape = get_downsample_shape(root, format_hint=args.input_format)
         if ds_shape is None:
-            raise ValueError(f"{zarr_path.name}: unable to resolve downsample shape for '{args.input_format}'.")
+            raise ValueError(
+                f"{zarr_path.name}: unable to resolve downsample shape for '{args.input_format}'."
+            )
 
         dataset_id_text = str(row["dataset_id"]) if row["dataset_id"] else ""
-        quality_row = selected_quality_rows_by_dataset.get(dataset_id_text) if quality_gate_active else None
+        quality_row = (
+            selected_quality_rows_by_dataset.get(dataset_id_text)
+            if quality_gate_active
+            else None
+        )
         method_hint = selector_method_hint
         keypoints_parent = root.get("keypoints_runs")
         keypoint_run_resolved: Optional[str] = None
@@ -1528,7 +1713,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                     f"{zarr_path.name}: quality row missing source_keypoint_run for dataset_id '{dataset_id_text}'."
                 )
             quality_method = _decode_attr(quality_row["keypoint_method"])
-            if method_hint is not None and quality_method is not None and quality_method != method_hint:
+            if (
+                method_hint is not None
+                and quality_method is not None
+                and quality_method != method_hint
+            ):
                 warnings.append(
                     f"Selector '{args.keypoint_run}' required method '{method_hint}', "
                     f"quality-selected run method is '{quality_method}' (cross-method fallback)."
@@ -1537,16 +1726,27 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             keypoint_selector = "quality"
         else:
             try:
-                keypoint_run_resolved, keypoint_selector = _resolve_keypoint_run(root, args.keypoint_run)
+                keypoint_run_resolved, keypoint_selector = _resolve_keypoint_run(
+                    root, args.keypoint_run
+                )
             except ValueError:
                 if not (
                     quality_gate_active
                     and selector_is_dynamic
-                    and (args.require_review_state is not None or args.require_review_intended_use is not None)
+                    and (
+                        args.require_review_state is not None
+                        or args.require_review_intended_use is not None
+                    )
                 ):
                     raise
-        if keypoint_run_resolved is None and quality_gate_active and selector_is_dynamic and (
-            args.require_review_state is not None or args.require_review_intended_use is not None
+        if (
+            keypoint_run_resolved is None
+            and quality_gate_active
+            and selector_is_dynamic
+            and (
+                args.require_review_state is not None
+                or args.require_review_intended_use is not None
+            )
         ):
             reviewed_choice = _resolve_reviewed_keypoint_run(
                 root,
@@ -1574,10 +1774,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 if args.require_review_state is not None:
                     constraint_parts.append(f"state={args.require_review_state!r}")
                 if args.require_review_intended_use is not None:
-                    constraint_parts.append(f"intended_use={args.require_review_intended_use!r}")
+                    constraint_parts.append(
+                        f"intended_use={args.require_review_intended_use!r}"
+                    )
                 constraint_text = ", ".join(constraint_parts) or "none"
                 fallback_hint = ""
-                if method_hint is not None and not args.allow_cross_method_review_fallback:
+                if (
+                    method_hint is not None
+                    and not args.allow_cross_method_review_fallback
+                ):
                     fallback_hint = (
                         " Re-run with --allow-cross-method-review-fallback to allow reviewed "
                         "runs from another keypoint method."
@@ -1590,7 +1795,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             if relaxed_method_hint:
                 reviewed_method = (
                     _decode_attr(keypoints_parent[reviewed_source].attrs.get("method"))
-                    if keypoints_parent is not None and reviewed_source in keypoints_parent
+                    if keypoints_parent is not None
+                    and reviewed_source in keypoints_parent
                     else "unknown"
                 )
                 warnings.append(
@@ -1610,7 +1816,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             raise ValueError(f"{zarr_path.name}: unable to resolve keypoint run.")
 
         keypoint_perf_row = dict(
-            keypoint_performance_by_dataset.get(dataset_id_text, {}).get(str(keypoint_run_resolved))
+            keypoint_performance_by_dataset.get(dataset_id_text, {}).get(
+                str(keypoint_run_resolved)
+            )
             or _missing_keypoint_performance_row(
                 dataset_id=dataset_id_text,
                 keypoint_run=str(keypoint_run_resolved),
@@ -1619,7 +1827,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         kp_group: Optional[zarr.Group] = (
             keypoints_parent[keypoint_run_resolved]
-            if keypoints_parent is not None and keypoint_run_resolved in keypoints_parent
+            if keypoints_parent is not None
+            and keypoint_run_resolved in keypoints_parent
             else None
         )
         refined_quality = _resolve_refined_keypoint_quality(
@@ -1637,7 +1846,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         else:
             refined_run_name = _decode_attr(refined_quality.get("refined_keypoint_run"))
             refined_parent = _resolve_refined_parent(root)
-            if refined_parent is None or not refined_run_name or refined_run_name not in refined_parent:
+            if (
+                refined_parent is None
+                or not refined_run_name
+                or refined_run_name not in refined_parent
+            ):
                 raise ValueError(
                     f"{zarr_path.name}: keypoint run '{keypoint_run_resolved}' not found in keypoints_runs "
                     "and no matching refined_keypoints_runs annotation source is available."
@@ -1674,7 +1887,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 f"{zarr_path.name}: source crop run '{source_crop_run}' not found in crop_runs for "
                 f"keypoint run '{keypoint_run_resolved}'."
             )
-        registry_source_crop_run = _decode_attr(keypoint_perf_row.get("source_crop_run"))
+        registry_source_crop_run = _decode_attr(
+            keypoint_perf_row.get("source_crop_run")
+        )
         if (
             not bool(keypoint_perf_row.get("registry_row_missing"))
             and registry_source_crop_run
@@ -1688,7 +1903,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         crop_group = crop_parent[source_crop_run]
         if "roi_images" not in crop_group:
-            raise ValueError(f"{zarr_path.name}: crop run '{source_crop_run}' missing roi_images array.")
+            raise ValueError(
+                f"{zarr_path.name}: crop run '{source_crop_run}' missing roi_images array."
+            )
         roi_total = int(crop_group["roi_images"].shape[0])
         if roi_total != keypoints_total:
             raise ValueError(
@@ -1696,18 +1913,25 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 f"(roi_images={roi_total}, keypoints_roi={keypoints_total})."
             )
 
-        source_type_resolved = _decode_attr(crop_group.attrs.get("detection_source_type"))
-        source_type_resolved = str(source_type_resolved).strip().lower() if source_type_resolved is not None else None
-        if source_type_resolved not in ALLOWED_KEYPOINT_CROP_SOURCE_TYPES:
-            raise ValueError(
-                f"{zarr_path.name}: keypoint training requires crop lineage detection_source_type in "
-                f"{sorted(ALLOWED_KEYPOINT_CROP_SOURCE_TYPES)!r}, observed {source_type_resolved or 'missing'!r} "
-                f"on crop run '{source_crop_run}'."
-            )
-
+        source_type_resolved = _decode_attr(
+            crop_group.attrs.get("detection_source_type")
+        )
+        source_type_resolved = (
+            str(source_type_resolved).strip().lower()
+            if source_type_resolved is not None
+            else None
+        )
         keypoints_successful: Optional[int] = None
-        keypoints_success_rate = _as_float(source_attrs.get("success_rate")) if kp_group is not None else None
-        keypoints_processed = _as_int(source_attrs.get("keypoints_processed")) if kp_group is not None else None
+        keypoints_success_rate = (
+            _as_float(source_attrs.get("success_rate"))
+            if kp_group is not None
+            else None
+        )
+        keypoints_processed = (
+            _as_int(source_attrs.get("keypoints_processed"))
+            if kp_group is not None
+            else None
+        )
         success_array_name = None
         if kp_group is not None:
             if "detection_success" in kp_group:
@@ -1723,9 +1947,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 )
             # Reading one boolean vector is cheap and gives an exact success count.
             keypoints_successful = int(success_arr[:].sum())
-            keypoints_success_rate = _format_ratio(keypoints_successful, keypoints_total)
+            keypoints_success_rate = _format_ratio(
+                keypoints_successful, keypoints_total
+            )
         elif keypoints_success_rate is not None:
-            denominator = keypoints_processed if keypoints_processed is not None else keypoints_total
+            denominator = (
+                keypoints_processed
+                if keypoints_processed is not None
+                else keypoints_total
+            )
             normalized_rate = float(keypoints_success_rate)
             if 1.0 < normalized_rate <= 100.0:
                 normalized_rate /= 100.0
@@ -1737,7 +1967,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             keypoints_success_rate = normalized_rate
             keypoints_successful = int(round(normalized_rate * float(denominator)))
         elif kp_group is None:
-            for success_name in ("usable_keypoints", "refined_success", "source_success"):
+            for success_name in (
+                "usable_keypoints",
+                "refined_success",
+                "source_success",
+            ):
                 if success_name not in refined_group:
                     continue
                 success_arr = refined_group[success_name]
@@ -1747,7 +1981,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         f"({success_name}={success_arr.shape[0]}, keypoints_roi={keypoints_total})."
                     )
                 keypoints_successful = int(success_arr[:].sum())
-                keypoints_success_rate = _format_ratio(keypoints_successful, keypoints_total)
+                keypoints_success_rate = _format_ratio(
+                    keypoints_successful, keypoints_total
+                )
                 break
 
         annotation_source = _resolve_effective_annotation_source(
@@ -1759,7 +1995,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         )
         annotation_group = annotation_source["group"]
         annotation_keypoints_arr = annotation_group["keypoints_roi"]
-        annotation_keypoint_shape = tuple(int(v) for v in annotation_keypoints_arr.shape)
+        annotation_keypoint_shape = tuple(
+            int(v) for v in annotation_keypoints_arr.shape
+        )
         annotation_keypoint_count = int(annotation_keypoint_shape[1])
 
         dataset_skeleton_id, dataset_kpt_shape = _resolve_dataset_skeleton_identity(
@@ -1781,11 +2019,28 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 }
             )
             continue
+        if source_type_resolved not in ALLOWED_KEYPOINT_CROP_SOURCE_TYPES:
+            raise ValueError(
+                f"{zarr_path.name}: keypoint training requires crop lineage "
+                f"detection_source_type in {sorted(ALLOWED_KEYPOINT_CROP_SOURCE_TYPES)!r}, "
+                f"observed {source_type_resolved or 'missing'!r} on crop run "
+                f"'{source_crop_run}'."
+            )
+        if inferred_keypoint_labels is None:
+            labels = _resolve_keypoint_labels(annotation_group)
+            if labels:
+                inferred_keypoint_labels = labels
+        if inferred_keypoint_skeleton is None:
+            edges = _resolve_keypoint_skeleton(annotation_group)
+            if edges:
+                inferred_keypoint_skeleton = edges
         dataset_member = (
             f"{dataset_label} (zarr={zarr_path.name}, "
             f"annotation_source={annotation_source['parent_name']}/{annotation_source['run_name']})"
         )
-        skeleton_signature_members.setdefault(dataset_signature, []).append(dataset_member)
+        skeleton_signature_members.setdefault(dataset_signature, []).append(
+            dataset_member
+        )
         candidate_identity = (dataset_skeleton_id, dataset_kpt_shape)
         if selected_skeleton_identity is None:
             selected_skeleton_identity = candidate_identity
@@ -1847,7 +2102,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         if quality_row is not None:
             expected_refined_run = _decode_attr(quality_row["refined_run"])
-            observed_refined_run = _decode_attr(refined_quality.get("refined_keypoint_run"))
+            observed_refined_run = _decode_attr(
+                refined_quality.get("refined_keypoint_run")
+            )
             if expected_refined_run != observed_refined_run:
                 raise ValueError(
                     f"{zarr_path.name}: stale keypoint_quality row: expected refined_run "
@@ -1863,7 +2120,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             expected_usable_total = _as_int(quality_row.get("usable_keypoints"))
             expected_total = _as_int(quality_row.get("total_keypoints"))
             expected_rate = _as_float(quality_row.get("usable_keypoints_rate"))
-            observed_usable_total = _as_int(refined_quality.get("usable_keypoints_total"))
+            observed_usable_total = _as_int(
+                refined_quality.get("usable_keypoints_total")
+            )
             observed_rate = _as_float(refined_quality.get("usable_keypoints_rate"))
             observed_total = keypoints_total
             if expected_usable_total != observed_usable_total:
@@ -1943,15 +2202,29 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "zarr_path": str(zarr_path),
                 "dataset_id": row["dataset_id"],
                 "session_uuid": row["session_uuid"],
+                "recording_id": (
+                    dict(row).get("recording_id")
+                    or row["session_uuid"]
+                    or row["dataset_id"]
+                ),
+                "leakage_group": leakage_group_by_zarr_path[
+                    str(zarr_path.expanduser().resolve())
+                ],
                 "rig_id": row["rig_id"],
                 "dish_design": row["dish_design"],
                 "canvas_name": row["canvas_name"],
                 "source_type_requested": DEFAULT_KEYPOINT_SOURCE_TYPE,
                 "source_type_resolved": source_type_resolved,
                 "source_crop_run": source_crop_run,
-                "source_crop_storage_mode": _decode_attr(keypoint_perf_row.get("source_crop_storage_mode")),
-                "source_crop_signature": _decode_attr(keypoint_perf_row.get("source_crop_signature")),
-                "source_crop_revision": _as_int(keypoint_perf_row.get("source_crop_revision")),
+                "source_crop_storage_mode": _decode_attr(
+                    keypoint_perf_row.get("source_crop_storage_mode")
+                ),
+                "source_crop_signature": _decode_attr(
+                    keypoint_perf_row.get("source_crop_signature")
+                ),
+                "source_crop_revision": _as_int(
+                    keypoint_perf_row.get("source_crop_revision")
+                ),
                 "source_roi_image_representation": _decode_attr(
                     keypoint_perf_row.get("source_roi_image_representation")
                 ),
@@ -1961,20 +2234,34 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "required_roi_pixel_contract_name": _decode_attr(
                     keypoint_perf_row.get("source_roi_pixel_contract_name")
                 ),
-                "source_roi_read_mode": _decode_attr(keypoint_perf_row.get("source_roi_read_mode")),
-                "roi_cache_policy": _decode_attr(keypoint_perf_row.get("roi_cache_policy")),
+                "source_roi_read_mode": _decode_attr(
+                    keypoint_perf_row.get("source_roi_read_mode")
+                ),
+                "roi_cache_policy": _decode_attr(
+                    keypoint_perf_row.get("roi_cache_policy")
+                ),
                 "source_roi_cache_used": keypoint_perf_row.get("source_roi_cache_used"),
-                "source_roi_cache_backend": _decode_attr(keypoint_perf_row.get("source_roi_cache_backend")),
+                "source_roi_cache_backend": _decode_attr(
+                    keypoint_perf_row.get("source_roi_cache_backend")
+                ),
                 "source_roi_live_acceleration_effective": _decode_attr(
                     keypoint_perf_row.get("source_roi_live_acceleration_effective")
                 ),
                 "source_roi_live_gpu_chunk_frames": _as_int(
                     keypoint_perf_row.get("source_roi_live_gpu_chunk_frames")
                 ),
-                "input_mode_requested": _decode_attr(keypoint_perf_row.get("input_mode_requested")),
-                "input_mode_effective": _decode_attr(keypoint_perf_row.get("input_mode_effective")),
-                "keypoint_performance_registry_used": not bool(keypoint_perf_row.get("registry_row_missing")),
-                "keypoint_performance_registry_updated_utc": _decode_attr(keypoint_perf_row.get("updated_utc")),
+                "input_mode_requested": _decode_attr(
+                    keypoint_perf_row.get("input_mode_requested")
+                ),
+                "input_mode_effective": _decode_attr(
+                    keypoint_perf_row.get("input_mode_effective")
+                ),
+                "keypoint_performance_registry_used": not bool(
+                    keypoint_perf_row.get("registry_row_missing")
+                ),
+                "keypoint_performance_registry_updated_utc": _decode_attr(
+                    keypoint_perf_row.get("updated_utc")
+                ),
                 "input_format": args.input_format,
                 "images_ds_shape": [int(ds_shape[0]), int(ds_shape[1])],
                 "keypoint_run_requested": args.keypoint_run,
@@ -1982,15 +2269,20 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "keypoint_run_resolved": keypoint_run_resolved,
                 "quality_registry_used": quality_row is not None,
                 "quality_registry_refined_run": (
-                    _decode_attr(quality_row.get("refined_run")) if quality_row is not None else None
+                    _decode_attr(quality_row.get("refined_run"))
+                    if quality_row is not None
+                    else None
                 ),
                 "quality_registry_keypoint_method": (
-                    _decode_attr(quality_row.get("keypoint_method")) if quality_row is not None else None
+                    _decode_attr(quality_row.get("keypoint_method"))
+                    if quality_row is not None
+                    else None
                 ),
                 "cross_method_fallback_used": bool(
                     quality_row is not None
                     and method_hint is not None
-                    and _decode_attr(quality_row.get("keypoint_method")) not in {None, method_hint}
+                    and _decode_attr(quality_row.get("keypoint_method"))
+                    not in {None, method_hint}
                 ),
                 "annotation_source_kind": annotation_source["kind"],
                 "annotation_source_parent": annotation_source["parent_name"],
@@ -2019,7 +2311,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if skeleton_exclusions:
         print(f"Skeleton filter excluded {len(skeleton_exclusions)} dataset(s):")
         for exclusion in skeleton_exclusions[:20]:
-            print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
+            print(
+                f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}"
+            )
         if len(skeleton_exclusions) > 20:
             print(f"  ... {len(skeleton_exclusions) - 20} more exclusion(s) omitted.")
 
@@ -2038,7 +2332,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.imgsz is not None:
         base_config["training_params"]["imgsz"] = int(args.imgsz)
     if args.project:
-        base_config["training_params"]["project"] = str(Path(args.project).expanduser().resolve())
+        base_config["training_params"]["project"] = str(
+            Path(args.project).expanduser().resolve()
+        )
 
     manifest_imgsz = _imgsz_list(base_config["training_params"]["imgsz"])
     pose_schema_kpt_shape = (
@@ -2054,7 +2350,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             )
         )
     )
-    pose_schema_skeleton_id = selected_skeleton_identity[0] if selected_skeleton_identity is not None else None
+    pose_schema_skeleton_id = (
+        selected_skeleton_identity[0]
+        if selected_skeleton_identity is not None
+        else None
+    )
     pose_schema_signature = selected_skeleton_signature or _format_skeleton_signature(
         skeleton_id=pose_schema_skeleton_id,
         kpt_shape=_normalize_kpt_shape(pose_schema_kpt_shape),
@@ -2080,7 +2380,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     )
     planned_out_manifest: Optional[Path] = None
     if args.out_config is not None:
-        planned_out_manifest = args.out_manifest if args.out_manifest is not None else args.out_config.with_suffix(".manifest.json")
+        planned_out_manifest = (
+            args.out_manifest
+            if args.out_manifest is not None
+            else args.out_config.with_suffix(".manifest.json")
+        )
 
     resolved_manifest_source_type_counts = _source_type_counts(
         [dataset.get("source_type_resolved") for dataset in manifest_datasets]
@@ -2095,11 +2399,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "input_format": args.input_format,
         "imgsz": manifest_imgsz,
         "datasets": manifest_datasets,
-        "required_roi_pixel_contract_name": keypoint_contract_policy.get("required_roi_pixel_contract_name"),
+        "required_roi_pixel_contract_name": keypoint_contract_policy.get(
+            "required_roi_pixel_contract_name"
+        ),
         "keypoint_contract_policy": keypoint_contract_policy,
         "base_config_path": str(args.base_config),
         "output_config_path": str(args.out_config) if args.out_config else None,
-        "output_manifest_path": str(planned_out_manifest) if planned_out_manifest else None,
+        "output_manifest_path": (
+            str(planned_out_manifest) if planned_out_manifest else None
+        ),
         "project": args.project,
         "run_name": args.run_name,
         "registry_path": str(registry_path),
@@ -2140,7 +2448,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     if args.out_config is None:
         raise ValueError("--out-config is required unless --dry-run is set.")
-    out_manifest = planned_out_manifest if planned_out_manifest is not None else args.out_config.with_suffix(".manifest.json")
+    out_manifest = (
+        planned_out_manifest
+        if planned_out_manifest is not None
+        else args.out_config.with_suffix(".manifest.json")
+    )
     args.out_config.parent.mkdir(parents=True, exist_ok=True)
     out_manifest.parent.mkdir(parents=True, exist_ok=True)
     args.out_config.write_text(config_yaml, encoding="utf-8")
@@ -2150,9 +2462,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     if args.register:
         if not set_id:
-            print("Note: --register ignored because set_id is only defined in set-based mode (omit --out-config).")
+            print(
+                "Note: --register ignored because set_id is only defined in set-based mode (omit --out-config)."
+            )
         else:
-            register_registry_path = args.register_registry or args.registry or RegistryPaths.from_env(Path.cwd()).path
+            register_registry_path = (
+                args.register_registry
+                or args.registry
+                or RegistryPaths.from_env(Path.cwd()).path
+            )
             register_registry = Registry(register_registry_path)
             skeleton_id = register_registry.upsert_pose_skeleton_spec(
                 kpt_shape=pose_schema_payload.get("kpt_shape"),
@@ -2172,7 +2490,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             register_registry.close()
             print(f"Recorded training set: {set_id}")
 
-    cli: List[str] = ["python", "-m", "fisheye.training.train_pose", str(args.out_config)]
+    cli: List[str] = [
+        "python",
+        "-m",
+        "fisheye.training.train_pose",
+        str(args.out_config),
+    ]
     _add_arg(cli, "--manifest", out_manifest)
     _add_arg(cli, "--run-name", args.run_name)
     _add_arg(cli, "--set-id", set_id)

@@ -27,9 +27,8 @@ from fisheye.shared.zarr.storage_intent import AccessPattern, StoragePlan, Write
 from fisheye.shared.zarr.storage_planner import plan_storage
 from fisheye.shared.zarr.storage_profiles import TRAINING_IMMUTABLE_V1, StorageProfile
 
-
 SCHEMA_ID = "palette.merged_keypoint_training"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -93,7 +92,9 @@ def plan_merged_keypoint_training_arrays(
     if any(value < 0 for value in dimensions.values()):
         raise ValueError("Merged keypoint training dimensions cannot be negative.")
 
-    roi_axes = ("sample", "roi_y", "roi_x") + (("channel",) if len(roi_shape) == 3 else ())
+    roi_axes = ("sample", "roi_y", "roi_x") + (
+        ("channel",) if len(roi_shape) == 3 else ()
+    )
     roi_template: tuple[str | int, ...] = ("N", *roi_shape)
     specs: list[tuple[str, ArrayContract, tuple[int, ...], AccessPattern, Any]] = [
         (
@@ -206,10 +207,27 @@ def plan_merged_keypoint_training_arrays(
     ]
     for name, dtype, description in (
         ("source_dataset_idx", INT32, "Source-dataset ordinal per merged row."),
-        ("source_frame_idx", INT64, "Source frame index per merged row."),
+        (
+            "source_sample_row_index",
+            INT64,
+            "Frame index in the source training archive's local frame domain.",
+        ),
+        (
+            "source_acquisition_frame_index",
+            INT64,
+            "Frame index in the original acquisition-camera domain.",
+        ),
         ("source_roi_idx", INT64, "Source ROI row per merged row."),
-        ("source_refined_row_ids", INT64, "Stable refined-row identity per merged row."),
-        ("source_detect_row_index", INT32, "Source detection-row lineage per merged row."),
+        (
+            "source_refined_row_ids",
+            INT64,
+            "Stable refined-row identity per merged row.",
+        ),
+        (
+            "source_detect_row_index",
+            INT32,
+            "Source detection-row lineage per merged row.",
+        ),
     ):
         specs.append(
             (
@@ -310,19 +328,21 @@ def validate_merged_keypoint_training_storage(
     return tuple(errors)
 
 
-def storage_plan_manifest(plans: Mapping[str, PlannedTrainingArray]) -> dict[str, object]:
+def storage_plan_manifest(
+    plans: Mapping[str, PlannedTrainingArray],
+) -> dict[str, object]:
     return {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
         "profile_id": TRAINING_IMMUTABLE_V1.profile_id,
-        "arrays": {
-            path: plans[path].as_manifest()
-            for path in sorted(plans)
-        },
+        "arrays": {path: plans[path].as_manifest() for path in sorted(plans)},
         "variable_width_metadata_arrays": [
             "source_index/source_dataset_id",
             "source_index/source_zarr_path",
             "source_index/source_roi_transform_json",
+            "source_index/source_frame_mapping_json",
+            "source_index/leakage_group_id",
+            "source_index/leakage_group_source",
         ],
     }
 

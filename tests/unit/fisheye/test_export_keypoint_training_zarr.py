@@ -20,6 +20,7 @@ from fisheye.utils.export_keypoint_training_zarr import (
     validate_merged_keypoint_training_zarr,
 )
 from fisheye.shared.detect_reason_codec import write_reason_columns
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
 
 
 THREE_POINT_SKELETON = [[0, 1], [0, 2], [1, 2]]
@@ -95,6 +96,12 @@ def _write_source_pose_zarr(
         data=np.array([2000, -1, 2002, 2003], dtype=np.int32),
         chunks=(4,),
     )
+    raw_video = root.create_group("raw_video")
+    raw_video.create_array(
+        "original_frame_indices",
+        data=np.array([100, 101, 102, 103], dtype=np.int64),
+        chunks=(4,),
+    )
 
     kp_parent = root.create_group("keypoints_runs")
     kp_parent.attrs["latest"] = "kp_pose_001"
@@ -124,6 +131,11 @@ def _write_source_pose_zarr(
         data=np.array([True, True, False, True], dtype=np.bool_),
         chunks=(4,),
     )
+    kp.create_array(
+        "frame_indices",
+        data=np.array([0, 1, 2, 3], dtype=np.int64),
+        chunks=(4,),
+    )
     if (
         refined_reasons is not None
         or refined_skeleton_id is not None
@@ -149,7 +161,9 @@ def _write_source_pose_zarr(
         refined.attrs["source_crop_run"] = "crop_pose_001"
         refined.attrs["created_utc"] = "2026-02-27T00:00:00+00:00"
         resolved_refined_keypoint_count = int(
-            refined_keypoint_count if refined_keypoint_count is not None else keypoint_count
+            refined_keypoint_count
+            if refined_keypoint_count is not None
+            else keypoint_count
         )
         resolved_refined_shape = (
             refined_runtime_kpt_shape
@@ -161,7 +175,10 @@ def _write_source_pose_zarr(
             refined_pose_schema_name or f"{resolved_refined_skeleton_id}_schema"
         )
         refined.attrs["skeleton_id"] = resolved_refined_skeleton_id
-        refined.attrs["kpt_shape"] = [int(resolved_refined_shape[0]), int(resolved_refined_shape[1])]
+        refined.attrs["kpt_shape"] = [
+            int(resolved_refined_shape[0]),
+            int(resolved_refined_shape[1]),
+        ]
         refined.attrs["pose_schema"] = {
             "name": resolved_refined_schema_name,
             "skeleton_id": resolved_refined_skeleton_id,
@@ -184,6 +201,11 @@ def _write_source_pose_zarr(
             data=np.array([True, True, False, True], dtype=np.bool_),
             chunks=(4,),
         )
+        refined.create_array(
+            "frame_indices",
+            data=np.array([0, 1, 2, 3], dtype=np.int64),
+            chunks=(4,),
+        )
         write_reason_columns(
             refined,
             np.asarray(refined_reasons, dtype=object),
@@ -204,6 +226,11 @@ def _manifest_for_single_source(path: Path) -> dict:
             {
                 "name": "dataset_single",
                 "dataset_id": "dataset_single",
+                "recording_id": "recording_single",
+                "leakage_group": {
+                    "id": "recording:recording_single",
+                    "source": "recording_fallback",
+                },
                 "zarr_path": str(path),
                 "input_format": "gray",
                 "source_crop_run": "crop_pose_001",
@@ -225,6 +252,11 @@ def _manifest_for_sources(path_a: Path, path_b: Path) -> dict:
             {
                 "name": "dataset_a",
                 "dataset_id": "dataset_a",
+                "recording_id": "recording_a",
+                "leakage_group": {
+                    "id": "recording:recording_a",
+                    "source": "recording_fallback",
+                },
                 "zarr_path": str(path_a),
                 "input_format": "gray",
                 "source_crop_run": "crop_pose_001",
@@ -233,6 +265,11 @@ def _manifest_for_sources(path_a: Path, path_b: Path) -> dict:
             {
                 "name": "dataset_b",
                 "dataset_id": "dataset_b",
+                "recording_id": "recording_b",
+                "leakage_group": {
+                    "id": "recording:recording_b",
+                    "source": "recording_fallback",
+                },
                 "zarr_path": str(path_b),
                 "input_format": "gray",
                 "source_crop_run": "crop_pose_001",
@@ -242,7 +279,9 @@ def _manifest_for_sources(path_a: Path, path_b: Path) -> dict:
     }
 
 
-def test_discover_merge_sources_accepts_single_skeleton_identity(tmp_path: Path) -> None:
+def test_discover_merge_sources_accepts_single_skeleton_identity(
+    tmp_path: Path,
+) -> None:
     zarr_a = tmp_path / "source_a.zarr"
     zarr_b = tmp_path / "source_b.zarr"
     _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_shared")
@@ -290,9 +329,13 @@ def test_discover_merge_sources_rejects_ordered_skeleton_disagreement(
         )
 
 
-def test_discover_merge_sources_prefers_crop_resolved_source_type(tmp_path: Path) -> None:
+def test_discover_merge_sources_prefers_crop_resolved_source_type(
+    tmp_path: Path,
+) -> None:
     zarr_path = tmp_path / "source_pose.zarr"
-    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared", detection_source_type="refined")
+    _write_source_pose_zarr(
+        zarr_path, skeleton_id="pose_skel_shared", detection_source_type="refined"
+    )
     manifest = _manifest_for_single_source(zarr_path)
     manifest["source_type"] = "filtered"
 
@@ -305,12 +348,18 @@ def test_discover_merge_sources_prefers_crop_resolved_source_type(tmp_path: Path
     assert specs[0].source_type_resolved == "refined"
 
 
-def test_discover_merge_sources_rejects_non_refined_crop_lineage(tmp_path: Path) -> None:
+def test_discover_merge_sources_rejects_non_refined_crop_lineage(
+    tmp_path: Path,
+) -> None:
     zarr_path = tmp_path / "source_pose.zarr"
-    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared", detection_source_type="filtered")
+    _write_source_pose_zarr(
+        zarr_path, skeleton_id="pose_skel_shared", detection_source_type="filtered"
+    )
     manifest = _manifest_for_single_source(zarr_path)
 
-    with pytest.raises(ValueError, match=r"crop lineage detection_source_type in .*manual.*refined"):
+    with pytest.raises(
+        ValueError, match=r"crop lineage detection_source_type in .*manual.*refined"
+    ):
         _discover_merge_sources(
             manifest,
             expected_input_format="gray",
@@ -318,7 +367,9 @@ def test_discover_merge_sources_rejects_non_refined_crop_lineage(tmp_path: Path)
         )
 
 
-def test_discover_merge_sources_accepts_required_roi_pixel_contract(tmp_path: Path) -> None:
+def test_discover_merge_sources_accepts_required_roi_pixel_contract(
+    tmp_path: Path,
+) -> None:
     zarr_path = tmp_path / "source_pose.zarr"
     _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared")
     manifest = _manifest_for_single_source(zarr_path)
@@ -338,7 +389,100 @@ def test_discover_merge_sources_accepts_required_roi_pixel_contract(tmp_path: Pa
     }
 
 
-def test_discover_merge_sources_rejects_required_roi_pixel_contract_mismatch(tmp_path: Path) -> None:
+def test_discover_merge_sources_reads_mutable_run_metadata_directly(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared")
+    zarr.consolidate_metadata(str(zarr_path))
+
+    crop = open_zarr_group_direct(zarr_path / "crop_runs" / "crop_pose_001", mode="r+")
+    crop.attrs["roi_pixel_contract"] = {
+        "name": "reviewed_gray_uint8_v2",
+        "channels": "gray",
+        "dtype": "uint8",
+    }
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["required_roi_pixel_contract_name"] = "reviewed_gray_uint8_v2"
+
+    specs, _ = _discover_merge_sources(
+        manifest,
+        expected_input_format="gray",
+        row_gate_policy="raw_success",
+    )
+
+    assert specs[0].roi_pixel_contract_name == "reviewed_gray_uint8_v2"
+
+
+def test_discover_merge_sources_honors_exact_refined_run_hidden_from_snapshot(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(
+        zarr_path,
+        skeleton_id="pose_skel_shared",
+        refined_skeleton_id="pose_skel_shared",
+        refined_run_name="refined_visible_001",
+    )
+    zarr.consolidate_metadata(str(zarr_path))
+
+    parent = open_zarr_group_direct(zarr_path / "refined_keypoints_runs", mode="r+")
+    refined = parent.create_group("refined_reviewed_002")
+    refined.attrs.update(
+        {
+            "source_keypoints_run": "kp_pose_001",
+            "source_crop_run": "crop_pose_001",
+            "created_utc": "2026-08-07T00:00:00+00:00",
+            "skeleton_id": "pose_skel_shared",
+            "kpt_shape": [3, 2],
+            "keypoint_labels": ["kpt_0", "kpt_1", "kpt_2"],
+        }
+    )
+    refined.create_array(
+        "keypoints_roi",
+        data=np.ones((4, 3, 2), dtype=np.float32),
+        chunks=(4, 3, 2),
+    )
+    refined.create_array(
+        "usable_keypoints",
+        data=np.array([True, True, False, True], dtype=np.bool_),
+        chunks=(4,),
+    )
+    refined.create_array(
+        "frame_indices",
+        data=np.arange(4, dtype=np.int64),
+        chunks=(4,),
+    )
+
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["datasets"][0].update(
+        {
+            "annotation_source_parent": "refined_keypoints_runs",
+            "refined_keypoint_run": "refined_reviewed_002",
+            "keypoints_array_path": (
+                "refined_keypoints_runs/refined_reviewed_002/keypoints_roi"
+            ),
+            "detection_success_path": (
+                "refined_keypoints_runs/refined_reviewed_002/usable_keypoints"
+            ),
+        }
+    )
+
+    specs, _ = _discover_merge_sources(
+        manifest,
+        expected_input_format="gray",
+        row_gate_policy="refined_usable",
+    )
+
+    assert specs[0].keypoints_path == (
+        "refined_keypoints_runs/refined_reviewed_002/keypoints_roi"
+    )
+    assert specs[0].row_gate_refined_run == "refined_reviewed_002"
+
+
+def test_discover_merge_sources_rejects_required_roi_pixel_contract_mismatch(
+    tmp_path: Path,
+) -> None:
     zarr_path = tmp_path / "source_pose.zarr"
     _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared")
     manifest = _manifest_for_single_source(zarr_path)
@@ -352,7 +496,9 @@ def test_discover_merge_sources_rejects_required_roi_pixel_contract_mismatch(tmp
         )
 
 
-def test_discover_merge_sources_rejects_mixed_skeleton_identities(tmp_path: Path) -> None:
+def test_discover_merge_sources_rejects_mixed_skeleton_identities(
+    tmp_path: Path,
+) -> None:
     zarr_a = tmp_path / "source_a.zarr"
     zarr_b = tmp_path / "source_b.zarr"
     _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_a")
@@ -373,7 +519,9 @@ def test_discover_merge_sources_rejects_mixed_skeleton_identities(tmp_path: Path
     assert "skeleton_id=pose_skel_b" in message
 
 
-def test_discover_merge_sources_rejects_manifest_keypoint_label_mismatch(tmp_path: Path) -> None:
+def test_discover_merge_sources_rejects_manifest_keypoint_label_mismatch(
+    tmp_path: Path,
+) -> None:
     zarr_path = tmp_path / "source_pose.zarr"
     _write_source_pose_zarr(
         zarr_path,
@@ -382,7 +530,11 @@ def test_discover_merge_sources_rejects_manifest_keypoint_label_mismatch(tmp_pat
     )
     manifest = _manifest_for_single_source(zarr_path)
     manifest["keypoint_labels"] = ["eye_left", "tail_tip", "swim_bladder"]
-    manifest["datasets"][0]["keypoint_labels"] = ["tail_tip", "eye_left", "swim_bladder"]
+    manifest["datasets"][0]["keypoint_labels"] = [
+        "tail_tip",
+        "eye_left",
+        "swim_bladder",
+    ]
 
     with pytest.raises(ValueError, match="dataset keypoint_labels"):
         _discover_merge_sources(
@@ -392,13 +544,19 @@ def test_discover_merge_sources_rejects_manifest_keypoint_label_mismatch(tmp_pat
         )
 
 
-def test_discover_merge_sources_rejects_mixed_keypoint_label_sets(tmp_path: Path) -> None:
+def test_discover_merge_sources_rejects_mixed_keypoint_label_sets(
+    tmp_path: Path,
+) -> None:
     zarr_a = tmp_path / "source_a.zarr"
     zarr_b = tmp_path / "source_b.zarr"
     labels_a = ["eye_left", "tail_tip", "bladder"]
     labels_b = ["eye_right", "tail_tip", "bladder"]
-    _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_shared", keypoint_labels=labels_a)
-    _write_source_pose_zarr(zarr_b, skeleton_id="pose_skel_shared", keypoint_labels=labels_b)
+    _write_source_pose_zarr(
+        zarr_a, skeleton_id="pose_skel_shared", keypoint_labels=labels_a
+    )
+    _write_source_pose_zarr(
+        zarr_b, skeleton_id="pose_skel_shared", keypoint_labels=labels_b
+    )
     manifest = _manifest_for_sources(zarr_a, zarr_b)
 
     with pytest.raises(ValueError, match="Mixed keypoint label sets detected"):
@@ -409,7 +567,9 @@ def test_discover_merge_sources_rejects_mixed_keypoint_label_sets(tmp_path: Path
         )
 
 
-def test_discover_merge_sources_raw_success_plus_box_only_includes_tagged_rows(tmp_path: Path) -> None:
+def test_discover_merge_sources_raw_success_plus_box_only_includes_tagged_rows(
+    tmp_path: Path,
+) -> None:
     zarr_path = tmp_path / "source_box_only.zarr"
     _write_source_pose_zarr(
         zarr_path,
@@ -435,7 +595,9 @@ def test_discover_merge_sources_raw_success_plus_box_only_includes_tagged_rows(t
     assert spec.box_only_selected_mask.tolist() == [False, False, True, False]
 
 
-def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(tmp_path: Path) -> None:
+def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(
+    tmp_path: Path,
+) -> None:
     zarr_path = tmp_path / "source_refined_v2.zarr"
     _write_source_pose_zarr(
         zarr_path,
@@ -466,8 +628,14 @@ def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(tmp
     spec = specs[0]
     assert spec.row_gate_policy == "refined_usable"
     assert spec.row_gate_refined_run == "refined_kp_pose_v2_001"
-    assert spec.keypoints_path == "refined_keypoints_runs/refined_kp_pose_v2_001/keypoints_roi"
-    assert spec.success_path == "refined_keypoints_runs/refined_kp_pose_v2_001/usable_keypoints"
+    assert (
+        spec.keypoints_path
+        == "refined_keypoints_runs/refined_kp_pose_v2_001/keypoints_roi"
+    )
+    assert (
+        spec.success_path
+        == "refined_keypoints_runs/refined_kp_pose_v2_001/usable_keypoints"
+    )
     assert spec.skeleton_id == "pose_skel_traditional_v2"
     assert spec.kpt_shape == (5, 3)
     assert layout["skeleton_id"] == "pose_skel_traditional_v2"
@@ -603,13 +771,19 @@ def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: 
     root = zarr.open_group(str(out_zarr), mode="a", use_consolidated=False)
     keypoints = np.asarray(root["keypoints_runs"][result.run_name]["keypoints_roi"][:], dtype=np.float32)
     assert keypoints.shape == (3, 5, 2)
-    assert np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist() == [0, 1, 3]
-    assert np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64).tolist() == [
+    assert np.asarray(
+        root["source_index/source_roi_idx"][:], dtype=np.int64
+    ).tolist() == [0, 1, 3]
+    assert np.asarray(
+        root["source_index/source_refined_row_ids"][:], dtype=np.int64
+    ).tolist() == [
         1000,
         1001,
         1003,
     ]
-    assert np.asarray(root["source_index/source_detect_row_index"][:], dtype=np.int64).tolist() == [
+    assert np.asarray(
+        root["source_index/source_detect_row_index"][:], dtype=np.int64
+    ).tolist() == [
         2000,
         -1,
         2003,
@@ -636,11 +810,17 @@ def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: 
         validate_merged_keypoint_training_zarr(out_zarr)
 
 
-def test_export_merged_keeps_mixed_lineage_out_of_surface_source_type(tmp_path: Path) -> None:
+def test_export_merged_keeps_mixed_lineage_out_of_surface_source_type(
+    tmp_path: Path,
+) -> None:
     zarr_a = tmp_path / "source_refined.zarr"
     zarr_b = tmp_path / "source_manual.zarr"
-    _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_shared", detection_source_type="refined")
-    _write_source_pose_zarr(zarr_b, skeleton_id="pose_skel_shared", detection_source_type="manual")
+    _write_source_pose_zarr(
+        zarr_a, skeleton_id="pose_skel_shared", detection_source_type="refined"
+    )
+    _write_source_pose_zarr(
+        zarr_b, skeleton_id="pose_skel_shared", detection_source_type="manual"
+    )
     manifest = _manifest_for_sources(zarr_a, zarr_b)
     manifest["source_type_requested"] = "refined"
 
@@ -676,7 +856,9 @@ def test_export_merged_keeps_mixed_lineage_out_of_surface_source_type(tmp_path: 
     assert training_export["source_type_resolved_counts"] == {"manual": 1, "refined": 1}
 
 
-def test_export_v2_pads_without_resize_and_groups_splits_by_source(tmp_path: Path) -> None:
+def test_export_v2_pads_without_resize_and_groups_splits_by_source(
+    tmp_path: Path,
+) -> None:
     zarr_a = tmp_path / "source_16.zarr"
     zarr_b = tmp_path / "source_12.zarr"
     _write_source_pose_zarr(
@@ -731,12 +913,16 @@ def test_export_v2_pads_without_resize_and_groups_splits_by_source(tmp_path: Pat
     assert np.all(roi[3, :4] == 0)
     assert keypoints[0, 0].tolist() == [4.0, 5.0]
     assert keypoints[3, 0].tolist() == [5.0, 6.0]
-    assert set(source_idx[train_idx].tolist()).isdisjoint(set(source_idx[val_idx].tolist()))
+    assert set(source_idx[train_idx].tolist()).isdisjoint(
+        set(source_idx[val_idx].tolist())
+    )
     assert root["splits"].attrs["strategy"] == "source_dataset_grouped"
 
     transforms = [
         json.loads(str(value))
-        for value in np.asarray(root["source_index/source_roi_transform_json"][:], dtype=object)
+        for value in np.asarray(
+            root["source_index/source_roi_transform_json"][:], dtype=object
+        )
     ]
     assert transforms[0]["pad_before_yx"] == [2, 2]
     assert transforms[1]["pad_before_yx"] == [4, 4]
@@ -761,7 +947,9 @@ def test_export_v2_rejects_roi_larger_than_padding_target(tmp_path: Path) -> Non
         )
 
 
-def test_immutable_v2_publication_is_consolidated_and_selector_ineligible(tmp_path: Path) -> None:
+def test_immutable_v3_publication_is_consolidated_and_selector_ineligible(
+    tmp_path: Path,
+) -> None:
     zarr_a = tmp_path / "source_a.zarr"
     zarr_b = tmp_path / "source_b.zarr"
     _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_shared", roi_hw=(16, 16))
@@ -789,7 +977,7 @@ def test_immutable_v2_publication_is_consolidated_and_selector_ineligible(tmp_pa
         invocation={},
         roi_transform_mode="pad_to_shape",
         target_roi_hw=(20, 20),
-        split_unit="source_dataset",
+        split_unit="leakage_group",
     )
 
     assert result.total_samples == 6
@@ -799,14 +987,96 @@ def test_immutable_v2_publication_is_consolidated_and_selector_ineligible(tmp_pa
     assert direct.attrs["training_artifact_mutability"] == "immutable"
     assert direct.attrs["stage_selector_eligible"] is False
     assert direct.attrs["registry_activation"] == "deferred"
+    assert direct.attrs["training_export"]["storage"]["schema_version"] == 3
+    assert direct["splits"].attrs["strategy"] == "biological_acquisition_grouped_v1"
+    assert "source_frame_idx" not in direct["source_index"]
+    assert np.asarray(
+        direct["source_index/source_sample_row_index"][:], dtype=np.int64
+    ).tolist() == [0, 1, 3, 0, 1, 3]
+    assert np.asarray(
+        direct["source_index/source_acquisition_frame_index"][:], dtype=np.int64
+    ).tolist() == [100, 101, 103, 100, 101, 103]
     assert consolidated.attrs["immutable_training_publication"]["task"] == "keypoints"
-    publication_validation = consolidated.attrs["immutable_training_publication"]["validation"]
+    publication_validation = consolidated.attrs["immutable_training_publication"][
+        "validation"
+    ]
     assert publication_validation["published_zarr_path"] == str(target.resolve())
     assert "zarr_path" not in publication_validation
     assert not list(target.parent.glob(f".{target.name}.publish_tmp.*"))
 
 
-def test_checked_dtype_policy_normalizes_float64_to_float32_with_receipt(tmp_path: Path) -> None:
+def test_v3_leakage_group_keeps_related_sources_in_one_split(tmp_path: Path) -> None:
+    sources = [tmp_path / f"source_{name}.zarr" for name in ("a", "b", "c")]
+    for source in sources:
+        _write_source_pose_zarr(source, skeleton_id="pose_skel_shared")
+    manifest = _manifest_for_sources(sources[0], sources[1])
+    manifest["datasets"].append(
+        {
+            "name": "dataset_c",
+            "dataset_id": "dataset_c",
+            "recording_id": "recording_c",
+            "leakage_group": {
+                "id": "subject:subject_c",
+                "source": "registered_subject",
+            },
+            "zarr_path": str(sources[2]),
+            "input_format": "gray",
+            "source_crop_run": "crop_pose_001",
+            "keypoint_run": "kp_pose_001",
+        }
+    )
+    for dataset in manifest["datasets"][:2]:
+        dataset["leakage_group"] = {
+            "id": "subject:shared_subject",
+            "source": "registered_subject",
+        }
+    manifest_path = tmp_path / "manifest_v3.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "merged_v3.zarr"
+
+    result = _export_merged(
+        manifest_payload=manifest,
+        manifest_path=manifest_path,
+        out_zarr=output,
+        merged_dataset_id="merged_v3",
+        overwrite=False,
+        train_ratio=0.5,
+        val_ratio=0.5,
+        test_ratio=0.0,
+        seed=42,
+        copy_batch_size=2,
+        row_gate_policy="raw_success",
+        invocation={},
+        split_unit="leakage_group",
+        use_storage_contract_v2=True,
+    )
+
+    root = zarr.open_group(str(output), mode="r", use_consolidated=False)
+    source_idx = np.asarray(root["source_index/source_dataset_idx"][:], dtype=np.int64)
+    group_ids = np.asarray(root["source_index/leakage_group_id"][:], dtype=object)
+    train = np.asarray(root["splits/train_indices"][:], dtype=np.int64)
+    validation = np.asarray(root["splits/val_indices"][:], dtype=np.int64)
+    train_groups = set(str(value) for value in group_ids[source_idx[train]].tolist())
+    validation_groups = set(
+        str(value) for value in group_ids[source_idx[validation]].tolist()
+    )
+
+    assert result.split_strategy == "biological_acquisition_grouped_v1"
+    assert train_groups.isdisjoint(validation_groups)
+    assert set(source_idx[train].tolist()).issuperset({0, 1}) or set(
+        source_idx[validation].tolist()
+    ).issuperset({0, 1})
+    assert validate_merged_keypoint_training_zarr(output)["total_samples"] == 9
+
+    writable = zarr.open_group(str(output), mode="a", use_consolidated=False)
+    writable["source_index/leakage_group_id"][1] = "subject:subject_c"
+    with pytest.raises(ValueError, match="share a group"):
+        validate_merged_keypoint_training_zarr(output)
+
+
+def test_checked_dtype_policy_normalizes_float64_to_float32_with_receipt(
+    tmp_path: Path,
+) -> None:
     source_float64 = tmp_path / "source_float64.zarr"
     source_float32 = tmp_path / "source_float32.zarr"
     _write_source_pose_zarr(
@@ -880,7 +1150,9 @@ def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_main_auto_aggregates_keypoint_data_card_by_default(tmp_path: Path, monkeypatch) -> None:
+def test_main_auto_aggregates_keypoint_data_card_by_default(
+    tmp_path: Path, monkeypatch
+) -> None:
     manifest_path = tmp_path / "pose_set_v001.manifest.json"
     _write_min_manifest(manifest_path)
 
@@ -911,7 +1183,11 @@ def test_main_auto_aggregates_keypoint_data_card_by_default(tmp_path: Path, monk
     monkeypatch.setattr(
         mod,
         "_build_merged_manifest_payload",
-        lambda **_kwargs: {"set_id": "pose_set_v001", "datasets": [], "merged_export": {"source_datasets": []}},
+        lambda **_kwargs: {
+            "set_id": "pose_set_v001",
+            "datasets": [],
+            "merged_export": {"source_datasets": []},
+        },
     )
     monkeypatch.setattr(mod, "_write_merged_config", lambda **_kwargs: None)
 
@@ -956,7 +1232,9 @@ def test_main_auto_aggregates_keypoint_data_card_by_default(tmp_path: Path, monk
     assert str(tmp_path / "registry.sqlite") in card_cli
 
 
-def test_main_no_aggregate_training_data_card_disables_aggregation(tmp_path: Path, monkeypatch) -> None:
+def test_main_no_aggregate_training_data_card_disables_aggregation(
+    tmp_path: Path, monkeypatch
+) -> None:
     manifest_path = tmp_path / "pose_set_v001.manifest.json"
     _write_min_manifest(manifest_path)
 
@@ -986,7 +1264,11 @@ def test_main_no_aggregate_training_data_card_disables_aggregation(tmp_path: Pat
     monkeypatch.setattr(
         mod,
         "_build_merged_manifest_payload",
-        lambda **_kwargs: {"set_id": "pose_set_v001", "datasets": [], "merged_export": {"source_datasets": []}},
+        lambda **_kwargs: {
+            "set_id": "pose_set_v001",
+            "datasets": [],
+            "merged_export": {"source_datasets": []},
+        },
     )
     monkeypatch.setattr(mod, "_write_merged_config", lambda **_kwargs: None)
 
