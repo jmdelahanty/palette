@@ -403,6 +403,135 @@ def _coerce_edge_pairs(raw_edges: object, *, n_keypoints: int) -> tuple[tuple[in
     return tuple(pairs)
 
 
+def normalize_ordered_skeleton_edges(
+    raw_edges: object,
+    *,
+    n_keypoints: int,
+    field: str = "skeleton edges",
+) -> tuple[tuple[int, int], ...]:
+    """Validate an exact directed, ordered skeleton edge list.
+
+    Unlike :func:`undirected_edge_topology`, this representation is suitable
+    for immutable training manifests: neither edge direction nor list order is
+    normalized away. Reversed duplicates are rejected because they would
+    describe the same undirected drawing edge twice while producing different
+    manifest content.
+    """
+    if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes, bytearray)):
+        raise ValueError(f"{field} must be an exact ordered edge list.")
+    keypoint_count = int(n_keypoints)
+    if keypoint_count <= 0:
+        raise ValueError(f"{field} requires a positive keypoint count.")
+
+    edges: list[tuple[int, int]] = []
+    undirected_seen: set[tuple[int, int]] = set()
+    for edge_index, edge in enumerate(raw_edges):
+        if (
+            not isinstance(edge, Sequence)
+            or isinstance(edge, (str, bytes, bytearray))
+            or len(edge) != 2
+        ):
+            raise ValueError(f"{field}[{edge_index}] must contain exactly two integer indices.")
+        source_raw, target_raw = edge[0], edge[1]
+        if (
+            isinstance(source_raw, bool)
+            or isinstance(target_raw, bool)
+            or not isinstance(source_raw, int)
+            or not isinstance(target_raw, int)
+        ):
+            raise ValueError(f"{field}[{edge_index}] must contain exactly two integer indices.")
+        source = int(source_raw)
+        target = int(target_raw)
+        if source == target or not (0 <= source < keypoint_count and 0 <= target < keypoint_count):
+            raise ValueError(
+                f"{field}[{edge_index}]={list(edge)!r} is outside [0,{keypoint_count}) "
+                "or is a self-edge."
+            )
+        undirected = (min(source, target), max(source, target))
+        if undirected in undirected_seen:
+            raise ValueError(f"{field}[{edge_index}] duplicates an existing undirected edge.")
+        undirected_seen.add(undirected)
+        edges.append((source, target))
+    return tuple(edges)
+
+
+def resolve_ordered_skeleton_edges_from_attrs(
+    attrs: Mapping[str, object],
+    *,
+    n_keypoints: int,
+    allow_package_schema: bool = True,
+) -> ResolvedSkeletonEdges:
+    """Resolve exact ordered edges without inventing a topology.
+
+    Explicit ``pose_schema`` and ``keypoint_skeleton`` declarations must agree.
+    A named packaged schema may supply omitted edges only when its cardinality
+    and skeleton ID agree with the surrounding metadata. No legacy triangle is
+    synthesized.
+    """
+    pose_schema = _coerce_mapping(attrs.get("pose_schema"))
+    pose_edges_raw: object | None = None
+    if pose_schema is not None:
+        pose_edges_raw = pose_schema.get("edges")
+        if pose_edges_raw is None:
+            pose_edges_raw = pose_schema.get("skeleton")
+
+    direct_edges_raw = attrs.get("keypoint_skeleton")
+    pose_edges: tuple[tuple[int, int], ...] | None = None
+    direct_edges: tuple[tuple[int, int], ...] | None = None
+    if pose_edges_raw is not None:
+        pose_edges = normalize_ordered_skeleton_edges(
+            pose_edges_raw, n_keypoints=n_keypoints, field="pose_schema skeleton edges"
+        )
+    if direct_edges_raw is not None:
+        direct_edges = normalize_ordered_skeleton_edges(
+            direct_edges_raw, n_keypoints=n_keypoints, field="keypoint_skeleton"
+        )
+    if pose_edges is not None and direct_edges is not None and pose_edges != direct_edges:
+        raise ValueError("pose_schema edges disagree with keypoint_skeleton exact ordering.")
+    if pose_edges is not None:
+        return ResolvedSkeletonEdges(edge_pairs=pose_edges, source="pose_schema")
+    if direct_edges is not None:
+        return ResolvedSkeletonEdges(edge_pairs=direct_edges, source="keypoint_skeleton")
+
+    schema_name = _normalize_text(pose_schema.get("name")) if pose_schema is not None else None
+    if schema_name is None:
+        skeleton_id = _normalize_text(attrs.get("skeleton_id"))
+        if skeleton_id is None and pose_schema is not None:
+            skeleton_id = _normalize_text(pose_schema.get("skeleton_id"))
+        if skeleton_id is not None and skeleton_id.startswith("pose_schema:"):
+            schema_name = skeleton_id.split(":", 1)[1].strip() or None
+    if not allow_package_schema or schema_name is None:
+        return ResolvedSkeletonEdges(edge_pairs=(), source="none")
+
+    try:
+        package_schema = schema_from_package(schema_name)
+    except FileNotFoundError:
+        return ResolvedSkeletonEdges(edge_pairs=(), source="none")
+    if package_schema.num_keypoints != int(n_keypoints):
+        raise ValueError(
+            f"Packaged pose schema {schema_name!r} has {package_schema.num_keypoints} keypoints, "
+            f"not runtime count {int(n_keypoints)}."
+        )
+    package_skeleton_id = _normalize_text(package_schema.metadata.get("skeleton_id")) or (
+        f"pose_schema:{package_schema.name}"
+    )
+    resolved_identity = resolve_skeleton_identity_from_attrs(attrs, keypoint_count=int(n_keypoints))
+    if resolved_identity.skeleton_id is not None and resolved_identity.skeleton_id != package_skeleton_id:
+        raise ValueError(
+            f"Packaged pose schema {schema_name!r} skeleton_id {package_skeleton_id!r} "
+            f"does not match declared {resolved_identity.skeleton_id!r}."
+        )
+    package_edges = normalize_ordered_skeleton_edges(
+        package_schema.edges,
+        n_keypoints=n_keypoints,
+        field=f"packaged pose schema {schema_name!r} edges",
+    )
+    return ResolvedSkeletonEdges(
+        edge_pairs=package_edges,
+        source=f"pose_schema_package:{schema_name}",
+    )
+
+
 def resolve_skeleton_edges_from_attrs(
     attrs: Mapping[str, object],
     *,

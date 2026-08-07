@@ -27,7 +27,9 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.pose.schema import (
+    normalize_ordered_skeleton_edges,
     resolve_keypoint_labels_from_attrs,
+    resolve_ordered_skeleton_edges_from_attrs,
     resolve_skeleton_identity_from_attrs,
 )
 from fisheye.shared.batch_logging import utc_now
@@ -96,6 +98,7 @@ class PoseMergeSourceSpec:
     keypoint_shape: Tuple[int, ...]
     keypoint_dtype: np.dtype
     keypoint_labels: List[str]
+    skeleton: List[List[int]]
     skeleton_id: Optional[str]
     kpt_shape: Optional[Tuple[int, int]]
     skeleton_signature: str
@@ -123,6 +126,7 @@ class PoseMergeResult:
     source_type_counts: Dict[str, int]
     keypoint_shape: Tuple[int, ...]
     keypoint_labels: List[str]
+    skeleton: List[List[int]]
     skeleton_id: Optional[str]
     kpt_shape: Optional[Tuple[int, int]]
     skeleton_signature: str
@@ -515,6 +519,44 @@ def _resolve_dataset_skeleton_identity(
     return skeleton_id, resolved_kpt_shape, signature
 
 
+def _resolve_dataset_skeleton_edges(
+    *,
+    manifest_skeleton: Tuple[Tuple[int, int], ...],
+    dataset_payload: Dict[str, Any],
+    annotation_group: zarr.Group,
+    source_zarr: Path,
+    keypoint_run: str,
+    keypoint_count: int,
+) -> List[List[int]]:
+    declarations: List[Tuple[str, Tuple[Tuple[int, int], ...]]] = [
+        ("manifest pose_schema.skeleton", manifest_skeleton)
+    ]
+    if "skeleton" in dataset_payload:
+        dataset_edges = normalize_ordered_skeleton_edges(
+            dataset_payload.get("skeleton"),
+            n_keypoints=int(keypoint_count),
+            field=f"{source_zarr} dataset skeleton",
+        )
+        declarations.append(("dataset skeleton", dataset_edges))
+
+    runtime_edges = resolve_ordered_skeleton_edges_from_attrs(
+        dict(annotation_group.attrs),
+        n_keypoints=int(keypoint_count),
+        allow_package_schema=True,
+    )
+    if runtime_edges.source != "none":
+        declarations.append((runtime_edges.source, runtime_edges.edge_pairs))
+
+    authority_source, authority_edges = declarations[0]
+    for source_name, edges in declarations[1:]:
+        if edges != authority_edges:
+            raise ValueError(
+                f"{source_zarr}: exact ordered skeleton edges from {source_name} disagree with "
+                f"{authority_source} for keypoint run '{keypoint_run}'."
+            )
+    return [[int(source), int(target)] for source, target in authority_edges]
+
+
 def _resolve_dataset_keypoint_labels(
     *,
     manifest_payload: Dict[str, Any],
@@ -749,6 +791,17 @@ def _discover_merge_sources(
     manifest_kpt_shape = (
         _normalize_kpt_shape(manifest_payload.get("kpt_shape"))
         or (_normalize_kpt_shape(manifest_pose_schema.get("kpt_shape")) if manifest_pose_schema is not None else None)
+    )
+    if manifest_pose_schema is None or "skeleton" not in manifest_pose_schema:
+        raise ValueError(
+            "Keypoint training manifest pose_schema must persist the exact ordered skeleton edge list."
+        )
+    if manifest_kpt_shape is None:
+        raise ValueError("Keypoint training manifest pose_schema.kpt_shape is missing or invalid.")
+    manifest_skeleton = normalize_ordered_skeleton_edges(
+        manifest_pose_schema.get("skeleton"),
+        n_keypoints=int(manifest_kpt_shape[0]),
+        field="manifest pose_schema.skeleton",
     )
     selected_skeleton_identity: Optional[Tuple[Optional[str], Tuple[int, int]]] = None
     selected_skeleton_signature: Optional[str] = None
@@ -1022,6 +1075,14 @@ def _discover_merge_sources(
             keypoint_run=f"{annotation_parent_name}/{annotation_run}",
             keypoint_count=int(dataset_keypoint_shape[0]),
         )
+        dataset_skeleton = _resolve_dataset_skeleton_edges(
+            manifest_skeleton=manifest_skeleton,
+            dataset_payload=dataset,
+            annotation_group=annotation_group,
+            source_zarr=source_zarr,
+            keypoint_run=f"{annotation_parent_name}/{annotation_run}",
+            keypoint_count=int(dataset_keypoint_shape[0]),
+        )
         dataset_member = f"{dataset_id} (zarr={source_zarr}, keypoint_run={keypoint_run})"
         label_signature = tuple(str(label) for label in dataset_labels)
         keypoint_label_members.setdefault(label_signature, []).append(dataset_member)
@@ -1095,6 +1156,7 @@ def _discover_merge_sources(
                 keypoint_shape=dataset_keypoint_shape,
                 keypoint_dtype=dataset_keypoint_dtype,
                 keypoint_labels=list(dataset_labels),
+                skeleton=[list(edge) for edge in dataset_skeleton],
                 skeleton_id=dataset_skeleton_id,
                 kpt_shape=dataset_kpt_shape,
                 skeleton_signature=dataset_signature,
@@ -1119,6 +1181,7 @@ def _discover_merge_sources(
         "keypoint_shape": keypoint_shape,
         "keypoint_dtype": keypoint_dtype,
         "keypoint_labels": keypoint_labels,
+        "skeleton": [[int(source), int(target)] for source, target in manifest_skeleton],
         "skeleton_id": selected_skeleton_identity[0],
         "kpt_shape": selected_skeleton_identity[1],
         "skeleton_signature": selected_skeleton_signature
@@ -1214,6 +1277,7 @@ def _export_merged(
         )
     merged_skeleton_id = _as_text(layout.get("skeleton_id"))
     merged_kpt_shape = _normalize_kpt_shape(layout.get("kpt_shape"))
+    merged_skeleton = [list(edge) for edge in layout["skeleton"]]
     merged_skeleton_signature = (
         _as_text(layout.get("skeleton_signature"))
         or _format_skeleton_signature(skeleton_id=merged_skeleton_id, kpt_shape=merged_kpt_shape)
@@ -1549,8 +1613,15 @@ def _export_merged(
             "method": "merged_export",
             "source_crop_run": run_name,
             "keypoint_labels": keypoint_labels,
+            "keypoint_skeleton": merged_skeleton,
             "skeleton_id": merged_skeleton_id,
             "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+            "pose_schema": {
+                "skeleton_id": merged_skeleton_id,
+                "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+                "keypoint_labels": keypoint_labels,
+                "skeleton": merged_skeleton,
+            },
             "skeleton_signature": merged_skeleton_signature,
             "keypoints_processed": int(total_samples),
             "success_rate": (float(total_successful) / float(total_samples)) if total_samples > 0 else 0.0,
@@ -1568,7 +1639,7 @@ def _export_merged(
     )
 
     training_export = {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "task": "pose",
         "set_id": manifest_payload.get("set_id"),
         "set_name": manifest_payload.get("set_name"),
@@ -1589,12 +1660,21 @@ def _export_merged(
         ],
         "skeleton_id": merged_skeleton_id,
         "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+        "keypoint_labels": keypoint_labels,
+        "skeleton": merged_skeleton,
+        "pose_schema": {
+            "skeleton_id": merged_skeleton_id,
+            "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+            "keypoint_labels": keypoint_labels,
+            "skeleton": merged_skeleton,
+        },
         "skeleton_signature": merged_skeleton_signature,
         "source_skeleton_signatures": [
             {
                 "dataset_id": spec.dataset_id,
                 "skeleton_id": spec.skeleton_id,
                 "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
+                "skeleton": [list(edge) for edge in spec.skeleton],
                 "signature": spec.skeleton_signature,
                 "zarr_path": str(spec.source_zarr),
             }
@@ -1678,6 +1758,7 @@ def _export_merged(
         source_type_counts=dict(source_type_counts),
         keypoint_shape=keypoint_shape,
         keypoint_labels=keypoint_labels,
+        skeleton=merged_skeleton,
         skeleton_id=merged_skeleton_id,
         kpt_shape=merged_kpt_shape,
         skeleton_signature=merged_skeleton_signature,
@@ -1820,10 +1901,17 @@ def validate_merged_keypoint_training_zarr(
 
     merged_skeleton_id: Optional[str] = None
     merged_kpt_shape: Optional[Tuple[int, int]] = None
+    merged_skeleton: Optional[Tuple[Tuple[int, int], ...]] = None
     merged_skeleton_signature: Optional[str] = None
     if not isinstance(training_export, dict):
         errors.append("root attr training_export must be an object with skeleton identity metadata.")
     else:
+        training_export_schema_version = _as_text(training_export.get("schema_version"))
+        exact_skeleton_required = training_export_schema_version == "2.0.0"
+        if training_export_schema_version not in {None, "1.0.0", "2.0.0"}:
+            errors.append(
+                "training_export.schema_version must be one of legacy 1.0.0 or exact-skeleton 2.0.0."
+            )
         merged_skeleton_id = _as_text(training_export.get("skeleton_id"))
         merged_kpt_shape = _normalize_kpt_shape(training_export.get("kpt_shape"))
         merged_skeleton_signature = _format_skeleton_signature(
@@ -1837,6 +1925,63 @@ def validate_merged_keypoint_training_zarr(
                 "training_export.kpt_shape/keypoints_roi mismatch "
                 f"(kpt_shape={list(merged_kpt_shape)} vs keypoints_roi K={int(keypoints.shape[1])})."
             )
+
+        if merged_kpt_shape is not None and exact_skeleton_required:
+            try:
+                merged_skeleton = normalize_ordered_skeleton_edges(
+                    training_export.get("skeleton"),
+                    n_keypoints=int(merged_kpt_shape[0]),
+                    field="training_export.skeleton",
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+
+            pose_schema = training_export.get("pose_schema")
+            if not isinstance(pose_schema, Mapping):
+                errors.append("training_export.pose_schema must be an exact object.")
+            else:
+                try:
+                    pose_schema_edges = normalize_ordered_skeleton_edges(
+                        pose_schema.get("skeleton"),
+                        n_keypoints=int(merged_kpt_shape[0]),
+                        field="training_export.pose_schema.skeleton",
+                    )
+                    if merged_skeleton is not None and pose_schema_edges != merged_skeleton:
+                        errors.append(
+                            "training_export.pose_schema.skeleton disagrees with training_export.skeleton."
+                        )
+                except ValueError as exc:
+                    errors.append(str(exc))
+
+            try:
+                keypoint_group_edges = normalize_ordered_skeleton_edges(
+                    kp.attrs.get("keypoint_skeleton"),
+                    n_keypoints=int(merged_kpt_shape[0]),
+                    field="keypoints run keypoint_skeleton",
+                )
+                if merged_skeleton is not None and keypoint_group_edges != merged_skeleton:
+                    errors.append(
+                        "keypoints run keypoint_skeleton disagrees with training_export.skeleton."
+                    )
+            except ValueError as exc:
+                errors.append(str(exc))
+
+            keypoint_pose_schema = kp.attrs.get("pose_schema")
+            if not isinstance(keypoint_pose_schema, Mapping):
+                errors.append("keypoints run pose_schema must be an exact object.")
+            else:
+                try:
+                    keypoint_pose_edges = normalize_ordered_skeleton_edges(
+                        keypoint_pose_schema.get("skeleton"),
+                        n_keypoints=int(merged_kpt_shape[0]),
+                        field="keypoints run pose_schema.skeleton",
+                    )
+                    if merged_skeleton is not None and keypoint_pose_edges != merged_skeleton:
+                        errors.append(
+                            "keypoints run pose_schema.skeleton disagrees with training_export.skeleton."
+                        )
+                except ValueError as exc:
+                    errors.append(str(exc))
 
         raw_source_signatures = training_export.get("source_skeleton_signatures")
         if not isinstance(raw_source_signatures, list) or not raw_source_signatures:
@@ -1860,6 +2005,20 @@ def validate_merged_keypoint_training_zarr(
                     )
                     continue
                 entry_identity = (entry_skeleton_id, entry_kpt_shape)
+                if exact_skeleton_required:
+                    try:
+                        entry_skeleton = normalize_ordered_skeleton_edges(
+                            raw_entry.get("skeleton"),
+                            n_keypoints=int(entry_kpt_shape[0]),
+                            field=f"training_export.source_skeleton_signatures[{idx}].skeleton",
+                        )
+                        if merged_skeleton is not None and entry_skeleton != merged_skeleton:
+                            errors.append(
+                                "training_export source exact ordered skeleton disagrees with merged skeleton "
+                                f"for dataset '{entry_dataset_id}'."
+                            )
+                    except ValueError as exc:
+                        errors.append(str(exc))
                 entry_signature = _format_skeleton_signature(
                     skeleton_id=entry_skeleton_id,
                     kpt_shape=entry_kpt_shape,
@@ -2034,6 +2193,7 @@ def validate_merged_keypoint_training_zarr(
         "training_input_format": train_input_format,
         "skeleton_id": merged_skeleton_id,
         "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+        "skeleton": [list(edge) for edge in merged_skeleton] if merged_skeleton is not None else None,
         "skeleton_signature": merged_skeleton_signature,
         "total_samples": int(total_samples),
         "success_count": int(success_count),
@@ -2166,6 +2326,7 @@ def _build_merged_manifest_payload(
                 "roi_pixel_contract_name": spec.roi_pixel_contract_name,
                 "skeleton_id": spec.skeleton_id,
                 "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
+                "skeleton": [list(edge) for edge in spec.skeleton],
                 "skeleton_signature": spec.skeleton_signature,
                 "dish_design": spec.dish_design,
                 "canvas_name": spec.canvas_name,
@@ -2202,6 +2363,7 @@ def _build_merged_manifest_payload(
         "keypoint_run_resolved": run_name,
         "skeleton_id": merge_result.skeleton_id,
         "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
+        "skeleton": [list(edge) for edge in merge_result.skeleton],
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
         "keypoint_supervision_counts": dict(merge_result.keypoint_supervision_counts),
@@ -2237,6 +2399,8 @@ def _build_merged_manifest_payload(
         pose_schema_out = {}
     pose_schema_out["skeleton_id"] = merge_result.skeleton_id
     pose_schema_out["kpt_shape"] = list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None
+    pose_schema_out["keypoint_labels"] = list(merge_result.keypoint_labels)
+    pose_schema_out["skeleton"] = [list(edge) for edge in merge_result.skeleton]
     pose_schema_out["skeleton_signature"] = merge_result.skeleton_signature
     payload["pose_schema"] = pose_schema_out
     payload["merged_export"] = {
@@ -2250,6 +2414,7 @@ def _build_merged_manifest_payload(
         "roi_pixel_contract_names": sorted(roi_contract_names),
         "skeleton_id": merge_result.skeleton_id,
         "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
+        "skeleton": [list(edge) for edge in merge_result.skeleton],
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
         "row_gate_counts": dict(merge_result.row_gate_counts),
@@ -2347,6 +2512,7 @@ def _write_merge_summary(
         "source_type_resolved_counts": dict(merge_result.source_type_counts),
         "skeleton_id": merge_result.skeleton_id,
         "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
+        "skeleton": [list(edge) for edge in merge_result.skeleton],
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
         "row_gate_counts": dict(merge_result.row_gate_counts),
@@ -2388,6 +2554,7 @@ def _write_merge_summary(
                 "keypoint_run": spec.keypoint_run,
                 "skeleton_id": spec.skeleton_id,
                 "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
+                "skeleton": [list(edge) for edge in spec.skeleton],
                 "skeleton_signature": spec.skeleton_signature,
                 "dish_design": spec.dish_design,
                 "canvas_name": spec.canvas_name,

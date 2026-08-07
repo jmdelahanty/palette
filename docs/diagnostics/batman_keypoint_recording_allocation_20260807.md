@@ -78,3 +78,26 @@ contrast, bubbles, and partial/failed poses. Initial targets of roughly 50–100
 accepted poses per training recording and 150–300 per development/test
 recording are planning ranges, not contract constants. Exact frames and
 instances must be persisted in each immutable training manifest.
+
+## Next materialization batches
+
+The next training-source batch is the synchronized four-camera session
+`2026-07-21T20-12-57Z`. Create one independently reviewable source training
+Zarr for each arena, preserving its recording/dataset/subject identity and
+explicit negative detection frames. Aim initially for 50–100 accepted pose
+instances per recording; do not merge these sources until review is complete.
+
+The first Batman-domain evaluation batch is the synchronized four-camera
+development session `2026-07-21T23-29-15Z`. Its source training Zarrs may be
+created and labeled, but their accepted labels must remain outside training
+merges until the historical and candidate models have been evaluated on the
+same frozen development selection. The `2026-07-22T16-15-04Z` sealed-test
+session remains untouched.
+
+For every new immutable source or merged artifact:
+
+- build and review through unconsolidated metadata while mutable;
+- retain exact instance, crop, recording, camera, subject, and split lineage;
+- persist the exact ordered pose labels and skeleton edges;
+- finalize payload, review state, and provenance before consolidation; and
+- consolidate metadata only as the final publication visibility step.

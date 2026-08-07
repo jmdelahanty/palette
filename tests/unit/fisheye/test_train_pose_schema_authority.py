@@ -71,6 +71,21 @@ def test_hash_verified_manifest_schema_is_primary_pose_training_authority(
     assert len(authority["manifest_sha256"]) == 64
 
 
+def test_hash_verified_manifest_rejects_missing_ordered_skeleton(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "pose.manifest.json"
+    payload = {
+        "task": "pose",
+        "set_id": "pose_set",
+        "pose_schema": _pose_schema(),
+    }
+    payload["pose_schema"].pop("skeleton")
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="pose_schema.skeleton"):
+        _load_pose_manifest_authority(manifest_path)
+
+
 @pytest.mark.parametrize(
     ("field", "hostile_value", "message"),
     [

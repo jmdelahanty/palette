@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import yaml
 import zarr
 
+from fisheye.pose.schema import resolve_ordered_skeleton_edges_from_attrs
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.training.config import PoseConfig
@@ -613,25 +614,22 @@ def _resolve_keypoint_labels(group: zarr.Group) -> Optional[List[str]]:
     return None
 
 
-def _resolve_keypoint_skeleton(group: zarr.Group) -> Optional[List[List[int]]]:
-    raw_skeleton = group.attrs.get("keypoint_skeleton")
-    edges_source: Any = raw_skeleton
-    if not isinstance(edges_source, (list, tuple)):
-        pose_schema = _as_mapping(group.attrs.get("pose_schema"))
-        if pose_schema is not None:
-            edges_source = pose_schema.get("edges")
-    if not isinstance(edges_source, (list, tuple)):
-        return None
-
-    edges: List[List[int]] = []
-    for edge in edges_source:
-        if not isinstance(edge, (list, tuple)) or len(edge) < 2:
-            continue
-        try:
-            edges.append([int(edge[0]), int(edge[1])])
-        except Exception:
-            continue
-    return edges or None
+def _resolve_keypoint_skeleton(
+    group: zarr.Group,
+    *,
+    keypoint_count: int,
+) -> Tuple[List[List[int]], str]:
+    resolved = resolve_ordered_skeleton_edges_from_attrs(
+        dict(group.attrs),
+        n_keypoints=int(keypoint_count),
+        allow_package_schema=True,
+    )
+    if resolved.source == "none":
+        raise ValueError(
+            "Keypoint annotation source has no exact ordered skeleton edge declaration "
+            "and does not name a matching packaged pose schema."
+        )
+    return [[int(source), int(target)] for source, target in resolved.edge_pairs], resolved.source
 
 
 def _normalize_keypoint_run_selector(value: Optional[str]) -> Optional[str]:
@@ -1494,6 +1492,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     dataset_ids: List[str] = []
     inferred_keypoint_labels: Optional[List[str]] = None
     inferred_keypoint_skeleton: Optional[List[List[int]]] = None
+    inferred_keypoint_skeleton_source: Optional[str] = None
+    keypoint_label_members: Dict[Tuple[str, ...], List[str]] = {}
+    skeleton_edge_members: Dict[Tuple[Tuple[int, int], ...], List[str]] = {}
     selected_skeleton_identity: Optional[Tuple[Optional[str], Tuple[int, int]]] = None
     selected_skeleton_signature: Optional[str] = None
     skeleton_signature_members: Dict[str, List[str]] = {}
@@ -1658,7 +1659,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 f"{zarr_path.name}: keypoints_roi must have at least 2 dims (N,K), got shape={keypoint_shape}."
             )
         keypoints_total = int(keypoint_shape[0])
-        keypoint_count = int(keypoint_shape[1])
         crop_parent = root.get("crop_runs")
         if crop_parent is None:
             raise ValueError(f"{zarr_path.name}: missing crop_runs group.")
@@ -1766,14 +1766,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 }
             )
             continue
-        if inferred_keypoint_labels is None:
-            labels = _resolve_keypoint_labels(annotation_group)
-            if labels:
-                inferred_keypoint_labels = labels
-        if inferred_keypoint_skeleton is None:
-            edges = _resolve_keypoint_skeleton(annotation_group)
-            if edges:
-                inferred_keypoint_skeleton = edges
         dataset_member = (
             f"{dataset_label} (zarr={zarr_path.name}, "
             f"annotation_source={annotation_source['parent_name']}/{annotation_source['run_name']})"
@@ -1790,6 +1782,44 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             raise ValueError(
                 "Mixed skeleton identities detected while selecting keypoint training datasets. "
                 "Expected one (skeleton_id, kpt_shape) signature but found:\n"
+                + "\n".join(detail_lines)
+            )
+
+        labels = _resolve_keypoint_labels(annotation_group)
+        if not labels:
+            raise ValueError(
+                f"{dataset_member}: annotation source lacks exact ordered keypoint labels."
+            )
+        label_signature = tuple(labels)
+        keypoint_label_members.setdefault(label_signature, []).append(dataset_member)
+        if inferred_keypoint_labels is None:
+            inferred_keypoint_labels = list(labels)
+        elif list(labels) != inferred_keypoint_labels:
+            detail_lines = [
+                f"- {list(signature)}: {', '.join(members)}"
+                for signature, members in sorted(keypoint_label_members.items())
+            ]
+            raise ValueError(
+                "Mixed ordered keypoint labels detected while selecting keypoint training datasets:\n"
+                + "\n".join(detail_lines)
+            )
+
+        edges, edge_source = _resolve_keypoint_skeleton(
+            annotation_group,
+            keypoint_count=annotation_keypoint_count,
+        )
+        edge_signature = tuple((int(edge[0]), int(edge[1])) for edge in edges)
+        skeleton_edge_members.setdefault(edge_signature, []).append(dataset_member)
+        if inferred_keypoint_skeleton is None:
+            inferred_keypoint_skeleton = [list(edge) for edge in edges]
+            inferred_keypoint_skeleton_source = edge_source
+        elif edges != inferred_keypoint_skeleton:
+            detail_lines = [
+                f"- {list(signature)}: {', '.join(members)}"
+                for signature, members in skeleton_edge_members.items()
+            ]
+            raise ValueError(
+                "Mixed exact ordered skeleton edges detected while selecting keypoint training datasets:\n"
                 + "\n".join(detail_lines)
             )
 
@@ -1958,6 +1988,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "keypoints_success_rate": keypoints_success_rate,
                 "skeleton_id": dataset_skeleton_id,
                 "kpt_shape": list(dataset_kpt_shape),
+                "keypoint_labels": list(labels),
+                "skeleton": [list(edge) for edge in edges],
+                "skeleton_source": edge_source,
                 "skeleton_signature": dataset_signature,
                 "usable_keypoints_total": usable_keypoints_total,
                 "usable_keypoints_rate": usable_keypoints_rate,
@@ -2018,6 +2051,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "kpt_shape": pose_schema_kpt_shape,
         "keypoint_labels": inferred_keypoint_labels,
         "skeleton": inferred_keypoint_skeleton,
+        "skeleton_source": inferred_keypoint_skeleton_source,
         "skeleton_signature": pose_schema_signature,
     }
     PoseConfig.model_validate(base_config)

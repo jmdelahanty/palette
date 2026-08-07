@@ -22,6 +22,18 @@ from fisheye.utils.export_keypoint_training_zarr import (
 from fisheye.shared.detect_reason_codec import write_reason_columns
 
 
+THREE_POINT_SKELETON = [[0, 1], [0, 2], [1, 2]]
+FIVE_POINT_SKELETON = [[0, 1], [0, 2], [1, 2], [3, 1], [3, 2], [0, 4]]
+
+
+def _skeleton_for_count(keypoint_count: int) -> list[list[int]]:
+    if int(keypoint_count) == 3:
+        return [list(edge) for edge in THREE_POINT_SKELETON]
+    if int(keypoint_count) == 5:
+        return [list(edge) for edge in FIVE_POINT_SKELETON]
+    return [[idx, idx + 1] for idx in range(max(0, int(keypoint_count) - 1))]
+
+
 def test_export_keypoint_skeleton_signature_helpers() -> None:
     assert _normalize_kpt_shape([3, 3]) == (3, 3)
     assert _normalize_kpt_shape(["3", 3]) == (3, 3)
@@ -91,7 +103,9 @@ def _write_source_pose_zarr(
         "name": f"{skeleton_id}_schema",
         "skeleton_id": skeleton_id,
         "kpt_shape": [int(kpt_shape[0]), int(kpt_shape[1])],
+        "edges": _skeleton_for_count(keypoint_count),
     }
+    kp.attrs["keypoint_skeleton"] = _skeleton_for_count(keypoint_count)
     kp.attrs["keypoint_labels"] = keypoint_labels or [f"kpt_{idx}" for idx in range(int(keypoint_count))]
     kp.create_array(
         "keypoints_roi",
@@ -145,7 +159,11 @@ def _write_source_pose_zarr(
             "name": resolved_refined_schema_name,
             "skeleton_id": resolved_refined_skeleton_id,
             "kpt_shape": [int(resolved_refined_shape[0]), int(resolved_refined_shape[1])],
+            "edges": _skeleton_for_count(resolved_refined_keypoint_count),
         }
+        refined.attrs["keypoint_skeleton"] = _skeleton_for_count(
+            resolved_refined_keypoint_count
+        )
         refined.attrs["keypoint_labels"] = [
             f"refined_kpt_{idx}" for idx in range(resolved_refined_keypoint_count)
         ]
@@ -173,6 +191,7 @@ def _manifest_for_single_source(path: Path) -> dict:
         "source_type": "refined",
         "pose_schema": {
             "kpt_shape": [3, 3],
+            "skeleton": THREE_POINT_SKELETON,
         },
         "datasets": [
             {
@@ -193,6 +212,7 @@ def _manifest_for_sources(path_a: Path, path_b: Path) -> dict:
         "source_type": "refined",
         "pose_schema": {
             "kpt_shape": [3, 3],
+            "skeleton": THREE_POINT_SKELETON,
         },
         "datasets": [
             {
@@ -231,6 +251,36 @@ def test_discover_merge_sources_accepts_single_skeleton_identity(tmp_path: Path)
     assert len(specs) == 2
     assert layout["skeleton_id"] == "pose_skel_shared"
     assert tuple(layout["kpt_shape"]) == (3, 3)
+    assert layout["skeleton"] == THREE_POINT_SKELETON
+    assert specs[0].skeleton == THREE_POINT_SKELETON
+
+
+def test_discover_merge_sources_requires_exact_manifest_skeleton(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared")
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["pose_schema"].pop("skeleton")
+    with pytest.raises(ValueError, match="exact ordered skeleton edge list"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+        )
+
+
+def test_discover_merge_sources_rejects_ordered_skeleton_disagreement(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared")
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["pose_schema"]["skeleton"] = [[0, 2], [0, 1], [1, 2]]
+    with pytest.raises(ValueError, match="exact ordered skeleton edges"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+        )
 
 
 def test_discover_merge_sources_prefers_crop_resolved_source_type(tmp_path: Path) -> None:
@@ -395,6 +445,7 @@ def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(tmp
     manifest["pose_schema"] = {
         "skeleton_id": "pose_skel_traditional_v2",
         "kpt_shape": [5, 3],
+        "skeleton": FIVE_POINT_SKELETON,
     }
     manifest["datasets"][0]["refined_keypoint_run"] = "refined_kp_pose_v2_001"
 
@@ -453,7 +504,9 @@ def test_discover_merge_sources_supports_strict_v2_success_and_source_binding(
                 "name": "traditional_v2",
                 "skeleton_id": "pose_skel_traditional_v2",
                 "kpt_shape": [5, 2],
+                "edges": FIVE_POINT_SKELETON,
             },
+            "keypoint_skeleton": FIVE_POINT_SKELETON,
             "keypoint_labels": [f"refined_kpt_{idx}" for idx in range(5)],
         }
     )
@@ -471,6 +524,7 @@ def test_discover_merge_sources_supports_strict_v2_success_and_source_binding(
     manifest["pose_schema"] = {
         "skeleton_id": "pose_skel_traditional_v2",
         "kpt_shape": [5, 3],
+        "skeleton": FIVE_POINT_SKELETON,
     }
     manifest["datasets"][0]["refined_keypoint_run"] = "refined_kp_pose_v2_001"
     manifest["datasets"][0]["annotation_zarr_path"] = str(annotation_zarr)
@@ -513,6 +567,7 @@ def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: 
     manifest["pose_schema"] = {
         "skeleton_id": "pose_skel_traditional_v2",
         "kpt_shape": [5, 3],
+        "skeleton": FIVE_POINT_SKELETON,
     }
     manifest["datasets"][0]["refined_keypoint_run"] = "refined_kp_pose_v2_001"
 
@@ -536,8 +591,9 @@ def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: 
     )
 
     assert result.kpt_shape == (5, 3)
+    assert result.skeleton == FIVE_POINT_SKELETON
 
-    root = zarr.open_group(str(out_zarr), mode="r")
+    root = zarr.open_group(str(out_zarr), mode="a", use_consolidated=False)
     keypoints = np.asarray(root["keypoints_runs"][result.run_name]["keypoints_roi"][:], dtype=np.float32)
     assert keypoints.shape == (3, 5, 2)
     assert np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist() == [0, 1, 3]
@@ -554,6 +610,23 @@ def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: 
 
     summary = validate_merged_keypoint_training_zarr(out_zarr)
     assert summary["kpt_shape"] == [5, 3]
+    assert summary["skeleton"] == FIVE_POINT_SKELETON
+    keypoint_group = root[f"keypoints_runs/{result.run_name}"]
+    assert keypoint_group.attrs["keypoint_skeleton"] == FIVE_POINT_SKELETON
+    assert keypoint_group.attrs["pose_schema"]["skeleton"] == FIVE_POINT_SKELETON
+    training_export = dict(root.attrs["training_export"])
+    assert training_export["schema_version"] == "2.0.0"
+    assert training_export["skeleton"] == FIVE_POINT_SKELETON
+    assert training_export["pose_schema"]["skeleton"] == FIVE_POINT_SKELETON
+
+    training_export["skeleton"] = [
+        FIVE_POINT_SKELETON[1],
+        FIVE_POINT_SKELETON[0],
+        *FIVE_POINT_SKELETON[2:],
+    ]
+    root.attrs["training_export"] = training_export
+    with pytest.raises(ValueError, match="pose_schema.skeleton disagrees"):
+        validate_merged_keypoint_training_zarr(out_zarr)
 
 
 def test_export_merged_keeps_mixed_lineage_out_of_surface_source_type(tmp_path: Path) -> None:
