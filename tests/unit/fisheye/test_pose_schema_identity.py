@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fisheye.detection import detect_keypoints_traditional as trad_mod
 from fisheye.detection import detect_keypoints_yolo as yolo_mod
 from fisheye.pose.schema import (
+    normalize_ordered_skeleton_edges,
     resolve_head_triangle_indices,
+    resolve_ordered_skeleton_edges_from_attrs,
     resolve_required_keypoint_indices_from_attrs,
     resolve_skeleton_edges_from_attrs,
     resolve_skeleton_identity_from_attrs,
@@ -17,6 +21,53 @@ from fisheye.utils import export_keypoint_training_zarr as export_mod
 class _FakeExportGroup:
     def __init__(self, attrs: dict[str, object]) -> None:
         self.attrs = attrs
+
+
+def test_ordered_skeleton_edges_preserve_direction_and_order() -> None:
+    edges = normalize_ordered_skeleton_edges(
+        [[3, 1], [0, 2], [0, 4]],
+        n_keypoints=5,
+    )
+    assert edges == ((3, 1), (0, 2), (0, 4))
+
+
+def test_ordered_skeleton_edges_reject_reversed_duplicate() -> None:
+    with pytest.raises(ValueError, match="duplicates"):
+        normalize_ordered_skeleton_edges([[0, 1], [1, 0]], n_keypoints=3)
+
+
+def test_ordered_skeleton_edges_resolve_exact_packaged_schema() -> None:
+    resolved = resolve_ordered_skeleton_edges_from_attrs(
+        {
+            "skeleton_id": "pose_skel_traditional_v2",
+            "pose_schema": {
+                "name": "traditional_v2",
+                "skeleton_id": "pose_skel_traditional_v2",
+                "kpt_shape": [5, 2],
+            },
+        },
+        n_keypoints=5,
+    )
+    assert resolved.source == "pose_schema_package:traditional_v2"
+    assert resolved.edge_pairs == (
+        (0, 1),
+        (0, 2),
+        (1, 2),
+        (3, 1),
+        (3, 2),
+        (0, 4),
+    )
+
+
+def test_ordered_skeleton_edges_reject_conflicting_declarations() -> None:
+    with pytest.raises(ValueError, match="disagree"):
+        resolve_ordered_skeleton_edges_from_attrs(
+            {
+                "pose_schema": {"edges": [[0, 1], [0, 2], [1, 2]]},
+                "keypoint_skeleton": [[0, 2], [0, 1], [1, 2]],
+            },
+            n_keypoints=3,
+        )
 
 
 def test_schema_payload_from_package_exposes_canonical_identity_attrs() -> None:

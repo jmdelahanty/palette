@@ -15,6 +15,14 @@ from fisheye.registry.db import Registry
 from fisheye.utils import prepare_keypoint_training_from_registry as wrapper
 
 
+def _test_skeleton(keypoint_count: int) -> list[list[int]]:
+    if int(keypoint_count) == 3:
+        return [[0, 1], [0, 2], [1, 2]]
+    if int(keypoint_count) == 5:
+        return [[0, 1], [0, 2], [1, 2], [3, 1], [3, 2], [0, 4]]
+    return [[idx, idx + 1] for idx in range(max(0, int(keypoint_count) - 1))]
+
+
 def test_prepare_keypoint_skeleton_signature_helpers() -> None:
     assert wrapper._normalize_kpt_shape([3, 3]) == (3, 3)
     assert wrapper._normalize_kpt_shape([3, "3"]) == (3, 3)
@@ -24,6 +32,19 @@ def test_prepare_keypoint_skeleton_signature_helpers() -> None:
         wrapper._format_skeleton_signature(skeleton_id="pose_skel_a", kpt_shape=(3, 3))
         == "skeleton_id=pose_skel_a, kpt_shape=[3,3]"
     )
+
+
+def test_prepare_keypoint_requires_exact_ordered_skeleton_source(tmp_path: Path) -> None:
+    root = zarr.open_group(str(tmp_path / "missing_edges.zarr"), mode="w")
+    group = root.create_group("keypoints")
+    group.attrs["skeleton_id"] = "pose_skel_unpublished"
+    group.attrs["pose_schema"] = {
+        "name": "unpublished_schema",
+        "skeleton_id": "pose_skel_unpublished",
+        "kpt_shape": [3, 2],
+    }
+    with pytest.raises(ValueError, match="no exact ordered skeleton edge declaration"):
+        wrapper._resolve_keypoint_skeleton(group, keypoint_count=3)
 
 
 def _mock_invocation_sources(monkeypatch) -> None:
@@ -148,7 +169,9 @@ def _create_minimal_pose_zarr(
             pose_schema_payload["name"] = str(pose_schema_name)
         if kpt_shape is not None:
             pose_schema_payload["kpt_shape"] = [int(kpt_shape[0]), int(kpt_shape[1])]
+        pose_schema_payload["edges"] = _test_skeleton(keypoint_count)
         kp_group.attrs["pose_schema"] = pose_schema_payload
+    kp_group.attrs["keypoint_skeleton"] = _test_skeleton(keypoint_count)
     if include_source_crop_run:
         kp_group.attrs["source_crop_run"] = "crop_pose_001"
     if source_roi_pixel_contract_name is not None:
@@ -211,7 +234,13 @@ def _create_minimal_pose_zarr(
                     int(resolved_refined_shape[0]),
                     int(resolved_refined_shape[1]),
                 ]
+            refined_pose_schema_payload["edges"] = _test_skeleton(
+                resolved_refined_keypoint_count
+            )
             refined_group.attrs["pose_schema"] = refined_pose_schema_payload
+        refined_group.attrs["keypoint_skeleton"] = _test_skeleton(
+            resolved_refined_keypoint_count
+        )
         if review_state is not None or review_intended_use is not None:
             refined_group.attrs["keypoint_review_status"] = {
                 "state": review_state or "approved",
@@ -1192,6 +1221,8 @@ def test_prepare_keypoint_from_registry_prefers_refined_annotation_source_skelet
         "refined_kpt_3",
         "refined_kpt_4",
     ]
+    assert manifest["pose_schema"]["skeleton"] == _test_skeleton(5)
+    assert manifest["datasets"][0]["skeleton"] == _test_skeleton(5)
     dataset = manifest["datasets"][0]
     assert dataset["annotation_source_kind"] == "refined"
     assert dataset["annotation_source_parent"] == "refined_keypoints_runs"

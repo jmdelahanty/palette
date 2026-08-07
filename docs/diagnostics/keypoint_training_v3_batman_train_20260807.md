@@ -134,14 +134,18 @@ are all captured.
 3. The warm-start model was not evaluated on this exact v003 validation split
    before training. The current metrics establish candidate quality, not a
    controlled before/after improvement.
-4. The v3 source-manifest composer records the skeleton ID and labels but does
-   not yet embed the exact ordered edge list. This run correctly failed closed
-   until an execution manifest supplied and hashed those edges. The v3 writer
-   should persist the exact skeleton before production adoption.
+4. The historical v003 source manifest records the skeleton ID and labels but
+   does not embed the exact ordered edge list. This run correctly failed closed
+   until an execution manifest supplied and hashed those edges. Palette now
+   requires future source manifests to resolve and persist the exact edge list,
+   propagates it through merged Zarr metadata and successor manifests, and
+   rejects missing, reordered, conflicting, or post-write-tampered edges. This
+   hardening is prospective and does not rewrite the immutable v003 artifact.
 
 ## Remaining gates
 
-- [ ] Persist the exact ordered skeleton edges in future v3 merged manifests.
+- [x] Persist and validate exact ordered skeleton edges in future v3 source and
+  merged manifests and merged Zarr metadata.
 - [ ] Evaluate the starting and candidate checkpoints on the same untouched
   source groups with one frozen evaluation command.
 - [ ] Label at least one additional Batman recording for an independent
