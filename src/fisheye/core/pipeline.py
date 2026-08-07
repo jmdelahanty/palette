@@ -447,8 +447,8 @@ class Pipeline:
         raise RuntimeError(
             "fisheye.core.pipeline import was retired with the Decord writer. "
             "Use fisheye.utils.import_recording_analysis for metadata-only analysis "
-            "archives or fisheye.utils.import_sampled_training_pynvvc for sampled "
-            "training pixels."
+            "archives or fisheye.utils.publish_sampled_training_base for atomic "
+            "sampled training publication."
         )
 
     
@@ -1480,7 +1480,7 @@ Examples:
         parser.error(
             "The legacy core import stage was retired with Decord. Use "
             "fisheye.utils.import_recording_analysis or "
-            "fisheye.utils.import_sampled_training_pynvvc."
+            "fisheye.utils.publish_sampled_training_base."
         )
     
     # Create pipeline config

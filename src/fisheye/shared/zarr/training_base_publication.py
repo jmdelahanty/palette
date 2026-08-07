@@ -154,10 +154,10 @@ def publish_sampled_training_base(
     source_frame_count: int,
     frame_step: int,
     skip_tail_frames: int,
-    config_path: str | Path,
-    camera_id: str,
+    config_path: str | Path | None,
+    camera_id: str | None,
     recording_dir: str | Path,
-    h5_path: str | Path,
+    h5_path: str | Path | None,
     gpu_id: int = 0,
     require_cuda: bool = True,
 ) -> dict[str, Any]:
@@ -172,15 +172,22 @@ def publish_sampled_training_base(
     scratch = _require_node_local_scratch(Path(scratch_root))
     source_video = Path(video_path).expanduser().resolve()
     recording = Path(recording_dir).expanduser().resolve()
-    source_h5 = Path(h5_path).expanduser().resolve()
-    config = Path(config_path).expanduser().resolve()
+    source_h5 = (
+        Path(h5_path).expanduser().resolve() if h5_path is not None else None
+    )
+    config = (
+        Path(config_path).expanduser().resolve()
+        if config_path is not None
+        else None
+    )
     for label, source in (
         ("video", source_video),
         ("recording", recording),
-        ("H5", source_h5),
-        ("config", config),
     ):
         if not source.exists():
+            raise FileNotFoundError(f"Sampled training {label} input not found: {source}")
+    for label, source in (("H5", source_h5), ("config", config)):
+        if source is not None and not source.exists():
             raise FileNotFoundError(f"Sampled training {label} input not found: {source}")
     if target.exists():
         raise FileExistsError(f"Sampled training destination exists: {target}")
@@ -197,7 +204,7 @@ def publish_sampled_training_base(
             skip_tail_frames=int(skip_tail_frames),
             config_path=config,
             overwrite=False,
-            camera_id=str(camera_id),
+            camera_id=str(camera_id) if camera_id is not None else None,
             recording_dir=recording,
             h5_path=source_h5,
             gpu_id=int(gpu_id),
@@ -226,13 +233,17 @@ def publish_sampled_training_base(
                     "source_frame_count": int(source_frame_count),
                     "frame_step": int(frame_step),
                     "skip_tail_frames": int(skip_tail_frames),
-                    "config_path": str(config),
+                    "config_path": str(config) if config is not None else None,
                     "gpu_id": int(gpu_id),
                 },
-                input_artifacts=[
-                    {"role": "source_video", "path": str(source_video)},
-                    {"role": "source_h5", "path": str(source_h5)},
-                ],
+                input_artifacts=(
+                    [{"role": "source_video", "path": str(source_video)}]
+                    + (
+                        [{"role": "source_h5", "path": str(source_h5)}]
+                        if source_h5 is not None
+                        else []
+                    )
+                ),
             ),
         }
         local_root.attrs.update(

@@ -29,6 +29,11 @@ class _FakePynvvcReader:
         self.closed = True
 
 
+def test_direct_cli_is_retired(capsys) -> None:
+    assert import_mod.main([]) == 2
+    assert "publish_sampled_training_base" in capsys.readouterr().err
+
+
 def test_import_sampled_training_pynvvc_writes_luma_training_zarr(
     tmp_path: Path,
     monkeypatch,

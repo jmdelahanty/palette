@@ -306,9 +306,9 @@ def run_video_import(
     *,
     video_path: Path,
     zarr_path: Path,
+    scratch_root: Path,
     config_path: Optional[Path],
     frame_step: int,
-    overwrite_zarr: bool,
     skip_tail_frames: int,
     recording_dir: Path,
     camera_id: Optional[str],
@@ -322,9 +322,13 @@ def run_video_import(
     command = [
         sys.executable,
         "-m",
-        "fisheye.utils.import_sampled_training_pynvvc",
-        str(video_path),
+        "fisheye.utils.publish_sampled_training_base",
+        "--destination",
         str(zarr_path),
+        "--scratch-root",
+        str(scratch_root),
+        "--video-path",
+        str(video_path),
         "--source-frame-count",
         str(source_frame_count),
         "--frame-step",
@@ -338,8 +342,6 @@ def run_video_import(
         command.extend(["--camera-id", str(camera_id)])
     if config_path is not None:
         command.extend(["--config", str(config_path)])
-    if overwrite_zarr:
-        command.append("--overwrite")
     if skip_tail_frames:
         command.extend(["--skip-tail-frames", str(skip_tail_frames)])
     _run_import_command(command)
@@ -364,6 +366,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Optional sampled PyNvVC import config path.",
     )
     parser.add_argument(
+        "--scratch-root",
+        type=Path,
+        help=(
+            "Bounded local scratch directory required for atomic sampled-training "
+            "publication."
+        ),
+    )
+    parser.add_argument(
         "--frame-step",
         type=int,
         help="Sample every Nth frame when importing video into a training Zarr.",
@@ -383,7 +393,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--overwrite-zarr",
         action="store_true",
-        help="Overwrite an existing Zarr during MP4 import.",
+        help="Retired: publish a new versioned training Zarr instead.",
     )
     parser.add_argument(
         "--overwrite-metadata",
@@ -515,6 +525,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.metadata_only and args.frame_step is None:
         print("--frame-step is required unless --metadata-only is used.")
         return 1
+    if not args.metadata_only and args.scratch_root is None:
+        print("--scratch-root is required for atomic sampled-training publication.")
+        return 1
+    if args.overwrite_zarr:
+        print(
+            "--overwrite-zarr is retired; publish a new versioned training Zarr "
+            "instead."
+        )
+        return 1
 
     tentative_recording_dir = (
         args.recording_dir.expanduser().resolve() if args.recording_dir is not None else video_path.parent.resolve()
@@ -552,9 +571,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         run_video_import(
             video_path=video_path,
             zarr_path=zarr_path,
+            scratch_root=args.scratch_root.expanduser().resolve(),
             config_path=args.config.expanduser().resolve() if args.config is not None else None,
             frame_step=int(args.frame_step),
-            overwrite_zarr=bool(args.overwrite_zarr),
             skip_tail_frames=int(args.skip_tail_frames or 0),
             recording_dir=recording_dir,
             camera_id=metadata.camera_id,

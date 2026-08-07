@@ -170,6 +170,8 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
             str(recording_dir),
             "--zarr-path",
             str(zarr_path),
+            "--scratch-root",
+            str(tmp_path / "scratch"),
             "--frame-step",
             "100",
             "--session-uuid",
@@ -194,7 +196,10 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
 
     assert rc == 0
     assert calls
-    assert "fisheye.utils.import_sampled_training_pynvvc" in calls[0]
+    assert "fisheye.utils.publish_sampled_training_base" in calls[0]
+    assert calls[0][calls[0].index("--scratch-root") + 1] == str(
+        (tmp_path / "scratch").resolve()
+    )
     assert "--source-frame-count" in calls[0]
     assert "1234" in calls[0]
     assert "--frame-step" in calls[0]

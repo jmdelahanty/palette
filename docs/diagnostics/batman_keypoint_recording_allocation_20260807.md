@@ -101,3 +101,20 @@ For every new immutable source or merged artifact:
 - persist the exact ordered pose labels and skeleton edges;
 - finalize payload, review state, and provenance before consolidation; and
 - consolidate metadata only as the final publication visibility step.
+
+## Atomic source-base publication checkpoint
+
+Before submitting the four-source batch, Palette retired direct sampled-
+training destination construction from maintained operator workflows. The
+PyNvVideoCodec importer remains an internal scratch constructor, but its CLI
+fails closed. `import_recordings_training` now always requires bounded local
+`--scratch-root` and routes through `publish_sampled_training_base`; overwrite
+in place is rejected. The LSF submitter supplies a job-specific `$TMPDIR`,
+validates the local artifact, checks the copied hidden sibling, and exposes the
+destination only by final rename. Local-host and video-only intake use the same
+publisher rather than retaining a non-atomic compatibility path.
+
+The no-write four-recording plan resolved 139,385 source frames per camera,
+`frame_step=696`, and exactly 200 sampled rows for cameras 2010093 through
+2010096. At this checkpoint no training Zarr, registry row, selector, or LSF job
+had been created.
