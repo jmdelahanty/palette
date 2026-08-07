@@ -1,6 +1,6 @@
 # Task-specific merged keypoint training v3 — 2026-08-07
 
-Status: **IMPLEMENTED; CORRECTED V2 SOURCE RECEIPT PREFLIGHT PASSED; FINAL PUBLICATION PENDING**
+Status: **IMPLEMENTED; SELECTOR-INELIGIBLE V002 PUBLICATION AND TRAINER-READER GATE PASSED**
 
 ## Goal
 
@@ -81,9 +81,12 @@ provenance reference.
 - [x] Compose the exact frozen census into one 61-source reviewed manifest.
 - [x] Bind the reviewed Batman artifact through that census composition.
 - [x] Preflight exactly 61 sources and 12,704 usable rows.
-- [ ] Build on bounded node-local scratch and publish atomically.
-- [ ] Validate direct/consolidated metadata, storage plans, row identities,
+- [x] Build on bounded node-local scratch and publish atomically.
+- [x] Validate direct/consolidated metadata, storage plans, row identities,
   split isolation, and exact source composition.
+- [x] Emit and validate a complete five-keypoint 512×512 trainer config.
+- [x] Load the published artifact through the real pose-training reader and
+  materialize a validation batch.
 - [ ] Train and evaluate a candidate before registry activation.
 
 ## Exact preflight receipt
@@ -110,3 +113,41 @@ inline snapshot and its bound source-manifest path was node-local. It remains
 immutable benchmark evidence and is superseded by `v002`; it is not eligible
 for registration or model training claims. The corrected census reports 3,047
 pose-only rows without detection identity, matching the actual merged arrays.
+
+## V002 publication receipt
+
+The final selector-ineligible candidate is:
+
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/keypoint_merged_v3/five_point_reviewed_full_v3_v002/pose_five_point_reviewed_full_v3_v002_merged.zarr`
+
+It was built from bounded node-local scratch and atomically published by clean
+Palette commit `942e8346e29e3536e795eaba10116d504d1b7357`. It contains 74 files,
+uses approximately 1.6 GiB on disk, and remains immutable,
+selector-ineligible, and registry-deferred.
+
+Validation confirmed 61 sources, 12,704 full-supervision rows, 29 indivisible
+leakage groups, 10,096 training rows, 2,608 validation rows, no test rows, and
+no group overlap. The 181 Batman rows use exact 348×348 to 512×512 centered
+zero padding: 82 pixels on each side, byte-identical interior pixels, and zero
+keypoint transform error. The remaining 3,047 pose-only rows are explicitly
+marked as lacking complete detection lineage.
+
+The source manifest SHA-256 is
+`a1dc33d8356dc3b1825500c05084114a8bb9d0d19893fe00303e5530fb7d8299`.
+The merged manifest SHA-256 is
+`4b84af223163547af7e4f360e2da144a0cd2ef1794b9f34cedb29068d426c894`.
+
+The original generated YAML was structurally incomplete. Commit
+`e1093a8de57060f94219c00f7533fdbff2ad0ba1` makes generated configs fail closed
+through `PoseConfig`, carries the exact `[5,3]` skeleton shape, and derives
+`training_params.imgsz: 512` from the materialized ROI contract. Only the YAML
+sidecar was corrected; the immutable Zarr and its manifests were not changed.
+The corrected YAML SHA-256 is
+`e75ec3d00f50b592cebc6e07b2638f791f3c5826403d5d62a3badd47b21565b8`.
+
+The real training reader then loaded the artifact-controlled split, retained
+2,608 validation samples, and produced a four-image batch shaped
+`[4,3,512,512]` with boxes `[4,4]` and keypoints `[4,5,3]`. All five labels
+were resolved in canonical order. This is a machinery/readability gate, not a
+model-training or scientific-quality result; registry activation remains
+intentionally deferred.
