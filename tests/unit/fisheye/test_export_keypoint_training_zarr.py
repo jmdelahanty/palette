@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import zarr
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -21,6 +22,7 @@ from fisheye.utils.export_keypoint_training_zarr import (
 )
 from fisheye.shared.detect_reason_codec import write_reason_columns
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.training.config import PoseConfig
 
 
 THREE_POINT_SKELETON = [[0, 1], [0, 2], [1, 2]]
@@ -43,6 +45,87 @@ def test_export_keypoint_skeleton_signature_helpers() -> None:
         _format_skeleton_signature(skeleton_id="pose_skel_shared", kpt_shape=(3, 3))
         == "skeleton_id=pose_skel_shared, kpt_shape=[3,3]"
     )
+
+
+def test_write_merged_config_emits_complete_exact_pose_contract(
+    tmp_path: Path,
+) -> None:
+    merged_zarr = tmp_path / "merged.zarr"
+    merged_zarr.mkdir()
+    (merged_zarr / "zarr.json").write_text(
+        '{"zarr_format":3,"node_type":"group"}\n', encoding="utf-8"
+    )
+    out_config = tmp_path / "pose.yaml"
+
+    mod._write_merged_config(
+        source_config_path=None,
+        out_config=out_config,
+        merged_zarr=merged_zarr,
+        dataset_name="five_point_reviewed",
+        source_type="refined",
+        input_format="gray",
+        keypoint_run="merged_pose_v3",
+        train_ratio=0.8,
+        val_ratio=0.2,
+        random_seed=42,
+        kpt_shape=(5, 3),
+        target_roi_hw=(512, 512),
+    )
+
+    validated = PoseConfig.from_yaml(out_config)
+    payload = yaml.safe_load(out_config.read_text(encoding="utf-8"))
+    assert validated.task == "pose"
+    assert validated.kpt_shape == (5, 3)
+    assert validated.training_params.imgsz == 512
+    assert validated.datasets["five_point_reviewed"].zarr_path == merged_zarr
+    assert validated.datasets["five_point_reviewed"].input_format == "gray"
+    assert payload["train"] == "./"
+    assert payload["val"] == "./"
+    assert "keypoints" not in payload
+
+
+def test_write_merged_config_preserves_explicit_training_overrides_but_forces_size(
+    tmp_path: Path,
+) -> None:
+    merged_zarr = tmp_path / "merged.zarr"
+    merged_zarr.mkdir()
+    (merged_zarr / "zarr.json").write_text(
+        '{"zarr_format":3,"node_type":"group"}\n', encoding="utf-8"
+    )
+    source_config = tmp_path / "source.yaml"
+    source_config.write_text(
+        yaml.safe_dump(
+            {
+                "training_params": {
+                    "model": "reviewed-five-point-base.pt",
+                    "batch": 32,
+                    "imgsz": 348,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_config = tmp_path / "pose.yaml"
+
+    mod._write_merged_config(
+        source_config_path=source_config,
+        out_config=out_config,
+        merged_zarr=merged_zarr,
+        dataset_name="five_point_reviewed",
+        source_type="refined",
+        input_format="gray",
+        keypoint_run="merged_pose_v3",
+        train_ratio=0.8,
+        val_ratio=0.2,
+        random_seed=42,
+        kpt_shape=(5, 3),
+        target_roi_hw=(384, 512),
+    )
+
+    validated = PoseConfig.from_yaml(out_config)
+    assert validated.training_params.model == "reviewed-five-point-base.pt"
+    assert validated.training_params.batch == 32
+    assert validated.training_params.imgsz == [384, 512]
 
 
 def _write_source_pose_zarr(
@@ -1174,6 +1257,8 @@ def test_main_auto_aggregates_keypoint_data_card_by_default(
         source_type="refined",
         source_type_counts={"refined": 1},
         run_name="merged_export_smoke",
+        kpt_shape=(5, 3),
+        target_roi_hw=(512, 512),
     )
 
     monkeypatch.setattr(mod, "_export_merged", lambda **_kwargs: merge_result)
@@ -1255,6 +1340,8 @@ def test_main_no_aggregate_training_data_card_disables_aggregation(
         source_type="refined",
         source_type_counts={"refined": 1},
         run_name="merged_export_smoke",
+        kpt_shape=(5, 3),
+        target_roi_hw=(512, 512),
     )
 
     monkeypatch.setattr(mod, "_export_merged", lambda **_kwargs: merge_result)

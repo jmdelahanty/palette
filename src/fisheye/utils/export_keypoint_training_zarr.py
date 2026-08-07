@@ -66,6 +66,7 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
 )
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.shared.system_metadata import build_invocation_record
+from fisheye.training.config import PoseConfig
 
 try:
     from rich.console import Console
@@ -4235,13 +4236,63 @@ def _write_merged_config(
     train_ratio: float,
     val_ratio: float,
     random_seed: int,
+    kpt_shape: Optional[Tuple[int, int]],
+    target_roi_hw: Optional[Tuple[int, int]],
 ) -> None:
-    cfg: Dict[str, Any] = {}
+    default_config_path = (
+        Path(__file__).resolve().parents[3] / "configs" / "fisheye" / "pose_config.yaml"
+    )
+    loaded_default = yaml.safe_load(default_config_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded_default, dict):
+        raise ValueError(
+            f"Default pose config must contain a YAML mapping: {default_config_path}"
+        )
+
+    # The repository default supplies complete, validated training hyperparameters.
+    # Do not copy its unrelated inference-only `keypoints` block into a generated
+    # training handoff.
+    cfg: Dict[str, Any] = {
+        key: value for key, value in loaded_default.items() if key != "keypoints"
+    }
+    default_training_params = cfg.get("training_params")
+    if not isinstance(default_training_params, dict):
+        raise ValueError(
+            f"Default pose config is missing training_params: {default_config_path}"
+        )
+
     if source_config_path and source_config_path.exists():
         loaded = yaml.safe_load(source_config_path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
-            cfg = loaded
+            source_training_params = loaded.get("training_params")
+            cfg.update(loaded)
+            cfg["training_params"] = {
+                **default_training_params,
+                **(
+                    source_training_params
+                    if isinstance(source_training_params, dict)
+                    else {}
+                ),
+            }
 
+    if kpt_shape is None:
+        raise ValueError("Merged pose training config requires an exact kpt_shape.")
+    if target_roi_hw is None or len(target_roi_hw) != 2:
+        raise ValueError(
+            "Merged pose training config requires the materialized target_roi_hw."
+        )
+    target_h, target_w = (int(target_roi_hw[0]), int(target_roi_hw[1]))
+    if target_h <= 0 or target_w <= 0:
+        raise ValueError("Merged pose target_roi_hw entries must be positive.")
+    training_imgsz: int | List[int] = (
+        target_h if target_h == target_w else [target_h, target_w]
+    )
+
+    cfg["train"] = "./"
+    cfg["val"] = "./"
+    cfg["nc"] = 1
+    cfg["names"] = ["fish"]
+    cfg["task"] = "pose"
+    cfg["kpt_shape"] = [int(kpt_shape[0]), int(kpt_shape[1])]
     cfg["datasets"] = {
         dataset_name: {
             "zarr_path": str(merged_zarr),
@@ -4255,6 +4306,12 @@ def _write_merged_config(
         }
     }
     cfg["random_seed"] = int(random_seed)
+    training_params = dict(cfg["training_params"])
+    training_params["imgsz"] = training_imgsz
+    cfg["training_params"] = training_params
+
+    # Fail before emitting a sidecar that the real trainer cannot consume.
+    PoseConfig(**cfg)
     out_config.parent.mkdir(parents=True, exist_ok=True)
     out_config.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
@@ -4883,6 +4940,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         train_ratio=config_train_ratio,
         val_ratio=config_val_ratio,
         random_seed=int(args.seed),
+        kpt_shape=merge_result.kpt_shape,
+        target_roi_hw=merge_result.target_roi_hw,
     )
 
     if args.aggregate_training_data_card:
