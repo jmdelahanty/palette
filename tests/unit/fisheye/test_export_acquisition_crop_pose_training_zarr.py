@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 import zarr
 
@@ -63,7 +64,7 @@ def _write_source_zarr(path: Path) -> None:
     mark_run_complete(run, parent_group=parent, run_name="refined_kp")
 
 
-def _patch_ffprobe(monkeypatch) -> None:
+def _patch_ffprobe(monkeypatch, *, color_range: str | None = "tv") -> None:
     monkeypatch.setattr(
         mod,
         "_ffprobe_stream",
@@ -72,7 +73,7 @@ def _patch_ffprobe(monkeypatch) -> None:
             "height": 20,
             "codec_name": "h264",
             "pix_fmt": "yuv420p",
-            "color_range": "tv",
+            "color_range": color_range,
             "color_space": "bt709",
             "nb_frames": "10",
         },
@@ -141,7 +142,7 @@ class _FakeReader:
 
 
 def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, monkeypatch) -> None:
-    _patch_ffprobe(monkeypatch)
+    _patch_ffprobe(monkeypatch, color_range="pc")
     monkeypatch.setattr(mod, "get_git_info", lambda _repo: {"short_hash": "abc123", "commit_hash": "abc123"})
     monkeypatch.setattr(
         mod,
@@ -180,6 +181,7 @@ def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, mo
     crop = root["crop_runs"]["crop_acq_test"]
     keypoints = root["keypoints_runs"]["keypoints_acq_test"]
     assert crop.attrs["source_type"] == "acquisition_crop_video"
+    assert crop.attrs["container_color_range_observed"] == "pc"
     assert crop.attrs["frame_format_confirmation_status"] == "pending_orange_confirmation"
     assert keypoints.attrs["source_crop_run"] == "crop_acq_test"
     assert keypoints.attrs["keypoint_coordinate_space"] == "crop_video_frame_px"
@@ -206,3 +208,43 @@ def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, mo
     np.testing.assert_allclose(keypoints["keypoints_roi"][:], [[[5.0, 5.0], [15.0, 15.0]]])
     np.testing.assert_allclose(keypoints["keypoints_img"][:], [[[5.0, 5.0], [15.0, 15.0]]])
     np.testing.assert_allclose(keypoints["source_keypoints_img"][:], [[[105.0, 205.0], [115.0, 215.0]]])
+
+
+def test_export_acquisition_crop_pose_training_rejects_unknown_color_range(
+    tmp_path, monkeypatch
+) -> None:
+    _patch_ffprobe(monkeypatch, color_range="unknown")
+    recording_dir = tmp_path / "recording"
+    zarr_path = recording_dir / "zarr" / "recording_analysis.zarr"
+    out_zarr = tmp_path / "must_not_exist.zarr"
+    crop_meta = (
+        recording_dir
+        / "derived"
+        / "external_crop_recorder"
+        / "Cam2010093_crop_meta.csv"
+    )
+    crop_video = (
+        recording_dir
+        / "derived"
+        / "external_crop_recorder"
+        / "Cam2010093_crop_external.mp4"
+    )
+    crop_video.parent.mkdir(parents=True, exist_ok=True)
+    crop_video.write_bytes(b"placeholder")
+    _write_crop_meta(crop_meta)
+    _write_source_zarr(zarr_path)
+
+    with pytest.raises(ValueError, match="exact ffprobe container color_range"):
+        mod.export_acquisition_crop_pose_training_zarr(
+            zarr_path,
+            out_zarr=out_zarr,
+            recording_dir=recording_dir,
+            crop_meta_path=crop_meta,
+            crop_video_path=crop_video,
+            margin_px=1.0,
+            apply=True,
+            require_cuda=False,
+            reader_factory=_FakeReader,
+        )
+
+    assert not out_zarr.exists()

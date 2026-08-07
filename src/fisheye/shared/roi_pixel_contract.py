@@ -20,6 +20,31 @@ SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME = "hybrid_acquisition_crop_video_off
 DECODE_BACKEND_PYNVVC_LUMA = "pynvvc_luma"
 APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE = "orange_mono8_full_range_0_255"
 CENTER_ROUNDING_NP_ROUND = "np.round_half_to_even"
+CONTAINER_COLOR_RANGE_FULL = "pc"
+CONTAINER_COLOR_RANGE_LIMITED = "tv"
+SUPPORTED_CONTAINER_COLOR_RANGES = (
+    CONTAINER_COLOR_RANGE_FULL,
+    CONTAINER_COLOR_RANGE_LIMITED,
+)
+
+
+def normalize_observed_container_color_range(value: object) -> str:
+    """Return an exact supported ffprobe container-range observation.
+
+    Orange monochrome pixels remain full-range mono8 and the decoder reads the
+    NV12 Y plane without range remapping. This value records the independent
+    container/VUI observation and therefore must never be guessed.
+    """
+
+    text = "" if value is None else str(value).strip().lower()
+    if text not in SUPPORTED_CONTAINER_COLOR_RANGES:
+        supported = ", ".join(repr(item) for item in SUPPORTED_CONTAINER_COLOR_RANGES)
+        observed = "missing" if not text else repr(text)
+        raise ValueError(
+            "Acquisition crop-video materialization requires an exact ffprobe "
+            f"container color_range observation ({supported}); observed {observed}."
+        )
+    return text
 
 
 def roi_pixel_contract(

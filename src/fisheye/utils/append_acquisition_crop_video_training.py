@@ -22,6 +22,7 @@ from fisheye.shared.roi_pixel_contract import (
     DECODE_BACKEND_PYNVVC_LUMA,
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
     SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+    normalize_observed_container_color_range,
     orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
@@ -276,6 +277,9 @@ def _write_crop_run(
     _create_array(crop_group, "frame_counts", frame_counts, chunks=(max(1, min(65536, max(1, frame_counts.shape[0]))),))
 
     roi_contract = orange_mono_pynvvc_luma_pixel_contract()
+    observed_container_color_range = normalize_observed_container_color_range(
+        report.crop_video.color_range
+    )
     crop_group.attrs.update(
         {
             "schema_id": SCHEMA_ID,
@@ -294,7 +298,7 @@ def _write_crop_run(
             "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
             "source_decode_surface": "nv12_y_plane_uint8",
             "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
-            "container_color_range_observed": "tv",
+            "container_color_range_observed": observed_container_color_range,
             "container_color_range_handling": roi_contract.get("container_color_range_handling"),
             "center_rounding": CENTER_ROUNDING_NP_ROUND,
             "device": f"cuda:{int(gpu_id)}",
@@ -398,6 +402,7 @@ def append_acquisition_crop_video_training(
         return report
     if selection.source_frames.size == 0:
         raise ValueError("No sampled training frames have usable acquisition crop-video rows; refusing empty crop run.")
+    normalize_observed_container_color_range(crop_info.color_range)
     resolved_run_name = run_name or _utc_run_name(DEFAULT_CROP_RUN_PREFIX)
     images = _read_selected_frames(
         resolved_crop_video,

@@ -35,6 +35,7 @@ from fisheye.shared.roi_pixel_contract import (
     DECODE_BACKEND_PYNVVC_LUMA,
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
     SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+    normalize_observed_container_color_range,
     orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -787,6 +788,9 @@ def _write_output_zarr(
         _create_array(keypoint_group, "heading", keypoints.heading[selection.source_keypoint_rows].astype(np.float64), chunks=vector_chunks)
 
     roi_contract = orange_mono_pynvvc_luma_pixel_contract()
+    observed_container_color_range = normalize_observed_container_color_range(
+        report.crop_video.color_range
+    )
     crop_attrs = {
         "schema_id": SCHEMA_ID,
         "crop_storage_mode": "materialized",
@@ -801,7 +805,7 @@ def _write_output_zarr(
         "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
         "source_decode_surface": "nv12_y_plane_uint8",
         "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
-        "container_color_range_observed": "tv",
+        "container_color_range_observed": observed_container_color_range,
         "container_color_range_handling": roi_contract.get("container_color_range_handling"),
         "center_rounding": CENTER_ROUNDING_NP_ROUND,
         "device": f"cuda:{int(gpu_id)}",
@@ -913,6 +917,7 @@ def export_acquisition_crop_pose_training_zarr(
         raise ValueError("--out-zarr is required with --apply.")
     if selection.source_keypoint_rows.size == 0:
         raise ValueError("No acquisition crop-video pose rows passed the sufficiency gate; refusing empty export.")
+    normalize_observed_container_color_range(report.crop_video.color_range)
     crop_run = crop_run_name or _utc_run_name(DEFAULT_CROP_RUN_PREFIX)
     kp_run = keypoint_export_run_name or _utc_run_name(DEFAULT_KEYPOINT_RUN_PREFIX)
     start = time.perf_counter()
