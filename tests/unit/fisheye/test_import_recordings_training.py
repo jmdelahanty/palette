@@ -39,7 +39,9 @@ def _write_recording(root: Path, name: str, *, frame_count: int | None = None) -
     return rec
 
 
-def test_build_plans_targets_training_zarr_and_computes_frame_step(tmp_path: Path) -> None:
+def test_build_plans_targets_training_zarr_and_computes_frame_step(
+    tmp_path: Path,
+) -> None:
     rec = _write_recording(tmp_path, "rec_a_GoodCopBadCop", frame_count=139_877)
 
     plans = mod._build_plans(
@@ -60,7 +62,44 @@ def test_build_plans_targets_training_zarr_and_computes_frame_step(tmp_path: Pat
     assert plan.frame_step == 699
     assert plan.estimated_sampled_frames == 200
     assert plan.source_frame_count == 139_877
-    assert plan.frame_count_source == "recording_manifest.video_streams.full.frame_count"
+    assert (
+        plan.frame_count_source == "recording_manifest.video_streams.full.frame_count"
+    )
+
+
+def test_build_plans_supports_additive_versioned_training_artifact(
+    tmp_path: Path,
+) -> None:
+    rec = _write_recording(tmp_path, "rec_a_Batman", frame_count=1_000)
+    canonical = rec / "zarr" / "rec_a_Batman_training.zarr"
+    canonical.mkdir(parents=True)
+
+    plans = mod._build_plans(
+        tmp_path,
+        recursive=False,
+        skip_existing=True,
+        check_stimulus=False,
+        requested_frame_step=None,
+        target_sampled_frames=200,
+        skip_tail_frames=0,
+        path_contains="Batman",
+        artifact_id="detection_640_v1",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "ok"
+    assert plans[0].zarr_path == (
+        rec / "zarr" / "rec_a_Batman_detection_640_v1_training.zarr"
+    )
+
+
+@pytest.mark.parametrize(
+    "artifact_id",
+    ["../escape", "UPPER CASE", "", "-leading"],
+)
+def test_training_artifact_id_rejects_unsafe_values(artifact_id: str) -> None:
+    with pytest.raises(ValueError, match="artifact id"):
+        mod._training_zarr_path(Path("recording"), artifact_id=artifact_id)
 
 
 def test_build_plans_can_require_source_frame_count_for_pynvvc(tmp_path: Path) -> None:
@@ -90,7 +129,9 @@ def test_build_plans_reads_legacy_external_summary_frame_count(tmp_path: Path) -
         json.dumps({"files": {"cams": ["cams/Cam2010093_demo.mp4", summary_rel]}}),
         encoding="utf-8",
     )
-    (rec / summary_rel).write_text(json.dumps({"frames_encoded": 143_447}), encoding="utf-8")
+    (rec / summary_rel).write_text(
+        json.dumps({"frames_encoded": 143_447}), encoding="utf-8"
+    )
 
     plans = mod._build_plans(
         tmp_path,
@@ -110,7 +151,9 @@ def test_build_plans_reads_legacy_external_summary_frame_count(tmp_path: Path) -
     assert plan.frame_count_source == f"{summary_rel}:frames_encoded"
 
 
-def test_target_sampled_frames_requires_fallback_when_count_missing(tmp_path: Path) -> None:
+def test_target_sampled_frames_requires_fallback_when_count_missing(
+    tmp_path: Path,
+) -> None:
     _write_recording(tmp_path, "rec_c_GoodCopBadCop")
 
     plans = mod._build_plans(
@@ -128,7 +171,9 @@ def test_target_sampled_frames_requires_fallback_when_count_missing(tmp_path: Pa
     assert "--target-sampled-frames" in (plans[0].reason or "")
 
 
-def test_frame_step_is_fallback_when_target_count_missing_metadata(tmp_path: Path) -> None:
+def test_frame_step_is_fallback_when_target_count_missing_metadata(
+    tmp_path: Path,
+) -> None:
     _write_recording(tmp_path, "rec_d_GoodCopBadCop")
 
     plans = mod._build_plans(
@@ -272,12 +317,18 @@ def test_run_acquisition_crop_video_append_uses_recording_scoped_run_name(
     assert success is True
     assert returncode == 0
     cmd = calls[0]
-    assert cmd[:3] == [sys.executable, "-m", "fisheye.utils.append_acquisition_crop_video_training"]
+    assert cmd[:3] == [
+        sys.executable,
+        "-m",
+        "fisheye.utils.append_acquisition_crop_video_training",
+    ]
     assert str(rec / "zarr" / "rec_red_scare_RedScare_training.zarr") in cmd
     assert "--recording-dir" in cmd
     assert str(rec) in cmd
     assert "--run-name" in cmd
-    assert "crop_red_scare_acquisition_crop_video_training_rec_red_scare_RedScare" in cmd
+    assert (
+        "crop_red_scare_acquisition_crop_video_training_rec_red_scare_RedScare" in cmd
+    )
     assert "--gpu-id" in cmd
     assert "3" in cmd
     assert "--overwrite-run" in cmd
@@ -287,12 +338,14 @@ def test_decord_decode_backend_is_not_supported(tmp_path: Path) -> None:
     _write_recording(tmp_path, "rec_legacy_GoodCopBadCop", frame_count=100)
 
     with pytest.raises(SystemExit, match="2"):
-        mod.main([
-            str(tmp_path),
-            "--path-contains",
-            "GoodCopBadCop",
-            "--decode-backend",
-            "legacy-decord",
-            "--apply",
-            "--no-log",
-        ])
+        mod.main(
+            [
+                str(tmp_path),
+                "--path-contains",
+                "GoodCopBadCop",
+                "--decode-backend",
+                "legacy-decord",
+                "--apply",
+                "--no-log",
+            ]
+        )

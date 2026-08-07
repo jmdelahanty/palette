@@ -5,17 +5,24 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 import zarr
 
 from fisheye.shared.crop_geometry import resolve_full_frame_shape
 from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+from fisheye.shared.zarr.training_image_storage import (
+    SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+    sampled_training_downsample_transform,
+)
 from fisheye.utils import import_sampled_training_pynvvc as import_mod
 from fisheye.utils.import_sampled_training_pynvvc import import_sampled_training_pynvvc
 
 
 class _FakePynvvcReader:
-    def __init__(self, video_path: Path, *, start_frame: int = 0, gpu_id: int = 0) -> None:
+    def __init__(
+        self, video_path: Path, *, start_frame: int = 0, gpu_id: int = 0
+    ) -> None:
         assert start_frame == 0
         self.source_height = 4
         self.source_width = 5
@@ -27,6 +34,15 @@ class _FakePynvvcReader:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_downsample_defaults_to_square_640_detection_training_input() -> None:
+    assert import_mod._downsample_config({}) == (  # noqa: SLF001
+        True,
+        (640, 640),
+        "area",
+        False,
+    )
 
 
 def test_direct_cli_is_retired(capsys) -> None:
@@ -81,12 +97,11 @@ def test_import_sampled_training_pynvvc_writes_luma_training_zarr(
         """
 import:
   resolutions: both
-  chunk_size: 2
+  batch_size: 2
   downsampled:
     size: [2, 3]
     method: nearest
     preserve_aspect: false
-    chunk_size: 2
 """,
         encoding="utf-8",
     )
@@ -163,7 +178,9 @@ import:
     assert raw.attrs["source_h5_path"] == str(h5_path)
     assert raw.attrs["source_h5_fingerprint_strategy"] == "stat_v1"
     assert raw.attrs["source_h5_fingerprint"]
-    assert root.attrs["source_video_fingerprint"] == raw.attrs["source_video_fingerprint"]
+    assert (
+        root.attrs["source_video_fingerprint"] == raw.attrs["source_video_fingerprint"]
+    )
     assert root.attrs["source_h5_fingerprint"] == raw.attrs["source_h5_fingerprint"]
     assert raw.attrs["original_resolution"] == [4, 5]
     assert resolve_full_frame_shape(root) == (4, 5)
@@ -179,5 +196,60 @@ import:
     assert clock["camera_timestamp_ns"][:].tolist()[3] == 1_030_000_000
     assert raw["images_full"].shape == (3, 4, 5)
     assert raw["images_ds"].shape == (3, 2, 3)
-    np.testing.assert_array_equal(raw["images_full"][:, 0, 0], np.array([0, 3, 6], dtype=np.uint8))
-    np.testing.assert_array_equal(raw["images_ds"][:, 0, 0], np.array([0, 3, 6], dtype=np.uint8))
+    assert raw["images_full"].chunks == (1, 4, 5)
+    assert raw["images_ds"].chunks == (1, 2, 3)
+    assert (
+        raw["images_full"].attrs["storage_contract_schema_id"]
+        == SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID
+    )
+    expected_transform = sampled_training_downsample_transform(
+        source_hw=(4, 5),
+        target_hw=(2, 3),
+        method="nearest",
+        preserve_aspect=False,
+    )
+    assert raw.attrs["downsample_transform"] == expected_transform
+    assert raw["images_ds"].attrs["source_to_stored_transform"] == expected_transform
+    np.testing.assert_array_equal(
+        raw["images_full"][:, 0, 0], np.array([0, 3, 6], dtype=np.uint8)
+    )
+    np.testing.assert_array_equal(
+        raw["images_ds"][:, 0, 0], np.array([0, 3, 6], dtype=np.uint8)
+    )
+
+
+def test_legacy_multi_frame_chunk_setting_fails_before_decode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    video = tmp_path / "demo.mp4"
+    video.write_bytes(b"placeholder")
+    config = tmp_path / "import.yaml"
+    config.write_text(
+        "import:\n  chunk_size: 4\n  downsampled:\n    chunk_size: 8\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        import_mod,
+        "probe_video_colorimetry_attrs",
+        lambda path: {},
+    )
+
+    reader_opened = False
+
+    def _unexpected_reader(*args, **kwargs):
+        nonlocal reader_opened
+        reader_opened = True
+        raise AssertionError("NVDEC reader must not open for an invalid storage config")
+
+    with pytest.raises(ValueError, match="fixed to complete single frames"):
+        import_sampled_training_pynvvc(
+            video_path=video,
+            zarr_path=tmp_path / "out.zarr",
+            source_frame_count=10,
+            frame_step=3,
+            config_path=config,
+            require_cuda=False,
+            reader_factory=_unexpected_reader,
+        )
+    assert reader_opened is False

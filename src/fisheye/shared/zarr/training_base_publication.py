@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import hashlib
 import os
 import shutil
 import tempfile
@@ -19,6 +20,11 @@ from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock,
     open_zarr_group_direct,
+)
+from fisheye.shared.zarr.training_image_storage import (
+    SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+    sampled_training_downsample_transform,
+    sampled_training_image_chunk_shape,
 )
 from fisheye.utils.import_sampled_training_pynvvc import (
     SampledTrainingImportResult,
@@ -38,9 +44,7 @@ SAMPLED_TRAINING_BASE_PUBLICATION_POLICY = (
 def _require_node_local_scratch(path: Path) -> Path:
     resolved = path.expanduser().resolve()
     if not resolved.is_dir():
-        raise FileNotFoundError(
-            f"Sampled training scratch root not found: {resolved}"
-        )
+        raise FileNotFoundError(f"Sampled training scratch root not found: {resolved}")
     if resolved in {
         Path("/").resolve(),
         Path("/tmp").resolve(),
@@ -104,9 +108,45 @@ def validate_sampled_training_base(
         )
     if full.shape[0] != row_count or downsampled.shape[0] != row_count:
         raise ValueError("Training image arrays must share the sampled-row axis.")
-    if int(full.chunks[0]) != 1 or int(downsampled.chunks[0]) != 1:
+    expected_full_chunks = sampled_training_image_chunk_shape(full.shape)
+    expected_downsampled_chunks = sampled_training_image_chunk_shape(downsampled.shape)
+    if (
+        tuple(int(value) for value in full.chunks) != expected_full_chunks
+        or tuple(int(value) for value in downsampled.chunks)
+        != expected_downsampled_chunks
+    ):
         raise ValueError(
-            "Sampled base image arrays must use one-frame physical chunks."
+            "Sampled base image arrays must use complete one-frame physical "
+            "chunks shaped (1, height, width)."
+        )
+    for label, array in (("images_full", full), ("images_ds", downsampled)):
+        if (
+            str(array.attrs.get("storage_contract_schema_id") or "")
+            != SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID
+        ):
+            raise ValueError(
+                f"raw_video/{label} is missing the sampled training image "
+                "storage contract declaration."
+            )
+    downsample_method = str(raw.attrs.get("downsample_method") or "").strip()
+    if not downsample_method:
+        raise ValueError("raw_video/downsample_method must be declared.")
+    if "downsample_preserve_aspect" not in raw.attrs:
+        raise ValueError("raw_video/downsample_preserve_aspect must be declared.")
+    expected_transform = sampled_training_downsample_transform(
+        source_hw=full.shape[1:],
+        target_hw=downsampled.shape[1:],
+        method=downsample_method,
+        preserve_aspect=bool(raw.attrs.get("downsample_preserve_aspect")),
+    )
+    if raw.attrs.get("downsample_transform") != expected_transform:
+        raise ValueError(
+            "raw_video/downsample_transform does not match the persisted image shapes."
+        )
+    if downsampled.attrs.get("source_to_stored_transform") != expected_transform:
+        raise ValueError(
+            "raw_video/images_ds source_to_stored_transform does not match the "
+            "persisted image shapes."
         )
     actual = np.asarray(indices[:], dtype=np.int32)
     if not np.array_equal(actual, expected):
@@ -122,6 +162,8 @@ def validate_sampled_training_base(
         "downsampled_chunks": [int(value) for value in downsampled.chunks],
         "index_shape": [int(value) for value in indices.shape],
         "index_chunks": [int(value) for value in indices.chunks],
+        "image_storage_contract_schema_id": SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+        "downsample_transform": expected_transform,
         "first_source_frame": int(actual[0]),
         "last_source_frame": int(actual[-1]),
     }
@@ -172,23 +214,23 @@ def publish_sampled_training_base(
     scratch = _require_node_local_scratch(Path(scratch_root))
     source_video = Path(video_path).expanduser().resolve()
     recording = Path(recording_dir).expanduser().resolve()
-    source_h5 = (
-        Path(h5_path).expanduser().resolve() if h5_path is not None else None
-    )
+    source_h5 = Path(h5_path).expanduser().resolve() if h5_path is not None else None
     config = (
-        Path(config_path).expanduser().resolve()
-        if config_path is not None
-        else None
+        Path(config_path).expanduser().resolve() if config_path is not None else None
     )
     for label, source in (
         ("video", source_video),
         ("recording", recording),
     ):
         if not source.exists():
-            raise FileNotFoundError(f"Sampled training {label} input not found: {source}")
+            raise FileNotFoundError(
+                f"Sampled training {label} input not found: {source}"
+            )
     for label, source in (("H5", source_h5), ("config", config)):
         if source is not None and not source.exists():
-            raise FileNotFoundError(f"Sampled training {label} input not found: {source}")
+            raise FileNotFoundError(
+                f"Sampled training {label} input not found: {source}"
+            )
     if target.exists():
         raise FileExistsError(f"Sampled training destination exists: {target}")
 
@@ -210,7 +252,7 @@ def publish_sampled_training_base(
             gpu_id=int(gpu_id),
             require_cuda=bool(require_cuda),
         )
-        validate_sampled_training_base(
+        construction_validation = validate_sampled_training_base(
             local_archive,
             source_frame_count=int(source_frame_count),
             frame_step=int(frame_step),
@@ -235,12 +277,33 @@ def publish_sampled_training_base(
                     "skip_tail_frames": int(skip_tail_frames),
                     "config_path": str(config) if config is not None else None,
                     "gpu_id": int(gpu_id),
+                    "image_storage_contract_schema_id": construction_validation[
+                        "image_storage_contract_schema_id"
+                    ],
+                    "full_chunks": construction_validation["full_chunks"],
+                    "downsampled_chunks": construction_validation["downsampled_chunks"],
+                    "downsample_transform": construction_validation[
+                        "downsample_transform"
+                    ],
                 },
                 input_artifacts=(
                     [{"role": "source_video", "path": str(source_video)}]
                     + (
                         [{"role": "source_h5", "path": str(source_h5)}]
                         if source_h5 is not None
+                        else []
+                    )
+                    + (
+                        [
+                            {
+                                "role": "import_config",
+                                "path": str(config),
+                                "sha256": hashlib.sha256(
+                                    config.read_bytes()
+                                ).hexdigest(),
+                            }
+                        ]
+                        if config is not None
                         else []
                     )
                 ),

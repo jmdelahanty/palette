@@ -5,6 +5,7 @@ Batch import sampled training Zarrs from the recordings layout.
 Defaults:
   - Input: camera video in recording_dir/cams/*.mp4
   - Output Zarr: recording_dir/zarr/<recording_dir>_training.zarr
+    or <recording_dir>_<artifact_id>_training.zarr for additive republication
   - Mode: sampled training import (requires --frame-step)
 """
 
@@ -42,6 +43,7 @@ from fisheye.registry.db import Registry, RegistryPaths
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")
 DECODE_BACKEND_PYNVVC_LUMA = "pynvvc-luma"
 DECODE_BACKENDS = (DECODE_BACKEND_PYNVVC_LUMA,)
+TRAINING_ARTIFACT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 
 
 _utc_now = utc_now
@@ -111,11 +113,28 @@ def _find_h5_files(root: Path, recursive: bool) -> List[Path]:
     return sorted(root.glob("*/raw/*.h5"))
 
 
-def _training_zarr_path(recording_dir: Path) -> Path:
-    return recording_dir / "zarr" / f"{recording_dir.name}_training.zarr"
+def _normalize_artifact_id(value: object | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not TRAINING_ARTIFACT_ID_PATTERN.fullmatch(normalized):
+        raise ValueError("Training artifact id must match [a-z0-9][a-z0-9_-]{0,79}.")
+    return normalized
 
 
-def _select_cam_video(recording_dir: Path, camera_id: Optional[str]) -> Tuple[Optional[Path], Optional[str]]:
+def _training_zarr_path(
+    recording_dir: Path,
+    *,
+    artifact_id: str | None = None,
+) -> Path:
+    normalized = _normalize_artifact_id(artifact_id)
+    infix = f"_{normalized}" if normalized is not None else ""
+    return recording_dir / "zarr" / (f"{recording_dir.name}{infix}_training.zarr")
+
+
+def _select_cam_video(
+    recording_dir: Path, camera_id: Optional[str]
+) -> Tuple[Optional[Path], Optional[str]]:
     cams_dir = recording_dir / "cams"
     if not cams_dir.exists():
         return None, "missing cams/ directory"
@@ -149,19 +168,24 @@ def _coerce_positive_int(value: object) -> Optional[int]:
     return coerced if coerced > 0 else None
 
 
-def _read_manifest_frame_count(recording_dir: Path) -> Tuple[Optional[int], Optional[str]]:
+def _read_manifest_frame_count(
+    recording_dir: Path,
+) -> Tuple[Optional[int], Optional[str]]:
     manifest = _safe_read_json(recording_dir / "recording_manifest.json")
     if not manifest:
         return None, None
 
-    streams = ((manifest.get("video_streams") or {}).get("streams") or {})
+    streams = (manifest.get("video_streams") or {}).get("streams") or {}
     if isinstance(streams, dict):
         for stream_name in ("full", "camera", "crop"):
             stream = streams.get(stream_name)
             if isinstance(stream, dict):
                 frame_count = _coerce_positive_int(stream.get("frame_count"))
                 if frame_count is not None:
-                    return frame_count, f"recording_manifest.video_streams.{stream_name}.frame_count"
+                    return (
+                        frame_count,
+                        f"recording_manifest.video_streams.{stream_name}.frame_count",
+                    )
 
     files = manifest.get("files") or {}
     if isinstance(files, dict):
@@ -179,15 +203,21 @@ def _read_manifest_frame_count(recording_dir: Path) -> Tuple[Optional[int], Opti
             ipc = summary.get("ipc_protocol")
             if isinstance(ipc, dict):
                 frame_count = _coerce_positive_int(
-                    ipc.get("client_finalize_frame_count") or ipc.get("client_drain_first_frame_count")
+                    ipc.get("client_finalize_frame_count")
+                    or ipc.get("client_drain_first_frame_count")
                 )
                 if frame_count is not None:
-                    return frame_count, f"{rel_text}:ipc_protocol.client_finalize_frame_count"
+                    return (
+                        frame_count,
+                        f"{rel_text}:ipc_protocol.client_finalize_frame_count",
+                    )
 
     return None, None
 
 
-def _estimate_sampled_frames(source_frame_count: int, frame_step: int, skip_tail_frames: int) -> int:
+def _estimate_sampled_frames(
+    source_frame_count: int, frame_step: int, skip_tail_frames: int
+) -> int:
     effective_total = max(int(source_frame_count) - max(int(skip_tail_frames), 0), 0)
     if effective_total <= 0:
         return 0
@@ -205,11 +235,25 @@ def _resolve_frame_step(
         if source_frame_count is not None:
             effective_total = max(source_frame_count - max(skip_tail_frames, 0), 0)
             if effective_total <= 0:
-                return None, 0, "source frame count is not larger than --skip-tail-frames"
+                return (
+                    None,
+                    0,
+                    "source frame count is not larger than --skip-tail-frames",
+                )
             frame_step = max(1, math.ceil(effective_total / target_sampled_frames))
-            return frame_step, _estimate_sampled_frames(source_frame_count, frame_step, skip_tail_frames), None
+            return (
+                frame_step,
+                _estimate_sampled_frames(
+                    source_frame_count, frame_step, skip_tail_frames
+                ),
+                None,
+            )
         if requested_frame_step is None:
-            return None, None, "--target-sampled-frames requires frame-count metadata or --frame-step fallback"
+            return (
+                None,
+                None,
+                "--target-sampled-frames requires frame-count metadata or --frame-step fallback",
+            )
 
     frame_step = requested_frame_step
     if frame_step is None:
@@ -233,6 +277,7 @@ def _build_plans(
     path_contains: Optional[str] = None,
     limit: Optional[int] = None,
     require_source_frame_count: bool = False,
+    artifact_id: str | None = None,
 ) -> List[ImportPlan]:
     plans: List[ImportPlan] = []
     for h5_path in _find_h5_files(root, recursive):
@@ -243,7 +288,10 @@ def _build_plans(
         recording_dir = h5_path.parent.parent
         if path_contains and path_contains not in str(recording_dir):
             continue
-        zarr_path = _training_zarr_path(recording_dir)
+        zarr_path = _training_zarr_path(
+            recording_dir,
+            artifact_id=artifact_id,
+        )
         try:
             meta = _read_h5_meta(h5_path)
         except Exception as exc:
@@ -265,7 +313,9 @@ def _build_plans(
         status = "ok"
         if cam_video is None:
             status = "missing"
-        source_frame_count, frame_count_source = _read_manifest_frame_count(recording_dir)
+        source_frame_count, frame_count_source = _read_manifest_frame_count(
+            recording_dir
+        )
         frame_step, estimated_sampled, frame_step_reason = _resolve_frame_step(
             source_frame_count=source_frame_count,
             requested_frame_step=requested_frame_step,
@@ -277,7 +327,9 @@ def _build_plans(
             reason = frame_step_reason
         elif require_source_frame_count and source_frame_count is None:
             status = "missing"
-            reason = "source frame count is required for PyNvVC sequential sampled import"
+            reason = (
+                "source frame count is required for PyNvVC sequential sampled import"
+            )
         elif skip_existing and zarr_path.exists():
             status = "skipped"
             reason = "zarr already exists"
@@ -372,8 +424,14 @@ def _print_plan_rich(plans: List[ImportPlan]) -> None:
         cam_name = plan.cam_video.name if plan.cam_video else "MISSING"
         zarr_name = plan.zarr_path.name
         step = "-" if plan.frame_step is None else str(plan.frame_step)
-        frames = "-" if plan.source_frame_count is None else str(plan.source_frame_count)
-        sample = "-" if plan.estimated_sampled_frames is None else str(plan.estimated_sampled_frames)
+        frames = (
+            "-" if plan.source_frame_count is None else str(plan.source_frame_count)
+        )
+        sample = (
+            "-"
+            if plan.estimated_sampled_frames is None
+            else str(plan.estimated_sampled_frames)
+        )
         mismatch = "!" if plan.frame_step_mismatch else ""
         table.add_row(
             plan.recording_dir.name,
@@ -563,7 +621,9 @@ def _gpu_preflight(logger: Optional[JsonLogger]) -> None:
             text=True,
         )
     except FileNotFoundError:
-        message = "GPU preflight failed: nvidia-smi not found (no NVIDIA driver available)."
+        message = (
+            "GPU preflight failed: nvidia-smi not found (no NVIDIA driver available)."
+        )
         print(message)
         if logger is not None:
             logger.log("preflight_failed", reason=message)
@@ -573,7 +633,10 @@ def _gpu_preflight(logger: Optional[JsonLogger]) -> None:
 
     if result.returncode != 0:
         details = (result.stderr or result.stdout).strip()
-        if "Driver/library version mismatch" in details or "Failed to initialize NVML" in details:
+        if (
+            "Driver/library version mismatch" in details
+            or "Failed to initialize NVML" in details
+        ):
             message = (
                 "GPU preflight failed: NVML driver/library version mismatch. "
                 "Reboot to reload the NVIDIA kernel module or run on a node with a working driver."
@@ -660,6 +723,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--overwrite",
         action="store_true",
         help="Retired: publish a new versioned training Zarr instead.",
+    )
+    parser.add_argument(
+        "--artifact-id",
+        type=str,
+        help=(
+            "Optional immutable artifact identifier. Publishes to "
+            "<recording>_<artifact-id>_training.zarr instead of occupying or "
+            "overwriting the canonical <recording>_training.zarr path."
+        ),
     )
     parser.add_argument(
         "--no-skip-existing",
@@ -772,7 +844,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"--frame-step must be >= 1 (got {args.frame_step})")
         return 1
     if args.target_sampled_frames is not None and args.target_sampled_frames < 1:
-        print(f"--target-sampled-frames must be >= 1 (got {args.target_sampled_frames})")
+        print(
+            f"--target-sampled-frames must be >= 1 (got {args.target_sampled_frames})"
+        )
         return 1
     if args.limit is not None and args.limit < 1:
         print(f"--limit must be >= 1 (got {args.limit})")
@@ -788,6 +862,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             "--overwrite is retired for sampled training publication; publish a new "
             "versioned artifact instead."
         )
+        return 1
+    try:
+        artifact_id = _normalize_artifact_id(args.artifact_id)
+    except ValueError as exc:
+        print(str(exc))
         return 1
     if args.apply and args.scratch_root is None:
         print("Sampled training publication with --apply requires --scratch-root")
@@ -810,9 +889,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             "run_start",
             recordings_root=str(root),
             recursive=bool(args.recursive),
-            frame_step=int(requested_frame_step) if requested_frame_step is not None else None,
+            frame_step=int(requested_frame_step)
+            if requested_frame_step is not None
+            else None,
             target_sampled_frames=(
-                int(args.target_sampled_frames) if args.target_sampled_frames is not None else None
+                int(args.target_sampled_frames)
+                if args.target_sampled_frames is not None
+                else None
             ),
             skip_tail_frames=int(args.skip_tail_frames),
             config=str(args.config),
@@ -826,9 +909,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             limit=args.limit,
             decode_backend=args.decode_backend,
             gpu_id=int(args.gpu_id),
-            scratch_root=str(args.scratch_root) if args.scratch_root is not None else None,
+            scratch_root=str(args.scratch_root)
+            if args.scratch_root is not None
+            else None,
             include_acquisition_crop_video=bool(args.include_acquisition_crop_video),
             acquisition_crop_run_prefix=str(args.acquisition_crop_run_prefix),
+            artifact_id=artifact_id,
         )
 
     if args.apply:
@@ -844,6 +930,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         path_contains=args.path_contains,
         limit=args.limit,
         require_source_frame_count=True,
+        artifact_id=artifact_id,
     )
 
     if args.dry_run:
@@ -868,7 +955,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     frame_step_mismatch=plan.frame_step_mismatch,
                     decode_backend=args.decode_backend,
                     gpu_id=int(args.gpu_id),
-                    include_acquisition_crop_video=bool(args.include_acquisition_crop_video),
+                    include_acquisition_crop_video=bool(
+                        args.include_acquisition_crop_video
+                    ),
                 )
         if args.rich:
             _print_plan_rich(plans)
@@ -901,7 +990,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     status="missing",
                 )
             continue
-        if plan.status == "skipped" and not args.overwrite and not args.no_skip_existing:
+        if (
+            plan.status == "skipped"
+            and not args.overwrite
+            and not args.no_skip_existing
+        ):
             skipped += 1
             if plan.frame_step_mismatch:
                 print(

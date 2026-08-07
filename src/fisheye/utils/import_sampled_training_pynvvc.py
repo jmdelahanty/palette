@@ -28,7 +28,9 @@ from fisheye.shared.import_profile_contract import (
     IMPORT_PROFILE_SCHEMA_ID,
     PROFILE_SAMPLED_TRAINING_PYNVVC_LUMA,
 )
-from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
+from fisheye.shared.import_source_fingerprint import (
+    optional_source_stat_fingerprint_attrs,
+)
 from fisheye.shared.import_video_metadata import probe_video_colorimetry_attrs
 from fisheye.shared.roi_pixel_contract import (
     APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
@@ -37,6 +39,12 @@ from fisheye.shared.roi_pixel_contract import (
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
     SOURCE_PIXELS_RAW_CAMERA_VIDEO,
     orange_mono_pynvvc_luma_pixel_contract,
+)
+from fisheye.shared.zarr.training_image_storage import (
+    SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+    compute_letterbox_dimensions,
+    sampled_training_downsample_transform,
+    sampled_training_image_chunk_shape,
 )
 
 
@@ -58,7 +66,9 @@ class SampledTrainingImportResult:
     duration_s: float
 
 
-def _compute_frame_indices(total_frames: int, frame_step: int, *, skip_tail_frames: int) -> list[int]:
+def _compute_frame_indices(
+    total_frames: int, frame_step: int, *, skip_tail_frames: int
+) -> list[int]:
     if total_frames <= 0:
         raise ValueError(f"source_frame_count must be positive, got {total_frames}")
     if frame_step < 1:
@@ -81,9 +91,15 @@ def _load_import_config(config_path: Path | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _downsample_config(config: dict[str, Any]) -> tuple[bool, tuple[int, int], str, bool, int]:
+def _downsample_config(
+    config: dict[str, Any],
+) -> tuple[bool, tuple[int, int], str, bool]:
     import_cfg = config.get("import") if isinstance(config.get("import"), dict) else {}
-    down_cfg = import_cfg.get("downsampled") if isinstance(import_cfg.get("downsampled"), dict) else {}
+    down_cfg = (
+        import_cfg.get("downsampled")
+        if isinstance(import_cfg.get("downsampled"), dict)
+        else {}
+    )
     resolutions = str(import_cfg.get("resolutions", "both"))
     create_downsampled = resolutions in {"both", "downsampled"}
     raw_size = down_cfg.get("size", [640, 640])
@@ -92,29 +108,40 @@ def _downsample_config(config: dict[str, Any]) -> tuple[bool, tuple[int, int], s
     target_hw = (int(raw_size[0]), int(raw_size[1]))
     method = str(down_cfg.get("method", "area"))
     preserve_aspect = bool(down_cfg.get("preserve_aspect", False))
-    chunk_size = int(down_cfg.get("chunk_size", import_cfg.get("chunk_size", 32)))
-    return create_downsampled, target_hw, method, preserve_aspect, max(1, chunk_size)
+    return create_downsampled, target_hw, method, preserve_aspect
 
 
-def _chunk_size(config: dict[str, Any]) -> int:
+def _write_batch_size(config: dict[str, Any]) -> int:
     import_cfg = config.get("import") if isinstance(config.get("import"), dict) else {}
-    return max(1, int(import_cfg.get("chunk_size", 32)))
+    return max(1, int(import_cfg.get("batch_size", 1)))
 
 
-def _compute_letterbox_dims(
-    source_h: int,
-    source_w: int,
-    target_h: int,
-    target_w: int,
-) -> tuple[int, int, int, int, int, int]:
-    scale = min(target_h / source_h, target_w / source_w)
-    resized_h = max(1, min(target_h, int(round(source_h * scale))))
-    resized_w = max(1, min(target_w, int(round(source_w * scale))))
-    pad_top = (target_h - resized_h) // 2
-    pad_bottom = target_h - resized_h - pad_top
-    pad_left = (target_w - resized_w) // 2
-    pad_right = target_w - resized_w - pad_left
-    return resized_h, resized_w, pad_top, pad_bottom, pad_left, pad_right
+def _validate_legacy_chunk_assertions(config: dict[str, Any]) -> None:
+    """Fail before decode when an old config contradicts the fixed contract."""
+
+    import_cfg = config.get("import") if isinstance(config.get("import"), dict) else {}
+    down_cfg = (
+        import_cfg.get("downsampled")
+        if isinstance(import_cfg.get("downsampled"), dict)
+        else {}
+    )
+    declared = {
+        "import.chunk_size": import_cfg.get("chunk_size"),
+        "import.downsampled.chunk_size": down_cfg.get("chunk_size"),
+    }
+    invalid = {
+        name: int(value)
+        for name, value in declared.items()
+        if value is not None and int(value) != 1
+    }
+    if invalid:
+        detail = ", ".join(f"{name}={value}" for name, value in invalid.items())
+        raise ValueError(
+            "Sampled training image chunks are fixed to complete single frames "
+            f"(1, H, W); conflicting legacy settings: {detail}. Remove those "
+            "settings or set them to 1, and use import.batch_size to control "
+            "decode/write batching."
+        )
 
 
 def _resize_luma(
@@ -130,18 +157,31 @@ def _resize_luma(
     batch = luma_hw.unsqueeze(0).unsqueeze(0).to(dtype=torch.float32)
     if preserve_aspect:
         source_h, source_w = int(luma_hw.shape[-2]), int(luma_hw.shape[-1])
-        resized_h, resized_w, pad_top, pad_bottom, pad_left, pad_right = _compute_letterbox_dims(
-            source_h,
-            source_w,
-            target_h,
-            target_w,
+        resized_h, resized_w, pad_top, pad_bottom, pad_left, pad_right = (
+            compute_letterbox_dimensions(
+                source_h,
+                source_w,
+                target_h,
+                target_w,
+            )
         )
-        resized = F.interpolate(batch, size=(resized_h, resized_w), mode=mode, align_corners=align_corners)
+        resized = F.interpolate(
+            batch, size=(resized_h, resized_w), mode=mode, align_corners=align_corners
+        )
         if any((pad_top, pad_bottom, pad_left, pad_right)):
-            resized = F.pad(resized, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=0)
+            resized = F.pad(
+                resized,
+                (pad_left, pad_right, pad_top, pad_bottom),
+                mode="constant",
+                value=0,
+            )
     else:
-        resized = F.interpolate(batch, size=(target_h, target_w), mode=mode, align_corners=align_corners)
-    return resized.squeeze(0).squeeze(0).clamp(0, 255).to(dtype=torch.uint8).contiguous()
+        resized = F.interpolate(
+            batch, size=(target_h, target_w), mode=mode, align_corners=align_corners
+        )
+    return (
+        resized.squeeze(0).squeeze(0).clamp(0, 255).to(dtype=torch.uint8).contiguous()
+    )
 
 
 def _raw_video_pixel_contract() -> dict[str, Any]:
@@ -159,7 +199,9 @@ def _raw_video_pixel_contract() -> dict[str, Any]:
         "source_pixels": SOURCE_PIXELS_RAW_CAMERA_VIDEO,
         "decode_backend": DECODE_BACKEND_PYNVVC_LUMA,
         "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
-        "container_color_range_handling": roi_contract.get("container_color_range_handling"),
+        "container_color_range_handling": roi_contract.get(
+            "container_color_range_handling"
+        ),
     }
 
 
@@ -208,11 +250,15 @@ def _manifest_recording_attrs(recording_dir: Path | None) -> dict[str, Any]:
         text = str(value).strip() if not isinstance(value, (dict, list)) else ""
         if text:
             attrs[key] = value
-    attrs["recording_manifest_path"] = str((recording_dir / "recording_manifest.json").resolve())
+    attrs["recording_manifest_path"] = str(
+        (recording_dir / "recording_manifest.json").resolve()
+    )
     return attrs
 
 
-def _observed_container_color_range(source_video_colorimetry_attrs: dict[str, Any] | None) -> str:
+def _observed_container_color_range(
+    source_video_colorimetry_attrs: dict[str, Any] | None,
+) -> str:
     if not source_video_colorimetry_attrs:
         return "unknown"
     value = source_video_colorimetry_attrs.get("video_color_range")
@@ -253,7 +299,9 @@ def _write_attrs(
 ) -> None:
     raw_contract = _raw_video_pixel_contract()
     roi_contract = orange_mono_pynvvc_luma_pixel_contract()
-    observed_container_color_range = _observed_container_color_range(source_video_colorimetry_attrs)
+    observed_container_color_range = _observed_container_color_range(
+        source_video_colorimetry_attrs
+    )
     source_video_fingerprint_attrs = optional_source_stat_fingerprint_attrs(
         source_video_path,
         attr_prefix="source_video",
@@ -308,7 +356,9 @@ def _write_attrs(
         "source_pixel_range": "0_255",
         "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
         "container_color_range_observed": observed_container_color_range,
-        "container_color_range_handling": roi_contract.get("container_color_range_handling"),
+        "container_color_range_handling": roi_contract.get(
+            "container_color_range_handling"
+        ),
         "center_rounding": CENTER_ROUNDING_NP_ROUND,
         "pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
         "pixel_contract": _json_attr(raw_contract),
@@ -344,13 +394,25 @@ def _write_attrs(
     if source_video_colorimetry_attrs:
         raw_attrs.update(source_video_colorimetry_attrs)
     if downsampled_hw is not None:
+        downsample_transform = sampled_training_downsample_transform(
+            source_hw=original_hw,
+            target_hw=downsampled_hw,
+            method=downsample_method,
+            preserve_aspect=downsample_preserve_aspect,
+        )
         raw_attrs.update(
             {
-                "downsampled_resolution": [int(downsampled_hw[0]), int(downsampled_hw[1])],
+                "downsampled_resolution": [
+                    int(downsampled_hw[0]),
+                    int(downsampled_hw[1]),
+                ],
                 "downsample_method": str(downsample_method),
                 "downsample_preserve_aspect": bool(downsample_preserve_aspect),
                 "downsample_formats": ["gray"],
-                "downsampled_shapes": {"images_ds": [int(downsampled_hw[0]), int(downsampled_hw[1])]},
+                "downsampled_shapes": {
+                    "images_ds": [int(downsampled_hw[0]), int(downsampled_hw[1])]
+                },
+                "downsample_transform": downsample_transform,
             }
         )
     if camera_id:
@@ -402,6 +464,8 @@ def import_sampled_training_pynvvc(
             "current environment reports torch.cuda.is_available() == False."
         )
     source_video_colorimetry_attrs = probe_video_colorimetry_attrs(video_path)
+    config = _load_import_config(config_path)
+    _validate_legacy_chunk_assertions(config)
 
     frame_indices = _compute_frame_indices(
         int(source_frame_count),
@@ -416,10 +480,8 @@ def import_sampled_training_pynvvc(
     source_h = int(reader.source_height)
     source_w = int(reader.source_width)
     original_hw = (source_h, source_w)
-    config = _load_import_config(config_path)
-    full_chunk_size = _chunk_size(config)
-    write_batch_size = full_chunk_size
-    create_downsampled, down_hw, down_method, down_preserve, down_chunk_size = _downsample_config(config)
+    write_batch_size = _write_batch_size(config)
+    create_downsampled, down_hw, down_method, down_preserve = _downsample_config(config)
     downsampled_hw = down_hw if create_downsampled else None
 
     temp_path = zarr_path.with_name(f"{zarr_path.name}.__pynvvc_tmp_{os.getpid()}")
@@ -444,26 +506,50 @@ def import_sampled_training_pynvvc(
         images_full = raw.create_array(
             "images_full",
             shape=(len(frame_indices), source_h, source_w),
-            chunks=(min(full_chunk_size, len(frame_indices)), source_h, source_w),
+            chunks=sampled_training_image_chunk_shape(
+                (len(frame_indices), source_h, source_w)
+            ),
             dtype="uint8",
             fill_value=0,
             compressors=[],
             overwrite=True,
         )
-        images_full.attrs.update({"format": "gray", "resolution": [source_h, source_w]})
+        images_full.attrs.update(
+            {
+                "format": "gray",
+                "resolution": [source_h, source_w],
+                "storage_contract_schema_id": SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+                "access_unit": "complete_sampled_frame",
+            }
+        )
         images_ds = None
         if downsampled_hw is not None:
             ds_h, ds_w = downsampled_hw
             images_ds = raw.create_array(
                 "images_ds",
                 shape=(len(frame_indices), ds_h, ds_w),
-                chunks=(min(down_chunk_size, len(frame_indices)), ds_h, ds_w),
+                chunks=sampled_training_image_chunk_shape(
+                    (len(frame_indices), ds_h, ds_w)
+                ),
                 dtype="uint8",
                 fill_value=0,
                 compressors=[],
                 overwrite=True,
             )
-            images_ds.attrs.update({"format": "gray", "resolution": [ds_h, ds_w]})
+            images_ds.attrs.update(
+                {
+                    "format": "gray",
+                    "resolution": [ds_h, ds_w],
+                    "storage_contract_schema_id": SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+                    "access_unit": "complete_sampled_frame",
+                    "source_to_stored_transform": sampled_training_downsample_transform(
+                        source_hw=original_hw,
+                        target_hw=downsampled_hw,
+                        method=down_method,
+                        preserve_aspect=down_preserve,
+                    ),
+                }
+            )
         raw.create_array(
             "original_frame_indices",
             data=np.asarray(frame_indices, dtype=np.int32),
