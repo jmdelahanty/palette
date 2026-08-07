@@ -109,10 +109,11 @@ training destination construction from maintained operator workflows. The
 PyNvVideoCodec importer remains an internal scratch constructor, but its CLI
 fails closed. `import_recordings_training` now always requires bounded local
 `--scratch-root` and routes through `publish_sampled_training_base`; overwrite
-in place is rejected. The LSF submitter supplies a job-specific `$TMPDIR`,
-validates the local artifact, checks the copied hidden sibling, and exposes the
-destination only by final rename. Local-host and video-only intake use the same
-publisher rather than retaining a non-atomic compatibility path.
+in place is rejected. The LSF submitter supplies a job-specific node-local
+directory below `${TMPDIR:-/tmp}`, validates the local artifact, checks the
+copied hidden sibling, and exposes the destination only by final rename.
+Local-host and video-only intake use the same publisher rather than retaining
+a non-atomic compatibility path.
 
 The no-write four-recording plan resolved 139,385 source frames per camera,
 `frame_step=696`, and exactly 200 sampled rows for cameras 2010093 through
@@ -120,3 +121,9 @@ The no-write four-recording plan resolved 139,385 source frames per camera,
 worktree and full commit, and every array task verifies that commit before
 decoding. At this checkpoint no training Zarr, registry row, selector, or LSF
 job had been created.
+
+The first array submission, LSF `153294439`, then demonstrated the scratch
+guard: all four tasks verified the pinned commit and exited before decoding or
+Zarr creation because this cluster does not define `$TMPDIR`. The submitter now
+uses the bounded node-local fallback `${TMPDIR:-/tmp}`; the publisher still
+rejects broad scratch roots and any `/groups` or `/nrs` scratch path.

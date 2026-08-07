@@ -321,7 +321,7 @@ echo "started_utc=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 task_log_dir="\${RUN_DIR}/task_logs/\$(printf '%04d' "\${LSB_JOBINDEX}")"
 mkdir -p "\$task_log_dir"
 
-node_scratch="\${TMPDIR:?LSF TMPDIR is required for atomic base publication}/palette-sampled-training-base-\${LSB_JOBID:-unknown}-\${LSB_JOBINDEX}"
+node_scratch="\${TMPDIR:-/tmp}/palette-sampled-training-base-\${LSB_JOBID:-unknown}-\${LSB_JOBINDEX}"
 mkdir -p "\$node_scratch"
 
 scripts/py -m fisheye.utils.import_recordings_training ${ROOT_Q} \
