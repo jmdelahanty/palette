@@ -82,7 +82,10 @@ LSF resources:
 General:
   --log-dir PATH            Submission log dir (default: <root>/logs/import_recordings_training/bsub_submissions)
   --run-id ID               Stable run id; default UTC timestamp
-  --repo-dir PATH           Repository checkout visible to compute nodes (default: current directory)
+  --palette-repo PATH       Immutable Palette checkout visible to compute nodes
+                            (default: current directory); its full commit is
+                            recorded and verified by every task
+  --repo-dir PATH           Compatibility alias for --palette-repo
   --submit                  Actually call bsub. Without this, dry-run only.
   -h, --help                Show this message
 
@@ -126,7 +129,7 @@ while [[ $# -gt 0 ]]; do
     --max-active) MAX_ACTIVE="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --run-id) RUN_ID="$2"; shift 2;;
-    --repo-dir) REPO_DIR="$2"; shift 2;;
+    --palette-repo|--repo-dir) REPO_DIR="$2"; shift 2;;
     --submit) SUBMIT=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2;;
@@ -152,6 +155,16 @@ fi
 if [[ -z "$REPO_DIR" ]]; then
   REPO_DIR="$(pwd)"
 fi
+REPO_DIR="$(realpath -- "$REPO_DIR")"
+[[ -x "$REPO_DIR/scripts/py" ]] || {
+  echo "Palette repository lacks executable scripts/py: $REPO_DIR" >&2
+  exit 2
+}
+PALETTE_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
+[[ -z "$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)" ]] || {
+  echo "Palette repository must be clean for cluster submission: $REPO_DIR" >&2
+  exit 2
+}
 
 RUN_DIR="${LOG_DIR%/}/import_training_${RUN_ID}"
 if [[ -e "$RUN_DIR" ]]; then
@@ -272,6 +285,7 @@ printf -v IMPORT_ARGS_SHELL '%q ' "${IMPORT_ARGS[@]}"
 
 JOB_SCRIPT="${RUN_DIR}/run_import_training_task.sh"
 REPO_DIR_Q="$(printf '%q' "$REPO_DIR")"
+PALETTE_COMMIT_Q="$(printf '%q' "$PALETTE_COMMIT")"
 ROOT_Q="$(printf '%q' "$ROOT")"
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -290,7 +304,14 @@ if [[ -z "\$recording_dir" ]]; then
 fi
 
 cd ${REPO_DIR_Q}
+expected_palette_commit=${PALETTE_COMMIT_Q}
+actual_palette_commit="\$(git rev-parse HEAD)"
+if [[ "\$actual_palette_commit" != "\$expected_palette_commit" ]]; then
+  echo "Palette commit mismatch: expected \$expected_palette_commit, got \$actual_palette_commit" >&2
+  exit 2
+fi
 echo "repo=\$(pwd)"
+echo "palette_commit=\$actual_palette_commit"
 echo "host=\$(hostname)"
 echo "job_id=\${LSB_JOBID:-unknown}"
 echo "job_index=\${LSB_JOBINDEX}"
@@ -319,7 +340,8 @@ scripts/py - "$RUN_DIR/submission_manifest.json" "$ROOT" "$PATH_CONTAINS" "$LIMI
   "$TARGET_SAMPLED_FRAMES" "$FRAME_STEP" "$SKIP_TAIL_FRAMES" "$DECODE_BACKEND" "$GPU_ID" \
   "$OVERWRITE" "$REGISTER" "$REGISTRY" "$IMPORT_STIMULUS" "$STIMULUS_QUIET" "$JOB_SCRIPT" \
   "$TARGETS_FILE" "$PLAN_JSON" "$REPO_DIR" "$INCLUDE_ACQUISITION_CROP_VIDEO" \
-  "$ACQUISITION_CROP_RUN_PREFIX" "$OVERWRITE_ACQUISITION_CROP_RUN" <<'PY'
+  "$ACQUISITION_CROP_RUN_PREFIX" "$OVERWRITE_ACQUISITION_CROP_RUN" \
+  "$PALETTE_COMMIT" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -354,6 +376,7 @@ from pathlib import Path
     include_acquisition_crop_video,
     acquisition_crop_run_prefix,
     overwrite_acquisition_crop_run,
+    palette_commit,
 ) = sys.argv[1:]
 
 payload = {
@@ -387,6 +410,8 @@ payload = {
     "targets_file": targets_file,
     "plan_json": plan_json,
     "repo_dir": repo_dir,
+    "palette_repo": repo_dir,
+    "palette_commit": palette_commit,
 }
 Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -419,6 +444,7 @@ echo "Targets: $target_count"
 echo "Target list: $TARGETS_FILE"
 echo "Plan: $PLAN_JSON"
 echo "Repo dir: $REPO_DIR"
+echo "Palette commit: $PALETTE_COMMIT"
 echo "Registry: $([[ "$REGISTER" == "1" ]] && echo "$REGISTRY" || echo "<disabled>")"
 echo "Queue: $QUEUE"
 echo "GPU: ${GPU_SPEC:-<none>}"
