@@ -86,5 +86,8 @@ a model, activate a production selector, or alter any source artifact.
   rows in the training viewer.
 - [ ] Train and evaluate a candidate model using the frozen split.
 - [ ] Register this exact artifact only if the model/lineage review passes.
-- [ ] Census and remediate additional historical sources rather than silently
-  adding them to this versioned cohort.
+- [x] Census the complete approved historical five-point corpus and the
+  reviewed Batman candidate; see
+  `docs/keypoint_training_source_census_2026-08-06.md`.
+- [ ] Add dual frame-domain lineage and subject/cohort-grouped splits before
+  rematerializing the complete 61-source cohort.
