@@ -361,6 +361,18 @@ def _open_source_group_direct(source_zarr: Path, relative_path: str) -> zarr.Gro
     return open_zarr_group_direct(source_zarr / relative_path, mode="r")
 
 
+def _open_source_array_direct(source_zarr: Path, relative_path: str) -> zarr.Array:
+    group_path, separator, array_name = str(relative_path).rpartition("/")
+    if not separator or not group_path or not array_name:
+        raise ValueError(f"Source array path must include a group: {relative_path!r}")
+    return _open_source_group_direct(source_zarr, group_path)[array_name]
+
+
+def _source_array_metadata_exists(source_zarr: Path, relative_path: str) -> bool:
+    node_path = source_zarr / relative_path
+    return (node_path / "zarr.json").is_file() or (node_path / ".zarray").is_file()
+
+
 def _clean_slug(value: Optional[str], fallback: str) -> str:
     text = _as_text(value) or fallback
     cleaned = "".join(
@@ -1386,11 +1398,11 @@ def _discover_merge_sources(
             raise ValueError(
                 f"{source_zarr}: crop run '{source_crop_run}' missing bbox_norm_coords."
             )
-        if keypoints_path not in root:
+        if not _source_array_metadata_exists(source_zarr, keypoints_path):
             raise ValueError(
                 f"{source_zarr}: keypoints array '{keypoints_path}' not found."
             )
-        if success_path not in root:
+        if not _source_array_metadata_exists(source_zarr, success_path):
             raise ValueError(
                 f"{source_zarr}: success array '{success_path}' not found."
             )
@@ -1590,7 +1602,9 @@ def _discover_merge_sources(
         )
         source_original_frame_map_path = (
             "raw_video/original_frame_indices"
-            if "raw_video/original_frame_indices" in root
+            if _source_array_metadata_exists(
+                source_zarr, "raw_video/original_frame_indices"
+            )
             else None
         )
         if source_acquisition_frame_index_path is not None:
@@ -2209,19 +2223,22 @@ def _export_merged(
                     copy_task_id, description=f"Copying {spec.dataset_name}"
                 )
 
-            root = zarr.open_group(str(spec.source_zarr), mode="r", use_consolidated=False)
-            annotation_root = (
-                root
-                if spec.annotation_zarr == spec.source_zarr
-                else zarr.open_group(
-                    str(spec.annotation_zarr), mode="r", use_consolidated=False
-                )
+            crop_source_group = _open_source_group_direct(
+                spec.source_zarr, f"crop_runs/{spec.source_crop_run}"
             )
-            roi_src = root[spec.roi_path]
-            crop_source_group = root[f"crop_runs/{spec.source_crop_run}"]
+            annotation_group_path = spec.keypoints_path.rsplit("/", 1)[0]
+            annotation_group = _open_source_group_direct(
+                spec.annotation_zarr, annotation_group_path
+            )
+            roi_src = _open_source_array_direct(spec.source_zarr, spec.roi_path)
             selected = np.asarray(spec.selected_indices, dtype=np.int64)
-            bbox_all = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
-            keypoints_source = np.asarray(annotation_root[spec.keypoints_path][:])
+            bbox_all = np.asarray(
+                _open_source_array_direct(spec.source_zarr, spec.bbox_path)[:],
+                dtype=np.float32,
+            )
+            keypoints_source = np.asarray(
+                _open_source_array_direct(spec.annotation_zarr, spec.keypoints_path)[:]
+            )
             if np.dtype(keypoints_source.dtype) != spec.keypoint_dtype:
                 raise ValueError(
                     f"{spec.source_zarr}: keypoint dtype changed after preflight "
@@ -2237,14 +2254,15 @@ def _export_merged(
                 cast_error = 0.0
             keypoint_cast_max_abs_error[spec.dataset_id] = float(cast_error)
             success_all = np.asarray(
-                annotation_root[spec.success_path][:], dtype=np.bool_
+                _open_source_array_direct(spec.annotation_zarr, spec.success_path)[:],
+                dtype=np.bool_,
             )
-            annotation_group_path = spec.keypoints_path.rsplit("/", 1)[0]
-            annotation_group = annotation_root[annotation_group_path]
-            source_refined_row_ids, source_detect_row_index = resolve_row_identity_arrays(
-                annotation_group,
-                crop_source_group,
-                total_rois=spec.source_sample_count,
+            source_refined_row_ids, source_detect_row_index = (
+                resolve_row_identity_arrays(
+                    annotation_group,
+                    crop_source_group,
+                    total_rois=spec.source_sample_count,
+                )
             )
             keypoints = keypoints_all[selected]
             success = success_all[selected]
@@ -2301,7 +2319,10 @@ def _export_merged(
 
             if spec.frame_indices_path:
                 source_sample_row_index = np.asarray(
-                    root[spec.frame_indices_path][:], dtype=np.int64
+                    _open_source_array_direct(
+                        spec.source_zarr, spec.frame_indices_path
+                    )[:],
+                    dtype=np.int64,
                 )
             else:
                 source_sample_row_index = np.arange(
@@ -2314,7 +2335,11 @@ def _export_merged(
                 )
             if spec.source_acquisition_frame_index_path is not None:
                 source_acquisition_frame_index = np.asarray(
-                    root[spec.source_acquisition_frame_index_path][:], dtype=np.int64
+                    _open_source_array_direct(
+                        spec.source_zarr,
+                        spec.source_acquisition_frame_index_path,
+                    )[:],
+                    dtype=np.int64,
                 )
                 if source_acquisition_frame_index.shape != (
                     int(spec.source_sample_count),
@@ -2326,7 +2351,10 @@ def _export_merged(
                     )
             elif spec.source_original_frame_map_path is not None:
                 original_frame_indices = np.asarray(
-                    root[spec.source_original_frame_map_path][:], dtype=np.int64
+                    _open_source_array_direct(
+                        spec.source_zarr, spec.source_original_frame_map_path
+                    )[:],
+                    dtype=np.int64,
                 )
                 if original_frame_indices.ndim != 1:
                     raise ValueError(
@@ -2351,7 +2379,10 @@ def _export_merged(
 
             if spec.detection_source_path:
                 detection_source = np.asarray(
-                    root[spec.detection_source_path][:], dtype=np.int8
+                    _open_source_array_direct(
+                        spec.source_zarr, spec.detection_source_path
+                    )[:],
+                    dtype=np.int8,
                 )
                 detection_source = _take_crop_or_source_rows(
                     detection_source,
