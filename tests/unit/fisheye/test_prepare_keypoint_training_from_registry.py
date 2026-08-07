@@ -285,6 +285,10 @@ def _seed_registry(registry_path: Path, zarr_path: Path) -> None:
 def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(zarr_path)
+    # Historical writers sometimes persisted percentage-valued success_rate
+    # attributes. The exact boolean payload must remain authoritative.
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root["keypoints_runs/kp_pose_001"].attrs["success_rate"] = 75.0
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     base_config_path = tmp_path / "pose_base.yaml"

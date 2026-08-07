@@ -59,6 +59,10 @@ def _write_source_pose_zarr(
     refined_keypoint_count: int | None = None,
     refined_pose_schema_name: str | None = None,
     strict_v2_names: bool = False,
+    roi_hw: tuple[int, int] = (16, 16),
+    roi_value: int = 0,
+    keypoint_xy: tuple[float, float] = (0.0, 0.0),
+    keypoint_dtype: np.dtype = np.dtype(np.float32),
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
 
@@ -73,8 +77,8 @@ def _write_source_pose_zarr(
     }
     crop.create_array(
         "roi_images",
-        data=np.zeros((4, 16, 16), dtype=np.uint8),
-        chunks=(2, 16, 16),
+        data=np.full((4, *roi_hw), roi_value, dtype=np.uint8),
+        chunks=(2, *roi_hw),
     )
     crop.create_array(
         "bbox_norm_coords",
@@ -109,7 +113,10 @@ def _write_source_pose_zarr(
     kp.attrs["keypoint_labels"] = keypoint_labels or [f"kpt_{idx}" for idx in range(int(keypoint_count))]
     kp.create_array(
         "keypoints_roi",
-        data=np.zeros((4, int(keypoint_count), 2), dtype=np.float32),
+        data=np.broadcast_to(
+            np.asarray(keypoint_xy, dtype=keypoint_dtype),
+            (4, int(keypoint_count), 2),
+        ).copy(),
         chunks=(4, int(keypoint_count), 2),
     )
     kp.create_array(
@@ -667,6 +674,193 @@ def test_export_merged_keeps_mixed_lineage_out_of_surface_source_type(tmp_path: 
     assert training_export["source_type_requested"] == "refined"
     assert training_export["source_type_resolved"] == "refined"
     assert training_export["source_type_resolved_counts"] == {"manual": 1, "refined": 1}
+
+
+def test_export_v2_pads_without_resize_and_groups_splits_by_source(tmp_path: Path) -> None:
+    zarr_a = tmp_path / "source_16.zarr"
+    zarr_b = tmp_path / "source_12.zarr"
+    _write_source_pose_zarr(
+        zarr_a,
+        skeleton_id="pose_skel_shared",
+        roi_hw=(16, 16),
+        roi_value=3,
+        keypoint_xy=(2.0, 3.0),
+    )
+    _write_source_pose_zarr(
+        zarr_b,
+        skeleton_id="pose_skel_shared",
+        roi_hw=(12, 12),
+        roi_value=7,
+        keypoint_xy=(1.0, 2.0),
+    )
+    manifest = _manifest_for_sources(zarr_a, zarr_b)
+    manifest["set_id"] = "pose_set_padded_v2"
+    manifest_path = tmp_path / "pose_set_padded_v2.manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    out_zarr = tmp_path / "pose_set_padded_v2_merged.zarr"
+
+    result = _export_merged(
+        manifest_payload=manifest,
+        manifest_path=manifest_path,
+        out_zarr=out_zarr,
+        merged_dataset_id=None,
+        overwrite=True,
+        train_ratio=0.5,
+        val_ratio=0.5,
+        test_ratio=0.0,
+        seed=42,
+        copy_batch_size=2,
+        row_gate_policy="raw_success",
+        invocation={},
+        roi_transform_mode="pad_to_shape",
+        target_roi_hw=(20, 20),
+        split_unit="source_dataset",
+    )
+
+    root = zarr.open_group(str(out_zarr), mode="r", use_consolidated=False)
+    roi = np.asarray(root[f"crop_runs/{result.run_name}/roi_images"][:])
+    keypoints = np.asarray(root[f"keypoints_runs/{result.run_name}/keypoints_roi"][:])
+    source_idx = np.asarray(root["source_index/source_dataset_idx"][:], dtype=np.int64)
+    train_idx = np.asarray(root["splits/train_indices"][:], dtype=np.int64)
+    val_idx = np.asarray(root["splits/val_indices"][:], dtype=np.int64)
+
+    assert roi.shape == (6, 20, 20)
+    assert np.all(roi[0, 2:18, 2:18] == 3)
+    assert np.all(roi[0, :2] == 0)
+    assert np.all(roi[3, 4:16, 4:16] == 7)
+    assert np.all(roi[3, :4] == 0)
+    assert keypoints[0, 0].tolist() == [4.0, 5.0]
+    assert keypoints[3, 0].tolist() == [5.0, 6.0]
+    assert set(source_idx[train_idx].tolist()).isdisjoint(set(source_idx[val_idx].tolist()))
+    assert root["splits"].attrs["strategy"] == "source_dataset_grouped"
+
+    transforms = [
+        json.loads(str(value))
+        for value in np.asarray(root["source_index/source_roi_transform_json"][:], dtype=object)
+    ]
+    assert transforms[0]["pad_before_yx"] == [2, 2]
+    assert transforms[1]["pad_before_yx"] == [4, 4]
+    assert all(transform["resize_applied"] is False for transform in transforms)
+
+    summary = validate_merged_keypoint_training_zarr(out_zarr)
+    assert summary["total_samples"] == 6
+
+
+def test_export_v2_rejects_roi_larger_than_padding_target(tmp_path: Path) -> None:
+    source = tmp_path / "source_24.zarr"
+    _write_source_pose_zarr(source, skeleton_id="pose_skel_shared", roi_hw=(24, 24))
+    manifest = _manifest_for_single_source(source)
+
+    with pytest.raises(ValueError, match="exceeds padding target"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+            roi_transform_mode="pad_to_shape",
+            target_roi_hw=(20, 20),
+        )
+
+
+def test_immutable_v2_publication_is_consolidated_and_selector_ineligible(tmp_path: Path) -> None:
+    zarr_a = tmp_path / "source_a.zarr"
+    zarr_b = tmp_path / "source_b.zarr"
+    _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_shared", roi_hw=(16, 16))
+    _write_source_pose_zarr(zarr_b, skeleton_id="pose_skel_shared", roi_hw=(12, 12))
+    manifest = _manifest_for_sources(zarr_a, zarr_b)
+    manifest["set_id"] = "immutable_pose_v2"
+    manifest_path = tmp_path / "immutable_pose_v2.manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    scratch = tmp_path / "bounded_scratch"
+    scratch.mkdir()
+    target = tmp_path / "published" / "immutable_pose_v2.zarr"
+
+    result = mod._publish_immutable_merged(
+        scratch_root=scratch,
+        manifest_payload=manifest,
+        manifest_path=manifest_path,
+        out_zarr=target,
+        merged_dataset_id="immutable_pose_v2",
+        train_ratio=0.5,
+        val_ratio=0.5,
+        test_ratio=0.0,
+        seed=42,
+        copy_batch_size=2,
+        row_gate_policy="raw_success",
+        invocation={},
+        roi_transform_mode="pad_to_shape",
+        target_roi_hw=(20, 20),
+        split_unit="source_dataset",
+    )
+
+    assert result.total_samples == 6
+    direct = zarr.open_group(str(target), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(target), mode="r", use_consolidated=True)
+    assert direct.attrs["training_artifact_status"] == "complete"
+    assert direct.attrs["training_artifact_mutability"] == "immutable"
+    assert direct.attrs["stage_selector_eligible"] is False
+    assert direct.attrs["registry_activation"] == "deferred"
+    assert consolidated.attrs["immutable_training_publication"]["task"] == "keypoints"
+    publication_validation = consolidated.attrs["immutable_training_publication"]["validation"]
+    assert publication_validation["published_zarr_path"] == str(target.resolve())
+    assert "zarr_path" not in publication_validation
+    assert not list(target.parent.glob(f".{target.name}.publish_tmp.*"))
+
+
+def test_checked_dtype_policy_normalizes_float64_to_float32_with_receipt(tmp_path: Path) -> None:
+    source_float64 = tmp_path / "source_float64.zarr"
+    source_float32 = tmp_path / "source_float32.zarr"
+    _write_source_pose_zarr(
+        source_float64,
+        skeleton_id="pose_skel_shared",
+        keypoint_xy=(0.123456789, 15.987654321),
+        keypoint_dtype=np.dtype(np.float64),
+    )
+    _write_source_pose_zarr(
+        source_float32,
+        skeleton_id="pose_skel_shared",
+        keypoint_xy=(2.5, 7.25),
+        keypoint_dtype=np.dtype(np.float32),
+    )
+    manifest = _manifest_for_sources(source_float64, source_float32)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="keypoint dtype mismatch"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+            keypoint_dtype_policy="strict",
+        )
+
+    out_zarr = tmp_path / "checked_float32.zarr"
+    result = _export_merged(
+        manifest_payload=manifest,
+        manifest_path=manifest_path,
+        out_zarr=out_zarr,
+        merged_dataset_id="checked_float32",
+        overwrite=False,
+        train_ratio=0.5,
+        val_ratio=0.5,
+        test_ratio=0.0,
+        seed=42,
+        copy_batch_size=2,
+        row_gate_policy="raw_success",
+        invocation={},
+        keypoint_dtype_policy="float32_checked",
+    )
+
+    root = zarr.open_group(str(out_zarr), mode="r", use_consolidated=False)
+    keypoints = root[f"keypoints_runs/{result.run_name}/keypoints_roi"]
+    dtype_receipt = dict(root.attrs["training_export"])["keypoint_dtype"]
+    by_id = {entry["dataset_id"]: entry for entry in dtype_receipt["per_source"]}
+
+    assert np.dtype(keypoints.dtype) == np.dtype(np.float32)
+    assert result.keypoint_dtype_policy == "float32_checked"
+    assert by_id["dataset_a"]["transform"] == "float64_to_float32_checked"
+    assert by_id["dataset_b"]["transform"] == "identity_float32"
+    assert 0.0 < by_id["dataset_a"]["max_abs_round_trip_error"] < 1.0e-5
+    assert by_id["dataset_b"]["max_abs_round_trip_error"] == 0.0
 
 
 def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:

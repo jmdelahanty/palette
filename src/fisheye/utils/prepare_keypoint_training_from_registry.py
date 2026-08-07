@@ -1708,19 +1708,34 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         keypoints_successful: Optional[int] = None
         keypoints_success_rate = _as_float(source_attrs.get("success_rate")) if kp_group is not None else None
         keypoints_processed = _as_int(source_attrs.get("keypoints_processed")) if kp_group is not None else None
-        if keypoints_success_rate is not None:
-            denominator = keypoints_processed if keypoints_processed is not None else keypoints_total
-            keypoints_successful = int(round(keypoints_success_rate * float(denominator)))
-        elif kp_group is not None and "detection_success" in kp_group:
-            success_arr = kp_group["detection_success"]
+        success_array_name = None
+        if kp_group is not None:
+            if "detection_success" in kp_group:
+                success_array_name = "detection_success"
+            elif "pose_success" in kp_group:
+                success_array_name = "pose_success"
+        if kp_group is not None and success_array_name is not None:
+            success_arr = kp_group[success_array_name]
             if success_arr.shape[0] != keypoints_total:
                 raise ValueError(
-                    f"{zarr_path.name}: detection_success row mismatch "
-                    f"(detection_success={success_arr.shape[0]}, keypoints_roi={keypoints_total})."
+                    f"{zarr_path.name}: {success_array_name} row mismatch "
+                    f"({success_array_name}={success_arr.shape[0]}, keypoints_roi={keypoints_total})."
                 )
             # Reading one boolean vector is cheap and gives an exact success count.
             keypoints_successful = int(success_arr[:].sum())
             keypoints_success_rate = _format_ratio(keypoints_successful, keypoints_total)
+        elif keypoints_success_rate is not None:
+            denominator = keypoints_processed if keypoints_processed is not None else keypoints_total
+            normalized_rate = float(keypoints_success_rate)
+            if 1.0 < normalized_rate <= 100.0:
+                normalized_rate /= 100.0
+            if not 0.0 <= normalized_rate <= 1.0:
+                raise ValueError(
+                    f"{zarr_path.name}: keypoint success_rate must be a fraction or percentage, "
+                    f"got {keypoints_success_rate}."
+                )
+            keypoints_success_rate = normalized_rate
+            keypoints_successful = int(round(normalized_rate * float(denominator)))
         elif kp_group is None:
             for success_name in ("usable_keypoints", "refined_success", "source_success"):
                 if success_name not in refined_group:

@@ -29,6 +29,7 @@ from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.refined_keypoint_manifest import (
     REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE,
+    refined_keypoint_source_bindings_from_manifest,
     validate_refined_keypoint_run_manifest,
 )
 from fisheye.shared.zarr.training_review_artifact_publication import (
@@ -44,6 +45,13 @@ from fisheye.shared.zarr_helpers import (
 REVIEWED_TRAINING_ARTIFACT_SCHEMA_ID = "palette.reviewed_training_artifact"
 REVIEWED_TRAINING_ARTIFACT_SCHEMA_VERSION = 1
 REVIEWED_TRAINING_ARTIFACT_RECEIPT = "reviewed_training_artifact_receipt.json"
+REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_ID = (
+    "palette.reviewed_keypoint_training_artifact"
+)
+REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_VERSION = 1
+REVIEWED_KEYPOINT_TRAINING_ARTIFACT_RECEIPT = (
+    "reviewed_keypoint_training_artifact_receipt.json"
+)
 KEYPOINT_COMPACTION_RECEIPT_SCHEMA_ID = "palette.refined_keypoint.delta_compaction"
 KEYPOINT_COMPACTION_RECEIPT_SCHEMA_VERSION = 2
 
@@ -186,12 +194,11 @@ def _validated_compaction_receipt(
     return dict(receipt)
 
 
-def _validate_source_and_compaction(
+def _validate_source_and_keypoint_compaction(
     *,
     source_archive: Path,
     compacted_archive: Path,
     compacted_run_id: str,
-    refined_subject_mask_run_id: str,
 ) -> dict[str, Any]:
     source = open_zarr_group_direct(source_archive, mode="r")
     review_receipt = source.attrs.get("training_review_artifact")
@@ -270,6 +277,27 @@ def _validate_source_and_compaction(
     ):
         raise ValueError("Compacted refined-keypoint run differs from its receipt.")
 
+    return {
+        "review_receipt_digest": str(review_receipt["payload_digest"]),
+        "compaction_receipt": compaction_receipt,
+        "compacted_manifest": dict(compacted_manifest),
+        "compacted_manifest_digest": canonical_json_sha256(compacted_manifest),
+    }
+
+
+def _validate_source_and_compaction(
+    *,
+    source_archive: Path,
+    compacted_archive: Path,
+    compacted_run_id: str,
+    refined_subject_mask_run_id: str,
+) -> dict[str, Any]:
+    evidence = _validate_source_and_keypoint_compaction(
+        source_archive=source_archive,
+        compacted_archive=compacted_archive,
+        compacted_run_id=compacted_run_id,
+    )
+    source = open_zarr_group_direct(source_archive, mode="r")
     mask_run = source[f"refined_subject_masks_runs/{refined_subject_mask_run_id}"]
     if (
         refined_subject_mask_lifecycle_state(mask_run)
@@ -280,12 +308,7 @@ def _validate_source_and_compaction(
         raise ValueError("Refined subject-mask source is not a dense editable draft.")
     require_approved_refined_subject_mask_review(mask_run)
 
-    return {
-        "review_receipt_digest": str(review_receipt["payload_digest"]),
-        "compaction_receipt": compaction_receipt,
-        "compacted_manifest_digest": canonical_json_sha256(compacted_manifest),
-        "mask_run": refined_subject_mask_run_id,
-    }
+    return {**evidence, "mask_run": refined_subject_mask_run_id}
 
 
 def _validate_reviewed_candidate(
@@ -369,6 +392,323 @@ def _validate_reviewed_candidate(
         "sealed_refined_subject_mask_run": refined_subject_mask_run_id,
         "receipt_digest": str(receipt["payload_digest"]),
         "stage_selector_eligible": False,
+    }
+
+
+def _refined_keypoint_source_run_paths(
+    compacted_manifest: Mapping[str, Any],
+    *,
+    compacted_run_id: str,
+) -> dict[str, str]:
+    payload = compacted_manifest.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("Compacted refined-keypoint manifest payload is missing.")
+    source_value = payload.get("source_bindings")
+    if not isinstance(source_value, Mapping):
+        raise ValueError("Compacted refined-keypoint source bindings are missing.")
+    source = refined_keypoint_source_bindings_from_manifest(source_value)
+    return {
+        "crop": f"crop_runs/{source.crop_run_id}",
+        "raw_keypoints": f"keypoints_runs/{source.raw_run_id}",
+        "keypoint_quality": f"keypoint_quality_runs/{source.quality_run_id}",
+        "refined_keypoints": f"refined_keypoints_runs/{compacted_run_id}",
+    }
+
+
+def _inventory_digest(path: Path) -> str:
+    return canonical_json_sha256(tree_inventory(path, hash_content=True).to_json())
+
+
+def _validate_reviewed_keypoint_candidate(
+    archive: Path,
+    *,
+    compacted_run_id: str,
+    compacted_manifest_digest: str,
+    included_run_paths: Mapping[str, str],
+    included_run_inventory_digests: Mapping[str, str],
+) -> dict[str, Any]:
+    root = open_zarr_group_direct(archive, mode="r")
+    if (
+        root.attrs.get("training_artifact_status")
+        != "reviewed_keypoint_immutable_candidate"
+        or root.attrs.get("training_task") != "keypoints"
+        or root.attrs.get("artifact_mutability") != "immutable_snapshot"
+        or root.attrs.get("stage_selector_eligible") is not False
+        or root.attrs.get("metadata_read_mode")
+        != "consolidated_immutable_publication"
+    ):
+        raise RuntimeError("Reviewed keypoint-training candidate root state is invalid.")
+    forbidden_parents = {
+        "edit_delta_runs",
+        "subject_mask_runs",
+        "subject_mask_shard_runs",
+        "subject_mask_quality_runs",
+        "refined_subject_masks_runs",
+        "raw_video",
+    }
+    present_forbidden = sorted(name for name in forbidden_parents if name in root)
+    if present_forbidden:
+        raise RuntimeError(
+            "Reviewed keypoint-training candidate contains unrelated mutable or "
+            f"pixel-heavy surfaces: {present_forbidden}."
+        )
+    expected_paths = dict(included_run_paths)
+    if set(expected_paths) != {
+        "crop",
+        "raw_keypoints",
+        "keypoint_quality",
+        "refined_keypoints",
+    }:
+        raise RuntimeError("Reviewed keypoint candidate run-path roles are not exact.")
+    for role, run_path in expected_paths.items():
+        if run_path not in root:
+            raise RuntimeError(f"Reviewed keypoint candidate lacks {role}: {run_path}.")
+        observed_digest = _inventory_digest(archive / run_path)
+        if observed_digest != included_run_inventory_digests.get(role):
+            raise RuntimeError(
+                f"Reviewed keypoint candidate {role} inventory digest changed."
+            )
+    keypoints = root[f"refined_keypoints_runs/{compacted_run_id}"]
+    manifest = keypoints.attrs.get(REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
+    if (
+        not isinstance(manifest, Mapping)
+        or canonical_json_sha256(manifest) != compacted_manifest_digest
+        or keypoints.attrs.get("artifact_mutability") != "immutable_snapshot"
+        or keypoints.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise RuntimeError("Reviewed keypoint candidate successor is invalid.")
+    root_document = _read_json_object(archive / "zarr.json")
+    consolidated = root_document.get("consolidated_metadata")
+    metadata = (
+        consolidated.get("metadata") if isinstance(consolidated, Mapping) else None
+    )
+    if not isinstance(metadata, Mapping):
+        raise RuntimeError(
+            "Reviewed keypoint-training candidate lacks consolidated metadata."
+        )
+    for run_path in expected_paths.values():
+        if not isinstance(metadata.get(run_path), Mapping):
+            raise RuntimeError(
+                f"Reviewed keypoint candidate consolidated declaration is missing: {run_path}."
+            )
+    receipt = root.attrs.get("reviewed_keypoint_training_artifact")
+    if not isinstance(receipt, Mapping) or receipt.get("schema_id") != (
+        REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_ID
+    ):
+        raise RuntimeError("Reviewed keypoint-training candidate receipt is missing.")
+    payload = receipt.get("payload")
+    if not isinstance(payload, Mapping) or receipt.get(
+        "payload_digest"
+    ) != canonical_json_sha256(payload):
+        raise RuntimeError("Reviewed keypoint-training candidate receipt is invalid.")
+    if (
+        payload.get("included_run_paths") != expected_paths
+        or payload.get("included_run_inventory_digests")
+        != dict(included_run_inventory_digests)
+    ):
+        raise RuntimeError("Reviewed keypoint-training candidate receipt changed.")
+    return {
+        "compacted_refined_keypoint_run": compacted_run_id,
+        "receipt_digest": str(receipt["payload_digest"]),
+        "stage_selector_eligible": False,
+    }
+
+
+def publish_reviewed_keypoint_training_artifact_candidate(
+    *,
+    source_review_archive: Path,
+    compacted_keypoint_archive: Path,
+    compacted_keypoint_run_id: str,
+    destination: Path,
+    scratch_root: Path,
+    created_by: str,
+) -> Mapping[str, Any]:
+    """Publish a self-contained keypoint-only authority candidate.
+
+    Pending subject-mask review is deliberately outside this task-specific
+    publication boundary.
+    """
+
+    source = source_review_archive.expanduser().resolve()
+    compacted = compacted_keypoint_archive.expanduser().resolve()
+    target = destination.expanduser().resolve()
+    scratch = _bounded_node_local_scratch(scratch_root)
+    keypoint_run = _safe_run_id(
+        compacted_keypoint_run_id, name="compacted_keypoint_run_id"
+    )
+    if not source.is_dir() or not compacted.is_dir():
+        raise FileNotFoundError(
+            "Source review and compacted keypoint archives are required."
+        )
+    if target.suffix != ".zarr":
+        raise ValueError("Reviewed keypoint-training destination must end in .zarr.")
+    if target.exists():
+        raise FileExistsError(
+            f"Reviewed keypoint-training destination exists: {target}"
+        )
+    if not str(created_by).strip():
+        raise ValueError("created_by cannot be empty.")
+
+    evidence = _validate_source_and_keypoint_compaction(
+        source_archive=source,
+        compacted_archive=compacted,
+        compacted_run_id=keypoint_run,
+    )
+    compacted_manifest = evidence["compacted_manifest"]
+    included_paths = _refined_keypoint_source_run_paths(
+        compacted_manifest,
+        compacted_run_id=keypoint_run,
+    )
+    source_paths = {
+        role: (compacted / run_path if role == "refined_keypoints" else source / run_path)
+        for role, run_path in included_paths.items()
+    }
+    for role, path in source_paths.items():
+        if not path.is_dir():
+            raise FileNotFoundError(f"Reviewed keypoint source {role} not found: {path}")
+    source_inventory_digests = {
+        role: _inventory_digest(path) for role, path in source_paths.items()
+    }
+    source_root = open_zarr_group_direct(source, mode="r")
+    identity_attr_names = (
+        "recording_id",
+        "recording_name",
+        "session_uuid",
+        "rig_id",
+        "camera_id",
+        "arena_id",
+        "dish_design",
+        "canvas_name",
+        "protocol_name",
+        "video_width",
+        "video_height",
+        "source_video_width",
+        "source_video_height",
+    )
+    identity_attrs = {
+        name: source_root.attrs[name]
+        for name in identity_attr_names
+        if name in source_root.attrs
+    }
+
+    with tempfile.TemporaryDirectory(
+        prefix="palette-reviewed-keypoint-training-", dir=str(scratch)
+    ) as temporary:
+        local = Path(temporary) / target.name
+        local_root = open_zarr_group_direct(local, mode="w")
+        for run_path in included_paths.values():
+            local_root.require_group(run_path.split("/", 1)[0])
+        for role, run_path in included_paths.items():
+            local_path = local / run_path
+            shutil.copytree(source_paths[role], local_path)
+            if _inventory_digest(local_path) != source_inventory_digests[role]:
+                raise RuntimeError(
+                    f"Reviewed keypoint source {role} changed during local copy."
+                )
+        payload = json_attr_safe(
+            {
+                "status": "reviewed_keypoint_immutable_candidate",
+                "training_task": "keypoints",
+                "created_at_utc": utc_now(),
+                "created_by": str(created_by),
+                "source_review_archive": str(source),
+                "source_review_receipt_digest": evidence["review_receipt_digest"],
+                "keypoint_compaction": {
+                    "archive": str(compacted),
+                    "run_id": keypoint_run,
+                    "manifest_digest": evidence["compacted_manifest_digest"],
+                    "receipt_digest": evidence["compaction_receipt"][
+                        "payload_digest"
+                    ],
+                },
+                "included_run_paths": dict(included_paths),
+                "included_run_inventory_digests": dict(source_inventory_digests),
+                "artifact_mutability": "immutable_snapshot",
+                "stage_selector_eligible": False,
+                "registry_activation": "deferred",
+                "production_state_changes": [],
+            }
+        )
+        receipt = {
+            "schema_id": REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_ID,
+            "schema_version": REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_VERSION,
+            "payload_digest": canonical_json_sha256(payload),
+            "payload": payload,
+        }
+        local_root = open_zarr_group_direct(local, mode="a")
+        local_root.attrs.update(
+            {
+                **json_attr_safe(identity_attrs),
+                "zarr_use": "training",
+                "zarr_purpose": "training",
+                "training_task": "keypoints",
+                "training_artifact_status": "reviewed_keypoint_immutable_candidate",
+                "artifact_mutability": "immutable_snapshot",
+                "stage_selector_eligible": False,
+                "registry_activation": "deferred",
+                "metadata_read_mode": "consolidated_immutable_publication",
+                "reviewed_keypoint_training_artifact": receipt,
+            }
+        )
+        write_json_atomic(
+            local / REVIEWED_KEYPOINT_TRAINING_ARTIFACT_RECEIPT, receipt
+        )
+        consolidate_metadata_capture_expected_warnings(local)
+        local_state = _validate_reviewed_keypoint_candidate(
+            local,
+            compacted_run_id=keypoint_run,
+            compacted_manifest_digest=str(evidence["compacted_manifest_digest"]),
+            included_run_paths=included_paths,
+            included_run_inventory_digests=source_inventory_digests,
+        )
+        local_inventory = tree_inventory(local, hash_content=True)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        hidden = target.with_name(
+            f".{target.name}.publish_tmp.{os.getpid()}.{uuid4().hex}"
+        )
+        with archive_metadata_publication_lock(target):
+            if target.exists() or hidden.exists():
+                raise FileExistsError(
+                    f"Reviewed keypoint-training target became occupied: {target}"
+                )
+            try:
+                shutil.copytree(local, hidden)
+                if tree_inventory(hidden, hash_content=True) != local_inventory:
+                    raise RuntimeError(
+                        "Published reviewed keypoint artifact copy changed."
+                    )
+                _validate_reviewed_keypoint_candidate(
+                    hidden,
+                    compacted_run_id=keypoint_run,
+                    compacted_manifest_digest=str(
+                        evidence["compacted_manifest_digest"]
+                    ),
+                    included_run_paths=included_paths,
+                    included_run_inventory_digests=source_inventory_digests,
+                )
+                hidden.rename(target)
+            except BaseException:
+                if hidden.exists():
+                    shutil.rmtree(hidden)
+                raise
+
+    final_state = _validate_reviewed_keypoint_candidate(
+        target,
+        compacted_run_id=keypoint_run,
+        compacted_manifest_digest=str(evidence["compacted_manifest_digest"]),
+        included_run_paths=included_paths,
+        included_run_inventory_digests=source_inventory_digests,
+    )
+    return {
+        "status": "complete",
+        "destination": str(target),
+        **local_state,
+        "final_receipt_digest": final_state["receipt_digest"],
+        "source_review_artifact_mutated": False,
+        "included_run_paths": dict(included_paths),
+        "stage_selector_eligible": False,
+        "production_state_changes": [],
     }
 
 
@@ -541,8 +881,12 @@ def publish_reviewed_training_artifact_candidate(
 
 
 __all__ = [
+    "REVIEWED_KEYPOINT_TRAINING_ARTIFACT_RECEIPT",
+    "REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_ID",
+    "REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_VERSION",
     "REVIEWED_TRAINING_ARTIFACT_RECEIPT",
     "REVIEWED_TRAINING_ARTIFACT_SCHEMA_ID",
     "REVIEWED_TRAINING_ARTIFACT_SCHEMA_VERSION",
+    "publish_reviewed_keypoint_training_artifact_candidate",
     "publish_reviewed_training_artifact_candidate",
 ]

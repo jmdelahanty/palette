@@ -13,7 +13,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import shutil
+import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -41,6 +44,23 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
     require_runs_parent,
+)
+from fisheye.analysis_workflows.materializers.atomic_run_publisher import tree_inventory
+from fisheye.shared.zarr.metadata_equivalence import validate_direct_consolidated_subtree
+from fisheye.shared.zarr.merged_keypoint_training_storage import (
+    PlannedTrainingArray,
+    create_planned_training_array,
+    plan_merged_keypoint_training_arrays,
+    storage_plan_manifest,
+    validate_merged_keypoint_training_storage,
+)
+from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    consolidate_metadata_capture_expected_warnings,
+    open_zarr_group_direct,
+)
+from fisheye.shared.zarr.refined_keypoint_manifest import (
+    refined_keypoint_source_bindings_from_manifest,
 )
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.shared.system_metadata import build_invocation_record
@@ -93,10 +113,16 @@ class PoseMergeSourceSpec:
     roi_shape: Tuple[int, ...]
     roi_dtype: np.dtype
     roi_chunks: Optional[Tuple[int, ...]]
+    roi_output_shape: Tuple[int, ...]
+    roi_transform_mode: str
+    roi_pad_before: Tuple[int, int]
+    roi_pad_after: Tuple[int, int]
     roi_pixel_contract: Optional[Dict[str, Any]]
     roi_pixel_contract_name: Optional[str]
     keypoint_shape: Tuple[int, ...]
     keypoint_dtype: np.dtype
+    keypoint_output_dtype: np.dtype
+    keypoint_dtype_transform: str
     keypoint_labels: List[str]
     skeleton: List[List[int]]
     skeleton_id: Optional[str]
@@ -133,6 +159,13 @@ class PoseMergeResult:
     row_gate_policy: str
     row_gate_counts: Dict[str, int]
     keypoint_supervision_counts: Dict[str, int]
+    split_strategy: str
+    split_unit: str
+    roi_transform_mode: str
+    target_roi_hw: Optional[Tuple[int, int]]
+    storage_plans: Optional[Dict[str, PlannedTrainingArray]]
+    keypoint_dtype_policy: str
+    keypoint_cast_max_abs_error: Dict[str, float]
 
 
 _utc_now = utc_now
@@ -206,7 +239,74 @@ def _resolve_roi_pixel_contract(crop_group: zarr.Group) -> Tuple[Optional[Dict[s
         _as_text(crop_group.attrs.get("roi_pixel_contract_name"))
         or (_as_text(contract.get("name")) if contract is not None else None)
     )
+    if contract_name is not None:
+        return contract, contract_name
+
+    binding = crop_group.attrs.get("training_crop_materialization_binding")
+    binding_payload = binding.get("payload") if isinstance(binding, Mapping) else None
+    declarations = (
+        binding_payload.get("array_declarations")
+        if isinstance(binding_payload, Mapping)
+        else None
+    )
+    roi_declaration = declarations.get("roi_images") if isinstance(declarations, Mapping) else None
+    roi_shape = roi_declaration.get("shape") if isinstance(roi_declaration, Mapping) else None
+    roi_dtype = _as_text(roi_declaration.get("dtype")) if isinstance(roi_declaration, Mapping) else None
+    if (
+        isinstance(binding_payload, Mapping)
+        and binding_payload.get("schema_id") == "palette.training_crop_materialization_binding"
+        and binding_payload.get("schema_version") == 1
+        and isinstance(roi_shape, list)
+        and len(roi_shape) == 3
+        and roi_dtype in {"|u1", "uint8"}
+    ):
+        contract_name = "palette_training_crop_materialization_gray_uint8_v1"
+        return (
+            {
+                "name": contract_name,
+                "channels": "gray",
+                "dtype": "uint8",
+                "source_binding_schema_id": binding_payload.get("schema_id"),
+                "source_binding_schema_version": binding_payload.get("schema_version"),
+                "source_binding_digest": binding.get("payload_digest"),
+            },
+            contract_name,
+        )
     return contract, contract_name
+
+
+def _keypoint_schema_attrs(group: zarr.Group) -> Dict[str, Any]:
+    """Normalize legacy flat and strict-v2 nested skeleton declarations."""
+
+    attrs = dict(group.attrs)
+    source_bindings = attrs.get("source_bindings")
+    if isinstance(source_bindings, Mapping):
+        bindings = refined_keypoint_source_bindings_from_manifest(source_bindings)
+        semantics = dict(bindings.skeleton_semantics)
+        attrs.setdefault("skeleton_id", bindings.skeleton_id)
+        attrs.setdefault("kpt_shape", semantics.get("kpt_shape"))
+        attrs.setdefault("keypoint_labels", semantics.get("keypoint_labels"))
+        attrs.setdefault("pose_schema", semantics)
+    model_binding = attrs.get("pose_model_schema_binding")
+    pose_schema = model_binding.get("pose_schema") if isinstance(model_binding, Mapping) else None
+    if isinstance(pose_schema, Mapping):
+        attrs.setdefault("skeleton_id", pose_schema.get("skeleton_id"))
+        attrs.setdefault("kpt_shape", pose_schema.get("kpt_shape"))
+        attrs.setdefault("keypoint_labels", pose_schema.get("keypoint_labels"))
+        attrs.setdefault("pose_schema", dict(pose_schema))
+    return attrs
+
+
+def _refined_keypoint_source_run(group: zarr.Group) -> Optional[str]:
+    direct = _as_text(
+        group.attrs.get("source_keypoints_run") or group.attrs.get("source_keypoint_run")
+    )
+    if direct:
+        return direct
+    source_bindings = group.attrs.get("source_bindings")
+    if isinstance(source_bindings, Mapping):
+        return refined_keypoint_source_bindings_from_manifest(source_bindings).raw_run_id
+    return None
 
 
 def _resolve_required_roi_pixel_contract_name(
@@ -242,6 +342,20 @@ def _parse_split_spec(spec: str) -> Tuple[float, float, float]:
     return values[0], values[1], values[2]
 
 
+def _parse_roi_hw(value: str) -> Tuple[int, int]:
+    normalized = str(value).strip().lower().replace(",", "x")
+    parts = [part.strip() for part in normalized.split("x") if part.strip()]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("ROI shape must be HEIGHTxWIDTH, for example 512x512.")
+    try:
+        height, width = (int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("ROI dimensions must be integers.") from exc
+    if height <= 0 or width <= 0:
+        raise argparse.ArgumentTypeError("ROI dimensions must be positive.")
+    return height, width
+
+
 def _compute_split_indices(
     total: int,
     *,
@@ -272,6 +386,78 @@ def _compute_split_indices(
     val_idx = order[train_count : train_count + val_count]
     test_idx = order[train_count + val_count : train_count + val_count + test_count]
     return train_idx, val_idx, test_idx
+
+
+def _compute_dataset_grouped_split_indices(
+    source_specs: Sequence[PoseMergeSourceSpec],
+    *,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Assign complete source datasets to deterministic, approximately balanced splits."""
+
+    ratios = np.asarray([train_ratio, val_ratio, test_ratio], dtype=np.float64)
+    active = np.where(ratios > 0.0)[0]
+    if active.size == 0:
+        raise ValueError("At least one dataset-grouped split ratio must be positive.")
+    nonempty = [spec for spec in source_specs if int(spec.sample_count) > 0]
+    if len(nonempty) < int(active.size):
+        raise ValueError(
+            "Dataset-grouped splitting needs at least one non-empty source dataset "
+            f"per requested split ({len(nonempty)} sources for {active.size} splits)."
+        )
+
+    total = int(sum(int(spec.sample_count) for spec in source_specs))
+    targets = ratios * float(total)
+    rng = np.random.default_rng(seed)
+    tie_break = {int(spec.ordinal): float(rng.random()) for spec in source_specs}
+    ordered = sorted(
+        nonempty,
+        key=lambda spec: (-int(spec.sample_count), tie_break[int(spec.ordinal)]),
+    )
+    assignments: list[list[PoseMergeSourceSpec]] = [[], [], []]
+    counts = np.zeros(3, dtype=np.int64)
+
+    # Seed every requested split with one complete dataset, prioritizing the
+    # largest requested target. This makes the fail-closed non-empty guarantee
+    # explicit rather than relying on a lucky random order.
+    split_seed_order = sorted(active.tolist(), key=lambda idx: (-float(targets[idx]), idx))
+    for split_idx, spec in zip(split_seed_order, ordered):
+        assignments[split_idx].append(spec)
+        counts[split_idx] += int(spec.sample_count)
+
+    for spec in ordered[len(split_seed_order) :]:
+        candidates: list[tuple[float, float, int]] = []
+        for split_idx in active.tolist():
+            candidate_counts = counts.astype(np.float64, copy=True)
+            candidate_counts[split_idx] += int(spec.sample_count)
+            scale = np.maximum(targets, 1.0)
+            error = float(np.sum(((candidate_counts - targets) / scale) ** 2))
+            remaining_fraction = float((targets[split_idx] - counts[split_idx]) / scale[split_idx])
+            candidates.append((error, -remaining_fraction, int(split_idx)))
+        split_idx = min(candidates)[2]
+        assignments[split_idx].append(spec)
+        counts[split_idx] += int(spec.sample_count)
+
+    offsets: dict[int, tuple[int, int]] = {}
+    offset = 0
+    for spec in source_specs:
+        stop = offset + int(spec.sample_count)
+        offsets[int(spec.ordinal)] = (offset, stop)
+        offset = stop
+
+    split_rows: list[np.ndarray] = []
+    for split_specs in assignments:
+        pieces = [
+            np.arange(*offsets[int(spec.ordinal)], dtype=np.int64)
+            for spec in split_specs
+        ]
+        rows = np.concatenate(pieces) if pieces else np.empty(0, dtype=np.int64)
+        rng.shuffle(rows)
+        split_rows.append(rows)
+    return split_rows[0], split_rows[1], split_rows[2]
 
 
 def _normalize_chunks(chunks: Optional[Tuple[int, ...]], shape: Tuple[int, ...]) -> Tuple[int, ...]:
@@ -340,6 +526,35 @@ def _copy_rows_indexed(
         stop = min(start + batch_size, int(indices.size))
         idx_batch = indices[start:stop]
         dest_array[dest_start + start : dest_start + stop] = src_array[idx_batch]
+        if on_copied is not None:
+            on_copied(stop - start)
+
+
+def _copy_rows_indexed_with_padding(
+    src_array: zarr.Array,
+    dest_array: zarr.Array,
+    dest_start: int,
+    indices: np.ndarray,
+    *,
+    pad_before: Tuple[int, int],
+    pad_after: Tuple[int, int],
+    batch_size: int = 128,
+    on_copied: Optional[Callable[[int], None]] = None,
+) -> None:
+    if indices.size <= 0:
+        return
+    top, left = (int(value) for value in pad_before)
+    bottom, right = (int(value) for value in pad_after)
+    if min(top, left, bottom, right) < 0:
+        raise ValueError("ROI padding values must be non-negative.")
+    batch_size = max(1, int(batch_size))
+    for start in range(0, int(indices.size), batch_size):
+        stop = min(start + batch_size, int(indices.size))
+        source = np.asarray(src_array[indices[start:stop]])
+        pad_width = [(0, 0), (top, bottom), (left, right)]
+        pad_width.extend((0, 0) for _ in range(max(0, source.ndim - 3)))
+        transformed = np.pad(source, pad_width, mode="constant", constant_values=0)
+        dest_array[dest_start + start : dest_start + stop] = transformed
         if on_copied is not None:
             on_copied(stop - start)
 
@@ -475,7 +690,7 @@ def _resolve_dataset_skeleton_identity(
     manifest_kpt_shape: Optional[Tuple[int, int]],
 ) -> Tuple[Optional[str], Tuple[int, int], str]:
     runtime_identity = resolve_skeleton_identity_from_attrs(
-        dict(kp_group.attrs),
+        _keypoint_schema_attrs(kp_group),
         keypoint_count=int(keypoint_count),
     )
     dataset_identity = resolve_skeleton_identity_from_attrs(dataset_payload)
@@ -568,7 +783,7 @@ def _resolve_dataset_keypoint_labels(
 ) -> List[str]:
     runtime_labels = list(
         resolve_keypoint_labels_from_attrs(
-            dict(annotation_group.attrs),
+            _keypoint_schema_attrs(annotation_group),
             keypoint_count=int(keypoint_count),
         )
     )
@@ -770,10 +985,31 @@ def _discover_merge_sources(
     *,
     expected_input_format: str,
     row_gate_policy: str,
+    roi_transform_mode: str = "strict",
+    target_roi_hw: Optional[Tuple[int, int]] = None,
+    keypoint_dtype_policy: str = "strict",
 ) -> Tuple[List[PoseMergeSourceSpec], Dict[str, Any]]:
     datasets = manifest_payload.get("datasets")
     if not isinstance(datasets, list) or not datasets:
         raise ValueError("Manifest has no datasets.")
+
+    transform_mode = str(roi_transform_mode).strip().lower()
+    if transform_mode not in {"strict", "pad_to_shape"}:
+        raise ValueError(
+            f"Unsupported ROI transform mode {roi_transform_mode!r}; expected strict or pad_to_shape."
+        )
+    if target_roi_hw is not None:
+        target_roi_hw = tuple(int(value) for value in target_roi_hw)
+        if len(target_roi_hw) != 2 or min(target_roi_hw) <= 0:
+            raise ValueError(f"target_roi_hw must be two positive dimensions, got {target_roi_hw!r}.")
+    if transform_mode == "pad_to_shape" and target_roi_hw is None:
+        raise ValueError("pad_to_shape requires an explicit target_roi_hw.")
+    dtype_policy = str(keypoint_dtype_policy).strip().lower()
+    if dtype_policy not in {"strict", "float32_checked"}:
+        raise ValueError(
+            f"Unsupported keypoint dtype policy {keypoint_dtype_policy!r}; "
+            "expected strict or float32_checked."
+        )
 
     specs: List[PoseMergeSourceSpec] = []
     roi_shape: Optional[Tuple[int, ...]] = None
@@ -957,7 +1193,6 @@ def _discover_merge_sources(
         dataset_roi_chunks = tuple(int(v) for v in roi_arr.chunks) if roi_arr.chunks else None
         dataset_keypoint_shape = tuple(int(v) for v in keypoints_arr.shape[1:])
         dataset_keypoint_dtype = np.dtype(keypoints_arr.dtype)
-
         selected_indices, selected_box_only_mask, gate_stats = _resolve_row_gate_selection(
             root=root,
             dataset_payload=dataset,
@@ -969,13 +1204,43 @@ def _discover_merge_sources(
             refined_root=annotation_root,
         )
 
-        if roi_shape is None:
-            roi_shape = dataset_roi_shape
-            roi_dtype = dataset_roi_dtype
-            roi_chunks = dataset_roi_chunks
+        if len(dataset_roi_shape) not in {2, 3}:
+            raise ValueError(
+                f"{source_zarr}: ROI samples must be rank 2 or 3, got {dataset_roi_shape}."
+            )
+        if transform_mode == "pad_to_shape":
+            assert target_roi_hw is not None
+            source_h, source_w = dataset_roi_shape[:2]
+            target_h, target_w = target_roi_hw
+            if source_h > target_h or source_w > target_w:
+                raise ValueError(
+                    f"{source_zarr}: ROI shape {dataset_roi_shape} exceeds padding target "
+                    f"{target_roi_hw}; resizing is not permitted."
+                )
+            output_roi_shape = (target_h, target_w, *dataset_roi_shape[2:])
+            height_delta = target_h - source_h
+            width_delta = target_w - source_w
+            pad_before = (height_delta // 2, width_delta // 2)
+            pad_after = (height_delta - pad_before[0], width_delta - pad_before[1])
         else:
-            if dataset_roi_shape != roi_shape:
-                raise ValueError(f"{source_zarr}: roi shape mismatch {dataset_roi_shape} != {roi_shape}.")
+            output_roi_shape = dataset_roi_shape
+            pad_before = (0, 0)
+            pad_after = (0, 0)
+            if target_roi_hw is not None and dataset_roi_shape[:2] != target_roi_hw:
+                raise ValueError(
+                    f"{source_zarr}: strict ROI shape {dataset_roi_shape[:2]} does not match "
+                    f"target {target_roi_hw}."
+                )
+
+        if roi_shape is None:
+            roi_shape = output_roi_shape
+            roi_dtype = dataset_roi_dtype
+            roi_chunks = dataset_roi_chunks if output_roi_shape == dataset_roi_shape else None
+        else:
+            if output_roi_shape != roi_shape:
+                raise ValueError(
+                    f"{source_zarr}: transformed roi shape mismatch {output_roi_shape} != {roi_shape}."
+                )
             if dataset_roi_dtype != roi_dtype:
                 raise ValueError(f"{source_zarr}: roi dtype mismatch {dataset_roi_dtype} != {roi_dtype}.")
 
@@ -1045,17 +1310,34 @@ def _discover_merge_sources(
                     )
                 success_path = f"{refined_parent_name}/{refined_run_name}/refined_success"
 
+        if dtype_policy == "float32_checked":
+            if dataset_keypoint_dtype not in {np.dtype(np.float32), np.dtype(np.float64)}:
+                raise ValueError(
+                    f"{source_zarr}: float32_checked only accepts float32/float64 keypoints, "
+                    f"got {dataset_keypoint_dtype}."
+                )
+            dataset_keypoint_output_dtype = np.dtype(np.float32)
+            dataset_keypoint_dtype_transform = (
+                "identity_float32"
+                if dataset_keypoint_dtype == np.dtype(np.float32)
+                else "float64_to_float32_checked"
+            )
+        else:
+            dataset_keypoint_output_dtype = dataset_keypoint_dtype
+            dataset_keypoint_dtype_transform = "identity_strict"
+
         if keypoint_shape is None:
             keypoint_shape = dataset_keypoint_shape
-            keypoint_dtype = dataset_keypoint_dtype
+            keypoint_dtype = dataset_keypoint_output_dtype
         else:
             if dataset_keypoint_shape != keypoint_shape:
                 raise ValueError(
                     f"{source_zarr}: keypoint shape mismatch {dataset_keypoint_shape} != {keypoint_shape}."
                 )
-            if dataset_keypoint_dtype != keypoint_dtype:
+            if dataset_keypoint_output_dtype != keypoint_dtype:
                 raise ValueError(
-                    f"{source_zarr}: keypoint dtype mismatch {dataset_keypoint_dtype} != {keypoint_dtype}."
+                    f"{source_zarr}: keypoint dtype mismatch "
+                    f"{dataset_keypoint_output_dtype} != {keypoint_dtype}."
                 )
 
         dataset_skeleton_id, dataset_kpt_shape, dataset_signature = _resolve_dataset_skeleton_identity(
@@ -1151,10 +1433,16 @@ def _discover_merge_sources(
                 roi_shape=dataset_roi_shape,
                 roi_dtype=dataset_roi_dtype,
                 roi_chunks=dataset_roi_chunks,
+                roi_output_shape=output_roi_shape,
+                roi_transform_mode=transform_mode,
+                roi_pad_before=pad_before,
+                roi_pad_after=pad_after,
                 roi_pixel_contract=roi_pixel_contract,
                 roi_pixel_contract_name=roi_pixel_contract_name,
                 keypoint_shape=dataset_keypoint_shape,
                 keypoint_dtype=dataset_keypoint_dtype,
+                keypoint_output_dtype=dataset_keypoint_output_dtype,
+                keypoint_dtype_transform=dataset_keypoint_dtype_transform,
                 keypoint_labels=list(dataset_labels),
                 skeleton=[list(edge) for edge in dataset_skeleton],
                 skeleton_id=dataset_skeleton_id,
@@ -1229,6 +1517,29 @@ def _pose_bbox_from_keypoints_px(keypoints_px: np.ndarray, *, roi_h: int, roi_w:
     return np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
 
 
+def _checked_keypoints_float32(values: np.ndarray, *, source_zarr: Path) -> Tuple[np.ndarray, float]:
+    source = np.asarray(values)
+    if source.dtype not in {np.dtype(np.float32), np.dtype(np.float64)}:
+        raise ValueError(f"{source_zarr}: unsupported keypoint source dtype {source.dtype}.")
+    converted = source.astype(np.float32, copy=True)
+    if not np.array_equal(np.isfinite(source), np.isfinite(converted)):
+        raise ValueError(f"{source_zarr}: float32 conversion changed keypoint finiteness.")
+    finite = np.isfinite(source)
+    if not np.any(finite):
+        return converted, 0.0
+    round_trip = converted.astype(np.float64)
+    source64 = source.astype(np.float64, copy=False)
+    max_error = float(np.max(np.abs(round_trip[finite] - source64[finite])))
+    max_magnitude = float(np.max(np.abs(source64[finite])))
+    tolerance = max(1.0e-6, max_magnitude * float(np.finfo(np.float32).eps) * 2.0)
+    if max_error > tolerance:
+        raise ValueError(
+            f"{source_zarr}: float64-to-float32 keypoint conversion error {max_error} "
+            f"exceeds bound {tolerance}."
+        )
+    return converted, max_error
+
+
 def _export_merged(
     *,
     manifest_payload: Dict[str, Any],
@@ -1243,7 +1554,18 @@ def _export_merged(
     copy_batch_size: int,
     row_gate_policy: str,
     invocation: Dict[str, Any],
+    roi_transform_mode: str = "strict",
+    target_roi_hw: Optional[Tuple[int, int]] = None,
+    split_unit: str = "row",
+    use_storage_contract_v2: bool = False,
+    keypoint_dtype_policy: str = "strict",
 ) -> PoseMergeResult:
+    keypoint_dtype_policy = str(keypoint_dtype_policy).strip().lower()
+    if keypoint_dtype_policy not in {"strict", "float32_checked"}:
+        raise ValueError(
+            f"Unsupported keypoint dtype policy {keypoint_dtype_policy!r}; "
+            "expected strict or float32_checked."
+        )
     input_format = str(manifest_payload.get("input_format") or "gray").strip().lower()
     if input_format not in {"gray", "rgb"}:
         raise ValueError(f"Unsupported manifest.input_format '{input_format}'. Expected gray or rgb.")
@@ -1262,7 +1584,13 @@ def _export_merged(
         manifest_payload,
         expected_input_format=input_format,
         row_gate_policy=row_gate_policy,
+        roi_transform_mode=roi_transform_mode,
+        target_roi_hw=target_roi_hw,
+        keypoint_dtype_policy=keypoint_dtype_policy,
     )
+    split_unit = str(split_unit).strip().lower()
+    if split_unit not in {"row", "source_dataset"}:
+        raise ValueError(f"Unsupported split_unit {split_unit!r}; expected row or source_dataset.")
     source_type_counts = _source_type_counts([spec.source_type_resolved for spec in source_specs])
     # Keep the merged artifact trainer-facing surface concrete. Heterogeneous
     # refined/manual lineage belongs in row/source provenance, not in the surface
@@ -1284,6 +1612,26 @@ def _export_merged(
     )
     total_samples = int(sum(spec.sample_count for spec in source_specs))
     row_gate_counts: Dict[str, int] = {}
+    keypoint_cast_max_abs_error: Dict[str, float] = {}
+
+    if split_unit == "source_dataset":
+        train_idx, val_idx, test_idx = _compute_dataset_grouped_split_indices(
+            source_specs,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+        )
+        split_strategy = "source_dataset_grouped"
+    else:
+        train_idx, val_idx, test_idx = _compute_split_indices(
+            total_samples,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+        )
+        split_strategy = "global_random"
 
     _ensure_writable_destination(out_zarr, overwrite=overwrite)
     out_root = zarr.open_group(str(out_zarr), mode="w")
@@ -1305,99 +1653,158 @@ def _export_merged(
     keypoint_dtype = np.dtype(layout["keypoint_dtype"])
     keypoint_labels = list(layout["keypoint_labels"])
 
+    storage_plans: Optional[Dict[str, PlannedTrainingArray]] = None
+    if use_storage_contract_v2:
+        if roi_dtype != np.dtype(np.uint8):
+            raise ValueError(
+                f"Merged keypoint training v2 requires uint8 ROI pixels, got {roi_dtype}."
+            )
+        if keypoint_dtype != np.dtype(np.float32):
+            raise ValueError(
+                f"Merged keypoint training v2 requires float32 keypoints, got {keypoint_dtype}."
+            )
+        storage_plans = plan_merged_keypoint_training_arrays(
+            run_name=run_name,
+            n_samples=total_samples,
+            roi_shape=roi_shape,
+            keypoint_shape=(int(keypoint_shape[0]), int(keypoint_shape[1])),
+            n_sources=len(source_specs),
+            split_counts={
+                "train": int(train_idx.shape[0]),
+                "val": int(val_idx.shape[0]),
+                "test": int(test_idx.shape[0]),
+            },
+        )
+
     vector_chunks = (max(1, min(8192, total_samples)),)
     bbox_chunks = (max(1, min(8192, total_samples)), 4)
 
-    roi_dest = crop_group.require_array(
-        "roi_images",
+    def _create_numeric_array(
+        group: zarr.Group,
+        *,
+        name: str,
+        path: str,
+        shape: tuple[int, ...],
+        dtype: Any,
+        chunks: tuple[int, ...],
+    ) -> zarr.Array:
+        if storage_plans is not None:
+            return create_planned_training_array(
+                group,
+                name=name,
+                planned=storage_plans[path],
+            )
+        return group.require_array(
+            name,
+            shape=shape,
+            dtype=dtype,
+            chunks=chunks,
+            overwrite=True,
+        )
+
+    roi_dest = _create_numeric_array(
+        crop_group,
+        name="roi_images",
+        path=f"crop_runs/{run_name}/roi_images",
         shape=(total_samples, *roi_shape),
         dtype=roi_dtype,
         chunks=roi_chunks,
-        overwrite=True,
     )
-    bbox_dest = crop_group.require_array(
-        "bbox_norm_coords",
+    bbox_dest = _create_numeric_array(
+        crop_group,
+        name="bbox_norm_coords",
+        path=f"crop_runs/{run_name}/bbox_norm_coords",
         shape=(total_samples, 4),
         dtype=np.float32,
         chunks=bbox_chunks,
-        overwrite=True,
     )
-    crop_bbox_dest = crop_group.require_array(
-        "crop_bbox_norm_coords",
+    crop_bbox_dest = _create_numeric_array(
+        crop_group,
+        name="crop_bbox_norm_coords",
+        path=f"crop_runs/{run_name}/crop_bbox_norm_coords",
         shape=(total_samples, 4),
         dtype=np.float32,
         chunks=bbox_chunks,
-        overwrite=True,
     )
-    frame_idx_dest = crop_group.require_array(
-        "frame_indices",
+    frame_idx_dest = _create_numeric_array(
+        crop_group,
+        name="frame_indices",
+        path=f"crop_runs/{run_name}/frame_indices",
         shape=(total_samples,),
         dtype=np.int64,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    det_source_dest = crop_group.require_array(
-        "detection_source",
+    det_source_dest = _create_numeric_array(
+        crop_group,
+        name="detection_source",
+        path=f"crop_runs/{run_name}/detection_source",
         shape=(total_samples,),
         dtype=np.int8,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    keypoints_dest = keypoint_group.require_array(
-        "keypoints_roi",
+    keypoints_dest = _create_numeric_array(
+        keypoint_group,
+        name="keypoints_roi",
+        path=f"keypoints_runs/{run_name}/keypoints_roi",
         shape=(total_samples, *keypoint_shape),
         dtype=keypoint_dtype,
         chunks=_normalize_chunks(None, (total_samples, *keypoint_shape)),
-        overwrite=True,
     )
-    success_dest = keypoint_group.require_array(
-        "detection_success",
+    success_dest = _create_numeric_array(
+        keypoint_group,
+        name="detection_success",
+        path=f"keypoints_runs/{run_name}/detection_success",
         shape=(total_samples,),
         dtype=np.bool_,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    box_only_dest = keypoint_group.require_array(
-        "keypoint_box_only",
+    box_only_dest = _create_numeric_array(
+        keypoint_group,
+        name="keypoint_box_only",
+        path=f"keypoints_runs/{run_name}/keypoint_box_only",
         shape=(total_samples,),
         dtype=np.bool_,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    src_dataset_idx_dest = source_index_group.require_array(
-        "source_dataset_idx",
+    src_dataset_idx_dest = _create_numeric_array(
+        source_index_group,
+        name="source_dataset_idx",
+        path="source_index/source_dataset_idx",
         shape=(total_samples,),
         dtype=np.int32,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    src_frame_idx_dest = source_index_group.require_array(
-        "source_frame_idx",
+    src_frame_idx_dest = _create_numeric_array(
+        source_index_group,
+        name="source_frame_idx",
+        path="source_index/source_frame_idx",
         shape=(total_samples,),
         dtype=np.int64,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    src_roi_idx_dest = source_index_group.require_array(
-        "source_roi_idx",
+    src_roi_idx_dest = _create_numeric_array(
+        source_index_group,
+        name="source_roi_idx",
+        path="source_index/source_roi_idx",
         shape=(total_samples,),
         dtype=np.int64,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    src_refined_row_ids_dest = source_index_group.require_array(
-        "source_refined_row_ids",
+    src_refined_row_ids_dest = _create_numeric_array(
+        source_index_group,
+        name="source_refined_row_ids",
+        path="source_index/source_refined_row_ids",
         shape=(total_samples,),
         dtype=np.int64,
         chunks=vector_chunks,
-        overwrite=True,
     )
-    src_detect_row_index_dest = source_index_group.require_array(
-        "source_detect_row_index",
+    src_detect_row_index_dest = _create_numeric_array(
+        source_index_group,
+        name="source_detect_row_index",
+        path="source_index/source_detect_row_index",
         shape=(total_samples,),
         dtype=np.int32,
         chunks=vector_chunks,
-        overwrite=True,
     )
 
     copy_total = total_samples * 2  # roi + keypoints arrays
@@ -1434,9 +1841,21 @@ def _export_merged(
             crop_source_group = root[f"crop_runs/{spec.source_crop_run}"]
             selected = np.asarray(spec.selected_indices, dtype=np.int64)
             bbox_all = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
-            keypoints_all = np.asarray(
-                annotation_root[spec.keypoints_path][:], dtype=keypoint_dtype
-            )
+            keypoints_source = np.asarray(annotation_root[spec.keypoints_path][:])
+            if np.dtype(keypoints_source.dtype) != spec.keypoint_dtype:
+                raise ValueError(
+                    f"{spec.source_zarr}: keypoint dtype changed after preflight "
+                    f"({keypoints_source.dtype} != {spec.keypoint_dtype})."
+                )
+            if keypoint_dtype_policy == "float32_checked":
+                keypoints_all, cast_error = _checked_keypoints_float32(
+                    keypoints_source,
+                    source_zarr=spec.source_zarr,
+                )
+            else:
+                keypoints_all = keypoints_source.astype(keypoint_dtype, copy=False)
+                cast_error = 0.0
+            keypoint_cast_max_abs_error[spec.dataset_id] = float(cast_error)
             success_all = np.asarray(
                 annotation_root[spec.success_path][:], dtype=np.bool_
             )
@@ -1471,6 +1890,13 @@ def _export_merged(
             full_mask = ~box_only_mask
 
             keypoints_export = np.asarray(keypoints, dtype=keypoint_dtype).copy()
+            pad_top, pad_left = spec.roi_pad_before
+            if pad_left:
+                finite_x = np.isfinite(keypoints_export[..., 0])
+                keypoints_export[..., 0][finite_x] += float(pad_left)
+            if pad_top:
+                finite_y = np.isfinite(keypoints_export[..., 1])
+                keypoints_export[..., 1][finite_y] += float(pad_top)
             if np.any(box_only_mask):
                 # Placeholder finite coordinates; loader maps these rows to visibility=0.
                 keypoints_export[box_only_mask] = 0
@@ -1479,7 +1905,7 @@ def _export_merged(
             full_idx = np.where(full_mask)[0]
             if full_idx.size > 0:
                 pose_bbox_full = _pose_bbox_from_keypoints_px(
-                    keypoints[full_idx],
+                    keypoints_export[full_idx],
                     roi_h=roi_h,
                     roi_w=roi_w,
                 )
@@ -1517,14 +1943,26 @@ def _export_merged(
             else:
                 detection_source = np.zeros(local_total, dtype=np.int8)
 
-            _copy_rows_indexed(
-                roi_src,
-                roi_dest,
-                offset,
-                selected,
-                batch_size=copy_batch_size,
-                on_copied=_advance_copy,
-            )
+            if spec.roi_transform_mode == "pad_to_shape":
+                _copy_rows_indexed_with_padding(
+                    roi_src,
+                    roi_dest,
+                    offset,
+                    selected,
+                    pad_before=spec.roi_pad_before,
+                    pad_after=spec.roi_pad_after,
+                    batch_size=copy_batch_size,
+                    on_copied=_advance_copy,
+                )
+            else:
+                _copy_rows_indexed(
+                    roi_src,
+                    roi_dest,
+                    offset,
+                    selected,
+                    batch_size=copy_batch_size,
+                    on_copied=_advance_copy,
+                )
             keypoints_dest[offset : offset + local_total] = keypoints_export
             _advance_copy(local_total)
             # Canonical pose bbox for training semantics.
@@ -1556,36 +1994,23 @@ def _export_merged(
             copy_progress.stop()
 
     total_failed = int(total_samples - total_successful)
-    train_idx, val_idx, test_idx = _compute_split_indices(
-        total_samples,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
-        seed=seed,
-    )
-
-    split_group.require_array(
-        "train_indices",
-        shape=train_idx.shape,
-        dtype=train_idx.dtype,
-        chunks=(max(1, min(8192, train_idx.shape[0] or 1)),),
-        overwrite=True,
-    )[:] = train_idx
-    split_group.require_array(
-        "val_indices",
-        shape=val_idx.shape,
-        dtype=val_idx.dtype,
-        chunks=(max(1, min(8192, val_idx.shape[0] or 1)),),
-        overwrite=True,
-    )[:] = val_idx
-    if test_idx.size > 0:
-        split_group.require_array(
-            "test_indices",
-            shape=test_idx.shape,
-            dtype=test_idx.dtype,
-            chunks=(max(1, min(8192, test_idx.shape[0])),),
-            overwrite=True,
-        )[:] = test_idx
+    for split_name, split_values in (
+        ("train_indices", train_idx),
+        ("val_indices", val_idx),
+        ("test_indices", test_idx),
+    ):
+        if split_name == "test_indices" and split_values.size == 0 and storage_plans is None:
+            continue
+        split_array = _create_numeric_array(
+            split_group,
+            name=split_name,
+            path=f"splits/{split_name}",
+            shape=tuple(split_values.shape),
+            dtype=split_values.dtype,
+            chunks=(max(1, min(8192, split_values.shape[0] or 1)),),
+        )
+        if split_values.size:
+            split_array[:] = split_values
 
     _write_string_array(source_index_group, "source_dataset_id", [spec.dataset_id for spec in source_specs])
     _write_string_array(source_index_group, "source_zarr_path", [str(spec.source_zarr) for spec in source_specs])
@@ -1594,7 +2019,36 @@ def _export_merged(
         "source_annotation_zarr_path",
         [str(spec.annotation_zarr) for spec in source_specs],
     )
-    source_index_group.attrs.update({"mapping_version": 2, "source_count": int(len(source_specs))})
+    _write_string_array(
+        source_index_group,
+        "source_roi_transform_json",
+        [
+            json.dumps(
+                {
+                    "schema_id": "palette.training_roi_transform",
+                    "schema_version": 1,
+                    "mode": spec.roi_transform_mode,
+                    "source_shape": list(spec.roi_shape),
+                    "output_shape": list(spec.roi_output_shape),
+                    "pad_before_yx": list(spec.roi_pad_before),
+                    "pad_after_yx": list(spec.roi_pad_after),
+                    "padding_value": 0,
+                    "keypoint_translation_xy": [spec.roi_pad_before[1], spec.roi_pad_before[0]],
+                    "resize_applied": False,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for spec in source_specs
+        ],
+    )
+    source_index_group.attrs.update(
+        {
+            "mapping_version": 2,
+            "source_count": int(len(source_specs)),
+            "roi_transform_contract": "palette.training_roi_transform.v1",
+        }
+    )
 
     crop_group.attrs.update(
         {
@@ -1686,12 +2140,43 @@ def _export_merged(
             "per_policy_counts": dict(row_gate_counts),
         },
         "keypoint_supervision_counts": dict(keypoint_supervision_counts),
+        "keypoint_dtype": {
+            "policy": str(keypoint_dtype_policy),
+            "output_dtype": str(keypoint_dtype),
+            "per_source": [
+                {
+                    "dataset_id": spec.dataset_id,
+                    "source_dtype": str(spec.keypoint_dtype),
+                    "output_dtype": str(spec.keypoint_output_dtype),
+                    "transform": spec.keypoint_dtype_transform,
+                    "max_abs_round_trip_error": keypoint_cast_max_abs_error[spec.dataset_id],
+                }
+                for spec in source_specs
+            ],
+        },
+        "roi_transform": {
+            "mode": str(roi_transform_mode),
+            "target_roi_hw": list(target_roi_hw) if target_roi_hw is not None else None,
+            "padding_value": 0,
+            "resize_applied": False,
+            "per_source_array": "source_index/source_roi_transform_json",
+        },
+        "storage": (
+            storage_plan_manifest(storage_plans)
+            if storage_plans is not None
+            else {
+                "schema_id": "palette.legacy_merged_keypoint_training_storage",
+                "schema_version": 1,
+                "profile_id": "legacy_per_array_chunks",
+            }
+        ),
         "split": {
             "train_ratio": float(train_ratio),
             "val_ratio": float(val_ratio),
             "test_ratio": float(test_ratio) if test_ratio > 0.0 else None,
             "seed": int(seed),
-            "strategy": "global_random",
+            "strategy": split_strategy,
+            "unit": split_unit,
         },
     }
     out_root.attrs.update(
@@ -1716,7 +2201,8 @@ def _export_merged(
             "val_ratio": float(val_ratio),
             "test_ratio": float(test_ratio) if test_ratio > 0.0 else None,
             "seed": int(seed),
-            "strategy": "global_random",
+            "strategy": split_strategy,
+            "unit": split_unit,
             "created_at_utc": _utc_now(),
         }
     )
@@ -1765,7 +2251,171 @@ def _export_merged(
         row_gate_policy=next(iter(row_gate_counts.keys())) if len(row_gate_counts) == 1 else "mixed",
         row_gate_counts=row_gate_counts,
         keypoint_supervision_counts=dict(keypoint_supervision_counts),
+        split_strategy=split_strategy,
+        split_unit=split_unit,
+        roi_transform_mode=str(roi_transform_mode),
+        target_roi_hw=target_roi_hw,
+        storage_plans=storage_plans,
+        keypoint_dtype_policy=str(keypoint_dtype_policy),
+        keypoint_cast_max_abs_error=dict(keypoint_cast_max_abs_error),
     )
+
+
+def _require_bounded_node_local_scratch(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"Merged training publication scratch root not found: {resolved}")
+    if resolved in {
+        Path("/").resolve(),
+        Path("/tmp").resolve(),
+        Path("/scratch").resolve(),
+    } or str(resolved).startswith(("/groups/", "/nrs/")):
+        raise ValueError("Merged training publication scratch must be a bounded node-local path.")
+    return resolved
+
+
+def _publish_immutable_merged(
+    *,
+    scratch_root: Path,
+    manifest_payload: Dict[str, Any],
+    manifest_path: Path,
+    out_zarr: Path,
+    merged_dataset_id: Optional[str],
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    copy_batch_size: int,
+    row_gate_policy: str,
+    invocation: Dict[str, Any],
+    roi_transform_mode: str,
+    target_roi_hw: Optional[Tuple[int, int]],
+    split_unit: str,
+    keypoint_dtype_policy: str = "strict",
+) -> PoseMergeResult:
+    """Build, seal, and atomically publish one immutable merged training artifact."""
+
+    scratch = _require_bounded_node_local_scratch(scratch_root)
+    target = out_zarr.expanduser().resolve()
+    if target.exists():
+        raise FileExistsError(f"Immutable merged training destination exists: {target}")
+
+    with tempfile.TemporaryDirectory(prefix="palette-keypoint-merge-v2-", dir=str(scratch)) as temporary:
+        local = Path(temporary) / "candidate.zarr"
+        result = _export_merged(
+            manifest_payload=manifest_payload,
+            manifest_path=manifest_path,
+            out_zarr=local,
+            merged_dataset_id=merged_dataset_id,
+            overwrite=False,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            copy_batch_size=copy_batch_size,
+            row_gate_policy=row_gate_policy,
+            invocation=invocation,
+            roi_transform_mode=roi_transform_mode,
+            target_roi_hw=target_roi_hw,
+            split_unit=split_unit,
+            use_storage_contract_v2=True,
+            keypoint_dtype_policy=keypoint_dtype_policy,
+        )
+        validation = validate_merged_keypoint_training_zarr(
+            local,
+            expected_input_format=result.input_format,
+            expected_total_samples=result.total_samples,
+        )
+        if result.storage_plans is None:
+            raise RuntimeError("Immutable merged publication did not resolve storage plans.")
+        storage_errors = validate_merged_keypoint_training_storage(
+            local,
+            plans=result.storage_plans,
+        )
+        if storage_errors:
+            raise ValueError(
+                "Merged keypoint training storage validation failed:\n- "
+                + "\n- ".join(storage_errors)
+            )
+        publication_validation = dict(validation)
+        publication_validation.pop("zarr_path", None)
+        publication_validation["published_zarr_path"] = str(target)
+        local_root = open_zarr_group_direct(local, mode="a")
+        local_root.attrs.update(
+            {
+                "training_artifact_status": "complete",
+                "training_artifact_mutability": "immutable",
+                "stage_selector_eligible": False,
+                "registry_activation": "deferred",
+                "immutable_training_publication": {
+                    "schema_id": "palette.immutable_merged_keypoint_training_publication",
+                    "schema_version": 1,
+                    "policy": "node_local_build_then_checked_hidden_sibling_rename_v1",
+                    "manifest_path": str(manifest_path.expanduser().resolve()),
+                    "manifest_sha256": _sha256(manifest_path),
+                    "task": "keypoints",
+                    "source_count": int(len(result.source_specs)),
+                    "sample_count": int(result.total_samples),
+                    "split_strategy": result.split_strategy,
+                    "split_unit": result.split_unit,
+                    "roi_transform_mode": result.roi_transform_mode,
+                    "target_roi_hw": (
+                        list(result.target_roi_hw)
+                        if result.target_roi_hw is not None
+                        else None
+                    ),
+                    "validation": publication_validation,
+                    "stage_selector_eligible": False,
+                    "registry_activation": "deferred",
+                },
+            }
+        )
+        consolidate_metadata_capture_expected_warnings(local)
+        for subtree in ("crop_runs", "keypoints_runs", "splits", "source_index"):
+            validate_direct_consolidated_subtree(local, subtree_path=subtree)
+        zarr.open_group(str(local), mode="r", use_consolidated=True)
+        local_inventory = tree_inventory(local, hash_content=True)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        hidden = target.with_name(f".{target.name}.publish_tmp.{os.getpid()}.{uuid.uuid4().hex}")
+        with archive_metadata_publication_lock(target):
+            if target.exists() or hidden.exists():
+                raise FileExistsError(f"Immutable merged training target became occupied: {target}")
+            try:
+                shutil.copytree(local, hidden)
+                if tree_inventory(hidden, hash_content=True) != local_inventory:
+                    raise RuntimeError("Published merged training copy differs from node-local candidate.")
+                validate_merged_keypoint_training_zarr(
+                    hidden,
+                    expected_input_format=result.input_format,
+                    expected_total_samples=result.total_samples,
+                )
+                storage_errors = validate_merged_keypoint_training_storage(
+                    hidden,
+                    plans=result.storage_plans,
+                )
+                if storage_errors:
+                    raise ValueError(
+                        "Published merged keypoint storage validation failed:\n- "
+                        + "\n- ".join(storage_errors)
+                    )
+                for subtree in ("crop_runs", "keypoints_runs", "splits", "source_index"):
+                    validate_direct_consolidated_subtree(hidden, subtree_path=subtree)
+                if target.exists():
+                    raise FileExistsError(f"Immutable merged training target appeared: {target}")
+                os.replace(hidden, target)
+            except Exception:
+                if hidden.exists():
+                    shutil.rmtree(hidden)
+                raise
+
+    validate_merged_keypoint_training_zarr(
+        target,
+        expected_input_format=result.input_format,
+        expected_total_samples=result.total_samples,
+    )
+    zarr.open_group(str(target), mode="r", use_consolidated=True)
+    return result
 
 
 def validate_merged_keypoint_training_zarr(
@@ -1983,6 +2633,52 @@ def validate_merged_keypoint_training_zarr(
                 except ValueError as exc:
                     errors.append(str(exc))
 
+        keypoint_dtype_receipt = training_export.get("keypoint_dtype")
+        if isinstance(keypoint_dtype_receipt, dict):
+            dtype_policy = _as_text(keypoint_dtype_receipt.get("policy"))
+            output_dtype = _as_text(keypoint_dtype_receipt.get("output_dtype"))
+            if dtype_policy not in {"strict", "float32_checked"}:
+                errors.append("training_export.keypoint_dtype.policy is invalid.")
+            if output_dtype != str(keypoints.dtype):
+                errors.append(
+                    "training_export.keypoint_dtype.output_dtype/keypoints_roi mismatch "
+                    f"({output_dtype!r} != {str(keypoints.dtype)!r})."
+                )
+            raw_dtype_sources = keypoint_dtype_receipt.get("per_source")
+            if not isinstance(raw_dtype_sources, list) or not raw_dtype_sources:
+                errors.append("training_export.keypoint_dtype.per_source missing or empty.")
+            else:
+                for idx, raw_dtype_source in enumerate(raw_dtype_sources):
+                    if not isinstance(raw_dtype_source, dict):
+                        errors.append(
+                            f"training_export.keypoint_dtype.per_source[{idx}] must be an object."
+                        )
+                        continue
+                    transform = _as_text(raw_dtype_source.get("transform"))
+                    if transform not in {
+                        "identity_strict",
+                        "identity_float32",
+                        "float64_to_float32_checked",
+                    }:
+                        errors.append(
+                            f"training_export.keypoint_dtype.per_source[{idx}].transform is invalid."
+                        )
+                    try:
+                        cast_error = float(raw_dtype_source.get("max_abs_round_trip_error"))
+                    except (TypeError, ValueError):
+                        errors.append(
+                            "training_export.keypoint_dtype.per_source"
+                            f"[{idx}].max_abs_round_trip_error must be numeric."
+                        )
+                    else:
+                        if not np.isfinite(cast_error) or cast_error < 0.0:
+                            errors.append(
+                                "training_export.keypoint_dtype.per_source"
+                                f"[{idx}].max_abs_round_trip_error must be finite and non-negative."
+                            )
+        elif str(training_export.get("schema_version") or "").startswith("2"):
+            errors.append("training_export.keypoint_dtype missing for schema v2.")
+
         raw_source_signatures = training_export.get("source_skeleton_signatures")
         if not isinstance(raw_source_signatures, list) or not raw_source_signatures:
             errors.append("training_export.source_skeleton_signatures missing or empty.")
@@ -2155,6 +2851,18 @@ def validate_merged_keypoint_training_zarr(
                     errors.append(
                         f"{src_dataset_idx_path} has value {max_idx} outside mapping length {source_dataset_id.shape[0]}."
                     )
+            split_strategy = _as_text(root["splits"].attrs.get("strategy"))
+            if split_strategy == "source_dataset_grouped":
+                split_source_sets = [
+                    set(source_dataset_idx_i64[indices].tolist())
+                    for indices in (train_idx, val_idx, test_idx)
+                ]
+                if split_source_sets[0].intersection(split_source_sets[1]):
+                    errors.append("dataset-grouped train and validation splits share a source dataset.")
+                if split_source_sets[0].intersection(split_source_sets[2]):
+                    errors.append("dataset-grouped train and test splits share a source dataset.")
+                if split_source_sets[1].intersection(split_source_sets[2]):
+                    errors.append("dataset-grouped validation and test splits share a source dataset.")
         else:
             errors.append(f"{src_dataset_idx_path} must be integer dtype.")
 
@@ -2182,6 +2890,35 @@ def validate_merged_keypoint_training_zarr(
             opt_i64 = opt_arr.astype(np.int64, copy=False)
             if require_nonnegative and opt_i64.size > 0 and int(opt_i64.min()) < 0:
                 errors.append(f"{opt_path} contains negative indices.")
+
+        mapping_version = int(root["source_index"].attrs.get("mapping_version", 1))
+        transform_path = "source_index/source_roi_transform_json"
+        if mapping_version >= 2:
+            if transform_path not in root:
+                errors.append(f"missing required array {transform_path} for source-index mapping v2.")
+            else:
+                raw_transforms = np.asarray(root[transform_path][:], dtype=object)
+                if raw_transforms.ndim != 1 or raw_transforms.shape[0] != source_dataset_id.shape[0]:
+                    errors.append(
+                        f"{transform_path} must be 1D with one entry per source dataset."
+                    )
+                else:
+                    for idx, raw_transform in enumerate(raw_transforms.tolist()):
+                        try:
+                            transform = json.loads(str(raw_transform))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            errors.append(f"{transform_path}[{idx}] is not valid JSON.")
+                            continue
+                        if transform.get("schema_id") != "palette.training_roi_transform":
+                            errors.append(f"{transform_path}[{idx}] has an invalid schema_id.")
+                        if transform.get("schema_version") != 1:
+                            errors.append(f"{transform_path}[{idx}] has an invalid schema_version.")
+                        if transform.get("resize_applied") is not False:
+                            errors.append(f"{transform_path}[{idx}] must declare resize_applied=false.")
+                        if transform.get("output_shape") != list(roi.shape[1:]):
+                            errors.append(
+                                f"{transform_path}[{idx}] output_shape does not match roi_images."
+                            )
 
     if errors:
         raise ValueError("Merged keypoint zarr validation failed:\n- " + "\n- ".join(errors))
@@ -2324,6 +3061,26 @@ def _build_merged_manifest_payload(
                 "keypoint_run": spec.keypoint_run,
                 "roi_pixel_contract": spec.roi_pixel_contract,
                 "roi_pixel_contract_name": spec.roi_pixel_contract_name,
+                "keypoint_dtype": {
+                    "source_dtype": str(spec.keypoint_dtype),
+                    "output_dtype": str(spec.keypoint_output_dtype),
+                    "transform": spec.keypoint_dtype_transform,
+                    "max_abs_round_trip_error": float(
+                        merge_result.keypoint_cast_max_abs_error.get(spec.dataset_id, 0.0)
+                    ),
+                },
+                "roi_transform": {
+                    "schema_id": "palette.training_roi_transform",
+                    "schema_version": 1,
+                    "mode": spec.roi_transform_mode,
+                    "source_shape": list(spec.roi_shape),
+                    "output_shape": list(spec.roi_output_shape),
+                    "pad_before_yx": list(spec.roi_pad_before),
+                    "pad_after_yx": list(spec.roi_pad_after),
+                    "padding_value": 0,
+                    "keypoint_translation_xy": [spec.roi_pad_before[1], spec.roi_pad_before[0]],
+                    "resize_applied": False,
+                },
                 "skeleton_id": spec.skeleton_id,
                 "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
                 "skeleton": [list(edge) for edge in spec.skeleton],
@@ -2419,6 +3176,13 @@ def _build_merged_manifest_payload(
         "row_gate_policy": merge_result.row_gate_policy,
         "row_gate_counts": dict(merge_result.row_gate_counts),
         "keypoint_supervision_counts": dict(merge_result.keypoint_supervision_counts),
+        "keypoint_dtype": {
+            "policy": getattr(merge_result, "keypoint_dtype_policy", "strict"),
+            "output_dtype": "float32",
+            "per_source_max_abs_round_trip_error": dict(
+                getattr(merge_result, "keypoint_cast_max_abs_error", {})
+            ),
+        },
         "keypoint_shape": list(merge_result.keypoint_shape),
         "keypoint_labels": list(merge_result.keypoint_labels),
         "split": {
@@ -2426,6 +3190,18 @@ def _build_merged_manifest_payload(
             "val_ratio": float(val_ratio),
             "test_ratio": float(test_ratio) if test_ratio > 0.0 else None,
             "seed": int(seed),
+            "strategy": getattr(merge_result, "split_strategy", "global_random"),
+            "unit": getattr(merge_result, "split_unit", "row"),
+        },
+        "roi_transform": {
+            "mode": getattr(merge_result, "roi_transform_mode", "strict"),
+            "target_roi_hw": (
+                list(merge_result.target_roi_hw)
+                if getattr(merge_result, "target_roi_hw", None) is not None
+                else None
+            ),
+            "padding_value": 0,
+            "resize_applied": False,
         },
         "counts": {
             "total_samples": int(merge_result.total_samples),
@@ -2517,6 +3293,13 @@ def _write_merge_summary(
         "row_gate_policy": merge_result.row_gate_policy,
         "row_gate_counts": dict(merge_result.row_gate_counts),
         "keypoint_supervision_counts": dict(merge_result.keypoint_supervision_counts),
+        "keypoint_dtype": {
+            "policy": getattr(merge_result, "keypoint_dtype_policy", "strict"),
+            "output_dtype": "float32",
+            "per_source_max_abs_round_trip_error": dict(
+                getattr(merge_result, "keypoint_cast_max_abs_error", {})
+            ),
+        },
         "keypoint_shape": list(merge_result.keypoint_shape),
         "keypoint_labels": list(merge_result.keypoint_labels),
         "counts": {
@@ -2552,6 +3335,14 @@ def _write_merge_summary(
                 "row_gate_box_only_selected": int(spec.row_gate_box_only_selected),
                 "source_crop_run": spec.source_crop_run,
                 "keypoint_run": spec.keypoint_run,
+                "keypoint_dtype": {
+                    "source_dtype": str(spec.keypoint_dtype),
+                    "output_dtype": str(spec.keypoint_output_dtype),
+                    "transform": spec.keypoint_dtype_transform,
+                    "max_abs_round_trip_error": float(
+                        merge_result.keypoint_cast_max_abs_error.get(spec.dataset_id, 0.0)
+                    ),
+                },
                 "skeleton_id": spec.skeleton_id,
                 "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
                 "skeleton": [list(edge) for edge in spec.skeleton],
@@ -2658,6 +3449,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--manifest", type=Path, required=True, help="Training manifest JSON.")
     parser.add_argument("--out-dir", type=Path, help="Output directory for merged artifacts.")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--immutable-publication",
+        action="store_true",
+        help=(
+            "Build under bounded node-local scratch, validate and consolidate, then publish "
+            "through a checked hidden-sibling rename. The final artifact remains selector-ineligible."
+        ),
+    )
+    parser.add_argument(
+        "--scratch-root",
+        type=Path,
+        help="Existing bounded node-local scratch root required by --immutable-publication.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--merge",
@@ -2680,6 +3484,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=int,
         default=42,
         help="Random seed for merged split generation.",
+    )
+    parser.add_argument(
+        "--split-unit",
+        choices=["row", "source_dataset"],
+        default="row",
+        help=(
+            "Split individual rows (legacy default) or keep every source dataset wholly "
+            "inside one split to prevent recording leakage."
+        ),
+    )
+    parser.add_argument(
+        "--roi-transform",
+        choices=["strict", "pad_to_shape"],
+        default="strict",
+        help=(
+            "Require identical native ROI shapes (legacy default), or zero-pad each source "
+            "onto an explicit target canvas without resizing."
+        ),
+    )
+    parser.add_argument(
+        "--target-roi-shape",
+        type=_parse_roi_hw,
+        help="Explicit output ROI canvas as HEIGHTxWIDTH; required by --roi-transform pad_to_shape.",
+    )
+    parser.add_argument(
+        "--keypoint-dtype-policy",
+        choices=["strict", "float32_checked"],
+        default="strict",
+        help=(
+            "Require identical keypoint dtypes (legacy default), or normalize float32/float64 "
+            "sources to exact float32 output with a measured conversion-error gate."
+        ),
     )
     parser.add_argument(
         "--copy-batch-size",
@@ -2778,6 +3614,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not args.merge:
         raise SystemExit("Only merged export mode is supported. Re-run with --merge.")
+    if args.immutable_publication and args.scratch_root is None:
+        raise ValueError("--immutable-publication requires --scratch-root.")
+    if args.immutable_publication and args.overwrite:
+        raise ValueError("Immutable publication forbids --overwrite; publish a new versioned artifact.")
+    if args.immutable_publication and args.registry:
+        raise ValueError(
+            "Immutable canary publication keeps registry activation deferred; omit --registry."
+        )
 
     manifest_payload = json.loads(args.manifest.read_text(encoding="utf-8"))
     if not isinstance(manifest_payload, dict):
@@ -2813,6 +3657,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Split: train={train_ratio:.3f} val={val_ratio:.3f} test={test_ratio:.3f} seed={args.seed}")
     print(f"Copy batch size: {int(args.copy_batch_size)}")
     print(f"Row gate policy: {args.row_gate_policy}")
+    print(f"Split unit: {args.split_unit}")
+    print(f"ROI transform: {args.roi_transform} target={args.target_roi_shape}")
+    print(f"Keypoint dtype policy: {args.keypoint_dtype_policy}")
     print(f"Training input format: {manifest_payload.get('input_format', 'gray')}")
     for entry in manifest_payload["datasets"]:
         if isinstance(entry, dict):
@@ -2823,24 +3670,40 @@ def main(argv: Optional[List[str]] = None) -> int:
             manifest_payload,
             expected_input_format=str(manifest_payload.get("input_format") or "gray").strip().lower(),
             row_gate_policy=str(args.row_gate_policy),
+            roi_transform_mode=str(args.roi_transform),
+            target_roi_hw=args.target_roi_shape,
+            keypoint_dtype_policy=str(args.keypoint_dtype_policy),
         )
         print("Dry run: validation passed, no files written.")
         return 0
 
-    merge_result = _export_merged(
-        manifest_payload=manifest_payload,
-        manifest_path=args.manifest,
-        out_zarr=merged_zarr,
-        merged_dataset_id=merged_dataset_id,
-        overwrite=bool(args.overwrite),
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
-        seed=int(args.seed),
-        copy_batch_size=int(args.copy_batch_size),
-        row_gate_policy=str(args.row_gate_policy),
-        invocation=invocation,
-    )
+    export_kwargs = {
+        "manifest_payload": manifest_payload,
+        "manifest_path": args.manifest,
+        "out_zarr": merged_zarr,
+        "merged_dataset_id": merged_dataset_id,
+        "train_ratio": train_ratio,
+        "val_ratio": val_ratio,
+        "test_ratio": test_ratio,
+        "seed": int(args.seed),
+        "copy_batch_size": int(args.copy_batch_size),
+        "row_gate_policy": str(args.row_gate_policy),
+        "invocation": invocation,
+        "roi_transform_mode": str(args.roi_transform),
+        "target_roi_hw": args.target_roi_shape,
+        "split_unit": str(args.split_unit),
+        "keypoint_dtype_policy": str(args.keypoint_dtype_policy),
+    }
+    if args.immutable_publication:
+        merge_result = _publish_immutable_merged(
+            scratch_root=Path(args.scratch_root),
+            **export_kwargs,
+        )
+    else:
+        merge_result = _export_merged(
+            overwrite=bool(args.overwrite),
+            **export_kwargs,
+        )
 
     if not args.skip_validate:
         validation_summary = validate_merged_keypoint_training_zarr(

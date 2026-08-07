@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+import shutil
 
 import numpy as np
 import zarr
@@ -93,9 +94,12 @@ from fisheye.shared.zarr.training_review_artifact_publication import (
     TRAINING_REVIEW_ARTIFACT_SCHEMA_ID,
 )
 from fisheye.shared.zarr.training_review_compaction_publication import (
+    REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_ID,
     REVIEWED_TRAINING_ARTIFACT_SCHEMA_ID,
+    publish_reviewed_keypoint_training_artifact_candidate,
     publish_reviewed_training_artifact_candidate,
 )
+from fisheye.utils.compose_task_keypoint_training_manifest import compose_manifest
 
 REVIEW_STATE_MAP = {0: "unreviewed", 1: "accepted", 2: "rejected"}
 REASON_CODE_MAP = {0: "none", 1: "manual_reject", 2: "manual_correction"}
@@ -578,7 +582,7 @@ def test_refined_delta_compaction_publishes_complete_successor(
 def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
     tmp_path: Path,
 ) -> None:
-    parent, _, _, _ = _publish_refined(tmp_path)
+    parent, raw, quality, _ = _publish_refined(tmp_path)
     policy = build_default_manual_keypoint_qc_policy(
         skeleton_id=parent.source.skeleton_id,
         skeleton_digest=parent.source.skeleton_digest,
@@ -629,6 +633,33 @@ def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
             "training_artifact_status": "review_active",
             "stage_selector_eligible": False,
         }
+    )
+    source_root.require_group("crop_runs")
+    source_crop = source_root["crop_runs"].create_group(parent.source.crop_run_id)
+    source_crop.attrs.update(
+        {
+            "status": "complete",
+            "stage_selector_eligible": False,
+            "run_manifest": parent.crop_manifest,
+            "roi_pixel_contract_name": "test_gray_uint8_v1",
+            "roi_pixel_contract": {
+                "name": "test_gray_uint8_v1",
+                "channels": "gray",
+                "dtype": "uint8",
+            },
+        }
+    )
+    for name, values in parent.source_crop_arrays.items():
+        source_crop.create_array(name, data=np.asarray(values))
+    source_root.require_group("keypoints_runs")
+    shutil.copytree(
+        raw.output_path / "keypoints_runs" / raw.run_id,
+        parent.output_path / "keypoints_runs" / raw.run_id,
+    )
+    source_root.require_group("keypoint_quality_runs")
+    shutil.copytree(
+        quality.output_path / "keypoint_quality_runs" / quality.run_id,
+        parent.output_path / "keypoint_quality_runs" / quality.run_id,
     )
     review_payload = {"status": "review_active", "test_fixture": True}
     source_root.attrs["training_review_artifact"] = {
@@ -726,6 +757,65 @@ def test_reviewed_training_candidate_copies_then_seals_without_source_mutation(
             "payload": compaction_payload,
         },
     )
+    keypoint_only_scratch = tmp_path / "reviewed_keypoint_scratch"
+    keypoint_only_scratch.mkdir()
+    keypoint_only_destination = (
+        tmp_path / "reviewed_keypoint_output" / "reviewed_keypoints.zarr"
+    )
+    keypoint_only_result = publish_reviewed_keypoint_training_artifact_candidate(
+        source_review_archive=parent.output_path,
+        compacted_keypoint_archive=compacted.output_path,
+        compacted_keypoint_run_id=compacted.run_id,
+        destination=keypoint_only_destination,
+        scratch_root=keypoint_only_scratch,
+        created_by="pytest_reviewed_keypoint_candidate",
+    )
+    keypoint_only = zarr.open_group(
+        str(keypoint_only_destination), mode="r", use_consolidated=True
+    )
+    assert keypoint_only.attrs["training_task"] == "keypoints"
+    assert keypoint_only.attrs["stage_selector_eligible"] is False
+    assert (
+        keypoint_only.attrs["reviewed_keypoint_training_artifact"]["schema_id"]
+        == REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_ID
+    )
+    assert f"refined_keypoints_runs/{compacted.run_id}" in keypoint_only
+    assert "refined_subject_masks_runs" not in keypoint_only
+    assert "edit_delta_runs" not in keypoint_only
+    assert keypoint_only_result["source_review_artifact_mutated"] is False
+
+    base_manifest_path = tmp_path / "approved_base.manifest.json"
+    write_json_atomic(
+        base_manifest_path,
+        {
+            "set_id": "approved_base",
+            "set_name": "approved_base",
+            "set_version": "1",
+            "input_format": "gray",
+            "source_type": "refined",
+            "pose_schema": {"skeleton_id": parent.source.skeleton_id},
+            "datasets": [
+                {
+                    "name": "approved_historical",
+                    "dataset_id": "approved_historical",
+                    "zarr_path": str(tmp_path / "historical.zarr"),
+                    "source_roi_pixel_contract_name": "historical_gray_v1",
+                }
+            ],
+        },
+    )
+    composed = compose_manifest(
+        base_manifest_paths=[base_manifest_path],
+        reviewed_artifact=keypoint_only_destination,
+        set_id="task_specific_pose_v001",
+        set_name="task_specific_pose",
+        set_version="1",
+    )
+    assert len(composed["datasets"]) == 2
+    assert composed["task_specific_merge"]["mask_dependencies"] == []
+    assert composed["task_specific_merge"]["registry_activation"] == "deferred"
+    assert composed["keypoint_contract_policy"]["status"] == "explicit_output_canvas_transform"
+
     scratch = tmp_path / "reviewed_scratch"
     scratch.mkdir()
     destination = tmp_path / "reviewed_output" / "reviewed.zarr"
