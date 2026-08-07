@@ -5,6 +5,7 @@ ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 PATH_CONTAINS=""
 LIMIT=0
 CONFIG="configs/fisheye/import_local.yaml"
+ARTIFACT_ID=""
 TARGET_SAMPLED_FRAMES="200"
 FRAME_STEP=""
 SKIP_TAIL_FRAMES="200"
@@ -47,6 +48,8 @@ Discovery/import:
   --path-contains STR       Keep recordings whose path contains this substring
   --limit N                 Limit planned recordings after filtering; 0 means no limit
   --config PATH             Import config YAML (default: configs/fisheye/import_local.yaml)
+  --artifact-id ID          Additive artifact id; writes
+                            <recording>_<id>_training.zarr
   --target-sampled-frames N Target sampled frames per recording (default: 200)
   --frame-step N            Fixed frame step instead of target-sampled-frames
   --skip-tail-frames N      Frames to skip at EOF (default: 200)
@@ -104,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --path-contains) PATH_CONTAINS="$2"; shift 2;;
     --limit) LIMIT="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
+    --artifact-id) ARTIFACT_ID="$2"; shift 2;;
     --target-sampled-frames) TARGET_SAMPLED_FRAMES="$2"; shift 2;;
     --frame-step) FRAME_STEP="$2"; shift 2;;
     --skip-tail-frames) SKIP_TAIL_FRAMES="$2"; shift 2;;
@@ -177,7 +181,7 @@ mkdir -p "$RUN_DIR"
 TARGETS_FILE="${RUN_DIR}/recording_dirs.txt"
 PLAN_JSON="${RUN_DIR}/plan.json"
 scripts/py - "$ROOT" "$PATH_CONTAINS" "$LIMIT" "$CONFIG" "$TARGET_SAMPLED_FRAMES" "$FRAME_STEP" \
-  "$SKIP_TAIL_FRAMES" "$DECODE_BACKEND" "$OVERWRITE" "$TARGETS_FILE" "$PLAN_JSON" <<'PY'
+  "$SKIP_TAIL_FRAMES" "$DECODE_BACKEND" "$OVERWRITE" "$ARTIFACT_ID" "$TARGETS_FILE" "$PLAN_JSON" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -194,6 +198,7 @@ from fisheye.utils import import_recordings_training as mod
     skip_tail_frames,
     decode_backend,
     overwrite,
+    artifact_id,
     targets_file,
     plan_json,
 ) = sys.argv[1:]
@@ -214,6 +219,7 @@ plans = mod._build_plans(
     path_contains=path_contains or None,
     limit=limit_value if limit_value > 0 else None,
     require_source_frame_count=decode_backend == mod.DECODE_BACKEND_PYNVVC_LUMA,
+    artifact_id=artifact_id or None,
 )
 
 ok_plans = [plan for plan in plans if plan.status == "ok"]
@@ -230,6 +236,7 @@ payload = {
     "frame_step": requested_frame_step,
     "skip_tail_frames": skip_tail,
     "overwrite": overwrite == "1",
+    "artifact_id": artifact_id or None,
     "planned_count": len(plans),
     "target_count": len(ok_plans),
     "status_counts": {
@@ -267,6 +274,7 @@ if [[ "$target_count" == "0" ]]; then
 fi
 
 IMPORT_ARGS=(--config "$CONFIG" --decode-backend "$DECODE_BACKEND" --skip-tail-frames "$SKIP_TAIL_FRAMES" --gpu-id "$GPU_ID")
+if [[ -n "$ARTIFACT_ID" ]]; then IMPORT_ARGS+=(--artifact-id "$ARTIFACT_ID"); fi
 if [[ -n "$FRAME_STEP" ]]; then
   IMPORT_ARGS+=(--frame-step "$FRAME_STEP")
 else
@@ -341,7 +349,7 @@ scripts/py - "$RUN_DIR/submission_manifest.json" "$ROOT" "$PATH_CONTAINS" "$LIMI
   "$OVERWRITE" "$REGISTER" "$REGISTRY" "$IMPORT_STIMULUS" "$STIMULUS_QUIET" "$JOB_SCRIPT" \
   "$TARGETS_FILE" "$PLAN_JSON" "$REPO_DIR" "$INCLUDE_ACQUISITION_CROP_VIDEO" \
   "$ACQUISITION_CROP_RUN_PREFIX" "$OVERWRITE_ACQUISITION_CROP_RUN" \
-  "$PALETTE_COMMIT" <<'PY'
+  "$PALETTE_COMMIT" "$ARTIFACT_ID" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -377,10 +385,11 @@ from pathlib import Path
     acquisition_crop_run_prefix,
     overwrite_acquisition_crop_run,
     palette_commit,
+    artifact_id,
 ) = sys.argv[1:]
 
 payload = {
-    "schema": "palette.import_recordings_training_bsub_submission.v1",
+    "schema": "palette.import_recordings_training_bsub_submission.v2",
     "root": root,
     "path_contains": path_contains or None,
     "limit": int(limit),
@@ -412,6 +421,7 @@ payload = {
     "repo_dir": repo_dir,
     "palette_repo": repo_dir,
     "palette_commit": palette_commit,
+    "artifact_id": artifact_id or None,
 }
 Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -451,6 +461,7 @@ echo "GPU: ${GPU_SPEC:-<none>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB walltime=$WALLTIME"
 echo "Max active: $MAX_ACTIVE"
 echo "Decode backend: $DECODE_BACKEND"
+echo "Artifact id: ${ARTIFACT_ID:-<canonical>}"
 echo "Include acquisition crop video: $([[ "$INCLUDE_ACQUISITION_CROP_VIDEO" == "1" ]] && echo "$ACQUISITION_CROP_RUN_PREFIX" || echo "<disabled>")"
 echo "Atomic base publication: node-local checked publish (required)"
 echo "Per-target command: $IMPORT_CMD"
