@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 import zarr
 
@@ -35,7 +36,7 @@ def _write_crop_meta(path: Path) -> None:
     )
 
 
-def _patch_ffprobe(monkeypatch) -> None:
+def _patch_ffprobe(monkeypatch, *, color_range: str | None = "tv") -> None:
     monkeypatch.setattr(
         mod,
         "inspect_crop_video_stream",
@@ -46,7 +47,7 @@ def _patch_ffprobe(monkeypatch) -> None:
             height=20,
             codec_name="h264",
             pix_fmt="yuv420p",
-            color_range="tv",
+            color_range=color_range,
             color_space="bt709",
             nb_frames="10",
             frame_format_confirmation_status="pending_orange_confirmation",
@@ -100,8 +101,11 @@ def test_append_acquisition_crop_video_training_dry_run_selects_matching_samples
     }
 
 
-def test_append_acquisition_crop_video_training_writes_crop_run(tmp_path, monkeypatch) -> None:
-    _patch_ffprobe(monkeypatch)
+@pytest.mark.parametrize("color_range", ["pc", "tv"])
+def test_append_acquisition_crop_video_training_writes_crop_run(
+    tmp_path, monkeypatch, color_range: str
+) -> None:
+    _patch_ffprobe(monkeypatch, color_range=color_range)
     monkeypatch.setattr(mod, "get_git_info", lambda _repo: {"short_hash": "abc123", "commit_hash": "abc123"})
     monkeypatch.setattr(
         mod,
@@ -134,6 +138,7 @@ def test_append_acquisition_crop_video_training_writes_crop_run(tmp_path, monkey
     crop = root["crop_runs"]["crop_red_scare_acq"]
     assert root["crop_runs"].attrs["latest"] == "crop_red_scare_acq"
     assert crop.attrs["source_pixels"] == "acquisition_crop_video"
+    assert crop.attrs["container_color_range_observed"] == color_range
     assert crop.attrs["frame_format_confirmation_status"] == "pending_orange_confirmation"
     assert crop.attrs["crop_detection_required"] is True
     assert crop.attrs["blank_crop_frames_excluded"] is True
@@ -164,3 +169,42 @@ def test_append_acquisition_crop_video_training_writes_crop_run(tmp_path, monkey
     np.testing.assert_allclose(crop["bbox_crop_norm_coords"][:], [[0.4, 0.4, 0.4, 0.4], [0.4, 0.55, 0.2, 0.3]])
     assert crop.attrs["bbox_norm_coords_semantics"] == "bbox_xywh_normalized_to_full_frame"
     assert crop.attrs["bbox_crop_norm_coords_semantics"] == "realtime_detection_bbox_xywh_normalized_to_crop_video_frame"
+
+
+def test_append_acquisition_crop_video_training_rejects_missing_color_range(
+    tmp_path, monkeypatch
+) -> None:
+    _patch_ffprobe(monkeypatch, color_range=None)
+    recording_dir = tmp_path / "recording"
+    training_zarr = recording_dir / "zarr" / "recording_training.zarr"
+    crop_meta = (
+        recording_dir
+        / "derived"
+        / "external_crop_recorder"
+        / "Cam2010093_crop_meta.csv"
+    )
+    crop_video = (
+        recording_dir
+        / "derived"
+        / "external_crop_recorder"
+        / "Cam2010093_crop_external.mp4"
+    )
+    crop_video.parent.mkdir(parents=True, exist_ok=True)
+    crop_video.write_bytes(b"placeholder")
+    _write_training_zarr(training_zarr, recording_dir)
+    _write_crop_meta(crop_meta)
+
+    with pytest.raises(ValueError, match="exact ffprobe container color_range"):
+        mod.append_acquisition_crop_video_training(
+            training_zarr,
+            recording_dir=recording_dir,
+            crop_meta_path=crop_meta,
+            crop_video_path=crop_video,
+            run_name="crop_must_not_exist",
+            apply=True,
+            require_cuda=False,
+            reader_factory=_FakeReader,
+        )
+
+    root = zarr.open_group(str(training_zarr), mode="r", use_consolidated=False)
+    assert "crop_runs" not in root
