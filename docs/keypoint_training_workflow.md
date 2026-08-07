@@ -252,6 +252,8 @@ Pose training is fail-closed at three boundaries:
 - the trainer compares requested loss, optimizer, augmentation, worker, seed, and
   image-size values with the effective Ultralytics arguments before the first
   epoch;
+- the instantiated optimizer class and all parameter-group learning rates,
+  weight decay, momentum, and beta values are recorded at train start;
 - the first runtime batch must be three-channel `uint8` at the declared model
   input shape and must become `float32` in `[0, 1]` after normalization.
 
@@ -267,11 +269,23 @@ loader and transforms boxes and keypoints with the image. Directional landmarks
 must be bound by label-name pairs such as `eye_left`/`eye_right`; keypoint indices
 are never hard-coded.
 
+Palette's `augment` switch controls this training-loader augmentation only. The
+Ultralytics `augment` argument is forced off because it instead requests
+test-time augmentation during final validation. These are recorded separately
+so a checkpoint cannot imply that an unsupported Ultralytics transform ran.
+
+Pose training resolves to an explicit optimizer class (`AdamW` in the maintained
+profile). `optimizer=auto` is not accepted: Ultralytics may otherwise replace
+configured learning-rate and momentum values while leaving the source
+configuration looking authoritative. The runtime receipt verifies the actual
+instantiated class and records its parameter groups.
+
 Every successful run writes `pose_training_runtime_receipt.json` beside the
 weights. Its digest is recorded in the training report and registry metrics. The
 receipt contains the starting-model digest and architecture, source and model
-input shapes, effective arguments, loader worker policy, active augmentation,
-and the observed first-batch tensor contract.
+input shapes, declared and effective arguments, instantiated optimizer groups,
+loader worker policy, active augmentation, and the observed first-batch tensor
+contract.
 
 Before a full run, inspect the exact configured loader without training:
 

@@ -8,6 +8,7 @@ import torch
 
 from fisheye.training.train_pose import (
     _apply_pose_loader_training_param_overrides,
+    _observe_pose_runtime_optimizer,
     _observe_pose_runtime_batch,
     _validate_pose_effective_arguments,
     _write_pose_runtime_receipt,
@@ -25,6 +26,7 @@ def _requested() -> dict[str, object]:
         "lr0": 0.001,
         "momentum": 0.9,
         "weight_decay": 0.0005,
+        "optimizer": "AdamW",
         "rect": False,
         "augment": False,
         "hsv_h": 0.0,
@@ -69,6 +71,7 @@ def test_pose_loader_overrides_preserve_losses_and_disable_unreachable_transform
     requested = _requested()
     requested.update(
         {
+            "augment": True,
             "num_workers": 24,
             "persistent_workers": True,
             "prefetch_factor": 2,
@@ -85,8 +88,32 @@ def test_pose_loader_overrides_preserve_losses_and_disable_unreachable_transform
     assert effective["mosaic"] == 0.0
     assert effective["auto_augment"] is None
     assert effective["multi_scale"] is False
+    assert effective["optimizer"] == "AdamW"
+    assert effective["augment"] is False
+    assert loader["augmentation_enabled"] is True
     assert loader["num_workers"] == 24
     assert loader["persistent_workers"] is True
+
+
+def test_pose_runtime_optimizer_receipt_uses_instantiated_optimizer() -> None:
+    optimizer = type("AdamW", (), {})()
+    optimizer.param_groups = [
+        {
+            "lr": 0.001,
+            "initial_lr": 0.001,
+            "betas": (0.9, 0.999),
+            "weight_decay": 0.0005,
+        }
+    ]
+    receipt = _observe_pose_runtime_optimizer(
+        {"requested_training_params": {"optimizer": "AdamW"}},
+        SimpleNamespace(optimizer=optimizer),
+    )
+
+    assert receipt["status"] == "verified"
+    assert receipt["effective_class"] == "AdamW"
+    assert receipt["parameter_groups"][0]["lr"] == pytest.approx(0.001)
+    assert receipt["parameter_groups"][0]["betas"] == pytest.approx([0.9, 0.999])
 
 
 def test_pose_runtime_batch_receipt_captures_actual_tensor_contract(tmp_path) -> None:

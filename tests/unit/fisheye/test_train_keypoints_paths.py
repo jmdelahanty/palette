@@ -12,7 +12,7 @@ from rich.console import Console
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
-from fisheye.training.config import PoseConfig
+from fisheye.training.config import PoseConfig, PoseTrainingParams
 from fisheye.training.zarr_yolo_dataset_loader import build_pose_zarr_dataset_config
 from fisheye.training.train_keypoints import (
     _build_default_run_name,
@@ -125,6 +125,24 @@ def test_pose_config_rejects_unknown_training_hyperparameter(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="posee"):
         PoseConfig.from_yaml(cfg_path)
+
+
+def test_pose_training_params_reject_optimizer_auto() -> None:
+    with pytest.raises(ValueError, match="optimizer"):
+        PoseTrainingParams.model_validate(
+            {
+                "model": "yolov8n-pose.pt",
+                "epochs": 1,
+                "batch": 1,
+                "imgsz": 512,
+                "lr0": 0.001,
+                "momentum": 0.9,
+                "weight_decay": 0.0005,
+                "patience": 1,
+                "device": "0",
+                "optimizer": "auto",
+            }
+        )
 
 
 def test_pose_config_requires_explicit_augmentation_switch(tmp_path: Path) -> None:

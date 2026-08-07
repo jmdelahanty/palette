@@ -169,6 +169,9 @@ class PoseTrainingParams(TrainingParams):
     box: float = Field(7.5, ge=0.0)
     cls: float = Field(0.5, ge=0.0)
     dfl: float = Field(1.5, ge=0.0)
+    optimizer: Literal[
+        "SGD", "Adam", "AdamW", "NAdam", "RAdam", "RMSProp"
+    ] = "AdamW"
     augment: bool = False
     hsv_h: float = Field(0.0, ge=0.0, le=1.0)
     hsv_s: float = Field(0.0, ge=0.0, le=1.0)
