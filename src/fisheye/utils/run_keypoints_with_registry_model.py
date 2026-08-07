@@ -21,6 +21,7 @@ from fisheye.detection.detect_keypoints_yolo import (
     detect_keypoints_yolo,
 )
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.pose.schema import schema_from_package, undirected_edge_topology
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.flat_roi_cache import (
     open_flat_roi_cache,
@@ -257,6 +258,67 @@ def pick_best_keypoint_candidate(candidates: list[Candidate], *, require_unique:
 
 def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -> Candidate:
     return pick_best_keypoint_candidate(candidates, require_unique=require_unique)
+
+
+def validate_pose_candidate_bindings(
+    registry: Registry,
+    candidates: list[Candidate],
+    *,
+    expected_pose_schema: Optional[str] = None,
+) -> tuple[list[Candidate], dict[str, dict[str, Any]], list[dict[str, str]]]:
+    """Reject internally inconsistent pose candidates before score selection."""
+    expected_labels: Optional[list[str]] = None
+    expected_edges: Optional[list[list[int]]] = None
+    if expected_pose_schema is not None:
+        schema = schema_from_package(expected_pose_schema)
+        expected_labels = list(schema.node_names)
+        expected_edges = [list(edge) for edge in schema.edges]
+    compatible: list[Candidate] = []
+    bindings: dict[str, dict[str, Any]] = {}
+    rejected: list[dict[str, str]] = []
+    for candidate in candidates:
+        try:
+            binding = resolve_registered_pose_model_schema_binding(
+                registry,
+                run_id=candidate.run_id,
+                expected_set_id=candidate.set_id,
+                expected_model_path=candidate.model_path,
+                expected_model_sha256=candidate.model_sha256,
+            )
+        except Exception as exc:
+            rejected.append(
+                {
+                    "run_id": candidate.run_id,
+                    "set_id": candidate.set_id,
+                    "reason": "pose_schema_binding_invalid",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            continue
+        bound_schema = binding.get("pose_schema")
+        if expected_labels is not None and (
+            not isinstance(bound_schema, Mapping)
+            or list(bound_schema.get("keypoint_labels") or []) != expected_labels
+            or undirected_edge_topology(bound_schema.get("edges"))
+            != undirected_edge_topology(expected_edges)
+        ):
+            rejected.append(
+                {
+                    "run_id": candidate.run_id,
+                    "set_id": candidate.set_id,
+                    "reason": "requested_pose_schema_mismatch",
+                    "error_type": "PoseModelSchemaMismatch",
+                    "error": (
+                        f"Model binding does not match requested pose schema "
+                        f"{expected_pose_schema!r}."
+                    ),
+                }
+            )
+            continue
+        compatible.append(candidate)
+        bindings[candidate.run_id] = binding
+    return compatible, bindings, rejected
 
 
 def build_keypoint_resolution_payload(
@@ -566,6 +628,9 @@ def run_keypoints_with_registry_model(
         verbose=bool(verbose),
     )
 
+    candidate_binding_rejections: list[dict[str, str]] = []
+    compatible_bindings: dict[str, dict[str, Any]] = {}
+    registry_db: Optional[Registry] = None
     try:
         registry_db = Registry(registry_path)
     except Exception as exc:
@@ -599,6 +664,13 @@ def run_keypoints_with_registry_model(
                 for candidate in candidates
                 if candidate.run_id == str(model_run_id)
             ]
+        candidates, compatible_bindings, candidate_binding_rejections = (
+            validate_pose_candidate_bindings(
+                registry_db,
+                candidates,
+                expected_pose_schema=pose_schema,
+            )
+        )
     except Exception as exc:
         return _failure_result(
             reason="model_resolution_failed",
@@ -610,7 +682,25 @@ def run_keypoints_with_registry_model(
             keypoint_parent=output_parent,
         )
     finally:
-        registry_db.close()
+        if registry_db is not None:
+            registry_db.close()
+
+    if not candidates and candidate_binding_rejections:
+        return _failure_result(
+            reason="model_pose_schema_binding_failed",
+            error=(
+                "No registry pose candidate has a valid hash-bound skeleton binding: "
+                + json.dumps(candidate_binding_rejections, sort_keys=True)
+            ),
+            remediation=(
+                "Repair or replace the rejected registry model metadata. Automatic "
+                "resolution will not rank schema-invalid pose candidates."
+            ),
+            recording_dir=resolved_recording_dir,
+            output_path=output_path,
+            registry_path=registry_path,
+            keypoint_parent=output_parent,
+        )
 
     try:
         best = pick_best_keypoint_candidate(candidates, require_unique=bool(require_unique))
@@ -629,21 +719,11 @@ def run_keypoints_with_registry_model(
         )
 
     try:
-        binding_registry = Registry(registry_path)
-        try:
-            model_pose_schema_binding = resolve_registered_pose_model_schema_binding(
-                binding_registry,
-                run_id=best.run_id,
-                expected_set_id=best.set_id,
-                expected_model_path=best.model_path,
-                expected_model_sha256=best.model_sha256,
-            )
-        finally:
-            binding_registry.close()
-    except Exception as exc:
+        model_pose_schema_binding = compatible_bindings[best.run_id]
+    except KeyError:
         return _failure_result(
             reason="model_pose_schema_binding_failed",
-            error=str(exc),
+            error=f"Validated pose binding disappeared for selected run {best.run_id!r}.",
             remediation=(
                 "Repair or replace the selected registry model's hash-bound training "
                 "manifest/skeleton metadata; canonical inference will not infer an "
@@ -669,6 +749,9 @@ def run_keypoints_with_registry_model(
     )
     payload.setdefault("artifacts", {})["model_pose_schema_binding"] = (
         model_pose_schema_binding
+    )
+    payload.setdefault("artifacts", {})["rejected_pose_candidates"] = (
+        candidate_binding_rejections
     )
     selected_payload = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
     selected_model_path = selected_payload.get("model_path") if isinstance(selected_payload.get("model_path"), str) else None

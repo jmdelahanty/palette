@@ -17,6 +17,10 @@ import zarr
 from torch.utils.data import Dataset
 
 from ..pose.schema import resolve_keypoint_labels_from_attrs
+from ..shared.model_input_transform import (
+    ModelInputTransform,
+    resolve_model_input_transform,
+)
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -66,7 +70,12 @@ class SingleDatasetConfig:
 
 @dataclass
 class DetectAugmentConfig:
-    """Single-sample augmentations applied in train mode for detection."""
+    """Single-sample augmentations applied in train mode.
+
+    Detection uses the numeric fields directly.  Pose additionally resolves the
+    configured semantic keypoint pairs into index permutations before allowing a
+    mirror transform.
+    """
 
     hsv_h: float = 0.0
     hsv_s: float = 0.0
@@ -79,6 +88,8 @@ class DetectAugmentConfig:
     fliplr: float = 0.0
     flipud: float = 0.0
     erasing: float = 0.0
+    fliplr_keypoint_pairs: Tuple[Tuple[str, str], ...] = ()
+    flipud_keypoint_pairs: Tuple[Tuple[str, str], ...] = ()
 
     def uses_affine(self) -> bool:
         return any(
@@ -114,6 +125,12 @@ class ZarrDatasetConfig:
     filter_interpolated: bool = False  # DEPRECATED: Use source_type instead
     chunk_cache_size: int = 0
     augmentation: DetectAugmentConfig = field(default_factory=DetectAugmentConfig)
+    augmentation_enabled: bool = True
+    model_input_shape_hw: Optional[Tuple[int, int]] = None
+    model_input_transform_mode: str = "auto"
+    pose_padding_value_uint8: int = 0
+    pose_channel_transform: str = "luma_repeat_three"
+    pose_normalization: str = "uint8_div_255"
 
     def __post_init__(self):
         """Convert enum strings and validate configuration."""
@@ -154,6 +171,24 @@ class ZarrDatasetConfig:
         elif self.augmentation is None:
             self.augmentation = DetectAugmentConfig()
         self.chunk_cache_size = max(0, int(self.chunk_cache_size or 0))
+        if self.model_input_shape_hw is not None:
+            shape = tuple(int(value) for value in self.model_input_shape_hw)
+            if len(shape) != 2 or any(value <= 0 for value in shape):
+                raise ValueError(
+                    "model_input_shape_hw must contain positive [height, width]."
+                )
+            self.model_input_shape_hw = shape
+        if int(self.pose_padding_value_uint8) != 0:
+            raise ValueError(
+                "The shared pad_to_size contract currently requires zero-valued padding."
+            )
+        if self.pose_channel_transform not in {
+            "luma_repeat_three",
+            "preserve_rgb",
+        }:
+            raise ValueError("Unsupported pose channel transform.")
+        if self.pose_normalization != "uint8_div_255":
+            raise ValueError("Unsupported pose normalization contract.")
     
     def get_zarr_paths(self) -> List[str]:
         """Get list of all zarr paths from datasets."""
@@ -253,6 +288,82 @@ class ZarrDatasetConfig:
         filtered_dict = {k: v for k, v in config_dict.items() if k in known_keys}
         
         return cls(**filtered_dict)
+
+
+def build_pose_zarr_dataset_config(full_config: Any) -> ZarrDatasetConfig:
+    """Build the one authoritative Zarr loader configuration for pose workflows."""
+    datasets: Dict[str, Dict[str, Any]] = {}
+    for name, dataset_config in full_config.datasets.items():
+        split = None
+        if dataset_config.split is not None:
+            split = {
+                "train": float(dataset_config.split.train),
+                "val": float(dataset_config.split.val),
+            }
+        source_type = dataset_config.source_type
+        if hasattr(source_type, "value"):
+            source_type = source_type.value
+        datasets[name] = {
+            "zarr_path": str(dataset_config.zarr_path),
+            "source_type": source_type,
+            "input_format": dataset_config.input_format,
+            "keypoint_run": dataset_config.keypoint_run,
+            "split": split,
+        }
+
+    default_split = 0.8
+    if full_config.datasets:
+        first_dataset = next(iter(full_config.datasets.values()))
+        if first_dataset.split is not None:
+            default_split = float(first_dataset.split.train)
+
+    imgsz = full_config.training_params.imgsz
+    if isinstance(imgsz, int):
+        model_input_shape_hw = (int(imgsz), int(imgsz))
+    else:
+        model_input_shape_hw = (int(imgsz[0]), int(imgsz[1]))
+    augmentation = {
+        key: getattr(full_config.training_params, key)
+        for key in (
+            "hsv_h",
+            "hsv_s",
+            "hsv_v",
+            "degrees",
+            "translate",
+            "scale",
+            "shear",
+            "perspective",
+            "fliplr",
+            "flipud",
+            "erasing",
+        )
+    }
+    augmentation["fliplr_keypoint_pairs"] = tuple(
+        tuple(pair) for pair in full_config.augmentation.fliplr_keypoint_pairs
+    )
+    augmentation["flipud_keypoint_pairs"] = tuple(
+        tuple(pair) for pair in full_config.augmentation.flipud_keypoint_pairs
+    )
+    return ZarrDatasetConfig(
+        datasets=datasets,
+        task=full_config.task,
+        sampling_strategy=(
+            full_config.sampling_strategy.value
+            if hasattr(full_config.sampling_strategy, "value")
+            else full_config.sampling_strategy
+        ),
+        random_seed=int(full_config.random_seed),
+        dataset_weights=full_config.dataset_weights,
+        split_ratio=default_split,
+        allow_source_mismatch=bool(full_config.allow_source_mismatch),
+        augmentation=augmentation,
+        augmentation_enabled=bool(full_config.training_params.augment),
+        model_input_shape_hw=model_input_shape_hw,
+        model_input_transform_mode=full_config.preprocessing.spatial_transform,
+        pose_padding_value_uint8=full_config.preprocessing.padding_value_uint8,
+        pose_channel_transform=full_config.preprocessing.channel_transform,
+        pose_normalization=full_config.preprocessing.normalization,
+    )
 
 
 # Core Dataset and Helper Classes
@@ -1320,6 +1431,9 @@ class ZarrYOLODataset(Dataset):
         self.kp_bbox_cache = {}
         self.kp_flat_cache = {}
         self.roi_size_cache = {}
+        self.pose_input_transforms: Dict[str, ModelInputTransform] = {}
+        self.pose_fliplr_permutation: Optional[np.ndarray] = None
+        self.pose_flipud_permutation: Optional[np.ndarray] = None
         self.detect_frame_arrays = {}
         self.detect_frame_chunk_len = {}
         self.detect_frame_chunk_cache = OrderedDict()
@@ -1427,6 +1541,12 @@ class ZarrYOLODataset(Dataset):
                 roi_shape = crop_group['roi_images'].shape[1:3]
                 roi_h, roi_w = roi_shape
                 self.roi_size_cache[zarr_path] = (roi_h, roi_w)
+                target_shape = self.config.model_input_shape_hw or (roi_h, roi_w)
+                self.pose_input_transforms[zarr_path] = resolve_model_input_transform(
+                    (roi_h, roi_w),
+                    mode=self.config.model_input_transform_mode,
+                    model_hw=target_shape,
+                )
 
                 metadata = self.metadata_map.get(zarr_path)
                 kp_run_name = None
@@ -1521,6 +1641,17 @@ class ZarrYOLODataset(Dataset):
                     f"  Cached {kp_roi_norm.shape[0]} keypoint entries from {Path(zarr_path).name} "
                     f"(run {kp_run_name}, box_only={box_only_count})"
                 )
+
+            self.pose_fliplr_permutation = self._resolve_pose_flip_permutation(
+                self.config.augmentation.fliplr_keypoint_pairs,
+                axis_name="horizontal",
+                probability=float(self.config.augmentation.fliplr),
+            )
+            self.pose_flipud_permutation = self._resolve_pose_flip_permutation(
+                self.config.augmentation.flipud_keypoint_pairs,
+                axis_name="vertical",
+                probability=float(self.config.augmentation.flipud),
+            )
         
         # Build labels using cached data
         label_fetcher = self._get_pose_data if self.config.task == 'pose' else self._get_bbox_data
@@ -1539,6 +1670,74 @@ class ZarrYOLODataset(Dataset):
             "chunk_cache_hits": int(self._chunk_cache_hits),
             "chunk_cache_misses": int(self._chunk_cache_misses),
         }
+
+    def pose_preprocessing_receipt(self) -> Dict[str, Any]:
+        """Return the effective per-source pose pixel/tensor declaration."""
+        if self.config.task != "pose":
+            return {}
+        return {
+            "schema_id": "palette.pose_training_preprocessing_runtime.v1",
+            "model_input_shape_hw": (
+                list(self.config.model_input_shape_hw)
+                if self.config.model_input_shape_hw is not None
+                else None
+            ),
+            "spatial_transform": self.config.model_input_transform_mode,
+            "padding_value_uint8": int(self.config.pose_padding_value_uint8),
+            "channel_transform": self.config.pose_channel_transform,
+            "normalization": self.config.pose_normalization,
+            "sources": {
+                str(path): transform.to_attrs()
+                for path, transform in sorted(self.pose_input_transforms.items())
+            },
+            "augmentation_enabled": bool(self.config.augmentation_enabled),
+            "augmentation": {
+                key: value
+                for key, value in vars(self.config.augmentation).items()
+            },
+        }
+
+    def _resolve_pose_flip_permutation(
+        self,
+        pairs: Tuple[Tuple[str, str], ...],
+        *,
+        axis_name: str,
+        probability: float,
+    ) -> Optional[np.ndarray]:
+        if probability <= 0.0:
+            return None
+        labels = list(self.keypoint_labels)
+        index_by_label = {label: index for index, label in enumerate(labels)}
+        permutation = np.arange(len(labels), dtype=np.int64)
+        seen: set[int] = set()
+        for first, second in pairs:
+            if first not in index_by_label or second not in index_by_label:
+                raise ValueError(
+                    f"Pose {axis_name} flip pair ({first!r}, {second!r}) is not "
+                    f"present in keypoint_labels={labels}."
+                )
+            first_index = index_by_label[first]
+            second_index = index_by_label[second]
+            if first_index in seen or second_index in seen or first_index == second_index:
+                raise ValueError(
+                    f"Pose {axis_name} flip keypoint pairs are not a disjoint permutation."
+                )
+            permutation[first_index] = second_index
+            permutation[second_index] = first_index
+            seen.update((first_index, second_index))
+
+        directional_labels = {
+            label
+            for label in labels
+            if "left" in label.lower() or "right" in label.lower()
+        }
+        covered_labels = {labels[index] for index in seen}
+        if directional_labels - covered_labels:
+            raise ValueError(
+                f"Pose {axis_name} flip requires explicit semantic pairs for "
+                f"directional keypoints {sorted(directional_labels - covered_labels)}."
+            )
+        return permutation
 
     def _get_detect_frame(self, zarr_path: str, image_source_path: str, frame_idx: int) -> np.ndarray:
         frame_array = self.detect_frame_arrays.get(zarr_path)
@@ -1750,6 +1949,181 @@ class ZarrYOLODataset(Dataset):
 
         return out_img, out_cls, out_boxes
 
+    @staticmethod
+    def _transform_pose_keypoints(
+        keypoints: np.ndarray,
+        matrix: np.ndarray,
+        *,
+        image_w: int,
+        image_h: int,
+        use_perspective: bool,
+    ) -> np.ndarray:
+        out = np.asarray(keypoints, dtype=np.float32).copy()
+        if out.size == 0:
+            return out
+        flat = out[..., :2].reshape(-1, 2)
+        homogeneous = np.ones((flat.shape[0], 3), dtype=np.float32)
+        homogeneous[:, :2] = flat * np.asarray([image_w, image_h], dtype=np.float32)
+        warped = homogeneous @ matrix.T
+        if use_perspective:
+            divisor = warped[:, 2:3]
+            safe = np.abs(divisor) > 1e-8
+            warped_xy = np.full((warped.shape[0], 2), np.nan, dtype=np.float32)
+            warped_xy[safe[:, 0]] = (
+                warped[safe[:, 0], :2] / divisor[safe[:, 0]]
+            )
+        else:
+            warped_xy = warped[:, :2]
+        visible = out[..., 2].reshape(-1) > 0.0
+        in_bounds = (
+            np.isfinite(warped_xy).all(axis=1)
+            & (warped_xy[:, 0] >= 0.0)
+            & (warped_xy[:, 0] <= float(image_w))
+            & (warped_xy[:, 1] >= 0.0)
+            & (warped_xy[:, 1] <= float(image_h))
+        )
+        clipped = np.nan_to_num(warped_xy, nan=0.0, posinf=0.0, neginf=0.0)
+        clipped[:, 0] = np.clip(clipped[:, 0], 0.0, float(image_w))
+        clipped[:, 1] = np.clip(clipped[:, 1], 0.0, float(image_h))
+        out[..., 0] = (clipped[:, 0] / float(image_w)).reshape(out.shape[:-1])
+        out[..., 1] = (clipped[:, 1] / float(image_h)).reshape(out.shape[:-1])
+        out[..., 2] = np.where(visible & in_bounds, out[..., 2].reshape(-1), 0.0).reshape(
+            out.shape[:-1]
+        )
+        return out
+
+    def _apply_pose_input_transform(
+        self,
+        *,
+        zarr_path: str,
+        image: np.ndarray,
+        bboxes_xywhn: np.ndarray,
+        keypoints_flat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, ModelInputTransform]:
+        transform = self.pose_input_transforms[zarr_path]
+        out_image = np.ascontiguousarray(image)
+        if tuple(out_image.shape[:2]) != transform.native_shape:
+            raise ValueError(
+                f"Pose source image shape {tuple(out_image.shape[:2])} disagrees with "
+                f"the declared native ROI shape {transform.native_shape}."
+            )
+        if not transform.is_identity:
+            padding = (
+                (transform.pad_top, transform.pad_bottom),
+                (transform.pad_left, transform.pad_right),
+                (0, 0),
+            )
+            out_image = np.pad(
+                out_image,
+                padding,
+                mode="constant",
+                constant_values=int(self.config.pose_padding_value_uint8),
+            )
+
+        boxes = np.asarray(bboxes_xywhn, dtype=np.float32).reshape(-1, 4).copy()
+        if boxes.size:
+            boxes[:, 0] = (
+                boxes[:, 0] * float(transform.native_width) + float(transform.pad_left)
+            ) / float(transform.model_width)
+            boxes[:, 1] = (
+                boxes[:, 1] * float(transform.native_height) + float(transform.pad_top)
+            ) / float(transform.model_height)
+            boxes[:, 2] *= float(transform.native_width) / float(transform.model_width)
+            boxes[:, 3] *= float(transform.native_height) / float(transform.model_height)
+
+        keypoints = np.asarray(keypoints_flat, dtype=np.float32)
+        if keypoints.size:
+            keypoints = keypoints.reshape(-1, len(self.keypoint_labels), 3).copy()
+            keypoints[..., 0] = (
+                keypoints[..., 0] * float(transform.native_width)
+                + float(transform.pad_left)
+            ) / float(transform.model_width)
+            keypoints[..., 1] = (
+                keypoints[..., 1] * float(transform.native_height)
+                + float(transform.pad_top)
+            ) / float(transform.model_height)
+            keypoints_flat = keypoints.reshape(keypoints.shape[0], -1)
+        else:
+            keypoints_flat = keypoints.reshape(0, len(self.keypoint_labels) * 3)
+        return np.ascontiguousarray(out_image), boxes, keypoints_flat, transform
+
+    def _augment_pose_train_sample(
+        self,
+        image: np.ndarray,
+        cls: np.ndarray,
+        bboxes_xywhn: np.ndarray,
+        keypoints_flat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        aug = self.config.augmentation
+        out_img = np.ascontiguousarray(image.copy())
+        out_cls = np.asarray(cls, dtype=np.float32).reshape(-1).copy()
+        out_boxes = np.asarray(bboxes_xywhn, dtype=np.float32).reshape(-1, 4).copy()
+        out_keypoints = np.asarray(keypoints_flat, dtype=np.float32).reshape(
+            -1, len(self.keypoint_labels), 3
+        ).copy()
+        image_h, image_w = out_img.shape[:2]
+
+        if aug.uses_affine() and out_boxes.shape[0] > 0:
+            matrix = self._random_affine_matrix(image_h, image_w, aug)
+            use_perspective = aug.perspective > 0.0
+            if use_perspective:
+                out_img = cv2.warpPerspective(
+                    out_img,
+                    matrix,
+                    dsize=(image_w, image_h),
+                    borderValue=(114, 114, 114),
+                )
+            else:
+                out_img = cv2.warpAffine(
+                    out_img,
+                    matrix[:2],
+                    dsize=(image_w, image_h),
+                    borderValue=(114, 114, 114),
+                )
+                if out_img.ndim == 2:
+                    out_img = out_img[..., None]
+            boxes_xyxy = self._xywhn_to_xyxy(out_boxes, image_w, image_h)
+            warped_xyxy = self._transform_boxes_xyxy(
+                boxes_xyxy, matrix, image_w, image_h, use_perspective
+            )
+            keep = self._box_candidates(boxes_xyxy, warped_xyxy)
+            out_cls = out_cls[keep]
+            out_keypoints = self._transform_pose_keypoints(
+                out_keypoints,
+                matrix,
+                image_w=image_w,
+                image_h=image_h,
+                use_perspective=use_perspective,
+            )[keep]
+            out_boxes = self._xyxy_to_xywhn(warped_xyxy[keep], image_w, image_h)
+
+        if aug.fliplr > 0.0 and np.random.random() < aug.fliplr:
+            out_img = np.ascontiguousarray(np.fliplr(out_img))
+            if out_boxes.size:
+                out_boxes[:, 0] = 1.0 - out_boxes[:, 0]
+            if out_keypoints.size:
+                out_keypoints[..., 0] = 1.0 - out_keypoints[..., 0]
+                if self.pose_fliplr_permutation is not None:
+                    out_keypoints = out_keypoints[:, self.pose_fliplr_permutation, :]
+
+        if aug.flipud > 0.0 and np.random.random() < aug.flipud:
+            out_img = np.ascontiguousarray(np.flipud(out_img))
+            if out_boxes.size:
+                out_boxes[:, 1] = 1.0 - out_boxes[:, 1]
+            if out_keypoints.size:
+                out_keypoints[..., 1] = 1.0 - out_keypoints[..., 1]
+                if self.pose_flipud_permutation is not None:
+                    out_keypoints = out_keypoints[:, self.pose_flipud_permutation, :]
+
+        out_img = self._apply_hsv_jitter(out_img, aug)
+        out_img = self._apply_random_erasing(out_img, aug.erasing)
+        return (
+            out_img,
+            out_cls,
+            out_boxes,
+            out_keypoints.reshape(out_keypoints.shape[0], -1),
+        )
+
     def _get_bbox_data(self, zarr_path: str, det_idx: int) -> Dict:
         bbox_coords = self.bbox_cache.get(zarr_path)
 
@@ -1864,17 +2238,42 @@ class ZarrYOLODataset(Dataset):
         if profile_enabled:
             read_seconds = max(0.0, time.perf_counter() - read_start)
 
+        native_shape = (int(image.shape[0]), int(image.shape[1]))
         if self.config.task == 'detect' and metadata.input_format == 'rgb' and image.ndim == 3:
             image_3ch = image
         else:
             if image.ndim == 2:
                 image_3ch = np.stack([image] * 3, axis=-1)
             else:
-                image_3ch = image
+                if (
+                    self.config.task == "pose"
+                    and self.config.pose_channel_transform == "luma_repeat_three"
+                ):
+                    if image.shape[2] == 1:
+                        luma = image[..., 0]
+                    else:
+                        luma = cv2.cvtColor(image[..., :3], cv2.COLOR_RGB2GRAY)
+                    image_3ch = np.stack([luma] * 3, axis=-1)
+                else:
+                    image_3ch = image[..., :3]
         
         label_info = self.labels[index]
         cls_arr = label_info.get('cls', np.zeros((0,), dtype=np.float32)).astype(np.float32)
         bboxes_arr = label_info.get('bboxes', np.zeros((0, 4), dtype=np.float32)).astype(np.float32)
+        keypoints_arr = label_info.get(
+            'keypoints',
+            np.zeros((0, len(self.keypoint_labels) * 3), dtype=np.float32),
+        ).astype(np.float32)
+        pose_transform: Optional[ModelInputTransform] = None
+        if self.config.task == "pose":
+            image_3ch, bboxes_arr, keypoints_arr, pose_transform = (
+                self._apply_pose_input_transform(
+                    zarr_path=zarr_path,
+                    image=image_3ch,
+                    bboxes_xywhn=bboxes_arr,
+                    keypoints_flat=keypoints_arr,
+                )
+            )
         if self.config.task == 'detect' and self.mode == 'train':
             augment_start = time.perf_counter() if profile_enabled else 0.0
             image_3ch, cls_arr, bboxes_arr = self._augment_detect_train_sample(
@@ -1884,8 +2283,30 @@ class ZarrYOLODataset(Dataset):
             )
             if profile_enabled:
                 augment_seconds = max(0.0, time.perf_counter() - augment_start)
+        elif (
+            self.config.task == "pose"
+            and self.mode == "train"
+            and self.config.augmentation_enabled
+        ):
+            augment_start = time.perf_counter() if profile_enabled else 0.0
+            image_3ch, cls_arr, bboxes_arr, keypoints_arr = (
+                self._augment_pose_train_sample(
+                    image=image_3ch,
+                    cls=cls_arr,
+                    bboxes_xywhn=bboxes_arr,
+                    keypoints_flat=keypoints_arr,
+                )
+            )
+            if profile_enabled:
+                augment_seconds = max(0.0, time.perf_counter() - augment_start)
 
-        ori_shape = (image_3ch.shape[0], image_3ch.shape[1])
+        ori_shape = native_shape
+        ratio_pad = ((1.0, 1.0), (0.0, 0.0))
+        if pose_transform is not None:
+            ratio_pad = (
+                (1.0, 1.0),
+                (float(pose_transform.pad_left), float(pose_transform.pad_top)),
+            )
         
         im_identifier = (f"{Path(zarr_path).stem}_frame_{frame_idx}"
                          if self.config.task == 'detect'
@@ -1895,14 +2316,11 @@ class ZarrYOLODataset(Dataset):
             "img": image_3ch.transpose(2, 0, 1),
             "cls": cls_arr,
             "bboxes": bboxes_arr,
-            "keypoints": label_info.get(
-                'keypoints',
-                np.zeros((0, len(self.keypoint_labels) * 3), dtype=np.float32),
-            ).astype(np.float32),
+            "keypoints": keypoints_arr,
             "num_keypoints": len(self.keypoint_labels) if self.config.task == "pose" else 0,
             "im_file": im_identifier,
             "ori_shape": ori_shape,
-            "ratio_pad": ((1.0, 1.0), (0.0, 0.0)),
+            "ratio_pad": ratio_pad,
             "segments": np.zeros((0, 0), dtype=np.float32)
         }
 

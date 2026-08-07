@@ -6,6 +6,20 @@ task: pose
 
 kpt_shape: [3, 3]
 
+preprocessing:
+  spatial_transform: auto
+  padding_value_uint8: 0
+  channel_transform: luma_repeat_three
+  normalization: uint8_div_255
+  interpolation: none
+
+# Semantic swaps are resolved by label name rather than hard-coded keypoint indices.
+# Add other pairs here when a skeleton introduces more directional landmarks.
+augmentation:
+  fliplr_keypoint_pairs:
+    - [eye_left, eye_right]
+  flipud_keypoint_pairs: []
+
 datasets:
   arena4:
     zarr_path: /nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.zarr
@@ -19,17 +33,34 @@ training_params:
   model: yolov8n-pose.pt
   epochs: 10
   batch: 256
-  imgsz: 256
+  # Native 512 ROIs remain unchanged; smaller ROIs are centered and zero-padded.
+  imgsz: 512
   lr0: 0.001
   momentum: 0.9
   weight_decay: 0.0005
   patience: 10
 
-  # Loss weights - prioritize keypoints
-  pose: 18.0
-  kobj: 3.0
-  box: 6.0
+  # Explicit controlled baseline matching the effective historical run.
+  pose: 12.0
+  kobj: 1.0
+  box: 7.5
   cls: 0.5
+  dfl: 1.5
+
+  # Pose-safe augmentation is implemented by Palette's Zarr loader. Set augment
+  # true and tune these values deliberately; boxes and keypoints transform together.
+  augment: false
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.0
+  degrees: 0.0
+  translate: 0.0
+  scale: 0.0
+  shear: 0.0
+  perspective: 0.0
+  fliplr: 0.0
+  flipud: 0.0
+  erasing: 0.0
 
   num_workers: 24
 

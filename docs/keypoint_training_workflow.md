@@ -243,6 +243,43 @@ scripts/py -m fisheye.utils.check_training_registry \
   --limit 20
 ```
 
+## Pose Runtime Contract
+
+Pose training is fail-closed at three boundaries:
+
+- `training_params` rejects unknown fields, including misspelled loss or
+  augmentation names;
+- the trainer compares requested loss, optimizer, augmentation, worker, seed, and
+  image-size values with the effective Ultralytics arguments before the first
+  epoch;
+- the first runtime batch must be three-channel `uint8` at the declared model
+  input shape and must become `float32` in `[0, 1]` after normalization.
+
+The training, batch-diagnostic, and integrity-audit entry points all use the same
+pose loader builder. Native ROIs are transformed with the shared reversible
+`identity`/`pad_to_size` contract. The default checked-in profile uses a 512x512
+model input: 512x512 pixels remain unchanged and smaller crops are centered with
+zero padding rather than resized.
+
+Pose augmentation is opt-in through `training_params.augment`. Palette applies
+the configured photometric, affine, flip, and erasing operations in the Zarr
+loader and transforms boxes and keypoints with the image. Directional landmarks
+must be bound by label-name pairs such as `eye_left`/`eye_right`; keypoint indices
+are never hard-coded.
+
+Every successful run writes `pose_training_runtime_receipt.json` beside the
+weights. Its digest is recorded in the training report and registry metrics. The
+receipt contains the starting-model digest and architecture, source and model
+input shapes, effective arguments, loader worker policy, active augmentation,
+and the observed first-batch tensor contract.
+
+Before a full run, inspect the exact configured loader without training:
+
+```bash
+scripts/py -m fisheye.training.diagnose_pose_batch /path/to/pose_build.yaml \
+  --batch-size 8
+```
+
 ## 6) Behavior and Defaults (Current)
 
 - `--model-input` defaults to `--input-format` in prepare/pipeline wrappers.

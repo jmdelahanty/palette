@@ -1,5 +1,5 @@
 # src/fisheye/training/config.py
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import List, Optional, Tuple, Dict, Any, Literal, Union
 from enum import Enum
 from pathlib import Path
@@ -153,6 +153,101 @@ class TrainingParams(BaseModel):
         raise TypeError("imgsz must be an int or a [height, width] list/tuple.")
 
 
+class PoseTrainingParams(TrainingParams):
+    """Fail-closed hyperparameters for the custom Zarr pose trainer.
+
+    The pose trainer replaces Ultralytics' dataset and augmentation pipeline.  Every
+    option accepted here must therefore either be consumed by Palette's loader or be
+    passed explicitly to ``YOLO.train``.  Unknown fields are rejected so a requested
+    loss or augmentation cannot silently disappear from the effective run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pose: float = Field(12.0, ge=0.0)
+    kobj: float = Field(1.0, ge=0.0)
+    box: float = Field(7.5, ge=0.0)
+    cls: float = Field(0.5, ge=0.0)
+    dfl: float = Field(1.5, ge=0.0)
+    augment: bool = False
+    hsv_h: float = Field(0.0, ge=0.0, le=1.0)
+    hsv_s: float = Field(0.0, ge=0.0, le=1.0)
+    hsv_v: float = Field(0.0, ge=0.0, le=1.0)
+    degrees: float = Field(0.0, ge=0.0, le=180.0)
+    translate: float = Field(0.0, ge=0.0, le=1.0)
+    scale: float = Field(0.0, ge=0.0)
+    shear: float = Field(0.0, ge=0.0, le=180.0)
+    perspective: float = Field(0.0, ge=0.0, le=0.001)
+    fliplr: float = Field(0.0, ge=0.0, le=1.0)
+    flipud: float = Field(0.0, ge=0.0, le=1.0)
+    erasing: float = Field(0.0, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_augmentation_switch(self) -> "PoseTrainingParams":
+        augmentation_values = (
+            self.hsv_h,
+            self.hsv_s,
+            self.hsv_v,
+            self.degrees,
+            self.translate,
+            self.scale,
+            self.shear,
+            self.perspective,
+            self.fliplr,
+            self.flipud,
+            self.erasing,
+        )
+        if not self.augment and any(float(value) != 0.0 for value in augmentation_values):
+            raise ValueError(
+                "Pose augmentation parameters are nonzero but training_params.augment "
+                "is false. Enable augmentation explicitly or set them to zero."
+            )
+        return self
+
+
+class PosePreprocessingConfig(BaseModel):
+    """Exact native-ROI to model-tensor contract for pose training."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spatial_transform: Literal["identity", "pad_to_size", "auto"] = "auto"
+    padding_value_uint8: Literal[0] = 0
+    channel_transform: Literal["luma_repeat_three", "preserve_rgb"] = (
+        "luma_repeat_three"
+    )
+    normalization: Literal["uint8_div_255"] = "uint8_div_255"
+    interpolation: Literal["none"] = "none"
+
+
+class PoseAugmentationConfig(BaseModel):
+    """Semantic information needed by Palette's pose-safe augmentation path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fliplr_keypoint_pairs: List[Tuple[str, str]] = Field(default_factory=list)
+    flipud_keypoint_pairs: List[Tuple[str, str]] = Field(default_factory=list)
+
+    @field_validator("fliplr_keypoint_pairs", "flipud_keypoint_pairs")
+    @classmethod
+    def validate_flip_pairs(
+        cls, value: List[Tuple[str, str]]
+    ) -> List[Tuple[str, str]]:
+        seen: set[str] = set()
+        normalized: List[Tuple[str, str]] = []
+        for left, right in value:
+            left_text = str(left).strip()
+            right_text = str(right).strip()
+            if not left_text or not right_text or left_text == right_text:
+                raise ValueError(
+                    "Pose flip keypoint pairs must contain two distinct nonempty labels."
+                )
+            if left_text in seen or right_text in seen:
+                raise ValueError("A keypoint label may appear in only one flip pair.")
+            seen.update((left_text, right_text))
+            normalized.append((left_text, right_text))
+        return normalized
+
+
 class EyeMaskTrainingParams(TrainingParams):
     """Training parameters for eye-mask segmentation pipelines."""
 
@@ -276,7 +371,18 @@ class DetectConfig(BaseModel):
 
 class PoseConfig(DetectConfig):
     """Configuration for pose estimation task"""
+    model_config = ConfigDict(extra="forbid")
+
     kpt_shape: Tuple[int, int]
+    training_params: PoseTrainingParams
+    preprocessing: PosePreprocessingConfig = Field(
+        default_factory=PosePreprocessingConfig
+    )
+    augmentation: PoseAugmentationConfig = Field(
+        default_factory=PoseAugmentationConfig
+    )
+    # Compatibility section consumed by batch inference utilities, not training.
+    keypoints: Optional[Dict[str, Any]] = None
 
 
 class CacheBackend(str, Enum):
