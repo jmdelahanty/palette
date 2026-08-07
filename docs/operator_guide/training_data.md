@@ -735,11 +735,13 @@ frame. See [sampled_import.md](sampled_import.md) for the full operator guide,
 including the recording-only/video-only path.
 
 ```bash
-scripts/py -m fisheye.utils.import_sampled_training_pynvvc \
-  /path/to/video.mp4 \
-  /path/to/training_sample.zarr \
+scripts/py -m fisheye.utils.publish_sampled_training_base \
+  --video-path /path/to/video.mp4 \
+  --destination /path/to/training_sample.zarr \
+  --scratch-root /path/to/local/scratch/training-sample \
   --source-frame-count 54000 \
   --frame-step 100 \
+  --recording-dir /path/to/recording \
   --config configs/fisheye/default.yaml
 ```
 
@@ -757,6 +759,9 @@ scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
 ```
 
 Remove `--dry-run` and add `--apply` to execute.
+Local application also requires `--scratch-root`; the LSF submitter supplies a
+bounded `$TMPDIR` automatically. Direct destination construction and overwrite
+are not supported.
 
 For organized recording-only directories that have camera videos but no H5 or
 protocol source, use `scripts/py -m fisheye.utils.intake_video_only_recording`

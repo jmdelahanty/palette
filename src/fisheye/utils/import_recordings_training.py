@@ -401,6 +401,7 @@ def _run_import(
     skip_tail_frames: int,
     decode_backend: str,
     gpu_id: int,
+    scratch_root: Path,
 ) -> Tuple[bool, int]:
     if plan.frame_step is None:
         return False, 2
@@ -408,24 +409,35 @@ def _run_import(
     if decode_backend == DECODE_BACKEND_PYNVVC_LUMA:
         if plan.source_frame_count is None:
             return False, 2
+        if overwrite:
+            raise ValueError("Atomic sampled-training publication refuses overwrite.")
+        if not plan.camera_id:
+            raise ValueError("Atomic sampled-training publication requires camera_id.")
         cmd = [
             sys.executable,
             "-m",
-            "fisheye.utils.import_sampled_training_pynvvc",
-            str(plan.cam_video),
+            "fisheye.utils.publish_sampled_training_base",
+            "--destination",
             str(plan.zarr_path),
-            "--config",
-            str(config_path),
+            "--scratch-root",
+            str(scratch_root),
+            "--video-path",
+            str(plan.cam_video),
             "--source-frame-count",
             str(plan.source_frame_count),
             "--frame-step",
             str(plan.frame_step),
+            "--config",
+            str(config_path),
+            "--camera-id",
+            str(plan.camera_id),
+            "--recording-dir",
+            str(plan.recording_dir),
+            "--h5-path",
+            str(plan.h5_path),
             "--gpu-id",
             str(int(gpu_id)),
         ]
-        if plan.camera_id:
-            cmd.extend(["--camera-id", str(plan.camera_id)])
-        cmd.extend(["--recording-dir", str(plan.recording_dir), "--h5-path", str(plan.h5_path)])
     else:
         raise ValueError(f"Unsupported decode backend: {decode_backend}")
     if skip_tail_frames:
@@ -647,7 +659,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Overwrite existing Zarrs (disables skipping).",
+        help="Retired: publish a new versioned training Zarr instead.",
     )
     parser.add_argument(
         "--no-skip-existing",
@@ -720,6 +732,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="GPU id for PyNvVC sampled training imports.",
     )
     parser.add_argument(
+        "--scratch-root",
+        type=Path,
+        help=(
+            "Bounded node-local scratch directory required when applying. "
+            "All sampled training bases are published atomically."
+        ),
+    )
+    parser.add_argument(
         "--include-acquisition-crop-video",
         action="store_true",
         help=(
@@ -763,6 +783,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.gpu_id < 0:
         print(f"--gpu-id must be >= 0 (got {args.gpu_id})")
         return 1
+    if args.overwrite:
+        print(
+            "--overwrite is retired for sampled training publication; publish a new "
+            "versioned artifact instead."
+        )
+        return 1
+    if args.apply and args.scratch_root is None:
+        print("Sampled training publication with --apply requires --scratch-root")
+        return 1
     skip_existing = not args.overwrite and not args.no_skip_existing
     requested_frame_step = args.frame_step
     if requested_frame_step is None and args.target_sampled_frames is None:
@@ -797,6 +826,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             limit=args.limit,
             decode_backend=args.decode_backend,
             gpu_id=int(args.gpu_id),
+            scratch_root=str(args.scratch_root) if args.scratch_root is not None else None,
             include_acquisition_crop_video=bool(args.include_acquisition_crop_video),
             acquisition_crop_run_prefix=str(args.acquisition_crop_run_prefix),
         )
@@ -911,6 +941,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             skip_tail_frames=args.skip_tail_frames,
             decode_backend=args.decode_backend,
             gpu_id=int(args.gpu_id),
+            scratch_root=args.scratch_root,
         )
         if success:
             if args.include_acquisition_crop_video:

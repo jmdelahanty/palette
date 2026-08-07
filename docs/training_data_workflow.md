@@ -120,6 +120,7 @@ Apply the imports:
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --target-sampled-frames 200 \
+  --scratch-root /nvme1/palette_staging/sampled-training/import-001 \
   --register \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --apply
@@ -153,6 +154,7 @@ Optional registry registration:
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --target-sampled-frames 200 \
+  --scratch-root /nvme1/palette_staging/sampled-training/import-002 \
   --register \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --apply
@@ -163,6 +165,7 @@ Optional: mirror stimulus H5 into the Zarr (when available):
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --target-sampled-frames 200 \
+  --scratch-root /nvme1/palette_staging/sampled-training/import-003 \
   --import-stimulus \
   --stimulus-quiet \
   --register \
@@ -178,6 +181,7 @@ Current GoodCopBadCop smoke:
 scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
   --path-contains GoodCopBadCop \
   --target-sampled-frames 200 \
+  --scratch-root /nvme1/palette_staging/sampled-training/goodcopbadcop-smoke \
   --limit 1 \
   --import-stimulus \
   --stimulus-quiet \
@@ -231,6 +235,7 @@ frames:
 scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
   --path-contains RedScare \
   --target-sampled-frames 200 \
+  --scratch-root /nvme1/palette_staging/sampled-training/redscare \
   --include-acquisition-crop-video \
   --acquisition-crop-run-prefix crop_red_scare_acquisition_crop_video_training \
   --import-stimulus \

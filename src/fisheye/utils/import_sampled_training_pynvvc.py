@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Create sampled training Zarrs from source video using PyNvVideoCodec luma."""
+"""Low-level scratch construction for sampled PyNvVideoCodec training pixels.
+
+Use ``fisheye.utils.publish_sampled_training_base`` for publication.
+"""
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shutil
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -379,11 +382,12 @@ def import_sampled_training_pynvvc(
     require_cuda: bool = True,
     reader_factory: Callable[..., Any] = PynvvcLumaRgbReader,
 ) -> SampledTrainingImportResult:
-    """Write a sampled training Zarr using sequential PyNvVC luma decode.
+    """Construct a sampled training Zarr using sequential PyNvVC luma decode.
 
-    The final path is created by renaming a sibling temp Zarr only after the
-    decode and writes complete. This avoids leaving a partially-created final
-    training Zarr on GPU/decode failures.
+    This is an internal construction primitive for bounded local scratch. The
+    public publisher performs checked copy and atomic destination visibility.
+    The local path is created by renaming a sibling temp Zarr only after decode
+    and writes complete, avoiding partial scratch artifacts on GPU failures.
     """
 
     video_path = video_path.expanduser().resolve()
@@ -605,50 +609,16 @@ def import_sampled_training_pynvvc(
         raise
 
 
-def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Import a sampled training Zarr using PyNvVC luma decode.")
-    parser.add_argument("video_path", type=Path)
-    parser.add_argument("zarr_path", type=Path)
-    parser.add_argument("--source-frame-count", type=int, required=True)
-    parser.add_argument("--frame-step", type=int, required=True)
-    parser.add_argument("--skip-tail-frames", type=int, default=0)
-    parser.add_argument("--config", type=Path)
-    parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--camera-id")
-    parser.add_argument("--recording-dir", type=Path)
-    parser.add_argument("--h5-path", type=Path)
-    parser.add_argument("--gpu-id", type=int, default=0)
-    return parser.parse_args(argv)
-
-
 def main(argv: Optional[list[str]] = None) -> int:
-    args = _parse_args(argv)
-    result = import_sampled_training_pynvvc(
-        video_path=args.video_path,
-        zarr_path=args.zarr_path,
-        source_frame_count=int(args.source_frame_count),
-        frame_step=int(args.frame_step),
-        skip_tail_frames=int(args.skip_tail_frames),
-        config_path=args.config,
-        overwrite=bool(args.overwrite),
-        camera_id=args.camera_id,
-        recording_dir=args.recording_dir,
-        h5_path=args.h5_path,
-        gpu_id=int(args.gpu_id),
+    del argv
+    print(
+        "Direct sampled-training writes are retired. Use "
+        "fisheye.utils.publish_sampled_training_base with bounded local scratch; "
+        "the import_sampled_training_pynvvc library function is internal to that "
+        "atomic publisher.",
+        file=sys.stderr,
     )
-    print(json.dumps({
-        "zarr_path": str(result.zarr_path),
-        "source_video_path": str(result.source_video_path),
-        "imported_frame_count": result.imported_frame_count,
-        "source_frame_count": result.source_frame_count,
-        "frame_step": result.frame_step,
-        "skip_tail_frames": result.skip_tail_frames,
-        "original_resolution": list(result.original_resolution),
-        "downsampled_resolution": list(result.downsampled_resolution) if result.downsampled_resolution else None,
-        "decode_backend": result.decode_backend,
-        "duration_s": result.duration_s,
-    }, sort_keys=True))
-    return 0
+    return 2
 
 
 if __name__ == "__main__":

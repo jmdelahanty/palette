@@ -52,7 +52,7 @@ Discovery/import:
   --skip-tail-frames N      Frames to skip at EOF (default: 200)
   --decode-backend NAME     Must be pynvvc-luma; retained for command compatibility
   --gpu-id N                PyNvVC GPU id visible inside the job (default: 0)
-  --overwrite               Overwrite existing *_training.zarr outputs
+  --overwrite               Retired; exits with an error. Publish a new version.
 
 Registry/stimulus:
   --registry PATH           Registry sqlite path
@@ -132,6 +132,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage; exit 2;;
   esac
 done
+
+if [[ "$OVERWRITE" == "1" ]]; then
+  echo "--overwrite is retired; publish a new versioned training artifact instead" >&2
+  exit 2
+fi
 
 if [[ "$DECODE_BACKEND" != "pynvvc-luma" ]]; then
   echo "Unsupported import backend: $DECODE_BACKEND (only pynvvc-luma is supported)" >&2
@@ -295,10 +300,14 @@ echo "started_utc=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 task_log_dir="\${RUN_DIR}/task_logs/\$(printf '%04d' "\${LSB_JOBINDEX}")"
 mkdir -p "\$task_log_dir"
 
+node_scratch="\${TMPDIR:?LSF TMPDIR is required for atomic base publication}/palette-sampled-training-base-\${LSB_JOBID:-unknown}-\${LSB_JOBINDEX}"
+mkdir -p "\$node_scratch"
+
 scripts/py -m fisheye.utils.import_recordings_training ${ROOT_Q} \
   --path-contains "\$recording_dir" \
   --limit 1 \
   --log-dir "\$task_log_dir" \
+  --scratch-root "\$node_scratch" \
   ${IMPORT_ARGS_SHELL}--apply
 
 echo "finished_utc=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -373,6 +382,7 @@ payload = {
     "include_acquisition_crop_video": include_acquisition_crop_video == "1",
     "acquisition_crop_run_prefix": acquisition_crop_run_prefix,
     "overwrite_acquisition_crop_run": overwrite_acquisition_crop_run == "1",
+    "atomic_base_publication": True,
     "job_script": job_script,
     "targets_file": targets_file,
     "plan_json": plan_json,
@@ -416,6 +426,7 @@ echo "Resources: ncores=$NCORES mem_gb=$MEM_GB walltime=$WALLTIME"
 echo "Max active: $MAX_ACTIVE"
 echo "Decode backend: $DECODE_BACKEND"
 echo "Include acquisition crop video: $([[ "$INCLUDE_ACQUISITION_CROP_VIDEO" == "1" ]] && echo "$ACQUISITION_CROP_RUN_PREFIX" || echo "<disabled>")"
+echo "Atomic base publication: node-local checked publish (required)"
 echo "Per-target command: $IMPORT_CMD"
 echo "Submit command: $BSUB_CMD"
 

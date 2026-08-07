@@ -26,11 +26,14 @@ imports. Use it when a recording has one manageable MP4 per camera. Rolling
 segments or when clip-local parallel processing is the workflow target.
 
 ```bash
-scripts/py -m fisheye.utils.import_sampled_training_pynvvc \
-  /path/to/Cam2010093.mp4 \
-  /path/to/output/training_sample.zarr \
+scripts/py -m fisheye.utils.publish_sampled_training_base \
+  --video-path /path/to/Cam2010093.mp4 \
+  --destination /path/to/output/training_sample.zarr \
+  --scratch-root /path/to/local/scratch/training-sample \
   --source-frame-count 54000 \
   --frame-step 100 \
+  --recording-dir /path/to/recording \
+  --camera-id 2010093 \
   --config configs/fisheye/import_local.yaml
 ```
 
@@ -38,7 +41,8 @@ This imports every 100th frame (frames 0, 100, 200, ...) from the video.
 
 ### Required flags
 
-`--source-frame-count` and `--frame-step` are both required. Organized batch
+`--source-frame-count`, `--frame-step`, and bounded local `--scratch-root` are
+required. Organized batch
 imports resolve the source count from the recording manifest; direct imports
 require it explicitly so an incomplete decode cannot masquerade as success.
 
@@ -46,14 +50,17 @@ require it explicitly so an incomplete decode cannot masquerade as success.
 
 | Argument | Description |
 |----------|-------------|
-| `video_path` | Source video file (first positional, required) |
-| `zarr_path` | Output Zarr path (second positional, required) |
+| `--video-path PATH` | Source video file |
+| `--destination PATH` | New versioned output Zarr path |
+| `--scratch-root PATH` | Bounded node-local construction directory |
 | `--source-frame-count N` | Canonical acquisition frame count |
 | `--frame-step N` | Import every Nth frame (e.g. 100 = frames 0, 100, 200, ...) |
 | `--config PATH` | Import config YAML (controls resolution, format, chunking) |
 | `--skip-tail-frames N` | Skip the last N frames (default: 0). See [below](#tail-frame-issues) |
-| `--overwrite` | Delete existing Zarr before importing |
 | `--gpu-id N` | CUDA device visible to PyNvVC |
+
+Direct construction into the destination and overwrite-in-place are retired.
+The low-level PyNvVideoCodec importer is used only inside the atomic publisher.
 
 ### Choosing a frame step
 
@@ -86,6 +93,7 @@ scripts/py -m fisheye.utils.intake_video_only_recording \
   /nvme1/recordings/<recording>/cams/Cam2010093_<recording>.mp4 \
   --recording-dir /nvme1/recordings/<recording> \
   --zarr-path /nvme1/recordings/<recording>/zarr/<recording>_training.zarr \
+  --scratch-root /nvme1/palette_staging/sampled-training/<recording> \
   --frame-step 5000 \
   --skip-tail-frames 0 \
   --session-uuid <recording> \
@@ -127,6 +135,7 @@ planning:
 scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
   --path-contains GoodCopBadCop \
   --target-sampled-frames 200 \
+  --scratch-root /nvme1/palette_staging/sampled-training/goodcopbadcop-smoke \
   --dry-run
 ```
 
@@ -268,6 +277,7 @@ output Zarr would go. Add `--rich` for a formatted table view.
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
+  --scratch-root /nvme1/palette_staging/sampled-training/batch-001 \
   --apply
 ```
 
@@ -299,7 +309,7 @@ wrapper only after deciding the metadata policy for that batch.
 | `--skip-tail-frames N` | 200 | Skip last N frames (higher default than single-video) |
 | `--config PATH` | `configs/fisheye/import_local.yaml` | Import config |
 | `--recursive` | off | Search recordings root recursively |
-| `--overwrite` | off | Re-import over existing Zarrs |
+| `--scratch-root PATH` | required on apply | Bounded node-local atomic construction root |
 | `--no-skip-existing` | off | Attempt import even if Zarr exists |
 | `--import-stimulus` | off | Also import stimulus events from the H5 |
 | `--stimulus-always` | off | Re-import stimulus even if already present |
@@ -315,6 +325,7 @@ etc.) and you want stimulus event tables available for analysis, add
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
+  --scratch-root /nvme1/palette_staging/sampled-training/batch-002 \
   --import-stimulus \
   --apply
 ```
@@ -435,11 +446,13 @@ If you see decoding errors near the end of an import, try increasing
 `--skip-tail-frames`:
 
 ```bash
-scripts/py -m fisheye.utils.import_sampled_training_pynvvc \
-  /path/to/video.mp4 \
-  /path/to/output.zarr \
+scripts/py -m fisheye.utils.publish_sampled_training_base \
+  --video-path /path/to/video.mp4 \
+  --destination /path/to/output.zarr \
+  --scratch-root /path/to/local/scratch/output \
   --source-frame-count 54000 \
   --frame-step 100 \
+  --recording-dir /path/to/recording \
   --skip-tail-frames 500
 ```
 

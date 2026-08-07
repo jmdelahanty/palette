@@ -168,8 +168,11 @@ def test_build_plans_limit_applies_after_path_filter(tmp_path: Path) -> None:
     assert plans[0].recording_dir == target
 
 
-def test_run_import_uses_pynvvc_backend_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _write_recording(tmp_path, "rec_pynvvc_GoodCopBadCop", frame_count=100)
+def test_run_import_uses_atomic_base_publisher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rec = _write_recording(tmp_path, "rec_atomic_Batman", frame_count=100)
     plan = mod._build_plans(
         tmp_path,
         recursive=False,
@@ -177,8 +180,8 @@ def test_run_import_uses_pynvvc_backend_command(tmp_path: Path, monkeypatch: pyt
         check_stimulus=False,
         requested_frame_step=10,
         target_sampled_frames=None,
-        skip_tail_frames=0,
-        path_contains="GoodCopBadCop",
+        skip_tail_frames=2,
+        path_contains="Batman",
         require_source_frame_count=True,
     )[0]
     calls: list[list[str]] = []
@@ -188,27 +191,51 @@ def test_run_import_uses_pynvvc_backend_command(tmp_path: Path, monkeypatch: pyt
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    scratch = tmp_path / "node-scratch"
 
     success, returncode = mod._run_import(
         plan,
         config_path=Path("configs/fisheye/import_local.yaml"),
         overwrite=False,
-        skip_tail_frames=0,
+        skip_tail_frames=2,
         decode_backend=mod.DECODE_BACKEND_PYNVVC_LUMA,
-        gpu_id=2,
+        gpu_id=1,
+        scratch_root=scratch,
     )
 
     assert success is True
     assert returncode == 0
     cmd = calls[0]
-    assert cmd[:3] == [sys.executable, "-m", "fisheye.utils.import_sampled_training_pynvvc"]
-    assert str(rec / "cams" / "Cam2010093_demo.mp4") in cmd
-    assert "--source-frame-count" in cmd
-    assert "100" in cmd
-    assert "--frame-step" in cmd
-    assert "10" in cmd
-    assert "--gpu-id" in cmd
-    assert "2" in cmd
+    assert cmd[:3] == [
+        sys.executable,
+        "-m",
+        "fisheye.utils.publish_sampled_training_base",
+    ]
+    assert cmd[cmd.index("--destination") + 1] == str(plan.zarr_path)
+    assert cmd[cmd.index("--scratch-root") + 1] == str(scratch)
+    assert cmd[cmd.index("--video-path") + 1] == str(
+        rec / "cams" / "Cam2010093_demo.mp4"
+    )
+    assert cmd[cmd.index("--camera-id") + 1] == "2010093"
+    assert cmd[cmd.index("--skip-tail-frames") + 1] == "2"
+
+
+def test_atomic_base_publication_apply_requires_scratch(tmp_path: Path) -> None:
+    _write_recording(tmp_path, "rec_atomic_Batman", frame_count=100)
+
+    result = mod.main(
+        [
+            str(tmp_path),
+            "--path-contains",
+            "Batman",
+            "--frame-step",
+            "10",
+            "--apply",
+            "--no-log",
+        ]
+    )
+
+    assert result == 1
 
 
 def test_run_acquisition_crop_video_append_uses_recording_scoped_run_name(
