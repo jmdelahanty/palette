@@ -22,7 +22,7 @@ corpus-wide count.
 The five-point pool contains 12,867 total pose rows; 163 are excluded by the
 persisted usable-row gates. Its source-composition SHA-256 is:
 
-`eb3baa8aeb58b619bc17f5283fa5764e01113983250028be368f91d745143941`
+`f07e3127f5b2c2e3fb55881962eccbf1df0ac7c0dacf41457d8d969460302323`
 
 That digest covers each source dataset, recording, path, refined run, usable
 row count, usable-row identity digest, pixel contract, and conservative split
@@ -99,8 +99,13 @@ input.
 Pose supervision and upstream detection lineage have different eligibility
 requirements. Forty-six historical sources contain at least one usable pose row
 whose crop cannot be joined to either a stable refined-detection row or a raw
-detection row. In total, 3,252 of 12,704 usable pose rows require the explicit
+detection row. In total, 3,047 of 12,704 usable pose rows require the explicit
 sample identity fallback `(recording, acquisition frame, crop row)`.
+
+An earlier census pass reported 3,252. Exact direct-array validation found that
+one legacy crop had 205 valid lineage rows added after its inline consolidated
+snapshot. The corrected census probes each array node directly; the prior
+composition digest is superseded and must not be used for final publication.
 
 Those rows remain valid for pose-only training: their pixels, five keypoints,
 recording, frame, and crop row are exact and non-duplicated. They are not valid

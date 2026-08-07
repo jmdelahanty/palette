@@ -2895,6 +2895,9 @@ def _publish_immutable_merged(
     target = out_zarr.expanduser().resolve()
     if target.exists():
         raise FileExistsError(f"Immutable merged training destination exists: {target}")
+    source_manifest = manifest_path.expanduser().resolve()
+    source_manifest_sha256 = _sha256(source_manifest)
+    published_source_manifest = target.with_name(f"{target.stem}.source_manifest.json")
 
     with tempfile.TemporaryDirectory(
         prefix="palette-keypoint-merge-v3-", dir=str(scratch)
@@ -2949,10 +2952,10 @@ def _publish_immutable_merged(
                 "registry_activation": "deferred",
                 "immutable_training_publication": {
                     "schema_id": "palette.immutable_merged_keypoint_training_publication",
-                    "schema_version": 1,
-                    "policy": "node_local_build_then_checked_hidden_sibling_rename_v1",
-                    "manifest_path": str(manifest_path.expanduser().resolve()),
-                    "manifest_sha256": _sha256(manifest_path),
+                    "schema_version": 2,
+                    "policy": "node_local_build_then_manifest_and_checked_hidden_sibling_rename_v2",
+                    "manifest_path": str(published_source_manifest),
+                    "manifest_sha256": source_manifest_sha256,
                     "task": "keypoints",
                     "source_count": int(len(result.source_specs)),
                     "sample_count": int(result.total_samples),
@@ -2980,12 +2983,34 @@ def _publish_immutable_merged(
         hidden = target.with_name(
             f".{target.name}.publish_tmp.{os.getpid()}.{uuid.uuid4().hex}"
         )
+        hidden_manifest = published_source_manifest.with_name(
+            f".{published_source_manifest.name}.publish_tmp."
+            f"{os.getpid()}.{uuid.uuid4().hex}"
+        )
         with archive_metadata_publication_lock(target):
             if target.exists() or hidden.exists():
                 raise FileExistsError(
                     f"Immutable merged training target became occupied: {target}"
                 )
+            manifest_created = False
             try:
+                if source_manifest != published_source_manifest:
+                    if published_source_manifest.exists() or hidden_manifest.exists():
+                        raise FileExistsError(
+                            "Immutable merged training source-manifest destination "
+                            f"exists: {published_source_manifest}"
+                        )
+                    shutil.copy2(source_manifest, hidden_manifest)
+                    if _sha256(hidden_manifest) != source_manifest_sha256:
+                        raise RuntimeError(
+                            "Published source-manifest copy differs from its input."
+                        )
+                    os.replace(hidden_manifest, published_source_manifest)
+                    manifest_created = True
+                elif _sha256(published_source_manifest) != source_manifest_sha256:
+                    raise RuntimeError(
+                        "Published source manifest changed during publication."
+                    )
                 shutil.copytree(local, hidden)
                 if tree_inventory(hidden, hash_content=True) != local_inventory:
                     raise RuntimeError(
@@ -3020,6 +3045,10 @@ def _publish_immutable_merged(
             except Exception:
                 if hidden.exists():
                     shutil.rmtree(hidden)
+                if hidden_manifest.exists():
+                    hidden_manifest.unlink()
+                if manifest_created and published_source_manifest.exists():
+                    published_source_manifest.unlink()
                 raise
 
     validate_merged_keypoint_training_zarr(

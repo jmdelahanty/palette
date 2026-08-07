@@ -996,13 +996,20 @@ def test_immutable_v3_publication_is_consolidated_and_selector_ineligible(
     assert np.asarray(
         direct["source_index/source_acquisition_frame_index"][:], dtype=np.int64
     ).tolist() == [100, 101, 103, 100, 101, 103]
-    assert consolidated.attrs["immutable_training_publication"]["task"] == "keypoints"
-    publication_validation = consolidated.attrs["immutable_training_publication"][
-        "validation"
-    ]
+    publication = consolidated.attrs["immutable_training_publication"]
+    assert publication["task"] == "keypoints"
+    assert publication["schema_version"] == 2
+    published_source_manifest = target.with_name(f"{target.stem}.source_manifest.json")
+    assert published_source_manifest.read_bytes() == manifest_path.read_bytes()
+    assert publication["manifest_path"] == str(published_source_manifest.resolve())
+    assert publication["manifest_sha256"] == mod._sha256(published_source_manifest)
+    publication_validation = publication["validation"]
     assert publication_validation["published_zarr_path"] == str(target.resolve())
     assert "zarr_path" not in publication_validation
     assert not list(target.parent.glob(f".{target.name}.publish_tmp.*"))
+    assert not list(
+        target.parent.glob(f".{published_source_manifest.name}.publish_tmp.*")
+    )
 
 
 def test_v3_leakage_group_keeps_related_sources_in_one_split(tmp_path: Path) -> None:

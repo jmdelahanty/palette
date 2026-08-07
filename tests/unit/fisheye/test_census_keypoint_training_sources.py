@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import zarr
 
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.utils import census_keypoint_training_sources as census
 
 
@@ -65,6 +67,26 @@ def test_frame_domain_distinguishes_local_and_acquisition_indices() -> None:
         )
         == "mismatch"
     )
+
+
+def test_direct_array_probe_sees_lineage_hidden_from_inline_snapshot(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "source.zarr"
+    root = zarr.open_group(str(archive), mode="w")
+    crop = root.create_group("crop_runs").create_group("crop_001")
+    crop.create_array("roi_images", data=np.zeros((2, 4, 4), dtype=np.uint8))
+    zarr.consolidate_metadata(str(archive))
+
+    direct = open_zarr_group_direct(archive / "crop_runs" / "crop_001", mode="r+")
+    direct.create_array(
+        "source_refined_row_ids",
+        data=np.asarray([11, -1], dtype=np.int64),
+    )
+
+    relative = "crop_runs/crop_001/source_refined_row_ids"
+    assert census._node_array_exists(archive, relative)
+    assert census._direct_int_array(archive, relative).tolist() == [11, -1]
 
 
 def test_historical_comparison_reports_split_leakage_and_mixed_frame_domains(

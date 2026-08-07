@@ -235,6 +235,28 @@ def _int_array(group: Any, path: str, *, dtype: Any = np.int64) -> np.ndarray:
     return np.asarray(group[path][:], dtype=dtype)
 
 
+def _node_array_exists(zarr_path: Path, relative_path: str) -> bool:
+    node = zarr_path / relative_path
+    return (node / "zarr.json").is_file() or (node / ".zarray").is_file()
+
+
+def _open_group_direct(zarr_path: Path, relative_path: str) -> Any:
+    return open_zarr_group_direct(zarr_path / relative_path, mode="r")
+
+
+def _open_array_direct(zarr_path: Path, relative_path: str) -> Any:
+    group_path, separator, array_name = str(relative_path).rpartition("/")
+    if not separator or not group_path or not array_name:
+        raise ValueError(f"Array path must include a group: {relative_path!r}")
+    return _open_group_direct(zarr_path, group_path)[array_name]
+
+
+def _direct_int_array(
+    zarr_path: Path, relative_path: str, *, dtype: Any = np.int64
+) -> np.ndarray:
+    return np.asarray(_open_array_direct(zarr_path, relative_path)[:], dtype=dtype)
+
+
 def _source_record(
     row: Mapping[str, Any],
     *,
@@ -246,12 +268,11 @@ def _source_record(
     recording_id = str(row["recording_id"])
     zarr_path = Path(str(row["zarr_path"]))
     refined_run = str(row["refined_run"])
-    root = open_zarr_group_direct(zarr_path, mode="r")
     refined_path = f"refined_keypoints_runs/{refined_run}"
-    if refined_path not in root:
+    if not (zarr_path / refined_path / "zarr.json").is_file():
         raise ValueError(f"Missing reviewed refined run: {zarr_path}:{refined_path}")
-    refined = root[refined_path]
-    keypoints_array = refined["keypoints_roi"]
+    refined = _open_group_direct(zarr_path, refined_path)
+    keypoints_array = _open_array_direct(zarr_path, f"{refined_path}/keypoints_roi")
     shape = tuple(int(value) for value in keypoints_array.shape)
     if len(shape) != 3:
         raise ValueError(f"{zarr_path}:{refined_path}/keypoints_roi is not rank 3")
@@ -334,13 +355,13 @@ def _source_record(
         crop_snapshot = {}
     crop_run = str(attrs.get("source_crop_run") or crop_snapshot.get("run_id") or "")
     crop_path = f"crop_runs/{crop_run}"
-    if not crop_run or crop_path not in root:
+    if not crop_run or not (zarr_path / crop_path / "zarr.json").is_file():
         raise ValueError(
             f"{zarr_path}:{refined_path} has no resolvable source crop run"
         )
-    crop = root[crop_path]
+    crop = _open_group_direct(zarr_path, crop_path)
     crop_attrs = dict(crop.attrs)
-    roi_images = crop["roi_images"]
+    roi_images = _open_array_direct(zarr_path, f"{crop_path}/roi_images")
     roi_shape = tuple(int(value) for value in roi_images.shape)
     if len(roi_shape) != 3:
         problems.append("roi_images_not_rank_3")
@@ -377,14 +398,17 @@ def _source_record(
         contract_source = "missing"
         problems.append("pixel_contract_missing")
 
-    usable = np.asarray(refined["usable_keypoints"][:], dtype=np.bool_)
+    usable = np.asarray(
+        _open_array_direct(zarr_path, f"{refined_path}/usable_keypoints")[:],
+        dtype=np.bool_,
+    )
     keypoints = np.asarray(keypoints_array[:])
-    frame_local = _int_array(refined, "frame_indices")
-    if "source_crop_row_ids" in refined:
-        roi_index = _int_array(refined, "source_crop_row_ids")
+    frame_local = _direct_int_array(zarr_path, f"{refined_path}/frame_indices")
+    if _node_array_exists(zarr_path, f"{refined_path}/source_crop_row_ids"):
+        roi_index = _direct_int_array(zarr_path, f"{refined_path}/source_crop_row_ids")
         roi_index_path = f"{refined_path}/source_crop_row_ids"
-    elif "detection_indices" in refined:
-        roi_index = _int_array(refined, "detection_indices")
+    elif _node_array_exists(zarr_path, f"{refined_path}/detection_indices"):
+        roi_index = _direct_int_array(zarr_path, f"{refined_path}/detection_indices")
         roi_index_path = f"{refined_path}/detection_indices"
     else:
         roi_index = np.arange(shape[0], dtype=np.int64)
@@ -399,16 +423,18 @@ def _source_record(
 
     direct_acquisition_path = f"{refined_path}/source_acquisition_frame_index"
     original_frame_path = "raw_video/original_frame_indices"
-    if "source_acquisition_frame_index" in refined:
-        acquisition_frame = _int_array(refined, "source_acquisition_frame_index")
+    if _node_array_exists(zarr_path, f"{refined_path}/source_acquisition_frame_index"):
+        acquisition_frame = _direct_int_array(
+            zarr_path, f"{refined_path}/source_acquisition_frame_index"
+        )
         if acquisition_frame.shape != (shape[0],):
             problems.append("source_acquisition_frame_index_length_mismatch")
             acquisition_frame = frame_local.copy()
             acquisition_source = "unresolved_source_acquisition_frame_index"
         else:
             acquisition_source = direct_acquisition_path
-    elif original_frame_path in root:
-        original_frames = _int_array(root, original_frame_path)
+    elif _node_array_exists(zarr_path, original_frame_path):
+        original_frames = _direct_int_array(zarr_path, original_frame_path)
         if frame_local.size and (
             int(frame_local.min()) < 0
             or int(frame_local.max()) >= int(original_frames.shape[0])
@@ -432,13 +458,17 @@ def _source_record(
         source_refined = np.full(shape[0], -1, dtype=np.int64)
     else:
         source_detect = (
-            _int_array(crop, "source_detect_row_index")[roi_index]
-            if "source_detect_row_index" in crop
+            _direct_int_array(zarr_path, f"{crop_path}/source_detect_row_index")[
+                roi_index
+            ]
+            if _node_array_exists(zarr_path, f"{crop_path}/source_detect_row_index")
             else np.full(shape[0], -1, dtype=np.int64)
         )
         source_refined = (
-            _int_array(crop, "source_refined_row_ids")[roi_index]
-            if "source_refined_row_ids" in crop
+            _direct_int_array(zarr_path, f"{crop_path}/source_refined_row_ids")[
+                roi_index
+            ]
+            if _node_array_exists(zarr_path, f"{crop_path}/source_refined_row_ids")
             else np.full(shape[0], -1, dtype=np.int64)
         )
 

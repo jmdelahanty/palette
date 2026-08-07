@@ -1,6 +1,6 @@
 # Task-specific merged keypoint training v3 — 2026-08-07
 
-Status: **IMPLEMENTED AND EXACT PREFLIGHT PASSED; PUBLICATION PENDING**
+Status: **IMPLEMENTED; CORRECTED V2 SOURCE RECEIPT PREFLIGHT PASSED; FINAL PUBLICATION PENDING**
 
 ## Goal
 
@@ -63,6 +63,11 @@ use the checked float32 conversion already validated by v2.
 The publication remains selector-ineligible and absent from the registry until
 training/evaluation review explicitly activates it.
 
+Immutable publication copies the complete 61-source input manifest to a
+versioned sibling of the Zarr and binds that durable path and SHA-256 inside
+the sealed root metadata. A node-local or `/tmp` manifest path is not the final
+provenance reference.
+
 ## Checklist
 
 - [x] Add exact dual frame-domain arrays.
@@ -85,11 +90,11 @@ training/evaluation review explicitly activates it.
 
 The source-composition digest remains:
 
-`eb3baa8aeb58b619bc17f5283fa5764e01113983250028be368f91d745143941`
+`f07e3127f5b2c2e3fb55881962eccbf1df0ac7c0dacf41457d8d969460302323`
 
 The composed manifest has composition digest:
 
-`2eea075db7c0876b136ff5803de4e40c408ec311866eb3c631df34f982545654`
+`25ca6294d51e3e5a1f04c519cc34610b44ec728e6db98a1bc4cfcd8b40bf15da`
 
 The fail-closed dry run resolved all 61 exact source paths and reviewed runs,
 selected 12,704 usable rows, grouped them into 29 leakage groups, and produced
@@ -98,3 +103,10 @@ preflight, stale ancestor inline metadata was proven capable of hiding both a
 current crop pixel contract and the census-selected five-keypoint refined run.
 Source discovery now opens each mutable run group at its exact direct path and
 never substitutes another refined run for an explicit census binding.
+
+The selector-ineligible `v001` artifact proved the write and validation path,
+but its source census conservatively missed 205 lineage IDs hidden by a stale
+inline snapshot and its bound source-manifest path was node-local. It remains
+immutable benchmark evidence and is superseded by `v002`; it is not eligible
+for registration or model training claims. The corrected census reports 3,047
+pose-only rows without detection identity, matching the actual merged arrays.
