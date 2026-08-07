@@ -7945,3 +7945,195 @@ class RegistryMigrationMixin:
              AND ac.manifest_sha256 = ae.collection_manifest_sha256;
             """
         )
+
+    def _migration_063_recording_subject_traits(self) -> None:
+        """Store observed subject traits without conflating them with genotype."""
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_subject_traits (
+                recording_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                trait_name TEXT NOT NULL,
+                trait_value TEXT NOT NULL,
+                vocabulary_id TEXT,
+                vocabulary_version TEXT,
+                assignment_method TEXT NOT NULL,
+                assigned_by TEXT,
+                assigned_at_utc TEXT NOT NULL,
+                evidence_json TEXT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL,
+                PRIMARY KEY (recording_id, subject_id, trait_name),
+                FOREIGN KEY(recording_id, subject_id)
+                    REFERENCES recording_subjects(recording_id, subject_id)
+                    ON DELETE CASCADE,
+                CHECK(length(trim(trait_name)) > 0),
+                CHECK(length(trim(trait_value)) > 0),
+                CHECK(length(trim(assignment_method)) > 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_subject_traits_lookup
+            ON recording_subject_traits(trait_name, trait_value, recording_id, subject_id);
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_subject_trait_overview;")
+        cur.execute(
+            """
+            CREATE VIEW recording_subject_trait_overview AS
+            SELECT
+                rst.recording_id,
+                rst.subject_id,
+                rs.dataset_id,
+                rst.trait_name,
+                rst.trait_value,
+                rst.vocabulary_id,
+                rst.vocabulary_version,
+                rst.assignment_method,
+                rst.assigned_by,
+                rst.assigned_at_utc,
+                rst.evidence_json,
+                rst.created_utc,
+                rst.updated_utc
+            FROM recording_subject_traits rst
+            JOIN recording_subjects rs
+              ON rs.recording_id = rst.recording_id
+             AND rs.subject_id = rst.subject_id;
+            """
+        )
+
+    def _migration_064_strain_trait_expectations(self) -> None:
+        """Add strain defaults and the observation-over-default resolution view."""
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS strain_label_mappings (
+                species TEXT NOT NULL,
+                source_label TEXT NOT NULL,
+                canonical_strain TEXT NOT NULL,
+                assignment_method TEXT NOT NULL,
+                assigned_by TEXT,
+                assigned_at_utc TEXT NOT NULL,
+                evidence_json TEXT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL,
+                PRIMARY KEY (species, source_label),
+                CHECK(length(trim(species)) > 0),
+                CHECK(length(trim(source_label)) > 0),
+                CHECK(length(trim(canonical_strain)) > 0),
+                CHECK(length(trim(assignment_method)) > 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_strain_label_mappings_canonical
+            ON strain_label_mappings(species, canonical_strain, source_label);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS strain_trait_expectations (
+                species TEXT NOT NULL,
+                canonical_strain TEXT NOT NULL,
+                trait_name TEXT NOT NULL,
+                trait_value TEXT NOT NULL,
+                vocabulary_id TEXT,
+                vocabulary_version TEXT,
+                assignment_method TEXT NOT NULL,
+                assigned_by TEXT,
+                assigned_at_utc TEXT NOT NULL,
+                evidence_json TEXT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL,
+                PRIMARY KEY (species, canonical_strain, trait_name),
+                CHECK(length(trim(species)) > 0),
+                CHECK(length(trim(canonical_strain)) > 0),
+                CHECK(length(trim(trait_name)) > 0),
+                CHECK(length(trim(trait_value)) > 0),
+                CHECK(length(trim(assignment_method)) > 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_strain_trait_expectations_lookup
+            ON strain_trait_expectations(
+                trait_name, trait_value, species, canonical_strain
+            );
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_subject_trait_resolved;")
+        cur.execute(
+            """
+            CREATE VIEW recording_subject_trait_resolved AS
+            SELECT
+                rst.recording_id,
+                rst.subject_id,
+                rso.dataset_id,
+                rso.species,
+                rso.line_strain AS source_line_strain,
+                slm.canonical_strain,
+                rst.trait_name,
+                rst.trait_value,
+                rst.vocabulary_id,
+                rst.vocabulary_version,
+                'subject_observed' AS value_origin,
+                rst.assignment_method,
+                rst.assigned_by,
+                rst.assigned_at_utc,
+                rst.evidence_json
+            FROM recording_subject_traits rst
+            JOIN recording_subject_overview rso
+              ON rso.recording_id = rst.recording_id
+             AND rso.subject_id = rst.subject_id
+            LEFT JOIN strain_label_mappings slm
+              ON slm.species = rso.species
+             AND slm.source_label = rso.line_strain
+
+            UNION ALL
+
+            SELECT
+                rso.recording_id,
+                rso.subject_id,
+                rso.dataset_id,
+                rso.species,
+                rso.line_strain AS source_line_strain,
+                slm.canonical_strain,
+                ste.trait_name,
+                ste.trait_value,
+                ste.vocabulary_id,
+                ste.vocabulary_version,
+                'strain_expected' AS value_origin,
+                ste.assignment_method,
+                ste.assigned_by,
+                ste.assigned_at_utc,
+                ste.evidence_json
+            FROM recording_subject_overview rso
+            JOIN strain_label_mappings slm
+              ON slm.species = rso.species
+             AND slm.source_label = rso.line_strain
+            JOIN strain_trait_expectations ste
+              ON ste.species = slm.species
+             AND ste.canonical_strain = slm.canonical_strain
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM recording_subject_traits rst
+                WHERE rst.recording_id = rso.recording_id
+                  AND rst.subject_id = rso.subject_id
+                  AND rst.trait_name = ste.trait_name
+            );
+            """
+        )
+
+    def _migration_065_subject_trait_schema_reconcile(self) -> None:
+        """Materialize trait tables skipped by historical legacy bootstrap."""
+
+        self.conn.execute("DROP VIEW IF EXISTS recording_subject_trait_resolved;")
+        self._migration_063_recording_subject_traits()
+        self._migration_064_strain_trait_expectations()

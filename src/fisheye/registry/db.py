@@ -52,6 +52,93 @@ EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
     "Standalone eye-mask registry write paths are retired. Historical "
     "eye_mask_* rows remain readable, but new rows must not be created."
 )
+PIGMENTATION_PHENOTYPE_TRAIT_NAME = "pigmentation_phenotype"
+PIGMENTATION_PHENOTYPE_VOCABULARY_ID = "palette.pigmentation_phenotype.v1"
+PIGMENTATION_PHENOTYPE_VALUES = frozenset(
+    {
+        "wild_type_pigmented",
+        "hypopigmented",
+        "amelanotic",
+        "hyperpigmented",
+        "transparent",
+        "altered_pattern",
+        "mosaic",
+        "other",
+        "unknown",
+    }
+)
+PIGMENT_CELL_STATUS_VOCABULARY_ID = "palette.pigment_cell_status.v1"
+PIGMENT_CELL_STATUS_VALUES = frozenset(
+    {"normal", "reduced", "absent", "increased", "altered_distribution", "unknown"}
+)
+PIGMENT_PATTERN_STATUS_VOCABULARY_ID = "palette.pigment_pattern_status.v1"
+PIGMENT_PATTERN_STATUS_VALUES = frozenset(
+    {"wild_type", "altered", "mosaic", "unknown"}
+)
+OPTICAL_TRANSPARENCY_VOCABULARY_ID = "palette.optical_transparency.v1"
+OPTICAL_TRANSPARENCY_VALUES = frozenset(
+    {"normal", "partially_transparent", "transparent", "unknown"}
+)
+PIGMENTATION_TRAIT_VOCABULARIES: Mapping[str, tuple[str, frozenset[str]]] = {
+    PIGMENTATION_PHENOTYPE_TRAIT_NAME: (
+        PIGMENTATION_PHENOTYPE_VOCABULARY_ID,
+        PIGMENTATION_PHENOTYPE_VALUES,
+    ),
+    "melanophore_status": (
+        PIGMENT_CELL_STATUS_VOCABULARY_ID,
+        PIGMENT_CELL_STATUS_VALUES,
+    ),
+    "xanthophore_status": (
+        PIGMENT_CELL_STATUS_VOCABULARY_ID,
+        PIGMENT_CELL_STATUS_VALUES,
+    ),
+    "iridophore_status": (
+        PIGMENT_CELL_STATUS_VOCABULARY_ID,
+        PIGMENT_CELL_STATUS_VALUES,
+    ),
+    "pigment_pattern_status": (
+        PIGMENT_PATTERN_STATUS_VOCABULARY_ID,
+        PIGMENT_PATTERN_STATUS_VALUES,
+    ),
+    "optical_transparency": (
+        OPTICAL_TRANSPARENCY_VOCABULARY_ID,
+        OPTICAL_TRANSPARENCY_VALUES,
+    ),
+}
+
+
+def _validate_trait_assignment(
+    *,
+    trait_name: str,
+    trait_value: str,
+    vocabulary_id: Optional[str],
+) -> tuple[str, str, Optional[str]]:
+    normalized_name = str(trait_name).strip().lower()
+    normalized_value = str(trait_value).strip().lower()
+    if (
+        not normalized_name
+        or not normalized_name[0].isalpha()
+        or any(not (char.isalnum() or char == "_") for char in normalized_name)
+    ):
+        raise ValueError("trait_name must be a lower-snake-case identifier.")
+    if not normalized_value:
+        raise ValueError("trait_value must not be empty.")
+
+    vocabulary = PIGMENTATION_TRAIT_VOCABULARIES.get(normalized_name)
+    if vocabulary is None:
+        return normalized_name, normalized_value, vocabulary_id
+    expected_vocabulary_id, allowed_values = vocabulary
+    if normalized_value not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ValueError(
+            f"Unsupported {normalized_name} value {normalized_value!r}; "
+            f"expected one of: {allowed}."
+        )
+    if vocabulary_id is not None and str(vocabulary_id).strip() != expected_vocabulary_id:
+        raise ValueError(
+            f"{normalized_name} requires vocabulary_id={expected_vocabulary_id!r}."
+        )
+    return normalized_name, normalized_value, expected_vocabulary_id
 
 
 def _raise_eye_mask_registry_writes_retired() -> NoReturn:
@@ -3324,6 +3411,212 @@ class Registry(RegistryMigrationMixin):
                     now,
                 ),
             )
+        self._commit_if_standalone()
+
+    def upsert_strain_label_mapping(
+        self,
+        *,
+        species: str,
+        source_label: str,
+        canonical_strain: str,
+        assignment_method: str,
+        assigned_by: Optional[str] = None,
+        assigned_at_utc: Optional[str] = None,
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Map one exact source husbandry label to a canonical strain name.
+
+        The mapping is exact and does not parse stock, colony, or cohort
+        semantics from the source label.
+        """
+
+        normalized_species = str(species).strip()
+        normalized_source_label = str(source_label).strip()
+        normalized_canonical_strain = str(canonical_strain).strip()
+        normalized_method = str(assignment_method).strip().lower()
+        if not normalized_species:
+            raise ValueError("species must not be empty.")
+        if not normalized_source_label:
+            raise ValueError("source_label must not be empty.")
+        if not normalized_canonical_strain:
+            raise ValueError("canonical_strain must not be empty.")
+        if not normalized_method:
+            raise ValueError("assignment_method must not be empty.")
+
+        now = _utc_now()
+        assigned_at = str(assigned_at_utc).strip() if assigned_at_utc else now
+        self.conn.execute(
+            """
+            INSERT INTO strain_label_mappings (
+                species, source_label, canonical_strain, assignment_method,
+                assigned_by, assigned_at_utc, evidence_json,
+                created_utc, updated_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(species, source_label) DO UPDATE SET
+                canonical_strain=excluded.canonical_strain,
+                assignment_method=excluded.assignment_method,
+                assigned_by=excluded.assigned_by,
+                assigned_at_utc=excluded.assigned_at_utc,
+                evidence_json=excluded.evidence_json,
+                updated_utc=excluded.updated_utc;
+            """,
+            (
+                normalized_species,
+                normalized_source_label,
+                normalized_canonical_strain,
+                normalized_method,
+                str(assigned_by).strip() if assigned_by else None,
+                assigned_at,
+                _json_dumps(evidence),
+                now,
+                now,
+            ),
+        )
+        self._commit_if_standalone()
+
+    def upsert_strain_trait_expectation(
+        self,
+        *,
+        species: str,
+        canonical_strain: str,
+        trait_name: str,
+        trait_value: str,
+        assignment_method: str,
+        assigned_by: Optional[str] = None,
+        assigned_at_utc: Optional[str] = None,
+        vocabulary_id: Optional[str] = None,
+        vocabulary_version: Optional[str] = None,
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Upsert one expected trait for a canonical strain."""
+
+        normalized_species = str(species).strip()
+        normalized_canonical_strain = str(canonical_strain).strip()
+        normalized_name, normalized_value, resolved_vocabulary_id = (
+            _validate_trait_assignment(
+                trait_name=trait_name,
+                trait_value=trait_value,
+                vocabulary_id=vocabulary_id,
+            )
+        )
+        normalized_method = str(assignment_method).strip().lower()
+        if not normalized_species:
+            raise ValueError("species must not be empty.")
+        if not normalized_canonical_strain:
+            raise ValueError("canonical_strain must not be empty.")
+        if not normalized_method:
+            raise ValueError("assignment_method must not be empty.")
+
+        now = _utc_now()
+        assigned_at = str(assigned_at_utc).strip() if assigned_at_utc else now
+        self.conn.execute(
+            """
+            INSERT INTO strain_trait_expectations (
+                species, canonical_strain, trait_name, trait_value,
+                vocabulary_id, vocabulary_version, assignment_method,
+                assigned_by, assigned_at_utc, evidence_json,
+                created_utc, updated_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(species, canonical_strain, trait_name) DO UPDATE SET
+                trait_value=excluded.trait_value,
+                vocabulary_id=excluded.vocabulary_id,
+                vocabulary_version=excluded.vocabulary_version,
+                assignment_method=excluded.assignment_method,
+                assigned_by=excluded.assigned_by,
+                assigned_at_utc=excluded.assigned_at_utc,
+                evidence_json=excluded.evidence_json,
+                updated_utc=excluded.updated_utc;
+            """,
+            (
+                normalized_species,
+                normalized_canonical_strain,
+                normalized_name,
+                normalized_value,
+                resolved_vocabulary_id,
+                str(vocabulary_version).strip() if vocabulary_version else None,
+                normalized_method,
+                str(assigned_by).strip() if assigned_by else None,
+                assigned_at,
+                _json_dumps(evidence),
+                now,
+                now,
+            ),
+        )
+        self._commit_if_standalone()
+
+    def upsert_recording_subject_trait(
+        self,
+        *,
+        recording_id: str,
+        subject_id: str,
+        trait_name: str,
+        trait_value: str,
+        assignment_method: str,
+        assigned_by: Optional[str] = None,
+        assigned_at_utc: Optional[str] = None,
+        vocabulary_id: Optional[str] = None,
+        vocabulary_version: Optional[str] = None,
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Upsert one observed trait for a subject in a recording.
+
+        Traits intentionally live below ``recording_subjects``: an observed
+        phenotype may vary with age or acquisition context and must not be
+        inferred from a strain or genotype label.
+        """
+
+        normalized_recording_id = str(recording_id).strip()
+        normalized_subject_id = str(subject_id).strip()
+        normalized_name, normalized_value, resolved_vocabulary_id = (
+            _validate_trait_assignment(
+                trait_name=trait_name,
+                trait_value=trait_value,
+                vocabulary_id=vocabulary_id,
+            )
+        )
+        normalized_method = str(assignment_method).strip().lower()
+        if not normalized_recording_id or not normalized_subject_id:
+            raise ValueError("recording_id and subject_id must not be empty.")
+        if not normalized_method:
+            raise ValueError("assignment_method must not be empty.")
+
+        now = _utc_now()
+        assigned_at = str(assigned_at_utc).strip() if assigned_at_utc else now
+        if not assigned_at:
+            raise ValueError("assigned_at_utc must not be empty.")
+        self.conn.execute(
+            """
+            INSERT INTO recording_subject_traits (
+                recording_id, subject_id, trait_name, trait_value,
+                vocabulary_id, vocabulary_version, assignment_method,
+                assigned_by, assigned_at_utc, evidence_json,
+                created_utc, updated_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(recording_id, subject_id, trait_name) DO UPDATE SET
+                trait_value=excluded.trait_value,
+                vocabulary_id=excluded.vocabulary_id,
+                vocabulary_version=excluded.vocabulary_version,
+                assignment_method=excluded.assignment_method,
+                assigned_by=excluded.assigned_by,
+                assigned_at_utc=excluded.assigned_at_utc,
+                evidence_json=excluded.evidence_json,
+                updated_utc=excluded.updated_utc;
+            """,
+            (
+                normalized_recording_id,
+                normalized_subject_id,
+                normalized_name,
+                normalized_value,
+                resolved_vocabulary_id,
+                str(vocabulary_version).strip() if vocabulary_version else None,
+                normalized_method,
+                str(assigned_by).strip() if assigned_by else None,
+                assigned_at,
+                _json_dumps(evidence),
+                now,
+                now,
+            ),
+        )
         self._commit_if_standalone()
 
     def replace_detection_sources(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
