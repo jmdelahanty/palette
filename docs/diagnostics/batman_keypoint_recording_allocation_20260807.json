@@ -1,0 +1,205 @@
+{
+  "schema_id": "palette.keypoint_recording_allocation.v1",
+  "allocation_id": "batman_keypoints_recording_grouped_20260807_v1",
+  "created_at_utc": "2026-08-07T00:00:00Z",
+  "recording_table": "batman_keypoint_recording_allocation_20260807.csv",
+  "source": {
+    "registry_path": "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite",
+    "dataset_filter": {
+      "zarr_use": "analysis",
+      "zarr_path_contains": "Batman"
+    },
+    "recording_count": 36,
+    "session_count": 9,
+    "camera_ids": [
+      "2010093",
+      "2010094",
+      "2010095",
+      "2010096"
+    ]
+  },
+  "allocation_policy": {
+    "group_unit": "synchronized_acquisition_session",
+    "maximum_start_time_skew_seconds": 1,
+    "subject_identity_cross_role_overlap_allowed": false,
+    "frame_level_random_split_allowed": false,
+    "development_corrections_may_enter_successor_training_set": true,
+    "sealed_test_corrections_may_enter_training_before_final_gate": false
+  },
+  "role_counts": {
+    "train": 28,
+    "development": 4,
+    "sealed_test": 4
+  },
+  "population_snapshot": {
+    "species_counts": {
+      "Danio rerio": 36
+    },
+    "line_strain_counts": {
+      "AB [AB IC] SEPT25": 36
+    },
+    "canonical_strain_counts": {
+      "AB": 36
+    },
+    "genotype_counts": {
+      "AB [AB IC] SEPT25": 36
+    },
+    "dpf_counts": {
+      "7": 28,
+      "8": 8
+    },
+    "pigmentation_phenotype_counts": {
+      "wild_type_pigmented": 36
+    },
+    "melanophore_status_counts": {
+      "normal": 36
+    },
+    "xanthophore_status_counts": {
+      "normal": 36
+    },
+    "iridophore_status_counts": {
+      "normal": 36
+    },
+    "pigment_pattern_status_counts": {
+      "wild_type": 36
+    },
+    "optical_transparency_counts": {
+      "normal": 36
+    },
+    "pigmentation_value_origin_counts": {
+      "subject_observed": 36
+    },
+    "phenotype_coverage_complete": true
+  },
+  "strain_resolution": {
+    "species": "Danio rerio",
+    "source_husbandry_label": "AB [AB IC] SEPT25",
+    "canonical_strain": "AB",
+    "mapping_method": "operator_confirmed_exact_label",
+    "suffix_semantics": "uninterpreted_pending_aquatics_definition",
+    "stock_or_colony_fields_published": false
+  },
+  "pigmentation_assignment": {
+    "scope": "all_36_recording_subjects",
+    "assignment_method": "operator_visual_confirmation",
+    "assigned_by": "project_operator",
+    "assigned_at_utc": "2026-08-07T00:00:00Z",
+    "traits": {
+      "pigmentation_phenotype": "wild_type_pigmented",
+      "melanophore_status": "normal",
+      "xanthophore_status": "normal",
+      "iridophore_status": "normal",
+      "pigment_pattern_status": "wild_type",
+      "optical_transparency": "normal"
+    }
+  },
+  "registry_application": {
+    "status": "applied_and_read_back",
+    "applied_at_utc": "2026-08-07T18:34:58Z",
+    "registry_schema_version": 65,
+    "strain_label_mapping_count": 1,
+    "ab_strain_expectation_count": 6,
+    "batman_subject_observation_count": 216,
+    "resolved_subject_count_per_trait": 36,
+    "resolved_value_origin": "subject_observed"
+  },
+  "recording_groups": [
+    {
+      "started_at_utc": "2026-07-21T19-38-32Z",
+      "role": "train",
+      "recording_ids": [
+        "2026-07-21T19-38-32Z_arena_1_Batman",
+        "2026-07-21T19-38-32Z_arena_2_Batman",
+        "2026-07-21T19-38-32Z_arena_3_Batman",
+        "2026-07-21T19-38-32Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-21T20-12-57Z",
+      "role": "train",
+      "recording_ids": [
+        "2026-07-21T20-12-57Z_arena_1_Batman",
+        "2026-07-21T20-12-57Z_arena_2_Batman",
+        "2026-07-21T20-12-57Z_arena_3_Batman",
+        "2026-07-21T20-12-57Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-21T20-56-02Z",
+      "role": "train",
+      "recording_ids": [
+        "2026-07-21T20-56-02Z_arena_1_Batman",
+        "2026-07-21T20-56-02Z_arena_2_Batman",
+        "2026-07-21T20-56-02Z_arena_3_Batman",
+        "2026-07-21T20-56-02Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-21T23-29-15Z",
+      "role": "development",
+      "recording_ids": [
+        "2026-07-21T23-29-15Z_arena_1_Batman",
+        "2026-07-21T23-29-15Z_arena_2_Batman",
+        "2026-07-21T23-29-15Z_arena_3_Batman",
+        "2026-07-21T23-29-15Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-22T00-06-17Z",
+      "role": "train",
+      "recording_ids": [
+        "2026-07-22T00-06-17Z_arena_1_Batman",
+        "2026-07-22T00-06-17Z_arena_2_Batman",
+        "2026-07-22T00-06-18Z_arena_3_Batman",
+        "2026-07-22T00-06-18Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-22T00-40-31Z",
+      "role": "train",
+      "recording_ids": [
+        "2026-07-22T00-40-31Z_arena_1_Batman",
+        "2026-07-22T00-40-31Z_arena_2_Batman",
+        "2026-07-22T00-40-31Z_arena_3_Batman",
+        "2026-07-22T00-40-31Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-22T01-08-24Z",
+      "role": "train",
+      "recording_ids": [
+        "2026-07-22T01-08-24Z_arena_1_Batman",
+        "2026-07-22T01-08-24Z_arena_2_Batman",
+        "2026-07-22T01-08-24Z_arena_3_Batman",
+        "2026-07-22T01-08-24Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-22T15-44-40Z",
+      "role": "train",
+      "recording_ids": [
+        "2026-07-22T15-44-40Z_arena_1_Batman",
+        "2026-07-22T15-44-40Z_arena_2_Batman",
+        "2026-07-22T15-44-40Z_arena_3_Batman",
+        "2026-07-22T15-44-40Z_arena_4_Batman"
+      ]
+    },
+    {
+      "started_at_utc": "2026-07-22T16-15-04Z",
+      "role": "sealed_test",
+      "recording_ids": [
+        "2026-07-22T16-15-04Z_arena_1_Batman",
+        "2026-07-22T16-15-04Z_arena_2_Batman",
+        "2026-07-22T16-15-04Z_arena_3_Batman",
+        "2026-07-22T16-15-04Z_arena_4_Batman"
+      ]
+    }
+  ],
+  "existing_reviewed_training_recordings": [
+    "2026-07-21T19-38-32Z_arena_2_Batman"
+  ],
+  "open_prerequisites": [
+    "Keep every sealed_test label outside training and Crimson correction promotion until the final comparison is frozen.",
+    "Record exact sampled frame and instance identities in each successor training manifest."
+  ]
+}

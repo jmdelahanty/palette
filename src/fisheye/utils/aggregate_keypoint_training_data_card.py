@@ -7,7 +7,7 @@ import argparse
 import json
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -24,8 +24,9 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 SCHEMA_NAME = "keypoint_training_data_card"
-SCHEMA_VERSION = "v1"
+SCHEMA_VERSION = "v2"
 COMPOSITION_FIELDS = (
+    "recording_id",
     "rig_id",
     "camera_id",
     "arena_id",
@@ -39,6 +40,14 @@ REFINED_PARENT_NAMES = ("refined_keypoints_runs", "keypoints_refined_runs")
 LANDMARK_HEATMAP_GRID_H = 32
 LANDMARK_HEATMAP_GRID_W = 32
 LANDMARK_EDGE_MARGIN_NORM = 0.05
+PIGMENTATION_TRAIT_FIELDS = (
+    "pigmentation_phenotype",
+    "melanophore_status",
+    "xanthophore_status",
+    "iridophore_status",
+    "pigment_pattern_status",
+    "optical_transparency",
+)
 
 
 @dataclass(frozen=True)
@@ -300,11 +309,52 @@ def _query_subject_lineage_rows(
     if not dataset_ids:
         return []
     placeholders = ", ".join("?" for _ in dataset_ids)
-    sql = (
-        "SELECT dataset_id, genotype, dpf_at_acquisition "
-        "FROM recording_subject_overview "
-        f"WHERE dataset_id IN ({placeholders});"
-    )
+    sql = f"""
+        WITH trait_pivot AS (
+            SELECT
+                recording_id,
+                subject_id,
+                MAX(canonical_strain) AS canonical_strain,
+                MAX(CASE WHEN trait_name = 'pigmentation_phenotype'
+                    THEN trait_value END) AS pigmentation_phenotype,
+                MAX(CASE WHEN trait_name = 'pigmentation_phenotype'
+                    THEN value_origin END) AS pigmentation_phenotype_origin,
+                MAX(CASE WHEN trait_name = 'melanophore_status'
+                    THEN trait_value END) AS melanophore_status,
+                MAX(CASE WHEN trait_name = 'xanthophore_status'
+                    THEN trait_value END) AS xanthophore_status,
+                MAX(CASE WHEN trait_name = 'iridophore_status'
+                    THEN trait_value END) AS iridophore_status,
+                MAX(CASE WHEN trait_name = 'pigment_pattern_status'
+                    THEN trait_value END) AS pigment_pattern_status,
+                MAX(CASE WHEN trait_name = 'optical_transparency'
+                    THEN trait_value END) AS optical_transparency
+            FROM recording_subject_trait_resolved
+            GROUP BY recording_id, subject_id
+        )
+        SELECT
+            rso.dataset_id,
+            rso.recording_id,
+            rso.subject_id,
+            rso.genotype,
+            rso.line_strain,
+            rso.species,
+            rso.sex,
+            rso.dpf_at_acquisition,
+            tp.canonical_strain,
+            tp.pigmentation_phenotype,
+            tp.pigmentation_phenotype_origin,
+            tp.melanophore_status,
+            tp.xanthophore_status,
+            tp.iridophore_status,
+            tp.pigment_pattern_status,
+            tp.optical_transparency
+        FROM recording_subject_overview rso
+        LEFT JOIN trait_pivot tp
+          ON tp.recording_id = rso.recording_id
+         AND tp.subject_id = rso.subject_id
+        WHERE rso.dataset_id IN ({placeholders});
+    """
     rows = registry.conn.execute(sql, tuple(dataset_ids)).fetchall()
     return [dict(row) for row in rows]
 
@@ -390,6 +440,105 @@ def _build_genotype_counts(lineage_rows: Sequence[Mapping[str, Any]]) -> dict[st
     return {key: int(counter[key]) for key in sorted(counter)}
 
 
+def _categorical_observation_counts(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    field: str,
+) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        counter[_normalize_text(row.get(field)) or "unknown"] += 1
+    return {key: int(counter[key]) for key in sorted(counter)}
+
+
+def _build_population_coverage_payload(
+    *,
+    lineage_rows: Sequence[Mapping[str, Any]],
+    context_rows: Mapping[str, Mapping[str, Any]],
+    source_dataset_count: int,
+) -> dict[str, Any]:
+    recording_ids = {
+        value
+        for row in context_rows.values()
+        if (value := _normalize_text(row.get("recording_id"))) is not None
+    }
+    subject_ids = {
+        value
+        for row in lineage_rows
+        if (value := _normalize_text(row.get("subject_id"))) is not None
+    }
+    field_counts = {
+        "species_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="species",
+        ),
+        "line_strain_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="line_strain",
+        ),
+        "canonical_strain_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="canonical_strain",
+        ),
+        "genotype_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="genotype",
+        ),
+        "sex_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="sex",
+        ),
+        "pigmentation_phenotype_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="pigmentation_phenotype",
+        ),
+        "pigmentation_phenotype_origin_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="pigmentation_phenotype_origin",
+        ),
+        "melanophore_status_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="melanophore_status",
+        ),
+        "xanthophore_status_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="xanthophore_status",
+        ),
+        "iridophore_status_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="iridophore_status",
+        ),
+        "pigment_pattern_status_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="pigment_pattern_status",
+        ),
+        "optical_transparency_counts": _categorical_observation_counts(
+            lineage_rows,
+            field="optical_transparency",
+        ),
+    }
+    camera_counts: Counter[str] = Counter()
+    for row in context_rows.values():
+        camera_counts[_normalize_text(row.get("camera_id")) or "unknown"] += 1
+    unknown_counts = {
+        name.removesuffix("_counts"): int(counts.get("unknown", 0))
+        for name, counts in field_counts.items()
+    }
+    unknown_counts["camera_id"] = int(camera_counts.get("unknown", 0))
+    return {
+        "count_unit": "recording_subject_observation",
+        "source_dataset_count": int(source_dataset_count),
+        "recording_count": int(len(recording_ids)),
+        "subject_count": int(len(subject_ids)),
+        "recording_subject_observation_count": int(len(lineage_rows)),
+        "camera_dataset_counts": {
+            key: int(camera_counts[key]) for key in sorted(camera_counts)
+        },
+        **field_counts,
+        "unknown_counts": unknown_counts,
+    }
+
+
 def _build_dpf_histogram(
     dpf_values: Sequence[Optional[float]],
     *,
@@ -422,7 +571,8 @@ def _query_dataset_context_rows(
         return {}
     placeholders = ", ".join("?" for _ in dataset_ids)
     sql = (
-        "SELECT dataset_id, rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name "
+        "SELECT dataset_id, recording_id, rig_id, camera_id, arena_id, "
+        "dish_design, canvas_name, protocol_name "
         "FROM dataset_context_current "
         f"WHERE dataset_id IN ({placeholders});"
     )
@@ -1105,10 +1255,10 @@ def _weighted_lineage_dpf(
     return weighted_sum / total_weight
 
 
-def _weighted_genotype_fractions(
+def _weighted_category_fractions(
     *,
     dataset_counts: Mapping[str, int],
-    genotype_by_dataset: Mapping[str, Optional[str]],
+    category_by_dataset: Mapping[str, Optional[str]],
 ) -> dict[str, float]:
     counter: Counter[str] = Counter()
     total_weight = 0.0
@@ -1116,10 +1266,8 @@ def _weighted_genotype_fractions(
         weight = float(raw_weight)
         if weight <= 0:
             continue
-        genotype = _normalize_text(genotype_by_dataset.get(dataset_id))
-        if genotype is None:
-            continue
-        counter[genotype] += int(raw_weight)
+        category = _normalize_text(category_by_dataset.get(dataset_id)) or "unknown"
+        counter[category] += int(raw_weight)
         total_weight += weight
     if total_weight <= 0:
         return {}
@@ -1141,6 +1289,7 @@ def _build_train_val_parity(
     merged_zarr: Optional[Path],
     profile_rows_by_dataset: Mapping[str, Mapping[str, Any]],
     lineage_rows: Sequence[Mapping[str, Any]],
+    context_rows: Mapping[str, Mapping[str, Any]],
 ) -> Optional[dict[str, Any]]:
     split_dataset_counts = _split_dataset_counts_from_merged_zarr(merged_zarr)
     train_counts = split_dataset_counts.get("train") or {}
@@ -1179,24 +1328,50 @@ def _build_train_val_parity(
             ),
         }
 
-    genotype_by_dataset = {
-        str(row.get("dataset_id")): _normalize_text(row.get("genotype"))
-        for row in lineage_rows
-        if _normalize_text(row.get("dataset_id")) is not None
+    lineage_fields = (
+        "genotype",
+        "species",
+        "line_strain",
+        "canonical_strain",
+        *PIGMENTATION_TRAIT_FIELDS,
+    )
+    category_by_field = {
+        field: {
+            str(row.get("dataset_id")): _normalize_text(row.get(field))
+            for row in lineage_rows
+            if _normalize_text(row.get("dataset_id")) is not None
+        }
+        for field in lineage_fields
+    }
+    category_by_field["camera_id"] = {
+        str(dataset_id): _normalize_text(row.get("camera_id"))
+        for dataset_id, row in context_rows.items()
     }
     dpf_by_dataset = {
         str(row.get("dataset_id")): _as_float(row.get("dpf_at_acquisition"))
         for row in lineage_rows
         if _normalize_text(row.get("dataset_id")) is not None
     }
-    train_genotype_fraction = _weighted_genotype_fractions(
-        dataset_counts=train_counts,
-        genotype_by_dataset=genotype_by_dataset,
-    )
-    val_genotype_fraction = _weighted_genotype_fractions(
-        dataset_counts=val_counts,
-        genotype_by_dataset=genotype_by_dataset,
-    )
+    categorical_parity: dict[str, Any] = {}
+    for field, category_by_dataset in category_by_field.items():
+        train_fraction = _weighted_category_fractions(
+            dataset_counts=train_counts,
+            category_by_dataset=category_by_dataset,
+        )
+        val_fraction = _weighted_category_fractions(
+            dataset_counts=val_counts,
+            category_by_dataset=category_by_dataset,
+        )
+        categorical_parity[field] = {
+            "fraction": {
+                "train": train_fraction,
+                "val": val_fraction,
+            },
+            "mix_max_abs_delta": _max_fraction_delta(
+                train_fraction,
+                val_fraction,
+            ),
+        }
     train_dpf_mean = _weighted_lineage_dpf(
         dataset_counts=train_counts,
         dpf_by_dataset=dpf_by_dataset,
@@ -1213,14 +1388,12 @@ def _build_train_val_parity(
         },
         "metrics": metric_payload,
         "lineage": {
-            "genotype_fraction": {
-                "train": train_genotype_fraction,
-                "val": val_genotype_fraction,
-            },
-            "genotype_mix_max_abs_delta": _max_fraction_delta(
-                train_genotype_fraction,
-                val_genotype_fraction,
-            ),
+            "categorical": categorical_parity,
+            # Retained in v2 for consumers of the v1 parity keys.
+            "genotype_fraction": categorical_parity["genotype"]["fraction"],
+            "genotype_mix_max_abs_delta": categorical_parity["genotype"][
+                "mix_max_abs_delta"
+            ],
             "dpf_mean": {
                 "train": float(train_dpf_mean) if train_dpf_mean is not None else None,
                 "val": float(val_dpf_mean) if val_dpf_mean is not None else None,
@@ -1481,6 +1654,8 @@ def _build_keypoint_training_data_card(
         )
         composition_rows.append(
             {
+                "recording_id": _normalize_text(dataset_context.get("recording_id"))
+                or _normalize_text(manifest_row.get("recording_id")),
                 "rig_id": (
                     _normalize_text(profile_row.get("rig_id")) if profile_row is not None else None
                 ) or _normalize_text(dataset_context.get("rig_id")) or _normalize_text(manifest_row.get("rig_id")),
@@ -1803,6 +1978,7 @@ def _build_keypoint_training_data_card(
         merged_zarr=merged_zarr,
         profile_rows_by_dataset=profile_rows_by_dataset,
         lineage_rows=lineage_rows,
+        context_rows=context_rows,
     )
 
     dpf_values = [_as_float(row.get("dpf_at_acquisition")) for row in lineage_rows]
@@ -1838,6 +2014,11 @@ def _build_keypoint_training_data_card(
         "spatial": spatial_payload,
         "composition_counts": composition_counts,
         "subject_coverage": _build_subject_coverage_payload(subject_lineage_coverage),
+        "population_coverage": _build_population_coverage_payload(
+            lineage_rows=lineage_rows,
+            context_rows=context_rows,
+            source_dataset_count=len(refs),
+        ),
         "genotype_counts": _build_genotype_counts(lineage_rows),
         "dpf_stats": _numeric_stats(dpf_values),
         "dpf_histogram": _build_dpf_histogram(

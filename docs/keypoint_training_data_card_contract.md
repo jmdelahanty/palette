@@ -1,8 +1,8 @@
 # Keypoint Training Data Card Contract
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-08-07
 -->
 
 Purpose: define a canonical, reproducible summary payload for keypoint (pose)
@@ -13,7 +13,7 @@ Related TODO: `docs/keypoint_multi_skeleton_todo.md`
 ## Scope
 
 In scope:
-- keypoint training data-card schema (`v1`)
+- keypoint training data-card schema (`v2`)
 - metric naming and aggregation rules
 - default plot bundle contract
 - skeleton compatibility guardrails
@@ -41,9 +41,13 @@ Out of scope:
 ## Schema Identity
 
 - `schema_name`: `keypoint_training_data_card`
-- `schema_version`: `v1`
+- `schema_version`: `v2`
 
-## Required Payload Sections (`v1`)
+Version 2 retains the version 1 quality, geometry, skeleton, spatial, and
+lineage fields. It adds recording-grouped acquisition and biological coverage;
+version 1 cards remain historical evidence and are not rewritten in place.
+
+## Required Payload Sections (`v2`)
 
 ### 1) `selection`
 
@@ -95,6 +99,7 @@ Derived from `pose_schema.skeleton`:
 
 ### 7) `composition_counts`
 
+- `recording_id`
 - `rig_id`
 - `camera_id`
 - `arena_id`
@@ -103,14 +108,42 @@ Derived from `pose_schema.skeleton`:
 - `protocol_name`
 - `keypoint_method`
 
-### 8) `subject_coverage` + lineage parity
+### 8) `subject_coverage`, `population_coverage`, and lineage parity
 
 Mirror detect data-card lineage sections:
 
 - `subject_coverage`
+- `population_coverage`
+  - `count_unit` (`recording_subject_observation`)
+  - `source_dataset_count`
+  - `recording_count`
+  - `subject_count`
+  - `recording_subject_observation_count`
+  - `camera_dataset_counts`
+  - `species_counts`
+  - `line_strain_counts`
+  - `canonical_strain_counts`
+  - `genotype_counts`
+  - `sex_counts`
+  - `pigmentation_phenotype_counts`
+  - `pigmentation_phenotype_origin_counts`
+  - `melanophore_status_counts`
+  - `xanthophore_status_counts`
+  - `iridophore_status_counts`
+  - `pigment_pattern_status_counts`
+  - `optical_transparency_counts`
+  - `unknown_counts`
 - `genotype_counts`
 - `dpf_stats`
 - `dpf_histogram`
+
+All population count mappings include an explicit `unknown` bin when the
+registry lacks the corresponding value. Species, source strain label,
+canonical strain, genotype, and pigmentation are separate axes. Pigmentation
+values are read from the resolved trait contract. Their origin is explicit:
+recording-scoped observations override curated strain expectations. Readers
+must not parse strain labels, filenames, or image appearance to manufacture a
+trait. See `docs/recording_subject_trait_contract.md`.
 
 ### 9) `train_val_parity`
 
@@ -120,7 +153,13 @@ Minimum parity deltas:
 - confidence validity rate
 - triangle area (`p50`, `p90`)
 - min angle (`p50`, `p90`)
-- lineage mix deltas (genotype/DPF)
+- lineage mix deltas (genotype, species, line/strain,
+  pigmentation phenotype, camera, and DPF)
+
+Split composition is descriptive rather than a quality threshold. For an
+independent evaluation, rows must be assigned by recording/subject group before
+sampling; frame-level random splitting is not acceptable evidence of
+generalization.
 
 ### 10) `audit_freshness`
 
@@ -135,7 +174,7 @@ Default behavior:
 - generate plots by default when card is written
 - do not auto-open unless explicit `--view` is requested
 
-Default plot set (`v1`):
+Default plot set (`v2`):
 - usable-rate distribution
 - triangle-area distribution
 - min-angle distribution

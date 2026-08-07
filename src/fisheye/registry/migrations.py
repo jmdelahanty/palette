@@ -77,6 +77,9 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
     (60, "recording_chaser_metadata_registry", "_migration_060_recording_chaser_metadata_registry"),
     (61, "stimulus_protocol_registry", "_migration_061_stimulus_protocol_registry"),
     (62, "analytics_report_registry", "_migration_062_analytics_report_registry"),
+    (63, "recording_subject_traits", "_migration_063_recording_subject_traits"),
+    (64, "strain_trait_expectations", "_migration_064_strain_trait_expectations"),
+    (65, "subject_trait_schema_reconcile", "_migration_065_subject_trait_schema_reconcile"),
 )
 
 

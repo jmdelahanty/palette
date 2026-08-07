@@ -283,6 +283,10 @@ def _seed_subject_lineage(
     recording_id: str,
     subject_id: str,
     genotype: str = "Tg(line_a)",
+    line_strain: str = "AB",
+    species: str = "Danio rerio",
+    sex: str = "unknown",
+    pigmentation_phenotype: str | None = None,
     dpf: int = 7,
 ) -> None:
     registry.conn.execute(
@@ -292,16 +296,16 @@ def _seed_subject_lineage(
     cross_id = f"cross_{subject_id}"
     dish_id = f"dish_{subject_id}"
     registry.conn.execute(
-        "INSERT OR IGNORE INTO crosses (cross_id, genotype) VALUES (?, ?);",
-        (cross_id, genotype),
+        "INSERT OR IGNORE INTO crosses (cross_id, genotype, line_strain) VALUES (?, ?, ?);",
+        (cross_id, genotype, line_strain),
     )
     registry.conn.execute(
-        "INSERT OR IGNORE INTO dishes (dish_id, cross_id) VALUES (?, ?);",
-        (dish_id, cross_id),
+        "INSERT OR IGNORE INTO dishes (dish_id, cross_id, species) VALUES (?, ?, ?);",
+        (dish_id, cross_id, species),
     )
     registry.conn.execute(
-        "INSERT OR IGNORE INTO subjects (subject_id, dish_id) VALUES (?, ?);",
-        (subject_id, dish_id),
+        "INSERT OR IGNORE INTO subjects (subject_id, dish_id, species, sex) VALUES (?, ?, ?, ?);",
+        (subject_id, dish_id, species, sex),
     )
     registry.conn.execute(
         """
@@ -310,12 +314,20 @@ def _seed_subject_lineage(
             subject_id,
             dataset_id,
             dpf_at_acquisition,
+            species,
+            sex,
+            genotype,
+            line_strain,
             created_utc,
             updated_utc
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(recording_id, subject_id) DO UPDATE SET
             dataset_id=excluded.dataset_id,
             dpf_at_acquisition=excluded.dpf_at_acquisition,
+            species=excluded.species,
+            sex=excluded.sex,
+            genotype=excluded.genotype,
+            line_strain=excluded.line_strain,
             updated_utc=excluded.updated_utc;
         """,
         (
@@ -323,11 +335,23 @@ def _seed_subject_lineage(
             subject_id,
             dataset_id,
             int(dpf),
+            species,
+            sex,
+            genotype,
+            line_strain,
             "2026-02-24T00:00:00+00:00",
             "2026-02-24T00:00:00+00:00",
         ),
     )
     registry.conn.commit()
+    if pigmentation_phenotype is not None:
+        registry.upsert_recording_subject_trait(
+            recording_id=recording_id,
+            subject_id=subject_id,
+            trait_name="pigmentation_phenotype",
+            trait_value=pigmentation_phenotype,
+            assignment_method="pytest_fixture",
+        )
 
 
 def _make_pose_root(
@@ -399,6 +423,60 @@ def _make_pose_root(
     refined_group.add_array("geometry_valid", np.asarray(geometry_valid, dtype=np.bool_))
     refined_group.add_array("usable_keypoints", np.asarray(usable, dtype=np.bool_))
     return root
+
+
+def test_subject_lineage_query_resolves_independent_strain_traits(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "pose_training.zarr"
+    _seed_dataset(
+        registry,
+        dataset_id="dataset_pose",
+        recording_id="recording_pose",
+        zarr_path=zarr_path,
+    )
+    _seed_subject_lineage(
+        registry,
+        dataset_id="dataset_pose",
+        recording_id="recording_pose",
+        subject_id="subject_pose",
+        line_strain="AB [AB IC] SEPT25",
+        genotype="AB [AB IC] SEPT25",
+    )
+    registry.upsert_strain_label_mapping(
+        species="Danio rerio",
+        source_label="AB [AB IC] SEPT25",
+        canonical_strain="AB",
+        assignment_method="pytest_fixture",
+    )
+    expected = {
+        "pigmentation_phenotype": "wild_type_pigmented",
+        "melanophore_status": "normal",
+        "xanthophore_status": "normal",
+        "iridophore_status": "normal",
+        "pigment_pattern_status": "wild_type",
+        "optical_transparency": "normal",
+    }
+    for trait_name, trait_value in expected.items():
+        registry.upsert_strain_trait_expectation(
+            species="Danio rerio",
+            canonical_strain="AB",
+            trait_name=trait_name,
+            trait_value=trait_value,
+            assignment_method="pytest_fixture",
+        )
+
+    rows = mod._query_subject_lineage_rows(
+        registry,
+        dataset_ids=["dataset_pose"],
+    )
+    assert len(rows) == 1
+    assert rows[0]["canonical_strain"] == "AB"
+    assert rows[0]["pigmentation_phenotype_origin"] == "strain_expected"
+    for trait_name, trait_value in expected.items():
+        assert rows[0][trait_name] == trait_value
+    registry.close()
 
 
 def _make_merged_root(
@@ -768,6 +846,7 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
         "spatial",
         "composition_counts",
         "subject_coverage",
+        "population_coverage",
         "genotype_counts",
         "dpf_stats",
         "dpf_histogram",
@@ -790,6 +869,42 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
     assert payload["spatial"]["landmark_center_heatmaps"]["0"]["alias"] == "swim_bladder"
     assert payload["subject_coverage"]["lineage_covered_dataset_count"] == 1
     assert payload["genotype_counts"] == {"Tg(line_complete)": 1}
+    assert payload["schema_version"] == "v2"
+    assert payload["population_coverage"] == {
+        "count_unit": "recording_subject_observation",
+        "source_dataset_count": 1,
+        "recording_count": 1,
+        "subject_count": 1,
+        "recording_subject_observation_count": 1,
+        "camera_dataset_counts": {"camera_1": 1},
+        "species_counts": {"Danio rerio": 1},
+        "line_strain_counts": {"AB": 1},
+        "genotype_counts": {"Tg(line_complete)": 1},
+        "sex_counts": {"unknown": 1},
+        "canonical_strain_counts": {"unknown": 1},
+        "pigmentation_phenotype_counts": {"unknown": 1},
+        "pigmentation_phenotype_origin_counts": {"unknown": 1},
+        "melanophore_status_counts": {"unknown": 1},
+        "xanthophore_status_counts": {"unknown": 1},
+        "iridophore_status_counts": {"unknown": 1},
+        "pigment_pattern_status_counts": {"unknown": 1},
+        "optical_transparency_counts": {"unknown": 1},
+        "unknown_counts": {
+            "species": 0,
+            "line_strain": 0,
+            "canonical_strain": 1,
+            "genotype": 0,
+            "sex": 1,
+            "pigmentation_phenotype": 1,
+            "pigmentation_phenotype_origin": 1,
+            "melanophore_status": 1,
+            "xanthophore_status": 1,
+            "iridophore_status": 1,
+            "pigment_pattern_status": 1,
+            "optical_transparency": 1,
+            "camera_id": 0,
+        },
+    }
     assert payload["dpf_stats"]["max"] == 8.0
     assert payload["train_val_parity"] is not None
     assert payload["train_val_parity"]["metrics"]["usable_keypoints_rate"]["delta"] == 0.0
@@ -839,6 +954,7 @@ def test_train_val_parity_delta_from_merged_source_index(
         recording_id="rec_a",
         subject_id="subject_a",
         genotype="Tg(line_a)",
+        pigmentation_phenotype="wild_type_pigmented",
         dpf=7,
     )
     _seed_subject_lineage(
@@ -847,6 +963,7 @@ def test_train_val_parity_delta_from_merged_source_index(
         recording_id="rec_b",
         subject_id="subject_b",
         genotype="Tg(line_b)",
+        pigmentation_phenotype="hypopigmented",
         dpf=10,
     )
     db.close()
@@ -912,6 +1029,9 @@ def test_train_val_parity_delta_from_merged_source_index(
     triangle_p50_delta = parity["metrics"]["triangle_area_p50"]["delta"]
     assert triangle_p50_delta == pytest.approx(20.0)
     assert parity["lineage"]["genotype_mix_max_abs_delta"] == pytest.approx(1.0)
+    assert parity["lineage"]["categorical"]["pigmentation_phenotype"][
+        "mix_max_abs_delta"
+    ] == pytest.approx(1.0)
     assert parity["lineage"]["dpf_mean"]["delta"] == pytest.approx(3.0)
 
 
