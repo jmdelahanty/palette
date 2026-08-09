@@ -155,7 +155,7 @@ def publish_training_crop_materialization(
         local_archive = Path(temporary) / "training.zarr"
         local_root = zarr.open_group(str(local_archive), mode="w", zarr_format=3)
         local_root.attrs["zarr_purpose"] = "training"
-        local_root.require_group("crop_runs")
+        require_runs_parent(local_root, "crop_runs")
         materialization = regenerate_training_crops_pynvvc(
             zarr_path=local_archive,
             source_zarr_path=source,
@@ -422,7 +422,7 @@ def create_training_crop_artifact(
                 "stage_selector_eligible": False,
             }
         )
-        local_root.require_group("crop_runs")
+        require_runs_parent(local_root, "crop_runs")
         materialization = regenerate_training_crops_pynvvc(
             zarr_path=local_archive,
             source_zarr_path=source,
@@ -597,7 +597,7 @@ def _create_reviewed_training_crop_artifact(
                 "registry_activation": "deferred",
             }
         )
-        local_root.require_group("crop_runs")
+        require_runs_parent(local_root, "crop_runs")
         materialization = materialize(local_archive, target)
         local_root = open_zarr_group_direct(local_archive, mode="a")
         local_root.attrs["training_artifact_status"] = "complete"

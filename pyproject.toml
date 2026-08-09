@@ -24,6 +24,7 @@ dependencies = [
   "zarr>=3,<4",
   "dask[distributed]",
   "matplotlib",
+  "seaborn",
   "pillow",
   "PyYAML",
   "rich",

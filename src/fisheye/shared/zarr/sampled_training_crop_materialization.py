@@ -60,6 +60,7 @@ from fisheye.shared.zarr_run_completion import (
     is_run_complete,
     mark_run_complete,
     mark_run_started,
+    require_runs_parent,
 )
 from fisheye.shared.zarr.detection_frame_supervision import (
     DetectionFrameSupervisionPlan,
@@ -394,7 +395,7 @@ def write_sampled_training_crops_from_images_full(
         refined_run_id=refined_run_id,
         roi_size_wh=roi_size_wh,
     )
-    parent = root.require_group("crop_runs")
+    parent = require_runs_parent(root, "crop_runs")
     if candidate in parent:
         raise FileExistsError(
             f"Training crop run already exists: crop_runs/{candidate}."

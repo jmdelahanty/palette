@@ -51,6 +51,7 @@ from fisheye.shared.zarr.training_crop_materialization import (
     TRAINING_CROP_MATERIALIZATION_SCHEMA_ID,
     build_training_crop_materialization_binding,
 )
+from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.shared.zarr.crop_schema import CROP_GEOMETRY_SCHEMA_V1
 
 
@@ -931,7 +932,7 @@ def regenerate_training_crops_pynvvc(
         return plan
 
     if crop_parent is None:
-        crop_parent = root.require_group("crop_runs")
+        crop_parent = require_runs_parent(root, "crop_runs")
     target_group = crop_parent.create_group(resolved_target_crop, overwrite=bool(overwrite))
     if cache_manifest_path is None and source_archive_path == archive_path:
         target_group.attrs.update(dict(source_group.attrs))

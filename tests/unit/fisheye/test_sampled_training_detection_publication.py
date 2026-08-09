@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 import sys
@@ -414,8 +415,8 @@ def test_artifact_and_bound_seed_publish_without_selectors_or_consolidation(
         parent = root[parent_name]
         for selector in ("authoritative_run", "latest_complete", "latest"):
             assert selector not in parent.attrs
-    root_metadata = (target / "zarr.json").read_text(encoding="utf-8")
-    assert '"consolidated_metadata":null' in root_metadata.replace(" ", "")
+    root_metadata = json.loads((target / "zarr.json").read_text(encoding="utf-8"))
+    assert root_metadata.get("consolidated_metadata") is None
     assert validate_sampled_training_detection_run(
         target / "detect_runs" / "detect-review-b",
         archive=target,

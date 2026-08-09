@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -66,16 +67,20 @@ training_history:
 
 
 def _document(root: Path) -> dict[str, object]:
-    return build_historical_pose_model_input_contract(
-        set_id=SET_ID,
-        run_id=RUN_ID,
-        model_package_root=root,
-        weights_relative_path=Path("weights/best.pt"),
-        training_manifest_relative_path=Path("inputs/training.manifest.json"),
-        training_report_relative_path=Path("training_report.yaml"),
-        training_args_relative_path=Path("args.yaml"),
-        model_stride=32,
-    )
+    # Reconstruct the immutable historical artifact under its recorded builder
+    # version. Runtime equivalence for the maintained 8.3.169 environment is
+    # tested separately below against the artifact's exact probe.
+    with patch.object(mod.importlib.metadata, "version", return_value="8.3.214"):
+        return build_historical_pose_model_input_contract(
+            set_id=SET_ID,
+            run_id=RUN_ID,
+            model_package_root=root,
+            weights_relative_path=Path("weights/best.pt"),
+            training_manifest_relative_path=Path("inputs/training.manifest.json"),
+            training_report_relative_path=Path("training_report.yaml"),
+            training_args_relative_path=Path("args.yaml"),
+            model_stride=32,
+        )
 
 
 def _v2_document(root: Path) -> dict[str, object]:
@@ -83,7 +88,7 @@ def _v2_document(root: Path) -> dict[str, object]:
     common = {
         "native_shape_hw": (348, 348),
         "model_stride": 32,
-        "runtime_ultralytics_versions": ("8.3.214",),
+        "runtime_ultralytics_versions": ("8.3.169", "8.3.214"),
         "evidence_id": "batman_reviewed_input_comparison_v1",
         "evidence_artifact_path": (
             "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
@@ -216,17 +221,18 @@ def test_runtime_requires_approved_version_and_exact_preprocessing_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, weights = _package(tmp_path)
-    document = build_historical_pose_model_input_contract(
-        set_id=SET_ID,
-        run_id=RUN_ID,
-        model_package_root=root,
-        weights_relative_path=Path("weights/best.pt"),
-        training_manifest_relative_path=Path("inputs/training.manifest.json"),
-        training_report_relative_path=Path("training_report.yaml"),
-        training_args_relative_path=Path("args.yaml"),
-        model_stride=32,
-        runtime_ultralytics_versions=("8.3.169",),
-    )
+    with patch.object(mod.importlib.metadata, "version", return_value="8.3.214"):
+        document = build_historical_pose_model_input_contract(
+            set_id=SET_ID,
+            run_id=RUN_ID,
+            model_package_root=root,
+            weights_relative_path=Path("weights/best.pt"),
+            training_manifest_relative_path=Path("inputs/training.manifest.json"),
+            training_report_relative_path=Path("training_report.yaml"),
+            training_args_relative_path=Path("args.yaml"),
+            model_stride=32,
+            runtime_ultralytics_versions=("8.3.169",),
+        )
     contract = tmp_path / "contract.json"
     contract.write_text(json.dumps(document), encoding="utf-8")
     binding = load_pose_model_input_contract(
@@ -237,10 +243,9 @@ def test_runtime_requires_approved_version_and_exact_preprocessing_probe(
         expected_model_sha256=document["payload"]["model"]["weights"]["sha256"],
     )
     assert binding.runtime_ultralytics_versions == ("8.3.169", "8.3.214")
-    assert (
-        validate_pose_runtime_compatibility(binding)["runtime_ultralytics_version"]
-        == "8.3.214"
-    )
+    assert validate_pose_runtime_compatibility(binding)[
+        "runtime_ultralytics_version"
+    ] == mod.importlib.metadata.version("ultralytics")
 
     monkeypatch.setattr(mod.importlib.metadata, "version", lambda _name: "8.3.168")
     with pytest.raises(PoseModelInputContractError, match="not an approved runtime"):

@@ -101,6 +101,7 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     env:
       MPLBACKEND: Agg
+      PALETTE_PYTHON: python
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Check out repository

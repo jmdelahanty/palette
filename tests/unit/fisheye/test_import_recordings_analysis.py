@@ -158,6 +158,8 @@ def test_main_logs_recording_failure_and_returns_nonzero(monkeypatch, tmp_path: 
     cams.mkdir(parents=True, exist_ok=True)
     (cams / "Cam2010093_foo.mp4").touch()
     log_dir = tmp_path / "logs"
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.touch()
 
     def _fake_process(*_args, **_kwargs):
         return SimpleNamespace(
@@ -175,6 +177,8 @@ def test_main_logs_recording_failure_and_returns_nonzero(monkeypatch, tmp_path: 
             str(tmp_path),
             "--recursive",
             "--apply",
+            "--registry",
+            str(registry_path),
             "--log-dir",
             str(log_dir),
         ]
@@ -225,6 +229,8 @@ def test_main_forwards_keypoint_stage_toggles_to_pipeline(monkeypatch, tmp_path:
     cams = recording_dir / "cams"
     cams.mkdir(parents=True, exist_ok=True)
     (cams / "Cam2010093_foo.mp4").touch()
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.touch()
 
     captured: dict[str, object] = {}
 
@@ -247,6 +253,8 @@ def test_main_forwards_keypoint_stage_toggles_to_pipeline(monkeypatch, tmp_path:
             str(tmp_path),
             "--recursive",
             "--apply",
+            "--registry",
+            str(registry_path),
             "--no-log",
             "--keypoints",
             "--refine-keypoints",
@@ -266,6 +274,8 @@ def test_main_recording_only_forwards_none_h5_to_pipeline(monkeypatch, tmp_path:
     cams = recording_dir / "cams"
     cams.mkdir(parents=True, exist_ok=True)
     (cams / "Cam2010093_foo.mp4").touch()
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.touch()
     captured: dict[str, object] = {}
 
     def _fake_process(plan, opts, **_kwargs):
@@ -286,6 +296,8 @@ def test_main_recording_only_forwards_none_h5_to_pipeline(monkeypatch, tmp_path:
             str(tmp_path),
             "--recursive",
             "--apply",
+            "--registry",
+            str(registry_path),
             "--no-log",
             "--recording-only",
         ]

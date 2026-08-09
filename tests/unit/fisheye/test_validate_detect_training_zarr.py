@@ -55,6 +55,11 @@ def _write_valid_merged_zarr(path: Path, *, suppress_legacy_string_warning: bool
         data=np.array([300, -1, 400, 401], dtype=np.int32),
         chunks=(4,),
     )
+    instances.create_array(
+        "instance_key",
+        data=np.array([1000, 1001, 1002, 1003], dtype=np.uint64),
+        chunks=(4,),
+    )
     instances.create_array("frame_counts", data=np.ones(4, dtype=np.int32), chunks=(4,))
 
     splits = root.create_group("splits")

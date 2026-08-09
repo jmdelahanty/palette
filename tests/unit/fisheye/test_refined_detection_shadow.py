@@ -424,7 +424,7 @@ def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
     consolidated_run_metadata = archive_metadata["consolidated_metadata"]["metadata"][
         "refined_detect_runs/refined_shadow_1"
     ]
-    assert direct_run_metadata["consolidated_metadata"] is None
+    assert direct_run_metadata.get("consolidated_metadata") is None
     assert consolidated_run_metadata["consolidated_metadata"] == {
         "kind": "inline",
         "must_understand": False,

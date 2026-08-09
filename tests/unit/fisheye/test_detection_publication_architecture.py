@@ -37,9 +37,11 @@ def test_supported_detection_entrypoints_do_not_import_low_level_writer() -> Non
     assert offenders == []
 
 
-def test_only_shared_candidate_boundary_imports_low_level_writer() -> None:
-    candidate = REPO_ROOT / "src/fisheye/shared/detection_candidate.py"
-    assert _imports_low_level_detector(candidate)
+def test_only_detection_candidate_builder_imports_low_level_writer() -> None:
+    shared_contract = REPO_ROOT / "src/fisheye/shared/detection_candidate.py"
+    candidate_builder = REPO_ROOT / "src/fisheye/detection/candidate_builder.py"
+    assert not _imports_low_level_detector(shared_contract)
+    assert _imports_low_level_detector(candidate_builder)
 
 
 def test_atomic_publisher_does_not_depend_on_registry_command_module() -> None:

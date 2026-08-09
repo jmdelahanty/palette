@@ -106,7 +106,7 @@ def test_existing_version_63_registry_upgrades_to_strain_traits(tmp_path) -> Non
     version = upgraded.conn.execute(
         "SELECT MAX(version) AS version FROM schema_version;"
     ).fetchone()["version"]
-    assert version == 65
+    assert version == 66
     objects = {
         row["name"]
         for row in upgraded.conn.execute(
@@ -137,7 +137,7 @@ def test_legacy_bootstrap_version_64_reconciles_missing_subject_trait_table(
     registry.conn.execute("DROP VIEW recording_subject_trait_resolved;")
     registry.conn.execute("DROP VIEW recording_subject_trait_overview;")
     registry.conn.execute("DROP TABLE recording_subject_traits;")
-    registry.conn.execute("DELETE FROM schema_version WHERE version = 65;")
+    registry.conn.execute("DELETE FROM schema_version WHERE version >= 65;")
     registry.conn.execute("PRAGMA user_version = 64;")
     registry.conn.commit()
     registry.close()
@@ -146,7 +146,7 @@ def test_legacy_bootstrap_version_64_reconciles_missing_subject_trait_table(
     version = reconciled.conn.execute(
         "SELECT MAX(version) AS version FROM schema_version;"
     ).fetchone()["version"]
-    assert version == 65
+    assert version == 66
     objects = {
         row["name"]
         for row in reconciled.conn.execute(

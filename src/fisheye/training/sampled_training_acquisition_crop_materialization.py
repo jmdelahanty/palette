@@ -56,7 +56,11 @@ from fisheye.shared.zarr.training_crop_materialization import (
     TRAINING_CROP_MATERIALIZATION_SCHEMA_ID,
     build_training_crop_materialization_binding,
 )
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils.export_acquisition_crop_pose_training_zarr import (
     load_crop_meta_table,
 )
@@ -604,7 +608,7 @@ def write_sampled_acquisition_crop_hybrid(
         source=source,
         allow_full_frame_fallback=allow_full_frame_fallback,
     )
-    parent = root.require_group("crop_runs")
+    parent = require_runs_parent(root, "crop_runs")
     if candidate in parent:
         raise FileExistsError(
             f"Training crop run already exists: crop_runs/{candidate}."

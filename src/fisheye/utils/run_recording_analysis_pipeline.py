@@ -470,7 +470,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
-    if not registry_path.exists():
+    if args.apply and not registry_path.exists():
         print(f"Registry not found for detection publication: {registry_path}")
         return 1
 
