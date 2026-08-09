@@ -66,7 +66,6 @@ from fisheye.training.detection_frame_supervision import (
     build_detection_frame_supervision_plan,
 )
 
-
 SAMPLED_TRAINING_CROP_WRITER_SCHEMA_ID = (
     "palette.sampled_training_images_full_crop_writer"
 )
@@ -148,9 +147,8 @@ def build_sampled_training_crop_plan(
     if n_frames <= 0 or source_height <= 0 or source_width <= 0:
         raise ValueError("raw_video/images_full dimensions must be positive.")
     original_frames = _values(raw["original_frame_indices"])
-    if (
-        original_frames.shape != (n_frames,)
-        or not np.issubdtype(original_frames.dtype, np.integer)
+    if original_frames.shape != (n_frames,) or not np.issubdtype(
+        original_frames.dtype, np.integer
     ):
         raise ValueError(
             "raw_video/original_frame_indices must be one integer per sampled frame."
@@ -167,9 +165,10 @@ def build_sampled_training_crop_plan(
     if refined_parent is None or run_id not in refined_parent:
         raise ValueError(f"Refined detection review run not found: {run_id!r}.")
     refined = refined_parent[run_id]
-    legacy_status_complete = str(
-        refined.attrs.get("status") or ""
-    ).strip().lower() in {"complete", "completed"}
+    legacy_status_complete = str(refined.attrs.get("status") or "").strip().lower() in {
+        "complete",
+        "completed",
+    }
     if not legacy_status_complete and not is_run_complete(
         refined, legacy_default=False
     ):
@@ -245,7 +244,9 @@ def build_sampled_training_crop_plan(
     refined_row_ids = refined_row_ids[source_rows]
     boxes = np.asarray(raw_boxes[source_rows], dtype=np.float32)
     if not np.isfinite(boxes).all() or np.any(boxes[:, 2:] <= 0):
-        raise ValueError("Refined boxes must remain finite and positive after float32 conversion.")
+        raise ValueError(
+            "Refined boxes must remain finite and positive after float32 conversion."
+        )
     if row_count:
         half = np.float32(0.5)
         if np.any(boxes[:, :2] - boxes[:, 2:] * half < 0) or np.any(
@@ -272,9 +273,7 @@ def build_sampled_training_crop_plan(
     acquisition_frames = original_frames[frames]
     arrays: dict[str, np.ndarray] = {
         "instance_key": np.array(keys, copy=True, order="C"),
-        "source_refined_row_ids": np.array(
-            refined_row_ids, copy=True, order="C"
-        ),
+        "source_refined_row_ids": np.array(refined_row_ids, copy=True, order="C"),
         "frame_indices": np.array(frames, copy=True, order="C"),
         "source_acquisition_frame_index": np.array(
             acquisition_frames, copy=True, order="C"
@@ -334,7 +333,7 @@ def build_sampled_training_crop_plan(
     )
 
 
-def _write_by_physical_units(destination: Any, values: np.ndarray, *, plan: Any) -> None:
+def write_by_physical_units(destination: Any, values: np.ndarray, *, plan: Any) -> None:
     if plan.chunk_shape is None:
         raise ValueError("Sampled crop arrays cannot be scalars.")
     unit_rows = int(
@@ -347,7 +346,7 @@ def _write_by_physical_units(destination: Any, values: np.ndarray, *, plan: Any)
         destination[selection] = values[selection]
 
 
-def _zero_padded_crop(
+def zero_padded_crop(
     frame: np.ndarray,
     *,
     x: int,
@@ -397,7 +396,9 @@ def write_sampled_training_crops_from_images_full(
     )
     parent = root.require_group("crop_runs")
     if candidate in parent:
-        raise FileExistsError(f"Training crop run already exists: crop_runs/{candidate}.")
+        raise FileExistsError(
+            f"Training crop run already exists: crop_runs/{candidate}."
+        )
     run = parent.create_group(candidate)
     mark_run_started(run, run_name=candidate, stage="crop")
     storage = plan_crop_geometry_storage(
@@ -460,9 +461,7 @@ def write_sampled_training_crops_from_images_full(
         }
     )
 
-    bindings = {
-        binding.path: binding for binding in CROP_GEOMETRY_SCHEMA_V1.bindings
-    }
+    bindings = {binding.path: binding for binding in CROP_GEOMETRY_SCHEMA_V1.bindings}
     for entry in storage.entries:
         name = entry.rule.path
         binding = bindings[name]
@@ -478,7 +477,7 @@ def write_sampled_training_crops_from_images_full(
             fill_value=0,
             attributes={"artifact_class": "sampled_training_crop_geometry"},
         )
-        _write_by_physical_units(
+        write_by_physical_units(
             destination,
             np.asarray(plan.arrays[name]),
             plan=entry.plan,
@@ -504,7 +503,7 @@ def write_sampled_training_crops_from_images_full(
         fill_value=0,
         attributes={"identity_semantics": "source_acquisition_frame_index"},
     )
-    _write_by_physical_units(
+    write_by_physical_units(
         source_frame_array,
         plan.source_frame_indices,
         plan=source_frame_plan,
@@ -521,9 +520,7 @@ def write_sampled_training_crops_from_images_full(
     )
     source_images = root["raw_video/images_full"]
     local_frames = np.asarray(plan.arrays["frame_indices"], dtype=np.int64)
-    coordinates = np.asarray(
-        plan.arrays["roi_coordinates_full"], dtype=np.int32
-    )
+    coordinates = np.asarray(plan.arrays["roi_coordinates_full"], dtype=np.int32)
     row_start = 0
     while row_start < plan.row_count:
         frame_index = int(local_frames[row_start])
@@ -532,10 +529,12 @@ def write_sampled_training_crops_from_images_full(
             row_stop += 1
         frame = np.asarray(source_images[frame_index], dtype=np.uint8)
         if frame.shape != plan.source_images_shape[1:]:
-            raise RuntimeError("Decoded sampled source frame shape changed during write.")
+            raise RuntimeError(
+                "Decoded sampled source frame shape changed during write."
+            )
         for row_index in range(row_start, row_stop):
             x, y = (int(value) for value in coordinates[row_index])
-            crop = _zero_padded_crop(
+            crop = zero_padded_crop(
                 frame,
                 x=x,
                 y=y,
@@ -573,22 +572,16 @@ def write_sampled_training_crops_from_images_full(
         run,
         run_name=candidate,
         run_provenance=build_writer_run_provenance(
-            command=(
-                "fisheye.shared.zarr.sampled_training_crop_materialization"
-            ),
+            command=("fisheye.shared.zarr.sampled_training_crop_materialization"),
             params={
                 "writer_schema_id": SAMPLED_TRAINING_CROP_WRITER_SCHEMA_ID,
-                "writer_schema_version": (
-                    SAMPLED_TRAINING_CROP_WRITER_SCHEMA_VERSION
-                ),
+                "writer_schema_version": (SAMPLED_TRAINING_CROP_WRITER_SCHEMA_VERSION),
                 "materialization_provider": (
                     SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER
                 ),
                 "roi_size_wh": [roi_width, roi_height],
                 "padding_mode": "zero_outside_source_frame",
-                "pixel_verification": (
-                    "all_rows_byte_equal_to_source_window_v1"
-                ),
+                "pixel_verification": ("all_rows_byte_equal_to_source_window_v1"),
             },
             input_run_ids={
                 "source_refined_detect_run": plan.refined_run_id,
@@ -613,9 +606,9 @@ def write_sampled_training_crops_from_images_full(
         "positive_frame_count": plan.supervision.positive_frame_count,
         "negative_frame_count": plan.supervision.negative_frame_count,
         "roi_shape": [roi_height, roi_width],
-        "binding_digest": run.attrs[
-            TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE
-        ]["payload_digest"],
+        "binding_digest": run.attrs[TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE][
+            "payload_digest"
+        ],
         "storage_plan": storage.as_manifest(),
         "pixel_rows_verified": plan.row_count,
         "stage_selector_eligible": False,
@@ -628,4 +621,6 @@ __all__ = [
     "SampledTrainingCropPlan",
     "build_sampled_training_crop_plan",
     "write_sampled_training_crops_from_images_full",
+    "write_by_physical_units",
+    "zero_padded_crop",
 ]

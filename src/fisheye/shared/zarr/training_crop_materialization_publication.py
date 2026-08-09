@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 from typing import Any, Mapping
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import uuid
 
 import zarr
@@ -25,6 +25,10 @@ from fisheye.shared.zarr.training_crop_materialization import (
 )
 from fisheye.shared.zarr.sampled_training_crop_materialization import (
     write_sampled_training_crops_from_images_full,
+)
+from fisheye.shared.zarr.sampled_training_acquisition_crop_materialization import (
+    resolve_acquisition_crop_source,
+    write_sampled_acquisition_crop_hybrid,
 )
 from fisheye.shared.zarr.training_dataset_composition import (
     TRAINING_DATASET_COMPOSITION_ATTRIBUTE,
@@ -523,23 +527,20 @@ def create_training_crop_artifact(
     }
 
 
-def create_sampled_images_full_training_crop_artifact(
+def _create_reviewed_training_crop_artifact(
     *,
     destination: str | Path,
     base_training_zarr: str | Path,
     run_id: str,
     refined_run_id: str,
     scratch_root: str | Path,
-    roi_size_wh: tuple[int, int] = (348, 348),
     copy_backend: str = "python",
+    materialization_provider: str,
+    materialize: Callable[[Path, Path], dict[str, Any]],
+    publication_inputs: Mapping[str, Any],
+    command: str,
 ) -> dict[str, Any]:
-    """Copy, crop embedded reviewed pixels locally, and publish one artifact.
-
-    Unlike :func:`create_training_crop_artifact`, this route does not consume
-    an external recording crop-v2 authority.  Its strict source is the copied
-    sampled training artifact's refined detection, complete frame decisions,
-    and ``raw_video/images_full`` pixels.
-    """
+    """Publish one reviewed-row crop provider through the same atomic boundary."""
 
     target = Path(destination).expanduser().resolve()
     base_archive = Path(base_training_zarr).expanduser().resolve()
@@ -597,13 +598,7 @@ def create_sampled_images_full_training_crop_artifact(
             }
         )
         local_root.require_group("crop_runs")
-        materialization = write_sampled_training_crops_from_images_full(
-            local_archive,
-            run_id=candidate,
-            refined_run_id=source_refined,
-            roi_size_wh=roi_size_wh,
-            published_archive_path=target,
-        )
+        materialization = materialize(local_archive, target)
         local_root = open_zarr_group_direct(local_archive, mode="a")
         local_root.attrs["training_artifact_status"] = "complete"
         local_root.attrs["training_artifact_publication"] = {
@@ -611,8 +606,7 @@ def create_sampled_images_full_training_crop_artifact(
             "schema_version": TRAINING_ARTIFACT_PUBLICATION_SCHEMA_VERSION,
             "policy": "node_local_build_then_checked_hidden_sibling_rename_v1",
             "base_training_zarr": str(base_archive),
-            "materialization_provider": "sampled_training_images_full",
-            "source_images_path": "raw_video/images_full",
+            "materialization_provider": materialization_provider,
             "source_refined_detect_run": source_refined,
             "source_detect_run": base.detect_run_id,
             "source_detect_review_status_digest": (base.refined_review_status_digest),
@@ -620,21 +614,16 @@ def create_sampled_images_full_training_crop_artifact(
                 f"detect_frame_decision_runs/{source_refined}"
             ),
             "crop_run": candidate,
-            "roi_size_wh": [int(roi_size_wh[0]), int(roi_size_wh[1])],
+            "roi_size_wh": list(materialization["roi_shape"])[::-1],
+            **dict(publication_inputs),
             "stage_selector_eligible": False,
             "registry_activation": "deferred",
             "run_provenance": build_writer_run_provenance(
-                command=(
-                    "fisheye.utils.publish_training_crop_materialization "
-                    "--create-artifact --sampled-images-full"
-                ),
+                command=(command),
                 params={
                     "publication_schema_id": (TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID),
-                    "materialization_provider": "sampled_training_images_full",
-                    "roi_size_wh": [
-                        int(roi_size_wh[0]),
-                        int(roi_size_wh[1]),
-                    ],
+                    "materialization_provider": materialization_provider,
+                    "roi_size_wh": list(materialization["roi_shape"])[::-1],
                     "stage_selector_eligible": False,
                     "registry_activation": "deferred",
                 },
@@ -734,6 +723,112 @@ def create_sampled_images_full_training_crop_artifact(
     }
 
 
+def create_sampled_images_full_training_crop_artifact(
+    *,
+    destination: str | Path,
+    base_training_zarr: str | Path,
+    run_id: str,
+    refined_run_id: str,
+    scratch_root: str | Path,
+    roi_size_wh: tuple[int, int] = (348, 348),
+    copy_backend: str = "python",
+) -> dict[str, Any]:
+    """Copy embedded sampled pixels, crop locally, and publish atomically."""
+
+    def materialize(local_archive: Path, target: Path) -> dict[str, Any]:
+        return write_sampled_training_crops_from_images_full(
+            local_archive,
+            run_id=run_id,
+            refined_run_id=refined_run_id,
+            roi_size_wh=roi_size_wh,
+            published_archive_path=target,
+        )
+
+    return _create_reviewed_training_crop_artifact(
+        destination=destination,
+        base_training_zarr=base_training_zarr,
+        run_id=run_id,
+        refined_run_id=refined_run_id,
+        scratch_root=scratch_root,
+        copy_backend=copy_backend,
+        materialization_provider="sampled_training_images_full",
+        materialize=materialize,
+        publication_inputs={
+            "source_images_path": "raw_video/images_full",
+        },
+        command=(
+            "fisheye.utils.publish_training_crop_materialization "
+            "--create-artifact --sampled-images-full"
+        ),
+    )
+
+
+def create_sampled_acquisition_crop_training_artifact(
+    *,
+    destination: str | Path,
+    base_training_zarr: str | Path,
+    run_id: str,
+    refined_run_id: str,
+    scratch_root: str | Path,
+    recording_dir: str | Path,
+    crop_video_path: str | Path | None = None,
+    crop_metadata_path: str | Path | None = None,
+    crop_summary_path: str | Path | None = None,
+    gpu_id: int = 0,
+    allow_full_frame_fallback: bool = True,
+    copy_backend: str = "python",
+    decoder: Callable[..., tuple[dict[int, Any], dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Publish native lossless acquisition crops with explicit fallback rows."""
+
+    source = resolve_acquisition_crop_source(
+        recording_dir,
+        video_path=crop_video_path,
+        metadata_path=crop_metadata_path,
+        summary_path=crop_summary_path,
+    )
+
+    def materialize(local_archive: Path, target: Path) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if decoder is not None:
+            kwargs["decoder"] = decoder
+        return write_sampled_acquisition_crop_hybrid(
+            local_archive,
+            run_id=run_id,
+            refined_run_id=refined_run_id,
+            source=source,
+            published_archive_path=target,
+            gpu_id=gpu_id,
+            allow_full_frame_fallback=allow_full_frame_fallback,
+            **kwargs,
+        )
+
+    return _create_reviewed_training_crop_artifact(
+        destination=destination,
+        base_training_zarr=base_training_zarr,
+        run_id=run_id,
+        refined_run_id=refined_run_id,
+        scratch_root=scratch_root,
+        copy_backend=copy_backend,
+        materialization_provider="sampled_acquisition_crop_video_hybrid",
+        materialize=materialize,
+        publication_inputs={
+            "recording_dir": str(source.recording_dir),
+            "acquisition_crop_video_path": str(source.video_path),
+            "acquisition_crop_video_stat": dict(source.video_stat),
+            "acquisition_crop_meta_path": str(source.metadata_path),
+            "acquisition_crop_meta_sha256": source.metadata_sha256,
+            "acquisition_crop_summary_path": str(source.summary_path),
+            "acquisition_crop_summary_sha256": source.summary_sha256,
+            "allow_full_frame_fallback": bool(allow_full_frame_fallback),
+        },
+        command=(
+            "fisheye.utils.publish_training_crop_materialization "
+            "--create-artifact --acquisition-crop-video"
+        ),
+    )
+
+
 __all__ = [
     "TRAINING_CROP_PUBLICATION_POLICY",
     "TRAINING_CROP_PUBLICATION_ROLLBACK_POLICY",
@@ -745,6 +840,7 @@ __all__ = [
     "TRAINING_DATASET_ENRICHMENT_SCHEMA_VERSION",
     "create_training_crop_artifact",
     "create_sampled_images_full_training_crop_artifact",
+    "create_sampled_acquisition_crop_training_artifact",
     "enrich_sampled_training_dataset",
     "publish_training_crop_materialization",
 ]

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from fisheye.shared.zarr.training_crop_materialization_publication import (
+    create_sampled_acquisition_crop_training_artifact,
     create_sampled_images_full_training_crop_artifact,
     create_training_crop_artifact,
     enrich_sampled_training_dataset,
@@ -50,15 +51,36 @@ def _parser() -> argparse.ArgumentParser:
             "--refined-detect-run."
         ),
     )
+    provider.add_argument(
+        "--acquisition-crop-video",
+        action="store_true",
+        help=(
+            "Use native lossless acquisition crop-video pixels, with an "
+            "explicit reviewed full-frame fallback where required. Requires "
+            "--create-artifact, --recording-dir, and --refined-detect-run."
+        ),
+    )
     parser.add_argument(
         "--roi-size",
         type=int,
         default=348,
         help="Square sampled-images-full crop extent in pixels (default: 348).",
     )
+    parser.add_argument("--recording-dir", type=Path)
+    parser.add_argument("--crop-video-path", type=Path)
+    parser.add_argument("--crop-metadata-path", type=Path)
+    parser.add_argument("--crop-summary-path", type=Path)
+    parser.add_argument("--gpu-id", type=int, default=0)
+    parser.add_argument(
+        "--forbid-full-frame-fallback",
+        action="store_true",
+        help="Fail if any reviewed row cannot use its recorded acquisition crop.",
+    )
     parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
     parser.add_argument("--cache-copy-batch-rows", type=int, default=1024)
-    parser.add_argument("--decode-mode", choices=("auto", "sequential", "indexed"), default="auto")
+    parser.add_argument(
+        "--decode-mode", choices=("auto", "sequential", "indexed"), default="auto"
+    )
     parser.add_argument("--decode-chunk-frames", type=int, default=1)
     parser.add_argument(
         "--source-instance-keys",
@@ -75,7 +97,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     source_instance_keys = (
-        [int(token.strip()) for token in args.source_instance_keys.split(",") if token.strip()]
+        [
+            int(token.strip())
+            for token in args.source_instance_keys.split(",")
+            if token.strip()
+        ]
         if args.source_instance_keys is not None
         else None
     )
@@ -89,9 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--sampled-images-full requires --create-artifact and publishes a new whole artifact."
             )
         if args.refined_detect_run is None:
-            raise SystemExit(
-                "--sampled-images-full requires --refined-detect-run."
-            )
+            raise SystemExit("--sampled-images-full requires --refined-detect-run.")
         if args.source_zarr is not None or args.source_crop_run is not None:
             raise SystemExit(
                 "--sampled-images-full derives directly from the base artifact; "
@@ -108,6 +132,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             refined_run_id=args.refined_detect_run,
             scratch_root=args.scratch_root,
             roi_size_wh=(int(args.roi_size), int(args.roi_size)),
+            copy_backend=args.copy_backend,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.acquisition_crop_video:
+        if not args.create_artifact:
+            raise SystemExit("--acquisition-crop-video requires --create-artifact.")
+        if args.refined_detect_run is None or args.recording_dir is None:
+            raise SystemExit(
+                "--acquisition-crop-video requires --refined-detect-run and --recording-dir."
+            )
+        if args.source_zarr is not None or args.source_crop_run is not None:
+            raise SystemExit(
+                "--acquisition-crop-video binds the reviewed base and recording sidecar; "
+                "do not pass --source-zarr or --source-crop-run."
+            )
+        if source_instance_keys is not None:
+            raise SystemExit(
+                "--acquisition-crop-video always materializes the complete reviewed rowset."
+            )
+        result = create_sampled_acquisition_crop_training_artifact(
+            destination=args.destination,
+            base_training_zarr=args.base_training_zarr,
+            run_id=args.run_id,
+            refined_run_id=args.refined_detect_run,
+            scratch_root=args.scratch_root,
+            recording_dir=args.recording_dir,
+            crop_video_path=args.crop_video_path,
+            crop_metadata_path=args.crop_metadata_path,
+            crop_summary_path=args.crop_summary_path,
+            gpu_id=args.gpu_id,
+            allow_full_frame_fallback=not args.forbid_full_frame_fallback,
             copy_backend=args.copy_backend,
         )
         print(json.dumps(result, indent=2, sort_keys=True))

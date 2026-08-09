@@ -18,13 +18,18 @@ from fisheye.shared.roi_pixel_contract import (
 )
 from fisheye.utils import regenerate_training_crops_pynvvc as mod
 from fisheye.shared.zarr.training_crop_materialization import (
+    SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER,
     SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER,
     TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE,
     TrainingCropMaterializationError,
     bind_training_crop_materialization,
     build_training_crop_materialization_binding,
 )
+from fisheye.shared.zarr.sampled_training_acquisition_crop_materialization import (
+    resolve_acquisition_crop_source,
+)
 from fisheye.shared.zarr.training_crop_materialization_publication import (
+    create_sampled_acquisition_crop_training_artifact,
     create_sampled_images_full_training_crop_artifact,
     create_training_crop_artifact,
     enrich_sampled_training_dataset,
@@ -889,6 +894,85 @@ def _make_reviewed_sampled_images_full_base(tmp_path: Path) -> Path:
     return path
 
 
+def _make_lossless_acquisition_crop_source(tmp_path: Path) -> Path:
+    recording = tmp_path / "recording"
+    derived = recording / "derived" / "external_crop_recorder"
+    derived.mkdir(parents=True)
+    video = derived / "camera_crop_external.mp4"
+    metadata = derived / "camera_crop_meta.csv"
+    summary = derived / "camera_crop_external_summary.json"
+    video.write_bytes(b"lossless-video-placeholder")
+    metadata.write_text(
+        "\n".join(
+            [
+                "recording_frame_id,crop_video_frame_index,local_frame_id,has_detection,blank_frame,crop_x,crop_y,crop_w,crop_h,detection_x,detection_y,detection_w,detection_h",
+                "11,0,100,1,0,-100,-100,384,384,0,0,1,1",
+                "21,1,101,0,1,-100,-100,384,384,,,,",
+                "31,2,102,1,1,-100,-100,384,384,4,3,2,2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary.write_text(
+        json.dumps(
+            {
+                "schema_id": "orange.external_recorder.summary",
+                "schema_version": 1,
+                "frames_encoded": 3,
+                "encode_dropped": 0,
+                "worker_failed": False,
+                "video_metadata": {
+                    "encoder": {
+                        "codec": "hevc",
+                        "tuning": "lossless",
+                        "rate_control_strategy": "lossless",
+                        "profile_name": "external_crop_hevc_lossless_gop1",
+                        "qp": 0,
+                        "resize_enabled": False,
+                        "requested_gop_length": 1,
+                        "resolved_gop_length": 1,
+                        "source_format": "mono8",
+                        "output_width": 384,
+                        "output_height": 384,
+                    },
+                    "source_pixel_contract": {
+                        "id": "orange.crop.mono8.v1",
+                        "dtype": "uint8",
+                        "value_range": "0_255",
+                        "pixel_format": "mono8",
+                        "memory_layout": "HxW",
+                        "width": 384,
+                        "height": 384,
+                        "encoded_color_range": "pc",
+                    },
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "video_streams": {
+                    "streams": {
+                        "crop": {
+                            "video": str(video.relative_to(recording)),
+                            "metadata": str(metadata.relative_to(recording)),
+                            "summary": str(summary.relative_to(recording)),
+                            "width": 384,
+                            "height": 384,
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return recording
+
+
 def test_sampled_images_full_artifact_publishes_reviewed_rows_atomically(
     tmp_path: Path,
 ) -> None:
@@ -947,6 +1031,104 @@ def test_sampled_images_full_artifact_publishes_reviewed_rows_atomically(
         str(base), mode="r", use_consolidated=True
     )
     assert not list(destination.parent.glob(f".{destination.name}.publish_tmp.*"))
+
+
+def test_acquisition_crop_artifact_uses_lossless_rows_and_explicit_fallback(
+    tmp_path: Path,
+) -> None:
+    base = _make_reviewed_sampled_images_full_base(tmp_path)
+    recording = _make_lossless_acquisition_crop_source(tmp_path)
+    destination = tmp_path / "reviewed_acquisition_crops.zarr"
+    scratch = tmp_path / "node-local" / "acquisition"
+    scratch.mkdir(parents=True)
+
+    def fake_decoder(
+        _video_path: Path,
+        frame_indices: list[int],
+        *,
+        expected_shape_hw: tuple[int, int],
+        gpu_id: int,
+    ) -> tuple[dict[int, np.ndarray], dict[str, object]]:
+        assert frame_indices == [0]
+        assert expected_shape_hw == (384, 384)
+        assert gpu_id == 2
+        return {0: np.full((384, 384), 17, dtype=np.uint8)}, {
+            "backend": "fake_exact_gop1",
+            "seek_count": 1,
+        }
+
+    result = create_sampled_acquisition_crop_training_artifact(
+        destination=destination,
+        base_training_zarr=base,
+        run_id="reviewed_acquisition_384",
+        refined_run_id="reviewed",
+        scratch_root=scratch,
+        recording_dir=recording,
+        gpu_id=2,
+        decoder=fake_decoder,
+    )
+
+    assert result["status"] == "complete"
+    assert result["row_count"] == 3
+    assert result["roi_shape"] == [384, 384]
+    assert result["materialization"]["acquisition_crop_video_rows"] == 1
+    assert result["materialization"]["sampled_images_full_fallback_rows"] == 2
+    root = zarr.open_group(str(destination), mode="r", use_consolidated=True)
+    run = root["crop_runs/reviewed_acquisition_384"]
+    assert run.attrs["training_materialization_provider"] == (
+        SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER
+    )
+    np.testing.assert_array_equal(run["pixel_source_codes"][:], [0, 1, 1])
+    np.testing.assert_array_equal(run["fallback_reason_codes"][:], [0, 2, 2])
+    np.testing.assert_array_equal(
+        run["source_crop_video_frame_indices"][:], [0, -1, -1]
+    )
+    np.testing.assert_array_equal(run["source_crop_meta_row_indices"][:], [0, -1, -1])
+    np.testing.assert_array_equal(run["roi_images"][0], 17)
+    assert np.count_nonzero(run["roi_images"][1]) > 0
+    assert np.count_nonzero(run["roi_images"][2]) > 0
+    bound = bind_training_crop_materialization(
+        destination, run_id="reviewed_acquisition_384"
+    )
+    assert bound.binding["payload_digest"] == result["binding_digest"]
+    assert not list(destination.parent.glob(f".{destination.name}.publish_tmp.*"))
+
+
+def test_acquisition_crop_artifact_can_forbid_fallback_rows(tmp_path: Path) -> None:
+    base = _make_reviewed_sampled_images_full_base(tmp_path)
+    recording = _make_lossless_acquisition_crop_source(tmp_path)
+    destination = tmp_path / "must_not_publish.zarr"
+    scratch = tmp_path / "node-local" / "strict-acquisition"
+    scratch.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="requires fallback reason 2"):
+        create_sampled_acquisition_crop_training_artifact(
+            destination=destination,
+            base_training_zarr=base,
+            run_id="strict_acquisition",
+            refined_run_id="reviewed",
+            scratch_root=scratch,
+            recording_dir=recording,
+            allow_full_frame_fallback=False,
+            decoder=lambda *_args, **_kwargs: ({}, {}),
+        )
+
+    assert not destination.exists()
+
+
+def test_acquisition_crop_source_rejects_nonlossless_summary(tmp_path: Path) -> None:
+    recording = _make_lossless_acquisition_crop_source(tmp_path)
+    summary = next(
+        (recording / "derived" / "external_crop_recorder").glob(
+            "*_crop_external_summary.json"
+        )
+    )
+    document = json.loads(summary.read_text(encoding="utf-8"))
+    document["video_metadata"]["encoder"]["resize_enabled"] = True
+    summary.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not the frozen lossless contract"):
+        resolve_acquisition_crop_source(recording)
 
 
 def test_sampled_images_full_artifact_fails_closed_on_unreviewed_frame(

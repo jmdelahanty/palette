@@ -32,10 +32,7 @@ from fisheye.shared.zarr.manifest_digest import (
 )
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 
-
-TRAINING_CROP_MATERIALIZATION_SCHEMA_ID = (
-    "palette.training_crop_materialization.v1"
-)
+TRAINING_CROP_MATERIALIZATION_SCHEMA_ID = "palette.training_crop_materialization.v1"
 TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE = (
     "training_crop_materialization_binding"
 )
@@ -43,17 +40,29 @@ TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_ID = (
     "palette.training_crop_materialization_binding"
 )
 TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_VERSION = 1
-SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER = (
-    "sampled_training_images_full"
+SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER = "sampled_training_images_full"
+SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER = (
+    "sampled_acquisition_crop_video_hybrid"
 )
-SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_ID = (
-    "palette.sampled_training_crop_geometry"
-)
+SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_ID = "palette.sampled_training_crop_geometry"
 SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_VERSION = 1
+ACQUISITION_HYBRID_PIXEL_SOURCE_CODE_MAP = {
+    "0": "acquisition_crop_video_lossless",
+    "1": "sampled_images_full_fallback",
+}
+ACQUISITION_HYBRID_FALLBACK_REASON_CODE_MAP = {
+    "0": "none",
+    "1": "missing_crop_metadata",
+    "2": "blank_crop_frame",
+    "3": "crop_has_no_detection",
+    "4": "invalid_crop_geometry",
+    "5": "reviewed_bbox_outside_recorded_crop",
+}
 TRAINING_CROP_MATERIALIZATION_PROVIDERS = (
     "source_video_pynvvc_luma",
     "verified_flat_roi_cache",
     SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER,
+    SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER,
 )
 
 _BASE_IDENTITY_ARRAYS = (
@@ -64,6 +73,14 @@ _SOURCE_CROP_IDENTITY_ARRAYS = ("source_crop_row_ids",)
 _OPTIONAL_CLIPPED_IDENTITY_ARRAYS = (
     "source_clip_local_frame_indices",
     "source_clip_indices",
+)
+_ACQUISITION_HYBRID_IDENTITY_ARRAYS = (
+    "source_training_row_indices",
+    "source_crop_meta_row_indices",
+    "source_crop_video_frame_indices",
+    "source_crop_local_frame_ids",
+    "pixel_source_codes",
+    "fallback_reason_codes",
 )
 
 
@@ -147,15 +164,14 @@ def validate_sampled_training_images_full_materialization(
         raise TrainingCropMaterializationError(
             "sampled images_full provider requires exact uint8 source pixels."
         )
-    if int(run.attrs.get("height") or 0) != source_height or int(
-        run.attrs.get("width") or 0
-    ) != source_width:
+    if (
+        int(run.attrs.get("height") or 0) != source_height
+        or int(run.attrs.get("width") or 0) != source_width
+    ):
         raise TrainingCropMaterializationError(
             "sampled provider source dimensions differ from source_images_shape."
         )
-    source_refined_run = str(
-        run.attrs.get("source_refined_detect_run") or ""
-    ).strip()
+    source_refined_run = str(run.attrs.get("source_refined_detect_run") or "").strip()
     if not source_refined_run or "/" in source_refined_run:
         raise TrainingCropMaterializationError(
             "sampled provider requires one safe source refined-detect run name."
@@ -336,6 +352,242 @@ def validate_sampled_training_images_full_materialization(
         )
 
 
+def validate_sampled_acquisition_crop_hybrid_materialization(
+    run: zarr.Group,
+) -> None:
+    """Validate explicit acquisition-video versus full-frame fallback rows."""
+
+    raw_shape = run.attrs.get("source_images_shape")
+    if (
+        not isinstance(raw_shape, list)
+        or len(raw_shape) != 3
+        or any(type(value) is not int or value <= 0 for value in raw_shape)
+    ):
+        raise TrainingCropMaterializationError(
+            "acquisition hybrid provider requires source_images_shape=[F,H,W]."
+        )
+    frame_count, source_height, source_width = (int(v) for v in raw_shape)
+    if run.attrs.get("source_images_path") != "raw_video/images_full":
+        raise TrainingCropMaterializationError(
+            "acquisition hybrid fallback must bind raw_video/images_full."
+        )
+    row_count = int(run["roi_images"].shape[0])
+    roi_images = run["roi_images"]
+    if np.dtype(roi_images.dtype) != np.dtype(np.uint8) or len(roi_images.shape) != 3:
+        raise TrainingCropMaterializationError(
+            "roi_images must be one rank-3 uint8 crop payload."
+        )
+    roi_height, roi_width = (int(value) for value in roi_images.shape[1:])
+    declared_shape = run.attrs.get("acquisition_crop_shape")
+    if declared_shape != [roi_height, roi_width]:
+        raise TrainingCropMaterializationError(
+            "acquisition_crop_shape must equal the persisted roi_images extent."
+        )
+    if (
+        int(run.attrs.get("height") or 0) != source_height
+        or int(run.attrs.get("width") or 0) != source_width
+    ):
+        raise TrainingCropMaterializationError(
+            "acquisition hybrid source dimensions differ from source_images_shape."
+        )
+
+    local_frames = _exact_array(
+        run, "frame_indices", dtype=np.dtype(np.int64), shape=(row_count,)
+    )
+    acquisition_frames = _exact_array(
+        run,
+        "source_acquisition_frame_index",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    source_frames = _exact_array(
+        run, "source_frame_indices", dtype=np.dtype(np.int64), shape=(row_count,)
+    )
+    if not np.array_equal(source_frames, acquisition_frames):
+        raise TrainingCropMaterializationError(
+            "source_frame_indices must equal source acquisition-frame identity."
+        )
+    if row_count and (
+        int(local_frames.min()) < 0
+        or int(local_frames.max()) >= frame_count
+        or np.any(local_frames[1:] < local_frames[:-1])
+    ):
+        raise TrainingCropMaterializationError(
+            "frame_indices must be sorted within the sampled full-frame axis."
+        )
+    expected_offsets = np.zeros(frame_count + 1, dtype=np.int64)
+    expected_offsets[1:] = np.cumsum(
+        np.bincount(local_frames, minlength=frame_count), dtype=np.int64
+    )
+    offsets = _exact_array(
+        run,
+        "frame_row_offsets",
+        dtype=np.dtype(np.int64),
+        shape=(frame_count + 1,),
+    )
+    if not np.array_equal(offsets, expected_offsets):
+        raise TrainingCropMaterializationError(
+            "frame_row_offsets does not exactly index sampled local frames."
+        )
+
+    keys = _exact_array(
+        run, "instance_key", dtype=np.dtype(np.uint64), shape=(row_count,)
+    )
+    if np.unique(keys).shape[0] != row_count:
+        raise TrainingCropMaterializationError("instance_key values must be unique.")
+    _exact_array(
+        run,
+        "source_refined_row_ids",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    source_training_rows = _exact_array(
+        run,
+        "source_training_row_indices",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    if not np.array_equal(source_training_rows, local_frames):
+        raise TrainingCropMaterializationError(
+            "source_training_row_indices must equal the compact sampled frame index."
+        )
+    meta_rows = _exact_array(
+        run,
+        "source_crop_meta_row_indices",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    video_rows = _exact_array(
+        run,
+        "source_crop_video_frame_indices",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    local_crop_rows = _exact_array(
+        run,
+        "source_crop_local_frame_ids",
+        dtype=np.dtype(np.int64),
+        shape=(row_count,),
+    )
+    source_codes = _exact_array(
+        run, "pixel_source_codes", dtype=np.dtype(np.uint8), shape=(row_count,)
+    )
+    reason_codes = _exact_array(
+        run, "fallback_reason_codes", dtype=np.dtype(np.uint8), shape=(row_count,)
+    )
+    if np.any(source_codes > 1) or np.any(reason_codes > 5):
+        raise TrainingCropMaterializationError(
+            "Acquisition hybrid source/reason codes are outside the v1 registries."
+        )
+    acquisition = source_codes == 0
+    fallback = source_codes == 1
+    if np.any(acquisition & (reason_codes != 0)) or np.any(
+        fallback & (reason_codes == 0)
+    ):
+        raise TrainingCropMaterializationError(
+            "Acquisition rows require reason 0 and fallback rows require a reason."
+        )
+    if np.any(
+        acquisition & ((meta_rows < 0) | (video_rows < 0) | (local_crop_rows < 0))
+    ):
+        raise TrainingCropMaterializationError(
+            "Acquisition rows require exact nonnegative crop-video lineage."
+        )
+    if np.any(
+        fallback & ((meta_rows != -1) | (video_rows != -1) | (local_crop_rows != -1))
+    ):
+        raise TrainingCropMaterializationError(
+            "Fallback rows must use -1 for unavailable crop-video lineage."
+        )
+
+    bbox_norm = _exact_array(
+        run, "bbox_norm_coords", dtype=np.dtype(np.float32), shape=(row_count, 4)
+    )
+    expected_bbox_img, expected_centers = derive_canonical_detection_geometry(
+        bbox_norm, source_width=source_width, source_height=source_height
+    )
+    bbox_img = _exact_array(
+        run, "bbox_img_xyxy", dtype=np.dtype(np.float32), shape=(row_count, 4)
+    )
+    centers = _exact_array(
+        run, "centers_img_xy", dtype=np.dtype(np.float32), shape=(row_count, 2)
+    )
+    if not np.array_equal(bbox_img, expected_bbox_img) or not np.array_equal(
+        centers, expected_centers
+    ):
+        raise TrainingCropMaterializationError(
+            "Acquisition hybrid detection projections differ from their authority."
+        )
+    sizes = _exact_array(
+        run, "roi_sizes_full", dtype=np.dtype(np.int32), shape=(row_count, 2)
+    )
+    expected_sizes = np.repeat(
+        np.asarray([[roi_width, roi_height]], dtype=np.int32), row_count, axis=0
+    )
+    if not np.array_equal(sizes, expected_sizes):
+        raise TrainingCropMaterializationError(
+            "Every acquisition hybrid row must use the native crop-video extent."
+        )
+    coordinates = _exact_array(
+        run,
+        "roi_coordinates_full",
+        dtype=np.dtype(np.int32),
+        shape=(row_count, 2),
+    )
+    source_crop = _exact_array(
+        run, "source_crop_xywh", dtype=np.dtype(np.float32), shape=(row_count, 4)
+    )
+    expected_source_crop = np.concatenate(
+        (coordinates.astype(np.float32), sizes.astype(np.float32)), axis=1
+    )
+    if not np.array_equal(source_crop, expected_source_crop):
+        raise TrainingCropMaterializationError(
+            "source_crop_xywh must exactly describe persisted placement and extent."
+        )
+    bbox_roi = _exact_array(
+        run, "bbox_roi_xyxy", dtype=np.dtype(np.float32), shape=(row_count, 4)
+    )
+    expected_bbox_roi = bbox_img - np.concatenate(
+        (coordinates.astype(np.float32), coordinates.astype(np.float32)), axis=1
+    )
+    if not np.array_equal(bbox_roi, expected_bbox_roi):
+        raise TrainingCropMaterializationError(
+            "bbox_roi_xyxy must translate authoritative source-camera boxes."
+        )
+    if row_count and (
+        np.any(bbox_roi[:, :2] < 0)
+        or np.any(bbox_roi[:, 2] > roi_width)
+        or np.any(bbox_roi[:, 3] > roi_height)
+    ):
+        raise TrainingCropMaterializationError(
+            "Every reviewed box must be fully represented by its persisted pixels."
+        )
+    _exact_array(
+        run,
+        "source_row_signature",
+        dtype=np.dtype(np.uint8),
+        shape=(row_count, 32),
+    )
+    if run.attrs.get("pixel_verification") != (
+        "all_rows_byte_equal_to_declared_provider_v1"
+    ):
+        raise TrainingCropMaterializationError(
+            "Acquisition hybrid publication requires all-row pixel verification."
+        )
+    if run.attrs.get("fallback_policy") != "sampled_images_full_zero_padded_v1":
+        raise TrainingCropMaterializationError(
+            "Acquisition hybrid fallback policy is missing or ambiguous."
+        )
+    if run.attrs.get("pixel_source_code_map") != (
+        ACQUISITION_HYBRID_PIXEL_SOURCE_CODE_MAP
+    ) or run.attrs.get("fallback_reason_code_map") != (
+        ACQUISITION_HYBRID_FALLBACK_REASON_CODE_MAP
+    ):
+        raise TrainingCropMaterializationError(
+            "Acquisition hybrid code registries differ from the frozen v1 maps."
+        )
+
+
 def build_training_crop_materialization_binding(
     run: zarr.Group,
 ) -> dict[str, Any]:
@@ -352,11 +604,18 @@ def build_training_crop_materialization_binding(
         raise TrainingCropMaterializationError(
             "Training crop materialization schema identity is missing or wrong."
         )
-    required_identity_arrays = (
-        _BASE_IDENTITY_ARRAYS
-        if provider == SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER
-        else (*_BASE_IDENTITY_ARRAYS, *_SOURCE_CROP_IDENTITY_ARRAYS)
-    )
+    if provider == SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER:
+        required_identity_arrays = _BASE_IDENTITY_ARRAYS
+    elif provider == SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER:
+        required_identity_arrays = (
+            *_BASE_IDENTITY_ARRAYS,
+            *_ACQUISITION_HYBRID_IDENTITY_ARRAYS,
+        )
+    else:
+        required_identity_arrays = (
+            *_BASE_IDENTITY_ARRAYS,
+            *_SOURCE_CROP_IDENTITY_ARRAYS,
+        )
     missing = [
         name for name in (*required_identity_arrays, "roi_images") if name not in run
     ]
@@ -372,6 +631,8 @@ def build_training_crop_materialization_binding(
         )
     if provider == SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER:
         validate_sampled_training_images_full_materialization(run)
+    elif provider == SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER:
+        validate_sampled_acquisition_crop_hybrid_materialization(run)
     row_count = int(roi_images.shape[0])
     declarations: dict[str, dict[str, Any]] = {}
     identity_sha256: dict[str, str] = {}
@@ -379,6 +640,7 @@ def build_training_crop_materialization_binding(
         *_BASE_IDENTITY_ARRAYS,
         *_SOURCE_CROP_IDENTITY_ARRAYS,
         *_OPTIONAL_CLIPPED_IDENTITY_ARRAYS,
+        *_ACQUISITION_HYBRID_IDENTITY_ARRAYS,
     ):
         if name not in run:
             continue
@@ -410,16 +672,42 @@ def build_training_crop_materialization_binding(
             "source_images_path": run.attrs.get("source_images_path"),
             "source_images_dtype": run.attrs.get("source_images_dtype"),
             "source_images_shape": run.attrs.get("source_images_shape"),
-            "source_refined_detect_run": run.attrs.get(
-                "source_refined_detect_run"
-            ),
-            "source_frame_decision_path": run.attrs.get(
-                "source_frame_decision_path"
-            ),
+            "source_refined_detect_run": run.attrs.get("source_refined_detect_run"),
+            "source_frame_decision_path": run.attrs.get("source_frame_decision_path"),
             "source_frame_decision_digest": run.attrs.get(
                 "source_frame_decision_digest"
             ),
             "padding_mode": run.attrs.get("padding_mode"),
+            "pixel_verification": run.attrs.get("pixel_verification"),
+        }
+    elif provider == SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER:
+        provider_evidence = {
+            "source_images_path": run.attrs.get("source_images_path"),
+            "source_images_shape": run.attrs.get("source_images_shape"),
+            "source_refined_detect_run": run.attrs.get("source_refined_detect_run"),
+            "source_frame_decision_path": run.attrs.get("source_frame_decision_path"),
+            "source_frame_decision_digest": run.attrs.get(
+                "source_frame_decision_digest"
+            ),
+            "acquisition_crop_video_path": run.attrs.get("acquisition_crop_video_path"),
+            "acquisition_crop_video_stat": run.attrs.get("acquisition_crop_video_stat"),
+            "acquisition_crop_meta_path": run.attrs.get("acquisition_crop_meta_path"),
+            "acquisition_crop_meta_sha256": run.attrs.get(
+                "acquisition_crop_meta_sha256"
+            ),
+            "acquisition_crop_summary_path": run.attrs.get(
+                "acquisition_crop_summary_path"
+            ),
+            "acquisition_crop_summary_sha256": run.attrs.get(
+                "acquisition_crop_summary_sha256"
+            ),
+            "acquisition_encoder_contract": run.attrs.get(
+                "acquisition_encoder_contract"
+            ),
+            "pixel_source_code_map": run.attrs.get("pixel_source_code_map"),
+            "fallback_reason_code_map": run.attrs.get("fallback_reason_code_map"),
+            "fallback_policy": run.attrs.get("fallback_policy"),
+            "decode_backend": run.attrs.get("decode_backend"),
             "pixel_verification": run.attrs.get("pixel_verification"),
         }
     else:
@@ -532,9 +820,7 @@ def bind_training_crop_materialization(
                 f"Published training crop lacks readable consolidated metadata: {exc}"
             ) from exc
         if (
-            consolidated_run.attrs.get(
-                TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE
-            )
+            consolidated_run.attrs.get(TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE)
             != persisted
         ):
             raise TrainingCropMaterializationError(
@@ -569,12 +855,15 @@ def bind_training_crop_materialization(
 
 
 __all__ = [
+    "ACQUISITION_HYBRID_FALLBACK_REASON_CODE_MAP",
+    "ACQUISITION_HYBRID_PIXEL_SOURCE_CODE_MAP",
     "TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE",
     "TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_ID",
     "TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_VERSION",
     "TRAINING_CROP_MATERIALIZATION_PROVIDERS",
     "TRAINING_CROP_MATERIALIZATION_SCHEMA_ID",
     "SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER",
+    "SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER",
     "SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_ID",
     "SAMPLED_TRAINING_CROP_GEOMETRY_SCHEMA_VERSION",
     "BoundTrainingCropMaterialization",
@@ -582,4 +871,5 @@ __all__ = [
     "bind_training_crop_materialization",
     "build_training_crop_materialization_binding",
     "validate_sampled_training_images_full_materialization",
+    "validate_sampled_acquisition_crop_hybrid_materialization",
 ]
