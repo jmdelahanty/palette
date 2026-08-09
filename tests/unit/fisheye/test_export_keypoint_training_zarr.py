@@ -230,15 +230,7 @@ def _write_source_pose_zarr(
         refined_parent.attrs["latest"] = refined_run_name
         refined = refined_parent.create_group(refined_run_name)
         if strict_v2_names:
-            refined.attrs["source_bindings"] = {
-                "schema_id": "palette.refined_keypoint.source_bindings",
-                "schema_version": 2,
-                "raw_keypoint_snapshot": {
-                    "stage": "keypoints",
-                    "run_id": "kp_pose_001",
-                    "run_path": "keypoints_runs/kp_pose_001",
-                },
-            }
+            refined.attrs["source_keypoints_run"] = "kp_pose_001"
         else:
             refined.attrs["source_keypoints_run"] = "kp_pose_001"
         refined.attrs["source_crop_run"] = "crop_pose_001"
@@ -725,7 +717,7 @@ def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(
     assert tuple(layout["kpt_shape"]) == (5, 3)
 
 
-def test_discover_merge_sources_supports_strict_v2_success_and_source_binding(
+def test_discover_merge_sources_supports_strict_v2_success_and_external_annotation(
     tmp_path: Path,
 ) -> None:
     zarr_path = tmp_path / "source_refined_strict_v2.zarr"
@@ -747,15 +739,7 @@ def test_discover_merge_sources_supports_strict_v2_success_and_source_binding(
     annotation = annotation_parent.create_group("refined_kp_pose_v2_001")
     annotation.attrs.update(
         {
-            "source_bindings": {
-                "schema_id": "palette.refined_keypoint.source_bindings",
-                "schema_version": 2,
-                "raw_keypoint_snapshot": {
-                    "stage": "keypoints",
-                    "run_id": "kp_pose_001",
-                    "run_path": "keypoints_runs/kp_pose_001",
-                },
-            },
+            "source_keypoints_run": "kp_pose_001",
             "skeleton_id": "pose_skel_traditional_v2",
             "kpt_shape": [5, 2],
             "pose_schema": {

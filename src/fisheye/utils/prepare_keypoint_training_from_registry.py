@@ -2026,14 +2026,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 f"observed {source_type_resolved or 'missing'!r} on crop run "
                 f"'{source_crop_run}'."
             )
-        if inferred_keypoint_labels is None:
-            labels = _resolve_keypoint_labels(annotation_group)
-            if labels:
-                inferred_keypoint_labels = labels
-        if inferred_keypoint_skeleton is None:
-            edges = _resolve_keypoint_skeleton(annotation_group)
-            if edges:
-                inferred_keypoint_skeleton = edges
         dataset_member = (
             f"{dataset_label} (zarr={zarr_path.name}, "
             f"annotation_source={annotation_source['parent_name']}/{annotation_source['run_name']})"
