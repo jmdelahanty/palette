@@ -141,6 +141,24 @@ not interchangeable. Hybrid artifacts declare
 array. A cache or work package must bind the exact source family that produced
 its bytes.
 
+The maintained hybrid builder is reviewed-observation based. Its v2 output
+rowset is exactly the approved refined-detection instance rowset, ordered by
+`frame_indices` and `instance_key`; it never unions rows merely because they
+occur on different frames. A reviewed row may reuse an acquisition crop-video
+frame only when its `instance_key` matches one unique acquisition crop row, the
+frame identity agrees, and the acquisition crop window contains the complete
+reviewed bounding box. Corrected rows that no longer fit, manual additions, and
+otherwise unmatched identities route to the supplemental full-frame cache.
+Retired acquisition rows are omitted. Refined `bbox_norm_coords` remains the
+authority for every route, and crop-local boxes are re-derived from that
+authority and the selected pixel window.
+
+This rule is essential for zero/one/many observations per frame. Frame presence
+is not row identity, and no frame-level fallback is permitted. The v2 builder
+also remains selector-ineligible by default; creating a complete hybrid child
+does not change `latest`, `latest_complete`, or `latest_any` unless a caller
+separately requests the specialized `latest_any` pointer.
+
 New acquisition crop-video analysis runs also publish stable observation keys
 and per-row source signatures. This makes the maintained geometry/pixel-source
 snapshot eligible for keyed keypoint and subject-mask work packages without a
