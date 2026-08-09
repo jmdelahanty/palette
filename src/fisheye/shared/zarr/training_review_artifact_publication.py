@@ -35,7 +35,7 @@ from fisheye.shared.refined_subject_mask_mutation import (
     refined_subject_mask_lifecycle_state,
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
-from fisheye.shared.tabular_deltas import create_delta_generation
+from fisheye.shared.tabular_deltas import create_delta_generation, instance_key_digest
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, sha256_file, utc_now
 from fisheye.shared.zarr.keypoint_bundle_production_publication import (
     publish_keypoint_v2_production_candidate_chain,
@@ -81,6 +81,16 @@ TRAINING_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
 TRAINING_REVIEW_ARTIFACT_RECEIPT = "training_review_artifact_receipt.json"
 TRAINING_REVIEW_ARTIFACT_POLICY = (
     "node_local_candidate_bases_plus_editable_surfaces_then_atomic_tree_v1"
+)
+TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID = (
+    "palette.training_keypoint_review_artifact"
+)
+TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_VERSION = 1
+TRAINING_KEYPOINT_REVIEW_ARTIFACT_RECEIPT = (
+    "training_keypoint_review_artifact_receipt.json"
+)
+TRAINING_KEYPOINT_REVIEW_ARTIFACT_POLICY = (
+    "node_local_immutable_keypoint_bases_plus_instance_key_deltas_v1"
 )
 
 
@@ -403,7 +413,7 @@ def _publish_subject_mask_contract_chain(
     }
 
 
-def _validate_review_state(
+def _validate_keypoint_review_state(
     archive: Path,
     *,
     crop_run_id: str,
@@ -413,12 +423,9 @@ def _validate_review_state(
     body_frame_run_id: str,
     delta_run_id: str,
     delta_generation: str,
-    raw_mask_run_id: str,
-    canonical_refined_mask_run_id: str,
-    mask_quality_run_id: str,
-    mask_bundle_id: str,
-    editable_refined_mask_run_id: str,
 ) -> dict[str, Any]:
+    """Validate the task-complete keypoint-only review surface."""
+
     root = open_zarr_group_direct(archive, mode="r")
     if root.attrs.get("stage_selector_eligible") is not False:
         raise RuntimeError("Training review artifact became selector eligible.")
@@ -461,7 +468,8 @@ def _validate_review_state(
         raise RuntimeError(
             "Persisted crop manifest differs from refined source binding."
         )
-    generation = root[f"edit_delta_runs/{delta_run_id}/generations/{delta_generation}"]
+    delta = root[f"edit_delta_runs/{delta_run_id}"]
+    generation = delta[f"generations/{delta_generation}"]
     if (
         generation.attrs.get("status") != "open"
         or generation.attrs.get("target_kind") != "keypoints"
@@ -485,6 +493,56 @@ def _validate_review_state(
         raise RuntimeError(
             "Keypoint edit generation QC policy differs from the refined skeleton."
         )
+    refined_keys = np.asarray(refined["instance_key"][:], dtype=np.uint64)
+    base_key_digest = instance_key_digest(refined_keys)
+    if (
+        delta.attrs.get("base_instance_key_count") != int(refined_keys.shape[0])
+        or delta.attrs.get("base_instance_key_sha256") != base_key_digest
+        or generation.attrs.get("base_instance_key_sha256") != base_key_digest
+    ):
+        raise RuntimeError(
+            "Keypoint edit generation instance-key binding differs from its "
+            "immutable base."
+        )
+    return {
+        "run_paths": run_paths,
+        "keypoint_delta_path": (
+            f"edit_delta_runs/{delta_run_id}/generations/{delta_generation}"
+        ),
+        "manual_keypoint_qc_policy_digest": review_policy.policy_digest,
+        "row_count": int(refined_keys.shape[0]),
+        "metadata_read_mode": "direct_unconsolidated_while_review_mutable",
+    }
+
+
+def _validate_review_state(
+    archive: Path,
+    *,
+    crop_run_id: str,
+    raw_run_id: str,
+    quality_run_id: str,
+    refined_run_id: str,
+    body_frame_run_id: str,
+    delta_run_id: str,
+    delta_generation: str,
+    raw_mask_run_id: str,
+    canonical_refined_mask_run_id: str,
+    mask_quality_run_id: str,
+    mask_bundle_id: str,
+    editable_refined_mask_run_id: str,
+) -> dict[str, Any]:
+    keypoint_state = _validate_keypoint_review_state(
+        archive,
+        crop_run_id=crop_run_id,
+        raw_run_id=raw_run_id,
+        quality_run_id=quality_run_id,
+        refined_run_id=refined_run_id,
+        body_frame_run_id=body_frame_run_id,
+        delta_run_id=delta_run_id,
+        delta_generation=delta_generation,
+    )
+    root = open_zarr_group_direct(archive, mode="r")
+    refined = root[keypoint_state["run_paths"]["refined_keypoints"]]
     for family, run_id in (
         ("subject_mask_runs", raw_mask_run_id),
         ("refined_subject_masks_runs", canonical_refined_mask_run_id),
@@ -571,11 +629,7 @@ def _validate_review_state(
             "Editable subject masks differ from the strict refined-keypoint row identity."
         )
     return {
-        "run_paths": run_paths,
-        "keypoint_delta_path": (
-            f"edit_delta_runs/{delta_run_id}/generations/{delta_generation}"
-        ),
-        "manual_keypoint_qc_policy_digest": review_policy.policy_digest,
+        **keypoint_state,
         "refined_subject_mask_path": (
             f"refined_subject_masks_runs/{editable_refined_mask_run_id}"
         ),
@@ -586,12 +640,264 @@ def _validate_review_state(
             "bundle": f"{SUBJECT_MASK_BUNDLE_FAMILY}/{mask_bundle_id}",
             "bundle_manifest_digest": bundle_validation["bundle_manifest_digest"],
         },
-        "row_count": int(refined_keys.shape[0]),
         "dense_masks_roi_shape": [int(value) for value in masks_roi.shape],
         "dense_masks_roi_dtype": str(np.dtype(masks_roi.dtype)),
         "mask_labels": expected_mask_labels,
-        "metadata_read_mode": "direct_unconsolidated_while_review_mutable",
     }
+
+
+def publish_training_keypoint_review_artifact(
+    *,
+    source_archive: Path,
+    destination: Path,
+    scratch_root: Path,
+    crop_run_id: str,
+    terminal_keypoint_run_id: str,
+    raw_keypoint_run_id: str,
+    quality_run_id: str,
+    refined_keypoint_run_id: str,
+    body_frame_run_id: str,
+    keypoint_delta_run_id: str,
+    keypoint_delta_generation: str,
+    created_by: str,
+    copy_backend: str = "python",
+) -> Mapping[str, Any]:
+    """Publish one atomic keypoint-only training-review artifact.
+
+    This is deliberately separate from :func:`publish_training_review_artifact`.
+    It closes the complete keypoint review lifecycle without inventing subject-mask
+    terminals for a pose-only task.  The prediction/refinement bases are immutable;
+    review writes are confined to the bound instance-key delta generation.
+    """
+
+    source = source_archive.expanduser().resolve()
+    target = destination.expanduser().resolve()
+    scratch = _bounded_node_local_scratch(scratch_root)
+    if copy_backend != "python":
+        raise ValueError(
+            "Training keypoint review currently supports copy_backend='python' only."
+        )
+    if not source.is_dir() or source.suffix != ".zarr":
+        raise FileNotFoundError(f"Source training Zarr not found: {source}")
+    if target.suffix != ".zarr":
+        raise ValueError("Training review artifact destination must end in .zarr.")
+    if target.exists():
+        raise FileExistsError(f"Training review artifact already exists: {target}")
+    run_ids = {
+        "crop": _safe_run_id(crop_run_id, name="crop_run_id"),
+        "terminal_keypoints": _safe_run_id(
+            terminal_keypoint_run_id, name="terminal_keypoint_run_id"
+        ),
+        "raw_keypoints": _safe_run_id(raw_keypoint_run_id, name="raw_keypoint_run_id"),
+        "keypoint_quality": _safe_run_id(quality_run_id, name="quality_run_id"),
+        "refined_keypoints": _safe_run_id(
+            refined_keypoint_run_id, name="refined_keypoint_run_id"
+        ),
+        "body_frame": _safe_run_id(body_frame_run_id, name="body_frame_run_id"),
+        "keypoint_delta": _safe_run_id(
+            keypoint_delta_run_id, name="keypoint_delta_run_id"
+        ),
+        "keypoint_delta_generation": _safe_run_id(
+            keypoint_delta_generation, name="keypoint_delta_generation"
+        ),
+    }
+    recording_identity = _recording_identity(source)
+    terminal_path = f"keypoint_shard_runs/{run_ids['terminal_keypoints']}"
+    terminal_metadata_sha256 = _metadata_sha256(source, terminal_path)
+    identity = _initial_refined_identity(
+        recording_identity=recording_identity,
+        terminal_metadata_sha256=terminal_metadata_sha256,
+        refined_run_id=run_ids["refined_keypoints"],
+    )
+
+    with tempfile.TemporaryDirectory(
+        prefix="palette-training-keypoint-review-", dir=str(scratch)
+    ) as temporary:
+        working_root = Path(temporary)
+        bundle_root = working_root / "keypoint_bundle"
+        local_archive = working_root / target.name
+        chain = publish_training_keypoint_review_candidate_chain(
+            source_archive=source,
+            crop_run_id=run_ids["crop"],
+            terminal_run_id=run_ids["terminal_keypoints"],
+            bundle_root=bundle_root,
+            raw_run_id=run_ids["raw_keypoints"],
+            quality_run_id=run_ids["keypoint_quality"],
+            refined_run_id=run_ids["refined_keypoints"],
+            body_frame_run_id=run_ids["body_frame"],
+            refined_identity=identity,
+            created_by=created_by,
+        )
+        shutil.copytree(source, local_archive)
+        keypoint_import = publish_keypoint_v2_production_candidate_chain(
+            analysis_zarr=local_archive,
+            chain=chain,
+            copy_backend=copy_backend,
+        )
+        local_root = open_zarr_group_direct(local_archive, mode="a")
+        local_root[f"crop_runs/{run_ids['crop']}"].attrs["run_manifest"] = dict(
+            chain.crop.manifest
+        )
+        local_root.attrs.update(
+            {
+                "training_artifact_status": "building_review_surfaces",
+                "training_task": "keypoints",
+                "stage_selector_eligible": False,
+                "registry_activation": "deferred",
+                "metadata_read_mode": "direct_unconsolidated_while_review_mutable",
+            }
+        )
+        manual_qc_policy = build_default_manual_keypoint_qc_policy(
+            skeleton_id=chain.refined.source.skeleton_id,
+            skeleton_digest=chain.refined.source.skeleton_digest,
+            keypoint_labels=chain.refined.source.skeleton_semantics[
+                "keypoint_labels"
+            ],
+        )
+        delta_binding = create_delta_generation(
+            local_root,
+            delta_run=run_ids["keypoint_delta"],
+            generation=run_ids["keypoint_delta_generation"],
+            generation_ordinal=1,
+            target_kind="keypoints",
+            base_run_path=f"refined_keypoints_runs/{run_ids['refined_keypoints']}",
+            created_by=created_by,
+            review_qc_policy=manual_qc_policy.as_manifest(),
+        )
+        payload = json_attr_safe(
+            {
+                "status": "review_active",
+                "training_task": "keypoints",
+                "created_at_utc": utc_now(),
+                "created_by": str(created_by),
+                "policy": TRAINING_KEYPOINT_REVIEW_ARTIFACT_POLICY,
+                "source_archive": str(source),
+                "destination": str(target),
+                "recording_identity": recording_identity,
+                "source_evidence": {
+                    "crop_run": run_ids["crop"],
+                    "terminal_keypoint_run": run_ids["terminal_keypoints"],
+                    "terminal_keypoint_metadata_sha256": terminal_metadata_sha256,
+                },
+                "runs": run_ids,
+                "keypoint_chain_receipt_digest": chain.receipt["payload_digest"],
+                "keypoint_import_schema": keypoint_import["schema_id"],
+                "keypoint_delta_binding": dict(delta_binding),
+                "keypoint_review_authority": (
+                    "immutable_refined_snapshot_plus_instance_key_delta_generation"
+                ),
+                "stage_selector_eligible": False,
+                "registry_activation": "deferred",
+                "metadata_read_mode": (
+                    "direct_unconsolidated_while_review_mutable"
+                ),
+                "published_consolidated_base_generation": keypoint_import[
+                    "consolidation"
+                ],
+                "run_provenance": build_writer_run_provenance(
+                    command=(
+                        "fisheye.utils.publish_training_keypoint_review_artifact"
+                    ),
+                    params={
+                        "policy": TRAINING_KEYPOINT_REVIEW_ARTIFACT_POLICY,
+                        "created_by": str(created_by),
+                        "stage_selector_eligible": False,
+                        "registry_activation": "deferred",
+                    },
+                    input_run_ids={
+                        "crop_run": run_ids["crop"],
+                        "terminal_keypoint_run": run_ids["terminal_keypoints"],
+                    },
+                ),
+            }
+        )
+        receipt = {
+            "schema_id": TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID,
+            "schema_version": TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_VERSION,
+            "payload_digest": canonical_json_sha256(payload),
+            "payload": payload,
+        }
+        local_root.attrs.update(
+            {
+                "training_artifact_status": "review_active",
+                "training_review_artifact": receipt,
+            }
+        )
+        write_json_atomic(
+            local_archive / TRAINING_KEYPOINT_REVIEW_ARTIFACT_RECEIPT,
+            receipt,
+        )
+        _validate_keypoint_review_state(
+            local_archive,
+            crop_run_id=run_ids["crop"],
+            raw_run_id=run_ids["raw_keypoints"],
+            quality_run_id=run_ids["keypoint_quality"],
+            refined_run_id=run_ids["refined_keypoints"],
+            body_frame_run_id=run_ids["body_frame"],
+            delta_run_id=run_ids["keypoint_delta"],
+            delta_generation=run_ids["keypoint_delta_generation"],
+        )
+        local_inventory = tree_inventory(local_archive, hash_content=True)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        hidden = target.with_name(
+            f".{target.name}.publish_tmp.{os.getpid()}.{uuid4().hex}"
+        )
+        with archive_metadata_publication_lock(target):
+            if target.exists() or hidden.exists():
+                raise FileExistsError(
+                    f"Training keypoint review target became occupied: {target}"
+                )
+            try:
+                shutil.copytree(local_archive, hidden)
+                if tree_inventory(hidden, hash_content=True) != local_inventory:
+                    raise RuntimeError(
+                        "Published keypoint review copy differs from node-local source."
+                    )
+                _validate_keypoint_review_state(
+                    hidden,
+                    crop_run_id=run_ids["crop"],
+                    raw_run_id=run_ids["raw_keypoints"],
+                    quality_run_id=run_ids["keypoint_quality"],
+                    refined_run_id=run_ids["refined_keypoints"],
+                    body_frame_run_id=run_ids["body_frame"],
+                    delta_run_id=run_ids["keypoint_delta"],
+                    delta_generation=run_ids["keypoint_delta_generation"],
+                )
+                os.replace(hidden, target)
+            except BaseException:
+                if hidden.exists():
+                    shutil.rmtree(hidden)
+                raise
+
+    final_state = _validate_keypoint_review_state(
+        target,
+        crop_run_id=run_ids["crop"],
+        raw_run_id=run_ids["raw_keypoints"],
+        quality_run_id=run_ids["keypoint_quality"],
+        refined_run_id=run_ids["refined_keypoints"],
+        body_frame_run_id=run_ids["body_frame"],
+        delta_run_id=run_ids["keypoint_delta"],
+        delta_generation=run_ids["keypoint_delta_generation"],
+    )
+    return json_attr_safe(
+        {
+            "schema_id": TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID,
+            "schema_version": TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_VERSION,
+            "status": "review_active",
+            "destination": str(target),
+            "receipt": str(target / TRAINING_KEYPOINT_REVIEW_ARTIFACT_RECEIPT),
+            "receipt_digest": receipt["payload_digest"],
+            "runs": run_ids,
+            "review_state": final_state,
+            "published_consolidated_base_generation": keypoint_import[
+                "consolidation"
+            ],
+            "physical_inventory": local_inventory.to_json(),
+            "stage_selector_eligible": False,
+            "registry_activation": "deferred",
+        }
+    )
 
 
 def publish_training_review_artifact(
@@ -940,9 +1246,14 @@ def publish_training_review_artifact(
 
 
 __all__ = [
+    "TRAINING_KEYPOINT_REVIEW_ARTIFACT_POLICY",
+    "TRAINING_KEYPOINT_REVIEW_ARTIFACT_RECEIPT",
+    "TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID",
+    "TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_VERSION",
     "TRAINING_REVIEW_ARTIFACT_POLICY",
     "TRAINING_REVIEW_ARTIFACT_RECEIPT",
     "TRAINING_REVIEW_ARTIFACT_SCHEMA_ID",
     "TRAINING_REVIEW_ARTIFACT_SCHEMA_VERSION",
+    "publish_training_keypoint_review_artifact",
     "publish_training_review_artifact",
 ]

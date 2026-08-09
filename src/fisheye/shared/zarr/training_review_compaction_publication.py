@@ -33,6 +33,7 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
     validate_refined_keypoint_run_manifest,
 )
 from fisheye.shared.zarr.training_review_artifact_publication import (
+    TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID,
     TRAINING_REVIEW_ARTIFACT_SCHEMA_ID,
 )
 from fisheye.shared.zarr_helpers import (
@@ -204,7 +205,11 @@ def _validate_source_and_keypoint_compaction(
     review_receipt = source.attrs.get("training_review_artifact")
     if (
         not isinstance(review_receipt, Mapping)
-        or review_receipt.get("schema_id") != TRAINING_REVIEW_ARTIFACT_SCHEMA_ID
+        or review_receipt.get("schema_id")
+        not in {
+            TRAINING_REVIEW_ARTIFACT_SCHEMA_ID,
+            TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID,
+        }
         or source.attrs.get("training_artifact_status") != "review_active"
         or source.attrs.get("stage_selector_eligible") is not False
     ):
