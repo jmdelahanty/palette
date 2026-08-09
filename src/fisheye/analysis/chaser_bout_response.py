@@ -76,10 +76,10 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _open_root,
     _protocol_position_transition_s,
     _read_epochs,
-    _resolve_arena_geometry,
     _resolve_chaser_distance_run,
     _wall_mask,
 )
+from fisheye.shared.arena_geometry import require_dish_mask_arena_geometry
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
@@ -963,16 +963,12 @@ def build_chaser_bout_response_result(
     if total_frames != distance.total_frames:
         raise ValueError("Typed chaser-distance frame extent is inconsistent.")
 
-    geometry = _resolve_arena_geometry(
+    geometry, geometry_notes = require_dish_mask_arena_geometry(
         root,
-        distance,
+        root[run_path],
         pixels_per_mm=float(pixels_per_mm),
+        consumer="chaser_bout_response virtual controls",
     )
-    if geometry.shape != "circle" or geometry.center_x_px is None or geometry.center_y_px is None:
-        raise ValueError(
-            "chaser_bout_response requires a circular arena geometry: the virtual controls are "
-            "rotations about the arena centre, which is undefined otherwise."
-        )
     fps = float(distance.fps)
 
     epochs = _read_epochs(distance, total_frames=total_frames)
@@ -1085,7 +1081,10 @@ def build_chaser_bout_response_result(
         visit_exit_mm=float(visit_exit_mm),
         min_visits_for_inference=int(min_visits_for_inference),
     )
-    qc = tuple(dict.fromkeys(list(qc) + ref_notes))
+    qc = tuple(dict.fromkeys(list(qc) + list(geometry_notes) + ref_notes))
+    diagnostics["arena_geometry_status"] = geometry.status
+    diagnostics["arena_geometry_source"] = geometry.source
+    diagnostics["arena_geometry_notes"] = list(geometry_notes)
     diagnostics["virtual_reference_notes"] = ref_notes
     diagnostics["reference_labels"] = [ref.label for ref in references]
     diagnostics["source_swim_bout_signal_id"] = int(source_signal_id)

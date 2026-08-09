@@ -343,7 +343,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
     snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
     run = root[snapshot.run_path]
     windows = _load_windows(run, fps=snapshot.fps)
-    geometry = _resolve_arena_geometry(root, run)
+    geometry, _geometry_notes = _resolve_arena_geometry(root, run)
     empty_bouts = _make_per_epoch_bouts(
         windows=windows,
         run_group=run,

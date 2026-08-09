@@ -9,6 +9,7 @@ from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.analysis.chaser_epoch_behavior_summary import (
     DEFAULT_COMPONENT_NAME,
     SCHEMA_ID,
+    _resolve_arena_geometry,
     _speed_level_key,
     build_chaser_epoch_behavior_summary_result as build_goodcopbadcop_epoch_behavior_summary_result,
     write_chaser_epoch_behavior_summary_component as write_goodcopbadcop_epoch_behavior_summary_component,
@@ -113,6 +114,20 @@ def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(
 def test_epoch_behavior_rejects_detector_signal_as_physical_speed_level() -> None:
     with pytest.raises(ValueError, match="Detector-only signals"):
         _speed_level_key("exponential")
+
+
+@pytest.mark.parametrize("pixels_per_mm", [None, 0.0, -1.0])
+def test_epoch_behavior_rejects_missing_or_nonpositive_arena_scale(
+    tmp_path,
+    pixels_per_mm,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "missing_scale.zarr"), mode="w")
+    run = root.require_group("analysis/chaser_distance_runs/run_1")
+    if pixels_per_mm is not None:
+        run.attrs["pixels_per_mm_projector"] = pixels_per_mm
+
+    with pytest.raises(ValueError, match="refusing the historical 1.0 fallback"):
+        _resolve_arena_geometry(root, run)
 
 
 @_REQUIRES_SEALED_CHASER_SEMANTICS

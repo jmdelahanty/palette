@@ -102,9 +102,9 @@ from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
     _decode_text_column,
     _open_root,
-    _resolve_arena_geometry,
     _resolve_chaser_distance_run,
 )
+from fisheye.shared.arena_geometry import require_dish_mask_arena_geometry
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
@@ -417,16 +417,12 @@ def build_chaser_escape_events_result(
     if total_frames != distance_run.total_frames:
         raise ValueError("Typed chaser-distance frame extent is inconsistent.")
 
-    geometry = _resolve_arena_geometry(
+    geometry, geometry_notes = require_dish_mask_arena_geometry(
         root,
-        distance_run,
+        root[run_path],
         pixels_per_mm=float(pixels_per_mm),
+        consumer="chaser_escape_events virtual references",
     )
-    if geometry.shape != "circle" or geometry.center_x_px is None or geometry.center_y_px is None:
-        raise ValueError(
-            "chaser_escape_events requires a circular arena geometry: the virtual references "
-            "it inherits are rotations about the arena centre."
-        )
     ref_xy = _reference_positions_px(
         references,
         chaser_indices=chaser_indices,
@@ -773,6 +769,9 @@ def build_chaser_escape_events_result(
         summary["median_first_escape_latency_s"] = _nan_median(trial_latency)
 
     diagnostics = {
+        "arena_geometry_status": geometry.status,
+        "arena_geometry_source": geometry.source,
+        "arena_geometry_notes": list(geometry_notes),
         "escape_definition": (
             f"a valid bout whose peak_speed_mm_s exceeds {peak_speed_threshold_mm_s:g} mm/s. Not a "
             "cluster: escapes are ~1.5% of bouts and k-means will not allocate a centroid to them."
@@ -923,7 +922,7 @@ def build_chaser_escape_events_result(
         habituation_slope_per_trial=float(hab_slope),
         habituation_slope_any_escape=float(hab_slope_any),
         status=status,
-        qc_warnings=tuple(qc),
+        qc_warnings=tuple(dict.fromkeys(list(qc) + list(geometry_notes))),
         summary=json_attr_safe(summary),
         diagnostics=json_attr_safe(diagnostics),
     )

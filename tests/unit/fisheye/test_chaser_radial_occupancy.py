@@ -88,8 +88,35 @@ def _make_archive(
             "experimental_area_radius_mm": ARENA_RADIUS_MM,
             "arena_region_width_px": 2.0 * ARENA_CENTER_PX,
             "arena_region_height_px": 2.0 * ARENA_CENTER_PX,
+            "arena_origin_in_canvas_x_px": 0.0,
+            "arena_origin_in_canvas_y_px": 0.0,
         }
     )
+    # Virtual-control consumers require the fitted camera-space dish authority,
+    # not merely the nominal projector circle.  Identity calibration keeps the
+    # fixture's historical 100 px centre / 80 px radius geometry exact.
+    calibration = analysis.require_group("calibration")
+    calibration.attrs.update(
+        {
+            "native_width_px": 2.0 * ARENA_CENTER_PX,
+            "native_height_px": 2.0 * ARENA_CENTER_PX,
+        }
+    )
+    calibration.create_array(
+        "homography_matrix",
+        data=np.eye(3, dtype=np.float64),
+        overwrite=True,
+    )
+    root.require_group("analysis_metadata").attrs["dish_mask"] = {
+        "shape": "circle",
+        "detected_circle": {
+            "center": [ARENA_CENTER_PX, ARENA_CENTER_PX],
+            "radius": ARENA_RADIUS_PX,
+        },
+        "metrics": {
+            "image_shape": [2.0 * ARENA_CENTER_PX, 2.0 * ARENA_CENTER_PX],
+        },
+    }
 
     fish_px = np.asarray(fish_xy_mm, dtype=np.float32) * PPM
     chaser_px = np.asarray(chaser_xy_mm, dtype=np.float32) * PPM
@@ -266,7 +293,12 @@ def test_near_zone_expected_fraction_matches_closed_form(tmp_path: Path) -> None
 
 def test_fish_clustered_on_chaser_is_enriched(tmp_path: Path) -> None:
     rng = np.random.default_rng(7)
-    n = 2000
+    # Keep the innermost 2 mm ring comfortably above the five-sample null
+    # threshold.  At n=2,000 its analytic expected count is exactly 5.0, so
+    # harmless floating-point residuals from fitting the persisted dish circle
+    # can put it infinitesimally below the threshold and intentionally suppress
+    # the selection index as underpowered.
+    n = 4000
     chaser_pos = np.asarray([ARENA_CENTER_MM, ARENA_CENTER_MM])
     fish = chaser_pos + rng.normal(scale=1.0, size=(n, 2))
     chaser = np.tile(chaser_pos, (n, 1)).reshape(n, 1, 2)
@@ -565,7 +597,7 @@ def test_write_component_round_trips(tmp_path: Path) -> None:
     component = root[component_path]
     assert component.attrs["schema_id"] == SCHEMA_ID
     assert component.attrs["status"] == "computed"
-    assert component.attrs["geometry_status"] == "circle"
+    assert component.attrs["geometry_status"] == "dish_mask"
 
     parent = root[f"analysis/chaser_distance_runs/chaser_distance_1/{COMPONENT_PARENT_NAME}"]
     assert "latest" not in parent.attrs

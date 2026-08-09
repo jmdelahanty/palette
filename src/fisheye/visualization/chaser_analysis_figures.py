@@ -38,7 +38,7 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_io import load_chaser_distance_run  # noqa: E402
-from fisheye.shared.arena_geometry import resolve_arena_geometry  # noqa: E402
+from fisheye.shared.arena_geometry import require_dish_mask_arena_geometry  # noqa: E402
 warnings.filterwarnings("ignore")
 
 OBJ_COLOR = {"aggressive": "#dc2626", "inert": "#2563eb"}
@@ -71,10 +71,11 @@ class RecordingData:
         self.recording_id = self.distance.recording_id
         self.ppm = float(self.distance.pixels_per_mm_projector)
         self.fps = float(self.distance.fps)
-        self.geometry, _notes = resolve_arena_geometry(
+        self.geometry, self.geometry_notes = require_dish_mask_arena_geometry(
             self.root,
             self.run,
             pixels_per_mm=self.ppm,
+            consumer="chaser_analysis_figures virtual-control summary",
         )
 
         self.fish = np.asarray(

@@ -55,10 +55,10 @@ from fisheye.analysis.chaser_egocentric_bearing import (
 )
 from fisheye.analysis.chaser_radial_occupancy import (
     _decode_text_column,
-    _resolve_arena_geometry,
     _resolve_chaser_distance_run,
     _safe_float,
 )
+from fisheye.shared.arena_geometry import require_dish_mask_arena_geometry
 from fisheye.analysis.gaze_convention_validation import (
     EXPECTED_BODY_FRAME_CONVENTION,
     EXPECTED_GAZE_SIGN_CONVENTION,
@@ -932,9 +932,12 @@ def build_chaser_gaze_tracking_result(
     fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
     chaser_xy = np.asarray(positions["chaser_arena_xy"][:], dtype=np.float64)
     pixels_per_mm = _safe_float(distance_run_group.attrs.get("pixels_per_mm_projector"), math.nan)
-    geometry = _resolve_arena_geometry(root, distance_run_group, pixels_per_mm=pixels_per_mm)
-    if geometry.shape != "circle" or geometry.center_x_px is None or geometry.center_y_px is None:
-        raise ValueError("Rotated gaze controls require a resolved circular arena centre.")
+    geometry, geometry_notes = require_dish_mask_arena_geometry(
+        root,
+        distance_run_group,
+        pixels_per_mm=pixels_per_mm,
+        consumer="chaser_gaze_tracking rotated controls",
+    )
     virtual_refs, virtual_xy = _virtual_positions(
         chaser_xy=chaser_xy,
         chaser_indices=chaser_indices,
@@ -1039,6 +1042,9 @@ def build_chaser_gaze_tracking_result(
     )
     recording_id = str(distance_run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or zarr_path.stem)
     diagnostics = {
+        "arena_geometry_status": geometry.status,
+        "arena_geometry_source": geometry.source,
+        "arena_geometry_notes": list(geometry_notes),
         "eye_angle_source_field": "left/right_gaze_signed_deg_smoothed",
         "object_bearing_source_field": f"{ego_path}/per_chaser/bearing_deg",
         "source_egocentric_bearing_manifest_sha256": ego_manifest_sha256,

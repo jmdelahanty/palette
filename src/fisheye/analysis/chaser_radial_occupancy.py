@@ -229,26 +229,6 @@ def _resolve_chaser_distance_run(
     return snapshot, snapshot.run_name, snapshot.run_path
 
 
-def _resolve_arena_geometry(
-    root: zarr.Group,
-    distance: ChaserDistanceReadSnapshot,
-    *,
-    pixels_per_mm: float,
-) -> ArenaGeometry:
-    """Prefer the fitted dish mask over the projector's nominal experimental_area circle.
-
-    See fisheye.shared.arena_geometry: they are different circles, and the nominal one is 3 mm
-    off-centre and 2.4 mm small, which puts a wall-hugging fish "outside the arena".
-    """
-
-    geometry, _notes = _resolve_shared_arena_geometry(
-        root,
-        root[distance.run_path],
-        pixels_per_mm=float(pixels_per_mm),
-    )
-    return geometry
-
-
 def resolve_arena_geometry_with_notes(
     root: zarr.Group,
     distance: ChaserDistanceReadSnapshot,

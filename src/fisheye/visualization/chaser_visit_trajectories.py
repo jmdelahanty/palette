@@ -52,9 +52,9 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _open_root,
     _protocol_position_transition_s,
     _read_epochs,
-    _resolve_arena_geometry,
     _resolve_chaser_distance_run,
 )
+from fisheye.shared.arena_geometry import require_dish_mask_arena_geometry
 
 
 DEFAULT_EPOCHS = ("pre_event", "post_event")
@@ -136,13 +136,12 @@ def _collect_visits_unsealed_inspection(
     )
     ppm = float(distance.pixels_per_mm_projector)
     fps = float(distance.fps)
-    geometry = _resolve_arena_geometry(
+    geometry, geometry_notes = require_dish_mask_arena_geometry(
         root,
-        distance,
+        root[run_path],
         pixels_per_mm=float(ppm),
+        consumer="chaser_visit_trajectories virtual controls",
     )
-    if geometry.shape != "circle" or geometry.center_x_px is None:
-        raise ValueError("Visit trajectories need a circular arena geometry.")
 
     fish = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float64) / ppm
     chaser = np.asarray(distance.chaser_arena_xy, dtype=np.float64) / ppm
@@ -261,6 +260,9 @@ def _collect_visits_unsealed_inspection(
         "run": run_name,
         "fps": float(fps),
         "arena_radius_mm": arena_r,
+        "arena_geometry_status": geometry.status,
+        "arena_geometry_source": geometry.source,
+        "arena_geometry_notes": list(geometry_notes),
         "visit_enter_mm": float(visit_enter_mm),
         "visit_exit_mm": float(visit_exit_mm),
     }

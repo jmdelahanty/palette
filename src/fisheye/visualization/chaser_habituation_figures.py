@@ -48,7 +48,7 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_io import load_chaser_distance_run  # noqa: E402
-from fisheye.shared.arena_geometry import resolve_arena_geometry  # noqa: E402
+from fisheye.shared.arena_geometry import require_dish_mask_arena_geometry  # noqa: E402
 from fisheye.visualization.chaser_analysis_figures import (  # noqa: E402
     _cohort_records,
     _latest_unsealed_inspection_child,
@@ -196,9 +196,12 @@ class HabituationData:
 
     def _wall_trace(self) -> np.ndarray:
         ppm = float(self.distance.pixels_per_mm_projector)
-        geo, _notes = resolve_arena_geometry(self.root, self.run, pixels_per_mm=ppm)
-        if geo.radius_px is None or geo.center_x_px is None:
-            raise ValueError("No circular arena geometry; cannot compute wall distance.")
+        geo, self.geometry_notes = require_dish_mask_arena_geometry(
+            self.root,
+            self.run,
+            pixels_per_mm=ppm,
+            consumer="chaser_habituation_figures wall-confound controls",
+        )
         fish = np.asarray(
             self.distance.fish_centroid_arena_xy,
             dtype=np.float64,

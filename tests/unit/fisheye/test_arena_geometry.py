@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 
@@ -16,6 +15,7 @@ from fisheye.shared.arena_geometry import (
     out_of_bounds_fraction,
     out_of_bounds_notes,
     read_dish_mask_circle,
+    require_dish_mask_arena_geometry,
     resolve_arena_geometry,
 )
 
@@ -165,6 +165,61 @@ def test_falls_back_to_the_nominal_circle_when_no_mask_exists(tmp_path: Path) ->
     assert geometry.radius_px == pytest.approx(160.0)
     # The fallback must be announced. A caller that silently gets the wrong circle is the bug.
     assert any(n.startswith("arena_geometry_fallback_to_nominal") for n in notes)
+
+
+def test_virtual_control_geometry_requires_the_fitted_dish_mask(tmp_path: Path) -> None:
+    z, run = _make_archive(
+        tmp_path,
+        dish_mask=_mask((320.0, 320.0), 160.0),
+    )
+    root = zarr.open_group(str(z), mode="r", use_consolidated=False)
+
+    geometry, notes = require_dish_mask_arena_geometry(
+        root,
+        root[run.path],
+        pixels_per_mm=PPM,
+        consumer="test_virtual_controls",
+    )
+
+    assert geometry.status == GEOMETRY_STATUS_DISH_MASK
+    assert geometry.source == "analysis_metadata.dish_mask"
+    assert notes == []
+
+
+def test_virtual_control_geometry_rejects_nominal_fallback(tmp_path: Path) -> None:
+    z, run = _make_archive(tmp_path, dish_mask=None)
+    root = zarr.open_group(str(z), mode="r", use_consolidated=False)
+
+    with pytest.raises(
+        ValueError,
+        match="requires fitted analysis_metadata.dish_mask geometry",
+    ):
+        require_dish_mask_arena_geometry(
+            root,
+            root[run.path],
+            pixels_per_mm=PPM,
+            consumer="test_virtual_controls",
+        )
+
+
+@pytest.mark.parametrize("pixels_per_mm", [0.0, -1.0, math.nan])
+def test_virtual_control_geometry_rejects_invalid_scale(
+    tmp_path: Path,
+    pixels_per_mm: float,
+) -> None:
+    z, run = _make_archive(
+        tmp_path,
+        dish_mask=_mask((320.0, 320.0), 160.0),
+    )
+    root = zarr.open_group(str(z), mode="r", use_consolidated=False)
+
+    with pytest.raises(ValueError, match="requires a positive pixels_per_mm_projector"):
+        require_dish_mask_arena_geometry(
+            root,
+            root[run.path],
+            pixels_per_mm=pixels_per_mm,
+            consumer="test_virtual_controls",
+        )
 
 
 def test_homography_scaling_is_applied(tmp_path: Path) -> None:

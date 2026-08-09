@@ -350,36 +350,54 @@ def _get_group_by_path(root: zarr.Group, path: str | None) -> Optional[zarr.Grou
     return current if isinstance(current, zarr.Group) else None
 
 
-def _resolve_arena_geometry(root: zarr.Group, run_group: zarr.Group) -> ArenaGeometry:
+def _resolve_arena_geometry(
+    root: zarr.Group,
+    run_group: zarr.Group,
+) -> tuple[ArenaGeometry, tuple[str, ...]]:
     """Prefer the fitted dish mask over the projector's nominal experimental_area circle.
 
     See fisheye.shared.arena_geometry -- these are different circles, and the nominal one is
     ~3 mm off-centre and ~2.4 mm small, which places a wall-hugging fish "outside the arena".
     """
 
-    pixels_per_mm = _optional_float(run_group.attrs.get("pixels_per_mm_projector")) or 1.0
-    try:
-        resolved, _notes = _resolve_shared_arena_geometry(root, run_group, pixels_per_mm=float(pixels_per_mm))
-    except ValueError:
-        return ArenaGeometry(
-            status="missing",
-            source=None,
-            shape="unknown",
-            width_px=float("nan"),
-            height_px=float("nan"),
-            center_x_px=None,
-            center_y_px=None,
-            radius_px=None,
+    pixels_per_mm = _optional_float(run_group.attrs.get("pixels_per_mm_projector"))
+    if pixels_per_mm is None or pixels_per_mm <= 0:
+        raise ValueError(
+            "chaser_epoch_behavior_summary requires a positive "
+            "pixels_per_mm_projector; refusing the historical 1.0 fallback."
         )
-    return ArenaGeometry(
-        status=resolved.status,
-        source=resolved.source,
-        shape=resolved.shape,
-        width_px=float(resolved.width_px),
-        height_px=float(resolved.height_px),
-        center_x_px=resolved.center_x_px,
-        center_y_px=resolved.center_y_px,
-        radius_px=resolved.radius_px,
+    try:
+        resolved, notes = _resolve_shared_arena_geometry(
+            root,
+            run_group,
+            pixels_per_mm=float(pixels_per_mm),
+        )
+    except ValueError as exc:
+        return (
+            ArenaGeometry(
+                status="missing",
+                source=None,
+                shape="unknown",
+                width_px=float("nan"),
+                height_px=float("nan"),
+                center_x_px=None,
+                center_y_px=None,
+                radius_px=None,
+            ),
+            (f"arena_geometry_unavailable:{exc}",),
+        )
+    return (
+        ArenaGeometry(
+            status=resolved.status,
+            source=resolved.source,
+            shape=resolved.shape,
+            width_px=float(resolved.width_px),
+            height_px=float(resolved.height_px),
+            center_x_px=resolved.center_x_px,
+            center_y_px=resolved.center_y_px,
+            radius_px=resolved.radius_px,
+        ),
+        tuple(notes),
     )
 
 
@@ -1322,7 +1340,8 @@ def build_chaser_epoch_behavior_summary_result(
         track_id=track_id,
         speed_level=speed_level,
     )
-    geometry = _resolve_arena_geometry(root, run_group)
+    geometry, geometry_notes = _resolve_arena_geometry(root, run_group)
+    warnings.extend(geometry_notes)
     if geometry.shape != "circle":
         warnings.append(f"arena_geometry_unavailable: {geometry.status}")
     per_epoch_fish = _make_per_epoch_fish(

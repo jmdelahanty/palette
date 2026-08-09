@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import zarr
@@ -380,6 +380,53 @@ def resolve_arena_geometry(
         else f"arena_geometry_nominal_requested:{fallback.status}"
     )
     return fallback, notes
+
+
+def require_dish_mask_arena_geometry(
+    root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    pixels_per_mm: float,
+    consumer: str,
+) -> tuple[ArenaGeometry, list[str]]:
+    """Resolve a fitted circular dish mask or fail before virtual-control use.
+
+    Rotating a reference about the nominal projector circle does not preserve its
+    physical wall geometry.  Consumers that use the arena centre to construct null
+    references must therefore require the fitted camera-space dish authority rather
+    than merely requiring any circular fallback.
+    """
+
+    scale = _safe_float(pixels_per_mm)
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError(
+            f"{consumer} requires a positive pixels_per_mm_projector to resolve "
+            "fitted dish-mask geometry."
+        )
+    geometry, notes = resolve_dish_mask_geometry(
+        root,
+        run_group,
+        pixels_per_mm=scale,
+    )
+    if (
+        geometry is None
+        or geometry.status != GEOMETRY_STATUS_DISH_MASK
+        or geometry.source != "analysis_metadata.dish_mask"
+        or geometry.shape != "circle"
+        or geometry.center_x_px is None
+        or geometry.center_y_px is None
+        or geometry.radius_px is None
+        or geometry.radius_px <= 0
+    ):
+        note_text = ", ".join(notes) if notes else "no usable dish-mask declaration"
+        raise ValueError(
+            f"{consumer} requires fitted analysis_metadata.dish_mask geometry; "
+            f"resolved status={getattr(geometry, 'status', None)!r}, "
+            f"source={getattr(geometry, 'source', None)!r} "
+            f"({note_text})."
+        )
+    assert geometry is not None
+    return geometry, notes
 
 
 def out_of_bounds_fraction(

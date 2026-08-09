@@ -113,7 +113,17 @@ Acceptance: no code path computes a published speed metric from raw centroid dif
 without explicit opt-in; `speed_source` present in the zarr group and Arrow export;
 tests ported.
 
-**W1.2 — Make arena-geometry fallback impossible to ignore; protect the virtual-control nulls.**
+**W1.2 — Make arena-geometry fallback impossible to ignore; protect the virtual-control nulls. [IMPLEMENTED]**
+Status: **implemented** by the strict
+`shared/arena_geometry.py::require_dish_mask_arena_geometry` boundary. Virtual-control,
+wall-confound, and geometry-dependent maintained figure paths now require a positive
+persisted scale and fitted `analysis_metadata.dish_mask`; they do not accept the nominal
+projector circle. Geometry identity and resolver notes are carried into component QC or
+diagnostics. The historical epoch-summary `pixels_per_mm_projector ... or 1.0` fallback is
+removed. Focused coverage includes accepted fitted geometry, nominal rejection, invalid
+scale rejection, and the affected chaser/visualization suite.
+
+Original finding:
 `chaser_radial_occupancy.py:232-249` defines a `_resolve_arena_geometry` that discards
 the QC notes. Three modules import it and use `geometry.center_*` as the **virtual
 reference control rotation center**: `chaser_escape_events.py:105,420`,
@@ -127,9 +137,10 @@ nominal-circle fallback, not warn.
 Also fix `chaser_epoch_behavior_summary.py:360`: `pixels_per_mm_projector ... or 1.0`
 — a missing/zero attr silently forces dish-mask rejection (residual_px misread as
 residual_mm) → silent fallback to the known-3mm-off nominal circle. Must raise.
-Acceptance: grep shows zero imports of the deleted helper; a synthetic recording with
-a forced nominal fallback raises in escape/bout/gaze components and surfaces a QC
-warning everywhere else; `or 1.0` gone.
+Acceptance evidence: grep shows zero imports of the deleted helper; the strict shared
+boundary rejects a synthetic nominal fallback; all escape/bout/gaze paths call that
+boundary; `or 1.0` is gone. The final focused run completed with 122 passes and two
+expected xfails.
 
 **W1.3 — Audit whether any escape-cohort recording actually fell back to nominal geometry. [VERIFIED]**
 Status: **implemented** by
