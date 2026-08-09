@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Optional, Sequence
 
-from fisheye.shared.zarr.training_review_compaction_publication import (
+from fisheye.training.training_review_compaction_publication import (
     publish_reviewed_keypoint_training_artifact_candidate,
 )
 

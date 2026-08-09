@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from ..pose.schema import resolve_head_triangle_indices
+from .pose_schema import resolve_head_triangle_indices
 
 DERIVED_METRICS_SCHEMA_VERSION = 1
 

@@ -78,7 +78,7 @@ from fisheye.pose.schema import (
 from fisheye.shared.metadata import get_fps
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
-from fisheye.analysis.eye_angle_schema import (
+from fisheye.shared.eye_angle_schema import (
     CANONICAL_FRAME_ANGLE_CHANNELS,
     CANONICAL_ROI_ANGLE_CHANNELS,
     FRAME_QA_CHANNELS,
@@ -105,10 +105,10 @@ from fisheye.analysis.eye_angle_schema import (
     _formula_for_angle_channel as _schema_formula_for_angle_channel,
     semantic_angle_channel_order as _schema_semantic_angle_channel_order,
     validate_eye_angle_compact_arrays,
-    validate_eye_angle_compact_run,
     validate_eye_angle_value_aliases,
     canonical_exact_json_bytes,
 )
+from fisheye.analysis.eye_angle_schema import validate_eye_angle_compact_run
 from fisheye.analysis.eye_angle_storage import (
     EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
     EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,

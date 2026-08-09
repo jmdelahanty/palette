@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from fisheye.shared.zarr.training_base_publication import (
+from fisheye.training.training_base_publication import (
     publish_sampled_training_base,
 )
 

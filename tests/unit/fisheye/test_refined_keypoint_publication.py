@@ -90,10 +90,10 @@ from fisheye.shared.zarr.refined_keypoint_publication import (
     republish_selector_ineligible_refined_keypoint_snapshot,
     validate_refined_keypoint_shadow_publication,
 )
-from fisheye.shared.zarr.training_review_artifact_publication import (
+from fisheye.training.training_review_artifact_publication import (
     TRAINING_REVIEW_ARTIFACT_SCHEMA_ID,
 )
-from fisheye.shared.zarr.training_review_compaction_publication import (
+from fisheye.training.training_review_compaction_publication import (
     REVIEWED_KEYPOINT_TRAINING_ARTIFACT_SCHEMA_ID,
     REVIEWED_TRAINING_ARTIFACT_SCHEMA_ID,
     publish_reviewed_keypoint_training_artifact_candidate,

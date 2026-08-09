@@ -545,7 +545,7 @@ def _create_array(group: Any, name: str, values: np.ndarray) -> Any:
         ):
             # Import lazily to keep the logical coordinate contract independent
             # of the optional physical candidate adapter.
-            from fisheye.analysis.subject_shape_storage import (
+            from fisheye.shared.subject_shape_storage import (
                 create_bound_subject_shape_candidate_array,
             )
 
@@ -1567,6 +1567,87 @@ def build_subject_shape_schema_inventory_record(
         "closed_array_inventory": True,
         "closed_attr_inventory": True,
     }
+
+
+def build_subject_shape_unbound_numeric_manifest_record(
+    run: Any,
+) -> dict[str, object]:
+    """Build the producer seal for one unbound subject-shape numeric payload."""
+
+    schema_inventory = build_subject_shape_schema_inventory_record(
+        run,
+        phase="unbound",
+    )
+    arrays = {
+        path: {
+            "relative_ref": path,
+            "dtype": np.dtype(node.dtype).str,
+            "shape": [int(value) for value in node.shape],
+            "content_sha256": array_payload_sha256(node),
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        }
+        for path in schema_inventory["arrays"]
+        for node in (run[path],)
+    }
+    return {
+        "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
+        "schema_version": 1,
+        "run_name": run.attrs.get("palette_run_name"),
+        "binding_status": "unbound_roi_local_numeric_payload",
+        "source_refined_subject_masks_run": run.attrs.get(
+            "source_refined_subject_masks_run"
+        ),
+        "method": run.attrs.get("method"),
+        "method_version": run.attrs.get("method_version"),
+        "component_names": list(run.attrs.get("component_names") or ()),
+        "scientific_configuration": (
+            build_subject_shape_scientific_configuration_record(run)
+        ),
+        "schema_inventory": schema_inventory,
+        "arrays": arrays,
+        "closed_array_inventory": True,
+        "closed_group_inventory": True,
+        "closed_attr_inventory": True,
+        "coordinate_descriptors_present": False,
+    }
+
+
+def stamp_unbound_subject_shape_manifest(run: Any) -> BoundCoordinateRecord:
+    """Persist and digest-bind the exact unbound producer seal."""
+
+    return stamp_and_bind_persisted_coordinate_record(
+        run,
+        build_subject_shape_unbound_numeric_manifest_record(run),
+        attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
+    )
+
+
+def load_unbound_subject_shape_manifest(run: Any) -> BoundCoordinateRecord:
+    """Load an unbound producer seal only when it matches the live payload."""
+
+    result = bind_persisted_coordinate_record(
+        run,
+        attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
+    )
+    if result.record != build_subject_shape_unbound_numeric_manifest_record(run):
+        _fail("Subject-shape unbound numeric manifest differs from live arrays.")
+    return result
+
+
+def load_sealed_unbound_subject_shape_manifest(run: Any) -> BoundCoordinateRecord:
+    """Require one complete, selector-ineligible, producer-sealed unbound run."""
+
+    if (
+        run.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+        or run.attrs.get("palette_run_completion_status") != "complete"
+        or run.attrs.get("stage_selector_eligible") is not False
+    ):
+        _fail(
+            "Subject-shape storage conversion requires one producer-sealed, "
+            "complete, unbound, selector-ineligible stage."
+        )
+    return load_unbound_subject_shape_manifest(run)
 
 
 def _stamp_scientific_configuration(run: Any) -> BoundCoordinateRecord:
@@ -4312,6 +4393,7 @@ __all__ = [
     "activate_subject_shape_coordinate_publication",
     "build_subject_shape_schema_inventory_record",
     "build_subject_shape_scientific_configuration_record",
+    "build_subject_shape_unbound_numeric_manifest_record",
     "build_subject_shape_pending_receipt",
     "commit_deferred_subject_shape_coordinate_activation",
     "load_completed_ineligible_subject_shape_coordinate_publication",
@@ -4319,6 +4401,7 @@ __all__ = [
     "load_subject_shape_consumed_unbound_stage",
     "load_subject_shape_temporal_authority",
     "load_persisted_subject_shape_coordinate_publication",
+    "load_sealed_unbound_subject_shape_manifest",
     "prepare_subject_shape_identity_and_schema",
     "publish_subject_shape_coordinate_surfaces",
     "require_translation_only_refined_placement",
@@ -4328,5 +4411,6 @@ __all__ = [
     "subject_shape_maintained_profile_record",
     "stamp_subject_shape_derivation",
     "stamp_subject_shape_temporal_authority",
+    "stamp_unbound_subject_shape_manifest",
     "transform_subject_shape_geometry_to_source_camera",
 ]

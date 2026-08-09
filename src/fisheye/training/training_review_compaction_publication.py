@@ -10,7 +10,7 @@ import tempfile
 from typing import Any, Mapping
 from uuid import uuid4
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     tree_inventory,
 )
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
@@ -32,7 +32,7 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
     refined_keypoint_source_bindings_from_manifest,
     validate_refined_keypoint_run_manifest,
 )
-from fisheye.shared.zarr.training_review_artifact_publication import (
+from fisheye.training.training_review_artifact_publication import (
     TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID,
     TRAINING_REVIEW_ARTIFACT_SCHEMA_ID,
 )

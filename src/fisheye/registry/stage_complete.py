@@ -275,7 +275,18 @@ def _validate_completion_run_group(
         }
 
     enforced = spec.stage_name in _ENFORCE_STAGE_ARRAY_VALIDATION_FOR
-    result = validate_run(run_group, spec)
+    eye_angle_manifest_validator = None
+    if spec.stage_name == "eye_angle":
+        from fisheye.analysis.eye_angle_analysis import (
+            validate_eye_angle_persisted_contract_manifests,
+        )
+
+        eye_angle_manifest_validator = validate_eye_angle_persisted_contract_manifests
+    result = validate_run(
+        run_group,
+        spec,
+        eye_angle_manifest_validator=eye_angle_manifest_validator,
+    )
     details: dict[str, Any] = {
         **provenance_details,
         "stage_array_validation_status": "ok" if result.valid else "invalid",

@@ -21,8 +21,8 @@ from fisheye.shared.zarr.keypoint_schema import (
     derive_frame_row_offsets,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-from fisheye.pose.heading import resolve_heading_computation
-from fisheye.pose.schema import (
+from fisheye.shared.pose_heading import resolve_heading_computation
+from fisheye.shared.pose_schema import (
     resolve_keypoint_labels_from_attrs,
     resolve_required_keypoint_indices,
 )

@@ -22,7 +22,7 @@ from typing import Any, Optional, Sequence
 
 import zarr
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     tree_inventory,
 )
 from fisheye.registry.db import RegistryPaths

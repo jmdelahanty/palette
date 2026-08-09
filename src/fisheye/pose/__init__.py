@@ -1,1 +1,1 @@
-"""Pose semantics, metrics, and body-frame helpers."""
+"""Pose application-layer compatibility package."""

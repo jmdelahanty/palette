@@ -12,7 +12,7 @@ import copy
 from pathlib import Path
 from typing import Any, Mapping
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
 )
 from fisheye.shared.json_safety import json_attr_safe

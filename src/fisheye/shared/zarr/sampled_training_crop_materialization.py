@@ -61,7 +61,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
 )
-from fisheye.training.detection_frame_supervision import (
+from fisheye.shared.zarr.detection_frame_supervision import (
     DetectionFrameSupervisionPlan,
     build_detection_frame_supervision_plan,
 )

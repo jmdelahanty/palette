@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from fisheye.shared.zarr.training_crop_materialization_publication import (
+from fisheye.training.training_crop_materialization_publication import (
     create_sampled_acquisition_crop_training_artifact,
     create_sampled_images_full_training_crop_artifact,
     create_training_crop_artifact,

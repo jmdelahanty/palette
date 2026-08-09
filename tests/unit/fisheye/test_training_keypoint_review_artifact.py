@@ -11,7 +11,7 @@ from fisheye.shared.keypoint_manual_review_qc import (
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.tabular_deltas import instance_key_digest
-from fisheye.shared.zarr.training_review_artifact_publication import (
+from fisheye.training.training_review_artifact_publication import (
     TRAINING_KEYPOINT_REVIEW_ARTIFACT_SCHEMA_ID,
     _validate_keypoint_review_state,
 )

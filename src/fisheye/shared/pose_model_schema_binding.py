@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
-from fisheye.pose.schema import Node, PoseSchema, canonicalize_keypoint_label
+from fisheye.shared.pose_schema import Node, PoseSchema, canonicalize_keypoint_label
 
 
 POSE_MODEL_SCHEMA_BINDING_SCHEMA_ID = "palette.pose_model_schema_binding"

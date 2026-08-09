@@ -45,7 +45,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
     require_runs_parent,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import tree_inventory
+from fisheye.shared.atomic_run_publisher import tree_inventory
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )

@@ -13,7 +13,7 @@ import uuid
 
 import numpy as np
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     tree_inventory,
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
@@ -270,7 +270,7 @@ def publish_sampled_training_base(
             "metadata_mode": "direct_mutable",
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "run_provenance": build_writer_run_provenance(
-                command="fisheye.shared.zarr.training_base_publication",
+                command="fisheye.training.training_base_publication",
                 params={
                     "source_frame_count": int(source_frame_count),
                     "frame_step": int(frame_step),

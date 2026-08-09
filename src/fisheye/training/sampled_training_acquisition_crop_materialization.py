@@ -793,7 +793,7 @@ def write_sampled_acquisition_crop_hybrid(
         run_name=candidate,
         run_provenance=build_writer_run_provenance(
             command=(
-                "fisheye.shared.zarr.sampled_training_acquisition_crop_materialization"
+                "fisheye.training.sampled_training_acquisition_crop_materialization"
             ),
             params={
                 "writer_schema_id": ACQUISITION_HYBRID_CROP_WRITER_SCHEMA_ID,

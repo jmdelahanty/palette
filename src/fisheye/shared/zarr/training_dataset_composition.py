@@ -17,7 +17,7 @@ from fisheye.shared.zarr.training_crop_materialization import (
 )
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete
-from fisheye.training.detection_frame_supervision import (
+from fisheye.shared.zarr.detection_frame_supervision import (
     build_detection_frame_supervision_plan,
 )
 

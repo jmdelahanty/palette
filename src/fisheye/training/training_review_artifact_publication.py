@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import numpy as np
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     tree_inventory,
 )
 from fisheye.refinement.finalize_subject_masks import finalize_subject_masks

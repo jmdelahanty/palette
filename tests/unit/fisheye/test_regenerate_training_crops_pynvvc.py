@@ -25,10 +25,10 @@ from fisheye.shared.zarr.training_crop_materialization import (
     bind_training_crop_materialization,
     build_training_crop_materialization_binding,
 )
-from fisheye.shared.zarr.sampled_training_acquisition_crop_materialization import (
+from fisheye.training.sampled_training_acquisition_crop_materialization import (
     resolve_acquisition_crop_source,
 )
-from fisheye.shared.zarr.training_crop_materialization_publication import (
+from fisheye.training.training_crop_materialization_publication import (
     create_sampled_acquisition_crop_training_artifact,
     create_sampled_images_full_training_crop_artifact,
     create_training_crop_artifact,

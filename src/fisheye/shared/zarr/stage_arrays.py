@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Union
 
@@ -600,6 +601,9 @@ def validate_run(
     spec: StageSpec,
     *,
     legacy_compatibility: bool = False,
+    eye_angle_manifest_validator: (
+        Callable[[Mapping[str, object]], Sequence[str]] | None
+    ) = None,
 ) -> ValidationResult:
     if type(legacy_compatibility) is not bool:
         raise TypeError("legacy_compatibility must be an exact bool.")
@@ -691,7 +695,7 @@ def validate_run(
             errors.append("subject_masks: missing required array 'mask_probs_roi'")
 
     if spec.stage_name == "eye_angle":
-        from fisheye.analysis.eye_angle_schema import (
+        from fisheye.shared.eye_angle_schema import (
             is_current_eye_angle_run_contract,
             is_supported_legacy_eye_angle_run,
             validate_eye_angle_compact_run,
@@ -699,20 +703,20 @@ def validate_run(
 
         is_current = is_current_eye_angle_run_contract(attrs)
         if is_current:
-            from fisheye.analysis.eye_angle_analysis import (
-                validate_eye_angle_persisted_contract_manifests,
-            )
-
             errors.extend(
                 f"eye_angle/{issue.path}: {issue.code}: {issue.message}"
                 for issue in validate_eye_angle_compact_run(group)
             )
-            errors.extend(
-                f"eye_angle/attrs: {message}"
-                for message in validate_eye_angle_persisted_contract_manifests(
-                    attrs
+            if eye_angle_manifest_validator is None:
+                errors.append(
+                    "eye_angle/attrs: compact-v7 validation requires the "
+                    "analysis-owned manifest validator"
                 )
-            )
+            else:
+                errors.extend(
+                    f"eye_angle/attrs: {message}"
+                    for message in eye_angle_manifest_validator(attrs)
+                )
         elif legacy_compatibility and is_supported_legacy_eye_angle_run(attrs):
             warnings.append(
                 "eye_angle: explicit legacy compatibility accepted one exact "

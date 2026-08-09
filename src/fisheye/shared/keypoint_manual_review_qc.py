@@ -8,11 +8,11 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from fisheye.pose.schema import HEAD_TRIANGLE_KEYPOINT_LABELS
-from fisheye.refinement.keypoint_quality import (
+from fisheye.shared.keypoint_quality import (
     compute_geometry_metrics,
     resolve_head_triangle_for_labels,
 )
+from fisheye.shared.pose_schema import HEAD_TRIANGLE_KEYPOINT_LABELS
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 

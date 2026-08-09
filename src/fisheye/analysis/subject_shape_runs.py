@@ -34,7 +34,6 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 
 from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.archive_identity import archive_identity
-from ..shared.coordinate_frame_record import array_payload_sha256
 from ..shared.coordinate_record import (
     bind_persisted_coordinate_record,
     coordinate_record_sha256,
@@ -89,16 +88,17 @@ from ..shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
-    SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
     DeferredSubjectShapeCoordinateActivation,
     activate_subject_shape_coordinate_publication,
-    build_subject_shape_schema_inventory_record,
-    build_subject_shape_scientific_configuration_record,
+    build_subject_shape_unbound_numeric_manifest_record,
     load_completed_ineligible_subject_shape_coordinate_publication,
+    load_sealed_unbound_subject_shape_manifest as _load_shared_sealed_unbound_manifest,
+    load_unbound_subject_shape_manifest as _load_shared_unbound_manifest,
     prepare_subject_shape_identity_and_schema,
     publish_subject_shape_coordinate_surfaces,
     selector_snapshot,
+    stamp_unbound_subject_shape_manifest,
 )
 from ..shared.zarr_io import open_zarr_root
 from .subject_shape_spline import (
@@ -2692,50 +2692,11 @@ def _iter_subject_shape_arrays(
 
 
 def _unbound_numeric_manifest_record(run_group: zarr.Group) -> dict[str, object]:
-    schema_inventory = build_subject_shape_schema_inventory_record(
-        run_group,
-        phase="unbound",
-    )
-    arrays = {
-        path: {
-            "relative_ref": path,
-            "dtype": np.dtype(node.dtype).str,
-            "shape": [int(value) for value in node.shape],
-            "content_sha256": array_payload_sha256(node),
-            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
-        }
-        for path in schema_inventory["arrays"]
-        for node in (run_group[path],)
-    }
-    return {
-        "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
-        "schema_version": 1,
-        "run_name": run_group.attrs.get("palette_run_name"),
-        "binding_status": "unbound_roi_local_numeric_payload",
-        "source_refined_subject_masks_run": run_group.attrs.get(
-            "source_refined_subject_masks_run"
-        ),
-        "method": run_group.attrs.get("method"),
-        "method_version": run_group.attrs.get("method_version"),
-        "component_names": list(run_group.attrs.get("component_names") or ()),
-        "scientific_configuration": (
-            build_subject_shape_scientific_configuration_record(run_group)
-        ),
-        "schema_inventory": schema_inventory,
-        "arrays": arrays,
-        "closed_array_inventory": True,
-        "closed_group_inventory": True,
-        "closed_attr_inventory": True,
-        "coordinate_descriptors_present": False,
-    }
+    return build_subject_shape_unbound_numeric_manifest_record(run_group)
 
 
 def _stamp_unbound_numeric_manifest(run_group: zarr.Group):
-    return stamp_and_bind_persisted_coordinate_record(
-        run_group,
-        _unbound_numeric_manifest_record(run_group),
-        attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
-    )
+    return stamp_unbound_subject_shape_manifest(run_group)
 
 
 def refresh_unbound_subject_shape_manifest_after_storage_materialization(
@@ -2800,15 +2761,7 @@ def refresh_unbound_subject_shape_manifest_after_storage_materialization(
 
 
 def _load_unbound_numeric_manifest(run_group: zarr.Group):
-    result = bind_persisted_coordinate_record(
-        run_group,
-        attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
-    )
-    if result.record != _unbound_numeric_manifest_record(run_group):
-        raise ValueError(
-            "Subject-shape unbound numeric manifest differs from live arrays."
-        )
-    return result
+    return _load_shared_unbound_manifest(run_group)
 
 
 def load_sealed_unbound_subject_shape_manifest(run_group: zarr.Group):
@@ -2820,17 +2773,7 @@ def load_sealed_unbound_subject_shape_manifest(run_group: zarr.Group):
     new apparently valid unbound stage.
     """
 
-    if (
-        run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
-        != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
-        or run_group.attrs.get("palette_run_completion_status") != "complete"
-        or run_group.attrs.get("stage_selector_eligible") is not False
-    ):
-        raise ValueError(
-            "Subject-shape storage conversion requires one producer-sealed, "
-            "complete, unbound, selector-ineligible stage."
-        )
-    return _load_unbound_numeric_manifest(run_group)
+    return _load_shared_sealed_unbound_manifest(run_group)
 
 
 def _validate_unbound_subject_shape_payload(

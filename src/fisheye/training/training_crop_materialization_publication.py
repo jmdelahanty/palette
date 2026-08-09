@@ -12,7 +12,7 @@ import uuid
 
 import zarr
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
     tree_inventory,
@@ -26,7 +26,7 @@ from fisheye.shared.zarr.training_crop_materialization import (
 from fisheye.shared.zarr.sampled_training_crop_materialization import (
     write_sampled_training_crops_from_images_full,
 )
-from fisheye.shared.zarr.sampled_training_acquisition_crop_materialization import (
+from fisheye.training.sampled_training_acquisition_crop_materialization import (
     resolve_acquisition_crop_source,
     write_sampled_acquisition_crop_hybrid,
 )
@@ -182,7 +182,7 @@ def publish_training_crop_materialization(
             run_name=candidate,
             run_provenance=build_writer_run_provenance(
                 command=(
-                    "fisheye.shared.zarr.training_crop_materialization_publication"
+                    "fisheye.training.training_crop_materialization_publication"
                 ),
                 params={
                     "publication_schema_id": TRAINING_CROP_PUBLICATION_SCHEMA_ID,
