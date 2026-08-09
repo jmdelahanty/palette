@@ -115,6 +115,7 @@ from fisheye.analysis.chaser_quadrant_occupancy import (
     QUADRANT_LABELS,
     quadrant_code_for_xy,
 )
+from fisheye.shared.arena_geometry import resolve_arena_geometry as _resolve_shared_arena_geometry
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.zarr.stimulus_response_schema import (
     CONCENTRIC_PER_FISH,
@@ -2393,51 +2394,72 @@ def _group_at_path(root: Any, path: str | None) -> Any | None:
     return current
 
 
-def _baseline_arena_geometry(root: Any, chaser_run: Any) -> dict[str, float] | None:
-    """Resolve the arena-relative coordinate geometry used by chaser positions."""
+def _baseline_arena_geometry(
+    root: Any, chaser_run: Any, *, diagnostics: list[dict[str, Any]] | None = None
+) -> dict[str, float | str] | None:
+    """Resolve the arena-relative coordinate geometry used by chaser positions.
 
-    candidates: list[Any] = []
-    source_stimulus_path = str(_attrs_dict(chaser_run).get("source_stimulus_path") or "").strip()
-    if source_stimulus_path:
-        source_geometry = _group_at_path(
-            root,
-            f"{source_stimulus_path}/calibration/arena_geometry",
-        )
-        if source_geometry is not None:
-            candidates.append(source_geometry)
-    analysis_calibration = _group_at_path(root, "analysis/calibration")
-    if analysis_calibration is not None:
-        candidates.append(analysis_calibration)
+    Routed through ``fisheye.shared.arena_geometry.resolve_arena_geometry``, which prefers
+    the fitted dish mask over the projector's nominal ``experimental_area`` circle. The
+    nominal circle is ~3 mm off-centre and 2.4 mm small (plausibly the refraction stack a
+    flat design circle does not model); reading it previously turned a 0.37 -> 0.87
+    thigmotaxis increase into 0.354 -> 0.353 by putting a wall-hugging fish "outside the
+    arena". See fisheye.shared.arena_geometry and
+    docs/archive/arena_calibration_and_thigmotaxis_2026-07-14.md.
+    """
 
     pixels_per_mm = _safe_float(_attrs_dict(chaser_run).get("pixels_per_mm_projector"))
     if pixels_per_mm is None or pixels_per_mm <= 0:
         return None
-    for group in candidates:
-        attrs = _attrs_dict(group)
-        shape = str(
-            attrs.get("experimental_area_shape") or attrs.get("arena_shape") or ""
-        ).strip().lower()
-        center_x = _safe_float(attrs.get("experimental_area_center_x_px"))
-        center_y = _safe_float(attrs.get("experimental_area_center_y_px"))
-        radius_px = _safe_float(attrs.get("experimental_area_radius_px"))
-        if radius_px is None:
-            radius_mm = _safe_float(attrs.get("experimental_area_radius_mm"))
-            if radius_mm is not None:
-                radius_px = radius_mm * pixels_per_mm
-        if (
-            shape == "circle"
-            and center_x is not None
-            and center_y is not None
-            and radius_px is not None
-            and radius_px > 0
-        ):
-            return {
-                "center_x_px": center_x,
-                "center_y_px": center_y,
-                "radius_px": radius_px,
-                "pixels_per_mm": pixels_per_mm,
+    try:
+        geometry, notes = _resolve_shared_arena_geometry(
+            root,
+            chaser_run,
+            pixels_per_mm=float(pixels_per_mm),
+        )
+    except ValueError as exc:
+        if diagnostics is not None:
+            diagnostics.append(
+                {
+                    "table": "baseline_arena_geometry",
+                    "status": "skipped",
+                    "reason": f"resolve_arena_geometry failed: {exc}",
+                }
+            )
+        return None
+    if (
+        geometry.shape != "circle"
+        or geometry.center_x_px is None
+        or geometry.center_y_px is None
+        or not geometry.radius_px
+    ):
+        if diagnostics is not None:
+            diagnostics.append(
+                {
+                    "table": "baseline_arena_geometry",
+                    "status": "skipped",
+                    "reason": f"resolved arena geometry is not circular: {geometry.status}",
+                }
+            )
+        return None
+    if diagnostics is not None and notes:
+        diagnostics.append(
+            {
+                "table": "baseline_arena_geometry",
+                "status": "ok",
+                "arena_geometry_status": geometry.status,
+                "arena_geometry_source": geometry.source,
+                "notes": notes,
             }
-    return None
+        )
+    return {
+        "center_x_px": float(geometry.center_x_px),
+        "center_y_px": float(geometry.center_y_px),
+        "radius_px": float(geometry.radius_px),
+        "pixels_per_mm": pixels_per_mm,
+        "arena_geometry_status": geometry.status,
+        "arena_geometry_source": geometry.source,
+    }
 
 
 def _load_baseline_tables(
@@ -2550,7 +2572,7 @@ def _load_baseline_tables(
     positions = chaser_run["positions"]
     arena_xy = _read_array(positions, "fish_centroid_arena_xy")
     position_valid = _read_array(positions, "fish_valid")
-    geometry = _baseline_arena_geometry(root, chaser_run)
+    geometry = _baseline_arena_geometry(root, chaser_run, diagnostics=diagnostics)
     if arena_xy is None or position_valid is None or geometry is None:
         reason = "missing arena-relative fish positions, validity, or circular arena geometry"
         for table in sorted(requested):
