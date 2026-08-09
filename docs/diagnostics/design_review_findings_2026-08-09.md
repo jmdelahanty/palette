@@ -4,7 +4,7 @@
 version: 1
 status: active
 last_verified: 2026-08-09
-implementation: specified-only
+implementation: partial
 -->
 
 Source: five parallel read-only design reviews (architecture, provenance, auditability,
@@ -22,6 +22,10 @@ proven one exists in-repo.
 ## Wave 0 — Resurrect CI (do first; nothing else is verifiable until this lands)
 
 **W0.1 — Un-break the layers contract. [VERIFIED]**
+Status: **implemented on the reconciliation branch** by `ac9aaf1e`. The stale
+`capture` layer was removed, package coverage was made exhaustive, and the live
+contract now evaluates successfully.
+
 `pyproject.toml:96` lists `capture` un-parenthesized; commit `35a872bf` (2026-07-25)
 deleted the last files in `src/fisheye/capture/`, so `lint-imports` has errored
 ("Missing layer ... fisheye.capture does not exist") on every run since. Because the
@@ -34,6 +38,10 @@ Acceptance: `lint-imports --config pyproject.toml` evaluates contracts (pass or 
 but no "missing layer" abort).
 
 **W0.2 — Triage the 8 shared-layer violations that accumulated while the linter was dead. [VERIFIED]**
+Status: **implemented on the reconciliation branch** by `ac9aaf1e` and
+`17a5d847`. The final graph analyzed 1,314 files and 5,451 dependencies with both
+contracts kept, zero broken contracts, and no new ratchet exceptions.
+
 Confirmed by running lint-imports with a patched config:
 - `fisheye.shared.derived_analysis_registry_status -> fisheye.registry.stage_complete` (l.10)
 - `fisheye.shared.derived_analysis_registry_status -> fisheye.registry.stage_catalog` (l.11)
@@ -49,7 +57,12 @@ Prefer moving code down where the import target is small.
 Acceptance: `lint-imports` green; every new ratchet has a why-comment.
 
 **W0.3 — Make the three quality gates independent.**
-In `.github/workflows/ci.yml` quality job, lint failure currently skips the file-size
+Status: **implemented on the reconciliation branch** by `ac9aaf1e`. Import
+boundaries and the file-size ratchet are independent jobs; package installation
+and test collection remain in the quality job. Local reconciliation validation
+also collected all 8,830 tests successfully.
+
+Original finding: in `.github/workflows/ci.yml`, a quality-job lint failure skipped the file-size
 ratchet and collect-only steps. Either split into separate jobs or add
 `if: always()` semantics so each gate reports independently.
 Acceptance: forcing a lint failure on a test branch still runs ratchet + collect steps.
