@@ -14,6 +14,11 @@ pass on 2026-08-09. This document is the implementation queue. Findings marked
 gh CLI, live-registry reads); everything else is from code reading by review agents —
 **implementing agents must re-verify a finding against current code before changing it.**
 
+Queue refresh: re-verified read-only at `29598056` on 2026-08-09 after the CI
+reconciliation. Status paragraphs below are current; original findings remain as
+historical evidence. The current full reconciliation CI is green. Scientific findings
+W1.1-W1.5 remain open and are the highest-priority implementation surface.
+
 Known-good patterns to copy are named per item. Do not invent new mechanisms where a
 proven one exists in-repo.
 
@@ -67,7 +72,12 @@ ratchet and collect-only steps. Either split into separate jobs or add
 `if: always()` semantics so each gate reports independently.
 Acceptance: forcing a lint failure on a test branch still runs ratchet + collect steps.
 
-**W0.4 — Diagnose the 6 failing non-gpu test shards.**
+**W0.4 — Diagnose the 6 failing non-gpu test shards. [VERIFIED]**
+Status: **implemented/superseded** by `29598056`. The reconciliation diagnosed the
+current failure set, all 12 non-GPU shards pass, and every job in the full CI run is
+green. The historical run below remains useful incident evidence but is no longer an
+open implementation item.
+
 Shards 0, 6, 7, 8, 9, 10 fail (run 31288102204). Root cause NOT diagnosed this
 session — do not assume it is related to W0.1. Investigate, fix or quarantine with
 linked issue.
@@ -75,8 +85,10 @@ Acceptance: full CI green on the working branch.
 
 **W0.5 — Process gate: no agent merges on red CI.**
 Two weeks of red CI normalized landing unverified work (8 boundary violations
-accumulated in exactly that window). Encode in `AGENTS.md`: agent branches must be
-green before handoff/merge.
+accumulated in exactly that window). Encode in `AGENTS.md`: no branch may be merged,
+integrated, promoted, or described as complete while its required CI is red. A
+deliberately incomplete handoff may still occur when its failing or unrun checks are
+reported explicitly; handoff is not equivalent to authorization to merge.
 
 ---
 
@@ -119,7 +131,15 @@ Acceptance: grep shows zero imports of the deleted helper; a synthetic recording
 a forced nominal fallback raises in escape/bout/gaze components and surfaces a QC
 warning everywhere else; `or 1.0` gone.
 
-**W1.3 — Audit whether any escape-cohort recording actually fell back to nominal geometry.**
+**W1.3 — Audit whether any escape-cohort recording actually fell back to nominal geometry. [VERIFIED]**
+Status: **implemented** by
+`docs/diagnostics/goodcopbadcop_arena_geometry_source_audit_2026-08-09.md`.
+The current registry contains 40 active GoodCopBadCop analysis recordings. All 33 with
+a selectable chaser-distance run resolve `analysis_metadata.dish_mask`; zero resolve
+the nominal circle. Seven have no chaser-distance parent and are unavailable rather
+than geometry failures. This answers the current-selector question but does not prove
+which source an older derived component used at compute time.
+
 Before/alongside W1.2: run the exporter-style geometry resolution
 (`utils/export_cross_recording_analytics.py:2400-2461` already computes
 `arena_geometry_status`/`arena_geometry_source`) across the GoodCopBadCop cohort and
@@ -167,10 +187,15 @@ time; exported wall metrics carry denominator declarations.
 Three parts:
 (a) `utils/backfill_completion_epoch.py` opens with `use_consolidated=False` (:813)
 and never reconsolidates — stamping the epoch is what CREATES the stale cache that
-hides it. Call `reconsolidate_zarr_metadata()` at the end.
+hides it. The repair must be lifecycle-aware: actively mutable/incomplete stores stay
+on direct metadata, while a selector-visible immutable store must reconsolidate and
+validate the intended selector generation as the final publication step. Applying a
+backfill to a published store must fail closed unless that final step succeeds; do not
+unconditionally consolidate mutable stores.
 (b) Add a lint/AST check (CI pattern: `scripts/check_file_size_ratchet.py`) failing any
-`zarr.open_group(` in `src/fisheye/` without explicit `use_consolidated`. ~404 bare
-call sites exist, including the `analysis/analyze_goodcopbadcop_*` family. Route
+`zarr.open_group(` in `src/fisheye/` without explicit `use_consolidated`. A refreshed
+AST census at `29598056` found 637 calls, 390 explicit and 247 bare, including the
+`analysis/analyze_goodcopbadcop_*` family. Route
 mutable-state reads through `shared/zarr_helpers.py:409` (`open_zarr_group_direct`).
 Expect a large mechanical sweep; allowlist-then-ratchet is acceptable.
 (c) Invert the legacy default: `zarr_run_completion.py:56-60`
@@ -189,7 +214,10 @@ post-cutover raises on missing parent epochs.
 `environment_digest` = sha256 of the sorted full package list from
 `get_software_versions()` (`shared/system_metadata.py` — currently computed then
 discarded in favor of the ~40-pattern `key_packages` allowlist at `:653-690`).
-Roll out shadow-first per stage, as stage-array validation did.
+Scope this requirement to selector-visible authoritative production publication.
+Selector-ineligible experiments and benchmarks may record a dirty checkout explicitly
+without becoming production authorities. Roll out shadow-first per stage, as
+stage-array validation did.
 Acceptance: epoch-3 stores refuse dirty-tree finalization without a written bypass;
 every new run_provenance payload carries environment_digest.
 
@@ -203,8 +231,9 @@ scale, and post-cutover (2026-07-02) recordings get a factually wrong `pc`→`tv
 Correct pattern already in: `utils/append_acquisition_crop_video_training.py:280`,
 `utils/export_acquisition_crop_pose_training_zarr.py:791`,
 `utils/import_sampled_training_pynvvc.py:259`.
-Also: registry migration 66 adding `color_range` (+ `color_space`, `color_transfer`,
-`color_primaries`) to `acquisition_video_streams`, backfilled via the ffprobe fields
+Also: add the next available registry migration (`67` at `29598056`, not `66`, which
+already owns `count_only_subject_context`) adding `color_range` (+ `color_space`,
+`color_transfer`, `color_primaries`) to `acquisition_video_streams`, backfilled via the ffprobe fields
 `shared/import_video_metadata.py:92` already requests.
 Also: sweep for other hardcoded literals assigned to `*_observed` / `*_measured` /
 `*_detected` fields.
@@ -241,16 +270,22 @@ Acceptance: manifests carry registry_uuid; docs point at the canonical path.
 **W3.2 — Wire the existing doc/schema checkers into CI.**
 Two additions next to the ratchet step:
 `python scripts/generate_registry_schema_reference.py && git diff --exit-code -- docs/registry_schema_reference.md`
-(reference is ~5 migrations stale: missing `recording_chasers`, `stimulus_protocols`,
-`analytics_reports`, `recording_subject_traits`, `strain_trait_expectations`,
-`strain_label_mappings`) and `python scripts/check_contract_freshness.py` (currently
-fails 99/115 docs — fix the checker's status vocabulary and glob first, add an
+(the generated reference already includes migrations 60-62 and is currently four
+migrations stale: missing 63-66, including `recording_subject_traits`,
+`strain_trait_expectations`, and `strain_label_mappings`) and
+`python scripts/check_contract_freshness.py` (currently scans 116 documents and emits
+116 findings across 100 documents — fix the checker's status vocabulary and glob first, add an
 `implementation: implemented|partial|specified-only` field; honest-form model:
 `docs/mutable_review_runs_contract.md:15-24`).
 Acceptance: both run in CI; freshness failures are triaged (fixed or explicitly
 waived), not ignored.
 
 **W3.3 — Packaging + import-graph truth. [VERIFIED]**
+Status: **partially implemented** by the reconciliation. `analysis` and `pose` now have
+package initializers, the layer declaration covers every present first-level package,
+and `exhaustive = true` is enforced. The requested non-editable wheel build/install
+smoke is still absent; current CI installs the package editable.
+
 `fisheye/analysis` (119 files) and `fisheye/pose` have no `__init__.py`;
 `find_packages` excludes them from any non-editable wheel; grimp cannot see them
 (graph = 1,149 modules, both absent), and the `(analysis)`/`(pose)` parens in
@@ -269,13 +304,16 @@ moving `atomic_run_publisher` down into `shared/zarr/`).
 Acceptance: wheel installs and imports; grimp sees analysis/pose; contract exhaustive.
 
 **W3.4 — Wire or delete the orphaned audit machinery.**
-Zero production callers today: `shared/tabular_deltas.py` (per-row `editor` — wire
-into the labeling apply boundary `labeling/web.py:2440-2760`, which already has
-`apply_id`, `edit_revision_before/after`, touched rows, and the authenticated user;
-start with subject_mask_component), `utils/audit_analysis_staleness.py` (compares a
-fingerprint no stage writes), `verify_deployment_artifact_content` (→ W2.4).
-Per the July audit's own words: deleting is better than leaving unwired.
-Acceptance: each of the three is either on a production path or deleted.
+Status: **partially implemented; original zero-caller claim is stale.**
+`shared/tabular_deltas.py` now has keypoint review, training publication, and compaction
+callers. `verify_deployment_artifact_content` is enforced by whole-video and clipped
+detection execution. `utils/audit_analysis_staleness.py` is consumed by the read-only
+lineage inspector but is not yet a production publication gate. Re-audit the remaining
+staleness semantics rather than wiring or deleting all three as one batch.
+
+Acceptance: the staleness audit is either bound to stage-written fingerprints and a
+defined gate, or retained explicitly as diagnostic-only; existing delta and deployment
+verification callers have focused end-to-end coverage.
 
 **W3.5 — Review-state history + ledger revival.**
 (a) The four `*_quality` review tables are upsert-overwrite — an approval erases a
@@ -302,16 +340,25 @@ to a declared dispatch), `fisheye/maintenance/` (69 `backfill_*`/`audit_*`/`chec
 one-shots, marked retirable), helpers → `shared/`. Delete the function-local imports
 at `cli/palette.py:1636,1727,1861`.
 
-**W4.2** Execute the eye-mask deletion the policy already authorizes (measured: one
+**W4.2** Plan the eye-mask compatibility retirement; do not execute wholesale deletion
+from the deprecation policy alone. The policy prohibits new eye-mask-primary workflows
+but still requires historical compatibility reads and materialization into subject-mask
+authorities. First inventory active consumers, training artifacts, registry rows, and a
+recoverable migration path. Measured: one
 archive's `refined_eye_masks_runs` = 27,440 files for 216 MB; 105 registry rows assert
 deprecated stages ok). Remove `EYE_MASKS_SPEC`/`REFINED_EYE_MASKS_SPEC` from
 `stage_arrays.py` (which has no deprecation concept — `stage_catalog.py` does);
-reconcile the two catalogs; drop eye-mask tables (migrations 15/17/25/26) in a new
-migration.
+reconcile the two catalogs only after compatibility consumers have a replacement.
+Dropping eye-mask tables or payloads requires a separately approved migration and
+retention plan.
 
-**W4.3** Adopt sharding on immutable run families (17 shard sites vs 707 chunk sites;
+**W4.3** Complete access-aware sharding on the remaining immutable run families (17
+shard sites vs 710 chunk sites in the refreshed static census;
 measured 23× copy speedup from packing; `storage_contract_catalog.py`'s
-`byte_planner_adopted: false` is the worklist). Leave actively-edited surfaces chunked.
+`byte_planner_adopted: false` families are the worklist). Detection, refined detection,
+crop, keypoint, and subject-mask publication already contain adopted access-aware
+profiles; do not describe this as repository-wide absence. Leave actively-edited
+surfaces chunked.
 
 **W4.4** Route `emit_stage_completion` validation through `ArrayContract`
 (`shared/zarr/array_contracts.py`) instead of legacy `ArraySpec`
@@ -331,14 +378,15 @@ via `scripts/py` PYTHONPATH), `src/chaser_analysis/` (self-bootstraps `sys.path`
 
 ## Not diagnosed this session (do not assume)
 
-- Root cause of the 6 failing CI test shards (W0.4).
 - Root cause of the step-status ledger freeze since 2026-06-18 (W3.5b).
-- Whether any escape-cohort recording actually resolved nominal geometry (W1.3 is the
-  audit that answers it).
+- Which geometry source older already-published escape/pursuit component generations
+  used at compute time; W1.3 covers current selected chaser-distance sources only.
 
 ## Ordering constraints
 
-- Wave 0 strictly first: fixes landed on red CI are unverified fixes.
-- W1.3 (geometry audit) before or with W1.2, so the science impact is known.
+- Wave 0 is complete on current `sun`; keep all three liveness gates green while later
+  work proceeds.
+- W1.3 is complete for current selected sources; W1.2 may proceed with zero current
+  nominal fallbacks but must still protect future/different cohorts.
 - W2.3 before any master-transcode campaign starts.
 - W3.3 will surface new lint violations; land after W0.2 so the triage waves don't mix.
