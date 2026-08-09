@@ -106,6 +106,31 @@ registry projection automatically when the dataset is registered. The profile
 stores bbox center heatmaps, size/aspect histograms, source-content hashes, and
 run-lineage fingerprints used by training data cards.
 
+For a deliberately selector-ineligible sampled-training candidate, keep the
+scientific approval separate from normal stage authority:
+
+```bash
+scripts/py -m fisheye.utils.accept_detect_review \
+  /path/to/sample_training.zarr \
+  --refined-run <exact_refined_run> \
+  --state approved \
+  --method manual \
+  --intended-use training \
+  --reviewer "$USER" \
+  --strict \
+  --selector-ineligible-candidate
+```
+
+This mode requires a complete refined run, the exact frame-review contract,
+embedded `raw_video/images_full`, and `stage_selector_eligible=false` on both
+the root and run. It materializes the bound
+`detect_frame_decision_runs/<refined_run>` sibling even when every frame is
+positive, then validates that every frame is positive or explicitly negative.
+It records the review receipt and digest but does not update `latest`,
+`authoritative_run`, registry authority, or production selectors. The root
+remains direct/unconsolidated until a later immutable crop artifact is built
+and consolidated.
+
 After approval, run the training image profile when you want to compare image
 statistics across training Zarrs before retraining:
 

@@ -12,7 +12,17 @@ import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
+from fisheye.shared.zarr.detect_frame_decisions import (
+    DETECT_FRAME_DECISION_FAMILY,
+    FRAME_REVIEW_CONTRACT_ATTR,
+    FRAME_REVIEW_CONTRACT_ID,
+    materialize_detect_frame_decision_run,
+)
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
+from fisheye.training.detection_frame_supervision import (
+    build_detection_frame_supervision_plan,
+)
 from fisheye.utils.detection_profile import write_detection_profile
 from fisheye.registry.inline_refresh import sync_latest_detection_profile_for_zarr
 
@@ -101,10 +111,122 @@ def _emit(result: dict[str, object], *, as_json: bool) -> None:
             print(f"detection_profile_registry_sync: {registry_sync.get('status')}")
     approval = result.get("authoritative_approval")
     if isinstance(approval, dict):
-        print(f"authoritative_approval: {approval.get('status')} ({approval.get('run')})")
+        print(
+            f"authoritative_approval: {approval.get('status')} ({approval.get('run')})"
+        )
     else:
         print("authoritative_approval: —")
+    candidate_receipt = result.get("selector_ineligible_candidate_receipt")
+    if isinstance(candidate_receipt, dict):
+        print(
+            "selector_ineligible_candidate_receipt: "
+            f"{candidate_receipt.get('status')} "
+            f"({candidate_receipt.get('frame_decision_path')})"
+        )
     print(f"dry_run: {result['dry_run']}")
+
+
+def _selector_ineligible_candidate_receipt(
+    *,
+    root: zarr.Group,
+    refined_parent: zarr.Group,
+    refined_run_name: str,
+    refined_run: zarr.Group,
+    resolved_group: Optional[str],
+    dry_run: bool,
+) -> dict[str, object]:
+    """Finalize review evidence without creating a normal stage authority."""
+
+    if str(root.attrs.get("zarr_purpose") or "").strip().lower() != "training":
+        raise RuntimeError(
+            "Selector-ineligible candidate approval is limited to training-purpose Zarrs."
+        )
+    if root.attrs.get("stage_selector_eligible") is not False:
+        raise RuntimeError(
+            "Selector-ineligible candidate approval requires root "
+            "stage_selector_eligible=false."
+        )
+    if refined_run.attrs.get("stage_selector_eligible") is not False:
+        raise RuntimeError(
+            "Selector-ineligible candidate approval requires the refined run "
+            "to remain selector-ineligible."
+        )
+    if not is_run_complete_in_parent(
+        refined_parent,
+        refined_run,
+        legacy_default=False,
+    ):
+        raise RuntimeError(
+            "Selector-ineligible candidate approval requires a complete refined run."
+        )
+    if resolved_group != "refined" or "instances" not in refined_run:
+        raise RuntimeError(
+            "Selector-ineligible candidate approval requires the canonical "
+            "refined instances surface."
+        )
+    if refined_run.attrs.get(FRAME_REVIEW_CONTRACT_ATTR) != FRAME_REVIEW_CONTRACT_ID:
+        raise RuntimeError(
+            "Selector-ineligible candidate approval requires the exact frame-review contract."
+        )
+    raw_video = root.get("raw_video")
+    if raw_video is None or "images_full" not in raw_video:
+        raise RuntimeError(
+            "Selector-ineligible candidate approval requires raw_video/images_full."
+        )
+    n_frames = int(raw_video["images_full"].shape[0])
+    if n_frames <= 0:
+        raise RuntimeError("Training review frame axis must be positive.")
+    bbox_path = f"refined_detect_runs/{refined_run_name}/instances/bbox_norm_coords"
+    frame_indices_path = (
+        f"refined_detect_runs/{refined_run_name}/instances/frame_indices"
+    )
+
+    # Validate completeness before creating anything.  Missing decision state
+    # is acceptable only when every frame already has a positive instance.
+    plan = build_detection_frame_supervision_plan(
+        root,
+        bbox_path=bbox_path,
+        frame_indices_path=frame_indices_path,
+        n_frames=n_frames,
+    )
+    would_materialize = plan.source_decision_run_path is None
+    if not dry_run:
+        materialize_detect_frame_decision_run(
+            root,
+            source_refined_detect_run=refined_run_name,
+            n_frames=n_frames,
+        )
+        plan = build_detection_frame_supervision_plan(
+            root,
+            bbox_path=bbox_path,
+            frame_indices_path=frame_indices_path,
+            n_frames=n_frames,
+        )
+        if plan.source_decision_run_path is None or plan.source_decision_digest is None:
+            raise RuntimeError(
+                "Candidate approval failed to materialize a bound frame-decision receipt."
+            )
+
+    return {
+        "schema_id": "palette.selector_ineligible_detection_review_receipt",
+        "schema_version": 1,
+        "status": "would_finalize" if dry_run else "complete",
+        "authority_scope": "selector_ineligible_training_candidate",
+        "source_refined_detect_run": refined_run_name,
+        "frame_decision_path": (
+            plan.source_decision_run_path
+            or f"{DETECT_FRAME_DECISION_FAMILY}/{refined_run_name}"
+        ),
+        "frame_decision_digest": plan.source_decision_digest,
+        "frame_decision_would_materialize": bool(would_materialize),
+        "frame_count": plan.frame_count,
+        "instance_count": plan.instance_count,
+        "positive_frame_count": plan.positive_frame_count,
+        "negative_frame_count": plan.negative_frame_count,
+        "parent_selectors_updated": False,
+        "stage_selector_eligible": False,
+        "metadata_mode": "direct_mutable",
+    }
 
 
 def _resolve_review_target(
@@ -135,7 +257,11 @@ def _source_detection_path_for_profile(
     resolved = (resolved_group or "").strip()
     if resolved == "refined" and "instances" in refined_run:
         return f"{refined_parent_name}/{refined_run_name}/instances"
-    if resolved == "refined" and "bbox_norm_coords" in refined_run and "frame_indices" in refined_run:
+    if (
+        resolved == "refined"
+        and "bbox_norm_coords" in refined_run
+        and "frame_indices" in refined_run
+    ):
         return f"{refined_parent_name}/{refined_run_name}"
     if requested and requested in refined_run:
         return f"{refined_parent_name}/{refined_run_name}/{requested}"
@@ -239,7 +365,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             "optional strict guardrails."
         )
     )
-    parser.add_argument("zarr_path", type=Path, help="Path to the recording .zarr directory.")
+    parser.add_argument(
+        "zarr_path", type=Path, help="Path to the recording .zarr directory."
+    )
     parser.add_argument("--refined-run", help="Refined run name (default: latest).")
     parser.add_argument(
         "--target-group",
@@ -279,6 +407,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Do not materialize analysis/detection_profile_runs when approving for training.",
     )
     parser.add_argument(
+        "--selector-ineligible-candidate",
+        action="store_true",
+        help=(
+            "Record approved training-review evidence and materialize the "
+            "frame-decision receipt without setting an authoritative/latest "
+            "selector. Requires a complete selector-ineligible training run."
+        ),
+    )
+    parser.add_argument(
         "--registry",
         type=Path,
         help=(
@@ -301,7 +438,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Resolve target and payload without writing zarr attrs.",
     )
-    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+    parser.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON output."
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -322,19 +461,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
         if args.target_group and resolved_group is None:
-            raise RuntimeError(f"Target group '{args.target_group}' could not be resolved.")
+            raise RuntimeError(
+                f"Target group '{args.target_group}' could not be resolved."
+            )
         if args.state == "approved" and resolved_group is None:
-            raise RuntimeError("Cannot set state=approved when no resolved detect group is available.")
+            raise RuntimeError(
+                "Cannot set state=approved when no resolved detect group is available."
+            )
 
         if args.strict:
             if not args.intended_use:
                 raise RuntimeError("--intended-use is required in strict mode.")
             if args.state == "approved" and not args.reviewer:
-                raise RuntimeError("--reviewer is required for approved state in strict mode.")
+                raise RuntimeError(
+                    "--reviewer is required for approved state in strict mode."
+                )
             if args.state == "rejected" and not args.notes:
-                raise RuntimeError("--notes is required for rejected state in strict mode.")
+                raise RuntimeError(
+                    "--notes is required for rejected state in strict mode."
+                )
 
         intended_use = args.intended_use or "training"
+        if args.selector_ineligible_candidate:
+            if args.state != "approved" or intended_use != "training":
+                raise RuntimeError(
+                    "--selector-ineligible-candidate requires "
+                    "--state approved --intended-use training."
+                )
+            if not args.reviewer:
+                raise RuntimeError(
+                    "--selector-ineligible-candidate requires --reviewer."
+                )
+
         timestamp_utc = datetime.now(timezone.utc).isoformat()
         payload: dict[str, object] = {
             "state": args.state,
@@ -353,8 +511,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         payload = {k: v for k, v in payload.items() if v is not None}
 
         authoritative_approval: Optional[dict[str, object]] = None
+        selector_ineligible_candidate_receipt: Optional[dict[str, object]] = None
+        if args.selector_ineligible_candidate:
+            selector_ineligible_candidate_receipt = (
+                _selector_ineligible_candidate_receipt(
+                    root=root,
+                    refined_parent=refined_parent,
+                    refined_run_name=refined_run_name,
+                    refined_run=refined_run,
+                    resolved_group=resolved_group,
+                    dry_run=bool(args.dry_run),
+                )
+            )
+            payload["authority_scope"] = "selector_ineligible_training_candidate"
+            payload["selector_ineligible_candidate_receipt"] = (
+                selector_ineligible_candidate_receipt
+            )
+            authoritative_approval = {
+                "status": "deferred_selector_ineligible",
+                "reason_code": "CANDIDATE_ONLY",
+                "run": refined_run_name,
+            }
+            payload["authoritative_approval"] = authoritative_approval
         if not args.dry_run:
-            if args.state == "approved":
+            if args.state == "approved" and not args.selector_ineligible_candidate:
                 envelope = _approve_refined_detect_authority(
                     zarr_path=args.zarr_path.expanduser().resolve(),
                     refined_run_name=refined_run_name,
@@ -368,17 +548,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                 }
                 payload["authoritative_approval"] = authoritative_approval
             refined_run.attrs["detect_review_status"] = payload
+            if args.selector_ineligible_candidate:
+                root.attrs["training_artifact_status"] = "review_complete"
 
-        detection_profile_result: dict[str, object] = {"enabled": False, "status": "skipped"}
+        detection_profile_result: dict[str, object] = {
+            "enabled": False,
+            "status": "skipped",
+        }
         should_write_profile = (
             args.state == "approved"
             and intended_use == "training"
             and not bool(args.skip_detection_profile)
+            and not bool(args.selector_ineligible_candidate)
         )
         if should_write_profile:
             refined_parent_name = _pick_refined_parent_name(root)
             if refined_parent_name is None:
-                raise RuntimeError("No refined detect parent found while writing detection profile.")
+                raise RuntimeError(
+                    "No refined detect parent found while writing detection profile."
+                )
             detection_profile_result = _write_profile_and_sync_registry(
                 root=root,
                 zarr_path=args.zarr_path.expanduser().resolve(),
@@ -403,6 +591,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             "intended_use": intended_use,
             "reviewer": args.reviewer,
             "authoritative_approval": authoritative_approval,
+            "selector_ineligible_candidate_receipt": (
+                selector_ineligible_candidate_receipt
+            ),
             "dry_run": bool(args.dry_run),
             "payload": payload,
             "detection_profile": detection_profile_result,

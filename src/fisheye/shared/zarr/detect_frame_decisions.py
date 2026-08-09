@@ -349,6 +349,37 @@ def _ensure_run(
     return run
 
 
+def materialize_detect_frame_decision_run(
+    root: zarr.Group,
+    *,
+    source_refined_detect_run: str,
+    n_frames: int,
+) -> DetectFrameDecisions:
+    """Materialize the exact editable decision sibling without inventing labels.
+
+    Positive supervision remains owned by refined-detection instance rows.  A
+    newly materialized decision run therefore contains only ``unreviewed`` /
+    ``none`` codes until explicit negative-frame decisions are recorded.  This
+    write is useful at the review-finalization boundary: an all-positive review
+    still receives a persisted, digestible frame-axis receipt, while downstream
+    completeness validation remains responsible for rejecting any empty frame
+    that lacks an explicit negative decision.
+    """
+
+    if int(n_frames) <= 0:
+        raise DetectFrameDecisionError("n_frames must be positive.")
+    _ensure_run(
+        root,
+        source_refined_detect_run=source_refined_detect_run,
+        n_frames=int(n_frames),
+    )
+    return load_detect_frame_decisions(
+        root,
+        source_refined_detect_run=source_refined_detect_run,
+        n_frames=int(n_frames),
+    )
+
+
 def set_detect_frame_negative(
     root: zarr.Group,
     *,
@@ -434,5 +465,6 @@ __all__ = [
     "REASON_CODE_MAP",
     "clear_detect_frame_decision",
     "load_detect_frame_decisions",
+    "materialize_detect_frame_decision_run",
     "set_detect_frame_negative",
 ]

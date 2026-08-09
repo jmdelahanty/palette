@@ -9,6 +9,7 @@ from fisheye.shared.zarr.detect_frame_decisions import (
     DetectFrameDecisionError,
     clear_detect_frame_decision,
     load_detect_frame_decisions,
+    materialize_detect_frame_decision_run,
     set_detect_frame_negative,
 )
 
@@ -35,6 +36,28 @@ def test_absent_decision_run_is_all_unreviewed_without_writing(tmp_path) -> None
     assert decisions.decision_codes.tolist() == [0, 0, 0]
     assert decisions.reason_codes.tolist() == [0, 0, 0]
     assert DETECT_FRAME_DECISION_FAMILY not in root
+
+
+def test_materialize_all_positive_decision_receipt_without_inventing_labels(
+    tmp_path,
+) -> None:
+    root = _root(tmp_path)
+
+    decisions = materialize_detect_frame_decision_run(
+        root,
+        source_refined_detect_run="refined-a",
+        n_frames=3,
+    )
+
+    assert decisions.decision_codes.tolist() == [0, 0, 0]
+    assert decisions.reason_codes.tolist() == [0, 0, 0]
+    run = root[f"{DETECT_FRAME_DECISION_FAMILY}/refined-a"]
+    assert run.attrs["source_refined_detect_run"] == "refined-a"
+    assert run.attrs["selector_eligible"] is False
+    np.testing.assert_array_equal(
+        run["source_acquisition_frame_index"][:],
+        [10, 20, 30],
+    )
 
 
 def test_negative_decision_is_bound_typed_and_clearable(tmp_path) -> None:
