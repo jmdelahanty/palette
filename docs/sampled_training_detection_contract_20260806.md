@@ -88,6 +88,25 @@ Implementation:
 - `fisheye.shared.zarr.sampled_training_detection_publication`
 - `fisheye.shared.detection_tables`
 
+The combined runner is resumable across the artifact/binding publication
+boundary. If immutable artifact publication succeeds but later canonical
+binding fails, rerun with the same registered model and exact artifact ID plus
+`--reuse-existing-artifact`. This opt-in mode rejects an absent artifact or a
+model-identity mismatch, performs no source copy or inference, validates the
+artifact seal through the binder, and publishes only the new bound review seed:
+
+```bash
+scripts/py -m fisheye.utils.run_sampled_training_detection_canary \
+  /path/to/training.zarr \
+  --scratch-root /node/local/bounded-scratch \
+  --registry /path/to/palette_registry.sqlite \
+  --model-run-id <same_registered_detect_run_id> \
+  --artifact-run-id <existing_immutable_artifact> \
+  --detect-run-id <new_bound_review_seed> \
+  --reuse-existing-artifact \
+  --apply
+```
+
 The compatibility reader resolves modern columns from `instances/` and legacy
 columns from the run root. New writers do not create root aliases. Manual
 curation preserves copied keys and mints new keys using mapped acquisition

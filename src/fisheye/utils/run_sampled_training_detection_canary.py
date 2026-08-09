@@ -104,6 +104,7 @@ def run_sampled_training_detection_canary(
     max_det: int,
     cpu: bool,
     copy_backend: str,
+    reuse_existing_artifact: bool = False,
     argv: Optional[Sequence[str]] = None,
 ) -> dict[str, Any]:
     """Execute the complete node-local inference and strict publication chain."""
@@ -119,9 +120,16 @@ def run_sampled_training_detection_canary(
         raise FileNotFoundError(f"Registry does not exist: {registry}")
     if batch_size <= 0 or max_det <= 0:
         raise ValueError("batch_size and max_det must be positive.")
-    if (target / "detection_artifact_runs" / artifact_name).exists():
+    artifact_path = target / "detection_artifact_runs" / artifact_name
+    artifact_exists = artifact_path.exists()
+    if artifact_exists and not reuse_existing_artifact:
         raise FileExistsError(
             f"Target artifact run already exists: detection_artifact_runs/{artifact_name}"
+        )
+    if reuse_existing_artifact and not artifact_exists:
+        raise FileNotFoundError(
+            "--reuse-existing-artifact requires the exact completed artifact: "
+            f"detection_artifact_runs/{artifact_name}"
         )
     if (target / "detect_runs" / detect_name).exists():
         raise FileExistsError(
@@ -136,39 +144,73 @@ def run_sampled_training_detection_canary(
         artifact_kind=str(artifact_kind),
     )
     phases: dict[str, float] = {}
-    with tempfile.TemporaryDirectory(
-        prefix="palette-sampled-training-detect-",
-        dir=str(scratch),
-    ) as temporary:
-        local_archive = Path(temporary) / target.name
-        copy_receipt = _copy_training_archive_to_scratch(target, local_archive)
-        phases["source_to_node_local_copy_and_authentication"] = float(
-            copy_receipt["seconds"]
+    if reuse_existing_artifact:
+        existing = zarr.open_group(str(artifact_path), mode="r", use_consolidated=False)
+        artifact_model_run = str(existing.attrs.get("model_registry_run_id") or "")
+        if artifact_model_run != spec.run_id:
+            raise ValueError(
+                "Existing artifact model identity differs from the requested "
+                f"registered model: artifact={artifact_model_run!r}, "
+                f"requested={spec.run_id!r}."
+            )
+        copy_receipt = {
+            "status": "skipped_reusing_existing_artifact",
+            "source": str(target),
+            "content_authenticated": True,
+            "authentication": "validated_by_bound_artifact_seal",
+        }
+        inference = {
+            "status": "skipped_reusing_existing_artifact",
+            "artifact_run_id": artifact_name,
+            "model_registry_run_id": artifact_model_run,
+        }
+        artifact_publication = {
+            "status": "reused_existing_immutable_artifact",
+            "artifact_path": f"detection_artifact_runs/{artifact_name}",
+        }
+        phases.update(
+            {
+                "source_to_node_local_copy_and_authentication": 0.0,
+                "node_local_inference": 0.0,
+                "artifact_atomic_publication": 0.0,
+            }
         )
+    else:
+        with tempfile.TemporaryDirectory(
+            prefix="palette-sampled-training-detect-",
+            dir=str(scratch),
+        ) as temporary:
+            local_archive = Path(temporary) / target.name
+            copy_receipt = _copy_training_archive_to_scratch(target, local_archive)
+            phases["source_to_node_local_copy_and_authentication"] = float(
+                copy_receipt["seconds"]
+            )
 
-        inference_started = time.perf_counter()
-        inference = run_training_zarr_prediction(
-            zarr_path=local_archive,
-            spec=spec,
-            run_name=artifact_name,
-            batch_size=int(batch_size),
-            conf=float(conf),
-            iou=float(iou),
-            max_det=int(max_det),
-            cpu=bool(cpu),
-            overwrite=False,
-            argv=list(argv) if argv is not None else None,
-        )
-        phases["node_local_inference"] = time.perf_counter() - inference_started
+            inference_started = time.perf_counter()
+            inference = run_training_zarr_prediction(
+                zarr_path=local_archive,
+                spec=spec,
+                run_name=artifact_name,
+                batch_size=int(batch_size),
+                conf=float(conf),
+                iou=float(iou),
+                max_det=int(max_det),
+                cpu=bool(cpu),
+                overwrite=False,
+                argv=list(argv) if argv is not None else None,
+            )
+            phases["node_local_inference"] = time.perf_counter() - inference_started
 
-        artifact_started = time.perf_counter()
-        artifact_publication = publish_detection_artifact_run(
-            local_archive=local_archive,
-            target_archive=target,
-            artifact_run_id=artifact_name,
-            copy_backend=copy_backend,
-        )
-        phases["artifact_atomic_publication"] = time.perf_counter() - artifact_started
+            artifact_started = time.perf_counter()
+            artifact_publication = publish_detection_artifact_run(
+                local_archive=local_archive,
+                target_archive=target,
+                artifact_run_id=artifact_name,
+                copy_backend=copy_backend,
+            )
+            phases["artifact_atomic_publication"] = (
+                time.perf_counter() - artifact_started
+            )
 
     binding_started = time.perf_counter()
     detection_publication = build_and_publish_sampled_training_detection(
@@ -197,6 +239,7 @@ def run_sampled_training_detection_canary(
             "max_det": int(max_det),
             "cpu": bool(cpu),
             "copy_backend": str(copy_backend),
+            "reuse_existing_artifact": bool(reuse_existing_artifact),
         },
         "source_copy": copy_receipt,
         "inference": inference,
@@ -230,6 +273,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-det", type=int, default=20)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--copy-backend", default="python")
+    parser.add_argument(
+        "--reuse-existing-artifact",
+        action="store_true",
+        help=(
+            "Validate and bind the named existing immutable artifact without "
+            "repeating source copy, inference, or artifact publication."
+        ),
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -253,6 +304,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     selection = select_frame_source(root, spec)
+    artifact_path = (
+        archive
+        / "detection_artifact_runs"
+        / _safe_run_id(args.artifact_run_id, option="--artifact-run-id")
+    )
+    if args.reuse_existing_artifact and not artifact_path.exists():
+        raise FileNotFoundError(
+            "--reuse-existing-artifact requires the exact existing artifact: "
+            f"{artifact_path}"
+        )
     plan = {
         "schema_id": CANARY_SCHEMA_ID,
         "schema_version": CANARY_SCHEMA_VERSION,
@@ -273,6 +334,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "max_det": int(args.max_det),
             "cpu": bool(args.cpu),
             "copy_backend": str(args.copy_backend),
+            "reuse_existing_artifact": bool(args.reuse_existing_artifact),
         },
         "invariants": {
             "node_local_inference": True,
@@ -302,6 +364,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_det=int(args.max_det),
         cpu=bool(args.cpu),
         copy_backend=str(args.copy_backend),
+        reuse_existing_artifact=bool(args.reuse_existing_artifact),
         argv=list(argv) if argv is not None else sys.argv,
     )
     if args.json:
