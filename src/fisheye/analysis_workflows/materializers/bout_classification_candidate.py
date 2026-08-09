@@ -45,8 +45,8 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
-from .runtime_telemetry import PhaseTelemetry
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.runtime_telemetry import PhaseTelemetry
 
 MATERIALIZATION_SCHEMA_ID = "palette.bout_classification_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.bout_classification_atomic_publish.v1"

@@ -26,6 +26,9 @@ from fisheye.shared.refined_subject_mask_coordinate_publication import (
     prepare_refined_subject_mask_coordinate_context,
     publish_refined_subject_mask_coordinate_surfaces,
 )
+from fisheye.shared.refined_subject_mask_mutation import (
+    stamp_refined_subject_mask_editable_draft,
+)
 from fisheye.shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
     SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
@@ -251,6 +254,10 @@ def _create_canonical_refined_masks(root: Any, raw: Any) -> Any:
                 name: {"state": "approved", "method": "unit_test"}
                 for name in LABELS
             },
+            "refined_subject_mask_review_status": {
+                "state": "approved",
+                "method": "unit_test",
+            },
             "method": "smart_finalize_subject_masks_v1",
             "refinement_semantics": "canonical_component_masks",
             "finalization_semantics": "smart_probability_to_refined_candidate",
@@ -264,6 +271,7 @@ def _create_canonical_refined_masks(root: Any, raw: Any) -> Any:
             },
         }
     )
+    stamp_refined_subject_mask_editable_draft(run)
     mark_run_started(run, run_name="r1", stage="refine_subject_masks")
     for name in (
         "source_crop_row_ids",

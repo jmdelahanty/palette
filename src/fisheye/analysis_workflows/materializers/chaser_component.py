@@ -37,7 +37,7 @@ from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.zarr_helpers import archive_metadata_publication_lock
 from fisheye.shared.zarr_io import open_zarr_root
 
-from .atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
     AtomicRunPublishSpec,

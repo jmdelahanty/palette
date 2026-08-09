@@ -16,7 +16,7 @@ from fisheye.analysis.subject_shape_storage import (
     validate_subject_shape_direct_consolidated_storage,
 )
 from fisheye.analysis_workflows.materializers import subject_shape as materializer
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
 )
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group

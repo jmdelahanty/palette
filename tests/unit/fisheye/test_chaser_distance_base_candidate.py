@@ -608,7 +608,7 @@ def test_copy_failure_leaves_source_pointers_unchanged(
     monkeypatch.setattr(
         materializer, "load_bound_chaser_distance_run", lambda *_a, **_k: _bound()
     )
-    from fisheye.analysis_workflows.materializers import atomic_run_publisher
+    from fisheye.shared import atomic_run_publisher
 
     def fail_copy(*_args, **_kwargs):
         raise RuntimeError("injected copy failure")

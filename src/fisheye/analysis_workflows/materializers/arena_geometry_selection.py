@@ -20,7 +20,7 @@ from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
     CANDIDATE_RUNS_PARENT,
     validate_arena_geometry_candidate_record,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
     AtomicRunPublishSpec,
     atomic_publish_run_group,

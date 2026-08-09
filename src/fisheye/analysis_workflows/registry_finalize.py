@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 from fisheye.registry.db import Registry, extract_dataset_metadata
 from fisheye.registry.stage_catalog import dependency_map
 from fisheye.shared.batch_logging import utc_now
-from fisheye.shared.derived_analysis_registry_status import (
+from fisheye.registry.derived_analysis_status import (
     emit_derived_analysis_stage_completion,
     emit_eye_angle_stage_completion,
     emit_track_kinematics_stage_completion,

@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from fisheye.cluster.lsf.bundle import write_json_snapshot
+from fisheye.shared.json_snapshot import write_json_snapshot
 from fisheye.shared.zarr.benchmark_matrix import (
     require_storage_benchmark_matrix_manifest,
 )

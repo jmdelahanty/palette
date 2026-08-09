@@ -95,7 +95,7 @@ class DerivedAnalysisStorageCandidate:
             return False
         module: Any = import_module(self.owner_module)
         publisher = import_module(
-            "fisheye.analysis_workflows.materializers.atomic_run_publisher"
+            "fisheye.shared.atomic_run_publisher"
         )
         return (
             getattr(module, "atomic_publish_run_group", None)

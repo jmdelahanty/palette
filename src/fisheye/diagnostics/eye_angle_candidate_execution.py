@@ -44,7 +44,7 @@ from fisheye.analysis_workflows.materializers.eye_angles import (
     materialize_eye_angles,
     tombstone_eye_angle_execution_candidate,
 )
-from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+from fisheye.shared.runtime_telemetry import (
     require_runtime_telemetry,
 )
 from fisheye.diagnostics.analysis_candidate_execution import (

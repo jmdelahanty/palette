@@ -44,7 +44,7 @@ from fisheye.analysis.exact_tabular_storage import (
 from fisheye.analysis_workflows.materializers.chaser_distance_base import (
     PUBLISH_SCHEMA_ID,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
     ATOMIC_RUN_PUBLISHER_SCHEMA_ID,
     ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION,

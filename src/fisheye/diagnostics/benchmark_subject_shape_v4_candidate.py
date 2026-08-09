@@ -33,7 +33,7 @@ from fisheye.analysis.subject_shape_storage import (
     subject_shape_fill_value,
     validate_subject_shape_candidate_storage,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_RUN_PUBLISHER_SCHEMA_ID,
     ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION,
     SERIALIZATION_POLICY,

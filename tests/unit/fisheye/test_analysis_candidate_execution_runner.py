@@ -33,7 +33,7 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
     require_candidate_execution_receipt,
     require_candidate_execution_request,
 )
-from fisheye.analysis_workflows.materializers.runtime_telemetry import PhaseTelemetry
+from fisheye.shared.runtime_telemetry import PhaseTelemetry
 from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
     ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE,
 )

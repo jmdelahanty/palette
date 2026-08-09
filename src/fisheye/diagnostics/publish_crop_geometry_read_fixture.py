@@ -12,7 +12,7 @@ from time import perf_counter
 from typing import Any, Mapping, Sequence
 import uuid
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     TreeInventory,
     tree_inventory,
 )

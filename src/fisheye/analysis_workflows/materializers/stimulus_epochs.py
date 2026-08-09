@@ -80,8 +80,8 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
-from .runtime_telemetry import PhaseTelemetry
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.runtime_telemetry import PhaseTelemetry
 
 PARENT_PATH = "analysis/stimulus_epoch_runs"
 SUPPORTED_PROFILE_ID = "published_http_v1"

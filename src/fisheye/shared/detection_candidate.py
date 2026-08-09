@@ -8,9 +8,6 @@ call here makes those two transport policies share one construction boundary.
 
 from __future__ import annotations
 
-from typing import Any
-
-
 DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR = (
     "palette_detection_candidate_build_authority"
 )
@@ -31,24 +28,11 @@ def node_local_detection_candidate_authority() -> dict[str, str]:
     }
 
 
-def build_detection_candidate(**kwargs: Any) -> str:
-    """Build one disposable candidate without selecting or publishing it.
-
-    The lazy import keeps Ultralytics and its settings initialization out of
-    help, planning, and artifact-inspection processes.
-    """
-
-    from fisheye.detection.detect_yolo import detect_yolo
-
-    return detect_yolo(**kwargs)
-
-
 __all__ = [
     "DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR",
     "DETECTION_CANDIDATE_BUILD_AUTHORITY_SCHEMA",
     "DEFAULT_DETECT_FRAME_SHARD_ROWS",
     "DEFAULT_DETECT_ROW_SHARD_ROWS",
     "NODE_LOCAL_DETECTION_CANDIDATE_KIND",
-    "build_detection_candidate",
     "node_local_detection_candidate_authority",
 ]

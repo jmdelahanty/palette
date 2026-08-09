@@ -44,7 +44,7 @@ from fisheye.analysis.track_kinematics_storage import (
     source_flat_projection_hashes,
     validate_flat_candidate,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
     ATOMIC_RUN_PUBLISHER_SCHEMA_ID,
     ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION,

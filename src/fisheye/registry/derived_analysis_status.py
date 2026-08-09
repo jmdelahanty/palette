@@ -7,13 +7,13 @@ from typing import Any, Mapping, Optional
 
 import zarr
 
-from ..registry.stage_complete import RegistryInput, emit_stage_completion
-from ..registry.stage_catalog import (
+from .stage_complete import RegistryInput, emit_stage_completion
+from .stage_catalog import (
     DERIVED_ANALYSIS,
     canonical_stage_id,
     get_stage_spec,
 )
-from .type_conversions import clean_mapping, normalize_attr
+from fisheye.shared.type_conversions import clean_mapping, normalize_attr
 
 try:
     from rich.console import Console

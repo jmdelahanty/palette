@@ -78,9 +78,9 @@ from ...shared.zarr_run_completion import (
 from ...shared.zarr.benchmark_runtime import storage_stats
 from ...shared.zarr.manifest_digest import canonical_json_sha256
 from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
-from .atomic_run_publisher import ATOMIC_PUBLICATION_TOMBSTONE_ATTR
-from .runtime_telemetry import PhaseTelemetry
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.atomic_run_publisher import ATOMIC_PUBLICATION_TOMBSTONE_ATTR
+from fisheye.shared.runtime_telemetry import PhaseTelemetry
 
 MATERIALIZATION_SCHEMA_ID = "palette.subject_shape_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.subject_shape_run_publish.v1"

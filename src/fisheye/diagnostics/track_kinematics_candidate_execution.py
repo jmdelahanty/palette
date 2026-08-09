@@ -38,10 +38,10 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
     require_candidate_execution_request,
     required_execution_phases,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
 )
-from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+from fisheye.shared.runtime_telemetry import (
     require_runtime_telemetry,
 )
 from fisheye.analysis_workflows.materializers.track_kinematics_candidate import (

@@ -24,7 +24,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from fisheye.shared.instance_keys import resolve_recording_identity
-from fisheye.shared.detection_candidate import build_detection_candidate
+from fisheye.detection.candidate_builder import build_detection_candidate
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 

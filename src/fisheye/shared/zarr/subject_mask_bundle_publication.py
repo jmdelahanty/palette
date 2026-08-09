@@ -19,7 +19,7 @@ from uuid import uuid4
 import numpy as np
 import zarr
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )

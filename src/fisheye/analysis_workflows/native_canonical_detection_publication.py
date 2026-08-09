@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 import zarr
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
     AtomicRunPublishSpec,

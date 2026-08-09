@@ -46,7 +46,7 @@ from ...shared.zarr_run_completion import (
     mark_run_started,
     require_runs_parent,
 )
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 MATERIALIZATION_SCHEMA_ID = "palette.collection_proxy_coordinate_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.collection_proxy_coordinate_publish.v1"

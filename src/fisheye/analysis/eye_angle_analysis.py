@@ -46,7 +46,7 @@ from fisheye.shared.coordinate_identity import (
     OBSERVATION_INSTANCE_DOMAIN,
 )
 from fisheye.shared.coordinate_record import bind_persisted_coordinate_record
-from fisheye.shared.derived_analysis_registry_status import (
+from fisheye.registry.derived_analysis_status import (
     emit_eye_angle_stage_completion,
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs

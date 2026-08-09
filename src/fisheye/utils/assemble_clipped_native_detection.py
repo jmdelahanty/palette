@@ -18,7 +18,7 @@ from fisheye.detection.native_canonical_candidate import (
 )
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-from fisheye.shared.zarr.native_canonical_detection_publication import (
+from fisheye.analysis_workflows.native_canonical_detection_publication import (
     publish_native_canonical_detection_candidate,
 )
 

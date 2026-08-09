@@ -46,7 +46,7 @@ from ...shared.zarr_sharded_copy import (
     SHARD_POLICY_MULTI_CHUNK_CAPPED,
     copy_completed_run_to_sharded,
 )
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.bout_kinematics_storage_materialization.v1"

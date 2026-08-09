@@ -22,10 +22,11 @@ from typing import Any, Mapping, Optional, Sequence
 
 import zarr
 
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
+from fisheye.detection.candidate_builder import build_detection_candidate
 from fisheye.registry.db import RegistryPaths
 from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.acquisition_publication_status import (
@@ -38,7 +39,6 @@ from fisheye.shared.detection_candidate import (
     DEFAULT_DETECT_FRAME_SHARD_ROWS,
     DEFAULT_DETECT_ROW_SHARD_ROWS,
     DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR,
-    build_detection_candidate,
     node_local_detection_candidate_authority,
 )
 from fisheye.shared.detection_model_provenance import (

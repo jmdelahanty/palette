@@ -92,10 +92,13 @@ id = "shared-layer"
 name = "Shared layer must not import higher application layers"
 type = "layers"
 containers = ["fisheye"]
+# Every present first-level package is mandatory here.  Keep only genuinely
+# absent extension namespaces optional; exhaustive mode rejects silent drift.
 layers = [
-  "(analysis) : (apps) : capture : cli : core : detection : diagnostics : (docs) : (group_analytics) : group_analytics_viewer : group_statistics : inference : labeling : (pose) : preprocessing : refinement : registry : segmentation : status_page : tracking : training : tune : utils : visualization",
+  "__main__ : analysis : analysis_workflows : analytics_exports : api : (apps) : baseline_strategy : cli : cluster : cohorts : core : detection : detection_quality_test : diagnostics : (docs) : (group_analytics) : group_analytics_viewer : group_statistics : inference : labeling : montage : pose : preprocessing : refinement : registry : reporting : segmentation : status_page : test_decord_minimal : test_standalone : test_system_utils : test_video_end_frames : tracking : training : training_response : tune : utils : visualization",
   "shared",
 ]
+exhaustive = true
 ignore_imports = [
   # RATCHET: existing clipped-collection cache helper still reaches a legacy utils resolver.
   "fisheye.shared.clipped_collection_flat_roi_cache -> fisheye.utils.resolve_clipped_refined_detect_collection",

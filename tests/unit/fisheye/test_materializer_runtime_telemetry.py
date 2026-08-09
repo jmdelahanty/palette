@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+from fisheye.shared.runtime_telemetry import (
     PhaseTelemetry,
     RUNTIME_TELEMETRY_IDENTITY_POLICY,
     RUNTIME_TELEMETRY_SCHEMA_ID,

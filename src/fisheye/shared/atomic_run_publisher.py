@@ -26,14 +26,14 @@ import uuid
 
 import zarr
 
-from ...shared.json_safety import json_attr_safe
-from ...shared.zarr_io import open_zarr_root
-from ...shared.zarr_helpers import (
+from .json_safety import json_attr_safe
+from .runtime_telemetry import PhaseTelemetry
+from .zarr_helpers import (
     ARCHIVE_METADATA_PUBLICATION_LOCK_SUFFIX,
     archive_metadata_publication_lock,
     archive_metadata_publication_lock_path,
 )
-from .runtime_telemetry import PhaseTelemetry
+from .zarr_io import open_zarr_root
 
 
 ATOMIC_RUN_PUBLISHER_SCHEMA_ID = "palette.atomic_run_group_publisher"

@@ -54,7 +54,7 @@ from fisheye.analysis.eye_angle_storage import (
     validate_eye_angle_candidate_storage,
     validate_eye_angle_direct_consolidated_storage,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
     ATOMIC_RUN_PUBLISHER_SCHEMA_ID,
     ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION,

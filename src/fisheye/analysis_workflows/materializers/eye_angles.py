@@ -46,7 +46,7 @@ from ...analysis.eye_angle_storage import (
     validate_eye_angle_direct_consolidated_storage,
 )
 from ..eye_angle_candidate_execution import compute_eye_angle_logical_hashes
-from ...shared.derived_analysis_registry_status import (
+from ...registry.derived_analysis_status import (
     emit_eye_angle_stage_completion,
 )
 from ...shared.eye_geometry_source import EYE_GEOMETRY_STAGE_SUBJECT_SHAPE
@@ -71,12 +71,12 @@ from ...shared.zarr_helpers import (
     archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
-from .atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
-from .runtime_telemetry import PhaseTelemetry, require_runtime_telemetry
+from fisheye.shared.runtime_telemetry import PhaseTelemetry, require_runtime_telemetry
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.eye_angle_materialization.v1"

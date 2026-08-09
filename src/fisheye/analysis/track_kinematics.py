@@ -103,7 +103,7 @@ from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
 )
-from fisheye.shared.derived_analysis_registry_status import (
+from fisheye.registry.derived_analysis_status import (
     emit_track_kinematics_stage_completion,
 )
 from fisheye.shared.run_provenance import (

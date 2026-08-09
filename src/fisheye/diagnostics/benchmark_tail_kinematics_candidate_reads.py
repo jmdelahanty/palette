@@ -56,7 +56,7 @@ from fisheye.analysis.tail_kinematics_storage import (
     ANALYSIS_STORAGE_PROFILE_ROLE_ATTR,
     validate_tail_kinematics_storage_receipt,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_RUN_PUBLISHER_SCHEMA_ID,
     ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION,
     SERIALIZATION_POLICY,

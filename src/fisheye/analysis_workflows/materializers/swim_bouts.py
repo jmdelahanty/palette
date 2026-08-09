@@ -25,7 +25,7 @@ from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 MATERIALIZATION_SCHEMA_ID = "palette.swim_bout_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.swim_bout_run_publish.v1"

@@ -21,7 +21,7 @@ from fisheye.analysis.chaser_component_publication import (
     validate_chaser_component_selector,
 )
 from fisheye.analysis_workflows.materializers import chaser_component as mod
-from fisheye.analysis_workflows.materializers import atomic_run_publisher
+from fisheye.shared import atomic_run_publisher
 
 
 def _snapshot():

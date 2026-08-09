@@ -16,10 +16,10 @@ import numpy as np
 import zarr
 from rich.console import Console
 
+from ..detection.candidate_builder import build_detection_candidate
 from ..shared.detection_candidate import (
     DEFAULT_DETECT_FRAME_SHARD_ROWS,
     DEFAULT_DETECT_ROW_SHARD_ROWS,
-    build_detection_candidate,
 )
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.zarr_run_completion import resolve_authoritative_run_name

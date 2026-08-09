@@ -35,11 +35,11 @@ from fisheye.analysis_workflows.analysis_candidate_invocation import (
 from fisheye.analysis_workflows.storage_candidate_catalog import (
     DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_RUN_PUBLISHER_OPTIONAL_SUCCESS_PHASES,
     ATOMIC_RUN_PUBLISHER_PHASE_ORDER,
 )
-from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+from fisheye.shared.runtime_telemetry import (
     PhaseTelemetry,
 )
 from fisheye.shared.zarr.analysis_array_contracts import (

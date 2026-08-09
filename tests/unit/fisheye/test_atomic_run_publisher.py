@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.analysis_workflows.materializers import atomic_run_publisher as mod
+from fisheye.shared import atomic_run_publisher as mod
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )

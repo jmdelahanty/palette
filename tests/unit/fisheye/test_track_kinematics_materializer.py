@@ -10,7 +10,7 @@ import pytest
 import zarr
 
 from fisheye.analysis_workflows.materializers import track_kinematics as mod
-from fisheye.analysis_workflows.materializers import atomic_run_publisher as atomic_mod
+from fisheye.shared import atomic_run_publisher as atomic_mod
 
 
 @pytest.fixture(autouse=True)

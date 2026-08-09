@@ -42,7 +42,7 @@ from fisheye.shared.zarr.benchmark_runtime import (
     utc_now,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-from fisheye.shared.zarr.native_canonical_detection_publication import (
+from fisheye.analysis_workflows.native_canonical_detection_publication import (
     load_native_canonical_detection_candidate,
 )
 from fisheye.shared.zarr_run_completion import is_run_complete

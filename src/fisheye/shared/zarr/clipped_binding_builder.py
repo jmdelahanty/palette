@@ -10,6 +10,9 @@ from typing import Any, Mapping, Sequence
 import pyarrow.parquet as pq
 import zarr
 
+from fisheye.shared.clipped_detection_plan_contract import (
+    CLIPPED_DETECT_REFINE_WORKFLOW_PLAN_SCHEMA,
+)
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_bytes,
@@ -19,9 +22,6 @@ from fisheye.shared.zarr.refined_detection_schema import (
     RefinedDetectionClipBinding,
     RefinedDetectionClippedBinding,
 )
-from fisheye.utils.plan_clipped_detect_refine_workflow import PLAN_SCHEMA
-
-
 CLIPPED_BINDING_BUILD_SCHEMA_ID = "palette.refined_detection.clipped_binding_build"
 CLIPPED_BINDING_BUILD_SCHEMA_VERSION = 1
 _FRAME_COLUMNS = (
@@ -165,7 +165,7 @@ def build_clipped_refined_detection_binding(
     if not strict_evidence_receipts:
         raise ValueError("At least one strict clip evidence receipt is required.")
     plan = _read_json(detection_plan_path)
-    if plan.get("schema_version") != PLAN_SCHEMA:
+    if plan.get("schema_version") != CLIPPED_DETECT_REFINE_WORKFLOW_PLAN_SCHEMA:
         raise ValueError("Detection plan schema is not supported.")
     work_units = plan.get("work_units")
     if not isinstance(work_units, list) or not work_units:

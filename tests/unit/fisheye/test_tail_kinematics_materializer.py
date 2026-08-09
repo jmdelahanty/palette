@@ -12,7 +12,7 @@ import zarr
 from fisheye.analysis import tail_kinematics_runs as tail_mod
 from fisheye.analysis import subject_shape_io
 from fisheye.analysis_workflows.materializers import tail_kinematics as mod
-from fisheye.analysis_workflows.materializers import atomic_run_publisher as atomic_mod
+from fisheye.shared import atomic_run_publisher as atomic_mod
 from fisheye.analysis_workflows.tail_kinematics_candidate_execution import (
     compute_tail_kinematics_logical_hashes,
 )

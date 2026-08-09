@@ -26,7 +26,7 @@ import numpy as np
 import zarr
 
 from ...analysis import track_kinematics as track_writer
-from ...shared.derived_analysis_registry_status import (
+from ...registry.derived_analysis_status import (
     emit_track_kinematics_stage_completion,
 )
 from ...shared.json_safety import json_attr_safe
@@ -41,8 +41,8 @@ from ...shared.zarr_sharded_copy import (
     STRUCTURED_DTYPE_SINGLE_CHUNK_LAYOUT,
     copy_completed_run_to_sharded,
 )
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
-from .runtime_telemetry import PhaseTelemetry
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.runtime_telemetry import PhaseTelemetry
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v3"

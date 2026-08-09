@@ -14,7 +14,7 @@ import zarr
 from fisheye.analysis.eye_angle_storage import (
     EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
 )
-from fisheye.analysis_workflows.materializers import atomic_run_publisher as atomic_mod
+from fisheye.shared import atomic_run_publisher as atomic_mod
 from fisheye.analysis_workflows.materializers import eye_angles as mod
 from fisheye.shared import eye_geometry_source as eye_geometry_source_mod
 from fisheye.shared.coordinate_descriptor import (

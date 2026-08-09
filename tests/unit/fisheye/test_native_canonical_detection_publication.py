@@ -15,10 +15,12 @@ from fisheye.detection.native_canonical_candidate import (
     write_native_clipped_detection_candidate,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-from fisheye.shared.zarr.native_canonical_detection_publication import (
+from fisheye.analysis_workflows.native_canonical_detection_publication import (
     publish_native_canonical_detection_candidate,
 )
-from fisheye.shared.zarr import native_canonical_detection_publication as publication_mod
+from fisheye.analysis_workflows import (
+    native_canonical_detection_publication as publication_mod,
+)
 
 
 RECORDING_IDENTITY = "recording:native-publication-fixture"

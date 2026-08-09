@@ -27,7 +27,7 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
     require_candidate_execution_request,
     required_execution_phases,
 )
-from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+from fisheye.shared.runtime_telemetry import (
     require_runtime_telemetry,
 )
 from fisheye.analysis_workflows.materializers.tail_posture import (

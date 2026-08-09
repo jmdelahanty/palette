@@ -9,6 +9,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Keep these liveness gates independent: a stale import-layer declaration
+  # must not suppress the file-size ratchet or pytest collection.
+  import-boundaries:
+    name: import boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install boundary checker and source package
+        run: |
+          python -m pip install "import-linter>=2,<3"
+          python -m pip install --no-deps -e .
+
+      - name: Lint import boundaries
+        run: |
+          lint-imports --config pyproject.toml
+
+  file-size-ratchet:
+    name: file-size ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check file-size ratchet
+        run: |
+          python scripts/check_file_size_ratchet.py
+          git diff --exit-code -- scripts/file_size_ratchet_baseline.json
+
   quality:
     name: package, boundaries, and collection
     runs-on: ubuntu-latest
@@ -42,15 +86,6 @@ jobs:
         run: |
           palette --help >/dev/null
           palette status --help >/dev/null
-
-      - name: Lint import boundaries
-        run: |
-          lint-imports --config pyproject.toml
-
-      - name: Check file-size ratchet
-        run: |
-          python scripts/check_file_size_ratchet.py
-          git diff --exit-code -- scripts/file_size_ratchet_baseline.json
 
       - name: Collect tests
         run: |

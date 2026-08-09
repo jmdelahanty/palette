@@ -64,7 +64,7 @@ from fisheye.analysis_workflows.analysis_candidate_execution import (
 from fisheye.shared.zarr.analysis_benchmark_suite import (
     require_analysis_benchmark_suite_manifest,
 )
-from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
 )
 from fisheye.analysis_workflows.materializers.exact_tabular_candidate import (
@@ -75,7 +75,7 @@ from fisheye.analysis_workflows.materializers.exact_tabular_candidate import (
     materialize_exact_tabular_candidate,
     tombstone_exact_tabular_execution_candidate,
 )
-from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+from fisheye.shared.runtime_telemetry import (
     require_runtime_telemetry,
 )
 from fisheye.analysis_workflows.occupancy_candidate_execution import (

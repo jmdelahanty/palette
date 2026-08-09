@@ -28,11 +28,11 @@ from .analysis_candidate_invocation import (
     CandidateInvocationContract,
     require_candidate_invocation_manifest,
 )
-from .materializers.atomic_run_publisher import (
+from fisheye.shared.atomic_run_publisher import (
     ATOMIC_RUN_PUBLISHER_OPTIONAL_SUCCESS_PHASES,
     ATOMIC_RUN_PUBLISHER_PHASE_ORDER,
 )
-from .materializers.runtime_telemetry import require_runtime_telemetry
+from fisheye.shared.runtime_telemetry import require_runtime_telemetry
 
 ANALYSIS_CANDIDATE_EXECUTION_REQUEST_SCHEMA_ID = (
     "palette.analysis_candidate_execution_request"

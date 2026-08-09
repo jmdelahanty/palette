@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from fisheye.shared import derived_analysis_registry_status as mod
+from fisheye.registry import derived_analysis_status as mod
 
 
 class _Run:

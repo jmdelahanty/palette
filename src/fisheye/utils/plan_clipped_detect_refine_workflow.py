@@ -17,8 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
+from fisheye.shared.clipped_detection_plan_contract import (
+    CLIPPED_DETECT_REFINE_WORKFLOW_PLAN_SCHEMA,
+)
 
-PLAN_SCHEMA = "palette.clipped_detect_refine_workflow_plan.v1"
+PLAN_SCHEMA = CLIPPED_DETECT_REFINE_WORKFLOW_PLAN_SCHEMA
 DEFAULT_CONFIG = "configs/fisheye/yolo_detect_config.yaml"
 DEFAULT_DECODE_BACKEND = "pynvvc_luma_rgb"
 

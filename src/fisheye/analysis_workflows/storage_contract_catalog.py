@@ -205,7 +205,7 @@ class DerivedAnalysisStorageContract:
             return False
         materializer = import_module(self.materializer_module)
         publisher = import_module(
-            "fisheye.analysis_workflows.materializers.atomic_run_publisher"
+            "fisheye.shared.atomic_run_publisher"
         )
         return (
             getattr(materializer, "atomic_publish_run_group", None)

@@ -52,8 +52,8 @@ from ...shared.zarr_helpers import (
     archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
-from .runtime_telemetry import PhaseTelemetry
+from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.runtime_telemetry import PhaseTelemetry
 
 MATERIALIZATION_SCHEMA_ID = "palette.stimulus_response_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.stimulus_response_run_publish.v1"

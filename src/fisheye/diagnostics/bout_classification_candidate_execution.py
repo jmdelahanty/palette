@@ -45,7 +45,7 @@ from fisheye.analysis_workflows.materializers.bout_classification_candidate impo
     materialize_bout_classification_candidate,
     tombstone_bout_classification_execution_candidate,
 )
-from fisheye.analysis_workflows.materializers.runtime_telemetry import (
+from fisheye.shared.runtime_telemetry import (
     require_runtime_telemetry,
 )
 from fisheye.diagnostics.analysis_candidate_execution import (
