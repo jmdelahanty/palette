@@ -679,7 +679,7 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
         CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
         "recording_x_chaser_near_field_occupancy_summary",
         ("recording_id",),
-        ("chaser_count", "pairwise_role_contrast_policy"),
+        ("chaser_count", "speed_source", "pairwise_role_contrast_policy"),
     ),
     CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE: _contract(
         CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,

@@ -148,6 +148,7 @@ def _make_goodcopbadcop_export(
         radial_bin_edges_mm=(0.0, 2.0, 4.0, 8.0),
         cdf_thresholds_mm=(2.0, 4.0),
         perimeter_band_mm=2.0,
+        immobility_signal_mode="raw_centroid_explicit",
     )
     write_cra_near_field_component(source, near_field_result, overwrite=True)
     _add_track_kinematics_run(source, monkeypatch=monkeypatch)
@@ -462,6 +463,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     )
     assert nearzone_specificity["mean"] == pytest.approx(-1.0)
     assert near_field_summary["rows"][0]["geometry_status"] == "circle"
+    assert near_field_summary["rows"][0]["speed_source"] == (
+        "raw_centroid_explicit"
+    )
 
     near_field_curves = query_cra_near_field_curves(context)
     assert near_field_curves["available"] is True

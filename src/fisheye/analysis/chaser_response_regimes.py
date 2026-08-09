@@ -53,7 +53,7 @@ from fisheye.analysis.chaser_component_writer import (
     require_chaser_component_staging_capability,
     sealed_chaser_component_writer,
 )
-from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.analysis.track_motion_speed import load_verified_smoothed_frame_speed
 from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
     _apply_settle_trim,
@@ -563,56 +563,11 @@ def _load_smoothed_immobility_speed(
     is an error; raw-centroid analysis is available only through the caller's explicit
     ``raw_centroid_explicit`` mode.
     """
-    frame_count = int(total_frames)
-    track = load_track_kinematics_track(
-        root,
-        run_name="latest",
-        scope="offline",
-        track_id=0,
-        required_speed_levels=("smoothed",),
-    )
-    if track.source_acquisition_frame_index is None:
-        raise ValueError(
-            f"Verified track motion {track.track_path} has no acquisition-frame identity."
-        )
-    if track.sample_valid is None or track.transition_valid is None:
-        raise ValueError(
-            f"Verified track motion {track.track_path} lacks sample/transition validity."
-        )
-    frames = np.asarray(
-        track.source_acquisition_frame_index,
-        dtype=np.int64,
-    ).reshape(-1)
-    speed = np.asarray(
-        track.speed_mm_by_level["smoothed"],
-        dtype=np.float64,
-    ).reshape(-1)
-    sample_valid = np.asarray(track.sample_valid, dtype=bool).reshape(-1)
-    transition_valid = np.asarray(track.transition_valid, dtype=bool).reshape(-1)
-    if not (
-        frames.shape == speed.shape == sample_valid.shape == transition_valid.shape
-    ):
-        raise ValueError(
-            f"Verified track motion {track.track_path} has inconsistent frame, "
-            "speed, and validity lengths."
-        )
-    if np.any(frames < 0) or np.any(frames >= frame_count):
-        raise ValueError(
-            f"Verified acquisition-frame identities in {track.track_path} exceed "
-            f"the chaser-distance extent [0, {frame_count})."
-        )
-    if np.unique(frames).shape[0] != frames.shape[0]:
-        raise ValueError(
-            f"Verified track motion {track.track_path} repeats acquisition-frame identities."
-        )
-    dense = np.full(frame_count, np.nan, dtype=np.float64)
-    usable = sample_valid & transition_valid & np.isfinite(speed)
-    dense[frames[usable]] = speed[usable]
-    authority = track.authority_record()
+    verified = load_verified_smoothed_frame_speed(root, total_frames)
     return (
-        dense,
-        "track_motion.movement/speed/smoothed/mm",
-        authority,
+        verified.values_mm_s,
+        verified.source,
+        verified.authority,
     )
 
 

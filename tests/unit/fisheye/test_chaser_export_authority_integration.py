@@ -218,6 +218,7 @@ def test_near_field_component_exports_all_four_tables_from_one_explicit_handle(
         radial_bin_edges_mm=(0.0, 2.0, 4.0, 8.0),
         cdf_thresholds_mm=(2.0, 4.0),
         perimeter_band_mm=2.0,
+        immobility_signal_mode="raw_centroid_explicit",
     )
     component_path = str(
         write_chaser_near_field_occupancy_component(
@@ -258,9 +259,13 @@ def test_near_field_component_exports_all_four_tables_from_one_explicit_handle(
         binding["component_handles"][NEAR_FIELD_OCCUPANCY_FAMILY]["component_path"]
         == component_path
     )
-    assert all(
-        _read_rows(output, "sealed_near_field", table)
-        for table in tables
+    exported = {
+        table: _read_rows(output, "sealed_near_field", table) for table in tables
+    }
+    assert all(exported.values())
+    assert (
+        exported[CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE][0]["speed_source"]
+        == "raw_centroid_explicit"
     )
     assert validate_export_run(output, "sealed_near_field")["status"] == "valid"
 

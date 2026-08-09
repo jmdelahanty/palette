@@ -1668,6 +1668,11 @@ def _load_cra_near_field_thigmotaxis_dataframe(
     median_speed = np.asarray(group["median_speed_mm_s"][:], dtype=np.float64).reshape(-1) if "median_speed_mm_s" in group else np.full(n_phase, np.nan)
     immobile = np.asarray(group["immobile_fraction"][:], dtype=np.float64).reshape(-1) if "immobile_fraction" in group else np.full(n_phase, np.nan)
     speed_count = np.asarray(group["speed_sample_count"][:], dtype=np.int64).reshape(-1) if "speed_sample_count" in group else np.zeros(n_phase, dtype=np.int64)
+    speed_source = (
+        _decode_text_column(np.asarray(group["speed_source_bytes"][:]))[:n_phase]
+        if "speed_source_bytes" in group
+        else [str(getattr(group, "attrs", {}).get("speed_source") or "") for _ in range(n_phase)]
+    )
     status = (
         _decode_text_column(np.asarray(group["geometry_status_bytes"][:]))[:n_phase]
         if "geometry_status_bytes" in group
@@ -1684,6 +1689,7 @@ def _load_cra_near_field_thigmotaxis_dataframe(
                 "median_speed_mm_s": float(median_speed[phase_axis]) if phase_axis < median_speed.shape[0] else np.nan,
                 "immobile_fraction": float(immobile[phase_axis]) if phase_axis < immobile.shape[0] else np.nan,
                 "speed_sample_count": int(speed_count[phase_axis]) if phase_axis < speed_count.shape[0] else 0,
+                "speed_source": speed_source[phase_axis] if phase_axis < len(speed_source) else "",
                 "geometry_status": status[phase_axis] if phase_axis < len(status) else "",
             }
         )

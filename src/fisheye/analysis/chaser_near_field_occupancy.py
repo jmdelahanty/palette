@@ -40,6 +40,7 @@ from fisheye.analysis.chaser_quadrant_occupancy import (
     SCHEMA_ID as QUADRANT_OCCUPANCY_SCHEMA_ID,
     SCHEMA_VERSION as QUADRANT_OCCUPANCY_SCHEMA_VERSION,
 )
+from fisheye.analysis.track_motion_speed import load_verified_smoothed_frame_speed
 from fisheye.shared.arena_geometry import (
     ArenaGeometry,
     out_of_bounds_notes,
@@ -54,9 +55,9 @@ from fisheye.shared.system_metadata import get_git_info
 SCHEMA_ID = "palette.chaser.near_field_occupancy.v1"
 SCHEMA_VERSION = 1
 METHOD = "chaser_near_field_occupancy"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 COMPONENT_PARENT_NAME = "chaser_near_field_occupancy"
-DEFAULT_COMPONENT_NAME = "chaser_relative_near_field_v1"
+DEFAULT_COMPONENT_NAME = "chaser_relative_near_field_v2"
 RADIAL_DENSITY_PNG_ARTIFACT_NAME = "chaser_near_field_occupancy_radial_density_png"
 DISTANCE_CDF_PNG_ARTIFACT_NAME = "chaser_near_field_occupancy_distance_cdf_png"
 SUMMARY_PNG_ARTIFACT_NAME = "chaser_near_field_occupancy_summary_png"
@@ -72,6 +73,10 @@ DEFAULT_CDF_THRESHOLDS_MM = (2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.
 DEFAULT_PERIMETER_BAND_MM = 5.0
 DEFAULT_IMMOBILITY_SPEED_THRESHOLD_MM_S = 1.0
 DEFAULT_RECTANGLE_AREA_GRID_STEP_MM = 0.25
+IMMOBILITY_SIGNAL_MODES = (
+    "verified_track_motion",
+    "raw_centroid_explicit",
+)
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,9 @@ class ChaserNearFieldOccupancyResult:
     cdf_thresholds_mm: np.ndarray
     perimeter_band_mm: float
     immobility_speed_threshold_mm_s: float
+    immobility_signal_mode: str
+    speed_source: str
+    source_track_motion_authority: dict[str, Any] | None
     chasers: tuple[ChaserNearFieldIdentity, ...]
     phases: tuple[ChaserNearFieldPhase, ...]
     approach_percentile_mm: np.ndarray
@@ -692,7 +700,7 @@ def _thigmotaxis_for_phase(
     return fraction, float(count) / safe_fps
 
 
-def _speed_state_for_phase(
+def _raw_centroid_speed_state_for_phase(
     fish_xy: np.ndarray,
     fish_valid: np.ndarray,
     *,
@@ -720,6 +728,24 @@ def _speed_state_for_phase(
     return (
         float(np.nanmean(values)),
         float(np.nanmedian(values)),
+        float(np.count_nonzero(values <= threshold) / values.size),
+        int(values.size),
+    )
+
+
+def _verified_speed_state_for_phase(
+    speed_mm_s: np.ndarray,
+    *,
+    immobility_speed_threshold_mm_s: float,
+) -> tuple[float, float, float, int]:
+    values = np.asarray(speed_mm_s, dtype=np.float64).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return math.nan, math.nan, math.nan, 0
+    threshold = max(0.0, float(immobility_speed_threshold_mm_s))
+    return (
+        float(np.mean(values)),
+        float(np.median(values)),
         float(np.count_nonzero(values <= threshold) / values.size),
         int(values.size),
     )
@@ -792,6 +818,7 @@ def _compute_near_field_arrays(
     r_out_mm: float,
     perimeter_band_mm: float,
     immobility_speed_threshold_mm_s: float,
+    immobility_speed_mm_s: np.ndarray | None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any], tuple[str, ...]]:
     n_phases = len(phases)
     n_chasers = len(chasers)
@@ -897,13 +924,23 @@ def _compute_near_field_arrays(
             perimeter_band_mm=float(perimeter_band_mm),
             pixels_per_mm=float(pixels_per_mm),
         )
-        speed_state = _speed_state_for_phase(
-            phase_fish_xy,
-            phase_fish_valid,
-            fps=safe_fps,
-            pixels_per_mm=float(pixels_per_mm),
-            immobility_speed_threshold_mm_s=float(immobility_speed_threshold_mm_s),
-        )
+        if immobility_speed_mm_s is None:
+            speed_state = _raw_centroid_speed_state_for_phase(
+                phase_fish_xy,
+                phase_fish_valid,
+                fps=safe_fps,
+                pixels_per_mm=float(pixels_per_mm),
+                immobility_speed_threshold_mm_s=float(
+                    immobility_speed_threshold_mm_s
+                ),
+            )
+        else:
+            speed_state = _verified_speed_state_for_phase(
+                np.asarray(immobility_speed_mm_s[slc], dtype=np.float64),
+                immobility_speed_threshold_mm_s=float(
+                    immobility_speed_threshold_mm_s
+                ),
+            )
         mean_speed[p_idx] = float(speed_state[0]) if math.isfinite(float(speed_state[0])) else np.nan
         median_speed[p_idx] = float(speed_state[1]) if math.isfinite(float(speed_state[1])) else np.nan
         immobile_fraction[p_idx] = float(speed_state[2]) if math.isfinite(float(speed_state[2])) else np.nan
@@ -1267,11 +1304,18 @@ def build_chaser_near_field_occupancy_result(
     cdf_thresholds_mm: Sequence[float] = DEFAULT_CDF_THRESHOLDS_MM,
     perimeter_band_mm: float = DEFAULT_PERIMETER_BAND_MM,
     immobility_speed_threshold_mm_s: float = DEFAULT_IMMOBILITY_SPEED_THRESHOLD_MM_S,
+    immobility_signal_mode: str = "verified_track_motion",
 ) -> ChaserNearFieldOccupancyResult:
     if not float(r_out_mm) > float(r_in_mm):
         raise ValueError("r_out_mm must be greater than r_in_mm.")
     if float(r_zone_mm) <= 0:
         raise ValueError("r_zone_mm must be positive.")
+    normalized_immobility_mode = str(immobility_signal_mode).strip()
+    if normalized_immobility_mode not in IMMOBILITY_SIGNAL_MODES:
+        raise ValueError(
+            f"Unsupported immobility_signal_mode {immobility_signal_mode!r}; "
+            f"expected one of: {', '.join(IMMOBILITY_SIGNAL_MODES)}."
+        )
 
     root = _open_root(zarr_path, mode="r")
     distance, distance_run_name, distance_run_path = _resolve_chaser_distance_run(
@@ -1389,6 +1433,17 @@ def build_chaser_near_field_occupancy_result(
     cdf_thresholds = _normalize_float_array(cdf_thresholds_mm, name="cdf_thresholds_mm", positive=True)
     fps = float(distance.fps)
 
+    source_track_motion_authority: dict[str, Any] | None
+    if normalized_immobility_mode == "verified_track_motion":
+        verified_speed = load_verified_smoothed_frame_speed(root, total_frames)
+        immobility_speed = verified_speed.values_mm_s
+        speed_source = verified_speed.source
+        source_track_motion_authority = verified_speed.authority
+    else:
+        immobility_speed = None
+        speed_source = "raw_centroid_explicit"
+        source_track_motion_authority = None
+
     arrays, diagnostics, compute_warnings = _compute_near_field_arrays(
         chasers=chasers,
         phases=phases,
@@ -1410,7 +1465,16 @@ def build_chaser_near_field_occupancy_result(
         r_out_mm=float(r_out_mm),
         perimeter_band_mm=float(perimeter_band_mm),
         immobility_speed_threshold_mm_s=float(immobility_speed_threshold_mm_s),
+        immobility_speed_mm_s=immobility_speed,
     )
+
+    diagnostics = dict(diagnostics)
+    diagnostics["immobility_signal_mode"] = normalized_immobility_mode
+    diagnostics["speed_source"] = speed_source
+    if normalized_immobility_mode == "raw_centroid_explicit":
+        compute_warnings = tuple(compute_warnings) + (
+            "immobility_signal_explicit_raw_centroid",
+        )
 
     recording_id = distance.recording_id
     summary = _build_summary(
@@ -1428,6 +1492,7 @@ def build_chaser_near_field_occupancy_result(
         valid_distance_count=arrays["valid_distance_count"],
         phases=phases,
     )
+    summary["speed_source"] = speed_source
     compute_warnings = tuple(
         dict.fromkeys(list(compute_warnings) + list(geometry_notes))
     )
@@ -1486,6 +1551,9 @@ def build_chaser_near_field_occupancy_result(
         cdf_thresholds_mm=cdf_thresholds.astype(np.float32),
         perimeter_band_mm=float(perimeter_band_mm),
         immobility_speed_threshold_mm_s=float(immobility_speed_threshold_mm_s),
+        immobility_signal_mode=normalized_immobility_mode,
+        speed_source=speed_source,
+        source_track_motion_authority=source_track_motion_authority,
         chasers=chasers,
         phases=phases,
         approach_percentile_mm=arrays["approach_percentile_mm"],
@@ -1703,6 +1771,8 @@ def _interactive_spec(
             "cdf_thresholds_mm": result.cdf_thresholds_mm,
             "perimeter_band_mm": result.perimeter_band_mm,
             "immobility_speed_threshold_mm_s": result.immobility_speed_threshold_mm_s,
+            "immobility_signal_mode": result.immobility_signal_mode,
+            "speed_source": result.speed_source,
             "geometry_status": result.geometry_status,
             "arena_geometry_source": result.arena_geometry_source,
             "arena_shape": result.arena_shape,
@@ -1727,6 +1797,7 @@ def _source_refs(result: ChaserNearFieldOccupancyResult) -> dict[str, Any]:
         "source_stimulus_path": result.source_stimulus_path,
         "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
         "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+        "source_track_motion_authority": result.source_track_motion_authority,
     }
 
 
@@ -1740,6 +1811,8 @@ def _parameters(result: ChaserNearFieldOccupancyResult) -> dict[str, Any]:
         "cdf_thresholds_mm": result.cdf_thresholds_mm,
         "perimeter_band_mm": result.perimeter_band_mm,
         "immobility_speed_threshold_mm_s": result.immobility_speed_threshold_mm_s,
+        "immobility_signal_mode": result.immobility_signal_mode,
+        "speed_source": result.speed_source,
         "geometry_mode": result.geometry_status,
         "arena_geometry_source": result.arena_geometry_source,
         "arena_shape": result.arena_shape,
@@ -1792,6 +1865,8 @@ def write_chaser_near_field_occupancy_component(
             "r_out_mm": float(result.r_out_mm),
             "perimeter_band_mm": float(result.perimeter_band_mm),
             "immobility_speed_threshold_mm_s": float(result.immobility_speed_threshold_mm_s),
+            "immobility_signal_mode": result.immobility_signal_mode,
+            "speed_source": result.speed_source,
             "geometry_status": result.geometry_status,
             "arena_geometry_source": result.arena_geometry_source,
             "arena_shape": result.arena_shape,
@@ -1999,6 +2074,11 @@ def write_chaser_near_field_occupancy_component(
     _write_array(thig, "median_speed_mm_s", result.median_speed_mm_s)
     _write_array(thig, "immobile_fraction", result.immobile_fraction)
     _write_array(thig, "speed_sample_count", result.speed_sample_count)
+    _write_array(
+        thig,
+        "speed_source_bytes",
+        _bytes_array([result.speed_source for _ in result.phases], width=96),
+    )
     _write_array(thig, "geometry_status_bytes", _bytes_array([result.geometry_status for _ in result.phases], width=48))
     thig.attrs.update(
         {
@@ -2007,6 +2087,8 @@ def write_chaser_near_field_occupancy_component(
             "arena_geometry_source": result.arena_geometry_source,
             "arena_shape": result.arena_shape,
             "immobility_speed_threshold_mm_s": float(result.immobility_speed_threshold_mm_s),
+            "immobility_signal_mode": result.immobility_signal_mode,
+            "speed_source": result.speed_source,
         }
     )
 
@@ -2167,6 +2249,8 @@ def _result_payload(
         "applied_path": applied_path,
         "chaser_distance_run": result.chaser_distance_run_name,
         "source_quadrant_occupancy_component": result.source_quadrant_occupancy_component,
+        "speed_source": result.speed_source,
+        "immobility_signal_mode": result.immobility_signal_mode,
         "endpoint_status": result.endpoint_status,
         "qc_warnings": list(result.qc_warnings),
         "summary": result.summary,
@@ -2207,6 +2291,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cdf-thresholds-mm", default=",".join(f"{value:g}" for value in DEFAULT_CDF_THRESHOLDS_MM))
     parser.add_argument("--perimeter-band-mm", type=float, default=DEFAULT_PERIMETER_BAND_MM)
     parser.add_argument("--immobility-speed-threshold-mm-s", type=float, default=DEFAULT_IMMOBILITY_SPEED_THRESHOLD_MM_S)
+    parser.add_argument(
+        "--immobility-signal-mode",
+        choices=IMMOBILITY_SIGNAL_MODES,
+        default="verified_track_motion",
+        help=(
+            "Physical speed authority. Raw centroid differences require the "
+            "explicit compatibility mode."
+        ),
+    )
     parser.add_argument("--apply", action="store_true", help="Write the near-field component.")
     parser.add_argument(
         "--overwrite",
@@ -2245,6 +2338,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cdf_thresholds_mm=_parse_float_list(str(args.cdf_thresholds_mm)),
         perimeter_band_mm=float(args.perimeter_band_mm),
         immobility_speed_threshold_mm_s=float(args.immobility_speed_threshold_mm_s),
+        immobility_signal_mode=str(args.immobility_signal_mode),
     )
     applied_path = None
     if args.apply:

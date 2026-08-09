@@ -23,6 +23,7 @@ from fisheye.analysis.chaser_near_field_occupancy import (
     DEFAULT_R_IN_MM,
     DEFAULT_R_OUT_MM,
     DEFAULT_R_ZONE_MM,
+    IMMOBILITY_SIGNAL_MODES,
     build_chaser_near_field_occupancy_result,
     write_chaser_near_field_occupancy_component,
 )
@@ -186,6 +187,7 @@ def run_for_targets(
     cdf_thresholds_mm: Sequence[float],
     perimeter_band_mm: float,
     immobility_speed_threshold_mm_s: float,
+    immobility_signal_mode: str,
     apply: bool,
     overwrite: bool,
     no_png: bool,
@@ -229,6 +231,7 @@ def run_for_targets(
                 cdf_thresholds_mm=cdf_thresholds_mm,
                 perimeter_band_mm=float(perimeter_band_mm),
                 immobility_speed_threshold_mm_s=float(immobility_speed_threshold_mm_s),
+                immobility_signal_mode=str(immobility_signal_mode),
             )
             chaser_run_name = result.chaser_distance_run_name
             source_quadrant_component = result.source_quadrant_occupancy_component
@@ -322,6 +325,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cdf-thresholds-mm", default=",".join(f"{value:g}" for value in DEFAULT_CDF_THRESHOLDS_MM))
     parser.add_argument("--perimeter-band-mm", type=float, default=DEFAULT_PERIMETER_BAND_MM)
     parser.add_argument("--immobility-speed-threshold-mm-s", type=float, default=DEFAULT_IMMOBILITY_SPEED_THRESHOLD_MM_S)
+    parser.add_argument(
+        "--immobility-signal-mode",
+        choices=IMMOBILITY_SIGNAL_MODES,
+        default="verified_track_motion",
+        help=(
+            "Physical speed authority. Raw centroid differences require the "
+            "explicit compatibility mode."
+        ),
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-png", action="store_true")
@@ -381,6 +393,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cdf_thresholds_mm=cdf_thresholds,
         perimeter_band_mm=float(args.perimeter_band_mm),
         immobility_speed_threshold_mm_s=float(args.immobility_speed_threshold_mm_s),
+        immobility_signal_mode=str(args.immobility_signal_mode),
         apply=bool(args.apply),
         overwrite=bool(args.overwrite),
         no_png=bool(args.no_png),
@@ -413,6 +426,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "cdf_thresholds_mm": cdf_thresholds,
             "perimeter_band_mm": float(args.perimeter_band_mm),
             "immobility_speed_threshold_mm_s": float(args.immobility_speed_threshold_mm_s),
+            "immobility_signal_mode": str(args.immobility_signal_mode),
         },
         "results": results,
     }

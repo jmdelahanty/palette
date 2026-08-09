@@ -94,7 +94,23 @@ reported explicitly; handoff is not equivalent to authorization to merge.
 
 ## Wave 1 — Science correctness (highest wrong-science risk; touches figures)
 
-**W1.1 — Kill the raw-centroid `immobile_fraction` shipping to dashboards.**
+**W1.1 — Kill the raw-centroid `immobile_fraction` shipping to dashboards. [IMPLEMENTED]**
+Status: **implemented** through the shared verified-speed boundary in
+`analysis/track_motion_speed.py`. The maintained near-field producer now defaults to
+the canonical offline `smoothed` track-motion level, maps it by acquisition-frame
+identity, and exposes samples only where both `sample_valid` and `transition_valid`
+are true. Failure to load or validate that authority is terminal. Raw centroid
+differences remain available only as the explicit `raw_centroid_explicit`
+compatibility mode and carry a QC warning. The method and default immutable child
+advance to `2` / `chaser_relative_near_field_v2`, so recomputation cannot collide
+with or overwrite an existing v1 child.
+
+`speed_source` is persisted per phase beside the speed-derived arrays, included in
+parameters, diagnostics, summaries, source authority, the dashboard dataframe, and
+the exact Arrow summary contract. The Arrow field is required, so a historical raw
+component without declared source cannot silently pass as a current export.
+
+Original finding:
 `src/fisheye/analysis/chaser_near_field_occupancy.py:695-725`
 (`_speed_state_for_phase`) frame-differences raw centroids at the 1 mm/s threshold —
 the exact artifact class that produced the retracted "learned avoidance" result
@@ -109,9 +125,13 @@ Copy the proven pattern: `chaser_response_regimes.py:551-614`
 (`:634-650`, raw reachable only via `"raw_centroid_explicit"`). Port the two guard
 tests from `tests/unit/fisheye/test_chaser_response_regimes.py:215,243`.
 Emit a `speed_source` field alongside every published speed-derived array.
-Acceptance: no code path computes a published speed metric from raw centroid diffs
-without explicit opt-in; `speed_source` present in the zarr group and Arrow export;
-tests ported.
+Acceptance evidence: the only raw-difference call is guarded by
+`immobility_signal_mode == "raw_centroid_explicit"`; invalid transitions remain NaN;
+strict authority failure does not fall back; Zarr and Arrow assertions verify the
+persisted source. The integrated producer/export/dashboard run completed with 294
+passes and 20 expected xfails. After advancing the immutable child name to v2, the
+final speed-authority, producer, publication, and exact-Arrow suite completed with
+248 passes.
 
 **W1.2 — Make arena-geometry fallback impossible to ignore; protect the virtual-control nulls. [IMPLEMENTED]**
 Status: **implemented** by the strict

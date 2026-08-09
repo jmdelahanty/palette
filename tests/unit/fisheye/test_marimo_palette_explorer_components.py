@@ -147,6 +147,7 @@ def _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path):
         radial_bin_edges_mm=(0.0, 2.0, 4.0, 8.0),
         cdf_thresholds_mm=(2.0, 4.0),
         perimeter_band_mm=2.0,
+        immobility_signal_mode="raw_centroid_explicit",
     )
     write_cra_near_field_component(zarr_path, result, overwrite=True)
     return zarr_path
@@ -806,7 +807,7 @@ def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> N
     near_field = loaded.cra_near_field
     assert near_field is not None
     assert near_field.component_path.endswith(
-        "/chaser_near_field_occupancy/chaser_relative_near_field_v1"
+        "/chaser_near_field_occupancy/chaser_relative_near_field_v2"
     )
     assert near_field.geometry_status == "circle"
     assert near_field.arena_shape == "circle"
@@ -822,6 +823,9 @@ def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> N
     assert near_field.control_reference_phase_df.height == 2
     assert near_field.thigmotaxis_df.height == 2
     assert "mean_speed_mm_s" in near_field.thigmotaxis_df.columns
+    assert near_field.thigmotaxis_df["speed_source"].unique().to_list() == [
+        "raw_centroid_explicit"
+    ]
 
     class _Ui:
         @staticmethod

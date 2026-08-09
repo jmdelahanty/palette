@@ -366,6 +366,7 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
         radial_bin_edges_mm=(0.0, 2.0, 4.0, 8.0),
         cdf_thresholds_mm=(2.0, 4.0),
         perimeter_band_mm=2.0,
+        immobility_signal_mode="raw_centroid_explicit",
     )
 
     assert result.source_quadrant_occupancy_path == cra_component_path
@@ -378,7 +379,11 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
     # This fixture carries no analysis_metadata.dish_mask, so the resolver correctly falls back
     # to the projector's nominal experimental_area circle -- and must say so. A silent fallback
     # is the bug that inverted thigmotaxis on the real recording.
-    assert result.qc_warnings == ("arena_geometry_fallback_to_nominal:circle",)
+    assert result.qc_warnings == (
+        "immobility_signal_explicit_raw_centroid",
+        "arena_geometry_fallback_to_nominal:circle",
+    )
+    assert result.speed_source == "raw_centroid_explicit"
     assert result.geometry_status == "circle"
     assert result.near_zone_occupancy_fraction.shape == (2, 2)
     assert result.approach_percentile_mm.shape == (2, 2, 2)
@@ -437,6 +442,9 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
     assert "per_chaser_json_bytes" in component["summary"]
     assert component["thigmotaxis"].attrs["arena_shape"] == "circle"
     assert "mean_speed_mm_s" in component["thigmotaxis"]
+    assert _decode_first(component["thigmotaxis"]["speed_source_bytes"]) == (
+        "raw_centroid_explicit"
+    )
 
     visualizations = component["visualizations"]
     for artifact_name in (
@@ -451,3 +459,74 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
     spec = visualizations[INTERACTIVE_ARTIFACT_NAME]
     assert spec.attrs["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID
     assert spec.attrs["renderer"] == INTERACTIVE_RENDERER
+
+
+def test_verified_track_failure_does_not_fall_back_to_raw_centroid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_path = tmp_path / "verified_track_failure"
+    case_path.mkdir()
+    zarr_path = _make_archive(case_path)
+    quadrant_path = _write_sources(zarr_path)
+    quadrant_handle = _quadrant_handle(zarr_path, quadrant_path)
+    monkeypatch.setattr(
+        near_field_module,
+        "load_verified_smoothed_frame_speed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("track motion manifest mismatch")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="track motion manifest mismatch"):
+        build_cra_near_field_result(
+            zarr_path,
+            chaser_distance_run="chaser_distance_1",
+            quadrant_occupancy_dependency_handle=quadrant_handle,
+        )
+
+
+def test_verified_speed_authority_controls_published_phase_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_path = tmp_path / "verified_track_speed"
+    case_path.mkdir()
+    zarr_path = _make_archive(case_path)
+    quadrant_path = _write_sources(zarr_path)
+    quadrant_handle = _quadrant_handle(zarr_path, quadrant_path)
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    total_frames = int(
+        root["analysis/chaser_distance_runs/chaser_distance_1/positions/fish_valid"].shape[0]
+    )
+    verified_values = np.zeros(total_frames, dtype=np.float64)
+    verified_values[0] = np.nan
+    authority = {
+        "schema_id": "palette.track_motion_read_authority",
+        "schema_version": 1,
+        "run_ref": "analysis/track_kinematics_runs/offline/tk_verified",
+        "track_ref": "analysis/track_kinematics_runs/offline/tk_verified/tracks/id_0",
+    }
+    monkeypatch.setattr(
+        near_field_module,
+        "load_verified_smoothed_frame_speed",
+        lambda _root, frame_count: SimpleNamespace(
+            values_mm_s=verified_values,
+            source="track_motion.movement/speed/smoothed/mm",
+            authority=authority,
+        )
+        if frame_count == total_frames
+        else pytest.fail("wrong frame extent"),
+    )
+
+    result = build_cra_near_field_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+        quadrant_occupancy_dependency_handle=quadrant_handle,
+    )
+
+    assert result.speed_source == "track_motion.movement/speed/smoothed/mm"
+    assert result.source_track_motion_authority == authority
+    assert np.nanmax(result.mean_speed_mm_s) == pytest.approx(0.0)
+    assert np.nanmin(result.immobile_fraction) == pytest.approx(1.0)
+    assert "immobility_signal_explicit_raw_centroid" not in result.qc_warnings

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import zarr
-import fisheye.analysis.chaser_response_regimes as regimes_module
+import fisheye.analysis.track_motion_speed as track_motion_speed_module
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
 from fisheye.analysis.chaser_response_regimes import (
     COMPONENT_PARENT_NAME,
@@ -101,7 +101,7 @@ def _install_verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(
-        regimes_module,
+        track_motion_speed_module,
         "load_track_kinematics_track",
         _load_verified_track,
     )
@@ -225,7 +225,7 @@ def test_verified_track_failure_does_not_fall_back_to_raw_centroid(
         name="tampered_track.zarr",
     )
     monkeypatch.setattr(
-        regimes_module,
+        track_motion_speed_module,
         "load_track_kinematics_track",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             ValueError("track motion manifest mismatch")
@@ -253,7 +253,7 @@ def test_raw_centroid_requires_explicit_mode(
         name="explicit_raw.zarr",
     )
     monkeypatch.setattr(
-        regimes_module,
+        track_motion_speed_module,
         "load_track_kinematics_track",
         lambda *_args, **_kwargs: pytest.fail("strict track reader must not run"),
     )

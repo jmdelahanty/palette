@@ -641,6 +641,7 @@ _CHASER_NEAR_FIELD_SUMMARY_FIELDS = (
         _field("per_chaser", "string"),
         _field("per_role", "string"),
         _field("fish_phase_values", "string"),
+        _field("speed_source", "string"),
         _field("pairwise_role_contrast_policy", "string"),
         _field("cra_near_field_summary_recording_id", "string"),
     )

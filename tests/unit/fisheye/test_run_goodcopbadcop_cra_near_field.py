@@ -63,6 +63,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
         cdf_thresholds_mm=(2.0, 4.0),
         perimeter_band_mm=3.0,
         immobility_speed_threshold_mm_s=1.5,
+        immobility_signal_mode="verified_track_motion",
         apply=True,
         overwrite=True,
         no_png=True,
@@ -84,6 +85,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
         "cdf_thresholds_mm": (2.0, 4.0),
         "perimeter_band_mm": 3.0,
         "immobility_speed_threshold_mm_s": 1.5,
+        "immobility_signal_mode": "verified_track_motion",
     }
     assert calls["write_path"] == zarr_path
     assert calls["write_kwargs"] == {
@@ -180,6 +182,7 @@ def test_batch_runner_refuses_implicit_latest_before_builder(
         cdf_thresholds_mm=(2.0,),
         perimeter_band_mm=3.0,
         immobility_speed_threshold_mm_s=1.5,
+        immobility_signal_mode="verified_track_motion",
         apply=False,
         overwrite=False,
         no_png=True,
