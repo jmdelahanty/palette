@@ -28,6 +28,31 @@ The publisher records zero/one/multiple counts and never forces `max_det=1` or
 drops duplicate candidates during inference. A later refined seed may apply
 top-1 while retaining every source row in its audit table.
 
+### Detector frame-source binding
+
+Detector inference may use either `raw_video/images_full` or a contract-bound
+`raw_video/images_ds`. Full-camera inference has an identity coordinate
+binding. Downsampled inference is eligible for canonical sampled binding only
+when all of the following are proven from live metadata and the sealed
+artifact:
+
+- the selected artifact source is exactly `raw_video/images_ds`;
+- the array declares `palette.sampled_training_image_storage.v1` and complete
+  sampled-frame access units;
+- the array and `raw_video` declare the same exact
+  `palette.sampled_training_downsample_transform.v1` document;
+- source, stored, and artifact extents agree with the live arrays;
+- `resized_shape_hw == stored_shape_hw` and `padding_tblr == [0, 0, 0, 0]`;
+- the sealed artifact lineage and its digest agree with the selected array and
+  sampled-frame mapping.
+
+For this zero-padding resize, normalized coordinates are invariant, so the
+artifact's normalized boxes are already source-camera normalized. The bound
+manifest persists the complete transform, its digest, and the coordinate
+mapping decision. Missing, stale, arbitrary, or padded transforms fail closed.
+Letterboxed inference requires a separately versioned inverse-box transform and
+is not accepted by this contract.
+
 ## Lifecycle
 
 Checklist:

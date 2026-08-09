@@ -15,6 +15,10 @@ from fisheye.shared.zarr.sampled_training_detection_publication import (
     publish_sampled_training_detection_candidate,
     validate_sampled_training_detection_run,
 )
+from fisheye.shared.zarr.training_image_storage import (
+    SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+    sampled_training_downsample_transform,
+)
 from fisheye.utils import predict_training_detections as prediction
 
 
@@ -62,7 +66,7 @@ class _FakeYOLO:
         return out
 
 
-def _write_base(path: Path) -> None:
+def _write_base(path: Path, *, ds_hw: tuple[int, int] = (60, 80)) -> None:
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
     root.attrs.update(
         {
@@ -84,15 +88,29 @@ def _write_base(path: Path) -> None:
             "frame_step": 5,
         }
     )
+    transform = sampled_training_downsample_transform(
+        source_hw=(90, 120),
+        target_hw=ds_hw,
+        method="area",
+        preserve_aspect=True,
+    )
+    raw.attrs["downsample_transform"] = transform
     raw.create_array(
         "images_full",
         data=np.zeros((3, 90, 120), dtype=np.uint8),
         chunks=(1, 90, 120),
     )
-    raw.create_array(
+    images_ds = raw.create_array(
         "images_ds",
-        data=np.zeros((3, 30, 40), dtype=np.uint8),
-        chunks=(1, 30, 40),
+        data=np.zeros((3, *ds_hw), dtype=np.uint8),
+        chunks=(1, *ds_hw),
+    )
+    images_ds.attrs.update(
+        {
+            "storage_contract_schema_id": SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+            "access_unit": "complete_sampled_frame",
+            "source_to_stored_transform": transform,
+        }
     )
     raw.create_array(
         "original_frame_indices",
@@ -101,7 +119,12 @@ def _write_base(path: Path) -> None:
     )
 
 
-def _spec(tmp_path: Path) -> prediction.ModelInputSpec:
+def _spec(
+    tmp_path: Path,
+    *,
+    img_h: int = 64,
+    img_w: int = 64,
+) -> prediction.ModelInputSpec:
     model = tmp_path / "model.pt"
     model.write_text("fake", encoding="utf-8")
     return prediction.ModelInputSpec(
@@ -110,11 +133,11 @@ def _spec(tmp_path: Path) -> prediction.ModelInputSpec:
         set_id="detect-set-v1",
         task_type="detect",
         artifact_path=str(model),
-        input_shape=[1, 3, 64, 64],
+        input_shape=[1, 3, img_h, img_w],
         input_layout="NCHW",
         input_channels=3,
-        img_h=64,
-        img_w=64,
+        img_h=img_h,
+        img_w=img_w,
         max_batch=1,
         dynamic_shapes=False,
         input_dtype="float32",
@@ -124,7 +147,15 @@ def _spec(tmp_path: Path) -> prediction.ModelInputSpec:
     )
 
 
-def _run_artifact(monkeypatch, path: Path, tmp_path: Path, *, run_id: str) -> None:
+def _run_artifact(
+    monkeypatch,
+    path: Path,
+    tmp_path: Path,
+    *,
+    run_id: str,
+    spec: prediction.ModelInputSpec | None = None,
+    expected_frame_source: str = "raw_video/images_full",
+) -> None:
     monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=_FakeYOLO))
     monkeypatch.setattr(
         prediction,
@@ -153,7 +184,7 @@ def _run_artifact(monkeypatch, path: Path, tmp_path: Path, *, run_id: str) -> No
     )
     result = prediction.run_training_zarr_prediction(
         zarr_path=path,
-        spec=_spec(tmp_path),
+        spec=spec or _spec(tmp_path),
         run_name=run_id,
         batch_size=2,
         conf=0.4,
@@ -163,7 +194,130 @@ def _run_artifact(monkeypatch, path: Path, tmp_path: Path, *, run_id: str) -> No
         overwrite=False,
         argv=["predict_training_detections"],
     )
-    assert result["frame_source"]["path"] == "raw_video/images_full"
+    assert result["frame_source"]["path"] == expected_frame_source
+
+
+def test_zero_padding_images_ds_artifact_binds_to_source_normalized_coordinates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = tmp_path / "training-ds.zarr"
+    _write_base(archive)
+    _run_artifact(
+        monkeypatch,
+        archive,
+        tmp_path,
+        run_id="artifact-ds",
+        spec=_spec(tmp_path, img_h=60, img_w=80),
+        expected_frame_source="raw_video/images_ds",
+    )
+
+    artifact = zarr.open_group(
+        str(archive / "detection_artifact_runs" / "artifact-ds"),
+        mode="r",
+        use_consolidated=False,
+    )
+    artifact_boxes = np.asarray(artifact["bbox_norm_coords"][:])
+    candidate = build_sampled_training_detection_candidate(
+        archive=archive,
+        artifact_run_id="artifact-ds",
+        destination=tmp_path / "candidate-ds.zarr",
+        run_id="detect-review-ds",
+    )
+
+    np.testing.assert_array_equal(
+        candidate.arrays["instances/bbox_norm_coords"][:], artifact_boxes
+    )
+    binding = candidate.manifest["payload"]["source_artifact"]["frame_source_binding"]
+    assert binding["artifact_frame_source_path"] == "raw_video/images_ds"
+    assert binding["coordinate_mapping"] == (
+        "source_camera_normalized_identity_via_zero_padding_resize"
+    )
+    assert binding["source_shape_hw"] == [90, 120]
+    assert binding["stored_shape_hw"] == [60, 80]
+
+
+def test_images_ds_binding_rejects_missing_or_padded_transform(
+    tmp_path: Path, monkeypatch
+) -> None:
+    missing = tmp_path / "missing-transform.zarr"
+    _write_base(missing)
+    _run_artifact(
+        monkeypatch,
+        missing,
+        tmp_path,
+        run_id="artifact-missing",
+        spec=_spec(tmp_path, img_h=60, img_w=80),
+        expected_frame_source="raw_video/images_ds",
+    )
+    mutable = zarr.open_group(str(missing), mode="a", use_consolidated=False)
+    del mutable["raw_video/images_ds"].attrs["source_to_stored_transform"]
+    try:
+        build_sampled_training_detection_candidate(
+            archive=missing,
+            artifact_run_id="artifact-missing",
+            destination=tmp_path / "candidate-missing.zarr",
+            run_id="detect-review-missing",
+        )
+    except ValueError as exc:
+        assert "source_to_stored_transform" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("Missing images_ds transform unexpectedly bound.")
+
+    padded = tmp_path / "padded-transform.zarr"
+    _write_base(padded, ds_hw=(64, 64))
+    _run_artifact(
+        monkeypatch,
+        padded,
+        tmp_path,
+        run_id="artifact-padded",
+        spec=_spec(tmp_path, img_h=64, img_w=64),
+        expected_frame_source="raw_video/images_ds",
+    )
+    try:
+        build_sampled_training_detection_candidate(
+            archive=padded,
+            artifact_run_id="artifact-padded",
+            destination=tmp_path / "candidate-padded.zarr",
+            run_id="detect-review-padded",
+        )
+    except ValueError as exc:
+        assert "zero-padding resize" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("Padded images_ds transform unexpectedly bound.")
+
+
+def test_images_ds_binding_rejects_tampered_artifact_lineage_digest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = tmp_path / "tampered-lineage.zarr"
+    _write_base(archive)
+    _run_artifact(
+        monkeypatch,
+        archive,
+        tmp_path,
+        run_id="artifact-tampered",
+        spec=_spec(tmp_path, img_h=60, img_w=80),
+        expected_frame_source="raw_video/images_ds",
+    )
+    artifact = zarr.open_group(
+        str(archive / "detection_artifact_runs" / "artifact-tampered"),
+        mode="a",
+        use_consolidated=False,
+    )
+    lineage = dict(artifact.attrs["artifact_frame_source_lineage"])
+    lineage["selected_array_path"] = "raw_video/images_full"
+    artifact.attrs["artifact_frame_source_lineage"] = lineage
+    try:
+        build_sampled_training_detection_candidate(
+            archive=archive,
+            artifact_run_id="artifact-tampered",
+            destination=tmp_path / "candidate-tampered.zarr",
+            run_id="detect-review-tampered",
+        )
+    except ValueError as exc:
+        assert "digest" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("Tampered artifact lineage unexpectedly bound.")
 
 
 def test_binding_preserves_local_axis_and_mints_acquisition_keys(

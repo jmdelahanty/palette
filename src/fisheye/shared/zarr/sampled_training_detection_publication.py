@@ -57,6 +57,10 @@ from fisheye.shared.zarr.storage_profiles import (
     DETECTION_PUBLISHED_ACCESS_AWARE_V1,
     StorageProfile,
 )
+from fisheye.shared.zarr.training_image_storage import (
+    SAMPLED_TRAINING_DOWNSAMPLE_TRANSFORM_SCHEMA_ID,
+    SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
+)
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
@@ -86,6 +90,12 @@ SAMPLED_TRAINING_DETECTION_ROLLBACK_POLICY = (
 SAMPLED_TRAINING_DETECTION_RUN_MANIFEST_ATTR = "run_manifest"
 SAMPLED_TRAINING_DETECTION_MAPPING_PATH = "raw_video/original_frame_indices"
 _SELECTOR_ATTRS = ("authoritative_run", "latest_complete", "latest")
+_ARTIFACT_FRAME_SOURCE_LINEAGE_SCHEMA_ID = (
+    "palette.training_detection_artifact_frame_source_lineage.v1"
+)
+_FRAME_SOURCE_BINDING_SCHEMA_ID = (
+    "palette.sampled_training_detection.frame_source_binding.v1"
+)
 
 
 @dataclass(frozen=True)
@@ -278,6 +288,8 @@ def _artifact_evidence(
     archive: Path,
     *,
     artifact_run_id: str,
+    raw: Any,
+    dimensions: SampledTrainingDetectionDimensions,
 ) -> tuple[Any, dict[str, Any]]:
     path = _artifact_path(archive, artifact_run_id)
     if not path.is_dir():
@@ -290,10 +302,6 @@ def _artifact_evidence(
         raise ValueError("Detection artifact must remain selector-ineligible.")
     if artifact.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
         raise ValueError("Detection artifact is not complete.")
-    if artifact.attrs.get("frame_source_path") != "raw_video/images_full":
-        raise ValueError(
-            "Canonical sampled binding currently requires full-camera images_full inference."
-        )
     if "source_frame_indices" not in artifact:
         raise ValueError(
             "Detection artifact lacks sampled-to-acquisition frame lineage."
@@ -301,18 +309,222 @@ def _artifact_evidence(
     lineage = artifact.attrs.get("artifact_frame_source_lineage")
     if not isinstance(lineage, Mapping):
         raise ValueError("Detection artifact lacks frame-source lineage.")
+    lineage_digest = str(
+        artifact.attrs.get("artifact_frame_source_lineage_sha256") or ""
+    )
+    if lineage_digest != canonical_json_sha256(lineage):
+        raise ValueError("Detection artifact frame-source lineage digest is stale.")
+    frame_source_binding = _validate_artifact_frame_source_binding(
+        raw=raw,
+        artifact=artifact,
+        lineage=lineage,
+        dimensions=dimensions,
+    )
     return artifact, {
         "artifact_path": f"{DETECTION_ARTIFACT_RUN_FAMILY}/{artifact_run_id}",
         "artifact_payload_inventory_seal_sha256": str(
             artifact.attrs.get(f"{ARTIFACT_PAYLOAD_INVENTORY_SEAL_ATTR}_sha256")
         ),
         "artifact_payload_inventory": seal,
-        "artifact_frame_source_lineage_sha256": str(
-            artifact.attrs.get("artifact_frame_source_lineage_sha256")
-        ),
+        "artifact_frame_source_lineage_sha256": lineage_digest,
+        "frame_source_binding": frame_source_binding,
         "model_registry_run_id": str(artifact.attrs.get("model_registry_run_id")),
         "model_registry_set_id": artifact.attrs.get("model_registry_set_id"),
         "model_path": str(artifact.attrs.get("model_path")),
+    }
+
+
+def _exact_int_list(value: Any, *, field: str, length: int) -> list[int]:
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        raise ValueError(f"{field} must be an exact {length}-element integer list.")
+    if any(type(item) is not int for item in value):
+        raise ValueError(f"{field} must contain exact integers.")
+    return [int(item) for item in value]
+
+
+def _validate_artifact_frame_source_binding(
+    *,
+    raw: Any,
+    artifact: Any,
+    lineage: Mapping[str, Any],
+    dimensions: SampledTrainingDetectionDimensions,
+) -> dict[str, Any]:
+    """Prove that normalized artifact boxes use the source-camera domain.
+
+    Full-camera inference is an identity binding.  Downsampled inference is
+    accepted only when the selected array carries the exact sampled-training
+    image contract and a zero-padding source-to-stored transform.  With no
+    padding, normalized coordinates are invariant under the resize; arbitrary
+    letterboxing remains unsupported because it requires an explicit inverse
+    box transform.
+    """
+
+    frame_source = str(artifact.attrs.get("frame_source_path") or "")
+    if frame_source not in {"raw_video/images_full", "raw_video/images_ds"}:
+        raise ValueError(
+            "Canonical sampled binding requires raw_video/images_full or "
+            "contract-bound raw_video/images_ds inference."
+        )
+    array_name = frame_source.split("/", 1)[1]
+    if array_name not in raw:
+        raise ValueError(
+            f"Artifact frame source is absent from the archive: {frame_source}"
+        )
+    frame_array = raw[array_name]
+    shape = [int(value) for value in frame_array.shape]
+    if len(shape) not in {3, 4} or shape[0] != dimensions.n_frames:
+        raise ValueError(
+            "Artifact frame-source array shape is incompatible with the sampled axis."
+        )
+    channels = 1 if len(shape) == 3 else int(shape[3])
+    height, width = int(shape[1]), int(shape[2])
+    chunks = getattr(frame_array, "chunks", None)
+    chunk_shape = [int(value) for value in chunks] if chunks is not None else None
+
+    expected_lineage_fields = {
+        "schema_id",
+        "status",
+        "selected_array_path",
+        "selected_array_shape",
+        "selected_array_dtype",
+        "selected_array_chunks",
+        "frame_row_count",
+        "frame_source_extent",
+        "selection",
+        "model_request",
+        "prediction_result_basis",
+        "pixel_content_binding_status",
+        "original_frame_mapping",
+        "source_camera_overlay_suitability",
+        "unbound_numeric_binding",
+    }
+    if set(lineage) != expected_lineage_fields:
+        raise ValueError(
+            "Detection artifact frame-source lineage fields are not exact."
+        )
+    if (
+        lineage.get("schema_id") != _ARTIFACT_FRAME_SOURCE_LINEAGE_SCHEMA_ID
+        or lineage.get("status") != "unbound_artifact_provenance_only"
+        or lineage.get("selected_array_path") != frame_source
+        or lineage.get("selected_array_shape") != shape
+        or lineage.get("selected_array_dtype") != np.dtype(frame_array.dtype).str
+        or lineage.get("selected_array_chunks") != chunk_shape
+        or lineage.get("frame_row_count") != dimensions.n_frames
+        or lineage.get("prediction_result_basis")
+        != "ultralytics_xyxy_rescaled_to_selected_training_frame_array_extent"
+    ):
+        raise ValueError(
+            "Detection artifact frame-source lineage differs from the live array."
+        )
+    if lineage.get("frame_source_extent") != {
+        "width": width,
+        "height": height,
+        "channels": channels,
+        "units": "pixels",
+        "extent_basis": "selected_training_frame_array_shape",
+    }:
+        raise ValueError("Detection artifact frame-source extent is stale.")
+    selection = lineage.get("selection")
+    if not isinstance(selection, Mapping) or (
+        selection.get("path") != frame_source
+        or selection.get("shape") != shape
+        or selection.get("n_frames") != dimensions.n_frames
+        or selection.get("height") != height
+        or selection.get("width") != width
+        or selection.get("channels") != channels
+    ):
+        raise ValueError("Detection artifact frame-source selection is stale.")
+    unbound = lineage.get("unbound_numeric_binding")
+    reference = unbound.get("reference") if isinstance(unbound, Mapping) else None
+    temporal = unbound.get("temporal") if isinstance(unbound, Mapping) else None
+    if (
+        not isinstance(reference, Mapping)
+        or reference.get("node_path") != frame_source
+        or reference.get("width") != width
+        or reference.get("height") != height
+        or not isinstance(temporal, Mapping)
+        or temporal.get("source_frame_count") != dimensions.n_frames
+    ):
+        raise ValueError("Detection artifact numeric binding is stale.")
+
+    if frame_source == "raw_video/images_full":
+        if (height, width) != (dimensions.source_height, dimensions.source_width):
+            raise ValueError(
+                "Full-camera artifact extent differs from source-camera authority."
+            )
+        return {
+            "schema_id": _FRAME_SOURCE_BINDING_SCHEMA_ID,
+            "artifact_frame_source_path": frame_source,
+            "coordinate_mapping": "source_camera_normalized_identity",
+            "source_shape_hw": [dimensions.source_height, dimensions.source_width],
+            "stored_shape_hw": [height, width],
+            "downsample_transform": None,
+            "downsample_transform_sha256": None,
+        }
+
+    if len(shape) != 3 or np.dtype(frame_array.dtype) != np.dtype("uint8"):
+        raise ValueError("Contract-bound raw_video/images_ds must be rank-3 uint8.")
+    if (
+        frame_array.attrs.get("storage_contract_schema_id")
+        != (SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID)
+        or frame_array.attrs.get("access_unit") != "complete_sampled_frame"
+    ):
+        raise ValueError(
+            "raw_video/images_ds lacks the exact sampled-image storage contract."
+        )
+    transform = frame_array.attrs.get("source_to_stored_transform")
+    if not isinstance(transform, Mapping):
+        raise ValueError("raw_video/images_ds lacks source_to_stored_transform.")
+    transform = dict(transform)
+    if set(transform) != {
+        "schema_id",
+        "source_shape_hw",
+        "stored_shape_hw",
+        "resized_shape_hw",
+        "padding_tblr",
+        "mode",
+        "interpolation",
+        "padding_value_uint8",
+    }:
+        raise ValueError("raw_video/images_ds transform fields are not exact.")
+    source_hw = _exact_int_list(
+        transform.get("source_shape_hw"), field="source_shape_hw", length=2
+    )
+    stored_hw = _exact_int_list(
+        transform.get("stored_shape_hw"), field="stored_shape_hw", length=2
+    )
+    resized_hw = _exact_int_list(
+        transform.get("resized_shape_hw"), field="resized_shape_hw", length=2
+    )
+    padding = _exact_int_list(
+        transform.get("padding_tblr"), field="padding_tblr", length=4
+    )
+    if (
+        transform.get("schema_id") != SAMPLED_TRAINING_DOWNSAMPLE_TRANSFORM_SCHEMA_ID
+        or source_hw != [dimensions.source_height, dimensions.source_width]
+        or stored_hw != [height, width]
+        or resized_hw != stored_hw
+        or padding != [0, 0, 0, 0]
+        or transform.get("mode") not in {"direct_resize", "aspect_preserving_letterbox"}
+        or type(transform.get("interpolation")) is not str
+        or not str(transform.get("interpolation"))
+        or transform.get("padding_value_uint8") != 0
+    ):
+        raise ValueError(
+            "Canonical images_ds binding requires an exact zero-padding resize "
+            "from the source-camera extent."
+        )
+    parent_transform = raw.attrs.get("downsample_transform")
+    if not isinstance(parent_transform, Mapping) or dict(parent_transform) != transform:
+        raise ValueError("raw_video and images_ds downsample transforms disagree.")
+    return {
+        "schema_id": _FRAME_SOURCE_BINDING_SCHEMA_ID,
+        "artifact_frame_source_path": frame_source,
+        "coordinate_mapping": "source_camera_normalized_identity_via_zero_padding_resize",
+        "source_shape_hw": source_hw,
+        "stored_shape_hw": stored_hw,
+        "downsample_transform": transform,
+        "downsample_transform_sha256": canonical_json_sha256(transform),
     }
 
 
@@ -327,10 +539,12 @@ def _expected_arrays(
     dict[str, Any],
     dict[str, object],
 ]:
-    root, _raw, mapping, base_dimensions = _mapping_from_archive(archive)
+    root, raw, mapping, base_dimensions = _mapping_from_archive(archive)
     artifact, artifact_evidence = _artifact_evidence(
         archive,
         artifact_run_id=artifact_run_id,
+        raw=raw,
+        dimensions=base_dimensions,
     )
     local_frames = np.asarray(artifact["frame_indices"][:], dtype=np.int32)
     bbox_norm = np.asarray(artifact["bbox_norm_coords"][:], dtype=np.float32)
