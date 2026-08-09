@@ -12,6 +12,9 @@ from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
 )
 from fisheye.shared.zarr.training_crop_materialization import (
+    ACQUISITION_HYBRID_FALLBACK_REASON_CODE_MAP,
+    ACQUISITION_HYBRID_PIXEL_SOURCE_CODE_MAP,
+    SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER,
     TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_ID,
     TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_VERSION,
 )
@@ -132,3 +135,60 @@ def test_training_crop_source_rejects_extra_binding_fields() -> None:
             recording_identity="batman_canary",
             training_crop_binding=binding,
         )
+
+
+def test_training_crop_source_accepts_exact_acquisition_crop_hybrid() -> None:
+    binding = _binding()
+    payload = binding["payload"]
+    payload["provider"] = SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER
+    payload["provider_evidence"] = {
+        "source_images_path": "raw_video/images_full",
+        "source_images_shape": [4, 4512, 4512],
+        "source_refined_detect_run": "reviewed",
+        "source_frame_decision_path": "detect_frame_decision_runs/reviewed",
+        "source_frame_decision_digest": "d" * 64,
+        "acquisition_crop_video_path": "/recording/crop.mp4",
+        "acquisition_crop_video_stat": {
+            "strategy": "stat_v1",
+            "size_bytes": 123,
+            "mtime_ns": 456,
+        },
+        "acquisition_crop_meta_path": "/recording/crop_meta.csv",
+        "acquisition_crop_meta_sha256": "e" * 64,
+        "acquisition_crop_summary_path": "/recording/crop_summary.json",
+        "acquisition_crop_summary_sha256": "f" * 64,
+        "acquisition_encoder_contract": {
+            "schema_id": "palette.orange_acquisition_crop_encoder_binding",
+            "schema_version": 1,
+        },
+        "pixel_source_code_map": ACQUISITION_HYBRID_PIXEL_SOURCE_CODE_MAP,
+        "fallback_reason_code_map": ACQUISITION_HYBRID_FALLBACK_REASON_CODE_MAP,
+        "fallback_policy": "sampled_images_full_zero_padded_v1",
+        "decode_backend": "pynvvc_luma_exact_gop1_seek_torch",
+        "pixel_verification": "all_rows_byte_equal_to_declared_provider_v1",
+    }
+    for name in (
+        "source_training_row_indices",
+        "source_crop_meta_row_indices",
+        "source_crop_video_frame_indices",
+        "source_crop_local_frame_ids",
+        "pixel_source_codes",
+        "fallback_reason_codes",
+    ):
+        payload["array_declarations"][name] = {"dtype": "<i8", "shape": [3]}
+        payload["identity_array_sha256"][name] = canonical_json_sha256(
+            {"path": name}
+        )
+    binding["payload_digest"] = canonical_json_sha256(payload)
+
+    manifest = build_training_keypoint_crop_source_manifest(
+        run_id="crop_reviewed_384",
+        recording_identity="batman_canary",
+        training_crop_binding=binding,
+    )
+
+    coordinate = manifest["payload"]["coordinate_contract"]["document"]
+    assert coordinate["padding_mode"] == (
+        "acquisition_crop_pixels_plus_zero_padded_full_frame_fallback_v1"
+    )
+    assert validate_training_keypoint_crop_source_manifest(manifest) == ()

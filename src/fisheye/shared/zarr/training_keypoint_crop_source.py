@@ -17,6 +17,7 @@ from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
 )
 from fisheye.shared.zarr.training_crop_materialization import (
+    SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER,
     SAMPLED_TRAINING_IMAGES_FULL_MATERIALIZATION_PROVIDER,
     TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_ID,
     TRAINING_CROP_MATERIALIZATION_BINDING_SCHEMA_VERSION,
@@ -137,6 +138,25 @@ def _parse_training_binding(value: Mapping[str, Any]) -> Mapping[str, Any]:
             "padding_mode",
             "pixel_verification",
         },
+        SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER: {
+            "source_images_path",
+            "source_images_shape",
+            "source_refined_detect_run",
+            "source_frame_decision_path",
+            "source_frame_decision_digest",
+            "acquisition_crop_video_path",
+            "acquisition_crop_video_stat",
+            "acquisition_crop_meta_path",
+            "acquisition_crop_meta_sha256",
+            "acquisition_crop_summary_path",
+            "acquisition_crop_summary_sha256",
+            "acquisition_encoder_contract",
+            "pixel_source_code_map",
+            "fallback_reason_code_map",
+            "fallback_policy",
+            "decode_backend",
+            "pixel_verification",
+        },
     }
     if set(evidence) != expected_evidence_fields[str(payload["provider"])]:
         raise ValueError("Training crop provider evidence has an unexpected field set.")
@@ -240,6 +260,15 @@ def build_training_keypoint_crop_source_manifest(
         binding_payload.get("provider_evidence"),
         name="training crop provider evidence",
     )
+    if (
+        binding_payload["provider"]
+        == SAMPLED_ACQUISITION_CROP_HYBRID_MATERIALIZATION_PROVIDER
+    ):
+        padding_mode: object = (
+            "acquisition_crop_pixels_plus_zero_padded_full_frame_fallback_v1"
+        )
+    else:
+        padding_mode = provider_evidence.get("padding_mode")
     coordinate_document: dict[str, object] = {
         "schema_id": TRAINING_KEYPOINT_CROP_COORDINATE_SCHEMA_ID,
         "schema_version": TRAINING_KEYPOINT_CROP_COORDINATE_SCHEMA_VERSION,
@@ -249,7 +278,7 @@ def build_training_keypoint_crop_source_manifest(
         "roi_coordinate_space": "sampled_crop_pixels",
         "source_coordinate_space": "source_camera_pixels",
         "roi_to_source_mapping": "integer_origin_translation_xy_v1",
-        "padding_mode": provider_evidence.get("padding_mode"),
+        "padding_mode": padding_mode,
         "dimensions": {
             "n_frames": n_frames,
             "n_instances": int(row_count),
