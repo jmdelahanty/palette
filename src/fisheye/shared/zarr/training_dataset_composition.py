@@ -16,7 +16,10 @@ from fisheye.shared.zarr.training_crop_materialization import (
     bind_training_crop_materialization,
 )
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
-
+from fisheye.shared.zarr_run_completion import is_run_complete
+from fisheye.training.detection_frame_supervision import (
+    build_detection_frame_supervision_plan,
+)
 
 TRAINING_DATASET_COMPOSITION_ATTRIBUTE = "training_dataset_composition"
 TRAINING_DATASET_COMPOSITION_SCHEMA_ID = "palette.training_dataset_composition"
@@ -37,8 +40,12 @@ class TrainingDetectionReviewBase:
     refined_run_id: str
     refined_review_state: str
     refined_review_intended_use: str
+    refined_review_authority_scope: str
+    refined_review_status_digest: str
     detect_row_count: int
     refined_row_count: int
+    refined_bbox_source_dtype: str
+    refined_bbox_source_digest: str
     refined_instance_keys: np.ndarray
     refined_frame_indices: np.ndarray
     refined_bbox_norm_coords: np.ndarray
@@ -145,7 +152,8 @@ def _read_detection_table(
     *,
     family: str,
     frame_count: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    allow_float64_boxes: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str]:
     table = _instances(run, family=family)
     frame_indices = np.asarray(table["frame_indices"][:])
     boxes = np.asarray(table["bbox_norm_coords"][:])
@@ -155,10 +163,28 @@ def _read_detection_table(
         raise TrainingDatasetCompositionError(
             f"{family} frame_indices must be one integer vector."
         )
-    if boxes.shape != (count, 4) or boxes.dtype != np.dtype(np.float32):
+    allowed_box_dtypes = {np.dtype(np.float32)}
+    if allow_float64_boxes:
+        allowed_box_dtypes.add(np.dtype(np.float64))
+    if boxes.shape != (count, 4) or boxes.dtype not in allowed_box_dtypes:
         raise TrainingDatasetCompositionError(
-            f"{family} bbox_norm_coords must have exact float32 shape ({count}, 4)."
+            f"{family} bbox_norm_coords must have shape ({count}, 4) and dtype "
+            f"in {sorted(str(dtype) for dtype in allowed_box_dtypes)}."
         )
+    boxes_source_dtype = str(boxes.dtype)
+    boxes_source_digest = _sha256_array(boxes)
+    boxes = np.asarray(boxes, dtype=np.float32)
+    if count:
+        half = np.float32(0.5)
+        if (
+            not np.isfinite(boxes).all()
+            or np.any(boxes[:, 2:] <= 0)
+            or np.any(boxes[:, :2] - boxes[:, 2:] * half < 0)
+            or np.any(boxes[:, :2] + boxes[:, 2:] * half > 1)
+        ):
+            raise TrainingDatasetCompositionError(
+                f"{family} bbox_norm_coords must remain finite, positive, and contained after float32 canonicalization."
+            )
     if keys.shape != (count,) or keys.dtype != np.dtype(np.uint64):
         raise TrainingDatasetCompositionError(
             f"{family} instance_key must have exact uint64 shape ({count},)."
@@ -180,8 +206,10 @@ def _read_detection_table(
         )
     return (
         np.asarray(frame_indices, dtype=np.int64),
-        np.asarray(boxes, dtype=np.float32),
+        boxes,
         np.asarray(keys, dtype=np.uint64),
+        boxes_source_dtype,
+        boxes_source_digest,
     )
 
 
@@ -227,7 +255,9 @@ def validate_training_detection_review_base(
         raise TrainingDatasetCompositionError(
             "images_full and images_ds must share one sampled frame axis."
         )
-    if original.shape != (frame_count,) or not np.issubdtype(original.dtype, np.integer):
+    if original.shape != (frame_count,) or not np.issubdtype(
+        original.dtype, np.integer
+    ):
         raise TrainingDatasetCompositionError(
             "raw_video/original_frame_indices must be one integer per sampled frame."
         )
@@ -256,10 +286,13 @@ def validate_training_detection_review_base(
         ("detect", detect_parent[detect_id]),
         ("refined-detect", refined_parent[refined_id]),
     ):
-        if str(run.attrs.get("status") or "").strip().lower() not in {
+        legacy_status_complete = str(run.attrs.get("status") or "").strip().lower() in {
             "complete",
             "completed",
-        }:
+        }
+        if not legacy_status_complete and not is_run_complete(
+            run, legacy_default=False
+        ):
             raise TrainingDatasetCompositionError(
                 f"Selected {family} review run is not complete."
             )
@@ -277,12 +310,94 @@ def validate_training_detection_review_base(
         raise TrainingDatasetCompositionError(
             "Refined detection review must be approved for training before crop enrichment."
         )
-    detect_frames, _detect_boxes, _detect_keys = _read_detection_table(
-        detect_parent[detect_id], family="detect", frame_count=frame_count
+    authority_scope = str(review_status.get("authority_scope") or "").strip()
+    review_status_digest = canonical_json_sha256(dict(review_status))
+    detect_frames, _detect_boxes, _detect_keys, _detect_dtype, _detect_digest = (
+        _read_detection_table(
+            detect_parent[detect_id], family="detect", frame_count=frame_count
+        )
     )
-    refined_frames, refined_boxes, refined_keys = _read_detection_table(
-        refined_parent[refined_id], family="refined-detect", frame_count=frame_count
+    (
+        refined_frames,
+        refined_boxes,
+        refined_keys,
+        refined_bbox_source_dtype,
+        refined_bbox_source_digest,
+    ) = _read_detection_table(
+        refined_parent[refined_id],
+        family="refined-detect",
+        frame_count=frame_count,
+        allow_float64_boxes=True,
     )
+    if authority_scope == "selector_ineligible_training_candidate":
+        receipt = review_status.get("selector_ineligible_candidate_receipt")
+        approval = review_status.get("authoritative_approval")
+        if not isinstance(receipt, Mapping) or not isinstance(approval, Mapping):
+            raise TrainingDatasetCompositionError(
+                "Selector-ineligible detection approval lacks its candidate receipt."
+            )
+        decision_path = f"detect_frame_decision_runs/{refined_id}"
+        table = _instances(refined_parent[refined_id], family="refined-detect")
+        table_prefix = f"refined_detect_runs/{refined_id}"
+        if table is not refined_parent[refined_id]:
+            table_prefix += "/instances"
+        supervision = build_detection_frame_supervision_plan(
+            root,
+            bbox_path=f"{table_prefix}/bbox_norm_coords",
+            frame_indices_path=f"{table_prefix}/frame_indices",
+            n_frames=frame_count,
+        )
+        would_materialize = receipt.get("frame_decision_would_materialize")
+        if type(would_materialize) is not bool:
+            raise TrainingDatasetCompositionError(
+                "Candidate receipt frame_decision_would_materialize must be boolean."
+            )
+        expected_receipt = {
+            "schema_id": "palette.selector_ineligible_detection_review_receipt",
+            "schema_version": 1,
+            "status": "complete",
+            "authority_scope": authority_scope,
+            "source_refined_detect_run": refined_id,
+            "frame_decision_path": decision_path,
+            "frame_decision_digest": supervision.source_decision_digest,
+            "frame_decision_would_materialize": would_materialize,
+            "frame_count": frame_count,
+            "instance_count": int(refined_frames.shape[0]),
+            "positive_frame_count": supervision.positive_frame_count,
+            "negative_frame_count": supervision.negative_frame_count,
+            "parent_selectors_updated": False,
+            "stage_selector_eligible": False,
+            "metadata_mode": "direct_mutable",
+        }
+        if dict(receipt) != expected_receipt:
+            raise TrainingDatasetCompositionError(
+                "Selector-ineligible detection approval receipt is stale or malformed."
+            )
+        if dict(approval) != {
+            "status": "deferred_selector_ineligible",
+            "reason_code": "CANDIDATE_ONLY",
+            "run": refined_id,
+        }:
+            raise TrainingDatasetCompositionError(
+                "Selector-ineligible detection approval must defer authoritative selection."
+            )
+        if (
+            root.attrs.get("stage_selector_eligible") is not False
+            or refined_parent[refined_id].attrs.get("stage_selector_eligible")
+            is not False
+            or root.attrs.get("training_artifact_status")
+            not in {"review_complete", "complete"}
+        ):
+            raise TrainingDatasetCompositionError(
+                "Selector-ineligible reviewed training artifacts must remain ineligible "
+                "and be review-complete or complete."
+            )
+        for parent in (detect_parent, refined_parent):
+            for selector in _SELECTOR_ORDER:
+                if parent.attrs.get(selector) in {detect_id, refined_id}:
+                    raise TrainingDatasetCompositionError(
+                        "Selector-ineligible review receipt conflicts with a parent selector."
+                    )
     return TrainingDetectionReviewBase(
         archive_path=path,
         frame_count=frame_count,
@@ -291,8 +406,12 @@ def validate_training_detection_review_base(
         refined_run_id=refined_id,
         refined_review_state=review_state,
         refined_review_intended_use=intended_use,
+        refined_review_authority_scope=authority_scope,
+        refined_review_status_digest=review_status_digest,
         detect_row_count=int(detect_frames.shape[0]),
         refined_row_count=int(refined_frames.shape[0]),
+        refined_bbox_source_dtype=refined_bbox_source_dtype,
+        refined_bbox_source_digest=refined_bbox_source_digest,
         refined_instance_keys=refined_keys,
         refined_frame_indices=refined_frames,
         refined_bbox_norm_coords=refined_boxes,
@@ -364,7 +483,9 @@ def build_training_dataset_composition(
     detect_run_id: str | None = None,
     refined_run_id: str | None = None,
     require_consolidated_crop: bool = True,
-) -> tuple[TrainingDetectionReviewBase, BoundTrainingCropMaterialization, dict[str, Any]]:
+) -> tuple[
+    TrainingDetectionReviewBase, BoundTrainingCropMaterialization, dict[str, Any]
+]:
     """Build an exact cross-surface receipt and validate all observation joins."""
 
     base = validate_training_detection_review_base(
@@ -380,9 +501,7 @@ def build_training_dataset_composition(
     root = open_zarr_group_direct(base.archive_path, mode="r")
     crop_run = root[f"crop_runs/{crop_run_id}"]
     crop_keys = np.asarray(crop_run["instance_key"][:], dtype=np.uint64)
-    crop_source_frames = np.asarray(
-        crop_run["source_frame_indices"][:], dtype=np.int64
-    )
+    crop_source_frames = np.asarray(crop_run["source_frame_indices"][:], dtype=np.int64)
     crop_boxes = np.asarray(crop_run["bbox_norm_coords"][:], dtype=np.float32)
     if crop_keys.shape != (crop.row_count,):
         raise TrainingDatasetCompositionError(
@@ -409,8 +528,13 @@ def build_training_dataset_composition(
                 "refined_detect_run": base.refined_run_id,
                 "review_state": base.refined_review_state,
                 "review_intended_use": base.refined_review_intended_use,
+                "review_authority_scope": base.refined_review_authority_scope,
+                "review_status_digest": base.refined_review_status_digest,
                 "detect_row_count": base.detect_row_count,
                 "refined_row_count": base.refined_row_count,
+                "refined_bbox_source_dtype": base.refined_bbox_source_dtype,
+                "refined_bbox_source_digest": base.refined_bbox_source_digest,
+                "canonical_crop_bbox_dtype": "float32",
                 "row_identity": "instance_key",
             },
             "crop": {
@@ -432,10 +556,14 @@ def build_training_dataset_composition(
         "stage_selector_eligible": False,
         "registry_activation": "deferred",
     }
-    return base, crop, {
-        "payload": payload,
-        "payload_digest": canonical_json_sha256(payload),
-    }
+    return (
+        base,
+        crop,
+        {
+            "payload": payload,
+            "payload_digest": canonical_json_sha256(payload),
+        },
+    )
 
 
 def bind_training_dataset_composition(
@@ -463,7 +591,10 @@ def bind_training_dataset_composition(
         )
     consolidated = zarr.open_group(str(path), mode="r", use_consolidated=True)
     consolidated_value = consolidated.attrs.get(TRAINING_DATASET_COMPOSITION_ATTRIBUTE)
-    if not isinstance(consolidated_value, Mapping) or dict(consolidated_value) != expected:
+    if (
+        not isinstance(consolidated_value, Mapping)
+        or dict(consolidated_value) != expected
+    ):
         raise TrainingDatasetCompositionError(
             "Consolidated training dataset composition receipt is absent or stale."
         )

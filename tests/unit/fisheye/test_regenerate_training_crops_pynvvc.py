@@ -44,7 +44,12 @@ from fisheye.shared.zarr.training_dataset_composition import (
     TrainingDatasetCompositionError,
     bind_training_dataset_composition,
 )
-from fisheye.utils.regenerate_training_crops_pynvvc import regenerate_training_crops_pynvvc
+from fisheye.training.detection_frame_supervision import (
+    build_detection_frame_supervision_plan,
+)
+from fisheye.utils.regenerate_training_crops_pynvvc import (
+    regenerate_training_crops_pynvvc,
+)
 
 
 class _FakePynvvcReader:
@@ -58,7 +63,10 @@ class _FakePynvvcReader:
                 np.vstack(
                     [
                         frame,
-                        np.zeros((max(1, frame.shape[0] // 2), frame.shape[1]), dtype=np.uint8),
+                        np.zeros(
+                            (max(1, frame.shape[0] // 2), frame.shape[1]),
+                            dtype=np.uint8,
+                        ),
                     ]
                 )
             )
@@ -100,7 +108,10 @@ class _FakeIndexedPynvvcDecoder:
                 np.vstack(
                     [
                         frame,
-                        np.zeros((max(1, frame.shape[0] // 2), frame.shape[1]), dtype=np.uint8),
+                        np.zeros(
+                            (max(1, frame.shape[0] // 2), frame.shape[1]),
+                            dtype=np.uint8,
+                        ),
                     ]
                 )
             )
@@ -108,7 +119,9 @@ class _FakeIndexedPynvvcDecoder:
         ]
 
     def get_stream_metadata(self) -> _FakeStreamMetadata:
-        return _FakeStreamMetadata(height=self._height, width=self._width, num_frames=len(self._frames))
+        return _FakeStreamMetadata(
+            height=self._height, width=self._width, num_frames=len(self._frames)
+        )
 
     def get_batch_frames_by_index(self, indices: list[int]):
         self.requested.extend(int(index) for index in indices)
@@ -133,7 +146,11 @@ def _make_training_archive(tmp_path: Path) -> tuple[Path, list[np.ndarray]]:
     root.attrs["source_video_total_frames"] = 5
 
     raw = root.create_group("raw_video")
-    raw.create_array("original_frame_indices", data=np.array([0, 2, 4], dtype=np.int32), overwrite=True)
+    raw.create_array(
+        "original_frame_indices",
+        data=np.array([0, 2, 4], dtype=np.int32),
+        overwrite=True,
+    )
 
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_001"
@@ -155,7 +172,9 @@ def _make_training_archive(tmp_path: Path) -> tuple[Path, list[np.ndarray]]:
 
     crop.create_array("frame_indices", data=frame_indices, overwrite=True)
     crop.create_array("roi_coordinates_full", data=roi_coordinates, overwrite=True)
-    crop.create_array("bbox_norm_coords", data=np.zeros((3, 4), dtype=np.float32), overwrite=True)
+    crop.create_array(
+        "bbox_norm_coords", data=np.zeros((3, 4), dtype=np.float32), overwrite=True
+    )
     crop.create_array("roi_images", data=stale_roi_images, overwrite=True)
     return zarr_path, frames
 
@@ -215,14 +234,20 @@ def _make_external_cache_materialization(
     source_crop.create_array(
         "bbox_norm_coords",
         data=np.asarray(
-            [[0.25, 0.25, 0.25, 1 / 3], [0.5, 0.5, 0.25, 1 / 3], [0.75, 0.75, 0.25, 1 / 3]],
+            [
+                [0.25, 0.25, 0.25, 1 / 3],
+                [0.5, 0.5, 0.25, 1 / 3],
+                [0.75, 0.75, 0.25, 1 / 3],
+            ],
             dtype=np.float32,
         ),
         overwrite=True,
     )
     source_crop.create_array(
         "bbox_img_xyxy",
-        data=np.asarray([[1, 0.5, 3, 2.5], [3, 2, 5, 4], [5, 3.5, 7, 5.5]], dtype=np.float32),
+        data=np.asarray(
+            [[1, 0.5, 3, 2.5], [3, 2, 5, 4], [5, 3.5, 7, 5.5]], dtype=np.float32
+        ),
         overwrite=True,
     )
     source_crop.create_array(
@@ -242,7 +267,9 @@ def _make_external_cache_materialization(
     )
     source_crop.create_array(
         "bbox_roi_xyxy",
-        data=np.asarray([[1, 0.5, 3, 2.5], [1, 1, 3, 3], [1, 0.5, 3, 2.5]], dtype=np.float32),
+        data=np.asarray(
+            [[1, 0.5, 3, 2.5], [1, 1, 3, 3], [1, 0.5, 3, 2.5]], dtype=np.float32
+        ),
         overwrite=True,
     )
     source_crop.create_array(
@@ -346,7 +373,9 @@ def test_regenerate_training_crops_pynvvc_writes_new_luma_crop_run(
     tmp_path: Path,
 ) -> None:
     zarr_path, frames = _make_training_archive(tmp_path)
-    monkeypatch.setattr(mod, "_open_pynvvc_luma_reader", lambda _video_path: _FakePynvvcReader(frames))
+    monkeypatch.setattr(
+        mod, "_open_pynvvc_luma_reader", lambda _video_path: _FakePynvvcReader(frames)
+    )
 
     report = regenerate_training_crops_pynvvc(
         zarr_path=zarr_path,
@@ -374,9 +403,16 @@ def test_regenerate_training_crops_pynvvc_writes_new_luma_crop_run(
     assert set(target.attrs["training_materialization_provider_contract"]) == set(
         mod.TRAINING_CROP_MATERIALIZATION_PROVIDERS
     )
-    assert target.attrs["roi_pixel_contract"]["name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
-    assert target.attrs["roi_pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
-    assert np.array_equal(target["source_frame_indices"][:], np.array([0, 2, 4], dtype=np.int64))
+    assert (
+        target.attrs["roi_pixel_contract"]["name"]
+        == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+    )
+    assert (
+        target.attrs["roi_pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+    )
+    assert np.array_equal(
+        target["source_frame_indices"][:], np.array([0, 2, 4], dtype=np.int64)
+    )
     expected = np.stack(
         [
             frames[0][0:2, 0:2],
@@ -386,7 +422,9 @@ def test_regenerate_training_crops_pynvvc_writes_new_luma_crop_run(
         axis=0,
     )
     assert np.array_equal(target["roi_images"][:], expected)
-    assert np.array_equal(target["frame_indices"][:], np.array([0, 1, 2], dtype=np.int64))
+    assert np.array_equal(
+        target["frame_indices"][:], np.array([0, 1, 2], dtype=np.int64)
+    )
     assert "bbox_norm_coords" in target
     direct_target = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)[
         "crop_runs/crop_001_pynvvc_luma"
@@ -421,7 +459,9 @@ def test_external_source_video_provider_remains_first_class(
     )
 
     assert report["status"] == "ok"
-    assert report["materialization_provider"] == mod.SOURCE_VIDEO_MATERIALIZATION_PROVIDER
+    assert (
+        report["materialization_provider"] == mod.SOURCE_VIDEO_MATERIALIZATION_PROVIDER
+    )
     run = zarr.open_group(str(target_path), mode="r", use_consolidated=False)[
         "crop_runs/crop_external_video"
     ]
@@ -436,7 +476,9 @@ def test_regenerate_training_crops_pynvvc_frame_domain_mapping_matches_legacy_fu
 ) -> None:
     zarr_path, _frames = _make_training_archive(tmp_path)
     root = zarr.open_group(str(zarr_path), mode="r")
-    crop_frame_indices = np.asarray(root["crop_runs/crop_001/frame_indices"][:], dtype=np.int64)
+    crop_frame_indices = np.asarray(
+        root["crop_runs/crop_001/frame_indices"][:], dtype=np.int64
+    )
 
     mapped, metadata = mod._map_source_frame_indices(
         root=root,
@@ -444,7 +486,9 @@ def test_regenerate_training_crops_pynvvc_frame_domain_mapping_matches_legacy_fu
         mode="original_frame_indices",
     )
 
-    original_frame_indices = np.asarray(root["raw_video/original_frame_indices"][:], dtype=np.int64)
+    original_frame_indices = np.asarray(
+        root["raw_video/original_frame_indices"][:], dtype=np.int64
+    )
     legacy_mapped = original_frame_indices[crop_frame_indices]
     np.testing.assert_array_equal(mapped, legacy_mapped)
     assert metadata == {
@@ -474,7 +518,9 @@ def test_load_clipped_source_frame_mapping_reads_required_parquet_columns(
     pq.write_table(table, index_path)
 
     mapping = mod._load_clipped_source_frame_mapping(
-        root=_FakeRootForFrameIndex({"source_frame_index_path": "source_frame_index.parquet"}),
+        root=_FakeRootForFrameIndex(
+            {"source_frame_index_path": "source_frame_index.parquet"}
+        ),
         archive_path=archive_path,
         crop_frame_indices=np.array([2, 0], dtype=np.int64),
         mode="source_frame_index_parquet",
@@ -483,9 +529,15 @@ def test_load_clipped_source_frame_mapping_reads_required_parquet_columns(
     assert mapping is not None
     assert mapping["mode"] == "source_frame_index_parquet"
     assert mapping["source_frame_index_path"] == str(index_path)
-    assert np.array_equal(mapping["source_frame_indices"], np.array([2, 0], dtype=np.int64))
-    assert np.array_equal(mapping["source_clip_local_frame_indices"], np.array([3, 11], dtype=np.int64))
-    assert np.array_equal(mapping["source_clip_indices"], np.array([-1, -1], dtype=np.int64))
+    assert np.array_equal(
+        mapping["source_frame_indices"], np.array([2, 0], dtype=np.int64)
+    )
+    assert np.array_equal(
+        mapping["source_clip_local_frame_indices"], np.array([3, 11], dtype=np.int64)
+    )
+    assert np.array_equal(
+        mapping["source_clip_indices"], np.array([-1, -1], dtype=np.int64)
+    )
     assert mapping["video_frame_to_rows"][video_b][3] == [0]
     assert mapping["video_frame_to_rows"][video_a][11] == [1]
 
@@ -518,7 +570,9 @@ def test_regenerate_training_crops_pynvvc_auto_uses_indexed_for_sparse_frames(
     ]
     root = zarr.open_group(str(zarr_path), mode="a")
     root.attrs["source_video_total_frames"] = 201
-    root["raw_video/original_frame_indices"][:] = np.array([0, 100, 200], dtype=np.int32)
+    root["raw_video/original_frame_indices"][:] = np.array(
+        [0, 100, 200], dtype=np.int32
+    )
     indexed_decoder = _FakeIndexedPynvvcDecoder(frames)
     monkeypatch.setattr(
         mod,
@@ -528,7 +582,9 @@ def test_regenerate_training_crops_pynvvc_auto_uses_indexed_for_sparse_frames(
     monkeypatch.setattr(
         mod,
         "_open_pynvvc_luma_reader",
-        lambda _video_path: (_ for _ in ()).throw(AssertionError("sequential reader should not be used")),
+        lambda _video_path: (_ for _ in ()).throw(
+            AssertionError("sequential reader should not be used")
+        ),
     )
 
     report = regenerate_training_crops_pynvvc(
@@ -542,7 +598,9 @@ def test_regenerate_training_crops_pynvvc_auto_uses_indexed_for_sparse_frames(
     assert report["status"] == "ok"
     assert report["decode_mode_effective"] == "indexed"
     assert indexed_decoder.requested == [0, 100, 200]
-    target = zarr.open_group(str(zarr_path), mode="r")["crop_runs/crop_001_pynvvc_luma_indexed"]
+    target = zarr.open_group(str(zarr_path), mode="r")[
+        "crop_runs/crop_001_pynvvc_luma_indexed"
+    ]
     assert target.attrs["decode_mode_effective"] == "indexed"
     expected = np.stack(
         [
@@ -698,9 +756,7 @@ def test_sampled_images_full_binding_requires_no_external_crop_row_ids(
             "source_images_dtype": "uint8",
             "source_images_shape": [3, 6, 8],
             "source_refined_detect_run": "reviewed",
-            "source_frame_decision_path": (
-                "detect_frame_decision_runs/reviewed"
-            ),
+            "source_frame_decision_path": ("detect_frame_decision_runs/reviewed"),
             "source_frame_decision_digest": "a" * 64,
             "padding_mode": "zero_outside_source_frame",
             "pixel_verification": "all_rows_byte_equal_to_source_window_v1",
@@ -750,40 +806,40 @@ def _make_reviewed_sampled_images_full_base(tmp_path: Path) -> Path:
         ]
     )
     raw.create_array("images_full", data=images)
+    raw.create_array("images_ds", data=images)
     raw.create_array(
         "original_frame_indices",
         data=np.asarray([10, 20, 30], dtype=np.int32),
     )
+    boxes = np.asarray(
+        [
+            [0.125, 1 / 6, 0.125, 1 / 6],
+            [0.5, 0.5, 0.25, 1 / 3],
+            [0.75, 0.75, 0.25, 1 / 3],
+        ],
+        dtype=np.float32,
+    )
+    frames = np.asarray([0, 2, 2], dtype=np.int32)
+    keys = np.asarray([101, 102, 103], dtype=np.uint64)
+    detected = root.require_group("detect_runs").create_group("detected")
+    detected.attrs["status"] = "completed"
+    detected_instances = detected.create_group("instances")
+    detected_instances.create_array("frame_indices", data=frames)
+    detected_instances.create_array("bbox_norm_coords", data=boxes)
+    detected_instances.create_array("instance_key", data=keys)
     refined = root.require_group("refined_detect_runs").create_group("reviewed")
     refined.attrs.update(
         {
             "status": "completed",
             "stage_selector_eligible": False,
+            "source_detect_run": "detected",
             FRAME_REVIEW_CONTRACT_ATTR: FRAME_REVIEW_CONTRACT_ID,
         }
     )
     instances = refined.create_group("instances")
-    instances.create_array(
-        "frame_indices",
-        data=np.asarray([0, 2, 2], dtype=np.int32),
-    )
-    # Intentionally float64: the sampled publication boundary freezes the
-    # canonical output as float32 without mutating the reviewed source run.
-    instances.create_array(
-        "bbox_norm_coords",
-        data=np.asarray(
-            [
-                [0.125, 1 / 6, 0.125, 1 / 6],
-                [0.5, 0.5, 0.25, 1 / 3],
-                [0.75, 0.75, 0.25, 1 / 3],
-            ],
-            dtype=np.float64,
-        ),
-    )
-    instances.create_array(
-        "instance_key",
-        data=np.asarray([101, 102, 103], dtype=np.uint64),
-    )
+    instances.create_array("frame_indices", data=frames)
+    instances.create_array("bbox_norm_coords", data=np.asarray(boxes, dtype=np.float64))
+    instances.create_array("instance_key", data=keys)
     instances.create_array(
         "refined_row_ids",
         data=np.asarray([7, 8, 9], dtype=np.int64),
@@ -794,6 +850,41 @@ def _make_reviewed_sampled_images_full_base(tmp_path: Path) -> Path:
         n_frames=3,
         frame_index=1,
     )
+    supervision = build_detection_frame_supervision_plan(
+        root,
+        bbox_path="refined_detect_runs/reviewed/instances/bbox_norm_coords",
+        frame_indices_path="refined_detect_runs/reviewed/instances/frame_indices",
+        n_frames=3,
+    )
+    refined.attrs["detect_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "reviewer",
+        "authority_scope": "selector_ineligible_training_candidate",
+        "selector_ineligible_candidate_receipt": {
+            "schema_id": "palette.selector_ineligible_detection_review_receipt",
+            "schema_version": 1,
+            "status": "complete",
+            "authority_scope": "selector_ineligible_training_candidate",
+            "source_refined_detect_run": "reviewed",
+            "frame_decision_path": "detect_frame_decision_runs/reviewed",
+            "frame_decision_digest": supervision.source_decision_digest,
+            "frame_decision_would_materialize": False,
+            "frame_count": 3,
+            "instance_count": 3,
+            "positive_frame_count": 2,
+            "negative_frame_count": 1,
+            "parent_selectors_updated": False,
+            "stage_selector_eligible": False,
+            "metadata_mode": "direct_mutable",
+        },
+        "authoritative_approval": {
+            "status": "deferred_selector_ineligible",
+            "reason_code": "CANDIDATE_ONLY",
+            "run": "reviewed",
+        },
+    }
     zarr.consolidate_metadata(str(path))
     return path
 
@@ -820,6 +911,15 @@ def test_sampled_images_full_artifact_publishes_reviewed_rows_atomically(
     assert result["materialization"]["positive_frame_count"] == 2
     assert result["materialization"]["negative_frame_count"] == 1
     assert result["materialization"]["pixel_rows_verified"] == 3
+    assert result["detect_run"] == "detected"
+    assert len(result["composition_digest"]) == 64
+    bound = bind_training_dataset_composition(
+        destination,
+        crop_run_id="reviewed_4px",
+        detect_run_id="detected",
+        refined_run_id="reviewed",
+    )
+    assert bound.binding["payload_digest"] == result["composition_digest"]
     root = zarr.open_group(str(destination), mode="r", use_consolidated=True)
     run = root["crop_runs/reviewed_4px"]
     assert run.attrs["training_materialization_provider"] == (
@@ -827,21 +927,22 @@ def test_sampled_images_full_artifact_publishes_reviewed_rows_atomically(
     )
     assert run.attrs["summary_statistics"]["padded_rows"] == 1
     np.testing.assert_array_equal(run["frame_indices"][:], [0, 2, 2])
-    np.testing.assert_array_equal(
-        run["frame_row_offsets"][:], [0, 1, 1, 3]
-    )
-    np.testing.assert_array_equal(
-        run["source_frame_indices"][:], [10, 30, 30]
-    )
+    np.testing.assert_array_equal(run["frame_row_offsets"][:], [0, 1, 1, 3])
+    np.testing.assert_array_equal(run["source_frame_indices"][:], [10, 30, 30])
     np.testing.assert_array_equal(run["instance_key"][:], [101, 102, 103])
     assert run["bbox_norm_coords"].dtype == np.dtype(np.float32)
     expected_padded = np.zeros((4, 4), dtype=np.uint8)
-    expected_padded[1:, 1:] = np.asarray(
-        root["raw_video/images_full"][0, :3, :3]
-    )
+    expected_padded[1:, 1:] = np.asarray(root["raw_video/images_full"][0, :3, :3])
     np.testing.assert_array_equal(run["roi_images"][0], expected_padded)
     assert root.attrs["stage_selector_eligible"] is False
     assert root.attrs["registry_activation"] == "deferred"
+    detection_binding = root.attrs[TRAINING_DATASET_COMPOSITION_ATTRIBUTE]["payload"][
+        "review_surfaces"
+    ]["detection"]
+    assert detection_binding["review_authority_scope"] == (
+        "selector_ineligible_training_candidate"
+    )
+    assert len(detection_binding["review_status_digest"]) == 64
     assert "crop_runs" not in zarr.open_group(
         str(base), mode="r", use_consolidated=True
     )
@@ -863,6 +964,37 @@ def test_sampled_images_full_artifact_fails_closed_on_unreviewed_frame(
     with pytest.raises(
         ValueError,
         match="incomplete|complete bound positive/negative",
+    ):
+        create_sampled_images_full_training_crop_artifact(
+            destination=destination,
+            base_training_zarr=base,
+            run_id="reviewed_4px",
+            refined_run_id="reviewed",
+            scratch_root=scratch,
+            roi_size_wh=(4, 4),
+        )
+
+    assert not destination.exists()
+
+
+def test_sampled_images_full_artifact_fails_closed_on_stale_approval_receipt(
+    tmp_path: Path,
+) -> None:
+    base = _make_reviewed_sampled_images_full_base(tmp_path)
+    direct = zarr.open_group(str(base), mode="a", use_consolidated=False)
+    refined = direct["refined_detect_runs/reviewed"]
+    review = dict(refined.attrs["detect_review_status"])
+    receipt = dict(review["selector_ineligible_candidate_receipt"])
+    receipt["frame_decision_digest"] = "0" * 64
+    review["selector_ineligible_candidate_receipt"] = receipt
+    refined.attrs["detect_review_status"] = review
+    destination = tmp_path / "stale_approval_must_not_publish.zarr"
+    scratch = tmp_path / "node-local" / "stale-approval"
+    scratch.mkdir(parents=True)
+
+    with pytest.raises(
+        TrainingDatasetCompositionError,
+        match="approval receipt is stale or malformed",
     ):
         create_sampled_images_full_training_crop_artifact(
             destination=destination,
@@ -934,9 +1066,12 @@ def test_enrich_sampled_training_dataset_preserves_detection_review(
     np.testing.assert_array_equal(
         root["crop_runs/crop_v2_composed/roi_images"][:], pixels
     )
-    assert root.attrs[TRAINING_DATASET_COMPOSITION_ATTRIBUTE]["payload"][
-        "review_surfaces"
-    ]["detection"]["row_identity"] == "instance_key"
+    assert (
+        root.attrs[TRAINING_DATASET_COMPOSITION_ATTRIBUTE]["payload"][
+            "review_surfaces"
+        ]["detection"]["row_identity"]
+        == "instance_key"
+    )
 
 
 def test_instance_key_selection_preserves_multiple_rows_in_one_frame(
@@ -1043,9 +1178,9 @@ def test_composed_enrichment_requires_detection_review_approval(
         _make_external_cache_materialization(tmp_path)
     )
     target = zarr.open_group(str(target_path), mode="a", use_consolidated=False)
-    del target[
-        "refined_detect_runs/refined_detect_review_seed"
-    ].attrs["detect_review_status"]
+    del target["refined_detect_runs/refined_detect_review_seed"].attrs[
+        "detect_review_status"
+    ]
     scratch = tmp_path / "node-local" / "unapproved"
     scratch.mkdir(parents=True)
 

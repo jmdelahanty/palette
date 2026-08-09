@@ -48,7 +48,6 @@ from fisheye.utils.regenerate_training_crops_pynvvc import (
     regenerate_training_crops_pynvvc,
 )
 
-
 TRAINING_CROP_PUBLICATION_SCHEMA_ID = (
     "palette.training_crop_materialization_publication"
 )
@@ -59,9 +58,7 @@ TRAINING_CROP_PUBLICATION_POLICY = (
 TRAINING_CROP_PUBLICATION_ROLLBACK_POLICY = (
     "retain_failed_owner_bound_selector_ineligible_child_v1"
 )
-TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID = (
-    "palette.training_crop_artifact_publication"
-)
+TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID = "palette.training_crop_artifact_publication"
 TRAINING_ARTIFACT_PUBLICATION_SCHEMA_VERSION = 1
 TRAINING_DATASET_ENRICHMENT_SCHEMA_ID = "palette.training_dataset_enrichment"
 TRAINING_DATASET_ENRICHMENT_SCHEMA_VERSION = 1
@@ -172,9 +169,7 @@ def publish_training_crop_materialization(
             dry_run=False,
         )
         local_run = local_archive / "crop_runs" / candidate
-        local_group = zarr.open_group(
-            str(local_run), mode="a", use_consolidated=False
-        )
+        local_group = zarr.open_group(str(local_run), mode="a", use_consolidated=False)
         mark_run_started(local_group, run_name=candidate, stage="crop")
         local_group.attrs["stage_selector_eligible"] = False
         local_group.attrs["immutable_training_materialization"] = True
@@ -385,9 +380,7 @@ def create_training_crop_artifact(
     if target.exists():
         raise FileExistsError(f"Training artifact already exists: {target}")
     if not base_archive.is_dir() or base_archive.suffix != ".zarr":
-        raise FileNotFoundError(
-            f"Base sampled training Zarr not found: {base_archive}"
-        )
+        raise FileNotFoundError(f"Base sampled training Zarr not found: {base_archive}")
     base = validate_training_detection_review_base(
         base_archive,
         detect_run_id=detect_run_id,
@@ -562,18 +555,31 @@ def create_sampled_images_full_training_crop_artifact(
     if target.exists():
         raise FileExistsError(f"Training artifact already exists: {target}")
     if not base_archive.is_dir() or base_archive.suffix != ".zarr":
-        raise FileNotFoundError(
-            f"Base sampled training Zarr not found: {base_archive}"
-        )
+        raise FileNotFoundError(f"Base sampled training Zarr not found: {base_archive}")
     if not candidate or "/" in candidate or candidate.startswith("."):
         raise ValueError("run_id must be one safe non-hidden child-group name.")
     if not source_refined or "/" in source_refined or source_refined.startswith("."):
-        raise ValueError(
-            "refined_run_id must be one safe non-hidden child-group name."
-        )
+        raise ValueError("refined_run_id must be one safe non-hidden child-group name.")
     base_root = open_zarr_group_direct(base_archive, mode="r")
     if str(base_root.attrs.get("zarr_purpose") or "").strip().lower() != "training":
         raise ValueError("Base sampled artifact must be a training-purpose Zarr.")
+    refined_parent = base_root.get("refined_detect_runs")
+    if refined_parent is None or source_refined not in refined_parent:
+        raise ValueError(
+            f"Base sampled artifact lacks refined detection run {source_refined!r}."
+        )
+    source_detect = str(
+        refined_parent[source_refined].attrs.get("source_detect_run") or ""
+    ).strip()
+    if not source_detect:
+        raise ValueError(
+            "Sampled refined detection run must bind one source_detect_run."
+        )
+    base = validate_training_detection_review_base(
+        base_archive,
+        detect_run_id=source_detect,
+        refined_run_id=source_refined,
+    )
 
     with tempfile.TemporaryDirectory(
         prefix=f"palette-sampled-training-artifact-{candidate}-",
@@ -608,6 +614,8 @@ def create_sampled_images_full_training_crop_artifact(
             "materialization_provider": "sampled_training_images_full",
             "source_images_path": "raw_video/images_full",
             "source_refined_detect_run": source_refined,
+            "source_detect_run": base.detect_run_id,
+            "source_detect_review_status_digest": (base.refined_review_status_digest),
             "source_frame_decision_path": (
                 f"detect_frame_decision_runs/{source_refined}"
             ),
@@ -621,9 +629,7 @@ def create_sampled_images_full_training_crop_artifact(
                     "--create-artifact --sampled-images-full"
                 ),
                 params={
-                    "publication_schema_id": (
-                        TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID
-                    ),
+                    "publication_schema_id": (TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID),
                     "materialization_provider": "sampled_training_images_full",
                     "roi_size_wh": [
                         int(roi_size_wh[0]),
@@ -634,6 +640,7 @@ def create_sampled_images_full_training_crop_artifact(
                 },
                 input_run_ids={
                     "base_training_zarr": str(base_archive),
+                    "source_detect_run": base.detect_run_id,
                     "source_refined_detect_run": source_refined,
                     "source_frame_decision_path": (
                         f"detect_frame_decision_runs/{source_refined}"
@@ -641,12 +648,25 @@ def create_sampled_images_full_training_crop_artifact(
                 },
             ),
         }
-        consolidate_metadata_capture_expected_warnings(local_archive)
-        local_bound = bind_training_crop_materialization(
+        _base, _crop, composition = build_training_dataset_composition(
             local_archive,
-            run_id=candidate,
+            crop_run_id=candidate,
+            detect_run_id=base.detect_run_id,
+            refined_run_id=base.refined_run_id,
+            require_consolidated_crop=False,
         )
-        if local_bound.binding["payload_digest"] != materialization["binding_digest"]:
+        local_root.attrs[TRAINING_DATASET_COMPOSITION_ATTRIBUTE] = composition
+        consolidate_metadata_capture_expected_warnings(local_archive)
+        local_bound = bind_training_dataset_composition(
+            local_archive,
+            crop_run_id=candidate,
+            detect_run_id=base.detect_run_id,
+            refined_run_id=base.refined_run_id,
+        )
+        if (
+            local_bound.crop.binding["payload_digest"]
+            != materialization["binding_digest"]
+        ):
             raise RuntimeError(
                 "Final sampled crop binding differs from the writer receipt."
             )
@@ -668,13 +688,15 @@ def create_sampled_images_full_training_crop_artifact(
                     raise RuntimeError(
                         "Training artifact physical copy differs from node-local source."
                     )
-                hidden_bound = bind_training_crop_materialization(
+                hidden_bound = bind_training_dataset_composition(
                     hidden,
-                    run_id=candidate,
+                    crop_run_id=candidate,
+                    detect_run_id=base.detect_run_id,
+                    refined_run_id=base.refined_run_id,
                 )
                 if hidden_bound.binding != local_bound.binding:
                     raise RuntimeError(
-                        "Hidden sampled crop binding differs from node-local source."
+                        "Hidden sampled dataset binding differs from node-local source."
                     )
                 if target.exists():
                     raise FileExistsError(
@@ -686,17 +708,24 @@ def create_sampled_images_full_training_crop_artifact(
                     shutil.rmtree(hidden)
                 raise
 
-    final_bound = bind_training_crop_materialization(target, run_id=candidate)
+    final_bound = bind_training_dataset_composition(
+        target,
+        crop_run_id=candidate,
+        detect_run_id=base.detect_run_id,
+        refined_run_id=base.refined_run_id,
+    )
     return {
         "schema_id": TRAINING_ARTIFACT_PUBLICATION_SCHEMA_ID,
         "schema_version": TRAINING_ARTIFACT_PUBLICATION_SCHEMA_VERSION,
         "status": "complete",
         "destination": str(target),
         "run_id": candidate,
-        "run_path": final_bound.run_path,
-        "row_count": final_bound.row_count,
-        "roi_shape": list(final_bound.roi_shape),
-        "binding_digest": final_bound.binding["payload_digest"],
+        "run_path": final_bound.crop.run_path,
+        "row_count": final_bound.crop.row_count,
+        "roi_shape": list(final_bound.crop.roi_shape),
+        "binding_digest": final_bound.crop.binding["payload_digest"],
+        "composition_digest": final_bound.binding["payload_digest"],
+        "detect_run": final_bound.base.detect_run_id,
         "source_refined_detect_run": source_refined,
         "physical_inventory": local_inventory.to_json(),
         "materialization": materialization,
