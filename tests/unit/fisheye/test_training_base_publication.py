@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.shared.zarr import training_base_publication as publication_mod
+from fisheye.training import training_base_publication as publication_mod
 from fisheye.shared.zarr.training_image_storage import (
     SAMPLED_TRAINING_IMAGE_STORAGE_SCHEMA_ID,
     sampled_training_downsample_transform,
