@@ -790,6 +790,130 @@ def _group_label(group_key_json: Any) -> str:
     return ", ".join(parts) if parts else "all"
 
 
+_CLUSTER_COMPUTED_STATUSES = {"computed", "boundary_zero_variance"}
+
+
+def _statistics_inference_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Choose the displayed inferential result without hiding alternatives.
+
+    A requested but unavailable clustered analysis must not silently fall back
+    to the naïve recording-level p/q values. Those values remain available in
+    explicitly labelled fields for diagnosis. An explicit ``cluster=none``
+    publication may use the naïve result, and a legacy row remains visibly
+    legacy because it was admitted only through the opt-in compatibility
+    adapter.
+    """
+
+    cluster_mode = row.get("cluster_mode")
+    cluster_status = row.get("cluster_status")
+    if cluster_mode == "session" and cluster_status in _CLUSTER_COMPUTED_STATUSES:
+        return {
+            "inference_policy": "prefer_computed_clustered_v1",
+            "inference_kind": "clustered",
+            "inference_label": "Session-clustered inference",
+            "inference_estimate": _round(_safe_float(row.get("clustered_mean_difference"))),
+            "inference_standard_error": _round(
+                _safe_float(row.get("clustered_standard_error"))
+            ),
+            "inference_ci_low": _round(_safe_float(row.get("clustered_ci_low"))),
+            "inference_ci_high": _round(_safe_float(row.get("clustered_ci_high"))),
+            "inference_p_value": _round(_safe_float(row.get("clustered_p_value"))),
+            "inference_q_value": _round(_safe_float(row.get("clustered_q_value"))),
+            "inference_method": row.get("cluster_method"),
+            "inference_message": "Clustered inference is the preferred result for this row.",
+        }
+    if cluster_mode == "session":
+        reason = str(row.get("cluster_reason") or "unspecified")
+        return {
+            "inference_policy": "prefer_computed_clustered_v1",
+            "inference_kind": "unavailable",
+            "inference_label": "Clustered inference unavailable",
+            "inference_estimate": None,
+            "inference_standard_error": None,
+            "inference_ci_low": None,
+            "inference_ci_high": None,
+            "inference_p_value": None,
+            "inference_q_value": None,
+            "inference_method": row.get("cluster_method"),
+            "inference_message": (
+                "Clustered inference unavailable; naïve p/q are shown only in "
+                f"explicitly labelled diagnostic columns. Reason: {reason}."
+            ),
+        }
+    if cluster_mode == "none" and cluster_status == "disabled":
+        return {
+            "inference_policy": "prefer_computed_clustered_v1",
+            "inference_kind": "naive_cluster_disabled",
+            "inference_label": "Naïve inference (clustering disabled)",
+            "inference_estimate": _round(_safe_float(row.get("mean_difference"))),
+            "inference_standard_error": None,
+            "inference_ci_low": _round(_safe_float(row.get("ci_low"))),
+            "inference_ci_high": _round(_safe_float(row.get("ci_high"))),
+            "inference_p_value": _round(_safe_float(row.get("p_value"))),
+            "inference_q_value": _round(_safe_float(row.get("q_value"))),
+            "inference_method": row.get("test_method"),
+            "inference_message": (
+                "The publication explicitly disabled clustering; the displayed "
+                "result is labelled naïve inference."
+            ),
+        }
+    return {
+        "inference_policy": "prefer_computed_clustered_v1",
+        "inference_kind": "legacy_naive",
+        "inference_label": "Legacy naïve inference",
+        "inference_estimate": _round(_safe_float(row.get("mean_difference"))),
+        "inference_standard_error": None,
+        "inference_ci_low": _round(_safe_float(row.get("ci_low"))),
+        "inference_ci_high": _round(_safe_float(row.get("ci_high"))),
+        "inference_p_value": _round(_safe_float(row.get("p_value"))),
+        "inference_q_value": _round(_safe_float(row.get("q_value"))),
+        "inference_method": row.get("test_method"),
+        "inference_message": (
+            "Explicit legacy compatibility row; no clustered-inference contract "
+            "is available."
+        ),
+    }
+
+
+def _statistics_inference_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        counts[str(row.get("inference_kind") or "unknown")] += 1
+    if counts.get("unavailable"):
+        message = (
+            f"Clustered inference unavailable for {counts['unavailable']} of "
+            f"{len(rows)} rows. Naïve p/q remain diagnostic only for those rows."
+        )
+        status = "clustered_unavailable"
+    elif counts.get("clustered"):
+        message = (
+            "Session-clustered estimates, confidence intervals, p-values, and "
+            "q-values are the preferred inferential results."
+        )
+        status = "clustered_preferred"
+    elif counts.get("naive_cluster_disabled"):
+        message = (
+            "Clustering was explicitly disabled by the statistics publication; "
+            "displayed inferential results are labelled naïve."
+        )
+        status = "clustering_disabled"
+    elif counts.get("legacy_naive"):
+        message = (
+            "Statistics were admitted through the explicit legacy adapter and "
+            "contain naïve inference only."
+        )
+        status = "legacy_naive"
+    else:
+        message = "No statistical result rows matched the current filters."
+        status = "empty"
+    return {
+        "policy": "prefer_computed_clustered_v1",
+        "status": status,
+        "message": message,
+        "counts": dict(sorted(counts.items())),
+    }
+
+
 def query_group_statistics(
     context: ViewerContext,
     *,
@@ -822,8 +946,7 @@ def query_group_statistics(
 
     out_rows: list[dict[str, Any]] = []
     for row in rows:
-        out_rows.append(
-            {
+        projected = {
                 "metric_family": row.get("metric_family"),
                 "metric_name": row.get("metric_name"),
                 "metric_unit": row.get("metric_unit"),
@@ -847,6 +970,35 @@ def query_group_statistics(
                 "ci_estimand": row.get("ci_estimand"),
                 "p_value": _round(_safe_float(row.get("p_value"))),
                 "q_value": _round(_safe_float(row.get("q_value"))),
+                "naive_estimate": _round(_safe_float(row.get("mean_difference"))),
+                "naive_ci_low": _round(_safe_float(row.get("ci_low"))),
+                "naive_ci_high": _round(_safe_float(row.get("ci_high"))),
+                "naive_p_value": _round(_safe_float(row.get("p_value"))),
+                "naive_q_value": _round(_safe_float(row.get("q_value"))),
+                "naive_test_method": row.get("test_method"),
+                "multiple_comparison_family": row.get("multiple_comparison_family"),
+                "cluster_mode": row.get("cluster_mode"),
+                "cluster_unit": row.get("cluster_unit"),
+                "cluster_method": row.get("cluster_method"),
+                "cluster_status": row.get("cluster_status"),
+                "cluster_reason": row.get("cluster_reason"),
+                "cluster_count": _safe_int(row.get("cluster_count")),
+                "clustered_unit_count": _safe_int(row.get("clustered_unit_count")),
+                "clustered_mean_difference": _round(
+                    _safe_float(row.get("clustered_mean_difference"))
+                ),
+                "clustered_standard_error": _round(
+                    _safe_float(row.get("clustered_standard_error"))
+                ),
+                "clustered_ci_low": _round(_safe_float(row.get("clustered_ci_low"))),
+                "clustered_ci_high": _round(_safe_float(row.get("clustered_ci_high"))),
+                "clustered_p_value": _round(_safe_float(row.get("clustered_p_value"))),
+                "clustered_q_value": _round(_safe_float(row.get("clustered_q_value"))),
+                "session_variance": _round(_safe_float(row.get("session_variance"))),
+                "residual_variance": _round(_safe_float(row.get("residual_variance"))),
+                "intraclass_correlation": _round(
+                    _safe_float(row.get("intraclass_correlation"))
+                ),
                 "test_method": row.get("test_method"),
                 "missing_policy": row.get("missing_policy"),
                 "parameters_json": row.get("parameters_json"),
@@ -856,7 +1008,8 @@ def query_group_statistics(
                 "exploratory": bool(row.get("exploratory")),
                 "stat_result_id": row.get("stat_result_id"),
             }
-        )
+        projected.update(_statistics_inference_projection(row))
+        out_rows.append(projected)
     out_rows.sort(
         key=lambda row: (
             str(row.get("metric_family") or ""),
@@ -877,6 +1030,7 @@ def query_group_statistics(
         "configured_row_count": _safe_int(row_counts.get(STATISTICS_TABLE)),
         "row_count": len(out_rows),
         "status_counts": manifest.get("status_counts"),
+        "inference_summary": _statistics_inference_summary(out_rows),
         "rows": out_rows,
     }
 

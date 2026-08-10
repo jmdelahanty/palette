@@ -19,6 +19,10 @@ from fisheye.analytics_exports.publication import (
     manifest_selected_part_files_from_payload,
     validate_publication_envelope,
 )
+from fisheye.analytics_exports.validation import (
+    ExportValidationError,
+    validate_export_payload,
+)
 
 
 @dataclass(frozen=True)
@@ -418,9 +422,39 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
             )
             continue
         capability_statuses = resolve_capabilities(columns_by_table)
-        capabilities = tuple(
+        metadata_capabilities = tuple(
             status.capability_id for status in capability_statuses if status.available
         )
+        # Selection is a correctness boundary, not a metadata preview. The
+        # shared validator verifies every selected part, digest, exact Arrow
+        # schema, row count, registry-identity envelope, and publication
+        # inventory before this base export can enter the selectable catalog.
+        try:
+            validation = validate_export_payload(root, payload_run_id, payload)
+        except (ExportValidationError, OSError, ValueError) as exc:
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="invalid_export_payload",
+                    message=str(exc),
+                )
+            )
+            continue
+        capabilities = tuple(
+            str(value) for value in validation.get("capabilities", ())
+        )
+        if capabilities != metadata_capabilities:
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="capability_validation_mismatch",
+                    message=(
+                        "Full payload validation capabilities differ from the "
+                        "catalog metadata projection."
+                    ),
+                )
+            )
+            continue
 
         collection = payload.get("collection_manifest")
         if not isinstance(collection, Mapping):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,8 @@ from fisheye.group_analytics_viewer.query import (
     query_spatial_occupancy,
     rebin_position_occupancy_rows,
 )
+from fisheye.group_analytics_viewer import query as viewer_query
+from fisheye.analytics_exports.publication import export_manifest_path
 from fisheye.group_statistics.goodcopbadcop import (
     GoodCopBadCopStatisticsConfig,
     compute_goodcopbadcop_descriptive_summaries,
@@ -88,6 +91,18 @@ def test_group_analytics_summary_reports_sample_std_and_sem() -> None:
     assert summary["sem"] == pytest.approx(2.0 / (3.0 ** 0.5))
 
 
+def test_browser_statistics_table_separates_displayed_and_naive_inference() -> None:
+    script = (
+        Path(__file__).resolve().parents[3]
+        / "src/fisheye/group_analytics_viewer/static/group_viewer.js"
+    ).read_text(encoding="utf-8")
+
+    assert "statisticsInferenceColumns" in script
+    assert 'key: "inference_p_value", label: "Displayed p"' in script
+    assert 'key: "naive_p_value", label: "Naïve p (diagnostic)"' in script
+    assert 'key: "cluster_reason", label: "Cluster reason"' in script
+
+
 def test_unknown_chaser_roles_are_resolved_by_recording_and_object_column() -> None:
     distance_rows = [
         {
@@ -120,6 +135,130 @@ def test_unknown_chaser_roles_are_resolved_by_recording_and_object_column() -> N
 
     assert [row["behavior_class"] for row in enriched] == ["aggressive", "inert"]
     assert [row["raw_color_hex"] for row in enriched] == ["#ff0000", "#1600ff"]
+
+
+def _statistics_projection_row(
+    *, cluster_mode: str, cluster_status: str
+) -> dict[str, object]:
+    return {
+        "stat_result_id": "stat_1",
+        "metric_family": "chaser_distance",
+        "metric_name": "p50_distance_mm",
+        "metric_unit": "mm",
+        "contrast_name": "post-vs-pre",
+        "condition_a": "pre_event",
+        "condition_b": "post_event",
+        "group_key_json": "{}",
+        "unit_count": 8,
+        "paired_unit_count": 8,
+        "excluded_unit_count": 0,
+        "mean_a": 2.0,
+        "mean_b": 3.0,
+        "mean_difference": 1.0,
+        "median_difference": 0.9,
+        "std_difference": 0.4,
+        "effect_size": 0.5,
+        "effect_size_kind": "rank_biserial",
+        "ci_low": 0.2,
+        "ci_high": 1.8,
+        "ci_estimand": "median_difference",
+        "p_value": 0.03,
+        "q_value": 0.06,
+        "multiple_comparison_family": "primary|chaser_distance",
+        "cluster_mode": cluster_mode,
+        "cluster_unit": "session",
+        "cluster_method": (
+            "session_random_intercept_reml_v1" if cluster_mode == "session" else "none"
+        ),
+        "cluster_status": cluster_status,
+        "cluster_reason": (
+            "no_repeated_session_observations"
+            if cluster_status == "unavailable"
+            else None
+        ),
+        "cluster_count": 4 if cluster_mode == "session" else 0,
+        "clustered_unit_count": 8,
+        "clustered_mean_difference": 1.1 if cluster_status == "computed" else None,
+        "clustered_standard_error": 0.2 if cluster_status == "computed" else None,
+        "clustered_ci_low": 0.7 if cluster_status == "computed" else None,
+        "clustered_ci_high": 1.5 if cluster_status == "computed" else None,
+        "clustered_p_value": 0.01 if cluster_status == "computed" else None,
+        "clustered_q_value": 0.02 if cluster_status == "computed" else None,
+        "session_variance": 0.05 if cluster_status == "computed" else None,
+        "residual_variance": 0.15 if cluster_status == "computed" else None,
+        "intraclass_correlation": 0.25 if cluster_status == "computed" else None,
+        "test_method": "wilcoxon_signed_rank",
+        "missing_policy": "paired_complete_recordings",
+        "parameters_json": "{}",
+        "status": "computed",
+        "skip_reason": None,
+        "primary": True,
+        "exploratory": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("cluster_mode", "cluster_status", "expected_kind", "expected_p", "summary_status"),
+    [
+        ("session", "computed", "clustered", 0.01, "clustered_preferred"),
+        ("session", "unavailable", "unavailable", None, "clustered_unavailable"),
+        ("none", "disabled", "naive_cluster_disabled", 0.03, "clustering_disabled"),
+    ],
+)
+def test_group_statistics_query_exposes_explicit_clustered_inference_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cluster_mode: str,
+    cluster_status: str,
+    expected_kind: str,
+    expected_p: float | None,
+    summary_status: str,
+) -> None:
+    context = ViewerContext(export_root=tmp_path, export_run_id="base_export")
+    manifest_path = export_manifest_path(tmp_path, "stats_projection")
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "export_run_id": "stats_projection",
+                "source_export_run_id": "base_export",
+                "created_at_utc": "2026-08-10T00:00:00+00:00",
+                "row_counts_by_table": {"group_statistical_summary": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        viewer_query, "resolve_statistics_run_id", lambda _context: "stats_projection"
+    )
+    monkeypatch.setattr(
+        viewer_query,
+        "_load_table_rows_for_run",
+        lambda _context, _table, _run: [
+            _statistics_projection_row(
+                cluster_mode=cluster_mode, cluster_status=cluster_status
+            )
+        ],
+    )
+
+    result = query_group_statistics(context)
+
+    row = result["rows"][0]
+    assert result["inference_summary"]["status"] == summary_status
+    assert row["inference_kind"] == expected_kind
+    assert row["inference_p_value"] == expected_p
+    assert row["naive_p_value"] == pytest.approx(0.03)
+    assert row["cluster_mode"] == cluster_mode
+    assert row["cluster_status"] == cluster_status
+    if cluster_status == "computed":
+        assert row["clustered_mean_difference"] == pytest.approx(1.1)
+        assert row["intraclass_correlation"] == pytest.approx(0.25)
+    else:
+        assert row["clustered_mean_difference"] is None
+        assert row["intraclass_correlation"] is None
+    if cluster_status == "unavailable":
+        assert "Clustered inference unavailable" in row["inference_message"]
+        assert row["inference_q_value"] is None
 
 
 def _make_goodcopbadcop_export(

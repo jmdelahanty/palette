@@ -68,6 +68,44 @@ function tableHtml(rows, columns) {
   return html;
 }
 
+function statisticsInferenceMeta(data) {
+  const summary = data.inference_summary || {};
+  const message = summary.message || "Inference policy unavailable";
+  return `${data.stats_run_id} | ${fmt(data.row_count, 0)} rows | ${message}`;
+}
+
+function statisticsInferenceColumns({ includeFamily = false, includeGroup = false } = {}) {
+  const columns = [];
+  if (includeFamily) columns.push({ key: "metric_family", label: "Family" });
+  columns.push(
+    { key: "metric_name", label: "Metric" },
+    { key: "contrast_name", label: "Contrast" }
+  );
+  if (includeGroup) columns.push({ key: "group", label: "Group" });
+  columns.push(
+    { key: "paired_unit_count", label: "N paired" },
+    { key: "inference_label", label: "Displayed inference" },
+    { key: "inference_estimate", label: "Displayed estimate" },
+    { key: "inference_ci_low", label: "Displayed CI low" },
+    { key: "inference_ci_high", label: "Displayed CI high" },
+    { key: "inference_p_value", label: "Displayed p" },
+    { key: "inference_q_value", label: "Displayed q" },
+    { key: "inference_method", label: "Displayed method" },
+    { key: "cluster_status", label: "Cluster status" },
+    { key: "cluster_reason", label: "Cluster reason" },
+    { key: "cluster_count", label: "Sessions" },
+    { key: "intraclass_correlation", label: "ICC" },
+    { key: "naive_estimate", label: "Naïve estimate" },
+    { key: "naive_ci_low", label: "Naïve CI low" },
+    { key: "naive_ci_high", label: "Naïve CI high" },
+    { key: "naive_p_value", label: "Naïve p (diagnostic)" },
+    { key: "naive_q_value", label: "Naïve q (diagnostic)" },
+    { key: "status", label: "Row status" },
+    { key: "skip_reason", label: "Skip reason" }
+  );
+  return columns;
+}
+
 function populateSelect(selectId, options, valueKey, labelKey) {
   const select = document.getElementById(selectId);
   select.innerHTML = "";
@@ -1156,21 +1194,11 @@ async function loadCraStatistics() {
     return;
   }
   document.getElementById("cra-statistics-meta").textContent =
-    `${data.stats_run_id} | ${fmt(data.row_count, 0)} rows | ${data.source_export_run_id}`;
-  document.getElementById("cra-statistics-table").innerHTML = tableHtml(data.rows, [
-    { key: "metric_name", label: "Metric" },
-    { key: "contrast_name", label: "Contrast" },
-    { key: "paired_unit_count", label: "N paired" },
-    { key: "mean_difference", label: "Mean delta" },
-    { key: "median_difference", label: "Median delta" },
-    { key: "ci_low", label: "CI low" },
-    { key: "ci_high", label: "CI high" },
-    { key: "effect_size", label: "Rank-biserial" },
-    { key: "p_value", label: "p" },
-    { key: "q_value", label: "q" },
-    { key: "test_method", label: "Test" },
-    { key: "status", label: "Status" },
-  ]);
+    statisticsInferenceMeta(data);
+  document.getElementById("cra-statistics-table").innerHTML = tableHtml(
+    data.rows,
+    statisticsInferenceColumns()
+  );
 }
 
 async function loadCraQuadrantDensity() {
@@ -1314,21 +1342,11 @@ async function loadCraNearFieldStatistics() {
     return;
   }
   document.getElementById("cra-near-field-statistics-meta").textContent =
-    `${data.stats_run_id} | ${fmt(data.row_count, 0)} rows | ${data.source_export_run_id}`;
-  document.getElementById("cra-near-field-statistics-table").innerHTML = tableHtml(data.rows, [
-    { key: "metric_name", label: "Metric" },
-    { key: "contrast_name", label: "Contrast" },
-    { key: "paired_unit_count", label: "N paired" },
-    { key: "mean_difference", label: "Mean delta" },
-    { key: "median_difference", label: "Median delta" },
-    { key: "ci_low", label: "CI low" },
-    { key: "ci_high", label: "CI high" },
-    { key: "effect_size", label: "Rank-biserial" },
-    { key: "p_value", label: "p" },
-    { key: "q_value", label: "q" },
-    { key: "test_method", label: "Test" },
-    { key: "status", label: "Status" },
-  ]);
+    statisticsInferenceMeta(data);
+  document.getElementById("cra-near-field-statistics-table").innerHTML = tableHtml(
+    data.rows,
+    statisticsInferenceColumns()
+  );
 }
 
 async function loadEgocentricSummary() {
@@ -1421,25 +1439,11 @@ async function loadStatistics() {
     return;
   }
   document.getElementById("statistics-meta").textContent =
-    `${data.stats_run_id} | ${fmt(data.row_count, 0)} rows | ${data.source_export_run_id}`;
-  document.getElementById("statistics-table").innerHTML = tableHtml(data.rows, [
-    { key: "metric_family", label: "Family" },
-    { key: "metric_name", label: "Metric" },
-    { key: "contrast_name", label: "Contrast" },
-    { key: "group", label: "Group" },
-    { key: "paired_unit_count", label: "N paired" },
-    { key: "mean_a", label: "Mean A" },
-    { key: "mean_b", label: "Mean B" },
-    { key: "mean_difference", label: "Delta" },
-    { key: "ci_low", label: "CI low" },
-    { key: "ci_high", label: "CI high" },
-    { key: "effect_size", label: "Effect" },
-    { key: "p_value", label: "p" },
-    { key: "q_value", label: "q" },
-    { key: "test_method", label: "Test" },
-    { key: "status", label: "Status" },
-    { key: "skip_reason", label: "Skip reason" },
-  ]);
+    statisticsInferenceMeta(data);
+  document.getElementById("statistics-table").innerHTML = tableHtml(
+    data.rows,
+    statisticsInferenceColumns({ includeFamily: true, includeGroup: true })
+  );
 }
 
 async function loadProvenance() {

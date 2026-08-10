@@ -16,6 +16,7 @@ from apps.marimo.components.group_analytics import (
     panel_control_spec,
     position_occupancy_heatmap_figure,
     sample_grain_status_rows,
+    statistics_inference_callout,
 )
 from fisheye.group_analytics_viewer.query import (
     egocentric_rebin_options,
@@ -45,6 +46,35 @@ def test_available_group_panels_follow_export_capabilities() -> None:
         "published_montages",
         "inventory",
     ]
+
+
+def test_statistics_inference_callout_never_hides_unavailable_clustering() -> None:
+    unavailable = statistics_inference_callout(
+        {
+            "inference_summary": {
+                "status": "clustered_unavailable",
+                "message": "Clustered inference unavailable for 2 of 3 rows.",
+            }
+        }
+    )
+    computed = statistics_inference_callout(
+        {
+            "inference_summary": {
+                "status": "clustered_preferred",
+                "message": "Session-clustered inference is preferred.",
+            }
+        }
+    )
+    missing = statistics_inference_callout({})
+
+    assert unavailable == {
+        "kind": "warn",
+        "message": "Clustered inference unavailable for 2 of 3 rows.",
+    }
+    assert computed["kind"] == "success"
+    assert "Session-clustered" in computed["message"]
+    assert missing["kind"] == "warn"
+    assert "do not interpret" in missing["message"]
 
 
 def test_sample_grain_status_is_scoped_to_selected_export() -> None:

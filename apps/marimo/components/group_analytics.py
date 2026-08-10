@@ -45,6 +45,32 @@ class PanelControlSpec:
     show_position_bins: bool = False
 
 
+def statistics_inference_callout(payload: Mapping[str, Any]) -> dict[str, str]:
+    """Return an explicit, presentation-neutral inference notice."""
+
+    summary = payload.get("inference_summary")
+    if not isinstance(summary, Mapping):
+        return {
+            "kind": "warn",
+            "message": (
+                "Inference policy metadata is unavailable; do not interpret "
+                "unlabelled p-values as clustered results."
+            ),
+        }
+    status = str(summary.get("status") or "unknown")
+    kind = {
+        "clustered_preferred": "success",
+        "clustered_unavailable": "warn",
+        "clustering_disabled": "info",
+        "legacy_naive": "info",
+        "empty": "info",
+    }.get(status, "warn")
+    return {
+        "kind": kind,
+        "message": str(summary.get("message") or "Inference status unavailable."),
+    }
+
+
 GROUP_PANEL_DEFINITIONS = (
     GroupPanelDefinition(
         "behavior",
@@ -1007,4 +1033,5 @@ __all__ = [
     "panel_control_spec",
     "position_occupancy_heatmap_figure",
     "sample_grain_status_rows",
+    "statistics_inference_callout",
 ]

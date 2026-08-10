@@ -38,6 +38,7 @@ def _():
         panel_control_spec,
         position_occupancy_heatmap_figure,
         sample_grain_status_rows,
+        statistics_inference_callout,
     )
     from fisheye.group_analytics_viewer.catalog import (
         discover_export_catalog,
@@ -129,6 +130,7 @@ def _():
         rebin_position_occupancy_rows,
         sample_grain_status_rows,
         select_export_run_id,
+        statistics_inference_callout,
     )
 
 
@@ -1037,6 +1039,7 @@ def _(
     selected_chasers,
     selected_windows,
     summary,
+    statistics_inference_callout,
 ):
     selected_panel = panel_labels[panel_picker.value]
 
@@ -1383,10 +1386,19 @@ def _(
         )
     elif selected_panel == "statistics":
         _stats = payloads.get("statistics", {})
+        _inference_notice = statistics_inference_callout(_stats)
         panel_output = mo.vstack(
             [
                 mo.md("## Linked statistics"),
-                mo.md("Rows come from the statistics export linked to this immutable base export."),
+                mo.md(
+                    "Rows come from the statistics export linked to this immutable base export. "
+                    "Displayed inference follows `prefer_computed_clustered_v1`; naïve fields "
+                    "remain separately labelled for diagnosis."
+                ),
+                mo.callout(
+                    mo.md(_inference_notice["message"]),
+                    kind=_inference_notice["kind"],
+                ),
                 _rows_table(_stats.get("rows", [])),
             ]
         )
