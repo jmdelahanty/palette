@@ -33,6 +33,30 @@
 - Do not rely on plain `git push` for Palette; it may fail with `Permission denied (publickey)` or sandbox DNS errors.
 - The `/groups` fast-forward must fail closed: do not use merge commits, rebase, reset, or dirty-checkout workarounds unless the user explicitly approves.
 
+## Required CI and Integration Rule
+
+<!-- required-ci-integration-contract:v1 -->
+
+- A branch must not be merged, integrated into another merge candidate,
+  fast-forwarded into the shared `/groups` checkout, used to activate a
+  production selector/publication, or described as complete or merge-ready
+  unless every required CI check for that change has completed successfully.
+- Failed, cancelled, timed-out, or accidentally skipped required checks are
+  blocking. A check skipped because an earlier gate failed is unrun evidence,
+  not a successful result. Do not dismiss a blocking result as pre-existing or
+  unrelated while still describing the branch as safe to merge.
+- An intentionally inapplicable check is acceptable only when the workflow
+  contract makes that condition explicit. Record the reason in the handoff.
+- A commit or branch with failing or unrun required checks may be pushed or
+  handed off only as explicitly incomplete work. The handoff must identify the
+  exact commit, every failing or unrun check, and the validation still needed.
+  An incomplete handoff is not authorization to merge, integrate, promote, or
+  update the shared checkout.
+- A commit-pinned experimental deployment may be used to obtain missing
+  evidence when the task requires it, but it must remain selector-ineligible,
+  must not alter production authority, and must be reported as not merge-ready
+  until the required CI is green.
+
 ## Sandbox Zarr Fallback Rule
 
 - If sync `zarr.open_group(...)` hangs in Codex sandbox, use metadata-file checks from `docs/sandbox_zarr_fallback.md`.

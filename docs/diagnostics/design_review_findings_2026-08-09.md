@@ -86,7 +86,16 @@ session — do not assume it is related to W0.1. Investigate, fix or quarantine 
 linked issue.
 Acceptance: full CI green on the working branch.
 
-**W0.5 — Process gate: no agent merges on red CI.**
+**W0.5 — Process gate: no agent merges on red CI. [IMPLEMENTED]**
+Status: **implemented** by the versioned Required CI and Integration Rule in
+`AGENTS.md`. Failed, cancelled, timed-out, accidentally skipped, and otherwise
+unrun required checks now block merge, integration, shared-checkout fast-forward,
+production selector activation, and any complete/merge-ready claim. The rule keeps
+an explicit boundary for incomplete handoffs and selector-ineligible commit-pinned
+experimental deployments needed to collect evidence. Those paths must disclose the
+exact commit and every failing or unrun check and do not authorize integration.
+`tests/unit/fisheye/test_agents_required_ci_policy.py` ratchets the normative rule.
+
 Two weeks of red CI normalized landing unverified work (8 boundary violations
 accumulated in exactly that window). Encode in `AGENTS.md`: no branch may be merged,
 integrated, promoted, or described as complete while its required CI is red. A
