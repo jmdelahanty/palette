@@ -219,6 +219,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--analysis-profile", type=Path, default=DEFAULT_ANALYSIS_PROFILE
     )
     parser.add_argument("--preset", default="chaser_v1")
+    parser.add_argument(
+        "--speed-level",
+        choices=("raw", "filtered", "smoothed", "averaged"),
+        required=True,
+        help=(
+            "Physical track-speed representation required by authoritative "
+            "epoch analytics."
+        ),
+    )
     parser.add_argument("--queue")
     parser.add_argument("--ncores", type=int, default=4)
     parser.add_argument("--mem-gb", type=int, default=16)
@@ -421,6 +430,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(args.analysis_profile),
             "--preset",
             str(args.preset),
+            "--speed-level",
+            str(args.speed_level),
             "--run-id",
             str(args.release_id),
             "--log-dir",

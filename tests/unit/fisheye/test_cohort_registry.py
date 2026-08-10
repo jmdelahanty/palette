@@ -494,6 +494,8 @@ def test_release_render_freezes_membership_and_wires_dependency_dag(
             str(cluster_repo),
             "--chaser-authority-manifest",
             str(authority_path),
+            "--speed-level",
+            "smoothed",
             "--skip-report",
         ]
     )
@@ -533,6 +535,14 @@ def test_release_render_freezes_membership_and_wires_dependency_dag(
     )
     assert submission["chaser_authority_manifest_path"] == str(authority_path)
     assert submission["chaser_authority_file_sha256"]
+    analytics_submission = next(
+        stage
+        for stage in submission["stages"]
+        if stage["name"] == "recording_analytics"
+    )
+    assert analytics_submission["command"][
+        analytics_submission["command"].index("--speed-level") + 1
+    ] == "smoothed"
     assert "--chaser-authority-manifest" in export_submission["command"]
     assert "--chaser-authority-sha256" in export_submission["command"]
     assert export_submission["command"][-2:] == [

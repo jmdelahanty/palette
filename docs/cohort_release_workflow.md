@@ -93,12 +93,19 @@ Render the complete release DAG without submitting it:
 scripts/submit_cohort_release_bsub.sh \
   --spec examples/cohorts/redscare_exact_protocol_v1.yaml \
   --release-id redscare_protocol_578a2c_v1 \
+  --chaser-authority-manifest /path/to/chaser_authority.json \
+  --speed-level smoothed \
   --queue short
 ```
 
 After inspecting `release_submission.json`, add `--submit`. Submission requires
 the workstation and cluster-visible Palette checkouts to be clean and at the
 same commit.
+
+`--speed-level` is a required scientific choice for authoritative epoch
+analytics and must name the physical track-speed representation (`raw`,
+`filtered`, `smoothed`, or `averaged`). Palette records and forwards the exact
+choice; the release front end does not infer or silently default it.
 
 The command freezes membership before any LSF submission and then creates this
 dependency chain:
@@ -142,6 +149,8 @@ scripts/submit_cohort_release_bsub.sh \
   --release-id chaser_dpf7_ab_v1 \
   --cohort-id chaser_dpf7_ab \
   --cohort-name "CHASER, DPF 7, AB background" \
+  --chaser-authority-manifest /path/to/chaser_authority.json \
+  --speed-level smoothed \
   --stimulus-mode CHASER \
   --protocol-hash 578a2cd8b3aa5762994b61a2405b94e1cf5012d68c1fa6bfcb76a5e04eb45492 \
   --dpf 7 \
