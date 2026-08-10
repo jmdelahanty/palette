@@ -57,7 +57,10 @@ from fisheye.group_statistics.legacy_arrow import (
 from fisheye.group_statistics.goodcopbadcop import (
     validate_goodcopbadcop_result_rows,
 )
-from fisheye.group_statistics.paired import bootstrap_median_ci, wilcoxon_signed_rank_p_value
+from fisheye.group_statistics.paired import (
+    bootstrap_median_ci,
+    wilcoxon_signed_rank_p_value,
+)
 
 from .catalog import discover_export_catalog, select_export_run_id
 from .models import HealthReport
@@ -348,7 +351,9 @@ def build_context(
     if resolved_stats in {"", "auto", "latest"}:
         resolved_stats = None
     if resolved_stats is not None:
-        resolved_stats = _validate_path_component(resolved_stats, label="statistics run ID")
+        resolved_stats = _validate_path_component(
+            resolved_stats, label="statistics run ID"
+        )
     return ViewerContext(
         export_root=resolved_root,
         export_run_id=resolved_run,
@@ -357,7 +362,9 @@ def build_context(
     )
 
 
-def table_dir(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> Path:
+def table_dir(
+    context: ViewerContext, table_name: str, *, export_run_id: str | None = None
+) -> Path:
     safe_table_name = _validate_path_component(table_name, label="table name")
     safe_run_id = _validate_path_component(
         export_run_id or context.export_run_id,
@@ -366,7 +373,9 @@ def table_dir(context: ViewerContext, table_name: str, *, export_run_id: str | N
     return context.export_root / "v1" / safe_table_name / f"export_run_id={safe_run_id}"
 
 
-def parquet_files(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> tuple[Path, ...]:
+def parquet_files(
+    context: ViewerContext, table_name: str, *, export_run_id: str | None = None
+) -> tuple[Path, ...]:
     safe_table_name = _validate_path_component(table_name, label="table name")
     safe_run_id = _validate_path_component(
         export_run_id or context.export_run_id,
@@ -385,7 +394,9 @@ def parquet_files(context: ViewerContext, table_name: str, *, export_run_id: str
 
 
 @lru_cache(maxsize=32)
-def _load_table_rows(export_root: str, export_run_id: str, table_name: str) -> tuple[dict[str, Any], ...]:
+def _load_table_rows(
+    export_root: str, export_run_id: str, table_name: str
+) -> tuple[dict[str, Any], ...]:
     import polars as pl
 
     context = ViewerContext(export_root=Path(export_root), export_run_id=export_run_id)
@@ -399,21 +410,35 @@ def _load_table_rows(export_root: str, export_run_id: str, table_name: str) -> t
 
 
 def load_table_rows(context: ViewerContext, table_name: str) -> list[dict[str, Any]]:
-    return [dict(row) for row in _load_table_rows(str(context.export_root), context.export_run_id, table_name)]
+    return [
+        dict(row)
+        for row in _load_table_rows(
+            str(context.export_root), context.export_run_id, table_name
+        )
+    ]
 
 
-def load_optional_table_rows(context: ViewerContext, table_name: str) -> list[dict[str, Any]]:
+def load_optional_table_rows(
+    context: ViewerContext, table_name: str
+) -> list[dict[str, Any]]:
     try:
         return load_table_rows(context, table_name)
     except FileNotFoundError:
         return []
 
 
-def _load_table_rows_for_run(context: ViewerContext, table_name: str, export_run_id: str) -> list[dict[str, Any]]:
-    return [dict(row) for row in _load_table_rows(str(context.export_root), export_run_id, table_name)]
+def _load_table_rows_for_run(
+    context: ViewerContext, table_name: str, export_run_id: str
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in _load_table_rows(str(context.export_root), export_run_id, table_name)
+    ]
 
 
-def _table_schema(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> list[dict[str, str]]:
+def _table_schema(
+    context: ViewerContext, table_name: str, *, export_run_id: str | None = None
+) -> list[dict[str, str]]:
     import polars as pl
 
     first = parquet_files(context, table_name, export_run_id=export_run_id)[0]
@@ -456,10 +481,7 @@ def _validate_statistics_manifest(
     has_stats_table = (
         isinstance(outputs, list)
         and STATISTICS_TABLE in {str(item) for item in outputs}
-    ) or (
-        isinstance(row_counts, Mapping)
-        and STATISTICS_TABLE in row_counts
-    )
+    ) or (isinstance(row_counts, Mapping) and STATISTICS_TABLE in row_counts)
     if not has_stats_table:
         raise ValueError(f"Statistics manifest does not declare {STATISTICS_TABLE}")
     is_current_exact = True
@@ -486,9 +508,11 @@ def _validate_statistics_manifest(
         manifest,
         STATISTICS_TABLE,
     )
-    expected_rows = _safe_int(row_counts.get(STATISTICS_TABLE)) if isinstance(
-        row_counts, Mapping
-    ) else None
+    expected_rows = (
+        _safe_int(row_counts.get(STATISTICS_TABLE))
+        if isinstance(row_counts, Mapping)
+        else None
+    )
     if expected_rows and not selected:
         raise ValueError("Statistics publication selects no summary part files")
     if any(not path.is_file() for path in selected):
@@ -504,10 +528,9 @@ def _validate_statistics_manifest(
             summary_rows,
             manifest,
         )
-        if (
-            isinstance(outputs, list)
-            and DESCRIPTIVE_TABLE in {str(item) for item in outputs}
-        ):
+        if isinstance(outputs, list) and DESCRIPTIVE_TABLE in {
+            str(item) for item in outputs
+        }:
             descriptive_rows = _load_table_rows_for_run(
                 context,
                 DESCRIPTIVE_TABLE,
@@ -629,7 +652,10 @@ def query_export_summary(context: ViewerContext) -> dict[str, Any]:
         diagnostics = []
     collection = manifest.get("collection_manifest")
     stats_run_id = resolve_statistics_run_id(context)
-    stats_summary: dict[str, Any] = {"available": stats_run_id is not None, "stats_run_id": stats_run_id}
+    stats_summary: dict[str, Any] = {
+        "available": stats_run_id is not None,
+        "stats_run_id": stats_run_id,
+    }
     if stats_run_id:
         stats_manifest_path = _manifest_path(context.export_root, stats_run_id)
         stats_manifest = _json_file(stats_manifest_path)
@@ -641,7 +667,9 @@ def query_export_summary(context: ViewerContext) -> dict[str, Any]:
                 "manifest_path": str(stats_manifest_path),
                 "created_at_utc": stats_manifest.get("created_at_utc"),
                 "row_count": _safe_int(stats_row_counts.get(STATISTICS_TABLE)),
-                "descriptive_row_count": _safe_int(stats_row_counts.get(DESCRIPTIVE_TABLE)),
+                "descriptive_row_count": _safe_int(
+                    stats_row_counts.get(DESCRIPTIVE_TABLE)
+                ),
                 "status_counts": stats_manifest.get("status_counts"),
             }
         )
@@ -662,7 +690,9 @@ def query_export_summary(context: ViewerContext) -> dict[str, Any]:
 
 def _window_key(row: Mapping[str, Any]) -> tuple[int, str]:
     return (
-        _safe_int(row.get("window_index")) if _safe_int(row.get("window_index")) is not None else 999,
+        _safe_int(row.get("window_index"))
+        if _safe_int(row.get("window_index")) is not None
+        else 999,
         str(row.get("window_label") or ""),
     )
 
@@ -685,35 +715,52 @@ def query_options(context: ViewerContext) -> dict[str, Any]:
     chaser = load_optional_table_rows(context, CHASER_SUMMARY_TABLE)
     speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE)
     bout_histogram = load_optional_table_rows(context, EPOCH_BOUT_HISTOGRAM_TABLE)
-    ibi_histogram = load_optional_table_rows(context, EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE)
+    ibi_histogram = load_optional_table_rows(
+        context, EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE
+    )
     cra_object_phase = load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE)
-    cra_near_field_object_phase = load_optional_table_rows(context, CRA_NEAR_FIELD_OBJECT_PHASE_TABLE)
+    cra_near_field_object_phase = load_optional_table_rows(
+        context, CRA_NEAR_FIELD_OBJECT_PHASE_TABLE
+    )
     egocentric = load_optional_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
     windows = sorted(
         {
             (
-                _safe_int(row.get("window_index")) if _safe_int(row.get("window_index")) is not None else 999,
+                _safe_int(row.get("window_index"))
+                if _safe_int(row.get("window_index")) is not None
+                else 999,
                 str(row.get("window_label") or ""),
             )
-            for row in spatial + chaser + speed + bout_histogram + ibi_histogram + egocentric
+            for row in spatial
+            + chaser
+            + speed
+            + bout_histogram
+            + ibi_histogram
+            + egocentric
             if row.get("window_label") is not None
         }
     )
     cra_phases = sorted(
         {
             (
-                _safe_int(row.get("phase_axis_index")) if _safe_int(row.get("phase_axis_index")) is not None else 999,
+                _safe_int(row.get("phase_axis_index"))
+                if _safe_int(row.get("phase_axis_index")) is not None
+                else 999,
                 str(row.get("phase_label") or ""),
             )
             for row in cra_object_phase
             if row.get("phase_label") is not None
         }
     )
-    zone_sets = sorted({str(row.get("zone_set_id")) for row in spatial if row.get("zone_set_id")})
+    zone_sets = sorted(
+        {str(row.get("zone_set_id")) for row in spatial if row.get("zone_set_id")}
+    )
     zones = sorted(
         {
             (
-                _safe_int(row.get("display_order")) if _safe_int(row.get("display_order")) is not None else 999,
+                _safe_int(row.get("display_order"))
+                if _safe_int(row.get("display_order")) is not None
+                else 999,
                 str(row.get("zone_id") or ""),
                 str(row.get("zone_label") or row.get("zone_id") or ""),
             )
@@ -736,8 +783,12 @@ def query_options(context: ViewerContext) -> dict[str, Any]:
         }
     )
     return {
-        "windows": [{"window_index": idx, "window_label": label} for idx, label in windows],
-        "cra_phases": [{"phase_axis_index": idx, "phase_label": label} for idx, label in cra_phases],
+        "windows": [
+            {"window_index": idx, "window_label": label} for idx, label in windows
+        ],
+        "cra_phases": [
+            {"phase_axis_index": idx, "phase_label": label} for idx, label in cra_phases
+        ],
         "zone_sets": zone_sets,
         "zones": [
             {"display_order": order, "zone_id": zone_id, "zone_label": label}
@@ -745,18 +796,32 @@ def query_options(context: ViewerContext) -> dict[str, Any]:
         ],
         "chasers": chasers,
         "cra_object_roles": cra_object_roles,
-        "spatial_metrics": [{"metric": key, "label": label} for key, label in SPATIAL_METRICS.items()],
-        "chaser_metrics": [{"metric": key, "label": label} for key, label in CHASER_METRICS.items()],
-        "epoch_speed_metrics": [{"metric": key, "label": label} for key, label in EPOCH_BEHAVIOR_METRICS.items()],
+        "spatial_metrics": [
+            {"metric": key, "label": label} for key, label in SPATIAL_METRICS.items()
+        ],
+        "chaser_metrics": [
+            {"metric": key, "label": label} for key, label in CHASER_METRICS.items()
+        ],
+        "epoch_speed_metrics": [
+            {"metric": key, "label": label}
+            for key, label in EPOCH_BEHAVIOR_METRICS.items()
+        ],
         "epoch_bout_histogram_metrics": [
-            {"metric": key, "label": label} for key, label in EPOCH_BOUT_HISTOGRAM_METRICS.items()
+            {"metric": key, "label": label}
+            for key, label in EPOCH_BOUT_HISTOGRAM_METRICS.items()
         ],
         "epoch_inter_bout_interval_histogram_metrics": [
             {"metric": key, "label": label}
             for key, label in EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_METRICS.items()
         ],
-        "cra_object_phase_metrics": [{"metric": key, "label": label} for key, label in CRA_OBJECT_PHASE_METRICS.items()],
-        "cra_summary_metrics": [{"metric": key, "label": label} for key, label in CRA_SUMMARY_METRICS.items()],
+        "cra_object_phase_metrics": [
+            {"metric": key, "label": label}
+            for key, label in CRA_OBJECT_PHASE_METRICS.items()
+        ],
+        "cra_summary_metrics": [
+            {"metric": key, "label": label}
+            for key, label in CRA_SUMMARY_METRICS.items()
+        ],
         "cra_near_field_object_phase_metrics": [
             {"metric": key, "label": label}
             for key, label in CRA_NEAR_FIELD_OBJECT_PHASE_METRICS.items()
@@ -765,7 +830,9 @@ def query_options(context: ViewerContext) -> dict[str, Any]:
             {"metric": key, "label": label}
             for key, label in CRA_NEAR_FIELD_SUMMARY_METRICS.items()
         ],
-        "egocentric_metrics": [{"metric": key, "label": label} for key, label in EGOCENTRIC_METRICS.items()],
+        "egocentric_metrics": [
+            {"metric": key, "label": label} for key, label in EGOCENTRIC_METRICS.items()
+        ],
     }
 
 
@@ -806,12 +873,17 @@ def _statistics_inference_projection(row: Mapping[str, Any]) -> dict[str, Any]:
 
     cluster_mode = row.get("cluster_mode")
     cluster_status = row.get("cluster_status")
-    if cluster_mode == "session" and cluster_status in _CLUSTER_COMPUTED_STATUSES:
+    if (
+        cluster_mode == "acquisition_batch"
+        and cluster_status in _CLUSTER_COMPUTED_STATUSES
+    ):
         return {
             "inference_policy": "prefer_computed_clustered_v1",
             "inference_kind": "clustered",
-            "inference_label": "Session-clustered inference",
-            "inference_estimate": _round(_safe_float(row.get("clustered_mean_difference"))),
+            "inference_label": "Acquisition-batch-adjusted inference",
+            "inference_estimate": _round(
+                _safe_float(row.get("clustered_mean_difference"))
+            ),
             "inference_standard_error": _round(
                 _safe_float(row.get("clustered_standard_error"))
             ),
@@ -820,14 +892,17 @@ def _statistics_inference_projection(row: Mapping[str, Any]) -> dict[str, Any]:
             "inference_p_value": _round(_safe_float(row.get("clustered_p_value"))),
             "inference_q_value": _round(_safe_float(row.get("clustered_q_value"))),
             "inference_method": row.get("cluster_method"),
-            "inference_message": "Clustered inference is the preferred result for this row.",
+            "inference_message": (
+                "The predeclared acquisition-batch adjustment is the preferred "
+                "result for this row."
+            ),
         }
-    if cluster_mode == "session":
+    if cluster_mode == "acquisition_batch":
         reason = str(row.get("cluster_reason") or "unspecified")
         return {
             "inference_policy": "prefer_computed_clustered_v1",
             "inference_kind": "unavailable",
-            "inference_label": "Clustered inference unavailable",
+            "inference_label": "Acquisition-batch adjustment unavailable",
             "inference_estimate": None,
             "inference_standard_error": None,
             "inference_ci_low": None,
@@ -989,17 +1064,19 @@ def query_group_statistics(
                 ),
                 "clustered_standard_error": _round(
                     _safe_float(row.get("clustered_standard_error"))
-                ),
-                "clustered_ci_low": _round(_safe_float(row.get("clustered_ci_low"))),
-                "clustered_ci_high": _round(_safe_float(row.get("clustered_ci_high"))),
-                "clustered_p_value": _round(_safe_float(row.get("clustered_p_value"))),
-                "clustered_q_value": _round(_safe_float(row.get("clustered_q_value"))),
-                "session_variance": _round(_safe_float(row.get("session_variance"))),
-                "residual_variance": _round(_safe_float(row.get("residual_variance"))),
-                "intraclass_correlation": _round(
-                    _safe_float(row.get("intraclass_correlation"))
-                ),
-                "test_method": row.get("test_method"),
+            ),
+            "clustered_ci_low": _round(_safe_float(row.get("clustered_ci_low"))),
+            "clustered_ci_high": _round(_safe_float(row.get("clustered_ci_high"))),
+            "clustered_p_value": _round(_safe_float(row.get("clustered_p_value"))),
+            "clustered_q_value": _round(_safe_float(row.get("clustered_q_value"))),
+            "acquisition_batch_variance": _round(
+                _safe_float(row.get("acquisition_batch_variance"))
+            ),
+            "residual_variance": _round(_safe_float(row.get("residual_variance"))),
+            "intraclass_correlation": _round(
+                _safe_float(row.get("intraclass_correlation"))
+            ),
+            "test_method": row.get("test_method"),
                 "missing_policy": row.get("missing_policy"),
                 "parameters_json": row.get("parameters_json"),
                 "status": row.get("status"),
@@ -1035,12 +1112,16 @@ def query_group_statistics(
     }
 
 
-def _load_descriptive_rows(context: ViewerContext) -> tuple[str | None, list[dict[str, Any]]]:
+def _load_descriptive_rows(
+    context: ViewerContext,
+) -> tuple[str | None, list[dict[str, Any]]]:
     stats_run_id = resolve_statistics_run_id(context)
     if stats_run_id is None:
         return None, []
     try:
-        return stats_run_id, _load_table_rows_for_run(context, DESCRIPTIVE_TABLE, stats_run_id)
+        return stats_run_id, _load_table_rows_for_run(
+            context, DESCRIPTIVE_TABLE, stats_run_id
+        )
     except FileNotFoundError:
         return stats_run_id, []
 
@@ -1114,7 +1195,11 @@ def query_spatial_occupancy(
         raise ValueError(f"Unsupported spatial metric: {metric}")
     if value_mode not in {"auto", "total", "mean"}:
         raise ValueError("value_mode must be one of: auto, total, mean")
-    effective_mode = "total" if value_mode == "auto" and metric in {"time_s", "frame_count"} else value_mode
+    effective_mode = (
+        "total"
+        if value_mode == "auto" and metric in {"time_s", "frame_count"}
+        else value_mode
+    )
     if effective_mode == "auto":
         effective_mode = "mean"
 
@@ -1136,7 +1221,14 @@ def query_spatial_occupancy(
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
-        window_index, window_label, group_zone_set, display_order, zone_id, zone_label = key
+        (
+            window_index,
+            window_label,
+            group_zone_set,
+            display_order,
+            zone_id,
+            zone_label,
+        ) = key
         condition_name = canonical_condition(window_label)
         group_key = {
             "zone_set_id": group_zone_set,
@@ -1162,7 +1254,11 @@ def query_spatial_occupancy(
             stats = _summary(values)
             summary_source = "computed_from_export_rows"
         recording_ids = sorted(
-            {str(row.get("recording_id")) for row in group_rows if row.get("recording_id")}
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
         )
         value = stats["sum"] if effective_mode == "total" else stats["mean"]
         out_rows.append(
@@ -1175,7 +1271,9 @@ def query_spatial_occupancy(
                 "zone_label": zone_label,
                 "value": value,
                 "value_mode": effective_mode,
-                "recording_count": stats["n"] if descriptive is not None else len(recording_ids),
+                "recording_count": stats["n"]
+                if descriptive is not None
+                else len(recording_ids),
                 "summary_source": summary_source,
                 **stats,
             }
@@ -1193,7 +1291,11 @@ def query_spatial_occupancy(
         "metric_label": SPATIAL_METRICS[metric],
         "value_mode": effective_mode,
         "summary_source": (
-            "persisted_descriptive_summary" if any(row.get("summary_source") == "persisted_descriptive_summary" for row in out_rows)
+            "persisted_descriptive_summary"
+            if any(
+                row.get("summary_source") == "persisted_descriptive_summary"
+                for row in out_rows
+            )
             else "computed_from_export_rows"
         ),
         "rows": out_rows,
@@ -1231,7 +1333,11 @@ def query_position_occupancy_histogram(
             "grid_ids": [],
         }
     grid_ids = sorted(
-        {str(row.get("normalized_grid_id")) for row in rows if row.get("normalized_grid_id")}
+        {
+            str(row.get("normalized_grid_id"))
+            for row in rows
+            if row.get("normalized_grid_id")
+        }
     )
     if not grid_ids:
         return {
@@ -1364,7 +1470,11 @@ def query_position_occupancy_histogram(
         "grid_id": selected_grid_id,
         "grid_ids": grid_ids,
         "recording_count": len(
-            {str(row.get("recording_id")) for row in selected if row.get("recording_id")}
+            {
+                str(row.get("recording_id"))
+                for row in selected
+                if row.get("recording_id")
+            }
         ),
         "pooling_method": "sum_counts_then_normalize_within_epoch",
     }
@@ -1447,7 +1557,9 @@ def position_occupancy_rebin_options(
             if (width := _safe_float(row.get(width_key))) is not None and width > 0.0
         }
         if not indices or indices != list(range(len(indices))) or len(widths) != 1:
-            raise ValueError(f"Cannot re-bin a non-uniform or discontinuous {axis} grid")
+            raise ValueError(
+                f"Cannot re-bin a non-uniform or discontinuous {axis} grid"
+            )
         native_width = float(next(iter(widths)))
         return [
             {
@@ -1521,15 +1633,25 @@ def rebin_position_occupancy_rows(
                 "y_axis_direction": row.get("y_axis_direction"),
             },
         )
-        item["x_bin_left_fraction"] = min(float(item["x_bin_left_fraction"]), float(x_left))
-        item["x_bin_right_fraction"] = max(float(item["x_bin_right_fraction"]), float(x_right))
-        item["y_bin_left_fraction"] = min(float(item["y_bin_left_fraction"]), float(y_left))
-        item["y_bin_right_fraction"] = max(float(item["y_bin_right_fraction"]), float(y_right))
+        item["x_bin_left_fraction"] = min(
+            float(item["x_bin_left_fraction"]), float(x_left)
+        )
+        item["x_bin_right_fraction"] = max(
+            float(item["x_bin_right_fraction"]), float(x_right)
+        )
+        item["y_bin_left_fraction"] = min(
+            float(item["y_bin_left_fraction"]), float(y_left)
+        )
+        item["y_bin_right_fraction"] = max(
+            float(item["y_bin_right_fraction"]), float(y_right)
+        )
         item["pooled_count"] += int(_safe_int(row.get("pooled_count")) or 0)
 
     totals: dict[tuple[Any, Any], int] = defaultdict(int)
     for item in grouped.values():
-        totals[(item["window_index"], item["window_label"])] += int(item["pooled_count"])
+        totals[(item["window_index"], item["window_label"])] += int(
+            item["pooled_count"]
+        )
     output: list[dict[str, Any]] = []
     for item in grouped.values():
         x_left = float(item["x_bin_left_fraction"])
@@ -1640,12 +1762,14 @@ def query_chaser_summary(
     _stats_run_id, descriptive_rows = _load_descriptive_rows(context)
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[(
-            _safe_int(row.get("window_index")),
-            row.get("window_label"),
-            _safe_int(row.get("chaser_index")),
-            row.get("behavior_class"),
-        )].append(row)
+        grouped[
+            (
+                _safe_int(row.get("window_index")),
+                row.get("window_label"),
+                _safe_int(row.get("chaser_index")),
+                row.get("behavior_class"),
+            )
+        ].append(row)
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
@@ -1676,7 +1800,13 @@ def query_chaser_summary(
             stats = _summary(values)
             summary_source = "computed_from_export_rows"
         value = stats["median"] if stat == "median" else stats["mean"]
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         raw_color_hex, color_status = _consistent_raw_color(group_rows)
         out_rows.append(
             {
@@ -1688,18 +1818,29 @@ def query_chaser_summary(
                 "color_status": color_status,
                 "value": value,
                 "stat": stat,
-                "recording_count": stats["n"] if descriptive is not None else len(recording_ids),
+                "recording_count": stats["n"]
+                if descriptive is not None
+                else len(recording_ids),
                 "summary_source": summary_source,
                 **stats,
             }
         )
-    out_rows.sort(key=lambda row: (_sort_int(row.get("window_index")), _sort_int(row.get("chaser_index"), 0)))
+    out_rows.sort(
+        key=lambda row: (
+            _sort_int(row.get("window_index")),
+            _sort_int(row.get("chaser_index"), 0),
+        )
+    )
     response: dict[str, Any] = {
         "metric": metric,
         "metric_label": CHASER_METRICS[metric],
         "stat": stat,
         "summary_source": (
-            "persisted_descriptive_summary" if any(row.get("summary_source") == "persisted_descriptive_summary" for row in out_rows)
+            "persisted_descriptive_summary"
+            if any(
+                row.get("summary_source") == "persisted_descriptive_summary"
+                for row in out_rows
+            )
             else "computed_from_export_rows"
         ),
         "rows": out_rows,
@@ -1749,10 +1890,12 @@ def query_epoch_speed_summary(
     metric_family = "epoch_behavior"
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[(
-            _safe_int(row.get("window_index")),
-            row.get("window_label"),
-        )].append(row)
+        grouped[
+            (
+                _safe_int(row.get("window_index")),
+                row.get("window_label"),
+            )
+        ].append(row)
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
@@ -1800,7 +1943,11 @@ def query_epoch_speed_summary(
         "source_table": source_table,
         "source_label": source_label,
         "summary_source": (
-            "persisted_descriptive_summary" if any(row.get("summary_source") == "persisted_descriptive_summary" for row in out_rows)
+            "persisted_descriptive_summary"
+            if any(
+                row.get("summary_source") == "persisted_descriptive_summary"
+                for row in out_rows
+            )
             else "computed_from_export_rows"
         ),
         "rows": out_rows,
@@ -1818,21 +1965,39 @@ def query_epoch_speed_summary(
                 "bout_count": _safe_int(row.get("bout_count")),
                 "bout_rate_per_min": _safe_float(row.get("bout_rate_per_min")),
                 "mean_bout_duration_s": _safe_float(row.get("mean_bout_duration_s")),
-                "median_bout_duration_s": _safe_float(row.get("median_bout_duration_s")),
-                "mean_bout_path_length_mm": _safe_float(row.get("mean_bout_path_length_mm")),
-                "median_bout_path_length_mm": _safe_float(row.get("median_bout_path_length_mm")),
-                "bout_heading_sample_count": _safe_int(row.get("bout_heading_sample_count")),
+                "median_bout_duration_s": _safe_float(
+                    row.get("median_bout_duration_s")
+                ),
+                "mean_bout_path_length_mm": _safe_float(
+                    row.get("mean_bout_path_length_mm")
+                ),
+                "median_bout_path_length_mm": _safe_float(
+                    row.get("median_bout_path_length_mm")
+                ),
+                "bout_heading_sample_count": _safe_int(
+                    row.get("bout_heading_sample_count")
+                ),
                 "mean_abs_bout_net_heading_change_deg": _safe_float(
                     row.get("mean_abs_bout_net_heading_change_deg")
                 ),
                 "median_abs_bout_net_heading_change_deg": _safe_float(
                     row.get("median_abs_bout_net_heading_change_deg")
                 ),
-                "mean_bout_heading_path_deg": _safe_float(row.get("mean_bout_heading_path_deg")),
-                "median_bout_heading_path_deg": _safe_float(row.get("median_bout_heading_path_deg")),
-                "inter_bout_interval_count": _safe_int(row.get("inter_bout_interval_count")),
-                "mean_inter_bout_interval_s": _safe_float(row.get("mean_inter_bout_interval_s")),
-                "median_inter_bout_interval_s": _safe_float(row.get("median_inter_bout_interval_s")),
+                "mean_bout_heading_path_deg": _safe_float(
+                    row.get("mean_bout_heading_path_deg")
+                ),
+                "median_bout_heading_path_deg": _safe_float(
+                    row.get("median_bout_heading_path_deg")
+                ),
+                "inter_bout_interval_count": _safe_int(
+                    row.get("inter_bout_interval_count")
+                ),
+                "mean_inter_bout_interval_s": _safe_float(
+                    row.get("mean_inter_bout_interval_s")
+                ),
+                "median_inter_bout_interval_s": _safe_float(
+                    row.get("median_inter_bout_interval_s")
+                ),
                 "mean_distance_from_arena_center_mm": _safe_float(
                     row.get("mean_distance_from_arena_center_mm")
                 ),
@@ -1841,7 +2006,9 @@ def query_epoch_speed_summary(
                 ),
                 "wall_fraction": _safe_float(row.get("wall_fraction")),
                 "wall_time_s": _safe_float(row.get("wall_time_s")),
-                "tracking_dropout_fraction": _safe_float(row.get("tracking_dropout_fraction")),
+                "tracking_dropout_fraction": _safe_float(
+                    row.get("tracking_dropout_fraction")
+                ),
                 "source_position_path": row.get("source_position_path"),
                 "source_table": source_table,
             }
@@ -1897,8 +2064,16 @@ def query_epoch_center_distance_histogram(
         ) = key
         pooled_count = sum(_safe_int(row.get("hist_count")) or 0 for row in group_rows)
         pooled_total = totals_by_window.get((window_index, label), 0)
-        pooled_fraction = float(pooled_count) / float(pooled_total) if pooled_total > 0 else None
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        pooled_fraction = (
+            float(pooled_count) / float(pooled_total) if pooled_total > 0 else None
+        )
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         out_rows.append(
             {
                 "window_index": window_index,
@@ -1913,14 +2088,19 @@ def query_epoch_center_distance_histogram(
                 "pooled_fraction": _round(pooled_fraction),
                 "pooled_density_per_mm": _round(
                     pooled_fraction / bin_width
-                    if pooled_fraction is not None and bin_width is not None and bin_width > 0
+                    if pooled_fraction is not None
+                    and bin_width is not None
+                    and bin_width > 0
                     else None
                 ),
                 "recording_count": len(recording_ids),
             }
         )
     out_rows.sort(
-        key=lambda row: (_sort_int(row.get("window_index")), _sort_int(row.get("bin_index")))
+        key=lambda row: (
+            _sort_int(row.get("window_index")),
+            _sort_int(row.get("bin_index")),
+        )
     )
     return {
         "available": True,
@@ -1996,14 +2176,24 @@ def _query_epoch_metric_histogram(
             bin_width,
         ) = key
         pooled_count = sum(_safe_int(row.get("hist_count")) or 0 for row in group_rows)
-        pooled_total = totals_by_window.get((window_index, label, metric_name, units), 0)
-        pooled_fraction = float(pooled_count) / float(pooled_total) if pooled_total > 0 else None
+        pooled_total = totals_by_window.get(
+            (window_index, label, metric_name, units), 0
+        )
+        pooled_fraction = (
+            float(pooled_count) / float(pooled_total) if pooled_total > 0 else None
+        )
         pooled_density = (
             pooled_fraction / bin_width
             if pooled_fraction is not None and bin_width is not None and bin_width > 0
             else None
         )
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         out_rows.append(
             {
                 "window_index": window_index,
@@ -2023,7 +2213,12 @@ def _query_epoch_metric_histogram(
                 "recording_count": len(recording_ids),
             }
         )
-    out_rows.sort(key=lambda row: (_sort_int(row.get("window_index")), _sort_int(row.get("bin_index"))))
+    out_rows.sort(
+        key=lambda row: (
+            _sort_int(row.get("window_index")),
+            _sort_int(row.get("bin_index")),
+        )
+    )
     return {
         "available": True,
         "metric": metric,
@@ -2077,7 +2272,9 @@ def query_speed_distance_bins(
     if window_label:
         rows = [row for row in rows if row.get("window_label") == window_label]
     if chaser_index is not None:
-        rows = [row for row in rows if _safe_int(row.get("chaser_index")) == chaser_index]
+        rows = [
+            row for row in rows if _safe_int(row.get("chaser_index")) == chaser_index
+        ]
     if not rows:
         return {
             "available": False,
@@ -2111,11 +2308,21 @@ def query_speed_distance_bins(
             bin_center,
             bin_width,
         ) = key
-        count = sum(int(_safe_int(row.get("speed_sample_count")) or 0) for row in group_rows)
-        speed_sum = sum(float(_safe_float(row.get("speed_sum_mm_s")) or 0.0) for row in group_rows)
+        count = sum(
+            int(_safe_int(row.get("speed_sample_count")) or 0) for row in group_rows
+        )
+        speed_sum = sum(
+            float(_safe_float(row.get("speed_sum_mm_s")) or 0.0) for row in group_rows
+        )
         values = _values(group_rows, "mean_speed_mm_s")
         stats = _summary(values)
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         pooled_mean = speed_sum / float(count) if count > 0 else None
         raw_color_hex, color_status = _consistent_raw_color(group_rows)
         out_rows.append(
@@ -2169,7 +2376,9 @@ def query_chaser_histogram(
     if window_label:
         rows = [row for row in rows if row.get("window_label") == window_label]
     if chaser_index is not None:
-        rows = [row for row in rows if _safe_int(row.get("chaser_index")) == chaser_index]
+        rows = [
+            row for row in rows if _safe_int(row.get("chaser_index")) == chaser_index
+        ]
 
     grouped: dict[tuple[Any, ...], int] = defaultdict(int)
     meta: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -2217,12 +2426,18 @@ def query_chaser_histogram(
         )
         total = totals[(key[1], key[2])]
         bin_width = _safe_float(item.get("bin_width_mm")) or 1.0
-        density = float(count) / float(total * bin_width) if total > 0 and bin_width > 0 else None
-        item.update({
-            "pooled_count": int(count),
-            "pooled_total_count": int(total),
-            "pooled_density": _round(density),
-        })
+        density = (
+            float(count) / float(total * bin_width)
+            if total > 0 and bin_width > 0
+            else None
+        )
+        item.update(
+            {
+                "pooled_count": int(count),
+                "pooled_total_count": int(total),
+                "pooled_density": _round(density),
+            }
+        )
         out_rows.append(item)
     out_rows.sort(
         key=lambda row: (
@@ -2252,22 +2467,37 @@ def query_cra_object_phase(
 
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[(
-            _safe_int(row.get("phase_axis_index")),
-            row.get("phase_label"),
-            row.get("object_role"),
-            _safe_int(row.get("object_index")),
-            row.get("raw_color_hex"),
-            row.get("object_quadrant_label"),
-        )].append(row)
+        grouped[
+            (
+                _safe_int(row.get("phase_axis_index")),
+                row.get("phase_label"),
+                row.get("object_role"),
+                _safe_int(row.get("object_index")),
+                row.get("raw_color_hex"),
+                row.get("object_quadrant_label"),
+            )
+        ].append(row)
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
-        phase_axis_index, phase_label, role, object_index, raw_color_hex, quadrant_label = key
+        (
+            phase_axis_index,
+            phase_label,
+            role,
+            object_index,
+            raw_color_hex,
+            quadrant_label,
+        ) = key
         values = _values(group_rows, metric)
         stats = _summary(values)
         value = stats["median"] if stat == "median" else stats["mean"]
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         out_rows.append(
             {
                 "phase_axis_index": phase_axis_index,
@@ -2308,9 +2538,13 @@ def query_cra_object_phase(
                 "raw_color_hex": row.get("raw_color_hex"),
                 "object_quadrant_label": row.get("object_quadrant_label"),
                 "value": _safe_float(row.get(metric)),
-                "tracking_dropout_fraction": _safe_float(row.get("tracking_dropout_fraction")),
+                "tracking_dropout_fraction": _safe_float(
+                    row.get("tracking_dropout_fraction")
+                ),
                 "object_max_drift_mm": _safe_float(row.get("object_max_drift_mm")),
-                "source_cra_primary_endpoint_path": row.get("source_cra_primary_endpoint_path"),
+                "source_cra_primary_endpoint_path": row.get(
+                    "source_cra_primary_endpoint_path"
+                ),
             }
             for row in rows
         ]
@@ -2440,7 +2674,13 @@ def query_cra_summary(
     response: dict[str, Any] = {
         "row_count": len(rows),
         "metrics": metric_rows,
-        "statuses": sorted({str(row.get("endpoint_status")) for row in rows if row.get("endpoint_status")}),
+        "statuses": sorted(
+            {
+                str(row.get("endpoint_status"))
+                for row in rows
+                if row.get("endpoint_status")
+            }
+        ),
     }
     if include_rows:
         response["rows"] = [
@@ -2464,13 +2704,19 @@ def query_cra_summary(
                 "occ_post_inert": _safe_float(row.get("occ_post_inert")),
                 "delta_occ_inert": _safe_float(row.get("delta_occ_inert")),
                 "specificity_occupancy": _safe_float(row.get("specificity_occupancy")),
-                "frac_tracking_dropout_pre": _safe_float(row.get("frac_tracking_dropout_pre")),
-                "frac_tracking_dropout_post": _safe_float(row.get("frac_tracking_dropout_post")),
+                "frac_tracking_dropout_pre": _safe_float(
+                    row.get("frac_tracking_dropout_pre")
+                ),
+                "frac_tracking_dropout_post": _safe_float(
+                    row.get("frac_tracking_dropout_post")
+                ),
                 "pre_aggressive_quadrant": row.get("pre_aggressive_quadrant"),
                 "post_aggressive_quadrant": row.get("post_aggressive_quadrant"),
                 "pre_inert_quadrant": row.get("pre_inert_quadrant"),
                 "post_inert_quadrant": row.get("post_inert_quadrant"),
-                "source_cra_primary_endpoint_path": row.get("source_cra_primary_endpoint_path"),
+                "source_cra_primary_endpoint_path": row.get(
+                    "source_cra_primary_endpoint_path"
+                ),
                 "source_component_fingerprint": row.get("source_component_fingerprint"),
             }
             for row in rows
@@ -2497,7 +2743,11 @@ def _gaussian_kde_rows(
     grid: np.ndarray,
 ) -> list[dict[str, Any]]:
     finite = np.asarray(
-        [float(value) for value in (_safe_float(item) for item in values) if value is not None],
+        [
+            float(value)
+            for value in (_safe_float(item) for item in values)
+            if value is not None
+        ],
         dtype=np.float64,
     )
     if finite.size == 0:
@@ -2535,7 +2785,11 @@ def _one_sample_signed_rank_summary(
     difference_definition: str,
 ) -> dict[str, Any]:
     finite = np.asarray(
-        [float(value) for value in (_safe_float(item) for item in values) if value is not None],
+        [
+            float(value)
+            for value in (_safe_float(item) for item in values)
+            if value is not None
+        ],
         dtype=np.float64,
     )
     finite = finite[np.isfinite(finite)]
@@ -2658,8 +2912,18 @@ def query_cra_specificity(
             continue
         fish_id = row.get("fish_id")
         role_specs = (
-            ("aggressive", "agg", row.get("pre_aggressive_quadrant"), row.get("post_aggressive_quadrant")),
-            ("inert", "inert", row.get("pre_inert_quadrant"), row.get("post_inert_quadrant")),
+            (
+                "aggressive",
+                "agg",
+                row.get("pre_aggressive_quadrant"),
+                row.get("post_aggressive_quadrant"),
+            ),
+            (
+                "inert",
+                "inert",
+                row.get("pre_inert_quadrant"),
+                row.get("post_inert_quadrant"),
+            ),
         )
         for role, suffix, pre_quadrant, post_quadrant in role_specs:
             pre_value = _safe_float(row.get(f"d_pre_{suffix}"))
@@ -2729,11 +2993,17 @@ def query_cra_specificity(
         q_code = _safe_int(row.get("object_quadrant_code"))
         non_values = [
             _safe_float(qrow.get("occupancy_fraction"))
-            for qrow in quadrants_by_recording_phase.get((recording_id, phase_label), [])
+            for qrow in quadrants_by_recording_phase.get(
+                (recording_id, phase_label), []
+            )
             if _safe_int(qrow.get("quadrant_code")) != q_code
         ]
         finite_non = [float(value) for value in non_values if value is not None]
-        non_mean = (sum(finite_non) / float(len(finite_non))) if finite_non else (1.0 - float(object_occ)) / 3.0
+        non_mean = (
+            (sum(finite_non) / float(len(finite_non)))
+            if finite_non
+            else (1.0 - float(object_occ)) / 3.0
+        )
         occupancy_index = float(object_occ) - float(non_mean)
         occupancy_index_phase_rows.append(
             {
@@ -2770,7 +3040,8 @@ def query_cra_specificity(
         occupancy_index_specificity_rows.append(
             {
                 "recording_id": recording_id,
-                "fish_id": role_rows["aggressive"].get("fish_id") or role_rows["inert"].get("fish_id"),
+                "fish_id": role_rows["aggressive"].get("fish_id")
+                or role_rows["inert"].get("fish_id"),
                 "delta_index_agg": _round(agg),
                 "delta_index_inert": _round(inert),
                 "occupancy_index_specificity": _round(float(agg) - float(inert)),
@@ -2781,7 +3052,13 @@ def query_cra_specificity(
         "available": True,
         "table_name": CRA_SUMMARY_TABLE,
         "row_count": len(summary_rows),
-        "recording_count": len({str(row.get("recording_id")) for row in summary_rows if row.get("recording_id")}),
+        "recording_count": len(
+            {
+                str(row.get("recording_id"))
+                for row in summary_rows
+                if row.get("recording_id")
+            }
+        ),
         "distance_slope_rows": distance_slope_rows,
         "distance_specificity_rows": distance_specificity_rows,
         "distance_specificity_statistics": _one_sample_signed_rank_summary(
@@ -2794,7 +3071,10 @@ def query_cra_specificity(
         "occupancy_index_slope_rows": occupancy_index_slope_rows,
         "occupancy_index_specificity_rows": occupancy_index_specificity_rows,
         "occupancy_index_specificity_statistics": _one_sample_signed_rank_summary(
-            [row["occupancy_index_specificity"] for row in occupancy_index_specificity_rows],
+            [
+                row["occupancy_index_specificity"]
+                for row in occupancy_index_specificity_rows
+            ],
             bootstrap_iterations=int(bootstrap_iterations),
             confidence_level=float(confidence_level),
             difference_definition="occupancy_index_specificity = delta_index_agg - delta_index_inert; tested against zero",
@@ -2844,9 +3124,15 @@ def _paired_chaser_occupancy_stats(
                 "pre_chaser_quadrant_occ": _round(pre),
                 "post_chaser_quadrant_occ": _round(post),
                 "delta_chaser_quadrant_occ": _round(diff),
-                "pre_tracking_dropout_fraction": _round(_safe_float(pre_row.get("tracking_dropout_fraction"))),
-                "post_tracking_dropout_fraction": _round(_safe_float(post_row.get("tracking_dropout_fraction"))),
-                "source_cra_primary_endpoint_path": pre_row.get("source_cra_primary_endpoint_path")
+                "pre_tracking_dropout_fraction": _round(
+                    _safe_float(pre_row.get("tracking_dropout_fraction"))
+                ),
+                "post_tracking_dropout_fraction": _round(
+                    _safe_float(post_row.get("tracking_dropout_fraction"))
+                ),
+                "source_cra_primary_endpoint_path": pre_row.get(
+                    "source_cra_primary_endpoint_path"
+                )
                 or post_row.get("source_cra_primary_endpoint_path"),
             }
         )
@@ -2940,16 +3226,28 @@ def query_cra_quadrant_occupancy_density(
                 "fraction_of_epoch": _round(_safe_float(row.get("fraction_of_epoch"))),
                 "frame_count": _safe_int(row.get("frame_count")),
                 "valid_frame_count": _safe_int(row.get("valid_frame_count")),
-                "quadrant_valid_frame_count": _safe_int(row.get("quadrant_valid_frame_count")),
+                "quadrant_valid_frame_count": _safe_int(
+                    row.get("quadrant_valid_frame_count")
+                ),
                 "missing_frame_count": _safe_int(row.get("missing_frame_count")),
-                "out_of_bounds_frame_count": _safe_int(row.get("out_of_bounds_frame_count")),
-                "tracking_dropout_fraction": _round(_safe_float(row.get("tracking_dropout_fraction"))),
+                "out_of_bounds_frame_count": _safe_int(
+                    row.get("out_of_bounds_frame_count")
+                ),
+                "tracking_dropout_fraction": _round(
+                    _safe_float(row.get("tracking_dropout_fraction"))
+                ),
                 "chaser_quadrant_code": _safe_int(row.get("chaser_quadrant_code")),
                 "chaser_quadrant_label": row.get("chaser_quadrant_label"),
-                "chaser_quadrant_occ": _round(_safe_float(row.get("chaser_quadrant_occ"))),
+                "chaser_quadrant_occ": _round(
+                    _safe_float(row.get("chaser_quadrant_occ"))
+                ),
                 "is_chaser_quadrant": bool(row.get("is_chaser_quadrant")),
-                "series_role": "chaser" if bool(row.get("is_chaser_quadrant")) else "non_chaser",
-                "source_cra_primary_endpoint_path": row.get("source_cra_primary_endpoint_path"),
+                "series_role": "chaser"
+                if bool(row.get("is_chaser_quadrant"))
+                else "non_chaser",
+                "source_cra_primary_endpoint_path": row.get(
+                    "source_cra_primary_endpoint_path"
+                ),
                 "source_component_fingerprint": row.get("source_component_fingerprint"),
             }
         )
@@ -2969,11 +3267,26 @@ def query_cra_quadrant_occupancy_density(
 
     quadrant_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped_quadrants.items():
-        phase_axis_index, phase_label, quadrant_code, quadrant_id, quadrant_label, display_order = key
+        (
+            phase_axis_index,
+            phase_label,
+            quadrant_code,
+            quadrant_id,
+            quadrant_label,
+            display_order,
+        ) = key
         values = _values(group_rows, "occupancy_fraction")
         stats = _summary(values)
-        chaser_count = sum(1 for row in group_rows if bool(row.get("is_chaser_quadrant")))
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        chaser_count = sum(
+            1 for row in group_rows if bool(row.get("is_chaser_quadrant"))
+        )
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         quadrant_rows.append(
             {
                 "phase_axis_index": phase_axis_index,
@@ -2998,17 +3311,22 @@ def query_cra_quadrant_occupancy_density(
 
     by_fish_phase: dict[tuple[str, Any], list[dict[str, Any]]] = defaultdict(list)
     for row in normalized_rows:
-        by_fish_phase[(str(row.get("recording_id") or ""), row.get("phase_label"))].append(row)
+        by_fish_phase[
+            (str(row.get("recording_id") or ""), row.get("phase_label"))
+        ].append(row)
     fish_phase_rows: list[dict[str, Any]] = []
     for (recording_id, phase_label), group_rows in sorted(by_fish_phase.items()):
         if not recording_id:
             continue
-        ordered = sorted(group_rows, key=lambda row: _sort_int(row.get("display_order")))
+        ordered = sorted(
+            group_rows, key=lambda row: _sort_int(row.get("display_order"))
+        )
         chaser_rows = [row for row in ordered if bool(row.get("is_chaser_quadrant"))]
         nonchaser_values = [
             _safe_float(row.get("occupancy_fraction"))
             for row in ordered
-            if not bool(row.get("is_chaser_quadrant")) and _safe_float(row.get("occupancy_fraction")) is not None
+            if not bool(row.get("is_chaser_quadrant"))
+            and _safe_float(row.get("occupancy_fraction")) is not None
         ]
         base = ordered[0]
         fish_phase_row = {
@@ -3017,13 +3335,19 @@ def query_cra_quadrant_occupancy_density(
             "phase_axis_index": base.get("phase_axis_index"),
             "phase_label": phase_label,
             "phase_kind": base.get("phase_kind"),
-            "chaser_quadrant": chaser_rows[0].get("chaser_quadrant_label") if chaser_rows else None,
-            "chaser_quadrant_occ": chaser_rows[0].get("occupancy_fraction") if chaser_rows else None,
+            "chaser_quadrant": chaser_rows[0].get("chaser_quadrant_label")
+            if chaser_rows
+            else None,
+            "chaser_quadrant_occ": chaser_rows[0].get("occupancy_fraction")
+            if chaser_rows
+            else None,
             "nonchaser_occ_pooled": [_round(value) for value in nonchaser_values],
             "valid_frame_count": base.get("valid_frame_count"),
             "quadrant_valid_frame_count": base.get("quadrant_valid_frame_count"),
             "tracking_dropout_fraction": base.get("tracking_dropout_fraction"),
-            "source_cra_primary_endpoint_path": base.get("source_cra_primary_endpoint_path"),
+            "source_cra_primary_endpoint_path": base.get(
+                "source_cra_primary_endpoint_path"
+            ),
         }
         for row in ordered:
             key = str(row.get("quadrant_id") or "")
@@ -3034,7 +3358,9 @@ def query_cra_quadrant_occupancy_density(
     phases = sorted(
         {
             (
-                _safe_int(row.get("phase_axis_index")) if _safe_int(row.get("phase_axis_index")) is not None else 999,
+                _safe_int(row.get("phase_axis_index"))
+                if _safe_int(row.get("phase_axis_index")) is not None
+                else 999,
                 str(row.get("phase_label") or ""),
                 str(row.get("phase_kind") or ""),
             )
@@ -3045,16 +3371,20 @@ def query_cra_quadrant_occupancy_density(
     grid = np.linspace(0.0, 1.0, 101, dtype=np.float64)
     density_rows: list[dict[str, Any]] = []
     for _phase_axis_index, phase_label, _phase_kind_value in phases:
-        phase_rows = [row for row in normalized_rows if row.get("phase_label") == phase_label]
+        phase_rows = [
+            row for row in normalized_rows if row.get("phase_label") == phase_label
+        ]
         chaser_values = [
             float(row["occupancy_fraction"])
             for row in phase_rows
-            if bool(row.get("is_chaser_quadrant")) and _safe_float(row.get("occupancy_fraction")) is not None
+            if bool(row.get("is_chaser_quadrant"))
+            and _safe_float(row.get("occupancy_fraction")) is not None
         ]
         nonchaser_values = [
             float(row["occupancy_fraction"])
             for row in phase_rows
-            if not bool(row.get("is_chaser_quadrant")) and _safe_float(row.get("occupancy_fraction")) is not None
+            if not bool(row.get("is_chaser_quadrant"))
+            and _safe_float(row.get("occupancy_fraction")) is not None
         ]
         density_rows.extend(
             _gaussian_kde_rows(
@@ -3085,7 +3415,13 @@ def query_cra_quadrant_occupancy_density(
         "available": True,
         "table_name": CRA_QUADRANT_OCCUPANCY_TABLE,
         "row_count": len(normalized_rows),
-        "recording_count": len({str(row.get("recording_id")) for row in normalized_rows if row.get("recording_id")}),
+        "recording_count": len(
+            {
+                str(row.get("recording_id"))
+                for row in normalized_rows
+                if row.get("recording_id")
+            }
+        ),
         "chance": 0.25,
         "x_domain": [0.0, 1.0],
         "kde": {
@@ -3094,7 +3430,11 @@ def query_cra_quadrant_occupancy_density(
             "grid_size": int(grid.size),
         },
         "phases": [
-            {"phase_axis_index": phase_axis_index, "phase_label": phase_label, "phase_kind": phase_kind_value}
+            {
+                "phase_axis_index": phase_axis_index,
+                "phase_label": phase_label,
+                "phase_kind": phase_kind_value,
+            }
             for phase_axis_index, phase_label, phase_kind_value in phases
         ],
         "rows": normalized_rows,
@@ -3125,13 +3465,15 @@ def query_cra_near_field_object_phase(
 
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[(
-            _safe_int(row.get("phase_axis_index")),
-            row.get("phase_label"),
-            row.get("object_role"),
-            _safe_int(row.get("object_index")),
-            row.get("raw_color_hex"),
-        )].append(row)
+        grouped[
+            (
+                _safe_int(row.get("phase_axis_index")),
+                row.get("phase_label"),
+                row.get("object_role"),
+                _safe_int(row.get("object_index")),
+                row.get("raw_color_hex"),
+            )
+        ].append(row)
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
@@ -3139,7 +3481,13 @@ def query_cra_near_field_object_phase(
         values = _values(group_rows, metric)
         stats = _summary(values)
         value = stats["median"] if stat == "median" else stats["mean"]
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         out_rows.append(
             {
                 "phase_axis_index": phase_axis_index,
@@ -3179,7 +3527,9 @@ def query_cra_near_field_object_phase(
                 "raw_color_hex": row.get("raw_color_hex"),
                 "value": _safe_float(row.get(metric)),
                 "valid_distance_count": _safe_int(row.get("valid_distance_count")),
-                "tracking_dropout_fraction": _safe_float(row.get("tracking_dropout_fraction")),
+                "tracking_dropout_fraction": _safe_float(
+                    row.get("tracking_dropout_fraction")
+                ),
                 "source_cra_near_field_path": row.get("source_cra_near_field_path"),
             }
             for row in rows
@@ -3277,7 +3627,13 @@ def query_cra_near_field_summary(
     response: dict[str, Any] = {
         "row_count": len(rows),
         "metrics": metric_rows,
-        "statuses": sorted({str(row.get("endpoint_status")) for row in rows if row.get("endpoint_status")}),
+        "statuses": sorted(
+            {
+                str(row.get("endpoint_status"))
+                for row in rows
+                if row.get("endpoint_status")
+            }
+        ),
     }
     if include_rows:
         response["rows"] = [
@@ -3287,26 +3643,56 @@ def query_cra_near_field_summary(
                 "endpoint_status": row.get("endpoint_status"),
                 "aggressive_color": row.get("aggressive_color"),
                 "inert_color": row.get("inert_color"),
-                "approach_p05_delta_agg": _safe_float(row.get("approach_p05_delta_agg")),
-                "approach_p05_delta_inert": _safe_float(row.get("approach_p05_delta_inert")),
-                "approach_p05_specificity": _safe_float(row.get("approach_p05_specificity")),
-                "approach_p10_delta_agg": _safe_float(row.get("approach_p10_delta_agg")),
-                "approach_p10_delta_inert": _safe_float(row.get("approach_p10_delta_inert")),
-                "approach_p10_specificity": _safe_float(row.get("approach_p10_specificity")),
-                "nearzone_occ_delta_agg": _safe_float(row.get("nearzone_occ_delta_agg")),
-                "nearzone_occ_delta_inert": _safe_float(row.get("nearzone_occ_delta_inert")),
-                "nearzone_occ_specificity": _safe_float(row.get("nearzone_occ_specificity")),
-                "nearzone_entry_rate_delta_agg": _safe_float(row.get("nearzone_entry_rate_delta_agg")),
-                "nearzone_entry_rate_delta_inert": _safe_float(row.get("nearzone_entry_rate_delta_inert")),
-                "nearzone_entry_rate_specificity": _safe_float(row.get("nearzone_entry_rate_specificity")),
+                "approach_p05_delta_agg": _safe_float(
+                    row.get("approach_p05_delta_agg")
+                ),
+                "approach_p05_delta_inert": _safe_float(
+                    row.get("approach_p05_delta_inert")
+                ),
+                "approach_p05_specificity": _safe_float(
+                    row.get("approach_p05_specificity")
+                ),
+                "approach_p10_delta_agg": _safe_float(
+                    row.get("approach_p10_delta_agg")
+                ),
+                "approach_p10_delta_inert": _safe_float(
+                    row.get("approach_p10_delta_inert")
+                ),
+                "approach_p10_specificity": _safe_float(
+                    row.get("approach_p10_specificity")
+                ),
+                "nearzone_occ_delta_agg": _safe_float(
+                    row.get("nearzone_occ_delta_agg")
+                ),
+                "nearzone_occ_delta_inert": _safe_float(
+                    row.get("nearzone_occ_delta_inert")
+                ),
+                "nearzone_occ_specificity": _safe_float(
+                    row.get("nearzone_occ_specificity")
+                ),
+                "nearzone_entry_rate_delta_agg": _safe_float(
+                    row.get("nearzone_entry_rate_delta_agg")
+                ),
+                "nearzone_entry_rate_delta_inert": _safe_float(
+                    row.get("nearzone_entry_rate_delta_inert")
+                ),
+                "nearzone_entry_rate_specificity": _safe_float(
+                    row.get("nearzone_entry_rate_specificity")
+                ),
                 "thigmotaxis_frac_pre": _safe_float(row.get("thigmotaxis_frac_pre")),
                 "thigmotaxis_frac_post": _safe_float(row.get("thigmotaxis_frac_post")),
-                "frac_tracking_dropout_pre": _safe_float(row.get("frac_tracking_dropout_pre")),
-                "frac_tracking_dropout_post": _safe_float(row.get("frac_tracking_dropout_post")),
+                "frac_tracking_dropout_pre": _safe_float(
+                    row.get("frac_tracking_dropout_pre")
+                ),
+                "frac_tracking_dropout_post": _safe_float(
+                    row.get("frac_tracking_dropout_post")
+                ),
                 "geometry_status": row.get("geometry_status"),
                 "arena_shape": row.get("arena_shape"),
                 "source_cra_near_field_path": row.get("source_cra_near_field_path"),
-                "source_cra_primary_endpoint_path": row.get("source_cra_primary_endpoint_path"),
+                "source_cra_primary_endpoint_path": row.get(
+                    "source_cra_primary_endpoint_path"
+                ),
                 "source_component_fingerprint": row.get("source_component_fingerprint"),
             }
             for row in rows
@@ -3342,10 +3728,18 @@ def _aggregate_fish_level_curve(
 
     out: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
-        phase_axis_index, phase_label, phase_kind, object_role, index_value, x_value = key
+        phase_axis_index, phase_label, phase_kind, object_role, index_value, x_value = (
+            key
+        )
         values = _values(group_rows, y_key)
         stats = _summary(values)
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         first = group_rows[0]
         out.append(
             {
@@ -3451,12 +3845,14 @@ def query_egocentric_summary(
     )
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[(
-            _safe_int(row.get("window_index")),
-            row.get("window_label"),
-            _safe_int(row.get("chaser_index")),
-            row.get("behavior_class"),
-        )].append(row)
+        grouped[
+            (
+                _safe_int(row.get("window_index")),
+                row.get("window_label"),
+                _safe_int(row.get("chaser_index")),
+                row.get("behavior_class"),
+            )
+        ].append(row)
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
@@ -3464,7 +3860,13 @@ def query_egocentric_summary(
         values = _values(group_rows, metric)
         stats = _summary(values)
         value = stats["median"] if stat == "median" else stats["mean"]
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {
+                str(row.get("recording_id"))
+                for row in group_rows
+                if row.get("recording_id")
+            }
+        )
         raw_color_hex, color_status = _consistent_raw_color(group_rows)
         out_rows.append(
             {
@@ -3480,7 +3882,12 @@ def query_egocentric_summary(
                 **stats,
             }
         )
-    out_rows.sort(key=lambda row: (_sort_int(row.get("window_index")), _sort_int(row.get("chaser_index"), 0)))
+    out_rows.sort(
+        key=lambda row: (
+            _sort_int(row.get("window_index")),
+            _sort_int(row.get("chaser_index"), 0),
+        )
+    )
     response: dict[str, Any] = {
         "metric": metric,
         "metric_label": EGOCENTRIC_METRICS[metric],
@@ -3513,7 +3920,9 @@ def query_egocentric_histogram(
     if window_label:
         rows = [row for row in rows if row.get("window_label") == window_label]
     if chaser_index is not None:
-        rows = [row for row in rows if _safe_int(row.get("chaser_index")) == chaser_index]
+        rows = [
+            row for row in rows if _safe_int(row.get("chaser_index")) == chaser_index
+        ]
 
     grouped: dict[tuple[Any, ...], int] = defaultdict(int)
     meta: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -3562,11 +3971,13 @@ def query_egocentric_histogram(
         item = dict(meta[key])
         total = totals[(key[1], key[2])]
         probability = float(count) / float(total) if total > 0 else None
-        item.update({
-            "pooled_count": int(count),
-            "pooled_total_count": int(total),
-            "pooled_probability": _round(probability),
-        })
+        item.update(
+            {
+                "pooled_count": int(count),
+                "pooled_total_count": int(total),
+                "pooled_probability": _round(probability),
+            }
+        )
         out_rows.append(item)
     out_rows.sort(
         key=lambda row: (
@@ -3611,7 +4022,9 @@ def egocentric_rebin_options(
             raise ValueError(f"Cannot re-bin a non-uniform {axis} grid")
         ordered = sorted(indices)
         if ordered[0] != 0:
-            raise ValueError(f"Cannot re-bin a {axis} grid that does not start at index zero")
+            raise ValueError(
+                f"Cannot re-bin a {axis} grid that does not start at index zero"
+            )
         if ordered != list(range(ordered[0], ordered[-1] + 1)):
             raise ValueError(f"Cannot re-bin a discontinuous {axis} grid")
         geometry_by_index: dict[int, set[tuple[float, float]]] = defaultdict(set)
@@ -3687,12 +4100,12 @@ def rebin_egocentric_histogram_rows(
         return []
 
     options = egocentric_rebin_options(rows)
-    distance_bin_count = max(
-        int(_safe_int(row.get("distance_bin_index")) or 0) for row in rows
-    ) + 1
-    bearing_bin_count = max(
-        int(_safe_int(row.get("bearing_bin_index")) or 0) for row in rows
-    ) + 1
+    distance_bin_count = (
+        max(int(_safe_int(row.get("distance_bin_index")) or 0) for row in rows) + 1
+    )
+    bearing_bin_count = (
+        max(int(_safe_int(row.get("bearing_bin_index")) or 0) for row in rows) + 1
+    )
     if distance_factor > distance_bin_count:
         raise ValueError("Distance re-bin factor exceeds the native grid")
     if bearing_factor > bearing_bin_count or bearing_bin_count % bearing_factor != 0:
@@ -3714,7 +4127,9 @@ def rebin_egocentric_histogram_rows(
             bearing_left,
             bearing_right,
         ):
-            raise ValueError("Cannot re-bin histogram rows with incomplete bin geometry")
+            raise ValueError(
+                "Cannot re-bin histogram rows with incomplete bin geometry"
+            )
         key = (
             _safe_int(row.get("window_index")),
             row.get("window_label"),
@@ -3776,12 +4191,8 @@ def rebin_egocentric_histogram_rows(
                 "pooled_probability": _round(count / total if total > 0 else None),
                 "distance_bin_factor": distance_factor,
                 "bearing_bin_factor": bearing_factor,
-                "native_distance_bin_width_mm": options[
-                    "native_distance_bin_width_mm"
-                ],
-                "native_bearing_bin_width_deg": options[
-                    "native_bearing_bin_width_deg"
-                ],
+                "native_distance_bin_width_mm": options["native_distance_bin_width_mm"],
+                "native_bearing_bin_width_deg": options["native_bearing_bin_width_deg"],
             }
         )
     output.sort(
@@ -3824,7 +4235,9 @@ def query_recordings(context: ViewerContext) -> dict[str, Any]:
         )
         if _safe_int(row.get("zone_index")) == 0:
             label = str(row.get("window_label") or "")
-            record[f"{label}_coverage_pct"] = _round(_safe_float(row.get("coverage_pct")), 3)
+            record[f"{label}_coverage_pct"] = _round(
+                _safe_float(row.get("coverage_pct")), 3
+            )
 
     for row in chaser:
         recording_id = str(row.get("recording_id") or "")
@@ -3840,7 +4253,9 @@ def query_recordings(context: ViewerContext) -> dict[str, Any]:
         label = str(row.get("window_label") or "")
         chaser_idx = _safe_int(row.get("chaser_index"))
         if chaser_idx is not None:
-            record[f"{label}_chaser_{chaser_idx}_p50_mm"] = _round(_safe_float(row.get("p50_distance_mm")), 3)
+            record[f"{label}_chaser_{chaser_idx}_p50_mm"] = _round(
+                _safe_float(row.get("p50_distance_mm")), 3
+            )
             record[f"{label}_chaser_{chaser_idx}_frac_within"] = _round(
                 _safe_float(row.get("fraction_within_threshold")),
                 4,
@@ -3858,8 +4273,12 @@ def query_recordings(context: ViewerContext) -> dict[str, Any]:
             },
         )
         label = str(row.get("window_label") or "")
-        record[f"{label}_mean_speed_mm_s"] = _round(_safe_float(row.get("mean_speed_mm_s")), 4)
-        record[f"{label}_median_speed_mm_s"] = _round(_safe_float(row.get("median_speed_mm_s")), 4)
+        record[f"{label}_mean_speed_mm_s"] = _round(
+            _safe_float(row.get("mean_speed_mm_s")), 4
+        )
+        record[f"{label}_median_speed_mm_s"] = _round(
+            _safe_float(row.get("median_speed_mm_s")), 4
+        )
         record[f"{label}_speed_samples"] = _safe_int(row.get("speed_sample_count"))
 
     for row in cra_summary:
@@ -3876,10 +4295,16 @@ def query_recordings(context: ViewerContext) -> dict[str, Any]:
         record["cra_endpoint_status"] = row.get("endpoint_status")
         record["cra_delta_agg_mm"] = _round(_safe_float(row.get("delta_agg")), 4)
         record["cra_delta_inert_mm"] = _round(_safe_float(row.get("delta_inert")), 4)
-        record["cra_specificity_distance_mm"] = _round(_safe_float(row.get("specificity_distance")), 4)
+        record["cra_specificity_distance_mm"] = _round(
+            _safe_float(row.get("specificity_distance")), 4
+        )
         record["cra_delta_occ_agg"] = _round(_safe_float(row.get("delta_occ_agg")), 4)
-        record["cra_delta_occ_inert"] = _round(_safe_float(row.get("delta_occ_inert")), 4)
-        record["cra_specificity_occupancy"] = _round(_safe_float(row.get("specificity_occupancy")), 4)
+        record["cra_delta_occ_inert"] = _round(
+            _safe_float(row.get("delta_occ_inert")), 4
+        )
+        record["cra_specificity_occupancy"] = _round(
+            _safe_float(row.get("specificity_occupancy")), 4
+        )
         record["cra_post_aggressive_quadrant"] = row.get("post_aggressive_quadrant")
 
     for row in cra_near_field_summary:
@@ -3947,5 +4372,7 @@ def query_provenance(context: ViewerContext) -> dict[str, Any]:
                 raise
     stats_run_id = resolve_statistics_run_id(context)
     if stats_run_id is not None:
-        schemas[STATISTICS_TABLE] = _table_schema(context, STATISTICS_TABLE, export_run_id=stats_run_id)
+        schemas[STATISTICS_TABLE] = _table_schema(
+            context, STATISTICS_TABLE, export_run_id=stats_run_id
+        )
     return {"summary": summary, "schemas": schemas}

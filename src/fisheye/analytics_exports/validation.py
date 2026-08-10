@@ -109,7 +109,7 @@ def _validate_declared_v2_table_contract(
 
 
 def _part_identity_values(parquet_file: Any) -> tuple[set[tuple[Any, ...]], int]:
-    names = ("zarr_path", "recording_id", "session_id", "subject_id")
+    names = ("zarr_path", "recording_id", "acquisition_batch_id", "subject_id")
     table = parquet_file.read(columns=list(names))
     values = set(zip(*(table.column(name).to_pylist() for name in names), strict=True))
     return values, int(table.num_rows)
@@ -183,9 +183,7 @@ def validate_export_payload(
                     identity,
                     expected_zarr_paths=source_zarrs,
                 )
-                registry_sources = registry_identity_sources_by_path(
-                    validated_identity
-                )
+                registry_sources = registry_identity_sources_by_path(validated_identity)
             except ValueError as exc:
                 errors.append(str(exc))
 
@@ -458,18 +456,23 @@ def validate_export_payload(
                         )
                     else:
                         mismatched = []
-                        for source_path, recording_id, session_id, subject_id in sorted(
+                        for (
+                            source_path,
+                            recording_id,
+                            acquisition_batch_id,
+                            subject_id,
+                        ) in sorted(
                             identity_values,
                             key=lambda item: tuple(map(str, item)),
                         ):
                             binding = registry_sources.get(str(source_path))
                             if binding is None or (
                                 recording_id,
-                                session_id,
+                                acquisition_batch_id,
                                 subject_id,
                             ) != (
                                 binding["recording_id"],
-                                binding["session_id"],
+                                binding["acquisition_batch_id"],
                                 binding["subject_id"],
                             ):
                                 mismatched.append(str(source_path))

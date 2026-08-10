@@ -1,4 +1,4 @@
-"""Session-clustered inference for recording-level group statistics."""
+"""Optional acquisition-batch adjustment for subject-level statistics."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ import numpy as np
 from scipy import stats
 
 
-SESSION_RANDOM_INTERCEPT_METHOD = "session_random_intercept_reml_v1"
+ACQUISITION_BATCH_RANDOM_INTERCEPT_METHOD = "acquisition_batch_random_intercept_reml_v1"
 # A random-effect variance and asymptotic Wald test are fragile with only a
-# handful of groups. Ten independent sessions is the fail-closed publication
-# default; smaller predeclared designs remain possible down to three sessions.
-DEFAULT_MINIMUM_SESSIONS = 10
+# handful of groups. Ten acquisition batches is the fail-closed adjustment
+# default; smaller predeclared designs remain possible down to three batches.
+DEFAULT_MINIMUM_ACQUISITION_BATCHES = 10
 
 
 @dataclass(frozen=True)
-class SessionClusterResult:
+class AcquisitionBatchClusterResult:
     """One intercept-only random-effects fit with explicit availability state."""
 
     status: str
@@ -43,12 +43,12 @@ def _unavailable(
     reason: str,
     unit_count: int,
     cluster_count: int,
-) -> SessionClusterResult:
-    return SessionClusterResult(
+) -> AcquisitionBatchClusterResult:
+    return AcquisitionBatchClusterResult(
         status="unavailable",
         reason=reason,
-        method=SESSION_RANDOM_INTERCEPT_METHOD,
-        unit="session",
+        method=ACQUISITION_BATCH_RANDOM_INTERCEPT_METHOD,
+        unit="acquisition_batch",
         unit_count=unit_count,
         cluster_count=cluster_count,
         mean=None,
@@ -62,53 +62,64 @@ def _unavailable(
     )
 
 
-def fit_session_random_intercept(
+def fit_acquisition_batch_random_intercept(
     values: Sequence[float] | np.ndarray,
-    session_ids: Sequence[object] | np.ndarray,
+    acquisition_batch_ids: Sequence[object] | np.ndarray,
     *,
     confidence_level: float,
-    minimum_sessions: int = DEFAULT_MINIMUM_SESSIONS,
-) -> SessionClusterResult:
-    """Fit ``value ~ 1 + (1 | session)`` without parsing recording names.
+    minimum_acquisition_batches: int = DEFAULT_MINIMUM_ACQUISITION_BATCHES,
+) -> AcquisitionBatchClusterResult:
+    """Fit ``value ~ 1 + (1 | acquisition_batch)`` when explicitly requested.
 
-    The caller must supply persisted registry session identities. Fit failure is
-    reported as unavailable; it never falls back to a model that ignores the
-    requested clustering.
+    The subject is the experimental unit. The caller may supply persisted batch
+    identities to model shared technical conditions as a nuisance random effect.
+    Fit failure is reported as unavailable; it never silently falls back.
     """
 
     if not 0.0 < float(confidence_level) < 1.0:
         raise ValueError("confidence_level must be in (0, 1).")
-    if type(minimum_sessions) is not int or minimum_sessions < 3:
-        raise ValueError("minimum_sessions must be an integer >= 3.")
+    if type(minimum_acquisition_batches) is not int or minimum_acquisition_batches < 3:
+        raise ValueError("minimum_acquisition_batches must be an integer >= 3.")
     y = np.asarray(values, dtype=np.float64).reshape(-1)
-    raw_sessions = np.asarray(session_ids, dtype=object).reshape(-1)
-    if y.shape != raw_sessions.shape:
-        raise ValueError("Session-cluster values and identities must have equal length.")
+    raw_batches = np.asarray(acquisition_batch_ids, dtype=object).reshape(-1)
+    if y.shape != raw_batches.shape:
+        raise ValueError(
+            "Acquisition-batch values and identities must have equal length."
+        )
 
-    normalized_sessions = np.asarray(
-        [str(value).strip() if value is not None else "" for value in raw_sessions],
+    normalized_batches = np.asarray(
+        [value.strip() if isinstance(value, str) else "" for value in raw_batches],
         dtype=object,
     )
-    usable = np.isfinite(y) & (normalized_sessions != "")
+    finite = np.isfinite(y)
+    missing_batch = finite & (normalized_batches == "")
+    usable = finite & ~missing_batch
+    if np.any(missing_batch):
+        batches = normalized_batches[usable]
+        return _unavailable(
+            reason="missing_acquisition_batch_identity",
+            unit_count=int(np.count_nonzero(usable)),
+            cluster_count=int(np.unique(batches).size),
+        )
     y = y[usable]
-    sessions = normalized_sessions[usable]
+    batches = normalized_batches[usable]
     unit_count = int(y.size)
-    cluster_count = int(np.unique(sessions).size)
+    cluster_count = int(np.unique(batches).size)
     if unit_count < 2:
         return _unavailable(
             reason="insufficient_complete_recordings",
             unit_count=unit_count,
             cluster_count=cluster_count,
         )
-    if cluster_count < int(minimum_sessions):
+    if cluster_count < int(minimum_acquisition_batches):
         return _unavailable(
-            reason=f"session_count<{int(minimum_sessions)}",
+            reason=f"acquisition_batch_count<{int(minimum_acquisition_batches)}",
             unit_count=unit_count,
             cluster_count=cluster_count,
         )
     if unit_count == cluster_count:
         return _unavailable(
-            reason="no_repeated_session_observations",
+            reason="no_repeated_acquisition_batch_observations",
             unit_count=unit_count,
             cluster_count=cluster_count,
         )
@@ -119,7 +130,7 @@ def fit_session_random_intercept(
         exog = np.ones((unit_count, 1), dtype=np.float64)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            fitted = MixedLM(y, exog, groups=sessions).fit(
+            fitted = MixedLM(y, exog, groups=batches).fit(
                 reml=True,
                 method=["lbfgs", "powell"],
                 disp=False,
@@ -132,15 +143,18 @@ def fit_session_random_intercept(
             np.asarray(fitted.cov_re, dtype=np.float64).reshape(-1)[0]
         )
         residual_variance = float(fitted.scale)
-        if not all(
-            math.isfinite(value)
-            for value in (
-                mean,
-                standard_error,
-                cluster_variance,
-                residual_variance,
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (
+                    mean,
+                    standard_error,
+                    cluster_variance,
+                    residual_variance,
+                )
             )
-        ) or standard_error <= 0.0:
+            or standard_error <= 0.0
+        ):
             raise ValueError("mixed model returned non-finite estimates")
     except Exception as exc:
         return _unavailable(
@@ -162,11 +176,11 @@ def fit_session_random_intercept(
             cluster_count=cluster_count,
         )
     boundary = cluster_variance <= np.finfo(np.float64).eps
-    return SessionClusterResult(
+    return AcquisitionBatchClusterResult(
         status="boundary_zero_variance" if boundary else "computed",
         reason=None,
-        method=SESSION_RANDOM_INTERCEPT_METHOD,
-        unit="session",
+        method=ACQUISITION_BATCH_RANDOM_INTERCEPT_METHOD,
+        unit="acquisition_batch",
         unit_count=unit_count,
         cluster_count=cluster_count,
         mean=mean,

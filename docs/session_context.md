@@ -64,9 +64,9 @@ Example:
 - Session context is separate from **subject metadata** (`/subject_metadata`)
   and **zebrobot snapshot** data.
 - `session_uuid` identifies this acquisition/recording surface. It is not the
-  cross-recording `experimental_session_id`; simultaneous arenas are grouped
+  cross-recording `acquisition_batch_id`; simultaneous arenas are grouped
   only by an explicit registry assignment under
-  `experimental_session_registry_contract.md`.
+  `acquisition_batch_registry_contract.md`.
 - Training pipelines should fail fast when datasets mix different contexts.
 
 ## Workflow

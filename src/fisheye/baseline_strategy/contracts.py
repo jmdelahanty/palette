@@ -44,7 +44,6 @@ BASELINE_STRATEGY_TABLES = (
 
 IDENTITY_COLUMNS = (
     "recording_id",
-    "session_id",
     "subject_id",
     "track_id",
     "baseline_window_id",
@@ -57,7 +56,7 @@ _ARROW_COMMON_FIELDS = (
     field("method", "string"),
     field("method_version", "string"),
     field("recording_id", "string"),
-    field("session_id", "string"),
+    field("acquisition_batch_id", "string", nullable=True),
     field("subject_id", "string"),
     field("track_id", "int64"),
     field("baseline_window_id", "int64"),
@@ -254,9 +253,7 @@ BASELINE_STRATEGY_ARROW_CONTRACTS = {
         fields=_BASELINE_EXPLORATION_EPISODES_ARROW_FIELDS,
         schema_version=SCHEMA_VERSION,
         schema_namespace=ARROW_TABLE_SCHEMA_NAMESPACE,
-        primary_key=BASELINE_STRATEGY_PRIMARY_KEYS[
-            BASELINE_EXPLORATION_EPISODES_TABLE
-        ],
+        primary_key=BASELINE_STRATEGY_PRIMARY_KEYS[BASELINE_EXPLORATION_EPISODES_TABLE],
     ),
     BASELINE_STRATEGY_CLASSIFICATION_TABLE: ArrowTableContract(
         table_name=BASELINE_STRATEGY_CLASSIFICATION_TABLE,
@@ -390,7 +387,10 @@ def _canonical_bic_json(value: object) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        def reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+
+        def reject_duplicate_pairs(
+            pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
             decoded: dict[str, object] = {}
             for key, item in pairs:
                 if key in decoded:
@@ -409,7 +409,9 @@ def _canonical_bic_json(value: object) -> str | None:
             raise ValueError("bic_by_component_count_json is not canonical JSON")
         return canonical
     if not isinstance(value, Mapping):
-        raise TypeError("bic_by_component_count must be a mapping, JSON string, or null")
+        raise TypeError(
+            "bic_by_component_count must be a mapping, JSON string, or null"
+        )
     normalized: dict[str, float] = {}
     for raw_key, raw_value in value.items():
         key = str(raw_key)
@@ -446,9 +448,7 @@ def _normalize_arrow_value(name: str, arrow_type: str, value: object) -> object:
     if arrow_type in {"int32", "int64"}:
         if type(value) is not int:
             raise ValueError(f"{name} must be an integer")
-        lower, upper = (
-            (-(2**31), 2**31) if arrow_type == "int32" else (-(2**63), 2**63)
-        )
+        lower, upper = (-(2**31), 2**31) if arrow_type == "int32" else (-(2**63), 2**63)
         if not lower <= value < upper:
             raise ValueError(f"{name} is outside the {arrow_type} range")
         return value
@@ -605,6 +605,7 @@ def contract_fields(table_name: str) -> tuple[str, ...]:
         "table_name",
         "method",
         "method_version",
+        "acquisition_batch_id",
         *IDENTITY_COLUMNS,
     )
     specific = {

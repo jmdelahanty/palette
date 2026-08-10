@@ -35,7 +35,7 @@ COMMON_SIGNATURE = (
     ("method", "string", False),
     ("method_version", "string", False),
     ("recording_id", "string", False),
-    ("session_id", "string", False),
+    ("acquisition_batch_id", "string", True),
     ("subject_id", "string", False),
     ("training_window_id", "int64", True),
     ("source_export_run_id", "string", False),
@@ -197,13 +197,13 @@ CLUSTER_SIGNATURE = COMMON_SIGNATURE + (
 
 EXPECTED_CONTRACT_DIGESTS = {
     TRAINING_RESPONSE_FEATURES_TABLE: (
-        "1307047b4d02d4fdadc379f01567a929e0af2a7d36f42fcbd203325df4e8c3f6"
+        "f8941cbfeee1a9cff64880f1276bf0bd7c73f21ad815061fc4bd86069fb2b0ef"
     ),
     TRAINING_RESPONSE_CLASSIFICATION_TABLE: (
-        "dff95f3b8435ac13c2f871717a62245f4b432b15cfa4c259c7c340fc3e62a667"
+        "b5287f4f7ba9d050f8db2d56ed1325f4a26ab98bdb83fdfca3d361c14a05d13e"
     ),
     TRAINING_RESPONSE_CLUSTERS_TABLE: (
-        "8f62f92238a063ddb99ebb73fb1cbf5509b1e1e5d7b99fc95bfaa3806a3a5f81"
+        "9247ac6ef5b8a6626054bb42d19d7eab81729002d593cd246d22565c045eb771"
     ),
 }
 EXPECTED_LEGACY_V2_CONTRACT_DIGESTS = {
@@ -250,7 +250,7 @@ def _minimal_row(table_name: str, *, recording_id: str = "recording_1") -> dict:
         method=METHOD,
         method_version=METHOD_VERSION,
         recording_id=recording_id,
-        session_id=f"session_{recording_id}",
+        acquisition_batch_id=f"session_{recording_id}",
         subject_id=f"subject_{recording_id}",
         source_export_run_id="source_1",
     )
@@ -266,7 +266,9 @@ def test_training_response_v3_freezes_all_three_ordered_schemas() -> None:
         CLASSIFICATION_SIGNATURE
     )
     assert _signature(TRAINING_RESPONSE_CLUSTERS_TABLE) == CLUSTER_SIGNATURE
-    assert {name: len(contract.fields) for name, contract in ARROW_TABLE_CONTRACTS.items()} == {
+    assert {
+        name: len(contract.fields) for name, contract in ARROW_TABLE_CONTRACTS.items()
+    } == {
         TRAINING_RESPONSE_FEATURES_TABLE: 104,
         TRAINING_RESPONSE_CLASSIFICATION_TABLE: 37,
         TRAINING_RESPONSE_CLUSTERS_TABLE: 27,
@@ -276,7 +278,6 @@ def test_training_response_v3_freezes_all_three_ordered_schemas() -> None:
         assert contract.primary_key == (
             "analysis_run_id",
             "recording_id",
-            "session_id",
             "subject_id",
         )
         assert contract.payload_sha256 == EXPECTED_CONTRACT_DIGESTS[table_name]
@@ -286,15 +287,12 @@ def test_training_response_envelope_is_closed_exact_and_digest_bound() -> None:
     envelope = training_response_arrow_contract_envelope()
     assert set(envelope["exact_tables"]) == set(TRAINING_RESPONSE_TABLES)
     assert envelope["inferred_v2_compatibility_tables"] == []
-    assert {
-        value["schema_version"] for value in envelope["exact_tables"].values()
-    } == {SCHEMA_VERSION}
-    assert {
-        tuple(value["primary_key"])
-        for value in envelope["exact_tables"].values()
-    } == {
-        ("analysis_run_id", "recording_id", "session_id", "subject_id")
+    assert {value["schema_version"] for value in envelope["exact_tables"].values()} == {
+        SCHEMA_VERSION
     }
+    assert {
+        tuple(value["primary_key"]) for value in envelope["exact_tables"].values()
+    } == {("analysis_run_id", "recording_id", "subject_id")}
     assert validate_training_response_arrow_contract_envelope(envelope) == envelope
 
     tampered = deepcopy(envelope)
@@ -398,9 +396,9 @@ def test_named_canonical_bic_json_is_preserved_byte_for_byte() -> None:
         row,
         analysis_run_id="analysis_1",
     )
-    assert normalized["bic_by_component_count_json"] == row[
-        "bic_by_component_count_json"
-    ]
+    assert (
+        normalized["bic_by_component_count_json"] == row["bic_by_component_count_json"]
+    )
 
 
 def test_v3_rejects_alternative_role_derived_columns_and_config() -> None:
@@ -470,11 +468,8 @@ def test_legacy_v2_contract_remains_explicit_and_identity_free(
     contract = LEGACY_V2_ARROW_TABLE_CONTRACTS[table_name]
     assert contract.schema_version == LEGACY_EXACT_SCHEMA_VERSION
     assert contract.primary_key == ("analysis_run_id", "recording_id")
-    assert (
-        contract.payload_sha256
-        == EXPECTED_LEGACY_V2_CONTRACT_DIGESTS[table_name]
-    )
-    assert "session_id" not in {item.name for item in contract.fields}
+    assert contract.payload_sha256 == EXPECTED_LEGACY_V2_CONTRACT_DIGESTS[table_name]
+    assert "acquisition_batch_id" not in {item.name for item in contract.fields}
     assert "subject_id" not in {item.name for item in contract.fields}
     schema = exact_training_response_arrow_schema(
         table_name,
@@ -484,7 +479,9 @@ def test_legacy_v2_contract_remains_explicit_and_identity_free(
     assert schema.metadata[b"palette.arrow_schema_version"] == b"2"
 
 
-def test_v3_primary_key_distinguishes_sessions_and_subjects_but_rejects_duplicates() -> None:
+def test_v3_primary_key_distinguishes_sessions_and_subjects_but_rejects_duplicates() -> (
+    None
+):
     first = normalize_training_response_rows(
         TRAINING_RESPONSE_FEATURES_TABLE,
         [_minimal_row(TRAINING_RESPONSE_FEATURES_TABLE, recording_id="recording_1")],
@@ -493,7 +490,7 @@ def test_v3_primary_key_distinguishes_sessions_and_subjects_but_rejects_duplicat
     second = {
         **first,
         "recording_id": "recording_2",
-        "session_id": "session_2",
+        "acquisition_batch_id": "session_2",
         "subject_id": "subject_2",
     }
     validate_training_response_primary_keys(

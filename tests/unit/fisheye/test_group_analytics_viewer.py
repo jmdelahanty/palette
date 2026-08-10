@@ -11,8 +11,14 @@ from fisheye.analysis.chaser_egocentric_bearing import (
     build_chaser_egocentric_bearing_result,
     write_chaser_egocentric_bearing_component,
 )
-from fisheye.analysis.cra_primary_endpoint import build_cra_primary_endpoint_result, write_cra_primary_endpoint_component
-from fisheye.analysis.cra_near_field import build_cra_near_field_result, write_cra_near_field_component
+from fisheye.analysis.cra_primary_endpoint import (
+    build_cra_primary_endpoint_result,
+    write_cra_primary_endpoint_component,
+)
+from fisheye.analysis.cra_near_field import (
+    build_cra_near_field_result,
+    write_cra_near_field_component,
+)
 from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
     build_goodcopbadcop_epoch_behavior_summary_result,
     write_goodcopbadcop_epoch_behavior_summary_component,
@@ -88,7 +94,7 @@ def test_group_analytics_summary_reports_sample_std_and_sem() -> None:
     assert summary["n"] == 3
     assert summary["mean"] == pytest.approx(3.0)
     assert summary["std_dev"] == pytest.approx(2.0)
-    assert summary["sem"] == pytest.approx(2.0 / (3.0 ** 0.5))
+    assert summary["sem"] == pytest.approx(2.0 / (3.0**0.5))
 
 
 def test_browser_statistics_table_separates_displayed_and_naive_inference() -> None:
@@ -166,17 +172,19 @@ def _statistics_projection_row(
         "q_value": 0.06,
         "multiple_comparison_family": "primary|chaser_distance",
         "cluster_mode": cluster_mode,
-        "cluster_unit": "session",
+        "cluster_unit": "acquisition_batch",
         "cluster_method": (
-            "session_random_intercept_reml_v1" if cluster_mode == "session" else "none"
+            "acquisition_batch_random_intercept_reml_v1"
+            if cluster_mode == "acquisition_batch"
+            else "none"
         ),
         "cluster_status": cluster_status,
         "cluster_reason": (
-            "no_repeated_session_observations"
+            "no_repeated_acquisition_batch_observations"
             if cluster_status == "unavailable"
             else None
         ),
-        "cluster_count": 4 if cluster_mode == "session" else 0,
+        "cluster_count": 4 if cluster_mode == "acquisition_batch" else 0,
         "clustered_unit_count": 8,
         "clustered_mean_difference": 1.1 if cluster_status == "computed" else None,
         "clustered_standard_error": 0.2 if cluster_status == "computed" else None,
@@ -184,7 +192,7 @@ def _statistics_projection_row(
         "clustered_ci_high": 1.5 if cluster_status == "computed" else None,
         "clustered_p_value": 0.01 if cluster_status == "computed" else None,
         "clustered_q_value": 0.02 if cluster_status == "computed" else None,
-        "session_variance": 0.05 if cluster_status == "computed" else None,
+        "acquisition_batch_variance": 0.05 if cluster_status == "computed" else None,
         "residual_variance": 0.15 if cluster_status == "computed" else None,
         "intraclass_correlation": 0.25 if cluster_status == "computed" else None,
         "test_method": "wilcoxon_signed_rank",
@@ -200,8 +208,20 @@ def _statistics_projection_row(
 @pytest.mark.parametrize(
     ("cluster_mode", "cluster_status", "expected_kind", "expected_p", "summary_status"),
     [
-        ("session", "computed", "clustered", 0.01, "clustered_preferred"),
-        ("session", "unavailable", "unavailable", None, "clustered_unavailable"),
+        (
+            "acquisition_batch",
+            "computed",
+            "clustered",
+            0.01,
+            "clustered_preferred",
+        ),
+        (
+            "acquisition_batch",
+            "unavailable",
+            "unavailable",
+            None,
+            "clustered_unavailable",
+        ),
         ("none", "disabled", "naive_cluster_disabled", 0.03, "clustering_disabled"),
     ],
 )
@@ -273,7 +293,9 @@ def _make_goodcopbadcop_export(
         overwrite=True,
         legacy_compatibility=True,
     )
-    cra_result = build_cra_primary_endpoint_result(source, chaser_distance_run="chaser_distance_1")
+    cra_result = build_cra_primary_endpoint_result(
+        source, chaser_distance_run="chaser_distance_1"
+    )
     write_cra_primary_endpoint_component(source, cra_result, overwrite=True)
     _add_circle_geometry(source)
     near_field_result = build_cra_near_field_result(
@@ -296,7 +318,9 @@ def _make_goodcopbadcop_export(
         source,
         chaser_distance_run="chaser_distance_1",
     )
-    write_goodcopbadcop_epoch_behavior_summary_component(source, epoch_behavior_result, overwrite=True)
+    write_goodcopbadcop_epoch_behavior_summary_component(
+        source, epoch_behavior_result, overwrite=True
+    )
     egocentric_result = build_chaser_egocentric_bearing_result(
         source,
         chaser_distance_run="chaser_distance_1",
@@ -373,7 +397,10 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert summary["row_counts_by_table"]["chaser_epoch_distance_summary"] == 6
     assert summary["row_counts_by_table"]["chaser_epoch_behavior_summary"] == 3
     assert summary["row_counts_by_table"]["chaser_epoch_bout_histogram"] == 183
-    assert summary["row_counts_by_table"]["chaser_epoch_inter_bout_interval_histogram"] == 3
+    assert (
+        summary["row_counts_by_table"]["chaser_epoch_inter_bout_interval_histogram"]
+        == 3
+    )
     assert summary["row_counts_by_table"]["chaser_epoch_center_distance_histogram"] == 9
     assert summary["row_counts_by_table"]["chaser_speed_distance_bins"] == 18
     assert summary["row_counts_by_table"]["chaser_epoch_distance_histogram"] == 18
@@ -392,7 +419,10 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
         summary["row_counts_by_table"]["chaser_near_field_occupancy_distance_cdf"] == 8
     )
     assert summary["row_counts_by_table"]["chaser_egocentric_epoch_summary"] == 6
-    assert summary["row_counts_by_table"]["chaser_egocentric_distance_bearing_histogram"] == 72
+    assert (
+        summary["row_counts_by_table"]["chaser_egocentric_distance_bearing_histogram"]
+        == 72
+    )
     assert summary["statistics"]["available"] is False
 
     options = query_options(context)
@@ -409,11 +439,20 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert options["cra_object_roles"] == ["aggressive", "inert"]
     assert options["cra_object_phase_metrics"][0]["metric"] == "median_distance_mm"
     assert options["epoch_speed_metrics"][0]["metric"] == "mean_speed_mm_s"
-    assert "mean_inter_bout_interval_s" in {item["metric"] for item in options["epoch_speed_metrics"]}
-    assert "mean_bout_net_heading_change_deg" in {item["metric"] for item in options["epoch_speed_metrics"]}
+    assert "mean_inter_bout_interval_s" in {
+        item["metric"] for item in options["epoch_speed_metrics"]
+    }
+    assert "mean_bout_net_heading_change_deg" in {
+        item["metric"] for item in options["epoch_speed_metrics"]
+    }
     assert options["epoch_bout_histogram_metrics"][0]["metric"] == "bout_path_length_mm"
-    assert options["epoch_inter_bout_interval_histogram_metrics"][0]["metric"] == "inter_bout_interval_s"
-    assert options["cra_near_field_object_phase_metrics"][0]["metric"] == "approach_p05_mm"
+    assert (
+        options["epoch_inter_bout_interval_histogram_metrics"][0]["metric"]
+        == "inter_bout_interval_s"
+    )
+    assert (
+        options["cra_near_field_object_phase_metrics"][0]["metric"] == "approach_p05_mm"
+    )
     assert options["egocentric_metrics"][0]["metric"] == "mean_alignment_cos"
 
     position_grids = query_position_occupancy_grid_options(context)
@@ -439,7 +478,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
         y_bin_factor=2,
     )
     assert len(rebinned_position) == 3
-    assert all(row["pooled_probability"] == pytest.approx(1.0) for row in rebinned_position)
+    assert all(
+        row["pooled_probability"] == pytest.approx(1.0) for row in rebinned_position
+    )
 
     spatial = query_spatial_occupancy(context, metric="time_s", value_mode="total")
     pre_top_left = next(
@@ -466,56 +507,82 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert post_chaser_1["std_dev"] is None
     assert post_chaser_1["sem"] is None
 
-    histogram = query_chaser_histogram(context, window_label="pre_event", chaser_index=0)
+    histogram = query_chaser_histogram(
+        context, window_label="pre_event", chaser_index=0
+    )
     first_bin = next(row for row in histogram["rows"] if row["distance_bin_index"] == 0)
     assert first_bin["pooled_count"] == 1
     assert first_bin["pooled_total_count"] == 3
     assert first_bin["pooled_density"] == pytest.approx(1.0 / 6.0, rel=1e-5)
 
-    epoch_speed = query_epoch_speed_summary(context, metric="mean_speed_mm_s", stat="mean")
-    pre_speed = next(row for row in epoch_speed["rows"] if row["window_label"] == "pre_event")
+    epoch_speed = query_epoch_speed_summary(
+        context, metric="mean_speed_mm_s", stat="mean"
+    )
+    pre_speed = next(
+        row for row in epoch_speed["rows"] if row["window_label"] == "pre_event"
+    )
     assert epoch_speed["available"] is True
     assert epoch_speed["source_table"] == "chaser_epoch_behavior_summary"
     assert epoch_speed["source_label"] == "persisted_epoch_behavior"
     assert pre_speed["value"] == pytest.approx(20.0)
     assert pre_speed["recording_count"] == 1
 
-    epoch_ibi = query_epoch_speed_summary(context, metric="mean_inter_bout_interval_s", stat="mean")
-    pre_ibi = next(row for row in epoch_ibi["rows"] if row["window_label"] == "pre_event")
+    epoch_ibi = query_epoch_speed_summary(
+        context, metric="mean_inter_bout_interval_s", stat="mean"
+    )
+    pre_ibi = next(
+        row for row in epoch_ibi["rows"] if row["window_label"] == "pre_event"
+    )
     assert epoch_ibi["source_table"] == "chaser_epoch_behavior_summary"
     assert pre_ibi["value"] == pytest.approx(0.06)
 
-    epoch_heading = query_epoch_speed_summary(context, metric="mean_bout_net_heading_change_deg", stat="mean")
-    pre_heading = next(row for row in epoch_heading["rows"] if row["window_label"] == "pre_event")
+    epoch_heading = query_epoch_speed_summary(
+        context, metric="mean_bout_net_heading_change_deg", stat="mean"
+    )
+    pre_heading = next(
+        row for row in epoch_heading["rows"] if row["window_label"] == "pre_event"
+    )
     assert epoch_heading["metric_label"] == "Mean net bout heading change (deg)"
     assert pre_heading["value"] == pytest.approx(0.0)
 
-    bout_hist = query_epoch_bout_histogram(context, metric="bout_duration_s", window_label="pre_event")
+    bout_hist = query_epoch_bout_histogram(
+        context, metric="bout_duration_s", window_label="pre_event"
+    )
     assert bout_hist["available"] is True
     assert bout_hist["source_table"] == "chaser_epoch_bout_histogram"
     assert bout_hist["metric_label"] == "Bout duration (s)"
     assert sum(row["pooled_count"] for row in bout_hist["rows"]) == 2
-    assert sum(row["pooled_fraction"] for row in bout_hist["rows"]) == pytest.approx(1.0)
+    assert sum(row["pooled_fraction"] for row in bout_hist["rows"]) == pytest.approx(
+        1.0
+    )
     first_bout_bin = bout_hist["rows"][0]
     assert first_bout_bin["bin_left"] is not None
     assert first_bout_bin["bin_right"] is not None
     assert first_bout_bin["recording_count"] == 1
 
-    ibi_hist = query_epoch_inter_bout_interval_histogram(context, window_label="pre_event")
+    ibi_hist = query_epoch_inter_bout_interval_histogram(
+        context, window_label="pre_event"
+    )
     assert ibi_hist["available"] is True
     assert ibi_hist["source_table"] == "chaser_epoch_inter_bout_interval_histogram"
     assert ibi_hist["metric_label"] == "Inter-bout interval (s)"
     assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
     assert sum(row["pooled_fraction"] for row in ibi_hist["rows"]) == pytest.approx(1.0)
 
-    speed_distance = query_speed_distance_bins(context, window_label="pre_event", chaser_index=0)
-    speed_bin = next(row for row in speed_distance["rows"] if row["distance_bin_index"] == 0)
+    speed_distance = query_speed_distance_bins(
+        context, window_label="pre_event", chaser_index=0
+    )
+    speed_bin = next(
+        row for row in speed_distance["rows"] if row["distance_bin_index"] == 0
+    )
     assert speed_distance["available"] is True
     assert speed_bin["pooled_speed_sample_count"] == 2
     assert speed_bin["pooled_mean_speed_mm_s"] == pytest.approx(5.0)
     assert speed_bin["recording_count"] == 1
 
-    cra_object_phase = query_cra_object_phase(context, metric="occupancy_fraction", stat="mean")
+    cra_object_phase = query_cra_object_phase(
+        context, metric="occupancy_fraction", stat="mean"
+    )
     post_aggressive = next(
         row
         for row in cra_object_phase["rows"]
@@ -530,7 +597,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     cra_summary = query_cra_summary(context)
     assert cra_summary["row_count"] == 1
     assert cra_summary["statuses"] == ["computed"]
-    delta_occ = next(row for row in cra_summary["metrics"] if row["metric"] == "delta_occ_agg")
+    delta_occ = next(
+        row for row in cra_summary["metrics"] if row["metric"] == "delta_occ_agg"
+    )
     assert delta_occ["mean"] == pytest.approx(-1.0)
     assert cra_summary["rows"][0]["post_aggressive_quadrant"] == "bottom_right"
     assert cra_summary["rows"][0]["source_component_fingerprint"]
@@ -542,7 +611,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert len(cra_specificity["distance_specificity_rows"]) == 1
     assert len(cra_specificity["occupancy_index_slope_rows"]) == 2
     assert len(cra_specificity["occupancy_index_specificity_rows"]) == 1
-    assert cra_specificity["occupancy_index_specificity_rows"][0]["occupancy_index_specificity"] == pytest.approx(-8.0 / 3.0)
+    assert cra_specificity["occupancy_index_specificity_rows"][0][
+        "occupancy_index_specificity"
+    ] == pytest.approx(-8.0 / 3.0)
 
     quadrant_density = query_cra_quadrant_occupancy_density(
         context,
@@ -554,7 +625,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert quadrant_density["chance"] == pytest.approx(0.25)
     assert quadrant_density["kde"]["bandwidth"] == pytest.approx(0.05)
     assert quadrant_density["statistics"]["n"] == 1
-    assert quadrant_density["statistics"]["test_method"].startswith("wilcoxon_signed_rank")
+    assert quadrant_density["statistics"]["test_method"].startswith(
+        "wilcoxon_signed_rank"
+    )
     assert quadrant_density["statistics"]["median_difference"] == pytest.approx(-1.0)
     assert len(quadrant_density["density_rows"]) == 404
     pre_fish_phase = next(
@@ -598,13 +671,13 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert near_field_summary["row_count"] == 1
     assert near_field_summary["statuses"] == ["computed"]
     nearzone_specificity = next(
-        row for row in near_field_summary["metrics"] if row["metric"] == "nearzone_occ_specificity"
+        row
+        for row in near_field_summary["metrics"]
+        if row["metric"] == "nearzone_occ_specificity"
     )
     assert nearzone_specificity["mean"] == pytest.approx(-1.0)
     assert near_field_summary["rows"][0]["geometry_status"] == "circle"
-    assert near_field_summary["rows"][0]["speed_source"] == (
-        "raw_centroid_explicit"
-    )
+    assert near_field_summary["rows"][0]["speed_source"] == ("raw_centroid_explicit")
 
     near_field_curves = query_cra_near_field_curves(context)
     assert near_field_curves["available"] is True
@@ -620,7 +693,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert first_cdf["recording_count"] == 1
     assert first_cdf["distance_threshold_mm"] == pytest.approx(2.0)
 
-    egocentric = query_egocentric_summary(context, metric="mean_alignment_cos", stat="mean")
+    egocentric = query_egocentric_summary(
+        context, metric="mean_alignment_cos", stat="mean"
+    )
     pre_egocentric_chaser_0 = next(
         row
         for row in egocentric["rows"]
@@ -631,7 +706,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert pre_egocentric_chaser_0["std_dev"] is None
     assert pre_egocentric_chaser_0["sem"] is None
 
-    egocentric_histogram = query_egocentric_histogram(context, window_label="pre_event", chaser_index=0)
+    egocentric_histogram = query_egocentric_histogram(
+        context, window_label="pre_event", chaser_index=0
+    )
     first_egocentric_bin = next(
         row
         for row in egocentric_histogram["rows"]
@@ -651,7 +728,9 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert recordings["rows"][0]["cra_delta_occ_agg"] == pytest.approx(-1.0)
     assert recordings["rows"][0]["cra_post_aggressive_quadrant"] == "bottom_right"
     assert recordings["rows"][0]["cra_near_field_status"] == "computed"
-    assert recordings["rows"][0]["cra_near_field_nearzone_occ_specificity"] == pytest.approx(-1.0)
+    assert recordings["rows"][0][
+        "cra_near_field_nearzone_occ_specificity"
+    ] == pytest.approx(-1.0)
     assert recordings["rows"][0]["cra_near_field_geometry_status"] == "circle"
     assert recordings["rows"][0]["pre_event_chaser_0_alignment"] is not None
 
@@ -703,24 +782,34 @@ def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(
     summary = query_export_summary(context)
     assert summary["statistics"]["descriptive_row_count"] > 0
 
-    epoch_ibi = query_epoch_speed_summary(context, metric="mean_inter_bout_interval_s", stat="mean")
+    epoch_ibi = query_epoch_speed_summary(
+        context, metric="mean_inter_bout_interval_s", stat="mean"
+    )
     assert epoch_ibi["source_table"] == "chaser_epoch_behavior_summary"
     assert epoch_ibi["summary_source"] == "persisted_descriptive_summary"
-    pre_ibi = next(row for row in epoch_ibi["rows"] if row["window_label"] == "pre_event")
+    pre_ibi = next(
+        row for row in epoch_ibi["rows"] if row["window_label"] == "pre_event"
+    )
     assert pre_ibi["summary_source"] == "persisted_descriptive_summary"
     assert pre_ibi["value"] == pytest.approx(0.06)
 
-    center_hist = query_epoch_center_distance_histogram(context, window_label="pre_event")
+    center_hist = query_epoch_center_distance_histogram(
+        context, window_label="pre_event"
+    )
     assert center_hist["available"] is True
     assert center_hist["source_table"] == "chaser_epoch_center_distance_histogram"
     assert sum(row["pooled_count"] for row in center_hist["rows"]) == 3
 
-    bout_hist = query_epoch_bout_histogram(context, metric="bout_path_length_mm", window_label="pre_event")
+    bout_hist = query_epoch_bout_histogram(
+        context, metric="bout_path_length_mm", window_label="pre_event"
+    )
     assert bout_hist["available"] is True
     assert bout_hist["source_table"] == "chaser_epoch_bout_histogram"
     assert sum(row["pooled_count"] for row in bout_hist["rows"]) == 2
 
-    ibi_hist = query_epoch_inter_bout_interval_histogram(context, window_label="pre_event")
+    ibi_hist = query_epoch_inter_bout_interval_histogram(
+        context, window_label="pre_event"
+    )
     assert ibi_hist["available"] is True
     assert ibi_hist["source_table"] == "chaser_epoch_inter_bout_interval_histogram"
     assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
@@ -771,7 +860,9 @@ def test_group_analytics_viewer_queries_cra_near_field_statistics(
     assert statistics["source_export_run_id"] == context.export_run_id
     assert statistics["row_count"] == 9
     by_metric = {row["metric_name"]: row for row in statistics["rows"]}
-    assert by_metric["nearzone_occ_specificity"]["test_method"].startswith("wilcoxon_signed_rank")
+    assert by_metric["nearzone_occ_specificity"]["test_method"].startswith(
+        "wilcoxon_signed_rank"
+    )
     assert by_metric["approach_p05_specificity"]["contrast_name"] == "vs-zero"
     assert by_metric["nearzone_occ_delta_inert"]["primary"] is False
     assert by_metric["nearzone_occ_specificity"]["paired_unit_count"] == 1
@@ -790,13 +881,17 @@ def test_group_analytics_viewer_rejects_unknown_metric(tmp_path: Path) -> None:
         query_epoch_bout_histogram(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported epoch metric histogram metric"):
         query_epoch_inter_bout_interval_histogram(context, metric="not_a_metric")
-    with pytest.raises(ValueError, match="Unsupported chaser quadrant-occupancy metric"):
+    with pytest.raises(
+        ValueError, match="Unsupported chaser quadrant-occupancy metric"
+    ):
         query_cra_object_phase(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported chaser quadrant summary metric"):
         query_cra_summary(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported chaser near-field metric"):
         query_cra_near_field_object_phase(context, metric="not_a_metric")
-    with pytest.raises(ValueError, match="Unsupported chaser near-field summary metric"):
+    with pytest.raises(
+        ValueError, match="Unsupported chaser near-field summary metric"
+    ):
         query_cra_near_field_summary(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported egocentric metric"):
         query_egocentric_summary(context, metric="not_a_metric")

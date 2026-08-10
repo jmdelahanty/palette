@@ -17,46 +17,42 @@ from fisheye.shared.zarr.manifest_digest import (
 REGISTRY_IDENTITY_RECEIPT_SCHEMA_ID = (
     "palette.analytics_export.registry_identity_receipt"
 )
-REGISTRY_IDENTITY_RECEIPT_SCHEMA_VERSION = 2
-REGISTRY_IDENTITY_SESSION_FIELD = "experimental_session_id"
-REGISTRY_IDENTITY_SESSION_SNAPSHOT_FIELD = "experimental_session_snapshot_id"
-REGISTRY_IDENTITY_SESSION_SCHEMA_ID_FIELD = "experimental_session_schema_id"
-REGISTRY_IDENTITY_SESSION_SCHEMA_ID = "palette.registry.experimental_session.v1"
-REGISTRY_IDENTITY_SESSION_SCHEMA_VERSION_FIELD = (
-    "experimental_session_creation_registry_schema_version"
+REGISTRY_IDENTITY_RECEIPT_SCHEMA_VERSION = 3
+REGISTRY_IDENTITY_BATCH_FIELD = "acquisition_batch_id"
+REGISTRY_IDENTITY_BATCH_SNAPSHOT_FIELD = "acquisition_batch_snapshot_id"
+REGISTRY_IDENTITY_BATCH_SCHEMA_ID_FIELD = "acquisition_batch_schema_id"
+REGISTRY_IDENTITY_BATCH_SCHEMA_ID = "palette.registry.acquisition_batch.v1"
+REGISTRY_IDENTITY_BATCH_SCHEMA_VERSION_FIELD = (
+    "acquisition_batch_creation_registry_schema_version"
 )
-REGISTRY_IDENTITY_SESSION_SOURCE = (
-    f"dataset_context_current.{REGISTRY_IDENTITY_SESSION_FIELD}"
+REGISTRY_IDENTITY_BATCH_SOURCE = (
+    f"dataset_context_current.{REGISTRY_IDENTITY_BATCH_FIELD}"
 )
-REGISTRY_IDENTITY_ASSIGNMENT_SNAPSHOT_FIELD = (
-    "experimental_session_assignment_snapshot_id"
-)
-REGISTRY_IDENTITY_ASSIGNMENT_BATCH_FIELD = "experimental_session_assignment_batch_id"
-REGISTRY_IDENTITY_ASSIGNMENT_REVISION_FIELD = (
-    "experimental_session_assignment_revision"
-)
+REGISTRY_IDENTITY_ASSIGNMENT_SNAPSHOT_FIELD = "acquisition_batch_assignment_snapshot_id"
+REGISTRY_IDENTITY_ASSIGNMENT_BATCH_FIELD = "acquisition_batch_assignment_batch_id"
+REGISTRY_IDENTITY_ASSIGNMENT_REVISION_FIELD = "acquisition_batch_assignment_revision"
 REGISTRY_IDENTITY_ASSIGNMENT_SUPERSEDES_FIELD = (
-    "experimental_session_supersedes_assignment_snapshot_id"
+    "acquisition_batch_supersedes_assignment_snapshot_id"
 )
-REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_ID_FIELD = (
-    "experimental_session_assignment_schema_id"
-)
+REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_ID_FIELD = "acquisition_batch_assignment_schema_id"
 REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_VERSION_FIELD = (
-    "experimental_session_assignment_registry_schema_version"
+    "acquisition_batch_assignment_registry_schema_version"
 )
 REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_ID = (
-    "palette.registry.experimental_session_assignment.v1"
+    "palette.registry.acquisition_batch_assignment.v1"
 )
-REGISTRY_IDENTITY_STATUS = "explicit"
-REGISTRY_IDENTITY_STATUS_FIELD = "experimental_session_identity_status"
-REGISTRY_IDENTITY_ASSIGNMENT_METHOD_FIELD = "experimental_session_assignment_method"
-REGISTRY_IDENTITY_ASSIGNED_BY_FIELD = "experimental_session_assigned_by"
-REGISTRY_IDENTITY_ASSIGNED_AT_FIELD = "experimental_session_assigned_at_utc"
+REGISTRY_IDENTITY_BATCH_STATUSES = frozenset({"explicit", "missing"})
+REGISTRY_IDENTITY_STATUS_FIELD = "acquisition_batch_identity_status"
+REGISTRY_IDENTITY_ASSIGNMENT_METHOD_FIELD = "acquisition_batch_assignment_method"
+REGISTRY_IDENTITY_ASSIGNED_BY_FIELD = "acquisition_batch_assigned_by"
+REGISTRY_IDENTITY_ASSIGNED_AT_FIELD = "acquisition_batch_assigned_at_utc"
 REGISTRY_IDENTITY_SUBJECT_SOURCE = (
     "coalesce(dataset_context_current.subject_id,"
     "dataset_context_current.legacy_fish_id)"
 )
 REGISTRY_IDENTITY_CARDINALITY_POLICY = "exactly_one_subject_per_source_v1"
+REGISTRY_IDENTITY_EXPERIMENTAL_UNIT_POLICY = "subject_is_experimental_unit_v1"
+REGISTRY_IDENTITY_BATCH_POLICY = "optional_explicit_nuisance_block_v1"
 
 _RECEIPT_BODY_FIELDS = frozenset(
     {
@@ -64,9 +60,11 @@ _RECEIPT_BODY_FIELDS = frozenset(
         "schema_version",
         "digest_algorithm",
         "registry_path",
-        "session_id_source",
+        "acquisition_batch_id_source",
+        "acquisition_batch_policy",
         "subject_id_source",
         "subject_cardinality_policy",
+        "experimental_unit_policy",
         "sources",
     }
 )
@@ -76,18 +74,19 @@ _SOURCE_BODY_FIELDS = frozenset(
         "dataset_id",
         "zarr_path",
         "recording_id",
-        "session_id",
-        "experimental_session_id",
-        "experimental_session_snapshot_id",
-        "experimental_session_schema_id",
-        "experimental_session_schema_version",
+        "experimental_unit_id",
+        "experimental_unit_kind",
+        "acquisition_batch_id",
+        "acquisition_batch_snapshot_id",
+        "acquisition_batch_schema_id",
+        "acquisition_batch_schema_version",
         "assignment_snapshot_id",
         "assignment_batch_id",
         "assignment_revision",
         "supersedes_assignment_snapshot_id",
         "assignment_schema_id",
         "assignment_schema_version",
-        "experimental_session_identity_status",
+        "acquisition_batch_identity_status",
         "assignment_method",
         "assigned_by",
         "assigned_at_utc",
@@ -151,6 +150,12 @@ def _uuid(value: object, *, label: str) -> str:
     return canonical
 
 
+def _optional_uuid(value: object, *, label: str) -> str | None:
+    if value is None:
+        return None
+    return _uuid(value, label=label)
+
+
 def _canonical_path(value: object, *, label: str) -> str:
     text = _nonempty(value, label=label)
     path = Path(text).expanduser()
@@ -192,16 +197,18 @@ def build_registry_identity_source(
 
     dataset_ids = unique("dataset_id")
     recording_ids = unique("recording_id")
-    session_ids = unique(REGISTRY_IDENTITY_SESSION_FIELD)
-    session_snapshot_ids = unique(REGISTRY_IDENTITY_SESSION_SNAPSHOT_FIELD)
-    session_schema_ids = unique(REGISTRY_IDENTITY_SESSION_SCHEMA_ID_FIELD)
-    session_schema_versions = unique(REGISTRY_IDENTITY_SESSION_SCHEMA_VERSION_FIELD)
+    acquisition_batch_ids = unique(REGISTRY_IDENTITY_BATCH_FIELD)
+    batch_snapshot_ids = unique(REGISTRY_IDENTITY_BATCH_SNAPSHOT_FIELD)
+    batch_schema_ids = unique(REGISTRY_IDENTITY_BATCH_SCHEMA_ID_FIELD)
+    batch_schema_versions = unique(REGISTRY_IDENTITY_BATCH_SCHEMA_VERSION_FIELD)
     assignment_snapshot_ids = unique(REGISTRY_IDENTITY_ASSIGNMENT_SNAPSHOT_FIELD)
     assignment_batch_ids = unique(REGISTRY_IDENTITY_ASSIGNMENT_BATCH_FIELD)
     assignment_revisions = unique(REGISTRY_IDENTITY_ASSIGNMENT_REVISION_FIELD)
     assignment_supersedes_ids = unique(REGISTRY_IDENTITY_ASSIGNMENT_SUPERSEDES_FIELD)
     assignment_schema_ids = unique(REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_ID_FIELD)
-    assignment_schema_versions = unique(REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_VERSION_FIELD)
+    assignment_schema_versions = unique(
+        REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_VERSION_FIELD
+    )
     identity_statuses = unique(REGISTRY_IDENTITY_STATUS_FIELD)
     assignment_methods = unique(REGISTRY_IDENTITY_ASSIGNMENT_METHOD_FIELD)
     assigned_by_values = unique(REGISTRY_IDENTITY_ASSIGNED_BY_FIELD)
@@ -212,44 +219,24 @@ def build_registry_identity_source(
         _fail(f"Registry source has ambiguous or invalid dataset_id: {canonical_path}")
     if len(recording_ids) != 1:
         _fail(f"Registry source has ambiguous recording identity: {canonical_path}")
-    if len(session_ids) != 1:
-        _fail(
-            "Registry source has ambiguous or missing experimental-session "
-            f"identity: {canonical_path}"
-        )
     for values, label in (
-        (session_snapshot_ids, "experimental_session_snapshot_id"),
-        (session_schema_ids, "experimental_session_schema_id"),
+        (acquisition_batch_ids, "acquisition_batch_id"),
+        (batch_snapshot_ids, "acquisition_batch_snapshot_id"),
+        (batch_schema_ids, "acquisition_batch_schema_id"),
+        (batch_schema_versions, "acquisition_batch_schema_version"),
         (assignment_snapshot_ids, "assignment_snapshot_id"),
         (assignment_batch_ids, "assignment_batch_id"),
         (assignment_revisions, "assignment_revision"),
         (assignment_supersedes_ids, "supersedes_assignment_snapshot_id"),
         (assignment_schema_ids, "assignment_schema_id"),
-        (identity_statuses, "experimental_session_identity_status"),
+        (assignment_schema_versions, "assignment_schema_version"),
+        (identity_statuses, "acquisition_batch_identity_status"),
         (assignment_methods, "assignment_method"),
         (assigned_by_values, "assigned_by"),
         (assigned_at_values, "assigned_at_utc"),
     ):
         if len(values) != 1:
-            _fail(f"Registry source has ambiguous or missing {label}: {canonical_path}")
-    if (
-        len(session_schema_versions) != 1
-        or type(next(iter(session_schema_versions))) is not int
-        or next(iter(session_schema_versions)) < 1
-    ):
-        _fail(
-            "Registry source has ambiguous or invalid session_schema_version: "
-            f"{canonical_path}"
-        )
-    if (
-        len(assignment_schema_versions) != 1
-        or type(next(iter(assignment_schema_versions))) is not int
-        or next(iter(assignment_schema_versions)) < 1
-    ):
-        _fail(
-            "Registry source has ambiguous or invalid assignment_schema_version: "
-            f"{canonical_path}"
-        )
+            _fail(f"Registry source has ambiguous {label}: {canonical_path}")
     if len(subject_ids) != 1:
         _fail(
             f"Registry source has ambiguous or missing subject identity: {canonical_path}"
@@ -260,7 +247,6 @@ def build_registry_identity_source(
             f"source; found {sorted(map(str, subject_counts))!r} for {canonical_path}."
         )
     recording_id = _nonempty(next(iter(recording_ids)), label="recording_id")
-    session_id = _nonempty(next(iter(session_ids)), label="session_id")
     subject_id = _nonempty(next(iter(subject_ids)), label="subject_id")
     for row in rows:
         declared_subjects = _parse_subject_ids(
@@ -272,52 +258,105 @@ def build_registry_identity_source(
                 "Registry subject_ids_json does not identify exactly the effective "
                 f"single subject for {canonical_path}."
             )
+    batch_status = next(iter(identity_statuses))
+    if batch_status not in REGISTRY_IDENTITY_BATCH_STATUSES:
+        _fail(
+            "Registry source has invalid acquisition_batch_identity_status: "
+            f"{canonical_path}"
+        )
+    raw_batch = {
+        "acquisition_batch_id": next(iter(acquisition_batch_ids)),
+        "acquisition_batch_snapshot_id": next(iter(batch_snapshot_ids)),
+        "acquisition_batch_schema_id": next(iter(batch_schema_ids)),
+        "acquisition_batch_schema_version": next(iter(batch_schema_versions)),
+        "assignment_snapshot_id": next(iter(assignment_snapshot_ids)),
+        "assignment_batch_id": next(iter(assignment_batch_ids)),
+        "assignment_revision": next(iter(assignment_revisions)),
+        "supersedes_assignment_snapshot_id": next(iter(assignment_supersedes_ids)),
+        "assignment_schema_id": next(iter(assignment_schema_ids)),
+        "assignment_schema_version": next(iter(assignment_schema_versions)),
+        "assignment_method": next(iter(assignment_methods)),
+        "assigned_by": next(iter(assigned_by_values)),
+        "assigned_at_utc": next(iter(assigned_at_values)),
+    }
+    if batch_status == "missing":
+        if any(value is not None for value in raw_batch.values()):
+            _fail(
+                "Missing acquisition-batch identity must not retain batch or "
+                f"assignment provenance: {canonical_path}"
+            )
+        batch = raw_batch
+    else:
+        batch = {
+            "acquisition_batch_id": _nonempty(
+                raw_batch["acquisition_batch_id"],
+                label="acquisition_batch_id",
+            ),
+            "acquisition_batch_snapshot_id": _uuid(
+                raw_batch["acquisition_batch_snapshot_id"],
+                label="acquisition_batch_snapshot_id",
+            ),
+            "acquisition_batch_schema_id": _nonempty(
+                raw_batch["acquisition_batch_schema_id"],
+                label="acquisition_batch_schema_id",
+            ),
+            "acquisition_batch_schema_version": raw_batch[
+                "acquisition_batch_schema_version"
+            ],
+            "assignment_snapshot_id": _uuid(
+                raw_batch["assignment_snapshot_id"],
+                label="assignment_snapshot_id",
+            ),
+            "assignment_batch_id": _uuid(
+                raw_batch["assignment_batch_id"],
+                label="assignment_batch_id",
+            ),
+            "assignment_revision": raw_batch["assignment_revision"],
+            "supersedes_assignment_snapshot_id": _optional_uuid(
+                raw_batch["supersedes_assignment_snapshot_id"],
+                label="supersedes_assignment_snapshot_id",
+            ),
+            "assignment_schema_id": _nonempty(
+                raw_batch["assignment_schema_id"],
+                label="assignment_schema_id",
+            ),
+            "assignment_schema_version": raw_batch["assignment_schema_version"],
+            "assignment_method": _nonempty(
+                raw_batch["assignment_method"],
+                label="assignment_method",
+            ),
+            "assigned_by": _nonempty(raw_batch["assigned_by"], label="assigned_by"),
+            "assigned_at_utc": _nonempty(
+                raw_batch["assigned_at_utc"],
+                label="assigned_at_utc",
+            ),
+        }
+        if batch["acquisition_batch_schema_id"] != REGISTRY_IDENTITY_BATCH_SCHEMA_ID:
+            _fail("Registry acquisition-batch schema_id is invalid.")
+        if batch["assignment_schema_id"] != REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_ID:
+            _fail("Registry acquisition-batch assignment schema_id is invalid.")
+        for field in ("acquisition_batch_schema_version", "assignment_schema_version"):
+            if type(batch[field]) is not int or batch[field] < 1:
+                _fail(f"Registry {field} must be a positive integer.")
+        if (
+            type(batch["assignment_revision"]) is not int
+            or batch["assignment_revision"] < 1
+        ):
+            _fail("Registry assignment_revision must be a positive integer.")
+        if batch["assignment_revision"] == 1:
+            if batch["supersedes_assignment_snapshot_id"] is not None:
+                _fail("Registry assignment revision 1 must not supersede a snapshot.")
+        elif batch["supersedes_assignment_snapshot_id"] is None:
+            _fail("Registry corrected batch assignment must supersede a snapshot.")
+
     body = {
         "dataset_id": next(iter(dataset_ids)),
         "zarr_path": canonical_path,
         "recording_id": recording_id,
-        "session_id": session_id,
-        "experimental_session_id": session_id,
-        "experimental_session_snapshot_id": _uuid(
-            next(iter(session_snapshot_ids)),
-            label="experimental_session_snapshot_id",
-        ),
-        "experimental_session_schema_id": _nonempty(
-            next(iter(session_schema_ids)),
-            label="experimental_session_schema_id",
-        ),
-        "experimental_session_schema_version": next(iter(session_schema_versions)),
-        "assignment_snapshot_id": _nonempty(
-            next(iter(assignment_snapshot_ids)),
-            label="assignment_snapshot_id",
-        ),
-        "assignment_batch_id": _nonempty(
-            next(iter(assignment_batch_ids)),
-            label="assignment_batch_id",
-        ),
-        "assignment_revision": next(iter(assignment_revisions)),
-        "supersedes_assignment_snapshot_id": next(iter(assignment_supersedes_ids)),
-        "assignment_schema_id": _nonempty(
-            next(iter(assignment_schema_ids)),
-            label="assignment_schema_id",
-        ),
-        "assignment_schema_version": next(iter(assignment_schema_versions)),
-        "experimental_session_identity_status": _nonempty(
-            next(iter(identity_statuses)),
-            label="experimental_session_identity_status",
-        ),
-        "assignment_method": _nonempty(
-            next(iter(assignment_methods)),
-            label="assignment_method",
-        ),
-        "assigned_by": _nonempty(
-            next(iter(assigned_by_values)),
-            label="assigned_by",
-        ),
-        "assigned_at_utc": _nonempty(
-            next(iter(assigned_at_values)),
-            label="assigned_at_utc",
-        ),
+        "experimental_unit_id": subject_id,
+        "experimental_unit_kind": "subject",
+        **batch,
+        "acquisition_batch_identity_status": batch_status,
         "subject_id": subject_id,
         "subject_count": 1,
     }
@@ -342,9 +381,11 @@ def build_registry_identity_receipt(
         "schema_version": REGISTRY_IDENTITY_RECEIPT_SCHEMA_VERSION,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
         "registry_path": canonical_registry_path,
-        "session_id_source": REGISTRY_IDENTITY_SESSION_SOURCE,
+        "acquisition_batch_id_source": REGISTRY_IDENTITY_BATCH_SOURCE,
+        "acquisition_batch_policy": REGISTRY_IDENTITY_BATCH_POLICY,
         "subject_id_source": REGISTRY_IDENTITY_SUBJECT_SOURCE,
         "subject_cardinality_policy": REGISTRY_IDENTITY_CARDINALITY_POLICY,
+        "experimental_unit_policy": REGISTRY_IDENTITY_EXPERIMENTAL_UNIT_POLICY,
         "sources": normalized,
     }
     return {**body, "payload_sha256": canonical_json_sha256(body)}
@@ -358,60 +399,80 @@ def validate_registry_identity_source(value: object) -> Mapping[str, Any]:
     body["zarr_path"] = _canonical_path(body["zarr_path"], label="source zarr_path")
     for field in (
         "recording_id",
-        "session_id",
-        "experimental_session_id",
-        "experimental_session_schema_id",
-        "assignment_snapshot_id",
-        "assignment_batch_id",
-        "assignment_schema_id",
-        "experimental_session_identity_status",
-        "assignment_method",
-        "assigned_by",
-        "assigned_at_utc",
+        "experimental_unit_id",
+        "experimental_unit_kind",
+        "acquisition_batch_identity_status",
         "subject_id",
     ):
         body[field] = _nonempty(body[field], label=field)
-    body["experimental_session_snapshot_id"] = _uuid(
-        body["experimental_session_snapshot_id"],
-        label="experimental_session_snapshot_id",
+    if body["experimental_unit_kind"] != "subject":
+        _fail("registry experimental_unit_kind must be 'subject'.")
+    if body["experimental_unit_id"] != body["subject_id"]:
+        _fail("registry experimental_unit_id must equal subject_id.")
+    status = body["acquisition_batch_identity_status"]
+    if status not in REGISTRY_IDENTITY_BATCH_STATUSES:
+        _fail("registry acquisition_batch_identity_status is invalid.")
+    batch_fields = (
+        "acquisition_batch_id",
+        "acquisition_batch_snapshot_id",
+        "acquisition_batch_schema_id",
+        "acquisition_batch_schema_version",
+        "assignment_snapshot_id",
+        "assignment_batch_id",
+        "assignment_revision",
+        "supersedes_assignment_snapshot_id",
+        "assignment_schema_id",
+        "assignment_schema_version",
+        "assignment_method",
+        "assigned_by",
+        "assigned_at_utc",
     )
-    body["assignment_snapshot_id"] = _uuid(
-        body["assignment_snapshot_id"],
-        label="assignment_snapshot_id",
-    )
-    body["assignment_batch_id"] = _uuid(
-        body["assignment_batch_id"],
-        label="assignment_batch_id",
-    )
-    if body["session_id"] != body["experimental_session_id"]:
-        _fail("registry export session_id must equal experimental_session_id.")
-    if body["assignment_schema_id"] != REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_ID:
-        _fail("registry assignment_schema_id is invalid.")
-    if body["experimental_session_schema_id"] != REGISTRY_IDENTITY_SESSION_SCHEMA_ID:
-        _fail("registry experimental_session_schema_id is invalid.")
-    if body["experimental_session_identity_status"] != REGISTRY_IDENTITY_STATUS:
-        _fail("registry experimental-session identity must be explicit.")
-    if (
-        type(body["experimental_session_schema_version"]) is not int
-        or body["experimental_session_schema_version"] < 1
-    ):
-        _fail("registry experimental_session_schema_version must be positive.")
-    if (
-        type(body["assignment_schema_version"]) is not int
-        or body["assignment_schema_version"] < 1
-    ):
-        _fail("registry assignment_schema_version must be a positive integer.")
-    if type(body["assignment_revision"]) is not int or body["assignment_revision"] < 1:
-        _fail("registry assignment_revision must be a positive integer.")
-    supersedes = body["supersedes_assignment_snapshot_id"]
-    if body["assignment_revision"] == 1:
-        if supersedes is not None:
-            _fail("registry assignment revision 1 must not supersede a snapshot.")
+    if status == "missing":
+        if any(body[field] is not None for field in batch_fields):
+            _fail("missing acquisition batch must have null batch provenance.")
     else:
-        body["supersedes_assignment_snapshot_id"] = _uuid(
-            supersedes,
-            label="supersedes_assignment_snapshot_id",
+        for field in (
+            "acquisition_batch_id",
+            "acquisition_batch_schema_id",
+            "assignment_schema_id",
+            "assignment_method",
+            "assigned_by",
+            "assigned_at_utc",
+        ):
+            body[field] = _nonempty(body[field], label=field)
+        body["acquisition_batch_snapshot_id"] = _uuid(
+            body["acquisition_batch_snapshot_id"],
+            label="acquisition_batch_snapshot_id",
         )
+        body["assignment_snapshot_id"] = _uuid(
+            body["assignment_snapshot_id"],
+            label="assignment_snapshot_id",
+        )
+        body["assignment_batch_id"] = _uuid(
+            body["assignment_batch_id"],
+            label="assignment_batch_id",
+        )
+        if body["assignment_schema_id"] != REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_ID:
+            _fail("registry assignment_schema_id is invalid.")
+        if body["acquisition_batch_schema_id"] != REGISTRY_IDENTITY_BATCH_SCHEMA_ID:
+            _fail("registry acquisition_batch_schema_id is invalid.")
+        for field in ("acquisition_batch_schema_version", "assignment_schema_version"):
+            if type(body[field]) is not int or body[field] < 1:
+                _fail(f"registry {field} must be a positive integer.")
+        if (
+            type(body["assignment_revision"]) is not int
+            or body["assignment_revision"] < 1
+        ):
+            _fail("registry assignment_revision must be a positive integer.")
+        supersedes = body["supersedes_assignment_snapshot_id"]
+        if body["assignment_revision"] == 1:
+            if supersedes is not None:
+                _fail("registry assignment revision 1 must not supersede a snapshot.")
+        else:
+            body["supersedes_assignment_snapshot_id"] = _uuid(
+                supersedes,
+                label="supersedes_assignment_snapshot_id",
+            )
     if body["subject_count"] != 1 or type(body["subject_count"]) is not int:
         _fail("registry identity source must declare exactly one subject.")
     digest = _sha256(record["record_sha256"], label="source record_sha256")
@@ -434,17 +495,23 @@ def validate_registry_identity_receipt(
         _fail("registry identity receipt schema_version is invalid.")
     if record["digest_algorithm"] != CANONICAL_JSON_DIGEST_ALGORITHM:
         _fail("registry identity receipt digest algorithm is invalid.")
-    if record["session_id_source"] != REGISTRY_IDENTITY_SESSION_SOURCE:
-        _fail("registry identity receipt session source is invalid.")
+    if record["acquisition_batch_id_source"] != REGISTRY_IDENTITY_BATCH_SOURCE:
+        _fail("registry identity receipt acquisition-batch source is invalid.")
+    if record["acquisition_batch_policy"] != REGISTRY_IDENTITY_BATCH_POLICY:
+        _fail("registry identity receipt acquisition-batch policy is invalid.")
     if record["subject_id_source"] != REGISTRY_IDENTITY_SUBJECT_SOURCE:
         _fail("registry identity receipt subject source is invalid.")
     if record["subject_cardinality_policy"] != REGISTRY_IDENTITY_CARDINALITY_POLICY:
         _fail("registry identity receipt subject policy is invalid.")
+    if record["experimental_unit_policy"] != REGISTRY_IDENTITY_EXPERIMENTAL_UNIT_POLICY:
+        _fail("registry identity receipt experimental-unit policy is invalid.")
     registry_path = _canonical_path(record["registry_path"], label="registry_path")
     raw_sources = record["sources"]
     if not isinstance(raw_sources, list):
         _fail("registry identity receipt sources must be an array.")
-    sources = [dict(validate_registry_identity_source(source)) for source in raw_sources]
+    sources = [
+        dict(validate_registry_identity_source(source)) for source in raw_sources
+    ]
     paths = [source["zarr_path"] for source in sources]
     if paths != sorted(paths) or len(paths) != len(set(paths)):
         _fail("registry identity receipt sources must be sorted and unique.")
@@ -462,9 +529,11 @@ def validate_registry_identity_receipt(
         "schema_version": record["schema_version"],
         "digest_algorithm": record["digest_algorithm"],
         "registry_path": registry_path,
-        "session_id_source": record["session_id_source"],
+        "acquisition_batch_id_source": record["acquisition_batch_id_source"],
+        "acquisition_batch_policy": record["acquisition_batch_policy"],
         "subject_id_source": record["subject_id_source"],
         "subject_cardinality_policy": record["subject_cardinality_policy"],
+        "experimental_unit_policy": record["experimental_unit_policy"],
         "sources": sources,
     }
     digest = _sha256(record["payload_sha256"], label="receipt payload_sha256")
@@ -482,6 +551,8 @@ def registry_identity_sources_by_path(
 
 __all__ = [
     "REGISTRY_IDENTITY_CARDINALITY_POLICY",
+    "REGISTRY_IDENTITY_BATCH_POLICY",
+    "REGISTRY_IDENTITY_EXPERIMENTAL_UNIT_POLICY",
     "REGISTRY_IDENTITY_RECEIPT_SCHEMA_ID",
     "REGISTRY_IDENTITY_RECEIPT_SCHEMA_VERSION",
     "REGISTRY_IDENTITY_ASSIGNMENT_BATCH_FIELD",
@@ -493,9 +564,9 @@ __all__ = [
     "REGISTRY_IDENTITY_ASSIGNMENT_SCHEMA_VERSION_FIELD",
     "REGISTRY_IDENTITY_ASSIGNMENT_SNAPSHOT_FIELD",
     "REGISTRY_IDENTITY_STATUS_FIELD",
-    "REGISTRY_IDENTITY_STATUS",
-    "REGISTRY_IDENTITY_SESSION_FIELD",
-    "REGISTRY_IDENTITY_SESSION_SOURCE",
+    "REGISTRY_IDENTITY_BATCH_STATUSES",
+    "REGISTRY_IDENTITY_BATCH_FIELD",
+    "REGISTRY_IDENTITY_BATCH_SOURCE",
     "REGISTRY_IDENTITY_SUBJECT_SOURCE",
     "RegistryIdentityReceiptError",
     "build_registry_identity_receipt",

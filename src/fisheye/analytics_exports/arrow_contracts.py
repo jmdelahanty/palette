@@ -104,7 +104,7 @@ _EXPORT_IDENTITY_FIELDS = (
     _field("export_schema_version", "int32"),
     _field("table_name", "string"),
     _field("recording_id", "string"),
-    _field("session_id", "string"),
+    _field("acquisition_batch_id", "string", nullable=True),
     _field("subject_id", "string"),
     _field("zarr_path", "string"),
     _field("source_lineage_hash", "string"),
@@ -185,12 +185,14 @@ _EPOCH_BEHAVIOR_COMPONENT_FIELDS = (
     _field("swim_bout_signal_level", "string", nullable=True),
 )
 
-_CHASER_SPATIAL_FIELDS = _EXPORT_IDENTITY_FIELDS + (
-    _field("detection_occupancy_run", "string"),
-    _field("detection_occupancy_path", "string"),
-    _field("detection_occupancy_schema_id", "string", nullable=True),
-    _field("detection_occupancy_schema_version", "int64", nullable=True),
-    _field("detection_occupancy_method", "string", nullable=True),
+_CHASER_SPATIAL_FIELDS = (
+    _EXPORT_IDENTITY_FIELDS
+    + (
+        _field("detection_occupancy_run", "string"),
+        _field("detection_occupancy_path", "string"),
+        _field("detection_occupancy_schema_id", "string", nullable=True),
+        _field("detection_occupancy_schema_version", "int64", nullable=True),
+        _field("detection_occupancy_method", "string", nullable=True),
     _field("detection_occupancy_method_version", "string", nullable=True),
     _field("source_detection_path", "string", nullable=True),
     _field("source_detection_kind", "string", nullable=True),
@@ -232,12 +234,14 @@ _CHASER_SPATIAL_FIELDS = _EXPORT_IDENTITY_FIELDS + (
     _field("frame_count", "int64"),
     _field("time_s", "float64", nullable=True),
     _field("fraction_of_epoch", "float64", nullable=True),
-    _field("fraction_of_detected", "float64", nullable=True),
-    _field("detected_frame_count", "int64", nullable=True),
-    _field("missing_frame_count", "int64", nullable=True),
-    _field("total_span_frames", "int64", nullable=True),
-    _field("coverage_pct", "float64", nullable=True),
-) + _COLLECTION_FIELDS
+        _field("fraction_of_detected", "float64", nullable=True),
+        _field("detected_frame_count", "int64", nullable=True),
+        _field("missing_frame_count", "int64", nullable=True),
+        _field("total_span_frames", "int64", nullable=True),
+        _field("coverage_pct", "float64", nullable=True),
+    )
+    + _COLLECTION_FIELDS
+)
 
 _CHASER_DISTANCE_SUMMARY_FIELDS = (
     _EXPORT_IDENTITY_FIELDS
@@ -829,7 +833,7 @@ _POSITION_OCCUPANCY_FIELDS = (
     _field("export_schema_version", "int32"),
     _field("table_name", "string"),
     _field("recording_id", "string"),
-    _field("session_id", "string"),
+    _field("acquisition_batch_id", "string", nullable=True),
     _field("subject_id", "string"),
     _field("zarr_path", "string"),
     _field("source_lineage_hash", "string"),
@@ -1191,9 +1195,7 @@ _STIMULUS_RESPONSE_FIELDS = (
     _field("first_classified_bout_score", "float64", nullable=True),
     _field("quality_flag", "int64", nullable=True),
     _field("concentric_mean_distance_to_center_mm", "float64", nullable=True),
-    _field(
-        "concentric_initial_distance_to_center_mm", "float64", nullable=True
-    ),
+    _field("concentric_initial_distance_to_center_mm", "float64", nullable=True),
     _field("concentric_final_distance_to_center_mm", "float64", nullable=True),
     _field("concentric_min_distance_to_center_mm", "float64", nullable=True),
     _field("concentric_net_radial_displacement_mm", "float64", nullable=True),
@@ -1205,9 +1207,7 @@ _STIMULUS_RESPONSE_FIELDS = (
     _field("concentric_mean_tangential_speed_mm_s", "float64", nullable=True),
     _field("radial_path_index", "float64", nullable=True),
     _field("tangential_bias_index", "float64", nullable=True),
-    _field(
-        "stimulus_aligned_radial_displacement_mm", "float64", nullable=True
-    ),
+    _field("stimulus_aligned_radial_displacement_mm", "float64", nullable=True),
     _field("radial_displacement_integrated_mm", "float64", nullable=True),
     _field("tangential_displacement_mm", "float64", nullable=True),
     _field("start_radius_mm", "float64", nullable=True),
@@ -1348,20 +1348,14 @@ _BOUT_KINEMATICS_METRICS_FIELDS = (
     _field("physical_active_end_time_s", "float64", nullable=True),
     _field("physical_active_duration_s", "float64", nullable=True),
     _field("physical_active_observed_duration_s", "float64", nullable=True),
-    _field(
-        "physical_active_start_time_s_interpolated", "float64", nullable=True
-    ),
+    _field("physical_active_start_time_s_interpolated", "float64", nullable=True),
     _field("physical_active_end_time_s_interpolated", "float64", nullable=True),
     _field("physical_active_duration_s_interpolated", "float64", nullable=True),
-    _field(
-        "physical_active_start_time_interpolated_valid", "bool", nullable=True
-    ),
+    _field("physical_active_start_time_interpolated_valid", "bool", nullable=True),
     _field("physical_active_end_time_interpolated_valid", "bool", nullable=True),
     _field("physical_active_sample_count", "int64", nullable=True),
     _field("physical_active_valid_transition_count", "int64", nullable=True),
-    _field(
-        "physical_active_valid_transition_fraction", "float64", nullable=True
-    ),
+    _field("physical_active_valid_transition_fraction", "float64", nullable=True),
     _field("physical_active_path_length_mm", "float64", nullable=True),
     _field("physical_active_path_length_px", "float64", nullable=True),
     _field("physical_active_mean_speed_mm_s", "float64", nullable=True),
@@ -1383,12 +1377,8 @@ _BOUT_KINEMATICS_METRICS_FIELDS = (
     _field("source_peak_prominence_mm_s", "float64", nullable=True),
     _field("source_peak_width_s", "float64", nullable=True),
     _field("source_peak_width_height_mm_s", "float64", nullable=True),
-    _field(
-        "source_peak_left_width_frame_interpolated", "float64", nullable=True
-    ),
-    _field(
-        "source_peak_right_width_frame_interpolated", "float64", nullable=True
-    ),
+    _field("source_peak_left_width_frame_interpolated", "float64", nullable=True),
+    _field("source_peak_right_width_frame_interpolated", "float64", nullable=True),
     _field("source_peak_left_width_time_s", "float64", nullable=True),
     _field("source_peak_right_width_time_s", "float64", nullable=True),
     _field("source_peak_boundary_mode", "string", nullable=True),
@@ -1453,15 +1443,11 @@ _BOUT_KINEMATICS_METRICS_FIELDS = (
     _field("within_bout_left_gaze_mean_deg", "float64", nullable=True),
     _field("within_bout_right_gaze_mean_deg", "float64", nullable=True),
     _field("within_bout_vergence_gaze_mean_deg", "float64", nullable=True),
-    _field(
-        "within_bout_vergence_gaze_signed_mean_deg", "float64", nullable=True
-    ),
+    _field("within_bout_vergence_gaze_signed_mean_deg", "float64", nullable=True),
     _field("within_bout_vergence_gaze_max_deg", "float64", nullable=True),
     _field("within_bout_vergence_gaze_range_deg", "float64", nullable=True),
     _field("within_bout_vergence_gaze_std_deg", "float64", nullable=True),
-    _field(
-        "within_bout_vergence_gaze_valid_fraction", "float64", nullable=True
-    ),
+    _field("within_bout_vergence_gaze_valid_fraction", "float64", nullable=True),
     _field("within_bout_converged_fraction", "float64", nullable=True),
     _field("pre_eye_window_valid", "bool", nullable=True),
     _field("post_eye_window_valid", "bool", nullable=True),
@@ -1489,7 +1475,7 @@ _BASELINE_BEHAVIOR_SUMMARY_FIELDS = (
     _field("export_schema_version", "int32"),
     _field("table_name", "string"),
     _field("recording_id", "string"),
-    _field("session_id", "string"),
+    _field("acquisition_batch_id", "string", nullable=True),
     _field("subject_id", "string"),
     _field("zarr_path", "string"),
     _field("source_lineage_hash", "string"),
@@ -1597,7 +1583,7 @@ _BASELINE_BEHAVIOR_TIME_BINS_FIELDS = (
     _field("export_schema_version", "int32"),
     _field("table_name", "string"),
     _field("recording_id", "string"),
-    _field("session_id", "string"),
+    _field("acquisition_batch_id", "string", nullable=True),
     _field("subject_id", "string"),
     _field("zarr_path", "string"),
     _field("source_lineage_hash", "string"),
@@ -1687,7 +1673,7 @@ _BASELINE_KINEMATIC_SAMPLES_FIELDS = (
     _field("export_schema_version", "int32"),
     _field("table_name", "string"),
     _field("recording_id", "string"),
-    _field("session_id", "string"),
+    _field("acquisition_batch_id", "string", nullable=True),
     _field("subject_id", "string"),
     _field("zarr_path", "string"),
     _field("source_lineage_hash", "string"),
@@ -2049,7 +2035,7 @@ _GROUP_STATISTICS_FIELDS = (
     _field("clustered_ci_high", "float64", nullable=True),
     _field("clustered_p_value", "float64", nullable=True),
     _field("clustered_q_value", "float64", nullable=True),
-    _field("session_variance", "float64", nullable=True),
+    _field("acquisition_batch_variance", "float64", nullable=True),
     _field("residual_variance", "float64", nullable=True),
     _field("intraclass_correlation", "float64", nullable=True),
     _field("test_method", "string"),
@@ -2295,7 +2281,9 @@ def validate_arrow_schema(table_name: str, schema: Any) -> None:
     contract = ARROW_TABLE_CONTRACTS.get(table_name)
     if contract is None:
         if metadata.get(b"palette.arrow_schema_mode") != b"inferred_v2_compatibility":
-            raise ValueError(f"{table_name}: Arrow schema compatibility mode is missing")
+            raise ValueError(
+                f"{table_name}: Arrow schema compatibility mode is missing"
+            )
         return
     validate_exact_schema(contract, schema)
 

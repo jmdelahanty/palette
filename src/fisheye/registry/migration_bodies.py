@@ -97,7 +97,17 @@ def _normalize_task_type(value: Any) -> Optional[str]:
     return alias.get(norm)
 
 
-def _infer_task_type(*, explicit: Any = None, set_id: Any = None, run_id: Any = None, config_path: Any = None, manifest_path: Any = None, model_path: Any = None, invocation: Optional[dict[str, Any]] = None, query_filter: Optional[dict[str, Any]] = None) -> Optional[str]:
+def _infer_task_type(
+    *,
+    explicit: Any = None,
+    set_id: Any = None,
+    run_id: Any = None,
+    config_path: Any = None,
+    manifest_path: Any = None,
+    model_path: Any = None,
+    invocation: Optional[dict[str, Any]] = None,
+    query_filter: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     def _infer_from_text(value: Any) -> Optional[str]:
         if value is None:
             return None
@@ -108,11 +118,19 @@ def _infer_task_type(*, explicit: Any = None, set_id: Any = None, run_id: Any = 
             return "detect"
         if text.startswith("pose_") or "_pose_" in text or "/pose/" in text:
             return "pose"
-        if text.startswith("keypoint_") or text.startswith("keypoints_") or "keypoint" in text:
+        if (
+            text.startswith("keypoint_")
+            or text.startswith("keypoints_")
+            or "keypoint" in text
+        ):
             return "pose"
         if text.startswith("eye_mask_") or "eye_mask" in text or "eyemask" in text:
             return "eye_masks"
-        if text.startswith("subject_mask_") or "subject_mask" in text or "subjectmask" in text:
+        if (
+            text.startswith("subject_mask_")
+            or "subject_mask" in text
+            or "subjectmask" in text
+        ):
             return "subject_masks"
         return None
 
@@ -2027,7 +2045,9 @@ class RegistryMigrationMixin:
                 "updated_utc": "TEXT",
             },
         )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_crop_quality_dataset_id ON crop_quality(dataset_id);")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crop_quality_dataset_id ON crop_quality(dataset_id);"
+        )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_crop_quality_review_gate ON crop_quality(review_state, review_intended_use);"
         )
@@ -2765,7 +2785,11 @@ class RegistryMigrationMixin:
             metadata = _json_loads(row["metadata_json"])
             metadata_map = metadata if isinstance(metadata, dict) else None
             manifest_path_text = row["manifest_path"]
-            manifest_payload = self._read_json_path(Path(str(manifest_path_text))) if manifest_path_text else {}
+            manifest_payload = (
+                self._read_json_path(Path(str(manifest_path_text)))
+                if manifest_path_text
+                else {}
+            )
             nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
                 manifest_payload=manifest_payload,
                 metadata=metadata_map,
@@ -2800,7 +2824,11 @@ class RegistryMigrationMixin:
             metadata = _json_loads(row["metadata_json"])
             metadata_map = metadata if isinstance(metadata, dict) else None
             manifest_path_text = row["manifest_path"]
-            manifest_payload = self._read_json_path(Path(str(manifest_path_text))) if manifest_path_text else {}
+            manifest_payload = (
+                self._read_json_path(Path(str(manifest_path_text)))
+                if manifest_path_text
+                else {}
+            )
             nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
                 manifest_payload=manifest_payload,
                 metadata=metadata_map,
@@ -6128,7 +6156,9 @@ class RegistryMigrationMixin:
             """
         )
 
-        cur.execute("DROP VIEW IF EXISTS recording_subject_mask_component_quality_overview;")
+        cur.execute(
+            "DROP VIEW IF EXISTS recording_subject_mask_component_quality_overview;"
+        )
         cur.execute(
             """
             CREATE VIEW recording_subject_mask_component_quality_overview AS
@@ -6187,24 +6217,24 @@ class RegistryMigrationMixin:
             """
         )
 
-    def _ensure_experimental_session_tables(self) -> None:
-        """Create explicit session entities and immutable recording assignments."""
+    def _ensure_acquisition_batch_tables(self) -> None:
+        """Create explicit acquisition-batch entities and immutable recording assignments."""
 
         cur = self.conn.cursor()
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS experimental_sessions (
-                experimental_session_id TEXT PRIMARY KEY,
-                session_snapshot_id TEXT NOT NULL UNIQUE,
+            CREATE TABLE IF NOT EXISTS acquisition_batches (
+                acquisition_batch_id TEXT PRIMARY KEY,
+                batch_snapshot_id TEXT NOT NULL UNIQUE,
                 schema_id TEXT NOT NULL,
                 creation_method TEXT NOT NULL,
                 created_by TEXT NOT NULL,
                 created_at_utc TEXT NOT NULL,
                 evidence_json TEXT NOT NULL,
                 registry_schema_version INTEGER NOT NULL,
-                CHECK(length(trim(experimental_session_id)) > 0),
-                CHECK(experimental_session_id = trim(experimental_session_id)),
-                CHECK(schema_id = 'palette.registry.experimental_session.v1'),
+                CHECK(length(trim(acquisition_batch_id)) > 0),
+                CHECK(acquisition_batch_id = trim(acquisition_batch_id)),
+                CHECK(schema_id = 'palette.registry.acquisition_batch.v1'),
                 CHECK(length(trim(creation_method)) > 0),
                 CHECK(length(trim(created_by)) > 0),
                 CHECK(json_valid(evidence_json)),
@@ -6215,10 +6245,10 @@ class RegistryMigrationMixin:
         )
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS recording_experimental_session_assignments (
+            CREATE TABLE IF NOT EXISTS recording_acquisition_batch_assignments (
                 assignment_snapshot_id TEXT PRIMARY KEY,
                 recording_id TEXT NOT NULL,
-                experimental_session_id TEXT NOT NULL,
+                acquisition_batch_id TEXT NOT NULL,
                 assignment_revision INTEGER NOT NULL,
                 supersedes_assignment_snapshot_id TEXT UNIQUE,
                 assignment_batch_id TEXT NOT NULL,
@@ -6229,15 +6259,15 @@ class RegistryMigrationMixin:
                 evidence_json TEXT NOT NULL,
                 registry_schema_version INTEGER NOT NULL,
                 FOREIGN KEY(recording_id) REFERENCES recordings(recording_id) ON DELETE RESTRICT,
-                FOREIGN KEY(experimental_session_id)
-                    REFERENCES experimental_sessions(experimental_session_id) ON DELETE RESTRICT,
+                FOREIGN KEY(acquisition_batch_id)
+                    REFERENCES acquisition_batches(acquisition_batch_id) ON DELETE RESTRICT,
                 FOREIGN KEY(recording_id, supersedes_assignment_snapshot_id)
-                    REFERENCES recording_experimental_session_assignments(
+                    REFERENCES recording_acquisition_batch_assignments(
                         recording_id, assignment_snapshot_id
                     ) ON DELETE RESTRICT,
                 UNIQUE(recording_id, assignment_revision),
                 UNIQUE(recording_id, assignment_snapshot_id),
-                CHECK(schema_id = 'palette.registry.experimental_session_assignment.v1'),
+                CHECK(schema_id = 'palette.registry.acquisition_batch_assignment.v1'),
                 CHECK(assignment_revision > 0),
                 CHECK(length(trim(assignment_method)) > 0),
                 CHECK(length(trim(assigned_by)) > 0),
@@ -6249,13 +6279,13 @@ class RegistryMigrationMixin:
         )
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS recording_experimental_session_current (
+            CREATE TABLE IF NOT EXISTS recording_acquisition_batch_current (
                 recording_id TEXT PRIMARY KEY,
                 assignment_snapshot_id TEXT NOT NULL UNIQUE,
                 updated_at_utc TEXT NOT NULL,
                 FOREIGN KEY(recording_id) REFERENCES recordings(recording_id) ON DELETE RESTRICT,
                 FOREIGN KEY(recording_id, assignment_snapshot_id)
-                    REFERENCES recording_experimental_session_assignments(
+                    REFERENCES recording_acquisition_batch_assignments(
                         recording_id, assignment_snapshot_id
                     ) ON DELETE RESTRICT
             );
@@ -6263,16 +6293,16 @@ class RegistryMigrationMixin:
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_recording_experimental_session_assignments_session
-            ON recording_experimental_session_assignments(
-                experimental_session_id, recording_id, assignment_revision
+            CREATE INDEX IF NOT EXISTS idx_recording_acquisition_batch_assignments_batch
+            ON recording_acquisition_batch_assignments(
+                acquisition_batch_id, recording_id, assignment_revision
             );
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_recording_experimental_session_assignments_batch
-            ON recording_experimental_session_assignments(
+            CREATE INDEX IF NOT EXISTS idx_recording_acquisition_batch_assignments_group
+            ON recording_acquisition_batch_assignments(
                 assignment_batch_id, recording_id
             );
             """
@@ -6284,7 +6314,7 @@ class RegistryMigrationMixin:
         # the append-only identity tables before the view references them; the
         # numbered migration 67 remains the upgrade/refresh boundary for
         # registries that already passed migration 34.
-        self._ensure_experimental_session_tables()
+        self._ensure_acquisition_batch_tables()
         self._ensure_columns(
             "datasets",
             {
@@ -6439,32 +6469,32 @@ class RegistryMigrationMixin:
                 d.dataset_id AS dataset_id,
                 d.recording_id AS recording_id,
                 d.session_uuid AS session_uuid,
-                resa.experimental_session_id AS experimental_session_id,
-                es.session_snapshot_id AS experimental_session_snapshot_id,
-                es.schema_id AS experimental_session_schema_id,
-                es.creation_method AS experimental_session_creation_method,
-                es.created_by AS experimental_session_created_by,
-                es.created_at_utc AS experimental_session_created_at_utc,
-                es.evidence_json AS experimental_session_creation_evidence_json,
+                resa.acquisition_batch_id AS acquisition_batch_id,
+                es.batch_snapshot_id AS acquisition_batch_snapshot_id,
+                es.schema_id AS acquisition_batch_schema_id,
+                es.creation_method AS acquisition_batch_creation_method,
+                es.created_by AS acquisition_batch_created_by,
+                es.created_at_utc AS acquisition_batch_created_at_utc,
+                es.evidence_json AS acquisition_batch_creation_evidence_json,
                 es.registry_schema_version
-                    AS experimental_session_creation_registry_schema_version,
+                    AS acquisition_batch_creation_registry_schema_version,
                 CASE
                     WHEN resa.recording_id IS NOT NULL THEN 'explicit'
                     ELSE 'missing'
-                END AS experimental_session_identity_status,
-                resa.assignment_snapshot_id AS experimental_session_assignment_snapshot_id,
-                resa.assignment_revision AS experimental_session_assignment_revision,
+                END AS acquisition_batch_identity_status,
+                resa.assignment_snapshot_id AS acquisition_batch_assignment_snapshot_id,
+                resa.assignment_revision AS acquisition_batch_assignment_revision,
                 resa.supersedes_assignment_snapshot_id
-                    AS experimental_session_supersedes_assignment_snapshot_id,
-                resa.assignment_batch_id AS experimental_session_assignment_batch_id,
-                resa.schema_id AS experimental_session_assignment_schema_id,
-                resa.assignment_method AS experimental_session_assignment_method,
-                resa.assigned_by AS experimental_session_assigned_by,
-                resa.assigned_at_utc AS experimental_session_assigned_at_utc,
-                resc.updated_at_utc AS experimental_session_current_updated_at_utc,
-                resa.evidence_json AS experimental_session_assignment_evidence_json,
+                    AS acquisition_batch_supersedes_assignment_snapshot_id,
+                resa.assignment_batch_id AS acquisition_batch_assignment_batch_id,
+                resa.schema_id AS acquisition_batch_assignment_schema_id,
+                resa.assignment_method AS acquisition_batch_assignment_method,
+                resa.assigned_by AS acquisition_batch_assigned_by,
+                resa.assigned_at_utc AS acquisition_batch_assigned_at_utc,
+                resc.updated_at_utc AS acquisition_batch_current_updated_at_utc,
+                resa.evidence_json AS acquisition_batch_assignment_evidence_json,
                 resa.registry_schema_version
-                    AS experimental_session_assignment_registry_schema_version,
+                    AS acquisition_batch_assignment_registry_schema_version,
                 d.zarr_path AS zarr_path,
                 d.artifact_kind AS artifact_kind,
                 d.zarr_origin AS zarr_origin,
@@ -6598,18 +6628,20 @@ class RegistryMigrationMixin:
                 rss.dpf_values_json AS dpf_values_json
             FROM datasets d
             LEFT JOIN recordings r ON r.recording_id = d.recording_id
-            LEFT JOIN recording_experimental_session_current resc
+            LEFT JOIN recording_acquisition_batch_current resc
               ON resc.recording_id = d.recording_id
-            LEFT JOIN recording_experimental_session_assignments resa
+            LEFT JOIN recording_acquisition_batch_assignments resa
               ON resa.assignment_snapshot_id = resc.assignment_snapshot_id
-            LEFT JOIN experimental_sessions es
-              ON es.experimental_session_id = resa.experimental_session_id
+            LEFT JOIN acquisition_batches es
+              ON es.acquisition_batch_id = resa.acquisition_batch_id
             LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
             LEFT JOIN recording_subject_summary rss ON rss.recording_id = d.recording_id;
             """
         )
 
-    def _migration_035_recording_step_status_latest_dataset_context_current(self) -> None:
+    def _migration_035_recording_step_status_latest_dataset_context_current(
+        self,
+    ) -> None:
         cur = self.conn.cursor()
         cur.execute("DROP VIEW IF EXISTS recording_step_status_latest;")
         cur.execute(
@@ -6619,8 +6651,8 @@ class RegistryMigrationMixin:
                 COALESCE(NULLIF(trim(rss.recording_id), ''), dcc.recording_id) AS recording_id,
                 rss.dataset_id,
                 dcc.session_uuid AS session_uuid,
-                dcc.experimental_session_id AS experimental_session_id,
-                dcc.experimental_session_identity_status AS experimental_session_identity_status,
+                dcc.acquisition_batch_id AS acquisition_batch_id,
+                dcc.acquisition_batch_identity_status AS acquisition_batch_identity_status,
                 dcc.zarr_path AS zarr_path,
                 dcc.zarr_use AS zarr_use,
                 dcc.artifact_kind AS artifact_kind,
@@ -6948,7 +6980,9 @@ class RegistryMigrationMixin:
             """
         )
 
-        cur.execute("DROP VIEW IF EXISTS subject_mask_component_quality_latest_by_recording;")
+        cur.execute(
+            "DROP VIEW IF EXISTS subject_mask_component_quality_latest_by_recording;"
+        )
         cur.execute(
             """
             CREATE VIEW subject_mask_component_quality_latest_by_recording AS
@@ -7209,12 +7243,16 @@ class RegistryMigrationMixin:
 
         self._migration_020_recording_step_status_wide_view()
 
-    def _migration_047_bout_stimulus_source_freshness_recording_step_status_wide_view(self) -> None:
+    def _migration_047_bout_stimulus_source_freshness_recording_step_status_wide_view(
+        self,
+    ) -> None:
         """Refresh wide status display for bout/stimulus source freshness."""
 
         self._migration_020_recording_step_status_wide_view()
 
-    def _migration_048_eye_shape_source_freshness_recording_step_status_wide_view(self) -> None:
+    def _migration_048_eye_shape_source_freshness_recording_step_status_wide_view(
+        self,
+    ) -> None:
         """Refresh wide status display for eye/shape source freshness."""
 
         self._migration_020_recording_step_status_wide_view()
@@ -8321,9 +8359,9 @@ class RegistryMigrationMixin:
 
         self._migration_034_dataset_context_current_view()
 
-    def _migration_067_explicit_experimental_session_identity(self) -> None:
-        """Add explicit cross-recording session identity without heuristic backfill."""
+    def _migration_067_explicit_acquisition_batch_identity(self) -> None:
+        """Add explicit cross-recording acquisition-batch identity without heuristic backfill."""
 
-        self._ensure_experimental_session_tables()
+        self._ensure_acquisition_batch_tables()
         self._migration_034_dataset_context_current_view()
         self._migration_035_recording_step_status_latest_dataset_context_current()

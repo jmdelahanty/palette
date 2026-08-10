@@ -63,8 +63,13 @@ from fisheye.group_statistics.paired import (
     compute_one_sample_signed_rank,
     compute_paired_contrast,
 )
-from fisheye.group_statistics.session_cluster import fit_session_random_intercept
+from fisheye.group_statistics.acquisition_batch_cluster import (
+    fit_acquisition_batch_random_intercept,
+)
 from fisheye.utils.compute_group_statistics import main as compute_group_statistics_main
+
+
+_DEFAULT_ACQUISITION_BATCH = object()
 
 
 def _write_rows(path: Path, rows: list[dict]) -> None:
@@ -75,10 +80,15 @@ def _write_rows(path: Path, rows: list[dict]) -> None:
 def _registry_identity(
     recording_id: str,
     *,
-    session_id: str | None = None,
-) -> dict[str, str]:
+    acquisition_batch_id: str | None | object = _DEFAULT_ACQUISITION_BATCH,
+) -> dict[str, str | None]:
+    resolved_batch = (
+        f"batch-{recording_id}"
+        if acquisition_batch_id is _DEFAULT_ACQUISITION_BATCH
+        else acquisition_batch_id
+    )
     return {
-        "session_id": session_id or f"session-{recording_id}",
+        "acquisition_batch_id": resolved_batch,
         "subject_id": f"subject-{recording_id}",
     }
 
@@ -88,7 +98,7 @@ def _make_goodcopbadcop_export(
     export_run_id: str = "source_export",
     *,
     values_by_recording: dict[str, dict[str, float]] | None = None,
-    session_by_recording: dict[str, str] | None = None,
+    acquisition_batch_by_recording: dict[str, str | None] | None = None,
     roles_by_recording: dict[str, tuple[str, str]] | None = None,
 ) -> Path:
     export_root = root / "palette_analytics"
@@ -112,7 +122,11 @@ def _make_goodcopbadcop_export(
                         "recording_id": recording_id,
                         **_registry_identity(
                             recording_id,
-                            session_id=(session_by_recording or {}).get(recording_id),
+                            acquisition_batch_id=(
+                                acquisition_batch_by_recording.get(recording_id)
+                                if acquisition_batch_by_recording is not None
+                                else _DEFAULT_ACQUISITION_BATCH
+                            ),
                         ),
                         "window_label": label_by_condition[condition],
                         "chaser_index": chaser_index,
@@ -126,7 +140,10 @@ def _make_goodcopbadcop_export(
                     }
                 )
     _write_rows(
-        export_root / "v1" / "chaser_epoch_distance_summary" / f"export_run_id={export_run_id}",
+        export_root
+        / "v1"
+        / "chaser_epoch_distance_summary"
+        / f"export_run_id={export_run_id}",
         rows,
     )
     role_by_recording = roles_by_recording or {
@@ -139,7 +156,11 @@ def _make_goodcopbadcop_export(
             "recording_id": recording_id,
             **_registry_identity(
                 recording_id,
-                session_id=(session_by_recording or {}).get(recording_id),
+                acquisition_batch_id=(
+                    acquisition_batch_by_recording.get(recording_id)
+                    if acquisition_batch_by_recording is not None
+                    else _DEFAULT_ACQUISITION_BATCH
+                ),
             ),
             "object_column_index": object_column_index,
             "object_role": role,
@@ -292,7 +313,7 @@ def _make_goodcopbadcop_cra_export(
     export_run_id: str = "source_export",
     *,
     deltas_by_recording: dict[str, dict[str, tuple[float, float]]] | None = None,
-    session_by_recording: dict[str, str] | None = None,
+    acquisition_batch_by_recording: dict[str, str] | None = None,
 ) -> Path:
     export_root = root / "palette_analytics"
     rows = [
@@ -300,7 +321,9 @@ def _make_goodcopbadcop_cra_export(
             "recording_id": recording_id,
             **_registry_identity(
                 recording_id,
-                session_id=(session_by_recording or {}).get(recording_id),
+                acquisition_batch_id=(acquisition_batch_by_recording or {}).get(
+                    recording_id
+                ),
             ),
             "fish_id": "0",
             "endpoint_status": "computed",
@@ -334,7 +357,9 @@ def _make_goodcopbadcop_cra_export(
                         "recording_id": recording_id,
                         **_registry_identity(
                             recording_id,
-                            session_id=(session_by_recording or {}).get(recording_id),
+                            acquisition_batch_id=(
+                                acquisition_batch_by_recording or {}
+                            ).get(recording_id),
                         ),
                         "fish_id": "0",
                         "phase_axis_index": phase_axis_index,
@@ -389,7 +414,9 @@ def _make_goodcopbadcop_cra_export(
     return export_root
 
 
-def _make_goodcopbadcop_epoch_behavior_export(root: Path, export_run_id: str = "source_export") -> Path:
+def _make_goodcopbadcop_epoch_behavior_export(
+    root: Path, export_run_id: str = "source_export"
+) -> Path:
     export_root = root / "palette_analytics"
     rows: list[dict] = []
     values = {
@@ -434,7 +461,10 @@ def _make_goodcopbadcop_epoch_behavior_export(root: Path, export_run_id: str = "
                 }
             )
     _write_rows(
-        export_root / "v1" / "chaser_epoch_behavior_summary" / f"export_run_id={export_run_id}",
+        export_root
+        / "v1"
+        / "chaser_epoch_behavior_summary"
+        / f"export_run_id={export_run_id}",
         rows,
     )
     manifest = {
@@ -457,22 +487,22 @@ def _make_goodcopbadcop_epoch_behavior_export(root: Path, export_run_id: str = "
     return export_root
 
 
-def _repeated_session_design() -> tuple[
+def _repeated_acquisition_batch_design() -> tuple[
     dict[str, str],
     dict[str, dict[str, float]],
     dict[str, tuple[str, str]],
     dict[str, dict[str, tuple[float, float]]],
 ]:
-    sessions: dict[str, str] = {}
+    batches: dict[str, str] = {}
     paired_values: dict[str, dict[str, float]] = {}
     roles: dict[str, tuple[str, str]] = {}
     cra_deltas: dict[str, dict[str, tuple[float, float]]] = {}
-    for session_index in range(1, 6):
+    for batch_index in range(1, 6):
         for replicate_index in range(2):
-            recording_id = f"s{session_index}-r{replicate_index + 1}"
-            sessions[recording_id] = f"session-{session_index}"
-            baseline = 10.0 + float(session_index) + 0.2 * replicate_index
-            training_delta = 0.6 * session_index + 0.1 * replicate_index
+            recording_id = f"s{batch_index}-r{replicate_index + 1}"
+            batches[recording_id] = f"session-{batch_index}"
+            baseline = 10.0 + float(batch_index) + 0.2 * replicate_index
+            training_delta = 0.6 * batch_index + 0.1 * replicate_index
             paired_values[recording_id] = {
                 "pre": baseline,
                 "training": baseline + training_delta,
@@ -481,15 +511,15 @@ def _repeated_session_design() -> tuple[
             roles[recording_id] = ("aggressive", "inert")
             cra_deltas[recording_id] = {
                 "aggressive": (
-                    0.5 + 0.3 * session_index + 0.05 * replicate_index,
-                    -0.02 * session_index - 0.005 * replicate_index,
+                    0.5 + 0.3 * batch_index + 0.05 * replicate_index,
+                    -0.02 * batch_index - 0.005 * replicate_index,
                 ),
                 "inert": (
-                    0.1 + 0.1 * session_index + 0.02 * replicate_index,
-                    0.01 * session_index + 0.002 * replicate_index,
+                    0.1 + 0.1 * batch_index + 0.02 * replicate_index,
+                    0.01 * batch_index + 0.002 * replicate_index,
                 ),
             }
-    return sessions, paired_values, roles, cra_deltas
+    return batches, paired_values, roles, cra_deltas
 
 
 def test_paired_contrast_uses_recording_level_sign_flip() -> None:
@@ -533,15 +563,19 @@ def test_one_sample_signed_rank_uses_exact_wilcoxon_and_rank_biserial() -> None:
 
 
 def test_benjamini_hochberg_adjusts_with_monotonicity() -> None:
-    assert benjamini_hochberg([0.01, 0.04, 0.03, None]) == pytest.approx([0.03, 0.04, 0.04, None])
+    assert benjamini_hochberg([0.01, 0.04, 0.03, None]) == pytest.approx(
+        [0.03, 0.04, 0.04, None]
+    )
 
 
-def test_session_random_intercept_reports_clustered_inference_and_icc() -> None:
-    result = fit_session_random_intercept(
+def test_acquisition_batch_random_intercept_reports_clustered_inference_and_icc() -> (
+    None
+):
+    result = fit_acquisition_batch_random_intercept(
         [1.0, 1.2, 2.0, 2.2, 3.0, 3.2, 4.0, 4.2],
         ["s1", "s1", "s2", "s2", "s3", "s3", "s4", "s4"],
         confidence_level=0.95,
-        minimum_sessions=4,
+        minimum_acquisition_batches=4,
     )
 
     assert result.status == "computed"
@@ -554,16 +588,18 @@ def test_session_random_intercept_reports_clustered_inference_and_icc() -> None:
     assert 0.0 <= result.intraclass_correlation <= 1.0
 
 
-def test_session_random_intercept_requires_repeated_session_observations() -> None:
-    result = fit_session_random_intercept(
+def test_acquisition_batch_random_intercept_requires_repeated_session_observations() -> (
+    None
+):
+    result = fit_acquisition_batch_random_intercept(
         [1.0, 2.0, 3.0],
         ["s1", "s2", "s3"],
         confidence_level=0.95,
-        minimum_sessions=3,
+        minimum_acquisition_batches=3,
     )
 
     assert result.status == "unavailable"
-    assert result.reason == "no_repeated_session_observations"
+    assert result.reason == "no_repeated_acquisition_batch_observations"
     assert result.cluster_count == result.unit_count == 3
 
 
@@ -571,7 +607,9 @@ def test_default_exploratory_fdr_families_have_multiple_registered_metrics() -> 
     family_counts: dict[str, int] = {}
     for spec in DEFAULT_METRICS:
         if spec.exploratory:
-            family_counts[spec.metric_family] = family_counts.get(spec.metric_family, 0) + 1
+            family_counts[spec.metric_family] = (
+                family_counts.get(spec.metric_family, 0) + 1
+            )
 
     assert family_counts
     assert all(count > 1 for count in family_counts.values())
@@ -614,16 +652,78 @@ def test_group_statistics_requires_explicit_metric_tier() -> None:
         )
 
 
-def test_group_statistics_rejects_nonconservative_minimum_sessions(
+def test_group_statistics_rejects_nonconservative_minimum_acquisition_batches(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="minimum_sessions must be an integer >= 3"):
+    with pytest.raises(
+        ValueError, match="minimum_acquisition_batches must be an integer >= 3"
+    ):
         GoodCopBadCopStatisticsConfig(
             export_root=tmp_path,
             source_export_run_id="source_export",
             stats_run_id="stats_invalid_sessions",
-            minimum_sessions=2,
+            minimum_acquisition_batches=2,
         )
+
+
+def test_subject_level_statistics_accept_explicit_missing_acquisition_batches(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_export(
+        tmp_path,
+        acquisition_batch_by_recording={"r1": None, "r2": None, "r3": None},
+    )
+    rows, manifest = compute_goodcopbadcop_statistics(
+        GoodCopBadCopStatisticsConfig(
+            export_root=export_root,
+            source_export_run_id="source_export",
+            stats_run_id="stats_subject_level",
+            metrics=metric_specs_for_families(("chaser_distance",)),
+            bootstrap_iterations=0,
+            minimum_recordings=3,
+            allow_legacy_export_layout=True,
+        )
+    )
+
+    assert rows
+    assert all(row["status"] == "computed" for row in rows)
+    assert all(row["cluster_mode"] == "none" for row in rows)
+    assert all(row["cluster_status"] == "disabled" for row in rows)
+    assert manifest["parameters"]["cluster"] == "none"
+
+
+def test_requested_batch_adjustment_rejects_partial_batch_identity(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_export(
+        tmp_path,
+        acquisition_batch_by_recording={
+            "r1": "batch-a",
+            "r2": None,
+            "r3": "batch-b",
+        },
+    )
+    rows, _manifest = compute_goodcopbadcop_statistics(
+        GoodCopBadCopStatisticsConfig(
+            export_root=export_root,
+            source_export_run_id="source_export",
+            stats_run_id="stats_missing_batch",
+            metrics=metric_specs_for_families(("chaser_distance",)),
+            bootstrap_iterations=0,
+            minimum_recordings=3,
+            minimum_acquisition_batches=3,
+            cluster="acquisition_batch",
+            allow_legacy_export_layout=True,
+        )
+    )
+
+    assert rows
+    assert all(row["status"] == "computed" for row in rows)
+    assert all(row["cluster_status"] == "unavailable" for row in rows)
+    assert all(
+        row["cluster_reason"] == "missing_acquisition_batch_identity" for row in rows
+    )
+    assert all(row["clustered_p_value"] is None for row in rows)
 
 
 def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) -> None:
@@ -635,6 +735,7 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
         metrics=metric_specs_for_families(("chaser_distance",)),
         bootstrap_iterations=0,
         minimum_recordings=3,
+        cluster="acquisition_batch",
         random_seed=0,
         allow_legacy_export_layout=True,
     )
@@ -662,7 +763,7 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     )
     assert descriptive_target["mean"] == pytest.approx(13.0 / 3.0)
     assert descriptive_target["std_dev"] == pytest.approx(2.081665999)
-    assert descriptive_target["sem"] == pytest.approx(2.081665999 / (3.0 ** 0.5))
+    assert descriptive_target["sem"] == pytest.approx(2.081665999 / (3.0**0.5))
     target = next(
         row
         for row in rows
@@ -673,9 +774,7 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert target["source_export_run_id"] == "source_export"
     assert target["collection_id"] == "collection_test"
     assert target["metric_unit"] == "mm"
-    assert target["effect_size_kind"] == (
-        "paired_mean_difference_over_sample_sd"
-    )
+    assert target["effect_size_kind"] == ("paired_mean_difference_over_sample_sd")
     assert target["ci_estimand"] == "paired_mean_difference"
     assert target["paired_unit_count"] == 3
     assert target["mean_a"] == pytest.approx(7.0 / 3.0)
@@ -684,18 +783,16 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert target["p_value"] == pytest.approx(0.25)
     assert target["q_value"] is not None
     assert target["multiple_comparison_family"] == "primary|chaser_distance"
-    assert target["cluster_mode"] == "session"
-    assert target["cluster_method"] == "session_random_intercept_reml_v1"
+    assert target["cluster_mode"] == "acquisition_batch"
+    assert target["cluster_method"] == "acquisition_batch_random_intercept_reml_v1"
     assert target["cluster_count"] == 3
     assert target["cluster_status"] == "unavailable"
-    assert target["cluster_reason"] == "session_count<10"
+    assert target["cluster_reason"] == "acquisition_batch_count<10"
     assert target["clustered_p_value"] is None
     assert target["clustered_q_value"] is None
     assert target["intraclass_correlation"] is None
     assert target["test_method"] == "paired_sign_flip_exact"
-    assert json.loads(target["parameters_json"])[
-        "allow_legacy_export_layout"
-    ] is True
+    assert json.loads(target["parameters_json"])["allow_legacy_export_layout"] is True
 
     written = write_goodcopbadcop_statistics(
         rows,
@@ -714,13 +811,17 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     summary_metadata = pq.ParquetFile(part).schema_arrow.metadata or {}
     assert summary_metadata[b"palette.export_schema_id"].decode() == EXPORT_SCHEMA_ID
     assert summary_metadata[b"palette.arrow_schema_mode"] == b"exact"
-    assert pq.ParquetFile(part).schema_arrow.remove_metadata() == exact_arrow_schema(
-        SUMMARY_TABLE,
-        metadata={},
-    ).remove_metadata()
-    assert json.loads(summary_metadata[b"palette.table_contract"]) == TABLE_CONTRACTS[
-        SUMMARY_TABLE
-    ].to_dict()
+    assert (
+        pq.ParquetFile(part).schema_arrow.remove_metadata()
+        == exact_arrow_schema(
+            SUMMARY_TABLE,
+            metadata={},
+        ).remove_metadata()
+    )
+    assert (
+        json.loads(summary_metadata[b"palette.table_contract"])
+        == TABLE_CONTRACTS[SUMMARY_TABLE].to_dict()
+    )
     descriptive_part = manifest_selected_part_files(
         export_root,
         "stats_test",
@@ -730,14 +831,15 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     descriptive_table = pq.read_table(descriptive_part).to_pylist()
     assert len(descriptive_table) == 18
     descriptive_schema = pq.ParquetFile(descriptive_part).schema_arrow
-    assert descriptive_schema.remove_metadata() == exact_arrow_schema(
-        DESCRIPTIVE_TABLE,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        descriptive_schema.remove_metadata()
+        == exact_arrow_schema(
+            DESCRIPTIVE_TABLE,
+            metadata={},
+        ).remove_metadata()
+    )
     assert descriptive_schema.metadata[b"palette.arrow_schema_mode"] == b"exact"
-    assert written["arrow_schema_contracts"][
-        "inferred_v2_compatibility_tables"
-    ] == []
+    assert written["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
     assert written["schema_version"] == EXPORT_SCHEMA_VERSION
     assert set(written["capabilities"]) == {
         "group.statistics",
@@ -745,14 +847,14 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     }
 
 
-def test_paired_session_cluster_inference_survives_arrow_publication_and_readback(
+def test_paired_acquisition_batch_cluster_inference_survives_arrow_publication_and_readback(
     tmp_path: Path,
 ) -> None:
-    sessions, paired_values, roles, _cra_deltas = _repeated_session_design()
+    batches, paired_values, roles, _cra_deltas = _repeated_acquisition_batch_design()
     export_root = _make_goodcopbadcop_export(
         tmp_path,
         values_by_recording=paired_values,
-        session_by_recording=sessions,
+        acquisition_batch_by_recording=batches,
         roles_by_recording=roles,
     )
     config = GoodCopBadCopStatisticsConfig(
@@ -762,7 +864,8 @@ def test_paired_session_cluster_inference_survives_arrow_publication_and_readbac
         metrics=metric_specs_for_families(("chaser_distance",)),
         bootstrap_iterations=0,
         minimum_recordings=10,
-        minimum_sessions=5,
+        minimum_acquisition_batches=5,
+        cluster="acquisition_batch",
         random_seed=0,
         allow_legacy_export_layout=True,
     )
@@ -771,13 +874,12 @@ def test_paired_session_cluster_inference_survives_arrow_publication_and_readbac
     assert rows
     assert all(row["status"] == "computed" for row in rows)
     assert all(
-        row["cluster_status"] in {"computed", "boundary_zero_variance"}
-        for row in rows
+        row["cluster_status"] in {"computed", "boundary_zero_variance"} for row in rows
     )
     assert all(row["cluster_count"] == 5 for row in rows)
     assert all(row["clustered_p_value"] is not None for row in rows)
     assert all(row["clustered_q_value"] is not None for row in rows)
-    assert manifest["parameters"]["minimum_sessions"] == 5
+    assert manifest["parameters"]["minimum_acquisition_batches"] == 5
     assert manifest["fdr_families"] == [
         {
             "family_id": "primary|chaser_distance",
@@ -798,10 +900,13 @@ def test_paired_session_cluster_inference_survives_arrow_publication_and_readbac
         stats_run_id="stats_repeated_paired",
         descriptive_rows=descriptive_rows,
     )
-    assert validate_export_run(
-        export_root,
-        "stats_repeated_paired",
-    )["status"] == "valid"
+    assert (
+        validate_export_run(
+            export_root,
+            "stats_repeated_paired",
+        )["status"]
+        == "valid"
+    )
     persisted = {
         row["stat_result_id"]: row
         for row in pq.read_table(
@@ -815,25 +920,21 @@ def test_paired_session_cluster_inference_survives_arrow_publication_and_readbac
     assert set(persisted) == {row["stat_result_id"] for row in rows}
     for row in rows:
         actual = persisted[row["stat_result_id"]]
-        assert actual["clustered_p_value"] == pytest.approx(
-            row["clustered_p_value"]
-        )
-        assert actual["clustered_q_value"] == pytest.approx(
-            row["clustered_q_value"]
-        )
+        assert actual["clustered_p_value"] == pytest.approx(row["clustered_p_value"])
+        assert actual["clustered_q_value"] == pytest.approx(row["clustered_q_value"])
         assert actual["intraclass_correlation"] == pytest.approx(
             row["intraclass_correlation"]
         )
 
 
-def test_one_sample_session_cluster_inference_survives_arrow_publication_and_readback(
+def test_one_sample_acquisition_batch_cluster_inference_survives_arrow_publication_and_readback(
     tmp_path: Path,
 ) -> None:
-    sessions, _paired_values, _roles, cra_deltas = _repeated_session_design()
+    batches, _paired_values, _roles, cra_deltas = _repeated_acquisition_batch_design()
     export_root = _make_goodcopbadcop_cra_export(
         tmp_path,
         deltas_by_recording=cra_deltas,
-        session_by_recording=sessions,
+        acquisition_batch_by_recording=batches,
     )
     metrics = tuple(
         spec
@@ -847,7 +948,8 @@ def test_one_sample_session_cluster_inference_survives_arrow_publication_and_rea
         metrics=metrics,
         bootstrap_iterations=0,
         minimum_recordings=10,
-        minimum_sessions=5,
+        minimum_acquisition_batches=5,
+        cluster="acquisition_batch",
         random_seed=0,
         allow_legacy_export_layout=True,
     )
@@ -857,8 +959,7 @@ def test_one_sample_session_cluster_inference_survives_arrow_publication_and_rea
     assert all(row["contrast_name"] == "vs-zero" for row in rows)
     assert all(row["status"] == "computed" for row in rows)
     assert all(
-        row["cluster_status"] in {"computed", "boundary_zero_variance"}
-        for row in rows
+        row["cluster_status"] in {"computed", "boundary_zero_variance"} for row in rows
     )
     assert all(row["cluster_count"] == 5 for row in rows)
     assert all(row["clustered_q_value"] is not None for row in rows)
@@ -882,10 +983,13 @@ def test_one_sample_session_cluster_inference_survives_arrow_publication_and_rea
         stats_run_id="stats_repeated_one_sample",
         descriptive_rows=descriptive_rows,
     )
-    assert validate_export_run(
-        export_root,
-        "stats_repeated_one_sample",
-    )["status"] == "valid"
+    assert (
+        validate_export_run(
+            export_root,
+            "stats_repeated_one_sample",
+        )["status"]
+        == "valid"
+    )
     persisted_rows = pq.read_table(
         manifest_selected_part_files(
             export_root,
@@ -1160,8 +1264,8 @@ def test_group_statistics_exact_writer_rejects_row_shape_and_identity_tampering(
     absent_descriptive_values = [dict(row) for row in descriptive_rows]
     for field_name in ("sum", "mean", "median", "min", "max"):
         absent_descriptive_values[0][field_name] = None
-    absent_descriptive_values[0]["descriptive_result_id"] = (
-        _descriptive_result_id(absent_descriptive_values[0])
+    absent_descriptive_values[0]["descriptive_result_id"] = _descriptive_result_id(
+        absent_descriptive_values[0]
     )
     with pytest.raises(ValueError, match="lacks descriptive location values"):
         write_goodcopbadcop_statistics(
@@ -1211,6 +1315,7 @@ def test_group_statistics_all_null_inference_columns_keep_exact_physical_types(
         metrics=metric_specs_for_families(("chaser_distance",)),
         bootstrap_iterations=0,
         minimum_recordings=100,
+        cluster="acquisition_batch",
         random_seed=0,
         allow_legacy_export_layout=True,
     )
@@ -1255,13 +1360,14 @@ def test_group_statistics_all_null_inference_columns_keep_exact_physical_types(
     assert schema.field("q_value").type == pa.float64()
     assert schema.field("effect_size").type == pa.float64()
     assert schema.field("skip_reason").type == pa.string()
-    assert schema.remove_metadata() == exact_arrow_schema(
-        SUMMARY_TABLE,
-        metadata={},
-    ).remove_metadata()
-    assert payload["arrow_schema_contracts"][
-        "inferred_v2_compatibility_tables"
-    ] == []
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            SUMMARY_TABLE,
+            metadata={},
+        ).remove_metadata()
+    )
+    assert payload["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
 
 
 def test_group_statistics_zero_rows_publish_schema_bearing_empty_part(
@@ -1297,10 +1403,13 @@ def test_group_statistics_zero_rows_publish_schema_bearing_empty_part(
     assert len(parts) == 1
     parquet_file = pq.ParquetFile(parts[0])
     assert parquet_file.metadata.num_rows == 0
-    assert parquet_file.schema_arrow.remove_metadata() == exact_arrow_schema(
-        SUMMARY_TABLE,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        parquet_file.schema_arrow.remove_metadata()
+        == exact_arrow_schema(
+            SUMMARY_TABLE,
+            metadata={},
+        ).remove_metadata()
+    )
     assert payload["row_counts_by_table"][SUMMARY_TABLE] == 0
 
 
@@ -1313,7 +1422,9 @@ def test_group_statistics_exact_contract_has_unique_ordered_fields(
     assert len(names) == len(set(names))
 
 
-def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_path: Path) -> None:
+def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(
+    tmp_path: Path,
+) -> None:
     export_root = _make_goodcopbadcop_cra_export(tmp_path)
     config = GoodCopBadCopStatisticsConfig(
         export_root=export_root,
@@ -1347,9 +1458,13 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
     assert target["mean_difference"] == pytest.approx(2.0)
     assert target["median_difference"] == pytest.approx(2.0)
     assert target["effect_size"] == pytest.approx(1.0)
-    specificity = next(row for row in rows if row["metric_name"] == "specificity_distance")
+    specificity = next(
+        row for row in rows if row["metric_name"] == "specificity_distance"
+    )
     assert specificity["primary"] is True
-    occupancy_specificity = next(row for row in rows if row["metric_name"] == "specificity_occupancy")
+    occupancy_specificity = next(
+        row for row in rows if row["metric_name"] == "specificity_occupancy"
+    )
     assert occupancy_specificity["primary"] is False
     assert target["p_value"] == pytest.approx(0.25)
     assert target["test_method"] == "wilcoxon_signed_rank_exact"
@@ -1363,7 +1478,9 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
     assert inert["effect_size"] == pytest.approx(1.0)
 
 
-def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path) -> None:
+def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(
+    tmp_path: Path,
+) -> None:
     export_root = _make_goodcopbadcop_epoch_behavior_export(tmp_path)
     config = GoodCopBadCopStatisticsConfig(
         export_root=export_root,
@@ -1406,10 +1523,13 @@ def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path
     assert target["mean_difference"] == pytest.approx(0.06)
     families = {row["multiple_comparison_family"] for row in rows}
     assert families == {"exploratory|epoch_behavior"}
-    assert sum(
-        row["multiple_comparison_family"] == "exploratory|epoch_behavior"
-        for row in rows
-    ) == 36
+    assert (
+        sum(
+            row["multiple_comparison_family"] == "exploratory|epoch_behavior"
+            for row in rows
+        )
+        == 36
+    )
 
 
 def test_group_statistics_rejects_missing_registry_subject_identity(
@@ -1498,7 +1618,9 @@ def test_statistics_concurrent_first_publication_uses_compare_and_swap(
         real_validate(staging_root, payload)
         ready_to_commit.wait(timeout=10)
 
-    monkeypatch.setattr(statistics, "validate_staged_publication", synchronized_validate)
+    monkeypatch.setattr(
+        statistics, "validate_staged_publication", synchronized_validate
+    )
 
     def publish() -> dict[str, object]:
         return write_goodcopbadcop_statistics(
@@ -1518,10 +1640,13 @@ def test_statistics_concurrent_first_publication_uses_compare_and_swap(
                 outcomes.append(exc)
 
     assert sum(isinstance(item, dict) for item in outcomes) == 1
-    assert sum(
-        isinstance(item, RuntimeError) and "changed during publication" in str(item)
-        for item in outcomes
-    ) == 1
+    assert (
+        sum(
+            isinstance(item, RuntimeError) and "changed during publication" in str(item)
+            for item in outcomes
+        )
+        == 1
+    )
     assert validate_export_run(export_root, "stats_race")["status"] == "valid"
 
 
@@ -1663,12 +1788,7 @@ def test_statistics_cli_binds_summary_and_descriptive_to_one_source_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     export_root = _make_goodcopbadcop_export(tmp_path)
-    source_path = (
-        export_root
-        / "v1"
-        / "manifests"
-        / "export_run_id=source_export.json"
-    )
+    source_path = export_root / "v1" / "manifests" / "export_run_id=source_export.json"
     original_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
     import fisheye.group_statistics.goodcopbadcop as statistics
 
@@ -1685,34 +1805,34 @@ def test_statistics_cli_binds_summary_and_descriptive_to_one_source_snapshot(
         return snapshot
 
     monkeypatch.setattr(statistics, "_load_json_snapshot", replace_after_snapshot)
-    assert compute_group_statistics_main(
-        [
-            "--profile",
-            "chaser",
-            "--source-export-run-id",
-            "source_export",
-            "--export-root",
-            str(export_root),
-            "--stats-run-id",
-            "stats_one_snapshot",
-            "--metrics",
-            "chaser_distance",
-            "--bootstrap-iterations",
-            "0",
-            "--minimum-recordings",
-            "3",
-            "--allow-legacy-export-layout",
-            "--apply",
-        ]
-    ) == 0
+    assert (
+        compute_group_statistics_main(
+            [
+                "--profile",
+                "chaser",
+                "--source-export-run-id",
+                "source_export",
+                "--export-root",
+                str(export_root),
+                "--stats-run-id",
+                "stats_one_snapshot",
+                "--metrics",
+                "chaser_distance",
+                "--bootstrap-iterations",
+                "0",
+                "--minimum-recordings",
+                "3",
+                "--allow-legacy-export-layout",
+                "--apply",
+            ]
+        )
+        == 0
+    )
 
     assert load_count == 1
     published_manifest = json.loads(
         (
-            export_root
-            / "v1"
-            / "manifests"
-            / "export_run_id=stats_one_snapshot.json"
+            export_root / "v1" / "manifests" / "export_run_id=stats_one_snapshot.json"
         ).read_text(encoding="utf-8")
     )
     assert published_manifest["source_export_manifest_sha256"] == original_digest
@@ -1725,9 +1845,9 @@ def test_statistics_cli_binds_summary_and_descriptive_to_one_source_snapshot(
             )[0]
         ).to_pylist()
         assert rows
-        assert {
-            row["source_export_manifest_sha256"] for row in rows
-        } == {original_digest}
+        assert {row["source_export_manifest_sha256"] for row in rows} == {
+            original_digest
+        }
 
 
 @pytest.mark.parametrize(
@@ -1754,12 +1874,7 @@ def test_statistics_legacy_mode_rejects_unsafe_payload_run_identity(
     tmp_path: Path,
 ) -> None:
     export_root = _make_goodcopbadcop_export(tmp_path)
-    source_path = (
-        export_root
-        / "v1"
-        / "manifests"
-        / "export_run_id=source_export.json"
-    )
+    source_path = export_root / "v1" / "manifests" / "export_run_id=source_export.json"
     payload = json.loads(source_path.read_text(encoding="utf-8"))
     payload["export_run_id"] = "../escape"
     source_path.write_text(json.dumps(payload), encoding="utf-8")

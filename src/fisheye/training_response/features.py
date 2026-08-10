@@ -30,12 +30,16 @@ def _int(value: object) -> int | None:
         return None
 
 
-def _ratio_log2(training: object, pre: object, *, epsilon: float = 1e-6) -> float | None:
+def _ratio_log2(
+    training: object, pre: object, *, epsilon: float = 1e-6
+) -> float | None:
     training_value = _float(training)
     pre_value = _float(pre)
     if training_value is None or pre_value is None:
         return None
-    return math.log2((max(0.0, training_value) + epsilon) / (max(0.0, pre_value) + epsilon))
+    return math.log2(
+        (max(0.0, training_value) + epsilon) / (max(0.0, pre_value) + epsilon)
+    )
 
 
 def _delta(training: object, pre: object) -> float | None:
@@ -80,13 +84,16 @@ def _validate_source_identity(
     rows: Sequence[Mapping[str, Any]],
     *,
     recording_id: str,
-    session_id: str,
+    acquisition_batch_id: str | None,
     subject_id: str,
     label: str,
 ) -> None:
-    expected = (recording_id, session_id, subject_id)
+    expected = (recording_id, acquisition_batch_id, subject_id)
     for row_index, row in enumerate(rows):
-        observed = tuple(row.get(name) for name in ("recording_id", "session_id", "subject_id"))
+        observed = tuple(
+            row.get(name)
+            for name in ("recording_id", "acquisition_batch_id", "subject_id")
+        )
         if observed != expected:
             raise ValueError(
                 f"{label} row {row_index} identity {observed!r} differs from "
@@ -139,7 +146,7 @@ def _weighted_far_speed(
 def derive_training_response_features(
     *,
     recording_id: str,
-    session_id: str,
+    acquisition_batch_id: str | None,
     subject_id: str,
     source_export_run_id: str,
     behavior_rows: Sequence[Mapping[str, Any]],
@@ -153,13 +160,13 @@ def derive_training_response_features(
 
     config = config or TrainingResponseConfig()
     config.validate()
-    for name, value in (
-        ("recording_id", recording_id),
-        ("session_id", session_id),
-        ("subject_id", subject_id),
-    ):
+    for name, value in (("recording_id", recording_id), ("subject_id", subject_id)):
         if type(value) is not str or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
+    if acquisition_batch_id is not None and (
+        type(acquisition_batch_id) is not str or not acquisition_batch_id.strip()
+    ):
+        raise ValueError("acquisition_batch_id must be null or a non-empty string")
     for label, rows in (
         ("behavior", behavior_rows),
         ("distance", distance_rows),
@@ -169,7 +176,7 @@ def derive_training_response_features(
         _validate_source_identity(
             rows,
             recording_id=recording_id,
-            session_id=session_id,
+            acquisition_batch_id=acquisition_batch_id,
             subject_id=subject_id,
             label=label,
         )
@@ -186,7 +193,7 @@ def derive_training_response_features(
         "method": METHOD,
         "method_version": METHOD_VERSION,
         "recording_id": recording_id,
-        "session_id": session_id,
+        "acquisition_batch_id": acquisition_batch_id,
         "subject_id": subject_id,
         "training_window_id": training_window_id,
         "source_export_run_id": source_export_run_id,
@@ -262,7 +269,9 @@ def derive_training_response_features(
     )
     pre_center = _float(pre.get("median_distance_from_arena_center_mm"))
     training_center = _float(training.get("median_distance_from_arena_center_mm"))
-    pre_center_norm = pre_center / arena_radius if pre_center is not None and arena_radius else None
+    pre_center_norm = (
+        pre_center / arena_radius if pre_center is not None and arena_radius else None
+    )
     training_center_norm = (
         training_center / arena_radius
         if training_center is not None and arena_radius
@@ -291,7 +300,11 @@ def derive_training_response_features(
         if pre_distance is None or training_distance is None:
             required_role_rows = False
             continue
-        for metric in ("p05_distance_mm", "p50_distance_mm", "fraction_within_threshold"):
+        for metric in (
+            "p05_distance_mm",
+            "p50_distance_mm",
+            "fraction_within_threshold",
+        ):
             pre_value = _float(pre_distance.get(metric))
             training_value = _float(training_distance.get(metric))
             row[f"{role}_pre_{metric}"] = pre_value

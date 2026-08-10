@@ -29,7 +29,7 @@ def _float(value: object) -> float | None:
 def _identity(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "recording_id": row.get("recording_id"),
-        "session_id": row.get("session_id"),
+        "acquisition_batch_id": row.get("acquisition_batch_id"),
         "subject_id": row.get("subject_id"),
         "training_window_id": row.get("training_window_id"),
         "source_export_run_id": row.get("source_export_run_id"),
@@ -139,9 +139,7 @@ def _axis_score(
         weighted.append(weight * ((transform(value) - center) / scale))
         weights.append(weight)
     return (
-        (float(sum(weighted) / sum(weights)), len(weighted))
-        if weighted
-        else (None, 0)
+        (float(sum(weighted) / sum(weights)), len(weighted)) if weighted else (None, 0)
     )
 
 
@@ -162,9 +160,7 @@ def _state(
     return middle
 
 
-def _primary_profile(
-    scores: Mapping[str, float | None], threshold: float
-) -> str:
+def _primary_profile(scores: Mapping[str, float | None], threshold: float) -> str:
     locomotor = scores.get("locomotor_response")
     proximity = scores.get("aggressive_proximity")
     selectivity = scores.get("role_distance_selectivity")
@@ -291,7 +287,9 @@ def classify_training_response_features(
             if strongest is not None
             and result["primary_training_profile"]
             not in {"limited_summary_change", "mixed_training_response"}
-            else 0.0 if strongest is not None else None
+            else 0.0
+            if strongest is not None
+            else None
         )
         output.append(result)
     return output
@@ -314,9 +312,10 @@ def discover_training_response_clusters(
     matrix_rows: list[list[float]] = []
     for index, row in enumerate(classification_rows):
         values = [_float(row.get(axis)) for axis in axes]
-        if row.get("classification_status") == "complete" and sum(
-            value is not None for value in values
-        ) >= 3:
+        if (
+            row.get("classification_status") == "complete"
+            and sum(value is not None for value in values) >= 3
+        ):
             valid_indexes.append(index)
             matrix_rows.append([0.0 if value is None else value for value in values])
     output = [

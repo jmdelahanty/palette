@@ -40,9 +40,10 @@ chaser_speed_distance_bins
 
 Every source export is validated before analysis. Output is published beneath
 a separate root and every output row carries `source_export_run_id`, the
-registry-derived `session_id`, and the effective registry `subject_id`. These
-identities are required non-null exact-schema columns in the feature,
-classification, and cluster tables. The source manifest's validated registry
+nullable registry-derived `acquisition_batch_id`, and the effective registry
+`subject_id`. Subject identity is required and non-null. Acquisition-batch identity
+is an exact-schema nullable provenance field, not part of the biological
+experimental-unit identity or primary key. The source manifest's validated registry
 identity receipt is copied opaquely into the derived manifest. Training-response
 does not duplicate the export layer's versioned receipt semantics. Publication
 validation instead proves that the copied receipt exactly matches the
@@ -51,16 +52,17 @@ the source export's digest-declared Parquet parts.
 The source manifest SHA-256 and frozen collection-manifest SHA-256 are also
 recorded, and the source Parquet files are never modified.
 
-The receipt is intentionally opaque here so analytics-export receipt v1 and
-the forthcoming digest-bound experimental-session receipt v2 remain owned by
-the export contract. The workflow first runs the installed source-export
+The receipt is intentionally opaque here so the versioned, digest-bound registry
+identity receipt remains owned by the analytics-export contract. The workflow first
+runs the installed source-export
 validator. During reconciliation, the shared receipt validator can be called
 at that boundary without changing the training-response v3 tables.
 
-The recording/session/subject tuple is preserved while grouping source tables,
-building features, assigning cohort-relative classifications, discovering
-clusters, and joining the three output tables for QC. One `recording_id` may
-not acquire conflicting session or subject bindings across source tables.
+The recording/subject identity is preserved while grouping source tables, building
+features, assigning cohort-relative classifications, discovering clusters, and
+joining the three output tables for QC. A non-null acquisition batch is propagated
+as optional provenance. One `recording_id` may not acquire conflicting subject or
+non-null acquisition-batch bindings across source tables.
 
 The combined cohort is defined by the registry's normalized `CHASER` stimulus
 mode rather than a protocol-name prefix. Protocol remains a diagnostic stratum.
@@ -166,7 +168,7 @@ of behavioral types.
 
 ## Output schema, compatibility, and lazy querying
 
-Each validated recording/session/subject binding contributes one row to each
+Each validated recording/subject binding contributes one row to each
 output table:
 
 ```text
@@ -177,8 +179,8 @@ training_response_clusters
 
 New output uses `palette.training_response_analytics` schema version 3 and
 Arrow-contract envelope version 2. Version 3 is the first training-response
-schema to preserve registry session and subject identities. Its primary key is
-`analysis_run_id`, `recording_id`, `session_id`, and `subject_id`.
+schema to preserve registry subject identity and optional acquisition-batch
+provenance. Its primary key is `analysis_run_id`, `recording_id`, and `subject_id`.
 
 The shared derived-publication directory named `v2` describes the immutable
 publication protocol, not this family's logical schema version. Readers inspect
@@ -187,9 +189,9 @@ the manifest's `schema_version` and fail closed unless it is version 3.
 Frozen exact schema v2 remains readable only when callers explicitly pass
 `allow_legacy_v2=True`; that compatibility path validates the original v2
 Arrow schemas, manifest, receipts, and primary keys but cannot invent missing
-session or subject identities. Historical schema-v1 layout remains a separate
-explicit compatibility mode. Neither compatibility mode participates in
-default catalog selection.
+subject identities or acquisition-batch provenance. Historical schema-v1 layout
+remains a separate explicit compatibility mode. Neither compatibility mode
+participates in default catalog selection.
 
 Manifest-declared parts can be scanned lazily with Polars:
 

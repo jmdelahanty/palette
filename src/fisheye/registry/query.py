@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .db import Registry, RegistryPaths
-from .experimental_sessions import validate_experimental_session_id
+from .acquisition_batches import validate_acquisition_batch_id
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -17,14 +17,29 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         description="Query the Palette registry for curated dataset selection.",
     )
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
-    parser.add_argument("--format", choices=["table", "json", "csv"], default="table", help="Output format.")
-    parser.add_argument("--output", type=Path, help="Optional output file for json/csv formats.")
-    parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
-    parser.add_argument("--list-ids", action="store_true", help="Print only dataset IDs (one per line).")
+    parser.add_argument(
+        "--format",
+        choices=["table", "json", "csv"],
+        default="table",
+        help="Output format.",
+    )
+    parser.add_argument(
+        "--output", type=Path, help="Optional output file for json/csv formats."
+    )
+    parser.add_argument(
+        "--output-file-list", type=Path, help="Write matched zarr paths to file."
+    )
+    parser.add_argument(
+        "--list-ids", action="store_true", help="Print only dataset IDs (one per line)."
+    )
 
     parser.add_argument("--dataset-id", type=str, help="Exact dataset_id match.")
-    parser.add_argument("--status", choices=["active", "missing"], help="Filter dataset status.")
-    parser.add_argument("--path-contains", type=str, help="Substring match for zarr_path.")
+    parser.add_argument(
+        "--status", choices=["active", "missing"], help="Filter dataset status."
+    )
+    parser.add_argument(
+        "--path-contains", type=str, help="Substring match for zarr_path."
+    )
 
     parser.add_argument("--dish-id", type=str, help="Exact dish_id match.")
     parser.add_argument("--cross-id", type=str, help="Exact cross_id match.")
@@ -77,35 +92,57 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--camera-id", type=str, help="Exact camera_id match.")
     parser.add_argument("--canvas-name", type=str, help="Exact canvas_name match.")
     parser.add_argument(
-        "--experimental-session-id",
+        "--acquisition-batch-id",
         type=str,
-        help="Exact explicit experimental_session_id match (never inferred from timestamps).",
+        help="Exact explicit acquisition_batch_id match (never inferred from timestamps).",
     )
     parser.add_argument(
-        "--experimental-session-status",
+        "--acquisition-batch-status",
         choices=["explicit", "missing"],
-        help="Filter by explicit experimental-session assignment status.",
+        help="Filter by explicit acquisition-batch assignment status.",
     )
     parser.add_argument(
         "--model-input",
         choices=["gray", "rgb"],
         help="Filter by required downsample modality for training input.",
     )
-    parser.add_argument("--require-context", action="store_true", help="Require full context fields.")
-    parser.add_argument("--missing-context", action="store_true", help="Require any missing context field.")
+    parser.add_argument(
+        "--require-context", action="store_true", help="Require full context fields."
+    )
+    parser.add_argument(
+        "--missing-context",
+        action="store_true",
+        help="Require any missing context field.",
+    )
 
-    parser.add_argument("--include-training", action="store_true", help="Include latest training run metadata.")
-    parser.add_argument("--trained-only", action="store_true", help="Only datasets with at least one training run.")
-    parser.add_argument("--set-id", type=str, help="Only datasets that belong to this training set ID.")
+    parser.add_argument(
+        "--include-training",
+        action="store_true",
+        help="Include latest training run metadata.",
+    )
+    parser.add_argument(
+        "--trained-only",
+        action="store_true",
+        help="Only datasets with at least one training run.",
+    )
+    parser.add_argument(
+        "--set-id", type=str, help="Only datasets that belong to this training set ID."
+    )
 
-    parser.add_argument("--where", type=str, help="Raw SQL WHERE clause suffix (advanced).")
-    parser.add_argument("--limit", type=int, default=200, help="Maximum rows to return (0 = no limit).")
+    parser.add_argument(
+        "--where", type=str, help="Raw SQL WHERE clause suffix (advanced)."
+    )
+    parser.add_argument(
+        "--limit", type=int, default=200, help="Maximum rows to return (0 = no limit)."
+    )
     parser.add_argument("--offset", type=int, default=0, help="Offset rows.")
     return parser.parse_args(argv)
 
 
 def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
-    needs_training_join = bool(args.include_training or args.trained_only or args.set_id)
+    needs_training_join = bool(
+        args.include_training or args.trained_only or args.set_id
+    )
     sql: List[str] = []
     params: List[Any] = []
 
@@ -135,8 +172,8 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
     select_cols = [
         "d.dataset_id",
         "d.session_uuid",
-        "dcc.experimental_session_id",
-        "dcc.experimental_session_identity_status",
+        "dcc.acquisition_batch_id",
+        "dcc.acquisition_batch_identity_status",
         "d.zarr_path",
         "d.status",
         "dcc.dish_id",
@@ -175,7 +212,9 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
     sql.append("LEFT JOIN provenance p ON d.dataset_id = p.dataset_id")
     if needs_training_join:
         sql.append("LEFT JOIN set_members sm ON sm.dataset_id = d.dataset_id")
-        sql.append("LEFT JOIN latest_runs lr ON lr.dataset_id = d.dataset_id AND lr.rn = 1")
+        sql.append(
+            "LEFT JOIN latest_runs lr ON lr.dataset_id = d.dataset_id AND lr.rn = 1"
+        )
 
     sql.append("WHERE 1=1")
 
@@ -198,7 +237,9 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         )
         params.extend([value, value])
 
-    def add_like_or_json_membership(*, scalar_column: str, json_column: str, pattern: str) -> None:
+    def add_like_or_json_membership(
+        *, scalar_column: str, json_column: str, pattern: str
+    ) -> None:
         sql.append(
             f"AND ({scalar_column} LIKE ? OR EXISTS ("
             f"SELECT 1 FROM json_each(COALESCE({json_column}, '[]')) "
@@ -258,9 +299,13 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
     if args.protocol_hash:
         add_clause("AND dcc.protocol_hash = ?", args.protocol_hash)
     if args.experiment_context_status:
-        add_clause("AND dcc.experiment_context_status = ?", args.experiment_context_status)
+        add_clause(
+            "AND dcc.experiment_context_status = ?", args.experiment_context_status
+        )
     if args.experiment_context_source:
-        add_clause("AND dcc.experiment_context_source = ?", args.experiment_context_source)
+        add_clause(
+            "AND dcc.experiment_context_source = ?", args.experiment_context_source
+        )
     if args.stimulus_runs_available is not None:
         add_clause(
             "AND dcc.stimulus_runs_available = ?",
@@ -313,15 +358,15 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         add_clause("AND dcc.camera_id = ?", args.camera_id)
     if args.canvas_name:
         add_clause("AND dcc.canvas_name = ?", args.canvas_name)
-    if args.experimental_session_id:
+    if args.acquisition_batch_id:
         add_clause(
-            "AND dcc.experimental_session_id = ?",
-            validate_experimental_session_id(args.experimental_session_id),
+            "AND dcc.acquisition_batch_id = ?",
+            validate_acquisition_batch_id(args.acquisition_batch_id),
         )
-    if args.experimental_session_status:
+    if args.acquisition_batch_status:
         add_clause(
-            "AND dcc.experimental_session_identity_status = ?",
-            args.experimental_session_status,
+            "AND dcc.acquisition_batch_identity_status = ?",
+            args.acquisition_batch_status,
         )
     if args.model_input == "gray":
         sql.append(
@@ -376,8 +421,8 @@ def _print_table(rows: List[Dict[str, Any]], include_training: bool) -> None:
     columns = [
         "dataset_id",
         "status",
-        "experimental_session_id",
-        "experimental_session_identity_status",
+        "acquisition_batch_id",
+        "acquisition_batch_identity_status",
         "dpf_at_acquisition",
         "snapshot_status",
         "protocol_name",
@@ -452,12 +497,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     elif args.format == "csv":
         _emit_csv(payload, args.output)
     else:
-        _print_table(payload, include_training=bool(args.include_training or args.trained_only or args.set_id))
+        _print_table(
+            payload,
+            include_training=bool(
+                args.include_training or args.trained_only or args.set_id
+            ),
+        )
 
     if args.output_file_list:
         args.output_file_list.parent.mkdir(parents=True, exist_ok=True)
         args.output_file_list.write_text(
-            "\n".join(row.get("zarr_path", "") for row in payload if row.get("zarr_path"))
+            "\n".join(
+                row.get("zarr_path", "") for row in payload if row.get("zarr_path")
+            )
             + ("\n" if payload else ""),
             encoding="utf-8",
         )

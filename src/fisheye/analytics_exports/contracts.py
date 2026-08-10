@@ -128,7 +128,9 @@ def _contract(
 ) -> TableContract:
     base = ("export_schema_version", "table_name", *primary_key)
     identity_columns = (
-        ("session_id", "subject_id") if table_name in REGISTRY_IDENTITY_TABLES else ()
+        ("acquisition_batch_id", "subject_id")
+        if table_name in REGISTRY_IDENTITY_TABLES
+        else ()
     )
     return TableContract(
         table_name=table_name,
@@ -793,7 +795,12 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
         CHASER_EGOCENTRIC_SUMMARY_TABLE,
         "recording_x_chaser_epoch_x_chaser_egocentric_summary",
         ("recording_id", "window_id", "chaser_index"),
-        ("window_id", "chaser_index", "mean_alignment_cos", "circular_mean_bearing_deg"),
+        (
+            "window_id",
+            "chaser_index",
+            "mean_alignment_cos",
+            "circular_mean_bearing_deg",
+        ),
         {"circular_mean_bearing_deg": "deg"},
     ),
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE: _contract(
@@ -887,8 +894,12 @@ ALL_TABLES = (
 def contract_snapshot(table_names: Sequence[str]) -> dict[str, dict[str, Any]]:
     unknown = sorted(set(table_names) - set(TABLE_CONTRACTS))
     if unknown:
-        raise ValueError(f"No version-3 table contract is registered for: {', '.join(unknown)}")
-    return {table_name: TABLE_CONTRACTS[table_name].to_dict() for table_name in table_names}
+        raise ValueError(
+            f"No version-3 table contract is registered for: {', '.join(unknown)}"
+        )
+    return {
+        table_name: TABLE_CONTRACTS[table_name].to_dict() for table_name in table_names
+    }
 
 
 def _canonical_value(value: Any) -> Any:
@@ -916,13 +927,17 @@ def canonicalize_export_row(table_name: str, row: Mapping[str, Any]) -> dict[str
         key = str(raw_key).replace("benign", "inert")
         value = _canonical_value(raw_value)
         if key in out and out[key] != value:
-            raise ValueError(f"Conflicting values while canonicalizing {raw_key!r} to {key!r}")
+            raise ValueError(
+                f"Conflicting values while canonicalizing {raw_key!r} to {key!r}"
+            )
         out[key] = value
     out["export_schema_version"] = EXPORT_SCHEMA_VERSION
     out["table_name"] = table_name
     forbidden = sorted(key for key in out if "benign" in key.lower())
     if forbidden:
-        raise ValueError(f"Version-3 row contains forbidden legacy columns: {forbidden}")
+        raise ValueError(
+            f"Version-3 row contains forbidden legacy columns: {forbidden}"
+        )
     return out
 
 

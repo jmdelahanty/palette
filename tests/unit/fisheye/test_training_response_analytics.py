@@ -71,7 +71,7 @@ from fisheye.training_response.workflow import (
 def _identity(recording_id: str) -> dict[str, str]:
     return {
         "recording_id": recording_id,
-        "session_id": f"session_{int(recording_id.rsplit('_', 1)[-1]) // 2}",
+        "acquisition_batch_id": f"session_{int(recording_id.rsplit('_', 1)[-1]) // 2}",
         "subject_id": f"subject_{recording_id}",
     }
 
@@ -188,7 +188,7 @@ def _speed_distance_rows(recording_id: str):
 def test_feature_builder_separates_pre_change_role_and_proximity_metrics() -> None:
     row = derive_training_response_features(
         recording_id="recording_001",
-        session_id="session_0",
+        acquisition_batch_id="session_0",
         subject_id="subject_recording_001",
         source_export_run_id="source_001",
         behavior_rows=_behavior_rows("recording_001", scale=2.0),
@@ -213,7 +213,7 @@ def test_feature_builder_separates_pre_change_role_and_proximity_metrics() -> No
 def test_feature_builder_rejects_low_tracking_coverage() -> None:
     row = derive_training_response_features(
         recording_id="recording_001",
-        session_id="session_0",
+        acquisition_batch_id="session_0",
         subject_id="subject_recording_001",
         source_export_run_id="source_001",
         behavior_rows=_behavior_rows("recording_001", dropout=0.30),
@@ -236,13 +236,11 @@ def test_classification_uses_clear_cohort_proximity_vocabulary() -> None:
         features.append(
             derive_training_response_features(
                 recording_id=recording_id,
-                session_id=_identity(recording_id)["session_id"],
+                acquisition_batch_id=_identity(recording_id)["acquisition_batch_id"],
                 subject_id=_identity(recording_id)["subject_id"],
                 source_export_run_id="source_001",
                 behavior_rows=_behavior_rows(recording_id, scale=0.5 + index * 0.3),
-                distance_rows=_distance_rows(
-                    recording_id, aggressive_training_p50=p50
-                ),
+                distance_rows=_distance_rows(recording_id, aggressive_training_p50=p50),
                 speed_distance_rows=_speed_distance_rows(recording_id),
             )
         )
@@ -264,7 +262,9 @@ def test_build_tables_preserves_multi_session_multi_subject_identity() -> None:
         source_export_run_id="source_001",
         behavior_rows=[row for item in recording_ids for row in _behavior_rows(item)],
         distance_rows=[row for item in recording_ids for row in _distance_rows(item)],
-        egocentric_rows=[row for item in recording_ids for row in _egocentric_rows(item)],
+        egocentric_rows=[
+            row for item in recording_ids for row in _egocentric_rows(item)
+        ],
         speed_distance_rows=[
             row for item in recording_ids for row in _speed_distance_rows(item)
         ],
@@ -278,17 +278,17 @@ def test_build_tables_preserves_multi_session_multi_subject_identity() -> None:
         "training_response_clusters",
     }
     assert {len(rows) for rows in tables.values()} == {6}
-    assert {
-        row["protocol_name"] for row in tables["training_response_features"]
-    } == {"GoodCopBadCop"}
+    assert {row["protocol_name"] for row in tables["training_response_features"]} == {
+        "GoodCopBadCop"
+    }
     for rows in tables.values():
         assert {
-            (row["recording_id"], row["session_id"], row["subject_id"])
+            (row["recording_id"], row["acquisition_batch_id"], row["subject_id"])
             for row in rows
         } == {
             (
                 recording_id,
-                _identity(recording_id)["session_id"],
+                _identity(recording_id)["acquisition_batch_id"],
                 _identity(recording_id)["subject_id"],
             )
             for recording_id in recording_ids
@@ -300,7 +300,7 @@ def test_build_tables_rejects_conflicting_subject_binding_for_recording() -> Non
     distance = _distance_rows("recording_0")
     distance[0] = {**distance[0], "subject_id": "different_subject"}
 
-    with pytest.raises(ValueError, match="conflicting session/subject bindings"):
+    with pytest.raises(ValueError, match="conflicting batch/subject bindings"):
         build_training_response_tables(
             source_export_run_id="source_001",
             behavior_rows=behavior,
@@ -315,7 +315,7 @@ def test_cluster_discovery_reports_missing_stability_instead_of_validating_it() 
         rows.append(
             {
                 "recording_id": f"recording_{index}",
-                "session_id": f"session_{index // 2}",
+                "acquisition_batch_id": f"session_{index // 2}",
                 "subject_id": f"subject_recording_{index}",
                 "training_window_id": 1,
                 "classification_status": "complete",
@@ -361,10 +361,7 @@ def _source_rows(recording_ids: list[str]):
 def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
     rows_by_table = _source_rows([f"recording_{index}" for index in range(6)])
     generation_path = (
-        Path("v1")
-        / ".generations"
-        / f"export_run_id={run_id}"
-        / "generation=test"
+        Path("v1") / ".generations" / f"export_run_id={run_id}" / "generation=test"
     )
     parts: dict[str, Path] = {}
     schemas: dict[str, tuple[str, ...]] = {}
@@ -386,7 +383,9 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
             row.update(raw)
             recording_id = str(raw["recording_id"])
             row["zarr_path"] = f"/{recording_id}_analysis.zarr"
-            row["session_id"] = _identity(recording_id)["session_id"]
+            row["acquisition_batch_id"] = _identity(recording_id)[
+                "acquisition_batch_id"
+            ]
             row["subject_id"] = f"subject-{recording_id}"
             row["export_schema_version"] = EXPORT_SCHEMA_VERSION
             row["table_name"] = table_name
@@ -429,33 +428,32 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                     {
                         "dataset_id": index + 1,
                         "recording_id": recording_id,
-                        "experimental_session_id": _identity(recording_id)[
-                            "session_id"
+                        "acquisition_batch_id": _identity(recording_id)[
+                            "acquisition_batch_id"
                         ],
-                        "experimental_session_snapshot_id": (
-                            "00000000-0000-4000-8000-"
-                            f"{index // 2 + 1:012d}"
+                        "acquisition_batch_snapshot_id": (
+                            f"00000000-0000-4000-8000-{index // 2 + 1:012d}"
                         ),
-                        "experimental_session_schema_id": (
-                            "palette.registry.experimental_session.v1"
+                        "acquisition_batch_schema_id": (
+                            "palette.registry.acquisition_batch.v1"
                         ),
-                        "experimental_session_creation_registry_schema_version": 1,
-                        "experimental_session_identity_status": "explicit",
-                        "experimental_session_assignment_snapshot_id": (
+                        "acquisition_batch_creation_registry_schema_version": 1,
+                        "acquisition_batch_identity_status": "explicit",
+                        "acquisition_batch_assignment_snapshot_id": (
                             f"10000000-0000-4000-8000-{index + 1:012d}"
                         ),
-                        "experimental_session_assignment_batch_id": (
+                        "acquisition_batch_assignment_batch_id": (
                             "20000000-0000-4000-8000-000000000001"
                         ),
-                        "experimental_session_assignment_revision": 1,
-                        "experimental_session_supersedes_assignment_snapshot_id": None,
-                        "experimental_session_assignment_schema_id": (
-                            "palette.registry.experimental_session_assignment.v1"
+                        "acquisition_batch_assignment_revision": 1,
+                        "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                        "acquisition_batch_assignment_schema_id": (
+                            "palette.registry.acquisition_batch_assignment.v1"
                         ),
-                        "experimental_session_assignment_registry_schema_version": 1,
-                        "experimental_session_assignment_method": "manual_test",
-                        "experimental_session_assigned_by": "test",
-                        "experimental_session_assigned_at_utc": (
+                        "acquisition_batch_assignment_registry_schema_version": 1,
+                        "acquisition_batch_assignment_method": "manual_test",
+                        "acquisition_batch_assigned_by": "test",
+                        "acquisition_batch_assigned_at_utc": (
                             "2026-08-10T00:00:00+00:00"
                         ),
                         "fish_id": f"subject-{recording_id}",
@@ -483,9 +481,7 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                 "row_counts_by_table": {
                     name: len(rows) for name, rows in rows_by_table.items()
                 },
-                "part_files_by_table": {
-                    name: [relative_parts[name]] for name in parts
-                },
+                "part_files_by_table": {name: [relative_parts[name]] for name in parts},
                 "capabilities": capabilities,
                 "publication": {
                     "schema_id": "palette.analytics_export.publication",
@@ -531,8 +527,12 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
     assert result["source_registry_identity_receipt"]["sources"]
     assert result["temporal_adaptation_status"].startswith("unavailable")
     assert result["output_validation"]["status"] == "valid"
-    assert validate_training_response_run(output_root, "training_001")["table_count"] == 3
-    assert all(path.read_bytes() == source_hashes[name] for name, path in source_parts.items())
+    assert (
+        validate_training_response_run(output_root, "training_001")["table_count"] == 3
+    )
+    assert all(
+        path.read_bytes() == source_hashes[name] for name, path in source_parts.items()
+    )
     lazy = scan_training_response_table(
         output_root,
         "training_001",
@@ -542,12 +542,15 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
     assert lazy.collect().shape == (6, 2)
     qc = scan_training_response_qc_rows(output_root, "training_001").collect()
     assert qc.height == 6
-    assert qc["session_id"].n_unique() == 3
+    assert qc["acquisition_batch_id"].n_unique() == 3
     assert qc["subject_id"].n_unique() == 6
     catalog = discover_training_response_catalog(output_root)
-    assert select_training_response_run_id(
-        catalog, "latest", source_export_run_id="source_001"
-    ) == "training_001"
+    assert (
+        select_training_response_run_id(
+            catalog, "latest", source_export_run_id="source_001"
+        )
+        == "training_001"
+    )
     with pytest.raises(ValueError, match="no ready training-response"):
         select_training_response_run_id(
             catalog,
@@ -571,10 +574,7 @@ def test_training_catalog_rejects_digest_valid_but_ineligible_v3_run(
         config=TrainingResponseConfig(cluster_stability_resamples=2),
     )
     manifest_path = (
-        output_root
-        / "v2"
-        / "manifests"
-        / "analysis_run_id=training_ineligible.json"
+        output_root / "v2" / "manifests" / "analysis_run_id=training_ineligible.json"
     )
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["publication"]["selector_eligible"] = False
@@ -603,7 +603,9 @@ def test_strict_v3_reader_rejects_v2_and_explicit_v2_adapter_accepts_it(
         source_export_run_id="source_001",
         behavior_rows=[row for item in recording_ids for row in _behavior_rows(item)],
         distance_rows=[row for item in recording_ids for row in _distance_rows(item)],
-        egocentric_rows=[row for item in recording_ids for row in _egocentric_rows(item)],
+        egocentric_rows=[
+            row for item in recording_ids for row in _egocentric_rows(item)
+        ],
         speed_distance_rows=[
             row for item in recording_ids for row in _speed_distance_rows(item)
         ],
@@ -641,9 +643,7 @@ def test_strict_v3_reader_rejects_v2_and_explicit_v2_adapter_accepts_it(
             schema_version=LEGACY_EXACT_SCHEMA_VERSION
         ),
         arrow_envelope_schema_id=RESPONSE_ARROW_ENVELOPE_SCHEMA_ID,
-        arrow_envelope_schema_version=(
-            LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION
-        ),
+        arrow_envelope_schema_version=(LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION),
         manifest_fields={
             "schema_id": RESPONSE_SCHEMA_ID,
             "schema_version": LEGACY_EXACT_SCHEMA_VERSION,
@@ -713,10 +713,7 @@ def test_training_workflow_rejects_source_manifest_generation_change(
             config=TrainingResponseConfig(cluster_stability_resamples=2),
         )
     assert not (
-        output_root
-        / "v2"
-        / "manifests"
-        / "analysis_run_id=training_snapshot.json"
+        output_root / "v2" / "manifests" / "analysis_run_id=training_snapshot.json"
     ).exists()
 
 

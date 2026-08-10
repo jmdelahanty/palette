@@ -67,8 +67,8 @@ Identity and provenance fields:
 - `datasets.session_uuid`
 - `datasets.path_hash`
 - `datasets.recording_id` for `artifact_kind='source_recording'`
-- `experimental_sessions.*` entity identity/provenance
-- `recording_experimental_session_assignments.*` append-only revisions
+- `acquisition_batches.*` entity identity/provenance
+- `recording_acquisition_batch_assignments.*` append-only revisions
 - `dataset_lineage.*` edge identity:
   - `child_dataset_id`
   - `parent_dataset_id`
@@ -86,14 +86,16 @@ Current source-recording dataset-ID policy:
 - For source-recording zarrs under `/recordings/`, the canonical dataset ID is
   path-disambiguated: `<session_uuid>:z<path_hash_prefix>`.
 - `session_uuid` remains the acquisition-surface identity, but it is not
-  sufficient as either the registry primary key or the cross-recording
-  experimental-unit identity. Simultaneous arenas may have distinct
-  `session_uuid` values.
-- `experimental_session_id` is the explicit cross-recording experimental-unit
-  identity. It is assigned only through the versioned registry contract in
-  `experimental_session_registry_contract.md`; timestamps and names never infer
-  it.
-- `recording_experimental_session_current` is mutable only as an audited
+  sufficient as either the registry primary key or a cross-recording technical
+  grouping. Simultaneous arenas may have distinct `session_uuid` values.
+- `subject_id` is the biological experimental-unit identity for the current
+  single-subject analytics contract.
+- `acquisition_batch_id` is an optional explicit identity for recordings made
+  together under shared technical conditions. It may be used as a nuisance block
+  only when an analysis declares that adjustment. It is assigned only through the
+  versioned registry contract in `acquisition_batch_registry_contract.md`;
+  timestamps and names never infer it.
+- `recording_acquisition_batch_current` is mutable only as an audited
   authority pointer. A correction must append an immutable assignment revision
   and compare-and-swap the pointer against its expected current snapshot ID.
 - Live stage completion and full registry scans should both resolve to the same

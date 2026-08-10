@@ -1,26 +1,26 @@
 """Model registry utilities for training datasets and runs."""
 
 from .db import Registry, RegistryPaths
-from .experimental_sessions import (
-    ExperimentalSessionAssignment,
-    ExperimentalSessionAssignmentConflictError,
-    ExperimentalSessionIdentityError,
-    ExperimentalSessionRecord,
-    MissingExperimentalSessionIdentityError,
+from .acquisition_batches import (
+    AcquisitionBatchAssignment,
+    AcquisitionBatchAssignmentConflictError,
+    AcquisitionBatchIdentityError,
+    AcquisitionBatchRecord,
+    MissingAcquisitionBatchIdentityError,
     UnknownDatasetIdentityError,
-    UnknownExperimentalSessionError,
+    UnknownAcquisitionBatchError,
     UnknownRecordingIdentityError,
 )
 
 __all__ = [
-    "ExperimentalSessionAssignment",
-    "ExperimentalSessionAssignmentConflictError",
-    "ExperimentalSessionIdentityError",
-    "ExperimentalSessionRecord",
-    "MissingExperimentalSessionIdentityError",
+    "AcquisitionBatchAssignment",
+    "AcquisitionBatchAssignmentConflictError",
+    "AcquisitionBatchIdentityError",
+    "AcquisitionBatchRecord",
+    "MissingAcquisitionBatchIdentityError",
     "Registry",
     "RegistryPaths",
     "UnknownDatasetIdentityError",
-    "UnknownExperimentalSessionError",
+    "UnknownAcquisitionBatchError",
     "UnknownRecordingIdentityError",
 ]

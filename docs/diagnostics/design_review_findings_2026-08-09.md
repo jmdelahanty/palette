@@ -20,7 +20,7 @@ historical evidence. The prior full reconciliation CI is green. The 2026-08-10 l
 production-readiness integration implements W1.4, W1.5, and the W1.6 guard described
 below, but is not production activation: no live registry assignments, cohort export,
 selector, or scientific publication was changed. Full-cohort rollout remains blocked
-until recordings have explicit experimental-session assignments and missing subject
+until recordings have explicit acquisition-batch assignments and missing subject
 identities are repaired or excluded by an auditable cohort decision.
 
 Known-good patterns to copy are named per item. Do not invent new mechanisms where a
@@ -194,62 +194,61 @@ report which recordings resolved `circle` vs `dish_mask`. This determines whethe
 published escape/pursuit numbers need recomputation.
 Acceptance: a table (recording_id → geometry source) in a diagnostics doc.
 
-**W1.4 — Real FDR families + session clustering in group_statistics. [IMPLEMENTED; ROLLOUT BLOCKED]**
+**W1.4 — Real FDR families + optional acquisition-batch adjustment in group_statistics. [IMPLEMENTED; ROLLOUT BLOCKED]**
 Status: **implemented on the design-review queue branch; live cohort rollout remains
 blocked.** The statistics registry now
 requires every metric to be exactly one of primary or exploratory, and the
-multiple-comparison family is `analysis_tier|metric_family`. Both naive and
-session-random-intercept estimates are persisted; a non-identifiable or failed mixed
-model is explicit `cluster_status=unavailable` and never falls back to an unclustered
-claim. Naive and clustered inference use one eligibility gate, clustered inference has
-an explicit minimum-session policy, and actual FDR-family test counts/status are
-persisted. The exact statistics Arrow contract carries clustered p/q values, confidence
-intervals, variance components, and ICC. The viewer prefers a computed clustered result
-and explicitly reports clustering as unavailable instead of silently presenting naive
-p/q values as the current result.
+multiple-comparison family is `analysis_tier|metric_family`. Both subject-level and
+acquisition-batch-random-intercept estimates can be persisted. Subject-level
+inference is the default. Batch adjustment is opt-in and requires an explicit batch for
+every eligible row; a non-identifiable or failed mixed model is explicit
+`cluster_status=unavailable` and never falls back to an unadjusted claim. Naive and
+batch-adjusted inference use one eligibility gate, adjusted inference has an explicit
+minimum-batch policy, and actual FDR-family test counts/status are persisted. The exact
+statistics Arrow contract carries adjusted p/q values, confidence intervals, variance
+components, and ICC. The viewer prefers an adjusted result only when that mode was
+explicitly requested and computed; otherwise it presents the subject-level result.
 
-Chaser/baseline analytics rows now require registry-derived `session_id` and
-`subject_id`. `session_id` is now an explicitly created registry experimental-session
-entity, never an acquisition timestamp, name parse, path parse, or arena-local
-`session_uuid`. Assignment revisions are append-only and corrections use compare-and-
-swap against the current assignment snapshot. Existing registry rows remain explicitly
-unassigned; no heuristic backfill exists. The current exporter fails closed unless each
-source has one explicit session assignment and exactly one subject.
+Chaser/baseline analytics rows require registry-derived `subject_id` and carry nullable
+registry-derived `acquisition_batch_id`. `subject_id` is the biological experimental
+unit. `acquisition_batch_id` identifies recordings made together under shared technical
+conditions and is only a nuisance/blocking variable. It is never inferred from an
+acquisition timestamp, name, path, arena-local `session_uuid`, or simultaneous start.
+Assignment revisions are append-only and corrections use compare-and-swap against the
+current assignment snapshot. Existing registry rows remain explicitly unassigned; no
+heuristic backfill exists. The exporter fails closed unless each source has exactly one
+subject, but it can publish an explicit missing-batch status.
 
 The immutable export boundary is versioned as export schema v3 / Arrow envelope v2.
 The publisher resolves identities through an exact `Registry` instance or SQLite path;
-callers cannot supply a self-authored receipt. Its digest-bound receipt records session
-entity and assignment snapshots, schema versions, assignment revision/supersession,
-registry path, source path, and subject cardinality. Pre-visibility and published-
-payload validation compare actual Parquet row identities with the receipt. Historical
-v2 exports remain behind a self-contained versioned validator. Baseline-strategy and
-training-response v3 artifacts preserve the same session/subject identities.
+callers cannot supply a self-authored receipt. Its digest-bound receipt records subject
+identity, explicit batch status, any batch entity and assignment snapshots, schema
+versions, assignment revision/supersession, registry path, and source path.
+Pre-visibility and published-payload validation compare actual Parquet row identities
+with the receipt. Historical v2 exports remain behind a self-contained versioned
+validator. Baseline-strategy and training-response v3 artifacts preserve the same
+subject identity and optional batch provenance.
 
-Rollout blocker: live recordings must be assigned to explicit experimental sessions,
-and known recordings lacking subject identity must be repaired or excluded with an
-auditable cohort receipt. The exporter intentionally refuses to synthesize either
-identity. Multi-subject sources also fail closed until a track/instance-to-subject
-binding contract exists.
+Rollout blocker: known recordings lacking subject identity must be repaired or excluded
+with an auditable cohort receipt. Batch assignment is required only for a predeclared
+batch-adjusted analysis. Multi-subject sources also fail closed until a
+track/instance-to-subject binding contract exists.
 
 Acceptance evidence: `test_group_statistics.py` covers a computed random-intercept
 fit/ICC, explicit non-identifiability, the 36-result exploratory FDR family, and
-missing-identity rejection. Exact Arrow/export and baseline-strategy suites cover the
-new physical fields, registry envelope, propagation, and fail-closed publication.
+missing-subject rejection, optional missing-batch export, and explicit batch-adjusted
+inference. Exact Arrow/export and baseline-strategy suites cover the new physical
+fields, registry envelope, propagation, and fail-closed publication.
 
-`group_statistics/goodcopbadcop.py:1707-1713` defines
-`multiple_comparison_family = metric_family|metric_name|contrast` → 24 of 37 specs sit
-in size-1 families → `q_value == p_value` by construction across a ~111-test battery.
-The `primary`/`exploratory` flags are stored (`:1731-1732`) and never read by
-`apply_fdr` (`:1862-1872`).
-Fix: family = `{primary|exploratory}|{metric_family}` (or per pre-registered unit);
-update the manifest validator (`:1147-1170`) to match intent, not implementation.
-Add `session_id` (and `subject_id`) to `analytics_exports/contracts.py` and
-`baseline_strategy/contracts.py:45-49` identity columns, sourced from the registry —
-not regex-parsed (current hack: `analyze_goodcopbadcop_learning_mixed_model.py:47`).
-Promote the session random-intercept + ICC fit from that script into
-`group_statistics/` as `cluster="session"` mode with a `cluster_status` output field.
-Acceptance: no size-1 families for exploratory metrics; `session_id` a real exported
-column; clustered and naive estimates both reported.
+The current group-statistics implementation remains a GoodCop/BadCop chaser profile.
+Storage, publication, registry identity, and protocol-window orchestration are reusable;
+a registered statistics-profile interface is a separate follow-up and must not be
+implied by this identity correction.
+
+The original size-1 FDR families and timestamp-derived session clustering are retired
+from this path. The implementation now derives registry identity explicitly, groups
+tests by the registered analysis tier and metric family, and keeps batch adjustment an
+opt-in analysis choice rather than part of every subject-level estimate.
 
 **W1.5 — Denominator and default hygiene in epoch summaries. [IMPLEMENTED]**
 Status: **implemented through current v2 producer and consumer contracts.** Authoritative

@@ -16,7 +16,9 @@ from fisheye.group_statistics.goodcopbadcop import (
     utc_run_id,
     write_goodcopbadcop_statistics,
 )
-from fisheye.group_statistics.session_cluster import DEFAULT_MINIMUM_SESSIONS
+from fisheye.group_statistics.acquisition_batch_cluster import (
+    DEFAULT_MINIMUM_ACQUISITION_BATCHES,
+)
 
 
 def _parse_csv(value: str | None) -> tuple[str, ...]:
@@ -65,26 +67,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confidence-level", type=float, default=0.95)
     parser.add_argument("--minimum-recordings", type=int, default=3)
     parser.add_argument(
-        "--minimum-sessions",
+        "--minimum-acquisition-batches",
         type=int,
-        default=DEFAULT_MINIMUM_SESSIONS,
+        default=DEFAULT_MINIMUM_ACQUISITION_BATCHES,
         help=(
-            "Minimum independent registry sessions required for session-random-"
-            "intercept inference. Must be at least 3; default: 10."
+            "Minimum explicit acquisition batches required when batch adjustment "
+            "is requested. Must be at least 3; default: 10."
         ),
     )
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument(
         "--cluster",
-        choices=("session", "none"),
-        default="session",
+        choices=("acquisition_batch", "none"),
+        default="none",
         help=(
-            "Clustered-inference mode. The default fits a registry-session random "
-            "intercept alongside the naive recording-level result."
+            "Optional nuisance adjustment. Subject-level inference is the default; "
+            "acquisition_batch adds a predeclared batch random intercept."
         ),
     )
-    parser.add_argument("--apply", action="store_true", help="Write statistics Parquet/manifest.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing stats run id.")
+    parser.add_argument(
+        "--apply", action="store_true", help="Write statistics Parquet/manifest."
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Overwrite an existing stats run id."
+    )
     parser.add_argument(
         "--allow-legacy-export-layout",
         action="store_true",
@@ -108,7 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         permutation_iterations=int(args.permutation_iterations),
         confidence_level=float(args.confidence_level),
         minimum_recordings=int(args.minimum_recordings),
-        minimum_sessions=int(args.minimum_sessions),
+        minimum_acquisition_batches=int(args.minimum_acquisition_batches),
         random_seed=int(args.random_seed),
         cluster=str(args.cluster),
         overwrite=bool(args.overwrite),

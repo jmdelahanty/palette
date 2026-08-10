@@ -164,30 +164,30 @@ def _registry_identity_receipt(*sources: Path) -> dict[str, object]:
                     {
                         "dataset_id": len(bindings) + 1,
                         "recording_id": recording_id,
-                        "experimental_session_id": "session-test",
-                        "experimental_session_snapshot_id": (
+                        "acquisition_batch_id": "session-test",
+                        "acquisition_batch_snapshot_id": (
                             "00000000-0000-4000-8000-000000000001"
                         ),
-                        "experimental_session_schema_id": (
-                            "palette.registry.experimental_session.v1"
+                        "acquisition_batch_schema_id": (
+                            "palette.registry.acquisition_batch.v1"
                         ),
-                        "experimental_session_creation_registry_schema_version": 1,
-                        "experimental_session_identity_status": "explicit",
-                        "experimental_session_assignment_snapshot_id": (
+                        "acquisition_batch_creation_registry_schema_version": 1,
+                        "acquisition_batch_identity_status": "explicit",
+                        "acquisition_batch_assignment_snapshot_id": (
                             "00000000-0000-4000-8000-000000000002"
                         ),
-                        "experimental_session_assignment_batch_id": (
+                        "acquisition_batch_assignment_batch_id": (
                             "00000000-0000-4000-8000-000000000003"
                         ),
-                        "experimental_session_assignment_revision": 1,
-                        "experimental_session_supersedes_assignment_snapshot_id": None,
-                        "experimental_session_assignment_schema_id": (
-                            "palette.registry.experimental_session_assignment.v1"
+                        "acquisition_batch_assignment_revision": 1,
+                        "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                        "acquisition_batch_assignment_schema_id": (
+                            "palette.registry.acquisition_batch_assignment.v1"
                         ),
-                        "experimental_session_assignment_registry_schema_version": 1,
-                        "experimental_session_assignment_method": "manual_test",
-                        "experimental_session_assigned_by": "test",
-                        "experimental_session_assigned_at_utc": (
+                        "acquisition_batch_assignment_registry_schema_version": 1,
+                        "acquisition_batch_assignment_method": "manual_test",
+                        "acquisition_batch_assigned_by": "test",
+                        "acquisition_batch_assigned_at_utc": (
                             "2026-08-10T00:00:00+00:00"
                         ),
                         "fish_id": f"subject_{recording_id}",
@@ -234,7 +234,9 @@ def test_sealed_base_speed_distance_exports_with_exact_authority_in_process_pool
 
     assert manifest["row_counts_by_table"][CHASER_SPEED_DISTANCE_TABLE] > 0
     assert manifest["chaser_export_authority"]["file_sha256"] == authority_file_sha256
-    source_binding = manifest["chaser_export_authority"]["resolved_sources"][str(source)]
+    source_binding = manifest["chaser_export_authority"]["resolved_sources"][
+        str(source)
+    ]
     assert source_binding["base_run_name"] == "chaser_distance_1"
     assert source_binding["component_handles"] == {}
     rows = _read_rows(output, "sealed_base_speed", CHASER_SPEED_DISTANCE_TABLE)
@@ -498,10 +500,7 @@ def test_egocentric_component_exports_both_tables_from_one_explicit_handle(
         binding["component_handles"][EGOCENTRIC_BEARING_FAMILY]["component_path"]
         == component_path
     )
-    assert all(
-        _read_rows(output, "sealed_egocentric", table)
-        for table in tables
-    )
+    assert all(_read_rows(output, "sealed_egocentric", table) for table in tables)
     assert validate_export_run(output, "sealed_egocentric")["status"] == "valid"
 
 
@@ -785,10 +784,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         binding["component_handles"][EPOCH_BEHAVIOR_FAMILY]["component_path"]
         == component_path
     )
-    assert all(
-        _read_rows(output, "sealed_epoch_behavior", table)
-        for table in tables
-    )
+    assert all(_read_rows(output, "sealed_epoch_behavior", table) for table in tables)
     assert validate_export_run(output, "sealed_epoch_behavior")["status"] == "valid"
 
 

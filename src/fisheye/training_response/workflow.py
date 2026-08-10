@@ -104,31 +104,36 @@ def _read_rows(paths: Iterable[Path]) -> list[dict[str, Any]]:
     return rows
 
 
-IdentityKey = tuple[str, str, str]
+IdentityKey = tuple[str, str | None, str]
 
 
 def _group_recordings(
     rows: Iterable[Mapping[str, Any]],
 ) -> dict[IdentityKey, list[dict[str, Any]]]:
     output: dict[IdentityKey, list[dict[str, Any]]] = defaultdict(list)
-    binding_by_recording: dict[str, tuple[str, str]] = {}
+    binding_by_recording: dict[str, tuple[str | None, str]] = {}
     for row_index, row in enumerate(rows):
-        values = tuple(
-            str(row.get(name) or "").strip()
-            for name in ("recording_id", "session_id", "subject_id")
+        recording_id = str(row.get("recording_id") or "").strip()
+        subject_id = str(row.get("subject_id") or "").strip()
+        raw_batch_id = row.get("acquisition_batch_id")
+        acquisition_batch_id = (
+            str(raw_batch_id).strip() if raw_batch_id is not None else None
         )
-        if any(not value for value in values):
+        if not recording_id or not subject_id:
             raise ValueError(
-                f"source row {row_index} is missing recording/session/subject identity"
+                f"source row {row_index} is missing recording or subject identity"
             )
-        recording_id, session_id, subject_id = values
-        binding = (session_id, subject_id)
+        if raw_batch_id is not None and not acquisition_batch_id:
+            raise ValueError(
+                f"source row {row_index} has an invalid acquisition-batch identity"
+            )
+        binding = (acquisition_batch_id, subject_id)
         previous = binding_by_recording.setdefault(recording_id, binding)
         if previous != binding:
             raise ValueError(
-                f"recording {recording_id!r} has conflicting session/subject bindings"
+                f"recording {recording_id!r} has conflicting batch/subject bindings"
             )
-        output[(recording_id, session_id, subject_id)].append(dict(row))
+        output[(recording_id, acquisition_batch_id, subject_id)].append(dict(row))
     return dict(output)
 
 
@@ -162,7 +167,9 @@ def _recording_protocols(
     try:
         path.relative_to(source_root)
     except ValueError as exc:
-        raise PermissionError("collection manifest resolves outside export root") from exc
+        raise PermissionError(
+            "collection manifest resolves outside export root"
+        ) from exc
     payload = _load_object(path)
     expected_sha256 = str(collection.get("manifest_sha256") or "").strip()
     if expected_sha256 and (
@@ -209,10 +216,10 @@ def build_training_response_tables(
         egocentric_by_recording,
         speed_by_recording,
     )
-    binding_by_recording: dict[str, tuple[str, str]] = {}
+    binding_by_recording: dict[str, tuple[str | None, str]] = {}
     for grouped in all_groups:
-        for recording_id, session_id, subject_id in grouped:
-            binding = (session_id, subject_id)
+        for recording_id, acquisition_batch_id, subject_id in grouped:
+            binding = (acquisition_batch_id, subject_id)
             previous = binding_by_recording.setdefault(recording_id, binding)
             if previous != binding:
                 raise ValueError(
@@ -221,7 +228,7 @@ def build_training_response_tables(
     features = [
         derive_training_response_features(
             recording_id=recording_id,
-            session_id=session_id,
+            acquisition_batch_id=acquisition_batch_id,
             subject_id=subject_id,
             source_export_run_id=source_export_run_id,
             behavior_rows=rows,
@@ -232,7 +239,7 @@ def build_training_response_tables(
             config=config,
         )
         for identity_key, rows in sorted(behavior_by_recording.items())
-        for recording_id, session_id, subject_id in (identity_key,)
+        for recording_id, acquisition_batch_id, subject_id in (identity_key,)
     ]
     classifications = classify_training_response_features(features, config=config)
     clusters = discover_training_response_clusters(classifications, config=config)
@@ -262,7 +269,9 @@ def run_training_response_analytics(
             candidate.relative_to(parent)
         except ValueError:
             continue
-        raise ValueError("output root and immutable source export root must not overlap")
+        raise ValueError(
+            "output root and immutable source export root must not overlap"
+        )
     source_manifest_path = export_manifest_path(source_root, source_run_id)
     source_manifest, source_manifest_sha256 = _load_object_snapshot(
         source_manifest_path
@@ -328,8 +337,13 @@ def run_training_response_analytics(
         ),
         "temporal_adaptation_status": "unavailable_without_training_time_bins_or_samples",
     }
-    if hashlib.sha256(source_manifest_path.read_bytes()).hexdigest() != source_manifest_sha256:
-        raise ValueError("source export manifest changed during training-response planning")
+    if (
+        hashlib.sha256(source_manifest_path.read_bytes()).hexdigest()
+        != source_manifest_sha256
+    ):
+        raise ValueError(
+            "source export manifest changed during training-response planning"
+        )
     payload = publish_derived_table_generation(
         output_root=destination,
         analysis_run_id=run_id,

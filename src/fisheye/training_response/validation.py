@@ -63,9 +63,7 @@ _MANIFEST_FIELDS = {
     "interpretation_guardrail",
     "temporal_adaptation_status",
 }
-_LEGACY_V2_MANIFEST_FIELDS = _MANIFEST_FIELDS - {
-    "source_registry_identity_receipt"
-}
+_LEGACY_V2_MANIFEST_FIELDS = _MANIFEST_FIELDS - {"source_registry_identity_receipt"}
 
 
 class TrainingResponseValidationError(ValueError):
@@ -202,13 +200,17 @@ def _validate_payload(
         identity_receipt = payload.get("source_registry_identity_receipt")
         if not isinstance(identity_receipt, Mapping):
             raise ValueError("source registry identity receipt is missing")
-        source_root = Path(str(payload.get("source_export_root") or "")).expanduser().resolve()
+        source_root = (
+            Path(str(payload.get("source_export_root") or "")).expanduser().resolve()
+        )
         source_manifest_path = export_manifest_path(source_root, source_run_id)
         source_manifest_bytes = source_manifest_path.read_bytes()
         if hashlib.sha256(source_manifest_bytes).hexdigest() != payload.get(
             "source_export_manifest_sha256"
         ):
-            raise ValueError("source export manifest digest differs from derived binding")
+            raise ValueError(
+                "source export manifest digest differs from derived binding"
+            )
         source_manifest = json.loads(source_manifest_bytes)
         source_receipt = None
         if isinstance(source_manifest, Mapping):
@@ -220,9 +222,9 @@ def _validate_payload(
                 "source registry identity receipt differs from the digest-bound "
                 "source manifest"
             )
-        declared: set[tuple[str, str, str]] = set()
-        behavior_identities: set[tuple[str, str, str]] = set()
-        source_binding_by_recording: dict[str, tuple[str, str]] = {}
+        declared: set[tuple[str, str | None, str]] = set()
+        behavior_identities: set[tuple[str, str | None, str]] = set()
+        source_binding_by_recording: dict[str, tuple[str | None, str]] = {}
         for source_table in (
             CHASER_EPOCH_BEHAVIOR_TABLE,
             CHASER_DISTANCE_SUMMARY_TABLE,
@@ -234,30 +236,42 @@ def _validate_payload(
                 source_manifest,
                 source_table,
             ):
-                source_rows = pq.ParquetFile(part).read(
-                    columns=["recording_id", "session_id", "subject_id"]
-                ).to_pylist()
+                source_rows = (
+                    pq.ParquetFile(part)
+                    .read(
+                        columns=["recording_id", "acquisition_batch_id", "subject_id"]
+                    )
+                    .to_pylist()
+                )
                 for row in source_rows:
                     key = (
                         row["recording_id"],
-                        row["session_id"],
+                        row["acquisition_batch_id"],
                         row["subject_id"],
                     )
-                    if any(type(value) is not str or not value.strip() for value in key):
-                        raise ValueError("source export contains an invalid identity tuple")
+                    if any(
+                        type(value) is not str or not value.strip()
+                        for value in (key[0], key[2])
+                    ) or (
+                        key[1] is not None
+                        and (type(key[1]) is not str or not key[1].strip())
+                    ):
+                        raise ValueError(
+                            "source export contains an invalid identity tuple"
+                        )
                     previous = source_binding_by_recording.setdefault(
                         key[0],
                         (key[1], key[2]),
                     )
                     if previous != (key[1], key[2]):
                         raise ValueError(
-                            "source export assigns conflicting session/subject "
+                            "source export assigns conflicting batch/subject "
                             f"identities to recording {key[0]!r}"
                         )
                     declared.add(key)
                     if source_table == CHASER_EPOCH_BEHAVIOR_TABLE:
                         behavior_identities.add(key)
-        output_identities: set[tuple[str, str, str]] | None = None
+        output_identities: set[tuple[str, str | None, str]] | None = None
         for table_name in TRAINING_RESPONSE_TABLES:
             parts = derived_manifest_selected_parts(
                 root,
@@ -265,11 +279,13 @@ def _validate_payload(
                 table_name,
                 table_names=TRAINING_RESPONSE_TABLES,
             )
-            rows = pq.ParquetFile(parts[0]).read(
-                columns=["recording_id", "session_id", "subject_id"]
-            ).to_pylist()
+            rows = (
+                pq.ParquetFile(parts[0])
+                .read(columns=["recording_id", "acquisition_batch_id", "subject_id"])
+                .to_pylist()
+            )
             observed = {
-                (row["recording_id"], row["session_id"], row["subject_id"])
+                (row["recording_id"], row["acquisition_batch_id"], row["subject_id"])
                 for row in rows
             }
             if not observed <= declared:

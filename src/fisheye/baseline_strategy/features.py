@@ -52,7 +52,9 @@ def _safe_ratio(numerator: object, denominator: object) -> float | None:
     return num / den
 
 
-def expected_wall_fraction(arena_radius_mm: object, wall_band_mm: object) -> float | None:
+def expected_wall_fraction(
+    arena_radius_mm: object, wall_band_mm: object
+) -> float | None:
     """Uniform-area expectation for a wall band in a circular arena."""
 
     radius = _float(arena_radius_mm)
@@ -66,7 +68,7 @@ def expected_wall_fraction(arena_radius_mm: object, wall_band_mm: object) -> flo
 def _identity(summary: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "recording_id": summary.get("recording_id"),
-        "session_id": summary.get("session_id"),
+        "acquisition_batch_id": summary.get("acquisition_batch_id"),
         "subject_id": summary.get("subject_id"),
         "track_id": _int(summary.get("track_id")),
         "baseline_window_id": _int(summary.get("baseline_window_id")),
@@ -96,14 +98,18 @@ def _sorted_samples(sample_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, 
         time_s = _float(row.get("relative_time_s"))
         x = _float(row.get("x_arena_mm"))
         y = _float(row.get("y_arena_mm"))
-        valid = bool(row.get("position_valid", True)) and bool(row.get("sample_valid", True))
+        valid = bool(row.get("position_valid", True)) and bool(
+            row.get("sample_valid", True)
+        )
         if time_s is None or x is None or y is None or not valid:
             continue
         row["relative_time_s"] = time_s
         row["x_arena_mm"] = x
         row["y_arena_mm"] = y
         rows.append(row)
-    rows.sort(key=lambda item: (item["relative_time_s"], _int(item.get("source_frame")) or -1))
+    rows.sort(
+        key=lambda item: (item["relative_time_s"], _int(item.get("source_frame")) or -1)
+    )
     return rows
 
 
@@ -142,7 +148,9 @@ def _grid_cell(x: float, y: float, radius: float, size: int) -> tuple[int, int] 
 
 
 @lru_cache(maxsize=32)
-def _accessible_cell_weights(size: int, subdivisions: int = 24) -> dict[tuple[int, int], float]:
+def _accessible_cell_weights(
+    size: int, subdivisions: int = 24
+) -> dict[tuple[int, int], float]:
     """Approximate each grid cell's accessible fraction in a unit circle."""
 
     cells: dict[tuple[int, int], float] = {}
@@ -169,7 +177,9 @@ def _occupancy_features(
     ordered_cells: list[tuple[int, int]] = []
     ordered_times: list[float] = []
     for row in rows:
-        cell = _grid_cell(float(row["x_arena_mm"]), float(row["y_arena_mm"]), radius, size)
+        cell = _grid_cell(
+            float(row["x_arena_mm"]), float(row["y_arena_mm"]), radius, size
+        )
         if cell not in counts:
             continue
         counts[cell] += 1
@@ -187,19 +197,26 @@ def _occupancy_features(
             "occupancy_max_cell_fraction": None,
             "latency_to_half_final_coverage_s": None,
         }
-    probabilities = np.asarray([counts[cell] / total for cell in sorted(accessible)], dtype=float)
+    probabilities = np.asarray(
+        [counts[cell] / total for cell in sorted(accessible)], dtype=float
+    )
     positive = probabilities[probabilities > 0]
     entropy = -float(np.sum(positive * np.log(positive)))
-    normalized_entropy = entropy / math.log(len(accessible)) if len(accessible) > 1 else 0.0
+    normalized_entropy = (
+        entropy / math.log(len(accessible)) if len(accessible) > 1 else 0.0
+    )
     ordered_accessible = sorted(accessible)
     area_weights = np.asarray(
         [accessible_weights[cell] for cell in ordered_accessible], dtype=float
     )
     uniform = area_weights / float(np.sum(area_weights))
     midpoint = 0.5 * (probabilities + uniform)
-    kl_p = float(np.sum(probabilities[probabilities > 0] * np.log(
-        probabilities[probabilities > 0] / midpoint[probabilities > 0]
-    )))
+    kl_p = float(
+        np.sum(
+            probabilities[probabilities > 0]
+            * np.log(probabilities[probabilities > 0] / midpoint[probabilities > 0])
+        )
+    )
     kl_q = float(np.sum(uniform * np.log(uniform / midpoint)))
     js_divergence = 0.5 * (kl_p + kl_q) / math.log(2.0)
     visited_count = sum(count > 0 for count in counts.values())
@@ -233,7 +250,12 @@ def _dominant_dwell_features(
 ) -> tuple[dict[str, Any], tuple[int, int] | None]:
     dwell_rows = [row for row in rows if not _sample_active(row, config)] or list(rows)
     cells = [
-        _grid_cell(float(row["x_arena_mm"]), float(row["y_arena_mm"]), radius, config.dwell_grid_size)
+        _grid_cell(
+            float(row["x_arena_mm"]),
+            float(row["y_arena_mm"]),
+            radius,
+            config.dwell_grid_size,
+        )
         for row in dwell_rows
     ]
     cells = [cell for cell in cells if cell is not None]
@@ -334,7 +356,10 @@ def derive_exploration_episodes(
             radius_at_point = float(np.linalg.norm(point))
             if length <= 0 or radius_at_point <= 0:
                 continue
-            tangential.append(abs(float(point[0] * delta[1] - point[1] * delta[0])) / (radius_at_point * length))
+            tangential.append(
+                abs(float(point[0] * delta[1] - point[1] * delta[0]))
+                / (radius_at_point * length)
+            )
         origin_index = max(0, start_index - 1)
         destination_index = min(len(rows) - 1, end_index + 1)
         origin_cell = _grid_cell(
@@ -363,7 +388,9 @@ def derive_exploration_episodes(
                 "tortuosity": path_length / displacement if displacement > 0 else None,
                 "minimum_center_distance_mm": float(np.min(center_distance)),
                 "maximum_inward_excursion_mm": radius - float(np.min(center_distance)),
-                "wall_sample_fraction": float(np.mean(wall_flags)) if wall_flags else None,
+                "wall_sample_fraction": float(np.mean(wall_flags))
+                if wall_flags
+                else None,
                 "mean_tangential_alignment": mean_tangential,
                 "wall_following": bool(
                     mean_tangential is not None
@@ -372,7 +399,8 @@ def derive_exploration_episodes(
                     and float(np.mean(wall_flags)) >= 0.5
                 ),
                 "origin_dominant_dwell_zone": (
-                    dominant_dwell_cell is not None and origin_cell == dominant_dwell_cell
+                    dominant_dwell_cell is not None
+                    and origin_cell == dominant_dwell_cell
                 ),
                 "destination_dominant_dwell_zone": (
                     dominant_dwell_cell is not None
@@ -399,7 +427,7 @@ def _temporal_features(
 ) -> dict[str, Any]:
     rows = sorted(
         (dict(row) for row in time_bin_rows),
-        key=lambda row: (_int(row.get("time_bin_index")) or 0),
+        key=lambda row: _int(row.get("time_bin_index")) or 0,
     )
     if not rows:
         return {"time_bin_count": 0}
@@ -415,7 +443,11 @@ def _temporal_features(
     for output_name, source_name in metrics.items():
         early = _mean(row.get(source_name) for row in rows[:edge_count])
         late = _mean(row.get(source_name) for row in rows[-edge_count:])
-        if radius is not None and radius > 0 and source_name == "mean_center_distance_mm":
+        if (
+            radius is not None
+            and radius > 0
+            and source_name == "mean_center_distance_mm"
+        ):
             early = early / radius if early is not None else None
             late = late / radius if late is not None else None
             output_name = "center_distance_norm"
@@ -432,12 +464,18 @@ def _temporal_features(
             end = _float(row.get("relative_end_s"))
             if value is None or start is None or end is None:
                 continue
-            if radius is not None and radius > 0 and source_name == "mean_center_distance_mm":
+            if (
+                radius is not None
+                and radius > 0
+                and source_name == "mean_center_distance_mm"
+            ):
                 value /= radius
             x_values.append(0.5 * (start + end))
             y_values.append(value)
         if len(x_values) >= 2 and max(x_values) > min(x_values):
-            normalized_x = (np.asarray(x_values) - min(x_values)) / (max(x_values) - min(x_values))
+            normalized_x = (np.asarray(x_values) - min(x_values)) / (
+                max(x_values) - min(x_values)
+            )
             output[f"{output_name}_slope_per_baseline"] = float(
                 np.polyfit(normalized_x, np.asarray(y_values), 1)[0]
             )
@@ -460,9 +498,7 @@ def derive_baseline_strategy_features(
     radius = _float(summary_row.get("arena_radius_mm"))
     wall_band = _float(summary_row.get("wall_band_mm"))
     wall_fraction = _float(summary_row.get("wall_fraction"))
-    geometry_type = str(
-        summary_row.get("experimental_area_geometry_type") or "circle"
-    )
+    geometry_type = str(summary_row.get("experimental_area_geometry_type") or "circle")
     expected = _float(summary_row.get("expected_uniform_wall_fraction"))
     if expected is None and geometry_type == "circle":
         expected = expected_wall_fraction(radius, wall_band)
@@ -471,7 +507,9 @@ def derive_baseline_strategy_features(
         "sample_features_available": False,
         "time_bin_features_available": bool(time_bin_rows),
         "duration_s": _float(summary_row.get("duration_s")),
-        "tracking_dropout_fraction": _float(summary_row.get("tracking_dropout_fraction")),
+        "tracking_dropout_fraction": _float(
+            summary_row.get("tracking_dropout_fraction")
+        ),
         "mean_speed_mm_s": _float(summary_row.get("mean_speed_mm_s")),
         "median_speed_mm_s": _float(summary_row.get("median_speed_mm_s")),
         "p95_speed_mm_s": _float(summary_row.get("p95_speed_mm_s")),
@@ -497,18 +535,27 @@ def derive_baseline_strategy_features(
         "wall_enrichment_ratio": _safe_ratio(wall_fraction, expected),
         "wall_enrichment_log2": (
             math.log2(wall_fraction / expected)
-            if wall_fraction is not None and expected is not None and wall_fraction > 0 and expected > 0
+            if wall_fraction is not None
+            and expected is not None
+            and wall_fraction > 0
+            and expected > 0
             else None
         ),
-        "mean_center_distance_norm": _float(summary_row.get("mean_center_distance_norm")),
+        "mean_center_distance_norm": _float(
+            summary_row.get("mean_center_distance_norm")
+        ),
         "source_spatial_entropy_normalized": _float(
             summary_row.get("spatial_entropy_normalized")
         ),
         "source_quadrant_entropy_normalized": _float(
             summary_row.get("quadrant_entropy_normalized")
         ),
-        "source_spatial_max_cell_fraction": _float(summary_row.get("spatial_max_cell_fraction")),
-        "source_quadrant_max_fraction": _float(summary_row.get("quadrant_max_fraction")),
+        "source_spatial_max_cell_fraction": _float(
+            summary_row.get("spatial_max_cell_fraction")
+        ),
+        "source_quadrant_max_fraction": _float(
+            summary_row.get("quadrant_max_fraction")
+        ),
         "active_speed_threshold_mm_s": config.active_speed_mm_s,
         "spatial_grid_size": config.spatial_grid_size,
         "dwell_grid_size": config.dwell_grid_size,
@@ -519,7 +566,9 @@ def derive_baseline_strategy_features(
     episodes: list[dict[str, Any]] = []
     if radius is not None and radius > 0 and len(samples) >= config.min_sample_count:
         row["sample_features_available"] = True
-        active_flags = np.asarray([_sample_active(sample, config) for sample in samples], dtype=bool)
+        active_flags = np.asarray(
+            [_sample_active(sample, config) for sample in samples], dtype=bool
+        )
         row["valid_sample_count"] = len(samples)
         row["active_sample_fraction"] = float(np.mean(active_flags))
         direct_boundary_distance = any(
@@ -538,7 +587,9 @@ def derive_baseline_strategy_features(
             and (wall_value := _sample_wall(sample, radius, wall_band)) is not None
         )
         row.update(_occupancy_features(samples, radius, config.spatial_grid_size))
-        dwell_features, dominant_cell = _dominant_dwell_features(samples, radius, config)
+        dwell_features, dominant_cell = _dominant_dwell_features(
+            samples, radius, config
+        )
         row.update(dwell_features)
         episodes = derive_exploration_episodes(
             summary_row,
@@ -550,10 +601,16 @@ def derive_baseline_strategy_features(
         row["wall_following_episode_fraction"] = _mean(
             episode.get("wall_following") for episode in episodes
         )
-        outbound = [episode for episode in episodes if episode["origin_dominant_dwell_zone"]]
+        outbound = [
+            episode for episode in episodes if episode["origin_dominant_dwell_zone"]
+        ]
         row["dominant_dwell_excursion_count"] = len(outbound)
         row["dominant_dwell_return_fraction"] = (
-            float(np.mean([episode["returned_to_dominant_dwell_zone"] for episode in outbound]))
+            float(
+                np.mean(
+                    [episode["returned_to_dominant_dwell_zone"] for episode in outbound]
+                )
+            )
             if outbound
             else None
         )

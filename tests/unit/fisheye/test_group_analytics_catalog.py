@@ -59,7 +59,9 @@ def _write_export_manifest(
         part.parent.mkdir(parents=True, exist_ok=True)
         footer_metadata = {
             b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
-            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("utf-8"),
+            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(
+                "utf-8"
+            ),
             b"palette.table_contract": json.dumps(
                 contract_snapshot([TABLE])[TABLE],
                 sort_keys=True,
@@ -100,7 +102,11 @@ def _write_export_manifest(
         "capabilities": [
             status.capability_id
             for status in resolve_capabilities(
-                {TABLE: tuple(field.name for field in ARROW_TABLE_CONTRACTS[TABLE].fields)}
+                {
+                    TABLE: tuple(
+                        field.name for field in ARROW_TABLE_CONTRACTS[TABLE].fields
+                    )
+                }
             )
             if status.available
         ],
@@ -185,7 +191,7 @@ def _write_empty_registry_identity_export(root: Path, export_run_id: str) -> Pat
         "registry_identity": {
             "schema_id": "palette.analytics_export.registry_identity",
             "schema_version": 1,
-            "session_id_source": "dataset_context_current.recording_started_utc",
+            "acquisition_batch_id_source": "dataset_context_current.recording_started_utc",
             "subject_id_source": (
                 "coalesce(dataset_context_current.subject_id,"
                 "dataset_context_current.legacy_fish_id)"
@@ -193,7 +199,7 @@ def _write_empty_registry_identity_export(root: Path, export_run_id: str) -> Pat
             "sources": {
                 source_path: {
                     "recording_id": "recording_1",
-                    "session_id": "session_1",
+                    "acquisition_batch_id": "session_1",
                     "subject_id": "subject_1",
                 }
             },
@@ -223,7 +229,9 @@ def _write_empty_registry_identity_export(root: Path, export_run_id: str) -> Pat
     return manifest
 
 
-def test_catalog_discovers_base_exports_and_selects_newest_created_export(tmp_path: Path) -> None:
+def test_catalog_discovers_base_exports_and_selects_newest_created_export(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "analytics"
     _write_export_manifest(
         root,
@@ -254,12 +262,17 @@ def test_catalog_discovers_base_exports_and_selects_newest_created_export(tmp_pa
     assert catalog.entries[0].ready is True
     assert "2 recordings" in catalog.entries[0].label
     assert select_export_run_id(catalog, "latest") == "export_a_name_but_newer"
-    assert select_export_run_id(catalog, "export_z_name_but_older") == "export_z_name_but_older"
+    assert (
+        select_export_run_id(catalog, "export_z_name_but_older")
+        == "export_z_name_but_older"
+    )
     with pytest.raises(ValueError, match="not a selectable export"):
         select_export_run_id(catalog, "unknown")
 
 
-def test_catalog_rebases_historical_absolute_part_paths_to_mounted_root(tmp_path: Path) -> None:
+def test_catalog_rebases_historical_absolute_part_paths_to_mounted_root(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "mounted" / "analytics"
     _write_export_manifest(
         root,
@@ -330,7 +343,9 @@ def test_catalog_rejects_version_1_export_with_reexport_message(tmp_path: Path) 
     assert "re-export" in catalog.diagnostics[0].message
 
 
-def test_catalog_rejects_v2_manifest_with_mismatched_contract_snapshot(tmp_path: Path) -> None:
+def test_catalog_rejects_v2_manifest_with_mismatched_contract_snapshot(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "analytics"
     manifest = _write_export_manifest(
         root,
@@ -382,7 +397,9 @@ def test_catalog_rejects_missing_or_tampered_registry_identity(
     if mutation == "missing":
         payload.pop("registry_identity")
     else:
-        payload["registry_identity"]["session_id_source"] = "manifest.session_name"
+        payload["registry_identity"]["acquisition_batch_id_source"] = (
+            "manifest.session_name"
+        )
     manifest.write_text(json.dumps(payload), encoding="utf-8")
 
     catalog = discover_export_catalog(root)
@@ -392,7 +409,9 @@ def test_catalog_rejects_missing_or_tampered_registry_identity(
     assert "registry identity" in catalog.diagnostics[0].message
 
 
-def test_catalog_and_query_reject_part_symlink_that_escapes_root(tmp_path: Path) -> None:
+def test_catalog_and_query_reject_part_symlink_that_escapes_root(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "analytics"
     manifest = _write_export_manifest(
         root,
@@ -427,7 +446,9 @@ def test_catalog_and_query_reject_part_symlink_that_escapes_root(tmp_path: Path)
     assert manifest.is_file()
 
 
-def test_catalog_rejects_manifest_directory_symlink_that_escapes_root(tmp_path: Path) -> None:
+def test_catalog_rejects_manifest_directory_symlink_that_escapes_root(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "analytics"
     outside = tmp_path / "outside-manifests"
     outside.mkdir()
@@ -442,7 +463,9 @@ def test_catalog_rejects_manifest_directory_symlink_that_escapes_root(tmp_path: 
     ]
 
 
-def test_context_and_table_helpers_reject_path_component_traversal(tmp_path: Path) -> None:
+def test_context_and_table_helpers_reject_path_component_traversal(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "analytics"
     _write_export_manifest(
         root,
@@ -466,7 +489,9 @@ def test_context_and_table_helpers_reject_path_component_traversal(tmp_path: Pat
         table_dir(context, TABLE, export_run_id="../outside")
 
 
-def test_explicit_statistics_manifest_cannot_escape_root_by_symlink(tmp_path: Path) -> None:
+def test_explicit_statistics_manifest_cannot_escape_root_by_symlink(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "analytics"
     _write_export_manifest(
         root,
@@ -484,9 +509,7 @@ def test_explicit_statistics_manifest_cannot_escape_root_by_symlink(tmp_path: Pa
         ),
         encoding="utf-8",
     )
-    unsafe_manifest = (
-        root / "v1" / "manifests" / "export_run_id=unsafe_statistics.json"
-    )
+    unsafe_manifest = root / "v1" / "manifests" / "export_run_id=unsafe_statistics.json"
     unsafe_manifest.symlink_to(outside_manifest)
     context = build_context(
         export_root=root,

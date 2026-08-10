@@ -68,7 +68,10 @@ from fisheye.analytics_exports.registry_identity import (
     build_registry_identity_receipt,
     build_registry_identity_source,
 )
-from fisheye.analytics_exports.validation import ExportValidationError, validate_export_run
+from fisheye.analytics_exports.validation import (
+    ExportValidationError,
+    validate_export_run,
+)
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.utils.export_cross_recording_analytics import (
     SourceExportResult,
@@ -110,30 +113,30 @@ def _test_registry_identity_receipt(
                     {
                         "dataset_id": len(sources) + 1,
                         "recording_id": recording_id,
-                        "experimental_session_id": f"session-{recording_id}",
-                        "experimental_session_snapshot_id": (
+                        "acquisition_batch_id": f"session-{recording_id}",
+                        "acquisition_batch_snapshot_id": (
                             "00000000-0000-4000-8000-000000000001"
                         ),
-                        "experimental_session_schema_id": (
-                            "palette.registry.experimental_session.v1"
+                        "acquisition_batch_schema_id": (
+                            "palette.registry.acquisition_batch.v1"
                         ),
-                        "experimental_session_creation_registry_schema_version": 1,
-                        "experimental_session_identity_status": "explicit",
-                        "experimental_session_assignment_snapshot_id": (
+                        "acquisition_batch_creation_registry_schema_version": 1,
+                        "acquisition_batch_identity_status": "explicit",
+                        "acquisition_batch_assignment_snapshot_id": (
                             "00000000-0000-4000-8000-000000000002"
                         ),
-                        "experimental_session_assignment_batch_id": (
+                        "acquisition_batch_assignment_batch_id": (
                             "00000000-0000-4000-8000-000000000003"
                         ),
-                        "experimental_session_assignment_revision": 1,
-                        "experimental_session_supersedes_assignment_snapshot_id": None,
-                        "experimental_session_assignment_schema_id": (
-                            "palette.registry.experimental_session_assignment.v1"
+                        "acquisition_batch_assignment_revision": 1,
+                        "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                        "acquisition_batch_assignment_schema_id": (
+                            "palette.registry.acquisition_batch_assignment.v1"
                         ),
-                        "experimental_session_assignment_registry_schema_version": 1,
-                        "experimental_session_assignment_method": "manual_test",
-                        "experimental_session_assigned_by": "test",
-                        "experimental_session_assigned_at_utc": (
+                        "acquisition_batch_assignment_registry_schema_version": 1,
+                        "acquisition_batch_assignment_method": "manual_test",
+                        "acquisition_batch_assigned_by": "test",
+                        "acquisition_batch_assigned_at_utc": (
                             "2026-08-10T00:00:00+00:00"
                         ),
                         "fish_id": f"subject-{recording_id}",
@@ -474,8 +477,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
     assert envelope["inferred_v2_compatibility_tables"] == []
     assert envelope["schema_version"] == 2
     assert {
-        contract["schema_version"]
-        for contract in envelope["exact_tables"].values()
+        contract["schema_version"] for contract in envelope["exact_tables"].values()
     } == {2}
     assert (
         validate_arrow_contract_envelope(
@@ -563,7 +565,9 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         "source_lineage_hash",
         "stimulus_step_count",
     }
-    assert next(field for field in fields if field.name == "derived_protocol_hash").nullable
+    assert next(
+        field for field in fields if field.name == "derived_protocol_hash"
+    ).nullable
 
 
 def test_generic_kinematics_samples_contract_freezes_exact_multi_track_schema() -> None:
@@ -723,7 +727,9 @@ def test_activity_spatial_time_bins_freeze_exact_geometry_honest_schema() -> Non
 def test_tail_trace_samples_freeze_exact_long_form_body_frame_schema() -> None:
     fields = ARROW_TABLE_CONTRACTS[TAIL_TRACE_SAMPLES_TABLE].fields
     assert len(fields) == 52
-    assert tuple((field.name, field.arrow_type, field.nullable) for field in fields) == (
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
         ("export_schema_version", "int32", False),
         ("table_name", "string", False),
         ("recording_id", "string", False),
@@ -844,7 +850,7 @@ def test_group_statistics_contract_freezes_all_61_fields_in_order() -> None:
         ("clustered_ci_high", "float64", True),
         ("clustered_p_value", "float64", True),
         ("clustered_q_value", "float64", True),
-        ("session_variance", "float64", True),
+        ("acquisition_batch_variance", "float64", True),
         ("residual_variance", "float64", True),
         ("intraclass_correlation", "float64", True),
         ("test_method", "string", False),
@@ -975,7 +981,9 @@ def test_stimulus_steps_contract_freezes_all_60_maintained_fields_in_order() -> 
     )
 
 
-def test_stimulus_step_summary_contract_freezes_all_38_maintained_fields_in_order() -> None:
+def test_stimulus_step_summary_contract_freezes_all_38_maintained_fields_in_order() -> (
+    None
+):
     fields = ARROW_TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE].fields
     assert tuple(
         (field.name, field.arrow_type, field.nullable) for field in fields
@@ -1097,7 +1105,7 @@ def test_chaser_arrow_contracts_are_closed_unique_and_keyed(
         "export_schema_version",
         "table_name",
         "recording_id",
-        "session_id",
+        "acquisition_batch_id",
         "subject_id",
         "zarr_path",
         "source_lineage_hash",
@@ -1186,10 +1194,13 @@ def test_chaser_exact_writer_uses_declared_schema(
     assert count == 1
     schema = pq.ParquetFile(parts[0]).schema_arrow
     validate_arrow_schema(table_name, schema)
-    assert schema.remove_metadata() == exact_arrow_schema(
-        table_name,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            table_name,
+            metadata={},
+        ).remove_metadata()
+    )
 
 
 @pytest.mark.parametrize("table_name", CHASER_ARROW_TABLES)
@@ -1210,7 +1221,8 @@ def test_chaser_exact_writer_rejects_unexpected_missing_and_duplicate_rows(
     required_name = next(
         field.name
         for field in ARROW_TABLE_CONTRACTS[table_name].fields
-        if not field.nullable and field.name not in TABLE_CONTRACTS[table_name].primary_key
+        if not field.nullable
+        and field.name not in TABLE_CONTRACTS[table_name].primary_key
     )
     del missing[required_name]
     with pytest.raises(ValueError, match="null/missing non-nullable"):
@@ -1237,7 +1249,9 @@ def test_bout_kinematics_contract_keys_every_measurement_level() -> None:
     assert contract.primary_key == ("recording_id", "bout_id", "measurement_level")
 
 
-def test_core_analytics_exact_types_preserve_semantic_text_and_nullable_unions() -> None:
+def test_core_analytics_exact_types_preserve_semantic_text_and_nullable_unions() -> (
+    None
+):
     response = {
         field.name: (field.arrow_type, field.nullable)
         for field in ARROW_TABLE_CONTRACTS[STIMULUS_RESPONSE_TABLE].fields
@@ -1270,7 +1284,7 @@ def test_baseline_summary_contract_freezes_all_97_fields_in_order() -> None:
         ("export_schema_version", "int32", False),
         ("table_name", "string", False),
         ("recording_id", "string", False),
-        ("session_id", "string", False),
+        ("acquisition_batch_id", "string", True),
         ("subject_id", "string", False),
         ("zarr_path", "string", False),
         ("source_lineage_hash", "string", False),
@@ -1375,7 +1389,7 @@ def test_baseline_time_bins_contract_freezes_all_79_fields_in_order() -> None:
         ("export_schema_version", "int32", False),
         ("table_name", "string", False),
         ("recording_id", "string", False),
-        ("session_id", "string", False),
+        ("acquisition_batch_id", "string", True),
         ("subject_id", "string", False),
         ("zarr_path", "string", False),
         ("source_lineage_hash", "string", False),
@@ -1462,7 +1476,7 @@ def test_baseline_samples_contract_freezes_all_73_fields_in_order() -> None:
         ("export_schema_version", "int32", False),
         ("table_name", "string", False),
         ("recording_id", "string", False),
-        ("session_id", "string", False),
+        ("acquisition_batch_id", "string", True),
         ("subject_id", "string", False),
         ("zarr_path", "string", False),
         ("source_lineage_hash", "string", False),
@@ -1583,7 +1597,9 @@ def test_rehashed_arrow_contract_tampering_fails_closed(
         )
 
 
-def test_exact_writer_uses_declared_order_types_nullability_and_digest(tmp_path: Path) -> None:
+def test_exact_writer_uses_declared_order_types_nullability_and_digest(
+    tmp_path: Path,
+) -> None:
     table_name = POSITION_OCCUPANCY_HISTOGRAM_TABLE
     count, parts = _write_table_parts(
         generation_root=tmp_path / "generation",
@@ -1612,10 +1628,13 @@ def test_recording_summary_exact_writer_uses_declared_schema(tmp_path: Path) -> 
     assert count == 1
     schema = pq.ParquetFile(parts[0]).schema_arrow
     validate_arrow_schema(table_name, schema)
-    assert schema.remove_metadata() == exact_arrow_schema(
-        table_name,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            table_name,
+            metadata={},
+        ).remove_metadata()
+    )
     assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
         ARROW_TABLE_CONTRACTS[table_name].payload_sha256
     )
@@ -1632,16 +1651,21 @@ def test_stimulus_steps_exact_writer_uses_declared_schema(tmp_path: Path) -> Non
     assert count == 1
     schema = pq.ParquetFile(parts[0]).schema_arrow
     validate_arrow_schema(table_name, schema)
-    assert schema.remove_metadata() == exact_arrow_schema(
-        table_name,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            table_name,
+            metadata={},
+        ).remove_metadata()
+    )
     assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
         ARROW_TABLE_CONTRACTS[table_name].payload_sha256
     )
 
 
-def test_stimulus_step_summary_exact_writer_uses_declared_schema(tmp_path: Path) -> None:
+def test_stimulus_step_summary_exact_writer_uses_declared_schema(
+    tmp_path: Path,
+) -> None:
     table_name = STIMULUS_STEP_SUMMARY_TABLE
     count, parts = _write_table_parts(
         generation_root=tmp_path / "generation",
@@ -1652,10 +1676,13 @@ def test_stimulus_step_summary_exact_writer_uses_declared_schema(tmp_path: Path)
     assert count == 1
     schema = pq.ParquetFile(parts[0]).schema_arrow
     validate_arrow_schema(table_name, schema)
-    assert schema.remove_metadata() == exact_arrow_schema(
-        table_name,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            table_name,
+            metadata={},
+        ).remove_metadata()
+    )
     assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
         ARROW_TABLE_CONTRACTS[table_name].payload_sha256
     )
@@ -1784,10 +1811,13 @@ def test_baseline_time_bins_exact_writer_uses_declared_schema(tmp_path: Path) ->
     assert count == 1
     schema = pq.ParquetFile(parts[0]).schema_arrow
     validate_arrow_schema(table_name, schema)
-    assert schema.remove_metadata() == exact_arrow_schema(
-        table_name,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            table_name,
+            metadata={},
+        ).remove_metadata()
+    )
     assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
         ARROW_TABLE_CONTRACTS[table_name].payload_sha256
     )
@@ -1804,10 +1834,13 @@ def test_baseline_samples_exact_writer_uses_declared_schema(tmp_path: Path) -> N
     assert count == 1
     schema = pq.ParquetFile(parts[0]).schema_arrow
     validate_arrow_schema(table_name, schema)
-    assert schema.remove_metadata() == exact_arrow_schema(
-        table_name,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            table_name,
+            metadata={},
+        ).remove_metadata()
+    )
     assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
         ARROW_TABLE_CONTRACTS[table_name].payload_sha256
     )
@@ -2035,9 +2068,7 @@ def test_recording_summary_zero_rows_publish_no_parts_but_retain_exact_contract(
 
     assert manifest["row_counts_by_table"] == {RECORDING_SUMMARY_TABLE: 0}
     assert manifest["part_files_by_table"] == {RECORDING_SUMMARY_TABLE: []}
-    assert manifest["publication"]["parts_by_table"] == {
-        RECORDING_SUMMARY_TABLE: []
-    }
+    assert manifest["publication"]["parts_by_table"] == {RECORDING_SUMMARY_TABLE: []}
     assert tuple(manifest["arrow_schema_contracts"]["exact_tables"]) == (
         RECORDING_SUMMARY_TABLE,
     )
@@ -2120,10 +2151,7 @@ def test_stimulus_step_summary_zero_rows_retain_exact_contract_without_parts(
         STIMULUS_STEP_SUMMARY_TABLE,
     )
     assert manifest["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
-    assert (
-        validate_export_run(root, "empty-stimulus-step-summary")["status"]
-        == "valid"
-    )
+    assert validate_export_run(root, "empty-stimulus-step-summary")["status"] == "valid"
 
 
 def test_baseline_summary_zero_rows_publish_no_parts_but_retain_exact_contract(
@@ -2294,10 +2322,13 @@ def test_real_recording_summary_export_uses_exact_schema_and_collection_fields(
     part = root / manifest["part_files_by_table"][RECORDING_SUMMARY_TABLE][0]
     schema = pq.ParquetFile(part).schema_arrow
     validate_arrow_schema(RECORDING_SUMMARY_TABLE, schema)
-    assert schema.remove_metadata() == exact_arrow_schema(
-        RECORDING_SUMMARY_TABLE,
-        metadata={},
-    ).remove_metadata()
+    assert (
+        schema.remove_metadata()
+        == exact_arrow_schema(
+            RECORDING_SUMMARY_TABLE,
+            metadata={},
+        ).remove_metadata()
+    )
     row = pq.read_table(part).to_pylist()[0]
     assert row["recording_id"] == "recording_a"
     assert row["stimulus_step_count"] == 2
@@ -2350,14 +2381,15 @@ def test_real_stimulus_steps_export_uses_maintained_exact_selected_representatio
     assert concentric["concentric_grating_radial_polarity_validated"] is False
     assert {row["collection_id"] for row in rows} == {collection["collection_id"]}
     assert all(
-        row["protocol_signature_hash"] == row["derived_protocol_hash"]
-        for row in rows
+        row["protocol_signature_hash"] == row["derived_protocol_hash"] for row in rows
     )
     assert not any(
         "direction_degrees" == name or "stimulus_radial_polarity_authored" in name
         for name in parquet_file.schema_arrow.names
     )
-    assert not any(name.startswith("looming_dot_") for name in parquet_file.schema_arrow.names)
+    assert not any(
+        name.startswith("looming_dot_") for name in parquet_file.schema_arrow.names
+    )
     assert validate_export_run(root, "stimulus-steps-arrow")["status"] == "valid"
 
 
@@ -2405,8 +2437,7 @@ def test_real_stimulus_step_summary_export_uses_exact_selected_representation(
     assert (concentric["fish_id"], concentric["step_index"]) == (0, 1)
     assert {row["collection_id"] for row in rows} == {collection["collection_id"]}
     assert all(
-        row["protocol_signature_hash"] == row["derived_protocol_hash"]
-        for row in rows
+        row["protocol_signature_hash"] == row["derived_protocol_hash"] for row in rows
     )
     assert validate_export_run(root, "stimulus-step-summary-arrow")["status"] == "valid"
 
@@ -2438,23 +2469,22 @@ def test_real_stimulus_step_summary_primary_key_distinguishes_two_fish_in_one_st
         [
             str(path)
             for path in manifest_selected_part_files(
-            root,
-            "stimulus-step-summary-two-fish",
-            STIMULUS_STEP_SUMMARY_TABLE,
+                root,
+                "stimulus-step-summary-two-fish",
+                STIMULUS_STEP_SUMMARY_TABLE,
             )
         ]
     ).to_pylist()
     same_step = [row for row in rows if row["step_index"] == 0]
     contract = TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE]
-    keys = {
-        tuple(row[field] for field in contract.primary_key)
-        for row in same_step
-    }
+    keys = {tuple(row[field] for field in contract.primary_key) for row in same_step}
 
     assert manifest["row_counts_by_table"] == {STIMULUS_STEP_SUMMARY_TABLE: 3}
     assert {row["fish_id"] for row in same_step} == {0, 1}
     assert keys == {("two_fish", 0, 0), ("two_fish", 1, 0)}
-    assert validate_export_run(root, "stimulus-step-summary-two-fish")["status"] == "valid"
+    assert (
+        validate_export_run(root, "stimulus-step-summary-two-fish")["status"] == "valid"
+    )
 
 
 def test_selected_stimulus_step_summary_rejects_old_two_field_primary_key(
@@ -2580,9 +2610,9 @@ def test_stimulus_steps_empty_looming_group_has_no_current_row_representation(
 ) -> None:
     source = _make_source_zarr(tmp_path / "empty_looming_analysis.zarr")
     archive = zarr.open_group(str(source), mode="a", use_consolidated=False)
-    archive[
-        "analysis/stimulus_runs/stimulus_test/steps/step_0"
-    ].create_group("looming_dot")
+    archive["analysis/stimulus_runs/stimulus_test/steps/step_0"].create_group(
+        "looming_dot"
+    )
     root = tmp_path / "exports"
 
     export_sources(
@@ -2604,8 +2634,7 @@ def test_stimulus_steps_empty_looming_group_has_no_current_row_representation(
         for name in pq.ParquetFile(selected[0]).schema_arrow.names
     )
     assert (
-        validate_export_run(root, "stimulus-steps-empty-looming")["status"]
-        == "valid"
+        validate_export_run(root, "stimulus-steps-empty-looming")["status"] == "valid"
     )
 
 
@@ -2878,7 +2907,9 @@ def test_real_baseline_samples_export_uses_exact_closed_representation(
     assert all(row["requested_sample_rate_hz"] is None for row in rows)
     assert all(row["fps"] is None for row in rows)
     assert all("future_source_metric" not in row for row in rows)
-    assert validate_export_run(export_root, "baseline-samples-arrow")["status"] == "valid"
+    assert (
+        validate_export_run(export_root, "baseline-samples-arrow")["status"] == "valid"
+    )
 
 
 def test_manifest_selected_reader_rejects_rehashed_wrong_physical_type(
@@ -2894,7 +2925,7 @@ def test_manifest_selected_reader_rejects_rehashed_wrong_physical_type(
             {
                 "zarr_path": str(path.resolve()),
                 "recording_id": recording_id,
-                "session_id": f"session-{recording_id}",
+                "acquisition_batch_id": f"session-{recording_id}",
                 "subject_id": f"subject-{recording_id}",
             }
         )
@@ -2964,11 +2995,7 @@ def test_rehashed_registry_receipt_tamper_is_rejected_by_persisted_rows(
     source_record = receipt["sources"][0]
     source_record["subject_id"] = "forged-subject"
     source_record["record_sha256"] = _canonical_sha256(
-        {
-            key: value
-            for key, value in source_record.items()
-            if key != "record_sha256"
-        }
+        {key: value for key, value in source_record.items() if key != "record_sha256"}
     )
     receipt["payload_sha256"] = _canonical_sha256(
         {key: value for key, value in receipt.items() if key != "payload_sha256"}
@@ -2995,7 +3022,7 @@ def test_staged_identity_mismatch_is_cleaned_before_visibility(
             {
                 "zarr_path": str(path.resolve()),
                 "recording_id": recording_id,
-                "session_id": "forged-session",
+                "acquisition_batch_id": "forged-session",
                 "subject_id": f"subject-{recording_id}",
             }
         )
@@ -3035,7 +3062,14 @@ def test_staged_identity_mismatch_is_cleaned_before_visibility(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("reordered", "wrong_type", "wrong_nullability", "unexpected", "missing", "metadata"),
+    (
+        "reordered",
+        "wrong_type",
+        "wrong_nullability",
+        "unexpected",
+        "missing",
+        "metadata",
+    ),
 )
 def test_recording_summary_manifest_reader_rejects_rehashed_physical_tampering(
     tmp_path: Path,
@@ -3334,7 +3368,7 @@ def test_baseline_tables_manifest_reader_rejects_rehashed_physical_tampering(
             {
                 "zarr_path": str(path.resolve()),
                 "recording_id": recording_id,
-                "session_id": f"session-{recording_id}",
+                "acquisition_batch_id": f"session-{recording_id}",
                 "subject_id": f"subject-{recording_id}",
             }
         )

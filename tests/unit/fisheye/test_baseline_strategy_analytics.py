@@ -41,13 +41,16 @@ from fisheye.baseline_strategy.features import (
     expected_wall_fraction,
 )
 from fisheye.baseline_strategy.query import scan_strategy_table
-from fisheye.baseline_strategy.workflow import build_strategy_tables, run_strategy_analytics
+from fisheye.baseline_strategy.workflow import (
+    build_strategy_tables,
+    run_strategy_analytics,
+)
 from fisheye.baseline_strategy.validation import validate_strategy_analytics_run
 
 
 def _registry_identity(recording_id: str) -> dict[str, str]:
     return {
-        "session_id": f"session-{recording_id}",
+        "acquisition_batch_id": f"session-{recording_id}",
         "subject_id": f"subject-{recording_id}",
     }
 
@@ -145,15 +148,22 @@ def test_feature_builder_combines_summary_time_samples_and_episodes() -> None:
     assert feature["time_bin_features_available"] is True
     assert np.isclose(feature["expected_uniform_wall_fraction"], 0.36)
     assert feature["wall_enrichment_ratio"] > 1.0
-    assert feature["boundary_distance_method"] == "circle_radius_minus_center_distance_v1"
+    assert (
+        feature["boundary_distance_method"] == "circle_radius_minus_center_distance_v1"
+    )
     assert feature["wall_fraction_denominator"] == "valid_position_frames"
-    assert feature["active_wall_fraction_denominator"] == "active_valid_portable_samples"
+    assert (
+        feature["active_wall_fraction_denominator"] == "active_valid_portable_samples"
+    )
     assert feature["wall_fraction_delta_late_minus_early"] < 0
     assert feature["wall_fraction_slope_per_baseline"] < 0
     assert 0 <= feature["occupancy_entropy_accessible_normalized"] <= 1
     assert feature["exploration_episode_count"] == 2
     assert len(episodes) == 2
-    assert all(episode["path_length_method"] == "portable_sample_xy_chord_sum" for episode in episodes)
+    assert all(
+        episode["path_length_method"] == "portable_sample_xy_chord_sum"
+        for episode in episodes
+    )
 
 
 def test_episode_builder_does_not_invent_rows_without_samples() -> None:
@@ -179,7 +189,9 @@ def test_exported_boundary_distance_is_authoritative_for_wall_samples() -> None:
     assert all(episode["wall_sample_fraction"] == 1.0 for episode in episodes)
 
 
-def _feature(recording_id: str, value: float, *, wall: bool = False) -> dict[str, object]:
+def _feature(
+    recording_id: str, value: float, *, wall: bool = False
+) -> dict[str, object]:
     return {
         "recording_id": recording_id,
         **_registry_identity(recording_id),
@@ -226,7 +238,10 @@ def test_classification_keeps_activity_and_boundary_as_separate_axes() -> None:
     assert by_id["active_wall"]["activity_state"] == "active"
     assert by_id["active_wall"]["boundary_strategy"] == "wall_following"
     assert by_id["active_wall"]["anxiety_inference_permitted"] is False
-    assert by_id["active_wall"]["confidence_semantics"] == "descriptive_distance_not_probability"
+    assert (
+        by_id["active_wall"]["confidence_semantics"]
+        == "descriptive_distance_not_probability"
+    )
 
 
 def test_cluster_discovery_reports_model_selection_and_assignment_uncertainty() -> None:
@@ -264,7 +279,10 @@ def test_cluster_discovery_reports_model_selection_and_assignment_uncertainty() 
 
 
 def test_build_strategy_tables_returns_all_four_derived_tables() -> None:
-    summaries = [_summary(f"recording_{index}", total_path_mm=50.0 + 20 * index) for index in range(6)]
+    summaries = [
+        _summary(f"recording_{index}", total_path_mm=50.0 + 20 * index)
+        for index in range(6)
+    ]
     tables = build_strategy_tables(summary_rows=summaries)
 
     assert set(tables) == {
@@ -288,10 +306,7 @@ def _write_summary_only_export(
 ) -> Path:
     table_name = BASELINE_BEHAVIOR_SUMMARY_TABLE
     generation_path = (
-        Path("v1")
-        / ".generations"
-        / f"export_run_id={run_id}"
-        / "generation=test"
+        Path("v1") / ".generations" / f"export_run_id={run_id}" / "generation=test"
     )
     rows = []
     for index in range(6):
@@ -392,11 +407,7 @@ def _write_summary_only_export(
                 )
                 time_rows.append(row)
         time_part = (
-            root
-            / generation_path
-            / "tables"
-            / time_table
-            / "part-00000.parquet"
+            root / generation_path / "tables" / time_table / "part-00000.parquet"
         )
         time_part.parent.mkdir(parents=True)
         pq.write_table(
@@ -468,11 +479,7 @@ def _write_summary_only_export(
                 )
                 sample_rows.append(row)
         sample_part = (
-            root
-            / generation_path
-            / "tables"
-            / sample_table
-            / "part-00000.parquet"
+            root / generation_path / "tables" / sample_table / "part-00000.parquet"
         )
         sample_part.parent.mkdir(parents=True)
         pq.write_table(
@@ -503,8 +510,7 @@ def _write_summary_only_export(
     manifest.parent.mkdir(parents=True)
     relative_parts_by_table = {
         name: [
-            (generation_path / "tables" / name / path.name).as_posix()
-            for path in paths
+            (generation_path / "tables" / name / path.name).as_posix() for path in paths
         ]
         for name, paths in parts_by_table.items()
     }
@@ -531,30 +537,30 @@ def _write_summary_only_export(
                     {
                         "dataset_id": index + 1,
                         "recording_id": f"recording_{index}",
-                        "experimental_session_id": f"session-recording_{index}",
-                        "experimental_session_snapshot_id": (
+                        "acquisition_batch_id": f"session-recording_{index}",
+                        "acquisition_batch_snapshot_id": (
                             f"00000000-0000-4000-8000-{index + 1:012d}"
                         ),
-                        "experimental_session_schema_id": (
-                            "palette.registry.experimental_session.v1"
+                        "acquisition_batch_schema_id": (
+                            "palette.registry.acquisition_batch.v1"
                         ),
-                        "experimental_session_creation_registry_schema_version": 1,
-                        "experimental_session_identity_status": "explicit",
-                        "experimental_session_assignment_snapshot_id": (
+                        "acquisition_batch_creation_registry_schema_version": 1,
+                        "acquisition_batch_identity_status": "explicit",
+                        "acquisition_batch_assignment_snapshot_id": (
                             f"10000000-0000-4000-8000-{index + 1:012d}"
                         ),
-                        "experimental_session_assignment_batch_id": (
+                        "acquisition_batch_assignment_batch_id": (
                             "20000000-0000-4000-8000-000000000001"
                         ),
-                        "experimental_session_assignment_revision": 1,
-                        "experimental_session_supersedes_assignment_snapshot_id": None,
-                        "experimental_session_assignment_schema_id": (
-                            "palette.registry.experimental_session_assignment.v1"
+                        "acquisition_batch_assignment_revision": 1,
+                        "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                        "acquisition_batch_assignment_schema_id": (
+                            "palette.registry.acquisition_batch_assignment.v1"
                         ),
-                        "experimental_session_assignment_registry_schema_version": 1,
-                        "experimental_session_assignment_method": "manual_test",
-                        "experimental_session_assigned_by": "test",
-                        "experimental_session_assigned_at_utc": (
+                        "acquisition_batch_assignment_registry_schema_version": 1,
+                        "acquisition_batch_assignment_method": "manual_test",
+                        "acquisition_batch_assigned_by": "test",
+                        "acquisition_batch_assigned_at_utc": (
                             "2026-08-10T00:00:00+00:00"
                         ),
                         "fish_id": f"subject-recording_{index}",
@@ -595,7 +601,9 @@ def _write_summary_only_export(
     return part
 
 
-def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_path: Path) -> None:
+def test_workflow_reads_validated_export_and_publishes_separate_manifest(
+    tmp_path: Path,
+) -> None:
     source_root = tmp_path / "source_export"
     output_root = tmp_path / "derived_analytics"
     source_part = _write_summary_only_export(source_root, "source_001")
@@ -621,14 +629,18 @@ def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_pat
     assert result["row_counts_by_table"]["baseline_strategy_classification"] == 6
     assert Path(result["manifest_path"]).is_file()
     assert result["output_validation"]["status"] == "valid"
-    assert validate_strategy_analytics_run(output_root, "strategy_001")["table_count"] == 4
-    feature_part = output_root / result["part_files_by_table"][
-        "baseline_strategy_features"
-    ][0]
+    assert (
+        validate_strategy_analytics_run(output_root, "strategy_001")["table_count"] == 4
+    )
+    feature_part = (
+        output_root / result["part_files_by_table"]["baseline_strategy_features"][0]
+    )
     assert feature_part.is_file()
     feature_table = pq.ParquetFile(feature_part).read()
     assert feature_table.num_rows == 6
-    assert set(feature_table.column("source_export_run_id").to_pylist()) == {"source_001"}
+    assert set(feature_table.column("source_export_run_id").to_pylist()) == {
+        "source_001"
+    }
     for table_name, parts in result["part_files_by_table"].items():
         for part_path in parts:
             table = pq.ParquetFile(output_root / part_path).read(
@@ -664,9 +676,9 @@ def test_workflow_consumes_manifest_selected_exact_time_bins(tmp_path: Path) -> 
         config=StrategyFeatureConfig(cluster_stability_resamples=2),
     )
 
-    feature_part = output_root / result["part_files_by_table"][
-        "baseline_strategy_features"
-    ][0]
+    feature_part = (
+        output_root / result["part_files_by_table"]["baseline_strategy_features"][0]
+    )
     rows = pq.ParquetFile(feature_part).read().to_pylist()
     assert len(rows) == 6
     assert all(row["time_bin_features_available"] is True for row in rows)
@@ -679,20 +691,22 @@ def test_workflow_rejects_rehashed_unexpected_time_bin_column(tmp_path: Path) ->
     output_root = tmp_path / "derived_analytics"
     run_id = "tampered_time_bins"
     _write_summary_only_export(source_root, run_id, include_time_bins=True)
-    manifest_path = (
-        source_root / "v1" / "manifests" / f"export_run_id={run_id}.json"
-    )
+    manifest_path = source_root / "v1" / "manifests" / f"export_run_id={run_id}.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     relative_part = payload["part_files_by_table"][BASELINE_BEHAVIOR_TIME_BINS_TABLE][0]
     part = source_root / relative_part
-    table = pq.ParquetFile(part).read().append_column(
-        "future_source_metric",
-        pa.array([999.0] * 12, type=pa.float64()),
+    table = (
+        pq.ParquetFile(part)
+        .read()
+        .append_column(
+            "future_source_metric",
+            pa.array([999.0] * 12, type=pa.float64()),
+        )
     )
     pq.write_table(table, part)
-    entry = payload["publication"]["parts_by_table"][
-        BASELINE_BEHAVIOR_TIME_BINS_TABLE
-    ][0]
+    entry = payload["publication"]["parts_by_table"][BASELINE_BEHAVIOR_TIME_BINS_TABLE][
+        0
+    ]
     entry["sha256"] = sha256_file(part)
     entry["size_bytes"] = part.stat().st_size
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -726,9 +740,9 @@ def test_workflow_consumes_manifest_selected_exact_samples(tmp_path: Path) -> No
         ),
     )
 
-    feature_part = output_root / result["part_files_by_table"][
-        "baseline_strategy_features"
-    ][0]
+    feature_part = (
+        output_root / result["part_files_by_table"]["baseline_strategy_features"][0]
+    )
     feature_rows = pq.ParquetFile(feature_part).read().to_pylist()
     assert len(feature_rows) == 6
     assert all(row["sample_features_available"] is True for row in feature_rows)
@@ -740,9 +754,7 @@ def test_workflow_rejects_rehashed_unexpected_sample_column(tmp_path: Path) -> N
     output_root = tmp_path / "derived_analytics"
     run_id = "tampered_samples"
     _write_summary_only_export(source_root, run_id, include_samples=True)
-    manifest_path = (
-        source_root / "v1" / "manifests" / f"export_run_id={run_id}.json"
-    )
+    manifest_path = source_root / "v1" / "manifests" / f"export_run_id={run_id}.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     relative_part = payload["part_files_by_table"][BASELINE_KINEMATIC_SAMPLES_TABLE][0]
     part = source_root / relative_part
@@ -752,9 +764,9 @@ def test_workflow_rejects_rehashed_unexpected_sample_column(tmp_path: Path) -> N
         pa.array([999.0] * table.num_rows, type=pa.float64()),
     )
     pq.write_table(table, part)
-    entry = payload["publication"]["parts_by_table"][
-        BASELINE_KINEMATIC_SAMPLES_TABLE
-    ][0]
+    entry = payload["publication"]["parts_by_table"][BASELINE_KINEMATIC_SAMPLES_TABLE][
+        0
+    ]
     entry["sha256"] = sha256_file(part)
     entry["size_bytes"] = part.stat().st_size
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -775,12 +787,7 @@ def test_workflow_binds_manifest_digest_to_loaded_generation(
     source_root = tmp_path / "source_export"
     output_root = tmp_path / "derived_analytics"
     _write_summary_only_export(source_root, "source_001")
-    manifest_path = (
-        source_root
-        / "v1"
-        / "manifests"
-        / "export_run_id=source_001.json"
-    )
+    manifest_path = source_root / "v1" / "manifests" / "export_run_id=source_001.json"
     expected_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     import fisheye.baseline_strategy.workflow as workflow
 
@@ -832,8 +839,10 @@ def test_workflow_rejects_unexpected_source_identity_column(tmp_path: Path) -> N
     source_root = tmp_path / "source_export"
     output_root = tmp_path / "derived_analytics"
     part = _write_summary_only_export(source_root, "source_001")
-    table = pq.ParquetFile(part).read().append_column(
-        "export_run_id", pa.array(["wrong_export"] * 6)
+    table = (
+        pq.ParquetFile(part)
+        .read()
+        .append_column("export_run_id", pa.array(["wrong_export"] * 6))
     )
     pq.write_table(table, part)
 

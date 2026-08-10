@@ -312,9 +312,9 @@ def resolve_registry_export_identities(
 ) -> dict[str, Any]:
     """Resolve persisted analysis identities without parsing recording names.
 
-    An experimental session is the registry's acquisition start identity.  The
-    registry's ``session_uuid`` is arena-specific and therefore cannot cluster
-    simultaneous multi-arena recordings as one experimental session.
+    An acquisition batch is optional technical grouping provenance for recordings
+    acquired together.  ``session_uuid`` remains arena/recording-specific; neither
+    timestamps nor recording names infer batch membership.
     """
 
     resolved_sources: list[dict[str, Any]] = []
@@ -5737,7 +5737,9 @@ def export_one_zarr(
                     raise ValueError(
                         f"{table} row recording identity differs from its registry binding."
                     )
-                row["session_id"] = normalized_registry_identity["session_id"]
+                row["acquisition_batch_id"] = normalized_registry_identity[
+                    "acquisition_batch_id"
+                ]
                 row["subject_id"] = normalized_registry_identity["subject_id"]
         canonical_rows[table] = [canonicalize_export_row(table, row) for row in rows]
     for table in requested_table_set:

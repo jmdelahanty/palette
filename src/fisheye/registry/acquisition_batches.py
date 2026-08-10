@@ -1,9 +1,11 @@
-"""Explicit experimental-session identities for cross-recording grouping.
+"""Explicit acquisition-batch identities for cross-recording grouping.
 
 ``session_uuid`` identifies one acquisition/recording surface.  An
-``experimental_session_id`` identifies the experimental unit shared by recordings
-that were acquired together (for example, simultaneous arena recordings).  This
-module intentionally contains no timestamp-, path-, or name-based inference.
+``acquisition_batch_id`` identifies recordings acquired together under shared
+technical conditions (for example, simultaneous arena recordings).  It is a
+nuisance/blocking identity, not the experimental unit; the subject remains the
+experimental unit.  This module intentionally contains no timestamp-, path-, or
+name-based inference.
 """
 
 from __future__ import annotations
@@ -17,43 +19,43 @@ from typing import Any, Iterable, Mapping, Optional
 from uuid import UUID, uuid4
 
 
-EXPERIMENTAL_SESSION_SCHEMA_ID = "palette.registry.experimental_session.v1"
-EXPERIMENTAL_SESSION_ASSIGNMENT_SCHEMA_ID = (
-    "palette.registry.experimental_session_assignment.v1"
+ACQUISITION_BATCH_SCHEMA_ID = "palette.registry.acquisition_batch.v1"
+ACQUISITION_BATCH_ASSIGNMENT_SCHEMA_ID = (
+    "palette.registry.acquisition_batch_assignment.v1"
 )
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,254}$")
 _METHOD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
-class ExperimentalSessionIdentityError(ValueError):
-    """Base error for invalid or unavailable experimental-session identity."""
+class AcquisitionBatchIdentityError(ValueError):
+    """Base error for invalid or unavailable acquisition-batch identity."""
 
 
-class UnknownExperimentalSessionError(ExperimentalSessionIdentityError):
-    """Raised when a requested experimental-session entity does not exist."""
+class UnknownAcquisitionBatchError(AcquisitionBatchIdentityError):
+    """Raised when a requested acquisition-batch entity does not exist."""
 
 
-class UnknownRecordingIdentityError(ExperimentalSessionIdentityError):
+class UnknownRecordingIdentityError(AcquisitionBatchIdentityError):
     """Raised when a requested recording identity does not exist."""
 
 
-class UnknownDatasetIdentityError(ExperimentalSessionIdentityError):
+class UnknownDatasetIdentityError(AcquisitionBatchIdentityError):
     """Raised when a requested dataset identity does not exist."""
 
 
-class MissingExperimentalSessionIdentityError(ExperimentalSessionIdentityError):
-    """Raised when an existing recording has no explicit session assignment."""
+class MissingAcquisitionBatchIdentityError(AcquisitionBatchIdentityError):
+    """Raised when an existing recording has no explicit batch assignment."""
 
 
-class ExperimentalSessionAssignmentConflictError(ExperimentalSessionIdentityError):
+class AcquisitionBatchAssignmentConflictError(AcquisitionBatchIdentityError):
     """Raised when current assignment authority conflicts with a requested write."""
 
 
 @dataclass(frozen=True)
-class ExperimentalSessionRecord:
-    experimental_session_id: str
-    session_snapshot_id: str
+class AcquisitionBatchRecord:
+    acquisition_batch_id: str
+    batch_snapshot_id: str
     schema_id: str
     creation_method: str
     created_by: str
@@ -63,9 +65,9 @@ class ExperimentalSessionRecord:
 
 
 @dataclass(frozen=True)
-class ExperimentalSessionAssignment:
+class AcquisitionBatchAssignment:
     recording_id: str
-    experimental_session_id: str
+    acquisition_batch_id: str
     assignment_snapshot_id: str
     assignment_revision: int
     supersedes_assignment_snapshot_id: str | None
@@ -78,13 +80,13 @@ class ExperimentalSessionAssignment:
     registry_schema_version: int
 
 
-def validate_experimental_session_id(value: str) -> str:
-    """Validate and return an exact persisted experimental-session ID."""
+def validate_acquisition_batch_id(value: str) -> str:
+    """Validate and return an exact persisted acquisition-batch ID."""
 
     text = str(value)
     if text != text.strip() or not _IDENTIFIER_RE.fullmatch(text):
-        raise ExperimentalSessionIdentityError(
-            "experimental_session_id must be a 1-255 character identifier using "
+        raise AcquisitionBatchIdentityError(
+            "acquisition_batch_id must be a 1-255 character identifier using "
             "letters, digits, '.', '_', ':', '@', '/', '+', '~', or '-'; leading "
             "and trailing whitespace are forbidden."
         )
@@ -94,7 +96,7 @@ def validate_experimental_session_id(value: str) -> str:
 def _validate_recording_id(value: str) -> str:
     text = str(value)
     if not text or text != text.strip() or any(ord(char) < 32 for char in text):
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             "recording_id must be a non-empty exact identifier without surrounding "
             "whitespace or control characters."
         )
@@ -104,7 +106,7 @@ def _validate_recording_id(value: str) -> str:
 def _validate_method(value: str, *, field: str) -> str:
     text = str(value)
     if not _METHOD_RE.fullmatch(text):
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             f"{field} must be a lower_snake_case identifier of at most 64 characters."
         )
     return text
@@ -113,7 +115,7 @@ def _validate_method(value: str, *, field: str) -> str:
 def _validate_actor(value: str, *, field: str) -> str:
     text = str(value)
     if not text or text != text.strip() or any(ord(char) < 32 for char in text):
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             f"{field} must be a non-empty exact value without surrounding whitespace "
             "or control characters."
         )
@@ -128,9 +130,7 @@ def _canonical_evidence(
     elif isinstance(value, Mapping):
         payload = dict(value)
     else:
-        raise ExperimentalSessionIdentityError(
-            "evidence must be a JSON object mapping."
-        )
+        raise AcquisitionBatchIdentityError("evidence must be a JSON object mapping.")
     try:
         text = json.dumps(
             payload,
@@ -140,12 +140,12 @@ def _canonical_evidence(
             allow_nan=False,
         )
     except (TypeError, ValueError) as exc:
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             "evidence must be strict JSON without non-finite values."
         ) from exc
     loaded = json.loads(text)
     if not isinstance(loaded, dict):  # defensive: Mapping was normalized above
-        raise ExperimentalSessionIdentityError("evidence must encode a JSON object.")
+        raise AcquisitionBatchIdentityError("evidence must encode a JSON object.")
     return text, loaded
 
 
@@ -154,17 +154,17 @@ def _canonical_utc(value: str | None) -> str:
         return datetime.now(UTC).isoformat()
     text = str(value)
     if text != text.strip() or not text:
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             "UTC timestamp must be a non-empty exact value."
         )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             f"Invalid ISO-8601 UTC timestamp: {text!r}."
         ) from exc
     if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             "Timestamp must carry an explicit UTC offset."
         )
     return parsed.astimezone(UTC).isoformat()
@@ -177,11 +177,11 @@ def _canonical_uuid(value: str | None, *, field: str) -> str:
     try:
         parsed = UUID(text)
     except ValueError as exc:
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             f"{field} must be a canonical UUID."
         ) from exc
     if str(parsed) != text:
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             f"{field} must be a canonical lowercase UUID."
         )
     return text
@@ -190,16 +190,14 @@ def _canonical_uuid(value: str | None, *, field: str) -> str:
 def _mapping_from_json(text: str) -> Mapping[str, Any]:
     value = json.loads(text)
     if not isinstance(value, dict):
-        raise ExperimentalSessionIdentityError(
-            "Persisted evidence is not a JSON object."
-        )
+        raise AcquisitionBatchIdentityError("Persisted evidence is not a JSON object.")
     return value
 
 
-def _session_from_row(row: sqlite3.Row) -> ExperimentalSessionRecord:
-    return ExperimentalSessionRecord(
-        experimental_session_id=str(row["experimental_session_id"]),
-        session_snapshot_id=str(row["session_snapshot_id"]),
+def _batch_from_row(row: sqlite3.Row) -> AcquisitionBatchRecord:
+    return AcquisitionBatchRecord(
+        acquisition_batch_id=str(row["acquisition_batch_id"]),
+        batch_snapshot_id=str(row["batch_snapshot_id"]),
         schema_id=str(row["schema_id"]),
         creation_method=str(row["creation_method"]),
         created_by=str(row["created_by"]),
@@ -209,10 +207,10 @@ def _session_from_row(row: sqlite3.Row) -> ExperimentalSessionRecord:
     )
 
 
-def _assignment_from_row(row: sqlite3.Row) -> ExperimentalSessionAssignment:
-    return ExperimentalSessionAssignment(
+def _assignment_from_row(row: sqlite3.Row) -> AcquisitionBatchAssignment:
+    return AcquisitionBatchAssignment(
         recording_id=str(row["recording_id"]),
-        experimental_session_id=str(row["experimental_session_id"]),
+        acquisition_batch_id=str(row["acquisition_batch_id"]),
         assignment_snapshot_id=str(row["assignment_snapshot_id"]),
         assignment_revision=int(row["assignment_revision"]),
         supersedes_assignment_snapshot_id=(
@@ -230,49 +228,47 @@ def _assignment_from_row(row: sqlite3.Row) -> ExperimentalSessionAssignment:
     )
 
 
-def create_experimental_session_record(
+def create_acquisition_batch_record(
     conn: sqlite3.Connection,
     *,
-    experimental_session_id: str,
+    acquisition_batch_id: str,
     creation_method: str,
     created_by: str,
     evidence: Mapping[str, Any] | None,
     registry_schema_version: int,
     created_at_utc: str | None = None,
-    session_snapshot_id: str | None = None,
-) -> ExperimentalSessionRecord:
-    """Create one explicit session entity; existing IDs fail closed."""
+    batch_snapshot_id: str | None = None,
+) -> AcquisitionBatchRecord:
+    """Create one explicit acquisition-batch entity; existing IDs fail closed."""
 
-    session_id = validate_experimental_session_id(experimental_session_id)
+    batch_id = validate_acquisition_batch_id(acquisition_batch_id)
     method = _validate_method(creation_method, field="creation_method")
     actor = _validate_actor(created_by, field="created_by")
     timestamp = _canonical_utc(created_at_utc)
-    snapshot_id = _canonical_uuid(session_snapshot_id, field="session_snapshot_id")
+    snapshot_id = _canonical_uuid(batch_snapshot_id, field="batch_snapshot_id")
     evidence_json, _ = _canonical_evidence(evidence)
     if int(registry_schema_version) <= 0:
-        raise ExperimentalSessionIdentityError(
-            "registry_schema_version must be positive."
-        )
+        raise AcquisitionBatchIdentityError("registry_schema_version must be positive.")
     existing = conn.execute(
-        "SELECT 1 FROM experimental_sessions WHERE experimental_session_id = ?;",
-        (session_id,),
+        "SELECT 1 FROM acquisition_batches WHERE acquisition_batch_id = ?;",
+        (batch_id,),
     ).fetchone()
     if existing is not None:
-        raise ExperimentalSessionAssignmentConflictError(
-            f"Experimental session {session_id!r} already exists; session entities are immutable."
+        raise AcquisitionBatchAssignmentConflictError(
+            f"Acquisition batch {batch_id!r} already exists; acquisition-batch entities are immutable."
         )
     conn.execute(
         """
-        INSERT INTO experimental_sessions (
-            experimental_session_id, session_snapshot_id, schema_id,
+        INSERT INTO acquisition_batches (
+            acquisition_batch_id, batch_snapshot_id, schema_id,
             creation_method, created_by, created_at_utc, evidence_json,
             registry_schema_version
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """,
         (
-            session_id,
+            batch_id,
             snapshot_id,
-            EXPERIMENTAL_SESSION_SCHEMA_ID,
+            ACQUISITION_BATCH_SCHEMA_ID,
             method,
             actor,
             timestamp,
@@ -280,29 +276,29 @@ def create_experimental_session_record(
             int(registry_schema_version),
         ),
     )
-    return get_experimental_session_record(conn, session_id)
+    return get_acquisition_batch_record(conn, batch_id)
 
 
-def get_experimental_session_record(
+def get_acquisition_batch_record(
     conn: sqlite3.Connection,
-    experimental_session_id: str,
-) -> ExperimentalSessionRecord:
-    session_id = validate_experimental_session_id(experimental_session_id)
+    acquisition_batch_id: str,
+) -> AcquisitionBatchRecord:
+    batch_id = validate_acquisition_batch_id(acquisition_batch_id)
     row = conn.execute(
-        "SELECT * FROM experimental_sessions WHERE experimental_session_id = ?;",
-        (session_id,),
+        "SELECT * FROM acquisition_batches WHERE acquisition_batch_id = ?;",
+        (batch_id,),
     ).fetchone()
     if row is None:
-        raise UnknownExperimentalSessionError(
-            f"Experimental session {session_id!r} is not registered."
+        raise UnknownAcquisitionBatchError(
+            f"Acquisition batch {batch_id!r} is not registered."
         )
-    return _session_from_row(row)
+    return _batch_from_row(row)
 
 
 def assign_recordings(
     conn: sqlite3.Connection,
     *,
-    experimental_session_id: str,
+    acquisition_batch_id: str,
     recording_ids: Iterable[str],
     assignment_method: str,
     assigned_by: str,
@@ -310,30 +306,31 @@ def assign_recordings(
     registry_schema_version: int,
     assigned_at_utc: str | None = None,
     assignment_batch_id: str | None = None,
-) -> tuple[ExperimentalSessionAssignment, ...]:
+) -> tuple[AcquisitionBatchAssignment, ...]:
     """Atomically assign recordings without replacing any existing assignment."""
 
-    session_id = validate_experimental_session_id(experimental_session_id)
+    batch_id = validate_acquisition_batch_id(acquisition_batch_id)
     method = _validate_method(assignment_method, field="assignment_method")
     actor = _validate_actor(assigned_by, field="assigned_by")
     timestamp = _canonical_utc(assigned_at_utc)
-    batch_id = _canonical_uuid(assignment_batch_id, field="assignment_batch_id")
+    assignment_batch_uuid = _canonical_uuid(
+        assignment_batch_id,
+        field="assignment_batch_id",
+    )
     evidence_json, _ = _canonical_evidence(evidence)
     if int(registry_schema_version) <= 0:
-        raise ExperimentalSessionIdentityError(
-            "registry_schema_version must be positive."
-        )
+        raise AcquisitionBatchIdentityError("registry_schema_version must be positive.")
 
     normalized_recordings = tuple(
         _validate_recording_id(value) for value in recording_ids
     )
     if not normalized_recordings:
-        raise ExperimentalSessionIdentityError("At least one recording_id is required.")
+        raise AcquisitionBatchIdentityError("At least one recording_id is required.")
     if len(set(normalized_recordings)) != len(normalized_recordings):
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             "recording_ids must be unique; duplicate assignments are ambiguous."
         )
-    get_experimental_session_record(conn, session_id)
+    get_acquisition_batch_record(conn, batch_id)
 
     placeholders = ",".join("?" for _ in normalized_recordings)
     known = {
@@ -351,9 +348,9 @@ def assign_recordings(
 
     conflicts = conn.execute(
         f"""
-        SELECT current.recording_id, assignment.experimental_session_id
-        FROM recording_experimental_session_current current
-        JOIN recording_experimental_session_assignments assignment
+        SELECT current.recording_id, assignment.acquisition_batch_id
+        FROM recording_acquisition_batch_current current
+        JOIN recording_acquisition_batch_assignments assignment
           ON assignment.assignment_snapshot_id = current.assignment_snapshot_id
         WHERE current.recording_id IN ({placeholders})
         ORDER BY current.recording_id;
@@ -362,11 +359,10 @@ def assign_recordings(
     ).fetchall()
     if conflicts:
         details = ", ".join(
-            f"{row['recording_id']}->{row['experimental_session_id']}"
-            for row in conflicts
+            f"{row['recording_id']}->{row['acquisition_batch_id']}" for row in conflicts
         )
-        raise ExperimentalSessionAssignmentConflictError(
-            "Recording already has explicit current experimental-session authority; "
+        raise AcquisitionBatchAssignmentConflictError(
+            "Recording already has explicit current acquisition-batch authority; "
             f"use the audited correction API. Existing assignments: {details}."
         )
 
@@ -374,8 +370,8 @@ def assign_recordings(
         assignment_snapshot_id = str(uuid4())
         conn.execute(
             """
-            INSERT INTO recording_experimental_session_assignments (
-                assignment_snapshot_id, recording_id, experimental_session_id,
+            INSERT INTO recording_acquisition_batch_assignments (
+                assignment_snapshot_id, recording_id, acquisition_batch_id,
                 assignment_revision, supersedes_assignment_snapshot_id,
                 assignment_batch_id, schema_id, assignment_method,
                 assigned_by, assigned_at_utc, evidence_json,
@@ -385,9 +381,9 @@ def assign_recordings(
             (
                 assignment_snapshot_id,
                 recording_id,
-                session_id,
                 batch_id,
-                EXPERIMENTAL_SESSION_ASSIGNMENT_SCHEMA_ID,
+                assignment_batch_uuid,
+                ACQUISITION_BATCH_ASSIGNMENT_SCHEMA_ID,
                 method,
                 actor,
                 timestamp,
@@ -397,7 +393,7 @@ def assign_recordings(
         )
         conn.execute(
             """
-            INSERT INTO recording_experimental_session_current (
+            INSERT INTO recording_acquisition_batch_current (
                 recording_id, assignment_snapshot_id, updated_at_utc
             ) VALUES (?, ?, ?);
             """,
@@ -412,7 +408,7 @@ def correct_recording_assignment(
     conn: sqlite3.Connection,
     *,
     recording_id: str,
-    experimental_session_id: str,
+    acquisition_batch_id: str,
     expected_current_assignment_snapshot_id: str,
     assignment_method: str,
     assigned_by: str,
@@ -421,7 +417,7 @@ def correct_recording_assignment(
     assigned_at_utc: str | None = None,
     assignment_batch_id: str | None = None,
     assignment_snapshot_id: str | None = None,
-) -> ExperimentalSessionAssignment:
+) -> AcquisitionBatchAssignment:
     """Append a correction and atomically move the explicit current pointer.
 
     The expected snapshot is a compare-and-swap guard.  Stale callers cannot
@@ -429,7 +425,7 @@ def correct_recording_assignment(
     """
 
     normalized_recording_id = _validate_recording_id(recording_id)
-    session_id = validate_experimental_session_id(experimental_session_id)
+    batch_id = validate_acquisition_batch_id(acquisition_batch_id)
     expected_snapshot_id = _canonical_uuid(
         expected_current_assignment_snapshot_id,
         field="expected_current_assignment_snapshot_id",
@@ -438,30 +434,31 @@ def correct_recording_assignment(
         assignment_snapshot_id,
         field="assignment_snapshot_id",
     )
-    batch_id = _canonical_uuid(assignment_batch_id, field="assignment_batch_id")
+    assignment_batch_uuid = _canonical_uuid(
+        assignment_batch_id,
+        field="assignment_batch_id",
+    )
     method = _validate_method(assignment_method, field="assignment_method")
     actor = _validate_actor(assigned_by, field="assigned_by")
     timestamp = _canonical_utc(assigned_at_utc)
     evidence_json, _ = _canonical_evidence(evidence)
     if int(registry_schema_version) <= 0:
-        raise ExperimentalSessionIdentityError(
-            "registry_schema_version must be positive."
-        )
-    get_experimental_session_record(conn, session_id)
+        raise AcquisitionBatchIdentityError("registry_schema_version must be positive.")
+    get_acquisition_batch_record(conn, batch_id)
 
     current = get_recording_assignment(conn, normalized_recording_id)
     assert current is not None  # require_assigned=True above
     if current.assignment_snapshot_id != expected_snapshot_id:
-        raise ExperimentalSessionAssignmentConflictError(
-            "Experimental-session correction compare-and-swap failed for "
+        raise AcquisitionBatchAssignmentConflictError(
+            "Acquisition-batch correction compare-and-swap failed for "
             f"{normalized_recording_id!r}: expected {expected_snapshot_id!r}, "
             f"current is {current.assignment_snapshot_id!r}."
         )
     next_revision = current.assignment_revision + 1
     conn.execute(
         """
-        INSERT INTO recording_experimental_session_assignments (
-            assignment_snapshot_id, recording_id, experimental_session_id,
+        INSERT INTO recording_acquisition_batch_assignments (
+            assignment_snapshot_id, recording_id, acquisition_batch_id,
             assignment_revision, supersedes_assignment_snapshot_id,
             assignment_batch_id, schema_id, assignment_method, assigned_by,
             assigned_at_utc, evidence_json, registry_schema_version
@@ -470,11 +467,11 @@ def correct_recording_assignment(
         (
             new_snapshot_id,
             normalized_recording_id,
-            session_id,
+            batch_id,
             next_revision,
             current.assignment_snapshot_id,
-            batch_id,
-            EXPERIMENTAL_SESSION_ASSIGNMENT_SCHEMA_ID,
+            assignment_batch_uuid,
+            ACQUISITION_BATCH_ASSIGNMENT_SCHEMA_ID,
             method,
             actor,
             timestamp,
@@ -484,7 +481,7 @@ def correct_recording_assignment(
     )
     updated = conn.execute(
         """
-        UPDATE recording_experimental_session_current
+        UPDATE recording_acquisition_batch_current
         SET assignment_snapshot_id = ?, updated_at_utc = ?
         WHERE recording_id = ? AND assignment_snapshot_id = ?;
         """,
@@ -496,8 +493,8 @@ def correct_recording_assignment(
         ),
     )
     if updated.rowcount != 1:
-        raise ExperimentalSessionAssignmentConflictError(
-            "Experimental-session current authority changed during correction."
+        raise AcquisitionBatchAssignmentConflictError(
+            "Acquisition-batch current authority changed during correction."
         )
     corrected = get_recording_assignment(conn, normalized_recording_id)
     assert corrected is not None
@@ -507,7 +504,7 @@ def correct_recording_assignment(
 def list_recording_assignment_history(
     conn: sqlite3.Connection,
     recording_id: str,
-) -> tuple[ExperimentalSessionAssignment, ...]:
+) -> tuple[AcquisitionBatchAssignment, ...]:
     normalized_recording_id = _validate_recording_id(recording_id)
     recording = conn.execute(
         "SELECT 1 FROM recordings WHERE recording_id = ?;",
@@ -519,7 +516,7 @@ def list_recording_assignment_history(
         )
     rows = conn.execute(
         """
-        SELECT * FROM recording_experimental_session_assignments
+        SELECT * FROM recording_acquisition_batch_assignments
         WHERE recording_id = ?
         ORDER BY assignment_revision;
         """,
@@ -533,7 +530,7 @@ def get_recording_assignment(
     recording_id: str,
     *,
     require_assigned: bool = True,
-) -> ExperimentalSessionAssignment | None:
+) -> AcquisitionBatchAssignment | None:
     normalized_recording_id = _validate_recording_id(recording_id)
     recording = conn.execute(
         "SELECT 1 FROM recordings WHERE recording_id = ?;",
@@ -546,8 +543,8 @@ def get_recording_assignment(
     row = conn.execute(
         """
         SELECT assignment.*
-        FROM recording_experimental_session_current current
-        JOIN recording_experimental_session_assignments assignment
+        FROM recording_acquisition_batch_current current
+        JOIN recording_acquisition_batch_assignments assignment
           ON assignment.assignment_snapshot_id = current.assignment_snapshot_id
         WHERE current.recording_id = ?;
         """,
@@ -555,9 +552,9 @@ def get_recording_assignment(
     ).fetchone()
     if row is None:
         if require_assigned:
-            raise MissingExperimentalSessionIdentityError(
+            raise MissingAcquisitionBatchIdentityError(
                 f"Recording {normalized_recording_id!r} has no explicit "
-                "experimental_session_id assignment."
+                "acquisition_batch_id assignment."
             )
         return None
     return _assignment_from_row(row)
@@ -568,14 +565,14 @@ def resolve_dataset_assignment(
     dataset_id: str,
     *,
     require_assigned: bool = True,
-) -> ExperimentalSessionAssignment | None:
+) -> AcquisitionBatchAssignment | None:
     normalized_dataset_id = str(dataset_id)
     if (
         not normalized_dataset_id
         or normalized_dataset_id != normalized_dataset_id.strip()
         or any(ord(char) < 32 for char in normalized_dataset_id)
     ):
-        raise ExperimentalSessionIdentityError(
+        raise AcquisitionBatchIdentityError(
             "dataset_id must be a non-empty exact value without surrounding whitespace "
             "or control characters."
         )
@@ -590,9 +587,9 @@ def resolve_dataset_assignment(
     recording_id = row["recording_id"]
     if recording_id is None or not str(recording_id).strip():
         if require_assigned:
-            raise MissingExperimentalSessionIdentityError(
+            raise MissingAcquisitionBatchIdentityError(
                 f"Dataset {normalized_dataset_id!r} has no recording identity and therefore "
-                "cannot have an experimental-session assignment."
+                "cannot have an acquisition-batch assignment."
             )
         return None
     return get_recording_assignment(
@@ -602,8 +599,8 @@ def resolve_dataset_assignment(
     )
 
 
-class RegistryExperimentalSessionMixin:
-    """Expose explicit experimental-session lifecycle operations on ``Registry``.
+class RegistryAcquisitionBatchMixin:
+    """Expose explicit acquisition-batch lifecycle operations on ``Registry``.
 
     Persistence helpers remain usable independently for focused validation, while
     this mixin owns the public transaction-aware registry API.  Concrete registry
@@ -611,54 +608,54 @@ class RegistryExperimentalSessionMixin:
     ``_current_schema_version()``.
     """
 
-    def create_experimental_session(
+    def create_acquisition_batch(
         self,
         *,
-        experimental_session_id: str,
+        acquisition_batch_id: str,
         creation_method: str,
         created_by: str,
         evidence: Optional[Mapping[str, Any]] = None,
         created_at_utc: Optional[str] = None,
-        session_snapshot_id: Optional[str] = None,
-    ) -> ExperimentalSessionRecord:
-        """Create an explicit cross-recording session entity.
+        batch_snapshot_id: Optional[str] = None,
+    ) -> AcquisitionBatchRecord:
+        """Create an explicit cross-recording acquisition-batch entity.
 
         Acquisition timestamps, names, paths, and ``session_uuid`` values are
-        deliberately not consulted. Existing session IDs fail closed.
+        deliberately not consulted. Existing batch IDs fail closed.
         """
 
         with self._transaction_context():
-            return create_experimental_session_record(
+            return create_acquisition_batch_record(
                 self.conn,
-                experimental_session_id=experimental_session_id,
+                acquisition_batch_id=acquisition_batch_id,
                 creation_method=creation_method,
                 created_by=created_by,
                 evidence=evidence,
                 registry_schema_version=int(self._current_schema_version() or 0),
                 created_at_utc=created_at_utc,
-                session_snapshot_id=session_snapshot_id,
+                batch_snapshot_id=batch_snapshot_id,
             )
 
-    def get_experimental_session(
+    def get_acquisition_batch(
         self,
-        experimental_session_id: str,
-    ) -> ExperimentalSessionRecord:
-        """Return an exact registered experimental-session entity."""
+        acquisition_batch_id: str,
+    ) -> AcquisitionBatchRecord:
+        """Return an exact registered acquisition-batch entity."""
 
-        return get_experimental_session_record(self.conn, experimental_session_id)
+        return get_acquisition_batch_record(self.conn, acquisition_batch_id)
 
-    def assign_recordings_to_experimental_session(
+    def assign_recordings_to_acquisition_batch(
         self,
         *,
-        experimental_session_id: str,
+        acquisition_batch_id: str,
         recording_ids: Iterable[str],
         assignment_method: str,
         assigned_by: str,
         evidence: Optional[Mapping[str, Any]] = None,
         assigned_at_utc: Optional[str] = None,
         assignment_batch_id: Optional[str] = None,
-    ) -> tuple[ExperimentalSessionAssignment, ...]:
-        """Atomically assign known recordings to one explicit session.
+    ) -> tuple[AcquisitionBatchAssignment, ...]:
+        """Atomically assign known recordings to one explicit acquisition batch.
 
         A recording can have at most one immutable assignment. This API never
         infers grouping and never replaces an existing assignment.
@@ -667,7 +664,7 @@ class RegistryExperimentalSessionMixin:
         with self._transaction_context():
             return assign_recordings(
                 self.conn,
-                experimental_session_id=experimental_session_id,
+                acquisition_batch_id=acquisition_batch_id,
                 recording_ids=recording_ids,
                 assignment_method=assignment_method,
                 assigned_by=assigned_by,
@@ -677,12 +674,12 @@ class RegistryExperimentalSessionMixin:
                 assignment_batch_id=assignment_batch_id,
             )
 
-    def get_recording_experimental_session_assignment(
+    def get_recording_acquisition_batch_assignment(
         self,
         recording_id: str,
         *,
         require_assigned: bool = True,
-    ) -> Optional[ExperimentalSessionAssignment]:
+    ) -> Optional[AcquisitionBatchAssignment]:
         """Resolve a recording assignment, raising on missing identity by default."""
 
         return get_recording_assignment(
@@ -691,11 +688,11 @@ class RegistryExperimentalSessionMixin:
             require_assigned=require_assigned,
         )
 
-    def correct_recording_experimental_session_assignment(
+    def correct_recording_acquisition_batch_assignment(
         self,
         *,
         recording_id: str,
-        experimental_session_id: str,
+        acquisition_batch_id: str,
         expected_current_assignment_snapshot_id: str,
         assignment_method: str,
         assigned_by: str,
@@ -703,14 +700,14 @@ class RegistryExperimentalSessionMixin:
         assigned_at_utc: Optional[str] = None,
         assignment_batch_id: Optional[str] = None,
         assignment_snapshot_id: Optional[str] = None,
-    ) -> ExperimentalSessionAssignment:
+    ) -> AcquisitionBatchAssignment:
         """Append an audited correction and move current authority atomically."""
 
         with self._transaction_context():
             return correct_recording_assignment(
                 self.conn,
                 recording_id=recording_id,
-                experimental_session_id=experimental_session_id,
+                acquisition_batch_id=acquisition_batch_id,
                 expected_current_assignment_snapshot_id=(
                     expected_current_assignment_snapshot_id
                 ),
@@ -723,20 +720,20 @@ class RegistryExperimentalSessionMixin:
                 assignment_snapshot_id=assignment_snapshot_id,
             )
 
-    def list_recording_experimental_session_assignment_history(
+    def list_recording_acquisition_batch_assignment_history(
         self,
         recording_id: str,
-    ) -> tuple[ExperimentalSessionAssignment, ...]:
+    ) -> tuple[AcquisitionBatchAssignment, ...]:
         """Return every append-only assignment revision for a recording."""
 
         return list_recording_assignment_history(self.conn, recording_id)
 
-    def resolve_dataset_experimental_session_assignment(
+    def resolve_dataset_acquisition_batch_assignment(
         self,
         dataset_id: str,
         *,
         require_assigned: bool = True,
-    ) -> Optional[ExperimentalSessionAssignment]:
+    ) -> Optional[AcquisitionBatchAssignment]:
         """Resolve a dataset through its recording to an explicit assignment."""
 
         return resolve_dataset_assignment(
@@ -747,23 +744,23 @@ class RegistryExperimentalSessionMixin:
 
 
 __all__ = [
-    "EXPERIMENTAL_SESSION_ASSIGNMENT_SCHEMA_ID",
-    "EXPERIMENTAL_SESSION_SCHEMA_ID",
-    "ExperimentalSessionAssignment",
-    "ExperimentalSessionAssignmentConflictError",
-    "ExperimentalSessionIdentityError",
-    "ExperimentalSessionRecord",
-    "MissingExperimentalSessionIdentityError",
-    "RegistryExperimentalSessionMixin",
+    "ACQUISITION_BATCH_ASSIGNMENT_SCHEMA_ID",
+    "ACQUISITION_BATCH_SCHEMA_ID",
+    "AcquisitionBatchAssignment",
+    "AcquisitionBatchAssignmentConflictError",
+    "AcquisitionBatchIdentityError",
+    "AcquisitionBatchRecord",
+    "MissingAcquisitionBatchIdentityError",
+    "RegistryAcquisitionBatchMixin",
     "UnknownDatasetIdentityError",
-    "UnknownExperimentalSessionError",
+    "UnknownAcquisitionBatchError",
     "UnknownRecordingIdentityError",
     "assign_recordings",
     "correct_recording_assignment",
-    "create_experimental_session_record",
-    "get_experimental_session_record",
+    "create_acquisition_batch_record",
+    "get_acquisition_batch_record",
     "get_recording_assignment",
     "list_recording_assignment_history",
     "resolve_dataset_assignment",
-    "validate_experimental_session_id",
+    "validate_acquisition_batch_id",
 ]

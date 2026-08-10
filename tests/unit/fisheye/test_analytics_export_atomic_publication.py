@@ -22,7 +22,10 @@ from fisheye.analytics_exports.publication import (
     manifest_selected_part_files,
     sha256_file,
 )
-from fisheye.analytics_exports.validation import ExportValidationError, validate_export_run
+from fisheye.analytics_exports.validation import (
+    ExportValidationError,
+    validate_export_run,
+)
 from fisheye.group_analytics_viewer.query import (
     ViewerContext,
     build_health_report,
@@ -133,9 +136,9 @@ def test_historical_v2_export_is_validated_by_its_embedded_contracts(
         type=pa.int32(),
     )
     metadata = dict(original.schema.metadata or {})
-    metadata[b"palette.export_schema_version"] = str(
-        EXPORT_SCHEMA_VERSION_V2
-    ).encode("ascii")
+    metadata[b"palette.export_schema_version"] = str(EXPORT_SCHEMA_VERSION_V2).encode(
+        "ascii"
+    )
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["schema_version"] = EXPORT_SCHEMA_VERSION_V2
     arrow = payload["arrow_schema_contracts"]
@@ -164,9 +167,9 @@ def test_historical_v2_export_is_validated_by_its_embedded_contracts(
         ).encode("ascii")
     ).hexdigest()
     metadata[b"palette.arrow_schema_version"] = b"1"
-    metadata[b"palette.arrow_schema_sha256"] = table_contract[
-        "payload_sha256"
-    ].encode("ascii")
+    metadata[b"palette.arrow_schema_sha256"] = table_contract["payload_sha256"].encode(
+        "ascii"
+    )
     pq.write_table(
         pa.Table.from_arrays(
             columns,
@@ -205,7 +208,12 @@ def test_manifest_commit_failure_preserves_previous_authority(
         fail_manifest,
     )
     with pytest.raises(OSError, match="manifest commit failure"):
-        _publish(monkeypatch, root, [tmp_path / "a.zarr", tmp_path / "b.zarr"], overwrite=True)
+        _publish(
+            monkeypatch,
+            root,
+            [tmp_path / "a.zarr", tmp_path / "b.zarr"],
+            overwrite=True,
+        )
 
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert persisted["publication"]["generation_id"] == old_generation
@@ -235,7 +243,9 @@ def test_concurrent_first_publication_uses_manifest_compare_and_swap(
         real_validate(staging_root, payload)
         ready_to_commit.wait(timeout=10)
 
-    monkeypatch.setattr(publication, "validate_staged_publication", synchronized_validate)
+    monkeypatch.setattr(
+        publication, "validate_staged_publication", synchronized_validate
+    )
 
     def publish(source: str) -> dict[str, object]:
         return export_sources(
@@ -256,10 +266,13 @@ def test_concurrent_first_publication_uses_manifest_compare_and_swap(
                 outcomes.append(exc)
 
     assert sum(isinstance(item, dict) for item in outcomes) == 1
-    assert sum(
-        isinstance(item, RuntimeError) and "changed during publication" in str(item)
-        for item in outcomes
-    ) == 1
+    assert (
+        sum(
+            isinstance(item, RuntimeError) and "changed during publication" in str(item)
+            for item in outcomes
+        )
+        == 1
+    )
     assert validate_export_run(root, "atomic_race")["status"] == "valid"
     generations = list(
         (root / "v1" / ".generations" / "export_run_id=atomic_race").glob(
@@ -275,7 +288,9 @@ def test_strict_validation_rejects_unlisted_missing_and_tampered_parts(
 ) -> None:
     root = tmp_path / "exports"
     manifest = _publish(monkeypatch, root, [tmp_path / "a.zarr"])
-    selected = manifest_selected_part_files(root, "atomic_test", RECORDING_SUMMARY_TABLE)
+    selected = manifest_selected_part_files(
+        root, "atomic_test", RECORDING_SUMMARY_TABLE
+    )
     generation_root = root / manifest["publication"]["generation_path"]
 
     extra = generation_root / "unlisted.json"
@@ -301,12 +316,21 @@ def test_strict_validation_rejects_unlisted_missing_and_tampered_parts(
     [
         (lambda publication: publication.update({"unexpected": True}), "field set"),
         (lambda publication: publication.update({"state": "running"}), "state"),
-        (lambda publication: publication.update({"schema_version": True}), "schema version"),
+        (
+            lambda publication: publication.update({"schema_version": True}),
+            "schema version",
+        ),
         (lambda publication: publication.update({"schema_id": 1}), "schema ID"),
         (lambda publication: publication.update({"state": 1}), "state"),
-        (lambda publication: publication.update({"generation_id": " test "}), "generation ID"),
+        (
+            lambda publication: publication.update({"generation_id": " test "}),
+            "generation ID",
+        ),
         (lambda publication: publication.update({"generation_id": 1}), "generation ID"),
-        (lambda publication: publication.update({"generation_path": 1}), "generation path"),
+        (
+            lambda publication: publication.update({"generation_path": 1}),
+            "generation path",
+        ),
         (
             lambda publication: publication.update(
                 {
@@ -318,9 +342,9 @@ def test_strict_validation_rejects_unlisted_missing_and_tampered_parts(
             "generation path/identity",
         ),
         (
-            lambda publication: publication["parts_by_table"][
-                RECORDING_SUMMARY_TABLE
-            ][0].update(
+            lambda publication: publication["parts_by_table"][RECORDING_SUMMARY_TABLE][
+                0
+            ].update(
                 {
                     "path": str(
                         publication["parts_by_table"][RECORDING_SUMMARY_TABLE][0][
@@ -332,9 +356,9 @@ def test_strict_validation_rejects_unlisted_missing_and_tampered_parts(
             "part path",
         ),
         (
-            lambda publication: publication["parts_by_table"][RECORDING_SUMMARY_TABLE][0].update(
-                {"row_count": True}
-            ),
+            lambda publication: publication["parts_by_table"][RECORDING_SUMMARY_TABLE][
+                0
+            ].update({"row_count": True}),
             "row count",
         ),
     ],
@@ -380,9 +404,7 @@ def test_strict_validation_rejects_noncanonical_manifest_names(
     manifest_path = Path(manifest["manifest_path"])
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     inventory = payload["publication"]["parts_by_table"]
-    inventory[f" {RECORDING_SUMMARY_TABLE}"] = inventory.pop(
-        RECORDING_SUMMARY_TABLE
-    )
+    inventory[f" {RECORDING_SUMMARY_TABLE}"] = inventory.pop(RECORDING_SUMMARY_TABLE)
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ExportValidationError, match="Invalid table name"):
@@ -480,13 +502,18 @@ def test_consumers_and_registry_use_only_manifest_selected_absolute_parts(
 ) -> None:
     root = tmp_path / "exports"
     manifest = _publish(monkeypatch, root, [tmp_path / "a.zarr"])
-    selected = manifest_selected_part_files(root, "atomic_test", RECORDING_SUMMARY_TABLE)
+    selected = manifest_selected_part_files(
+        root, "atomic_test", RECORDING_SUMMARY_TABLE
+    )
     context = ViewerContext(export_root=root, export_run_id="atomic_test")
     assert parquet_files(context, RECORDING_SUMMARY_TABLE) == selected
 
     registry = Registry(tmp_path / "registry.sqlite")
     try:
-        assert index_export_manifest(registry, Path(manifest["manifest_path"])) == "atomic_test"
+        assert (
+            index_export_manifest(registry, Path(manifest["manifest_path"]))
+            == "atomic_test"
+        )
     finally:
         registry.close()
     resolution = resolve_latest_export_table(
@@ -495,7 +522,10 @@ def test_consumers_and_registry_use_only_manifest_selected_absolute_parts(
         export_run_id="atomic_test",
     )
     assert resolution.part_files
-    assert all(Path(path).is_absolute() and Path(path).is_file() for path in resolution.part_files)
+    assert all(
+        Path(path).is_absolute() and Path(path).is_file()
+        for path in resolution.part_files
+    )
 
     external_manifest = tmp_path / "stale-external-manifest.json"
     external_manifest.write_bytes(Path(manifest["manifest_path"]).read_bytes())
@@ -523,7 +553,9 @@ def test_viewer_reports_manifest_selected_generation_path(
 ) -> None:
     root = tmp_path / "exports"
     _publish(monkeypatch, root, [tmp_path / "a.zarr"])
-    selected = manifest_selected_part_files(root, "atomic_test", RECORDING_SUMMARY_TABLE)
+    selected = manifest_selected_part_files(
+        root, "atomic_test", RECORDING_SUMMARY_TABLE
+    )
     monkeypatch.setattr(
         "fisheye.group_analytics_viewer.query.CHASER_TABLES",
         (RECORDING_SUMMARY_TABLE,),
@@ -590,11 +622,11 @@ def test_statistics_latest_skips_newer_legacy_manifest(
                 "allow_legacy_export_layout": False,
                 "bootstrap_iterations": 0,
                 "confidence_level": 0.95,
-                "cluster": "session",
+                "cluster": "acquisition_batch",
                 "fdr_family_rule": "analysis_tier_metric_family_v1",
                 "fdr_method": "benjamini_hochberg",
                 "minimum_recordings": 1,
-                "minimum_sessions": 10,
+                "minimum_acquisition_batches": 10,
                 "permutation_iterations": 0,
                 "random_seed": 0,
                 "role_mapping_table": None,
@@ -778,12 +810,16 @@ def test_export_run_id_rejects_nonportable_characters_before_writing(
 
 
 class _Group(dict[str, object]):
-    def __init__(self, children: dict[str, object] | None = None, **attrs: object) -> None:
+    def __init__(
+        self, children: dict[str, object] | None = None, **attrs: object
+    ) -> None:
         super().__init__(children or {})
         self.attrs = attrs
 
 
-def test_swim_bout_export_selection_rejects_pointer_mismatch_and_ineligible_newer_child() -> None:
+def test_swim_bout_export_selection_rejects_pointer_mismatch_and_ineligible_newer_child() -> (
+    None
+):
     old = _Group(
         palette_run_completion_status="complete",
         stage_selector_eligible=True,

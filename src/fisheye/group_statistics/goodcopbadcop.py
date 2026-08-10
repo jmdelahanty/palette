@@ -65,11 +65,11 @@ from .paired import (
     compute_one_sample_signed_rank,
     compute_paired_contrast,
 )
-from .session_cluster import (
-    DEFAULT_MINIMUM_SESSIONS,
-    SESSION_RANDOM_INTERCEPT_METHOD,
-    SessionClusterResult,
-    fit_session_random_intercept,
+from .acquisition_batch_cluster import (
+    DEFAULT_MINIMUM_ACQUISITION_BATCHES,
+    ACQUISITION_BATCH_RANDOM_INTERCEPT_METHOD,
+    AcquisitionBatchClusterResult,
+    fit_acquisition_batch_random_intercept,
 )
 
 
@@ -148,8 +148,7 @@ def _metric_unit_for_values(source_table: object, metric_name: object) -> str:
         return _METRIC_UNITS[(str(source_table), str(metric_name))]
     except KeyError as exc:
         raise ValueError(
-            "No exact measurement unit is registered for "
-            f"{source_table}.{metric_name}"
+            f"No exact measurement unit is registered for {source_table}.{metric_name}"
         ) from exc
 
 
@@ -472,19 +471,22 @@ class GoodCopBadCopStatisticsConfig:
     permutation_iterations: int = 10000
     confidence_level: float = 0.95
     minimum_recordings: int = 3
-    minimum_sessions: int = DEFAULT_MINIMUM_SESSIONS
+    minimum_acquisition_batches: int = DEFAULT_MINIMUM_ACQUISITION_BATCHES
     random_seed: int = 0
-    cluster: str = "session"
+    cluster: str = "none"
     overwrite: bool = False
     allow_legacy_export_layout: bool = False
 
     def __post_init__(self) -> None:
         if type(self.minimum_recordings) is not int or self.minimum_recordings < 1:
             raise ValueError("minimum_recordings must be an integer >= 1")
-        if type(self.minimum_sessions) is not int or self.minimum_sessions < 3:
-            raise ValueError("minimum_sessions must be an integer >= 3")
-        if self.cluster not in {"none", "session"}:
-            raise ValueError("cluster must be 'none' or 'session'")
+        if (
+            type(self.minimum_acquisition_batches) is not int
+            or self.minimum_acquisition_batches < 3
+        ):
+            raise ValueError("minimum_acquisition_batches must be an integer >= 3")
+        if self.cluster not in {"none", "acquisition_batch"}:
+            raise ValueError("cluster must be 'none' or 'acquisition_batch'")
         for spec in self.metrics:
             _analysis_tier(spec)
 
@@ -506,12 +508,12 @@ def _multiple_comparison_family(spec: MetricSpec) -> str:
     return f"{_analysis_tier(spec)}|{spec.metric_family}"
 
 
-def _disabled_cluster_result(unit_count: int) -> SessionClusterResult:
-    return SessionClusterResult(
+def _disabled_cluster_result(unit_count: int) -> AcquisitionBatchClusterResult:
+    return AcquisitionBatchClusterResult(
         status="disabled",
         reason=None,
         method="none",
-        unit="session",
+        unit="acquisition_batch",
         unit_count=int(unit_count),
         cluster_count=0,
         mean=None,
@@ -525,44 +527,37 @@ def _disabled_cluster_result(unit_count: int) -> SessionClusterResult:
     )
 
 
-def _session_cluster_result(
+def _acquisition_batch_cluster_result(
     *,
     config: GoodCopBadCopStatisticsConfig,
     values: np.ndarray,
-    session_ids: np.ndarray,
+    acquisition_batch_ids: np.ndarray,
     naive_status: str,
     naive_skip_reason: str | None,
-) -> SessionClusterResult:
+) -> AcquisitionBatchClusterResult:
     if config.cluster == "none":
         return _disabled_cluster_result(int(values.size))
     if naive_status != "computed":
         numeric_values = np.asarray(values, dtype=np.float64).reshape(-1)
-        raw_sessions = np.asarray(session_ids, dtype=object).reshape(-1)
-        if numeric_values.shape != raw_sessions.shape:
+        raw_batches = np.asarray(acquisition_batch_ids, dtype=object).reshape(-1)
+        if numeric_values.shape != raw_batches.shape:
             raise ValueError(
-                "Cluster values and session identities must have equal length."
+                "Cluster values and acquisition-batch identities must have equal "
+                "length."
             )
-        normalized_session_values = np.asarray(
-            [
-                str(value).strip() if value is not None else ""
-                for value in raw_sessions
-            ],
+        normalized_batch_values = np.asarray(
+            [str(value).strip() if value is not None else "" for value in raw_batches],
             dtype=object,
         )
-        usable = np.isfinite(numeric_values) & (normalized_session_values != "")
-        normalized_sessions = {
-            str(value) for value in normalized_session_values[usable]
-        }
-        return SessionClusterResult(
+        usable = np.isfinite(numeric_values) & (normalized_batch_values != "")
+        normalized_batches = {str(value) for value in normalized_batch_values[usable]}
+        return AcquisitionBatchClusterResult(
             status="unavailable",
-            reason=(
-                "naive_inference_ineligible:"
-                f"{naive_skip_reason or naive_status}"
-            ),
-            method=SESSION_RANDOM_INTERCEPT_METHOD,
-            unit="session",
+            reason=(f"naive_inference_ineligible:{naive_skip_reason or naive_status}"),
+            method=ACQUISITION_BATCH_RANDOM_INTERCEPT_METHOD,
+            unit="acquisition_batch",
             unit_count=int(np.count_nonzero(usable)),
-            cluster_count=len(normalized_sessions),
+            cluster_count=len(normalized_batches),
             mean=None,
             standard_error=None,
             ci_low=None,
@@ -572,17 +567,19 @@ def _session_cluster_result(
             residual_variance=None,
             intraclass_correlation=None,
         )
-    return fit_session_random_intercept(
+    return fit_acquisition_batch_random_intercept(
         values,
-        session_ids,
+        acquisition_batch_ids,
         confidence_level=float(config.confidence_level),
-        minimum_sessions=int(config.minimum_sessions),
+        minimum_acquisition_batches=int(config.minimum_acquisition_batches),
     )
 
 
-def _cluster_fields(result: SessionClusterResult) -> dict[str, Any]:
+def _cluster_fields(result: AcquisitionBatchClusterResult) -> dict[str, Any]:
     return {
-        "cluster_mode": "none" if result.status == "disabled" else "session",
+        "cluster_mode": (
+            "none" if result.status == "disabled" else "acquisition_batch"
+        ),
         "cluster_unit": result.unit,
         "cluster_method": result.method,
         "cluster_status": result.status,
@@ -595,7 +592,7 @@ def _cluster_fields(result: SessionClusterResult) -> dict[str, Any]:
         "clustered_ci_high": result.ci_high,
         "clustered_p_value": result.p_value,
         "clustered_q_value": None,
-        "session_variance": result.cluster_variance,
+        "acquisition_batch_variance": result.cluster_variance,
         "residual_variance": result.residual_variance,
         "intraclass_correlation": result.intraclass_correlation,
     }
@@ -644,9 +641,7 @@ def _fdr_family_test_registry(
                 "naive_test_count": naive_test_count,
                 "naive_test_status": _test_count_status(naive_test_count),
                 "clustered_test_count": clustered_test_count,
-                "clustered_test_status": _test_count_status(
-                    clustered_test_count
-                ),
+                "clustered_test_status": _test_count_status(clustered_test_count),
             }
         )
     return registry
@@ -695,7 +690,9 @@ def _validate_fdr_family_test_registry(
             if type(count) is not int or count < 0:
                 raise ValueError("Statistics manifest FDR family test count is invalid")
             if item.get(status_name) != _test_count_status(count):
-                raise ValueError("Statistics manifest FDR family test status is invalid")
+                raise ValueError(
+                    "Statistics manifest FDR family test status is invalid"
+                )
         result_count = item.get("result_count")
         if (
             type(result_count) is not int
@@ -749,7 +746,12 @@ def canonical_condition(label: Any) -> str | None:
         return None
     if text in {"pre", "pre_event", "pre-event"} or text.startswith("pre"):
         return "pre"
-    if text in {"training", "training_event", "train", "train_event"} or text.startswith(("training", "train")):
+    if text in {
+        "training",
+        "training_event",
+        "train",
+        "train_event",
+    } or text.startswith(("training", "train")):
         return "training"
     if text in {"post", "post_event", "post-event"} or text.startswith("post"):
         return "post"
@@ -973,9 +975,7 @@ def _enrich_role_grouped_frames(
         return
     role_frame = frames.get(CRA_OBJECT_PHASE_TABLE)
     if role_frame is None:
-        raise ValueError(
-            f"Role-grouped statistics require {CRA_OBJECT_PHASE_TABLE}"
-        )
+        raise ValueError(f"Role-grouped statistics require {CRA_OBJECT_PHASE_TABLE}")
     required_role_columns = {
         "recording_id",
         "object_column_index",
@@ -1017,9 +1017,9 @@ def _enrich_role_grouped_frames(
         raise ValueError(
             "CRA object-role mapping is not unique by recording and object column"
         )
-    role_map = role_rows.group_by(
-        ["recording_id", "chaser_column_index"]
-    ).agg(pl.col("_resolved_behavior_class").first())
+    role_map = role_rows.group_by(["recording_id", "chaser_column_index"]).agg(
+        pl.col("_resolved_behavior_class").first()
+    )
 
     for table in role_grouped_tables:
         frame = frames[table]
@@ -1057,8 +1057,7 @@ def _enrich_role_grouped_frames(
             .alias("behavior_class")
         )
         unresolved = joined.filter(
-            pl.col("behavior_class").is_null()
-            | (pl.col("behavior_class") == "unknown")
+            pl.col("behavior_class").is_null() | (pl.col("behavior_class") == "unknown")
         )
         if unresolved.height:
             raise ValueError(
@@ -1068,7 +1067,10 @@ def _enrich_role_grouped_frames(
 
 
 def _require_v2_source_manifest(manifest: Mapping[str, Any], *, path: Path) -> None:
-    if manifest.get("schema_id") != EXPORT_SCHEMA_ID or manifest.get("schema_version") != EXPORT_SCHEMA_VERSION:
+    if (
+        manifest.get("schema_id") != EXPORT_SCHEMA_ID
+        or manifest.get("schema_version") != EXPORT_SCHEMA_VERSION
+    ):
         raise ValueError(
             f"Unsupported analytics export contract at {path}: "
             f"{manifest.get('schema_id')!r} version {manifest.get('schema_version')!r}; "
@@ -1086,7 +1088,9 @@ def _safe_float(value: Any) -> float | None:
     return out if math.isfinite(out) else None
 
 
-def _group_key_payload(row: Mapping[str, Any], group_keys: Sequence[str]) -> dict[str, Any]:
+def _group_key_payload(
+    row: Mapping[str, Any], group_keys: Sequence[str]
+) -> dict[str, Any]:
     return {key: row.get(key) for key in group_keys}
 
 
@@ -1109,9 +1113,7 @@ def _result_id(row: Mapping[str, Any]) -> str:
         "bootstrap_iterations": row.get("bootstrap_iterations"),
         "permutation_iterations": row.get("permutation_iterations"),
         "source_export_run_id": row.get("source_export_run_id"),
-        "source_export_manifest_sha256": row.get(
-            "source_export_manifest_sha256"
-        ),
+        "source_export_manifest_sha256": row.get("source_export_manifest_sha256"),
     }
     return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
 
@@ -1128,9 +1130,7 @@ def _descriptive_result_id(row: Mapping[str, Any]) -> str:
         "missing_policy": row.get("missing_policy"),
         "parameters_json": row.get("parameters_json"),
         "source_export_run_id": row.get("source_export_run_id"),
-        "source_export_manifest_sha256": row.get(
-            "source_export_manifest_sha256"
-        ),
+        "source_export_manifest_sha256": row.get("source_export_manifest_sha256"),
     }
     return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
 
@@ -1205,17 +1205,13 @@ def _validate_result_rows(
         )
         actual_id = row.get(id_field)
         if actual_id != expected_id:
-            raise ValueError(
-                f"{table_name}: row {row_index} has an invalid {id_field}"
-            )
+            raise ValueError(f"{table_name}: row {row_index} has an invalid {id_field}")
         if expected_id in seen:
             raise ValueError(f"{table_name}: duplicate {id_field} {expected_id}")
         seen.add(expected_id)
 
         if table_name == DESCRIPTIVE_TABLE:
-            if row.get("missing_policy") != (
-                "available_recording_values_by_condition"
-            ):
+            if row.get("missing_policy") != ("available_recording_values_by_condition"):
                 raise ValueError(
                     f"{table_name}: row {row_index} has an invalid missing_policy"
                 )
@@ -1278,14 +1274,10 @@ def _validate_result_rows(
             )
         cluster_mode = row.get("cluster_mode")
         cluster_status = row.get("cluster_status")
-        if cluster_mode not in {"none", "session"}:
-            raise ValueError(
-                f"{table_name}: row {row_index} has invalid cluster_mode"
-            )
-        if row.get("cluster_unit") != "session":
-            raise ValueError(
-                f"{table_name}: row {row_index} has invalid cluster_unit"
-            )
+        if cluster_mode not in {"none", "acquisition_batch"}:
+            raise ValueError(f"{table_name}: row {row_index} has invalid cluster_mode")
+        if row.get("cluster_unit") != "acquisition_batch":
+            raise ValueError(f"{table_name}: row {row_index} has invalid cluster_unit")
         cluster_count = row.get("cluster_count")
         clustered_unit_count = row.get("clustered_unit_count")
         if (
@@ -1304,7 +1296,7 @@ def _validate_result_rows(
             "clustered_ci_high",
             "clustered_p_value",
             "clustered_q_value",
-            "session_variance",
+            "acquisition_batch_variance",
             "residual_variance",
             "intraclass_correlation",
         )
@@ -1329,7 +1321,8 @@ def _validate_result_rows(
                 )
         elif cluster_status == "unavailable":
             if (
-                row.get("cluster_method") != "session_random_intercept_reml_v1"
+                row.get("cluster_method")
+                != "acquisition_batch_random_intercept_reml_v1"
                 or not isinstance(row.get("cluster_reason"), str)
                 or not row.get("cluster_reason")
                 or any(row.get(name) is not None for name in clustered_values)
@@ -1339,7 +1332,8 @@ def _validate_result_rows(
                 )
         elif cluster_status in {"computed", "boundary_zero_variance"}:
             if (
-                row.get("cluster_method") != "session_random_intercept_reml_v1"
+                row.get("cluster_method")
+                != "acquisition_batch_random_intercept_reml_v1"
                 or row.get("cluster_reason") is not None
                 or cluster_count < 2
                 or any(
@@ -1356,8 +1350,7 @@ def _validate_result_rows(
                 f"{table_name}: row {row_index} has invalid cluster_status"
             )
         one_sample = (
-            row.get("contrast_name") == "vs-zero"
-            and row.get("condition_a") == "zero"
+            row.get("contrast_name") == "vs-zero" and row.get("condition_a") == "zero"
         )
         expected_missing_policy = (
             "one_row_per_recording_complete_cases"
@@ -1375,9 +1368,7 @@ def _validate_result_rows(
         if any(type(value) is not int or value < 0 for value in counts):
             raise ValueError(f"{table_name}: row {row_index} has invalid counts")
         if counts[1] + counts[2] != counts[0]:
-            raise ValueError(
-                f"{table_name}: row {row_index} has inconsistent counts"
-            )
+            raise ValueError(f"{table_name}: row {row_index} has inconsistent counts")
         for field_name in ("bootstrap_iterations", "permutation_iterations"):
             value = row.get(field_name)
             if type(value) is not int or value < 0:
@@ -1401,7 +1392,7 @@ def _validate_result_rows(
             "clustered_ci_high",
             "clustered_p_value",
             "clustered_q_value",
-            "session_variance",
+            "acquisition_batch_variance",
             "residual_variance",
             "intraclass_correlation",
         )
@@ -1434,9 +1425,7 @@ def _validate_result_rows(
         if (ci_low is None) != (ci_high is None) or (
             ci_low is not None and float(ci_low) > float(ci_high)
         ):
-            raise ValueError(
-                f"{table_name}: row {row_index} has invalid CI bounds"
-            )
+            raise ValueError(f"{table_name}: row {row_index} has invalid CI bounds")
         clustered_ci_low = row.get("clustered_ci_low")
         clustered_ci_high = row.get("clustered_ci_high")
         if (clustered_ci_low is None) != (clustered_ci_high is None) or (
@@ -1463,9 +1452,7 @@ def _validate_result_rows(
             }
         )
         if row.get("test_method") not in allowed_methods:
-            raise ValueError(
-                f"{table_name}: row {row_index} has invalid test_method"
-            )
+            raise ValueError(f"{table_name}: row {row_index} has invalid test_method")
         test_method = row.get("test_method")
         if test_method == "skipped":
             if status != "skipped":
@@ -1486,9 +1473,10 @@ def _validate_result_rows(
                 raise ValueError(
                     f"{table_name}: row {row_index} has inferential values for a low-count skip"
                 )
-            if row.get("bootstrap_iterations") != 0 or row.get(
-                "permutation_iterations"
-            ) != 0:
+            if (
+                row.get("bootstrap_iterations") != 0
+                or row.get("permutation_iterations") != 0
+            ):
                 raise ValueError(
                     f"{table_name}: row {row_index} has iterations for a low-count skip"
                 )
@@ -1520,9 +1508,7 @@ def _validate_result_rows(
                 f"{table_name}: row {row_index} has invalid effect_size_kind"
             )
         if row.get("ci_estimand") != expected_estimand:
-            raise ValueError(
-                f"{table_name}: row {row_index} has invalid ci_estimand"
-            )
+            raise ValueError(f"{table_name}: row {row_index} has invalid ci_estimand")
 
     if table_name == SUMMARY_TABLE:
         by_family: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
@@ -1535,9 +1521,7 @@ def _validate_result_rows(
                     "computed",
                     "boundary_zero_variance",
                 }:
-                    clustered_by_family.setdefault(family, []).append(
-                        (row_index, row)
-                    )
+                    clustered_by_family.setdefault(family, []).append((row_index, row))
         for family_rows in by_family.values():
             expected_q_values = benjamini_hochberg(
                 [_safe_float(row.get("p_value")) for _index, row in family_rows]
@@ -1624,9 +1608,10 @@ def _validate_result_rows_against_manifest(
             raise ValueError("Statistics manifest metric group keys are invalid")
         if item.get("metric_unit") != _metric_unit_for_values(*key):
             raise ValueError("Statistics manifest metric unit is invalid")
-        if type(item.get("primary")) is not bool or type(
-            item.get("exploratory")
-        ) is not bool:
+        if (
+            type(item.get("primary")) is not bool
+            or type(item.get("exploratory")) is not bool
+        ):
             raise ValueError("Statistics manifest metric flags are invalid")
         if bool(item.get("primary")) == bool(item.get("exploratory")):
             raise ValueError(
@@ -1664,7 +1649,7 @@ def _validate_result_rows_against_manifest(
         "fdr_method",
         "fdr_family_rule",
         "minimum_recordings",
-        "minimum_sessions",
+        "minimum_acquisition_batches",
         "permutation_iterations",
         "random_seed",
         "role_mapping_table",
@@ -1675,7 +1660,7 @@ def _validate_result_rows_against_manifest(
         raise ValueError("Statistics manifest FDR method is invalid")
     if manifest_parameters.get("fdr_family_rule") != "analysis_tier_metric_family_v1":
         raise ValueError("Statistics manifest FDR family rule is invalid")
-    if manifest_parameters.get("cluster") not in {"none", "session"}:
+    if manifest_parameters.get("cluster") not in {"none", "acquisition_batch"}:
         raise ValueError("Statistics manifest cluster mode is invalid")
     if type(manifest_parameters.get("allow_legacy_export_layout")) is not bool:
         raise ValueError("Statistics manifest legacy-layout policy is invalid")
@@ -1684,20 +1669,23 @@ def _validate_result_rows_against_manifest(
         "permutation_iterations",
         "random_seed",
     ):
-        if type(manifest_parameters.get(parameter_name)) is not int or int(
-            manifest_parameters[parameter_name]
-        ) < 0:
+        if (
+            type(manifest_parameters.get(parameter_name)) is not int
+            or int(manifest_parameters[parameter_name]) < 0
+        ):
             raise ValueError(
                 f"Statistics manifest parameter {parameter_name} is invalid"
             )
-    if type(manifest_parameters.get("minimum_recordings")) is not int or int(
-        manifest_parameters["minimum_recordings"]
-    ) < 1:
+    if (
+        type(manifest_parameters.get("minimum_recordings")) is not int
+        or int(manifest_parameters["minimum_recordings"]) < 1
+    ):
         raise ValueError("Statistics manifest minimum_recordings is invalid")
-    if type(manifest_parameters.get("minimum_sessions")) is not int or int(
-        manifest_parameters["minimum_sessions"]
-    ) < 3:
-        raise ValueError("Statistics manifest minimum_sessions is invalid")
+    if (
+        type(manifest_parameters.get("minimum_acquisition_batches")) is not int
+        or int(manifest_parameters["minimum_acquisition_batches"]) < 3
+    ):
+        raise ValueError("Statistics manifest minimum_acquisition_batches is invalid")
     confidence = manifest_parameters.get("confidence_level")
     if (
         isinstance(confidence, bool)
@@ -1759,14 +1747,10 @@ def _validate_result_rows_against_manifest(
         if row.get("primary") != spec.get("primary") or row.get(
             "exploratory"
         ) != spec.get("exploratory"):
-            raise ValueError(
-                f"{table_name}: row {row_index} has invalid metric flags"
-            )
+            raise ValueError(f"{table_name}: row {row_index} has invalid metric flags")
         group_key = json.loads(str(row.get("group_key_json")))
         if set(group_key) != set(spec.get("group_keys") or ()):
-            raise ValueError(
-                f"{table_name}: row {row_index} has invalid grouping keys"
-            )
+            raise ValueError(f"{table_name}: row {row_index} has invalid grouping keys")
         if row.get("source_export_manifest_path") != source_path:
             raise ValueError(
                 f"{table_name}: row {row_index} has an invalid source manifest path"
@@ -1804,7 +1788,9 @@ def _validate_result_rows_against_manifest(
             "confidence_level": float(manifest_parameters["confidence_level"]),
             "cluster": str(manifest_parameters["cluster"]),
             "minimum_recordings": int(manifest_parameters["minimum_recordings"]),
-            "minimum_sessions": int(manifest_parameters["minimum_sessions"]),
+            "minimum_acquisition_batches": int(
+                manifest_parameters["minimum_acquisition_batches"]
+            ),
             "missing_policy": row.get("missing_policy"),
             "permutation_iterations_requested": int(
                 manifest_parameters["permutation_iterations"]
@@ -1822,11 +1808,11 @@ def _validate_result_rows_against_manifest(
                 "computed",
                 "boundary_zero_variance",
             } and int(row.get("cluster_count") or 0) < int(
-                manifest_parameters["minimum_sessions"]
+                manifest_parameters["minimum_acquisition_batches"]
             ):
                 raise ValueError(
                     f"{table_name}: row {row_index} has clustered inference below "
-                    "minimum_sessions"
+                    "minimum_acquisition_batches"
                 )
             tier = "primary" if row.get("primary") else "exploratory"
             expected_family = f"{tier}|{row.get('metric_family')}"
@@ -1905,7 +1891,9 @@ def _descriptive_stats(values: Sequence[Any]) -> dict[str, Any]:
             "max": None,
         }
     std_dev = float(np.std(finite, ddof=1)) if finite.size > 1 else None
-    sem = float(std_dev / math.sqrt(float(finite.size))) if std_dev is not None else None
+    sem = (
+        float(std_dev / math.sqrt(float(finite.size))) if std_dev is not None else None
+    )
     return {
         "unit_count": int(finite.size),
         "sum": float(np.sum(finite)),
@@ -1921,7 +1909,7 @@ def _descriptive_stats(values: Sequence[Any]) -> dict[str, Any]:
 def _prepare_metric_frame(frame: pl.DataFrame, spec: MetricSpec) -> pl.DataFrame:
     required = {
         "recording_id",
-        "session_id",
+        "acquisition_batch_id",
         "subject_id",
         "window_label",
         spec.metric_name,
@@ -1929,12 +1917,14 @@ def _prepare_metric_frame(frame: pl.DataFrame, spec: MetricSpec) -> pl.DataFrame
     }
     missing = sorted(required - set(frame.columns))
     if missing:
-        raise ValueError(f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}")
+        raise ValueError(
+            f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}"
+        )
 
     selected = frame.select(
         [
             "recording_id",
-            "session_id",
+            "acquisition_batch_id",
             "subject_id",
             "window_label",
             spec.metric_name,
@@ -1947,16 +1937,26 @@ def _prepare_metric_frame(frame: pl.DataFrame, spec: MetricSpec) -> pl.DataFrame
     )
     invalid_identity = selected.filter(
         pl.col("recording_id").is_null()
-        | pl.col("session_id").is_null()
         | pl.col("subject_id").is_null()
         | (pl.col("recording_id").cast(pl.String).str.strip_chars() == "")
-        | (pl.col("session_id").cast(pl.String).str.strip_chars() == "")
         | (pl.col("subject_id").cast(pl.String).str.strip_chars() == "")
     )
     if invalid_identity.height:
         raise ValueError(
             f"{spec.source_table} contains rows without registry-backed "
-            "recording_id, session_id, or subject_id."
+            "recording_id or subject_id."
+        )
+    batch_conflicts = (
+        selected.group_by(["recording_id", "subject_id"])
+        .agg(
+            pl.col("acquisition_batch_id").drop_nulls().n_unique().alias("_batch_count")
+        )
+        .filter(pl.col("_batch_count") > 1)
+    )
+    if batch_conflicts.height:
+        raise ValueError(
+            f"{spec.source_table} assigns multiple acquisition batches to one "
+            "subject recording."
         )
     value_column = "_value"
     selected = selected.rename({spec.metric_name: value_column})
@@ -1965,13 +1965,18 @@ def _prepare_metric_frame(frame: pl.DataFrame, spec: MetricSpec) -> pl.DataFrame
         .group_by(
             [
                 "recording_id",
-                "session_id",
                 "subject_id",
                 "condition",
                 *spec.group_keys,
             ]
         )
-        .agg(pl.col(value_column).mean().alias(value_column))
+        .agg(
+            pl.col("acquisition_batch_id")
+            .drop_nulls()
+            .first()
+            .alias("acquisition_batch_id"),
+            pl.col(value_column).mean().alias(value_column),
+        )
     )
 
 
@@ -1998,7 +2003,7 @@ def _base_descriptive_row(
         "confidence_level": float(config.confidence_level),
         "cluster": config.cluster,
         "minimum_recordings": int(config.minimum_recordings),
-        "minimum_sessions": int(config.minimum_sessions),
+        "minimum_acquisition_batches": int(config.minimum_acquisition_batches),
         "missing_policy": "available_recording_values_by_condition",
         "permutation_iterations_requested": int(config.permutation_iterations),
         "random_seed": int(config.random_seed),
@@ -2007,12 +2012,16 @@ def _base_descriptive_row(
         "export_schema_version": SCHEMA_VERSION,
         "stats_run_id": config.stats_run_id,
         "source_export_run_id": config.source_export_run_id,
-        "source_export_manifest_path": str(source_manifest_path(config.export_root, config.source_export_run_id)),
+        "source_export_manifest_path": str(
+            source_manifest_path(config.export_root, config.source_export_run_id)
+        ),
         "source_export_manifest_sha256": source_manifest_sha256,
         "collection_id": collection.get("collection_id"),
         "collection_manifest_sha256": collection.get("manifest_sha256"),
         "source_table": spec.source_table,
-        "source_row_count": int(source_row_counts.get(spec.source_table) or source_row_count),
+        "source_row_count": int(
+            source_row_counts.get(spec.source_table) or source_row_count
+        ),
         "metric_family": spec.metric_family,
         "metric_name": spec.metric_name,
         "metric_unit": _metric_unit(spec),
@@ -2048,7 +2057,10 @@ def _descriptive_rows_for_metric(
     source_row_count = int(frame.height)
     prepared = _prepare_metric_frame(frame, spec)
     group_rows = (
-        prepared.select(list(spec.group_keys)).unique().sort(list(spec.group_keys)).to_dicts()
+        prepared.select(list(spec.group_keys))
+        .unique()
+        .sort(list(spec.group_keys))
+        .to_dicts()
         if spec.group_keys
         else [{}]
     )
@@ -2061,8 +2073,14 @@ def _descriptive_rows_for_metric(
             str(value)
             for value in group_frame["condition"].drop_nulls().unique().to_list()
         ):
-            condition_frame = group_frame.filter(pl.col("condition") == condition).sort("recording_id")
-            values = condition_frame["_value"].to_numpy() if condition_frame.height else np.asarray([], dtype=np.float64)
+            condition_frame = group_frame.filter(pl.col("condition") == condition).sort(
+                "recording_id"
+            )
+            values = (
+                condition_frame["_value"].to_numpy()
+                if condition_frame.height
+                else np.asarray([], dtype=np.float64)
+            )
             rows.append(
                 _base_descriptive_row(
                     spec=spec,
@@ -2086,24 +2104,38 @@ def _descriptive_rows_for_cra_summary_metric(
     source_manifest: Mapping[str, Any],
     source_manifest_sha256: str,
 ) -> list[dict[str, Any]]:
-    required = {"recording_id", "session_id", "subject_id", spec.metric_name}
+    required = {"recording_id", "acquisition_batch_id", "subject_id", spec.metric_name}
     missing = sorted(required - set(frame.columns))
     if missing:
-        raise ValueError(f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}")
+        raise ValueError(
+            f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}"
+        )
     selected = (
-        frame.select(["recording_id", "session_id", "subject_id", spec.metric_name])
+        frame.select(
+            ["recording_id", "acquisition_batch_id", "subject_id", spec.metric_name]
+        )
         .rename({spec.metric_name: "_value"})
-        .drop_nulls(["recording_id", "session_id", "subject_id", "_value"])
-        .group_by(["recording_id", "session_id", "subject_id"])
-        .agg(pl.col("_value").mean().alias("_value"))
+        .drop_nulls(["recording_id", "subject_id", "_value"])
+        .group_by(["recording_id", "subject_id"])
+        .agg(
+            pl.col("acquisition_batch_id")
+            .drop_nulls()
+            .first()
+            .alias("acquisition_batch_id"),
+            pl.col("_value").mean().alias("_value"),
+        )
         .sort("recording_id")
     )
     if selected.height != frame.select("recording_id").drop_nulls().unique().height:
         raise ValueError(
-            f"{spec.source_table} lacks one registry-backed session_id/subject_id "
+            f"{spec.source_table} lacks one registry-backed subject_id "
             "identity per recording."
         )
-    values = selected["_value"].to_numpy() if selected.height else np.asarray([], dtype=np.float64)
+    values = (
+        selected["_value"].to_numpy()
+        if selected.height
+        else np.asarray([], dtype=np.float64)
+    )
     return [
         _base_descriptive_row(
             spec=spec,
@@ -2137,7 +2169,10 @@ def _rows_for_metric(
         source_row_counts = {}
 
     group_rows = (
-        prepared.select(list(spec.group_keys)).unique().sort(list(spec.group_keys)).to_dicts()
+        prepared.select(list(spec.group_keys))
+        .unique()
+        .sort(list(spec.group_keys))
+        .to_dicts()
         if spec.group_keys
         else [{}]
     )
@@ -2148,35 +2183,36 @@ def _rows_for_metric(
             group_frame = group_frame.filter(pl.col(key) == group_row.get(key))
         unit_count = int(group_frame.select("recording_id").unique().height)
         for contrast in config.contrasts:
-            a = (
-                group_frame.filter(pl.col("condition") == contrast.condition_a)
-                .select(
-                    [
-                        "recording_id",
-                        "session_id",
-                        "subject_id",
-                        pl.col("_value").alias("value_a"),
-                    ]
-                )
+            a = group_frame.filter(pl.col("condition") == contrast.condition_a).select(
+                [
+                    "recording_id",
+                    "acquisition_batch_id",
+                    "subject_id",
+                    pl.col("_value").alias("value_a"),
+                ]
             )
-            b = (
-                group_frame.filter(pl.col("condition") == contrast.condition_b)
-                .select(
-                    [
-                        "recording_id",
-                        "session_id",
-                        "subject_id",
-                        pl.col("_value").alias("value_b"),
-                    ]
-                )
+            b = group_frame.filter(pl.col("condition") == contrast.condition_b).select(
+                [
+                    "recording_id",
+                    "subject_id",
+                    pl.col("_value").alias("value_b"),
+                ]
             )
             paired = a.join(
                 b,
-                on=["recording_id", "session_id", "subject_id"],
+                on=["recording_id", "subject_id"],
                 how="inner",
             ).sort("recording_id")
-            values_a = paired["value_a"].to_numpy() if paired.height else np.asarray([], dtype=np.float64)
-            values_b = paired["value_b"].to_numpy() if paired.height else np.asarray([], dtype=np.float64)
+            values_a = (
+                paired["value_a"].to_numpy()
+                if paired.height
+                else np.asarray([], dtype=np.float64)
+            )
+            values_b = (
+                paired["value_b"].to_numpy()
+                if paired.height
+                else np.asarray([], dtype=np.float64)
+            )
             stats = compute_paired_contrast(
                 values_a,
                 values_b,
@@ -2191,11 +2227,11 @@ def _rows_for_metric(
                 values_a,
                 dtype=np.float64,
             )
-            clustered = _session_cluster_result(
+            clustered = _acquisition_batch_cluster_result(
                 config=config,
                 values=differences,
-                session_ids=(
-                    paired["session_id"].to_numpy()
+                acquisition_batch_ids=(
+                    paired["acquisition_batch_id"].to_numpy()
                     if paired.height
                     else np.asarray([], dtype=object)
                 ),
@@ -2208,11 +2244,9 @@ def _rows_for_metric(
                 "bootstrap_iterations_requested": int(config.bootstrap_iterations),
                 "confidence_level": float(config.confidence_level),
                 "minimum_recordings": int(config.minimum_recordings),
-                "minimum_sessions": int(config.minimum_sessions),
+                "minimum_acquisition_batches": int(config.minimum_acquisition_batches),
                 "missing_policy": "paired_complete_recordings",
-                "permutation_iterations_requested": int(
-                    config.permutation_iterations
-                ),
+                "permutation_iterations_requested": int(config.permutation_iterations),
                 "random_seed": int(config.random_seed),
                 "cluster": config.cluster,
             }
@@ -2221,12 +2255,18 @@ def _rows_for_metric(
                 "export_schema_version": SCHEMA_VERSION,
                 "stats_run_id": config.stats_run_id,
                 "source_export_run_id": config.source_export_run_id,
-                "source_export_manifest_path": str(source_manifest_path(config.export_root, config.source_export_run_id)),
+                "source_export_manifest_path": str(
+                    source_manifest_path(
+                        config.export_root, config.source_export_run_id
+                    )
+                ),
                 "source_export_manifest_sha256": source_manifest_sha256,
                 "collection_id": collection.get("collection_id"),
                 "collection_manifest_sha256": collection.get("manifest_sha256"),
                 "source_table": spec.source_table,
-                "source_row_count": int(source_row_counts.get(spec.source_table) or source_row_count),
+                "source_row_count": int(
+                    source_row_counts.get(spec.source_table) or source_row_count
+                ),
                 "metric_family": spec.metric_family,
                 "metric_name": spec.metric_name,
                 "metric_unit": _metric_unit(spec),
@@ -2277,25 +2317,39 @@ def _rows_for_cra_summary_metric(
     source_manifest_sha256: str,
     rng: np.random.Generator,
 ) -> list[dict[str, Any]]:
-    required = {"recording_id", "session_id", "subject_id", spec.metric_name}
+    required = {"recording_id", "acquisition_batch_id", "subject_id", spec.metric_name}
     missing = sorted(required - set(frame.columns))
     if missing:
-        raise ValueError(f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}")
+        raise ValueError(
+            f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}"
+        )
 
     selected = (
-        frame.select(["recording_id", "session_id", "subject_id", spec.metric_name])
+        frame.select(
+            ["recording_id", "acquisition_batch_id", "subject_id", spec.metric_name]
+        )
         .rename({spec.metric_name: "_value"})
-        .drop_nulls(["recording_id", "session_id", "subject_id", "_value"])
-        .group_by(["recording_id", "session_id", "subject_id"])
-        .agg(pl.col("_value").mean().alias("_value"))
+        .drop_nulls(["recording_id", "subject_id", "_value"])
+        .group_by(["recording_id", "subject_id"])
+        .agg(
+            pl.col("acquisition_batch_id")
+            .drop_nulls()
+            .first()
+            .alias("acquisition_batch_id"),
+            pl.col("_value").mean().alias("_value"),
+        )
         .sort("recording_id")
     )
     if selected.height != frame.select("recording_id").drop_nulls().unique().height:
         raise ValueError(
-            f"{spec.source_table} lacks one registry-backed session_id/subject_id "
+            f"{spec.source_table} lacks one registry-backed subject_id "
             "identity per recording."
         )
-    values = selected["_value"].to_numpy() if selected.height else np.asarray([], dtype=np.float64)
+    values = (
+        selected["_value"].to_numpy()
+        if selected.height
+        else np.asarray([], dtype=np.float64)
+    )
     unit_count = int(frame.select("recording_id").drop_nulls().unique().height)
     stats = compute_one_sample_signed_rank(
         values,
@@ -2305,11 +2359,11 @@ def _rows_for_cra_summary_metric(
         confidence_level=float(config.confidence_level),
         rng=rng,
     )
-    clustered = _session_cluster_result(
+    clustered = _acquisition_batch_cluster_result(
         config=config,
         values=np.asarray(values, dtype=np.float64),
-        session_ids=(
-            selected["session_id"].to_numpy()
+        acquisition_batch_ids=(
+            selected["acquisition_batch_id"].to_numpy()
             if selected.height
             else np.asarray([], dtype=object)
         ),
@@ -2328,7 +2382,7 @@ def _rows_for_cra_summary_metric(
         "bootstrap_iterations_requested": int(config.bootstrap_iterations),
         "confidence_level": float(config.confidence_level),
         "minimum_recordings": int(config.minimum_recordings),
-        "minimum_sessions": int(config.minimum_sessions),
+        "minimum_acquisition_batches": int(config.minimum_acquisition_batches),
         "missing_policy": "one_row_per_recording_complete_cases",
         "permutation_iterations_requested": int(config.permutation_iterations),
         "random_seed": int(config.random_seed),
@@ -2339,12 +2393,16 @@ def _rows_for_cra_summary_metric(
         "export_schema_version": SCHEMA_VERSION,
         "stats_run_id": config.stats_run_id,
         "source_export_run_id": config.source_export_run_id,
-        "source_export_manifest_path": str(source_manifest_path(config.export_root, config.source_export_run_id)),
+        "source_export_manifest_path": str(
+            source_manifest_path(config.export_root, config.source_export_run_id)
+        ),
         "source_export_manifest_sha256": source_manifest_sha256,
         "collection_id": collection.get("collection_id"),
         "collection_manifest_sha256": collection.get("manifest_sha256"),
         "source_table": spec.source_table,
-        "source_row_count": int(source_row_counts.get(spec.source_table) or int(frame.height)),
+        "source_row_count": int(
+            source_row_counts.get(spec.source_table) or int(frame.height)
+        ),
         "metric_family": spec.metric_family,
         "metric_name": spec.metric_name,
         "metric_unit": _metric_unit(spec),
@@ -2396,7 +2454,9 @@ def apply_fdr(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if row.get("cluster_status") in {"computed", "boundary_zero_variance"}:
             clustered_by_family.setdefault(family, []).append(index)
     for indices in by_family.values():
-        q_values = benjamini_hochberg([_safe_float(rows[index].get("p_value")) for index in indices])
+        q_values = benjamini_hochberg(
+            [_safe_float(rows[index].get("p_value")) for index in indices]
+        )
         for index, q_value in zip(indices, q_values):
             rows[index]["q_value"] = q_value
     for indices in clustered_by_family.values():
@@ -2481,7 +2541,7 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
             permutation_iterations=config.permutation_iterations,
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
-            minimum_sessions=config.minimum_sessions,
+            minimum_acquisition_batches=config.minimum_acquisition_batches,
             random_seed=config.random_seed,
             cluster=config.cluster,
             overwrite=config.overwrite,
@@ -2530,7 +2590,7 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
             permutation_iterations=config.permutation_iterations,
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
-            minimum_sessions=config.minimum_sessions,
+            minimum_acquisition_batches=config.minimum_acquisition_batches,
             random_seed=config.random_seed,
             cluster=config.cluster,
             overwrite=config.overwrite,
@@ -2565,7 +2625,7 @@ def _compute_goodcopbadcop_descriptive_from_snapshot(
             permutation_iterations=config.permutation_iterations,
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
-            minimum_sessions=config.minimum_sessions,
+            minimum_acquisition_batches=config.minimum_acquisition_batches,
             random_seed=config.random_seed,
             cluster=config.cluster,
             overwrite=config.overwrite,
@@ -2666,7 +2726,9 @@ def _build_stats_manifest(
         "palette_git_branch": git.get("branch"),
         "palette_git_dirty": git.get("is_dirty"),
         "source_export_run_id": config.source_export_run_id,
-        "source_export_manifest_path": str(source_manifest_path(config.export_root, config.source_export_run_id)),
+        "source_export_manifest_path": str(
+            source_manifest_path(config.export_root, config.source_export_run_id)
+        ),
         "source_export_manifest_sha256": source_manifest_sha256,
         "source_collection_manifest": source_manifest.get("collection_manifest"),
         "input_tables": _statistics_input_tables(config.metrics),
@@ -2703,7 +2765,7 @@ def _build_stats_manifest(
             "permutation_iterations": int(config.permutation_iterations),
             "confidence_level": float(config.confidence_level),
             "minimum_recordings": int(config.minimum_recordings),
-            "minimum_sessions": int(config.minimum_sessions),
+            "minimum_acquisition_batches": int(config.minimum_acquisition_batches),
             "random_seed": int(config.random_seed),
             "cluster": config.cluster,
             "fdr_method": "benjamini_hochberg",
@@ -2799,27 +2861,22 @@ def write_goodcopbadcop_statistics(
             manifest,
         )
 
-    def write_table(table_name: str, table_rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    def write_table(
+        table_name: str, table_rows: Sequence[Mapping[str, Any]]
+    ) -> list[str]:
         table_dir = staging_root / "tables" / table_name
         table_dir.mkdir(parents=True, exist_ok=True)
         contract = ARROW_TABLE_CONTRACTS[table_name]
         columns = tuple(field.name for field in contract.fields)
         expected = set(columns)
-        unexpected = sorted(
-            {str(key) for row in table_rows for key in row} - expected
-        )
+        unexpected = sorted({str(key) for row in table_rows for key in row} - expected)
         if unexpected:
             raise ValueError(
-                f"{table_name}: unexpected fields for exact Arrow schema: "
-                f"{unexpected}"
+                f"{table_name}: unexpected fields for exact Arrow schema: {unexpected}"
             )
-        nonnullable = {
-            field.name for field in contract.fields if not field.nullable
-        }
+        nonnullable = {field.name for field in contract.fields if not field.nullable}
         for row_index, row in enumerate(table_rows):
-            missing = sorted(
-                name for name in nonnullable if row.get(name) is None
-            )
+            missing = sorted(name for name in nonnullable if row.get(name) is None)
             if missing:
                 raise ValueError(
                     f"{table_name}: row {row_index} has null/missing "
@@ -2832,8 +2889,7 @@ def write_goodcopbadcop_statistics(
                 f"missing columns: {list(missing)}"
             )
         normalized = [
-            {column: row.get(column) for column in columns}
-            for row in table_rows
+            {column: row.get(column) for column in columns} for row in table_rows
         ]
         part_path = table_dir / "part-00000.parquet"
         tmp_path = table_dir / ".part-00000.parquet.tmp"
@@ -2843,9 +2899,9 @@ def write_goodcopbadcop_statistics(
             table_name,
             metadata={
                 b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
-                b"palette.export_schema_version": str(
-                    EXPORT_SCHEMA_VERSION
-                ).encode("utf-8"),
+                b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(
+                    "utf-8"
+                ),
                 b"palette.table_contract": json.dumps(
                     TABLE_CONTRACTS[table_name].to_dict(),
                     sort_keys=True,
@@ -2860,7 +2916,9 @@ def write_goodcopbadcop_statistics(
 
     try:
         part_files_by_table: dict[str, list[str]] = {
-            SUMMARY_TABLE: write_table(SUMMARY_TABLE, canonical_rows_by_table[SUMMARY_TABLE]),
+            SUMMARY_TABLE: write_table(
+                SUMMARY_TABLE, canonical_rows_by_table[SUMMARY_TABLE]
+            ),
         }
         if descriptive_rows:
             part_files_by_table[DESCRIPTIVE_TABLE] = write_table(
@@ -2898,9 +2956,7 @@ def write_goodcopbadcop_statistics(
                         "path": relative.as_posix(),
                         "sha256": sha256_file(staged_path),
                         "size_bytes": int(staged_path.stat().st_size),
-                        "row_count": int(
-                            pq.ParquetFile(staged_path).metadata.num_rows
-                        ),
+                        "row_count": int(pq.ParquetFile(staged_path).metadata.num_rows),
                     }
                 )
                 relative_paths.append(relative.as_posix())
@@ -2927,9 +2983,7 @@ def write_goodcopbadcop_statistics(
         }
         capability_statuses = resolve_capabilities(columns_by_table)
         payload["capabilities"] = [
-            status.capability_id
-            for status in capability_statuses
-            if status.available
+            status.capability_id for status in capability_statuses if status.available
         ]
         payload["capability_statuses"] = [
             status.to_dict() for status in capability_statuses
@@ -2976,7 +3030,9 @@ def metric_specs_for_families(families: Sequence[str] | None) -> tuple[MetricSpe
     unknown = wanted - {spec.metric_family for spec in DEFAULT_METRICS}
     if unknown:
         known = ", ".join(sorted({spec.metric_family for spec in DEFAULT_METRICS}))
-        raise ValueError(f"Unknown metric family/families: {', '.join(sorted(unknown))}. Known: {known}")
+        raise ValueError(
+            f"Unknown metric family/families: {', '.join(sorted(unknown))}. Known: {known}"
+        )
     return tuple(spec for spec in DEFAULT_METRICS if spec.metric_family in wanted)
 
 
@@ -2986,5 +3042,7 @@ def contrast_definitions(names: Sequence[str] | None) -> tuple[ContrastDefinitio
     known = {contrast.name: contrast for contrast in DEFAULT_CONTRASTS}
     unknown = [name for name in names if name not in known]
     if unknown:
-        raise ValueError(f"Unknown contrast(s): {', '.join(unknown)}. Known: {', '.join(sorted(known))}")
+        raise ValueError(
+            f"Unknown contrast(s): {', '.join(unknown)}. Known: {', '.join(sorted(known))}"
+        )
     return tuple(known[name] for name in names)

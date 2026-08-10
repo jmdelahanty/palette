@@ -9,10 +9,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoReturn, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
+
+if TYPE_CHECKING:
+    import zarr
 
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.subject_metadata import (
@@ -40,7 +43,7 @@ from .extractors.masks import (
     _extract_subject_mask_performance_rows,
 )
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
-from .experimental_sessions import RegistryExperimentalSessionMixin, validate_experimental_session_id
+from .acquisition_batches import RegistryAcquisitionBatchMixin, validate_acquisition_batch_id
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
 from .temp_store_guard import assert_temp_store_registration_allowed
@@ -1217,7 +1220,7 @@ def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:
 
 
 class Registry(
-    RegistryExperimentalSessionMixin,
+    RegistryAcquisitionBatchMixin,
     RegistryAnalyticsReportMixin,
     RegistryMigrationMixin,
 ):
@@ -8270,8 +8273,8 @@ class Registry(
         camera_id: Optional[str] = None,
         rig_id: Optional[str] = None,
         arena_id: Optional[str] = None,
-        experimental_session_id: Optional[str] = None,
-        require_experimental_session: Optional[bool] = None,
+        acquisition_batch_id: Optional[str] = None,
+        require_acquisition_batch: Optional[bool] = None,
         model_input: Optional[str] = None,
         path_contains: Optional[str] = None,
         status: Optional[str] = None,
@@ -8283,23 +8286,23 @@ class Registry(
     ) -> List[sqlite3.Row]:
         sql = [
             "SELECT dcc.dataset_id, dcc.session_uuid, dcc.zarr_path,",
-            "dcc.recording_id, dcc.recording_started_utc, dcc.experimental_session_id,",
-            "dcc.experimental_session_snapshot_id, dcc.experimental_session_schema_id,",
-            "dcc.experimental_session_creation_method, dcc.experimental_session_created_by,",
-            "dcc.experimental_session_created_at_utc,",
-            "dcc.experimental_session_creation_evidence_json,",
-            "dcc.experimental_session_creation_registry_schema_version,",
-            "dcc.experimental_session_identity_status,",
-            "dcc.experimental_session_assignment_snapshot_id,",
-            "dcc.experimental_session_assignment_revision,",
-            "dcc.experimental_session_supersedes_assignment_snapshot_id,",
-            "dcc.experimental_session_assignment_batch_id,",
-            "dcc.experimental_session_assignment_schema_id,",
-            "dcc.experimental_session_assignment_method, dcc.experimental_session_assigned_by,",
-            "dcc.experimental_session_assigned_at_utc,",
-            "dcc.experimental_session_current_updated_at_utc,",
-            "dcc.experimental_session_assignment_evidence_json,",
-            "dcc.experimental_session_assignment_registry_schema_version,",
+            "dcc.recording_id, dcc.recording_started_utc, dcc.acquisition_batch_id,",
+            "dcc.acquisition_batch_snapshot_id, dcc.acquisition_batch_schema_id,",
+            "dcc.acquisition_batch_creation_method, dcc.acquisition_batch_created_by,",
+            "dcc.acquisition_batch_created_at_utc,",
+            "dcc.acquisition_batch_creation_evidence_json,",
+            "dcc.acquisition_batch_creation_registry_schema_version,",
+            "dcc.acquisition_batch_identity_status,",
+            "dcc.acquisition_batch_assignment_snapshot_id,",
+            "dcc.acquisition_batch_assignment_revision,",
+            "dcc.acquisition_batch_supersedes_assignment_snapshot_id,",
+            "dcc.acquisition_batch_assignment_batch_id,",
+            "dcc.acquisition_batch_assignment_schema_id,",
+            "dcc.acquisition_batch_assignment_method, dcc.acquisition_batch_assigned_by,",
+            "dcc.acquisition_batch_assigned_at_utc,",
+            "dcc.acquisition_batch_current_updated_at_utc,",
+            "dcc.acquisition_batch_assignment_evidence_json,",
+            "dcc.acquisition_batch_assignment_registry_schema_version,",
             "dcc.zarr_origin, dcc.zarr_use, dcc.dataset_status AS status,",
             "dcc.source_layout, dcc.source_frame_index_path, dcc.source_recording_frame_index_path,",
             "dcc.source_frame_index_schema,",
@@ -8401,16 +8404,14 @@ class Registry(
         add_clause("AND dcc.camera_id = ?", camera_id)
         add_clause("AND dcc.rig_id = ?", rig_id)
         add_clause("AND dcc.arena_id = ?", arena_id)
-        if experimental_session_id is not None:
+        if acquisition_batch_id is not None:
             add_clause(
-                "AND dcc.experimental_session_id = ?",
-                validate_experimental_session_id(experimental_session_id),
+                "AND dcc.acquisition_batch_id = ?",
+                validate_acquisition_batch_id(acquisition_batch_id),
             )
-        if require_experimental_session is not None:
-            sql.append(
-                "AND dcc.experimental_session_identity_status = ?"
-            )
-            params.append("explicit" if require_experimental_session else "missing")
+        if require_acquisition_batch is not None:
+            sql.append("AND dcc.acquisition_batch_identity_status = ?")
+            params.append("explicit" if require_acquisition_batch else "missing")
         if model_input is not None:
             mode = str(model_input).strip().lower()
             if mode == "gray":

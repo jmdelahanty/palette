@@ -119,7 +119,9 @@ def immutable_manifest_commit_lock(
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f".{manifest.name}.lock"
     if lock_path.is_symlink():
-        raise ValueError(f"Immutable publication lock must not be a symlink: {lock_path}")
+        raise ValueError(
+            f"Immutable publication lock must not be a symlink: {lock_path}"
+        )
     if lock_path.exists() and not lock_path.is_file():
         raise ValueError(f"Immutable publication lock is not a file: {lock_path}")
     with lock_path.open("a+b") as handle:
@@ -170,9 +172,7 @@ def commit_validated_immutable_generation(
 
     manifest.parent.mkdir(parents=True, exist_ok=True)
     generation.parent.mkdir(parents=True, exist_ok=True)
-    temporary_manifest = (
-        manifest.parent / f".{manifest.name}.{uuid.uuid4().hex}.tmp"
-    )
+    temporary_manifest = manifest.parent / f".{manifest.name}.{uuid.uuid4().hex}.tmp"
     if temporary_manifest.exists() or temporary_manifest.is_symlink():
         raise FileExistsError(temporary_manifest)
     os.replace(stage, generation)
@@ -524,9 +524,10 @@ def validate_staged_publication(
             declared_tables.update(str(item) for item in value)
     if set(inventory) != declared_tables:
         raise ValueError("Staged publication inventory does not match declared tables")
-    if payload.get("schema_id") != EXPORT_SCHEMA_ID or payload.get(
-        "schema_version"
-    ) != EXPORT_SCHEMA_VERSION:
+    if (
+        payload.get("schema_id") != EXPORT_SCHEMA_ID
+        or payload.get("schema_version") != EXPORT_SCHEMA_VERSION
+    ):
         raise ValueError("Staged publication must use the current export schema")
     validate_arrow_contract_envelope(
         payload.get("arrow_schema_contracts"),
@@ -639,7 +640,7 @@ def validate_staged_publication(
                     columns=[
                         "zarr_path",
                         "recording_id",
-                        "session_id",
+                        "acquisition_batch_id",
                         "subject_id",
                     ]
                 )
@@ -650,7 +651,7 @@ def validate_staged_publication(
                             for name in (
                                 "zarr_path",
                                 "recording_id",
-                                "session_id",
+                                "acquisition_batch_id",
                                 "subject_id",
                             )
                         ),
@@ -661,15 +662,20 @@ def validate_staged_publication(
                     raise ValueError(
                         f"{table}: staged part identity columns are incomplete"
                     )
-                for source_path, recording_id, session_id, subject_id in identity_values:
+                for (
+                    source_path,
+                    recording_id,
+                    acquisition_batch_id,
+                    subject_id,
+                ) in identity_values:
                     binding = registry_sources.get(str(source_path))
                     if binding is None or (
                         recording_id,
-                        session_id,
+                        acquisition_batch_id,
                         subject_id,
                     ) != (
                         binding["recording_id"],
-                        binding["session_id"],
+                        binding["acquisition_batch_id"],
                         binding["subject_id"],
                     ):
                         raise ValueError(

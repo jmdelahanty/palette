@@ -44,14 +44,12 @@ TRAINING_RESPONSE_TABLES = (
 
 IDENTITY_COLUMNS = (
     "recording_id",
-    "session_id",
     "subject_id",
     "training_window_id",
 )
 PRIMARY_KEY_COLUMNS = (
     "analysis_run_id",
     "recording_id",
-    "session_id",
     "subject_id",
 )
 LEGACY_V2_PRIMARY_KEY_COLUMNS = ("analysis_run_id", "recording_id")
@@ -123,7 +121,7 @@ _COMMON_ARROW_FIELDS = (
     field("method", "string"),
     field("method_version", "string"),
     field("recording_id", "string"),
-    field("session_id", "string"),
+    field("acquisition_batch_id", "string", nullable=True),
     field("subject_id", "string"),
     # A missing training window is a valid invalid-feature outcome. It is
     # lineage, not part of the v3 primary key.
@@ -133,7 +131,9 @@ _COMMON_ARROW_FIELDS = (
 )
 
 _LEGACY_V2_COMMON_ARROW_FIELDS = tuple(
-    item for item in _COMMON_ARROW_FIELDS if item.name not in {"session_id", "subject_id"}
+    item
+    for item in _COMMON_ARROW_FIELDS
+    if item.name not in {"acquisition_batch_id", "subject_id"}
 )
 
 _FEATURE_FLOAT_FIELDS = (
@@ -292,16 +292,14 @@ _CLUSTER_ARROW_FIELDS = _COMMON_ARROW_FIELDS + (
 )
 
 _LEGACY_V2_FEATURE_ARROW_FIELDS = (
-    _LEGACY_V2_COMMON_ARROW_FIELDS
-    + _FEATURE_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
+    _LEGACY_V2_COMMON_ARROW_FIELDS + _FEATURE_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
 )
 _LEGACY_V2_CLASSIFICATION_ARROW_FIELDS = (
     _LEGACY_V2_COMMON_ARROW_FIELDS
     + _CLASSIFICATION_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
 )
 _LEGACY_V2_CLUSTER_ARROW_FIELDS = (
-    _LEGACY_V2_COMMON_ARROW_FIELDS
-    + _CLUSTER_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
+    _LEGACY_V2_COMMON_ARROW_FIELDS + _CLUSTER_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
 )
 
 ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
@@ -449,6 +447,7 @@ def _canonical_bic_json(value: object) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
+
         def reject_duplicate_pairs(
             pairs: list[tuple[str, object]],
         ) -> dict[str, object]:
@@ -683,6 +682,7 @@ def contract_fields(table_name: str) -> tuple[str, ...]:
         "table_name",
         "method",
         "method_version",
+        "acquisition_batch_id",
         *IDENTITY_COLUMNS,
         "source_export_run_id",
     )

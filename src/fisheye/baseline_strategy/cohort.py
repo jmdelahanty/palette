@@ -30,7 +30,7 @@ def _float(value: object) -> float | None:
 def _identity(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "recording_id": row.get("recording_id"),
-        "session_id": row.get("session_id"),
+        "acquisition_batch_id": row.get("acquisition_batch_id"),
         "subject_id": row.get("subject_id"),
         "track_id": row.get("track_id"),
         "baseline_window_id": row.get("baseline_window_id"),
@@ -125,7 +125,9 @@ def _metric_scalers(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, tuple[float, float, Callable[[float], float]]]:
     scalers: dict[str, tuple[float, float, Callable[[float], float]]] = {}
-    metrics = {metric for definitions in AXIS_METRICS.values() for metric in definitions}
+    metrics = {
+        metric for definitions in AXIS_METRICS.values() for metric in definitions
+    }
     for name, _weight, transform in metrics:
         values = []
         for row in rows:
@@ -158,7 +160,9 @@ def _axis_score(
     return float(sum(weighted) / sum(weights)), len(weighted)
 
 
-def _state(score: float | None, *, low: str, middle: str, high: str, threshold: float) -> str:
+def _state(
+    score: float | None, *, low: str, middle: str, high: str, threshold: float
+) -> str:
     if score is None:
         return "unavailable"
     if score <= -threshold:
@@ -217,7 +221,8 @@ def classify_strategy_features(
             result.update(
                 {
                     "classification_status": "invalid",
-                    "classification_reason": row.get("feature_reason") or "feature_row_invalid",
+                    "classification_reason": row.get("feature_reason")
+                    or "feature_row_invalid",
                     "activity_state": "unavailable",
                     "boundary_strategy": "unavailable",
                     "spatial_organization": "unavailable",
@@ -285,12 +290,18 @@ def classify_strategy_features(
         confidence = (
             0.5 + 0.5 * math.tanh(max(0.0, strongest - threshold))
             if strongest is not None and primary != "mixed_or_uncertain"
-            else 0.0 if strongest is not None else None
+            else 0.0
+            if strongest is not None
+            else None
         )
         result.update(
             {
-                "classification_status": "complete" if finite_scores else "insufficient_cohort_variation",
-                "classification_reason": None if finite_scores else "no_robustly_scalable_metrics",
+                "classification_status": "complete"
+                if finite_scores
+                else "insufficient_cohort_variation",
+                "classification_reason": None
+                if finite_scores
+                else "no_robustly_scalable_metrics",
                 "reference_scope": "source_export_cohort_relative",
                 "relative_score_threshold": threshold,
                 "activity_state": activity_state,
@@ -331,7 +342,10 @@ def discover_strategy_clusters(
     matrix_rows = []
     for index, row in enumerate(classification_rows):
         values = [_float(row.get(axis)) for axis in axes]
-        if row.get("classification_status") == "complete" and sum(value is not None for value in values) >= 3:
+        if (
+            row.get("classification_status") == "complete"
+            and sum(value is not None for value in values) >= 3
+        ):
             valid_indexes.append(index)
             matrix_rows.append([0.0 if value is None else value for value in values])
     base_rows = [
@@ -389,7 +403,8 @@ def discover_strategy_clusters(
                 continue
     stability = float(np.median(stability_values)) if stability_values else None
     bic_by_components = {
-        str(model.n_components): bic for bic, model in sorted(candidates, key=lambda item: item[1].n_components)
+        str(model.n_components): bic
+        for bic, model in sorted(candidates, key=lambda item: item[1].n_components)
     }
     for matrix_index, source_index in enumerate(valid_indexes):
         probability = float(probabilities[matrix_index])
@@ -405,7 +420,9 @@ def discover_strategy_clusters(
             {
                 "cluster_status": status,
                 "cluster_reason": reason,
-                "cluster_id": int(labels[matrix_index]) if component_count > 1 else None,
+                "cluster_id": int(labels[matrix_index])
+                if component_count > 1
+                else None,
                 "cluster_probability": probability if component_count > 1 else None,
                 "cluster_probability_threshold": config.cluster_probability_threshold,
                 "selected_component_count": component_count,

@@ -29,7 +29,9 @@ from fisheye.analysis.stimulus_response import (
     STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
     write_stimulus_response_run,
 )
-from fisheye.analysis.stimulus_response_concentric_omr import ConcentricRadialOMRStepData
+from fisheye.analysis.stimulus_response_concentric_omr import (
+    ConcentricRadialOMRStepData,
+)
 from fisheye.analysis.stimulus_response_omr import OMRStepData
 from fisheye.utils.export_cross_recording_analytics import (
     _chaser_behaviors_for_run,
@@ -64,39 +66,37 @@ def _registry_receipt_for_sources(
         identity = build_registry_identity_source(
             zarr_path=source,
             rows=[
-            {
-                "dataset_id": index,
-                "recording_id": recording_id,
-                "experimental_session_id": "session-test",
-                "experimental_session_snapshot_id": (
-                    "00000000-0000-4000-8000-000000000001"
-                ),
-                "experimental_session_schema_id": (
-                    "palette.registry.experimental_session.v1"
-                ),
-                "experimental_session_creation_registry_schema_version": 1,
-                "experimental_session_identity_status": "explicit",
-                "experimental_session_assignment_snapshot_id": (
-                    "00000000-0000-4000-8000-000000000002"
-                ),
-                "experimental_session_assignment_batch_id": (
-                    "00000000-0000-4000-8000-000000000003"
-                ),
-                "experimental_session_assignment_revision": 1,
-                "experimental_session_supersedes_assignment_snapshot_id": None,
-                "experimental_session_assignment_schema_id": (
-                    "palette.registry.experimental_session_assignment.v1"
-                ),
-                "experimental_session_assignment_registry_schema_version": 1,
-                "experimental_session_assignment_method": "manual_test",
-                "experimental_session_assigned_by": "test",
-                "experimental_session_assigned_at_utc": (
-                    "2026-08-10T00:00:00+00:00"
-                ),
-                "fish_id": "subject-test",
-                "subject_count": 1,
-                "subject_ids_json": None,
-            }
+                {
+                    "dataset_id": index,
+                    "recording_id": recording_id,
+                    "acquisition_batch_id": "session-test",
+                    "acquisition_batch_snapshot_id": (
+                        "00000000-0000-4000-8000-000000000001"
+                    ),
+                    "acquisition_batch_schema_id": (
+                        "palette.registry.acquisition_batch.v1"
+                    ),
+                    "acquisition_batch_creation_registry_schema_version": 1,
+                    "acquisition_batch_identity_status": "explicit",
+                    "acquisition_batch_assignment_snapshot_id": (
+                        "00000000-0000-4000-8000-000000000002"
+                    ),
+                    "acquisition_batch_assignment_batch_id": (
+                        "00000000-0000-4000-8000-000000000003"
+                    ),
+                    "acquisition_batch_assignment_revision": 1,
+                    "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                    "acquisition_batch_assignment_schema_id": (
+                        "palette.registry.acquisition_batch_assignment.v1"
+                    ),
+                    "acquisition_batch_assignment_registry_schema_version": 1,
+                    "acquisition_batch_assignment_method": "manual_test",
+                    "acquisition_batch_assigned_by": "test",
+                    "acquisition_batch_assigned_at_utc": ("2026-08-10T00:00:00+00:00"),
+                    "fish_id": "subject-test",
+                    "subject_count": 1,
+                    "subject_ids_json": None,
+                }
             ],
         )
         identities.append(identity)
@@ -124,42 +124,40 @@ class _RegistryReceiptTestDouble(Registry):
                     "dataset_id": source["dataset_id"],
                     "zarr_path": source["zarr_path"],
                     "recording_id": source["recording_id"],
-                    "experimental_session_id": source["experimental_session_id"],
-                    "experimental_session_snapshot_id": source[
-                        "experimental_session_snapshot_id"
+                    "acquisition_batch_id": source["acquisition_batch_id"],
+                    "acquisition_batch_snapshot_id": source[
+                        "acquisition_batch_snapshot_id"
                     ],
-                    "experimental_session_schema_id": source[
-                        "experimental_session_schema_id"
+                    "acquisition_batch_schema_id": source[
+                        "acquisition_batch_schema_id"
                     ],
-                    "experimental_session_creation_registry_schema_version": source[
-                        "experimental_session_schema_version"
+                    "acquisition_batch_creation_registry_schema_version": source[
+                        "acquisition_batch_schema_version"
                     ],
-                    "experimental_session_identity_status": source[
-                        "experimental_session_identity_status"
+                    "acquisition_batch_identity_status": source[
+                        "acquisition_batch_identity_status"
                     ],
-                    "experimental_session_assignment_snapshot_id": source[
+                    "acquisition_batch_assignment_snapshot_id": source[
                         "assignment_snapshot_id"
                     ],
-                    "experimental_session_assignment_batch_id": source[
+                    "acquisition_batch_assignment_batch_id": source[
                         "assignment_batch_id"
                     ],
-                    "experimental_session_assignment_revision": source[
+                    "acquisition_batch_assignment_revision": source[
                         "assignment_revision"
                     ],
-                    "experimental_session_supersedes_assignment_snapshot_id": source[
+                    "acquisition_batch_supersedes_assignment_snapshot_id": source[
                         "supersedes_assignment_snapshot_id"
                     ],
-                    "experimental_session_assignment_schema_id": source[
+                    "acquisition_batch_assignment_schema_id": source[
                         "assignment_schema_id"
                     ],
-                    "experimental_session_assignment_registry_schema_version": source[
+                    "acquisition_batch_assignment_registry_schema_version": source[
                         "assignment_schema_version"
                     ],
-                    "experimental_session_assignment_method": source[
-                        "assignment_method"
-                    ],
-                    "experimental_session_assigned_by": source["assigned_by"],
-                    "experimental_session_assigned_at_utc": source["assigned_at_utc"],
+                    "acquisition_batch_assignment_method": source["assignment_method"],
+                    "acquisition_batch_assigned_by": source["assigned_by"],
+                    "acquisition_batch_assigned_at_utc": source["assigned_at_utc"],
                     "fish_id": source["subject_id"],
                     "subject_count": source["subject_count"],
                     "subject_ids_json": json.dumps([source["subject_id"]]),
@@ -171,7 +169,7 @@ class _RegistryReceiptTestDouble(Registry):
         return None
 
 
-def test_registry_export_identity_uses_persisted_session_and_subject(
+def test_registry_export_identity_uses_persisted_batch_and_subject(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "recording_a_analysis.zarr"
@@ -186,32 +184,30 @@ def test_registry_export_identity_uses_persisted_session_and_subject(
                     "dataset_id": 17,
                     "zarr_path": str(source),
                     "recording_id": "recording_a",
-                    "experimental_session_id": "session-a",
-                    "experimental_session_snapshot_id": (
+                    "acquisition_batch_id": "session-a",
+                    "acquisition_batch_snapshot_id": (
                         "10000000-0000-4000-8000-000000000001"
                     ),
-                    "experimental_session_schema_id": (
-                        "palette.registry.experimental_session.v1"
+                    "acquisition_batch_schema_id": (
+                        "palette.registry.acquisition_batch.v1"
                     ),
-                    "experimental_session_creation_registry_schema_version": 1,
-                    "experimental_session_identity_status": "explicit",
-                    "experimental_session_assignment_snapshot_id": (
+                    "acquisition_batch_creation_registry_schema_version": 1,
+                    "acquisition_batch_identity_status": "explicit",
+                    "acquisition_batch_assignment_snapshot_id": (
                         "10000000-0000-4000-8000-000000000002"
                     ),
-                    "experimental_session_assignment_batch_id": (
+                    "acquisition_batch_assignment_batch_id": (
                         "10000000-0000-4000-8000-000000000003"
                     ),
-                    "experimental_session_assignment_revision": 1,
-                    "experimental_session_supersedes_assignment_snapshot_id": None,
-                    "experimental_session_assignment_schema_id": (
-                        "palette.registry.experimental_session_assignment.v1"
+                    "acquisition_batch_assignment_revision": 1,
+                    "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                    "acquisition_batch_assignment_schema_id": (
+                        "palette.registry.acquisition_batch_assignment.v1"
                     ),
-                    "experimental_session_assignment_registry_schema_version": 1,
-                    "experimental_session_assignment_method": "manual_test",
-                    "experimental_session_assigned_by": "test",
-                    "experimental_session_assigned_at_utc": (
-                        "2026-08-10T00:00:00+00:00"
-                    ),
+                    "acquisition_batch_assignment_registry_schema_version": 1,
+                    "acquisition_batch_assignment_method": "manual_test",
+                    "acquisition_batch_assigned_by": "test",
+                    "acquisition_batch_assigned_at_utc": ("2026-08-10T00:00:00+00:00"),
                     "fish_id": "subject-uuid",
                     "subject_count": 1,
                     "subject_ids_json": '["subject-uuid"]',
@@ -220,15 +216,61 @@ def test_registry_export_identity_uses_persisted_session_and_subject(
 
     identities = resolve_registry_export_identities(FakeRegistry(), [source])
 
-    assert identities["schema_version"] == 2
+    assert identities["schema_version"] == 3
     assert identities["registry_path"] == str(FakeRegistry.path.resolve())
     assert identities["sources"][0]["zarr_path"] == str(source.resolve())
     assert identities["sources"][0]["recording_id"] == "recording_a"
-    assert identities["sources"][0]["session_id"] == "session-a"
+    assert identities["sources"][0]["acquisition_batch_id"] == "session-a"
     assert identities["sources"][0]["assignment_snapshot_id"] == (
         "10000000-0000-4000-8000-000000000002"
     )
     assert identities["sources"][0]["subject_id"] == "subject-uuid"
+    assert identities["sources"][0]["experimental_unit_id"] == "subject-uuid"
+    assert identities["sources"][0]["experimental_unit_kind"] == "subject"
+
+
+def test_registry_export_identity_allows_unassigned_acquisition_batch(
+    tmp_path: Path,
+) -> None:
+    source = (tmp_path / "recording_unbatched_analysis.zarr").resolve()
+
+    class FakeRegistry:
+        path = tmp_path / "registry.sqlite"
+
+        def query_datasets(self, **_kwargs):
+            return [
+                {
+                    "dataset_id": 19,
+                    "zarr_path": str(source),
+                    "recording_id": "recording_unbatched",
+                    "acquisition_batch_id": None,
+                    "acquisition_batch_snapshot_id": None,
+                    "acquisition_batch_schema_id": None,
+                    "acquisition_batch_creation_registry_schema_version": None,
+                    "acquisition_batch_identity_status": "missing",
+                    "acquisition_batch_assignment_snapshot_id": None,
+                    "acquisition_batch_assignment_batch_id": None,
+                    "acquisition_batch_assignment_revision": None,
+                    "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                    "acquisition_batch_assignment_schema_id": None,
+                    "acquisition_batch_assignment_registry_schema_version": None,
+                    "acquisition_batch_assignment_method": None,
+                    "acquisition_batch_assigned_by": None,
+                    "acquisition_batch_assigned_at_utc": None,
+                    "fish_id": "subject-unbatched",
+                    "subject_count": 1,
+                    "subject_ids_json": '["subject-unbatched"]',
+                }
+            ]
+
+    identities = resolve_registry_export_identities(FakeRegistry(), [source])
+    identity = identities["sources"][0]
+
+    assert identity["experimental_unit_id"] == "subject-unbatched"
+    assert identity["experimental_unit_kind"] == "subject"
+    assert identity["acquisition_batch_identity_status"] == "missing"
+    assert identity["acquisition_batch_id"] is None
+    assert identity["assignment_snapshot_id"] is None
 
 
 def test_registry_export_identity_rejects_multi_subject_source(
@@ -246,32 +288,30 @@ def test_registry_export_identity_rejects_multi_subject_source(
                     "dataset_id": 18,
                     "zarr_path": str(source),
                     "recording_id": "recording_multi",
-                    "experimental_session_id": "session-multi",
-                    "experimental_session_snapshot_id": (
+                    "acquisition_batch_id": "session-multi",
+                    "acquisition_batch_snapshot_id": (
                         "20000000-0000-4000-8000-000000000001"
                     ),
-                    "experimental_session_schema_id": (
-                        "palette.registry.experimental_session.v1"
+                    "acquisition_batch_schema_id": (
+                        "palette.registry.acquisition_batch.v1"
                     ),
-                    "experimental_session_creation_registry_schema_version": 1,
-                    "experimental_session_identity_status": "explicit",
-                    "experimental_session_assignment_snapshot_id": (
+                    "acquisition_batch_creation_registry_schema_version": 1,
+                    "acquisition_batch_identity_status": "explicit",
+                    "acquisition_batch_assignment_snapshot_id": (
                         "20000000-0000-4000-8000-000000000002"
                     ),
-                    "experimental_session_assignment_batch_id": (
+                    "acquisition_batch_assignment_batch_id": (
                         "20000000-0000-4000-8000-000000000003"
                     ),
-                    "experimental_session_assignment_revision": 1,
-                    "experimental_session_supersedes_assignment_snapshot_id": None,
-                    "experimental_session_assignment_schema_id": (
-                        "palette.registry.experimental_session_assignment.v1"
+                    "acquisition_batch_assignment_revision": 1,
+                    "acquisition_batch_supersedes_assignment_snapshot_id": None,
+                    "acquisition_batch_assignment_schema_id": (
+                        "palette.registry.acquisition_batch_assignment.v1"
                     ),
-                    "experimental_session_assignment_registry_schema_version": 1,
-                    "experimental_session_assignment_method": "manual_test",
-                    "experimental_session_assigned_by": "test",
-                    "experimental_session_assigned_at_utc": (
-                        "2026-08-10T00:00:00+00:00"
-                    ),
+                    "acquisition_batch_assignment_registry_schema_version": 1,
+                    "acquisition_batch_assignment_method": "manual_test",
+                    "acquisition_batch_assigned_by": "test",
+                    "acquisition_batch_assigned_at_utc": ("2026-08-10T00:00:00+00:00"),
                     "fish_id": "subject-a",
                     "subject_count": 2,
                     "subject_ids_json": '["subject-a","subject-b"]',
@@ -313,7 +353,9 @@ def test_unreadable_requested_source_fails_without_partial_publication(
 ) -> None:
     output = tmp_path / "exports"
 
-    with pytest.raises(ValueError, match="Requested analytics source could not be opened"):
+    with pytest.raises(
+        ValueError, match="Requested analytics source could not be opened"
+    ):
         export_sources(
             [tmp_path / "missing_analysis.zarr"],
             output_root=output,
@@ -539,7 +581,9 @@ def _make_source_zarr(path: Path) -> Path:
         }
     )
 
-    movement_metrics = bout_kin.create_group("movement").create_group("per_bout_metrics")
+    movement_metrics = bout_kin.create_group("movement").create_group(
+        "per_bout_metrics"
+    )
     _array(movement_metrics, "bout_id", [0, 1])
     _array(movement_metrics, "source_start_frame", [20, 140])
     _array(movement_metrics, "source_end_frame", [30, 150])
@@ -732,7 +776,11 @@ def _convert_bout_kinematics_fixture_to_compact_v2(path: Path) -> None:
         bout_kin,
         "movement_metrics",
         movement,
-        attrs={"schema_version": 7, "layout": "compact_tabular_v2", "analysis_level": "movement"},
+        attrs={
+            "schema_version": 7,
+            "layout": "compact_tabular_v2",
+            "analysis_level": "movement",
+        },
     )
 
     heading_rows = []
@@ -825,7 +873,9 @@ def _write_collection_manifest(path: Path, source: Path) -> dict:
 def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) -> None:
     source = _make_source_zarr(tmp_path / "recording_a_analysis.zarr")
     output = tmp_path / "exports" / "palette_analytics"
-    collection_manifest = _write_collection_manifest(tmp_path / "collection.manifest.json", source)
+    collection_manifest = _write_collection_manifest(
+        tmp_path / "collection.manifest.json", source
+    )
 
     manifest = export_sources(
         [source],
@@ -849,18 +899,30 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert payload["row_counts_by_table"]["swim_bout_metrics"] == 2
     assert payload["export_parameters"]["legacy_compatibility"] is True
     assert payload["collection_manifest"]["collection_id"] == "collection_test"
-    assert payload["collection_manifest"]["manifest_sha256"] == collection_manifest["manifest_sha256"]
+    assert (
+        payload["collection_manifest"]["manifest_sha256"]
+        == collection_manifest["manifest_sha256"]
+    )
 
     step_rows = _read_dataset(output, "stimulus_steps", "test_export")
     protocol_hash = step_rows[0]["protocol_signature_hash"]
     assert step_rows[0]["collection_id"] == "collection_test"
-    assert step_rows[0]["collection_manifest_sha256"] == collection_manifest["manifest_sha256"]
+    assert (
+        step_rows[0]["collection_manifest_sha256"]
+        == collection_manifest["manifest_sha256"]
+    )
     assert step_rows[0]["derived_protocol_hash"] == protocol_hash
     assert step_rows[1]["protocol_signature_hash"] == protocol_hash
-    assert step_rows[0]["protocol_mode_sequence"] == "MOVING_GRATING -> CONCENTRIC_GRATING"
+    assert (
+        step_rows[0]["protocol_mode_sequence"] == "MOVING_GRATING -> CONCENTRIC_GRATING"
+    )
 
-    response_rows = _read_dataset(output, "stimulus_response_per_fish_step", "test_export")
-    moving = next(row for row in response_rows if row["stimulus_mode"] == "MOVING_GRATING")
+    response_rows = _read_dataset(
+        output, "stimulus_response_per_fish_step", "test_export"
+    )
+    moving = next(
+        row for row in response_rows if row["stimulus_mode"] == "MOVING_GRATING"
+    )
     assert moving["protocol_signature_hash"] == protocol_hash
     assert isinstance(protocol_hash, str)
     assert len(protocol_hash) == 64
@@ -875,7 +937,9 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     np.testing.assert_allclose(moving["omr_path_index"], 0.75)
     assert moving["first_aligned_bout_latency_s"] is None
 
-    radial = next(row for row in response_rows if row["stimulus_mode"] == "CONCENTRIC_GRATING")
+    radial = next(
+        row for row in response_rows if row["stimulus_mode"] == "CONCENTRIC_GRATING"
+    )
     assert radial["omr_family"] == "concentric_radial_omr"
     assert radial["first_aligned_bout_latency_s"] == 0.2
     assert radial["radial_path_index"] == -0.5
@@ -889,7 +953,9 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
 
     bout_kin_rows = _read_dataset(output, "bout_kinematics_metrics", "test_export")
     assert len(bout_kin_rows) == 6
-    heading_rows = [row for row in bout_kin_rows if row["measurement_level"] == "heading_smoothed"]
+    heading_rows = [
+        row for row in bout_kin_rows if row["measurement_level"] == "heading_smoothed"
+    ]
     assert len(heading_rows) == 2
     assert heading_rows[0]["measurement_family"] == "heading"
     assert heading_rows[0]["is_default_heading_level"] is True
@@ -901,7 +967,9 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert heading_rows[1]["step_index"] == 1
     assert heading_rows[0]["net_delta_heading_deg"] == 12.5
     assert heading_rows[1]["abs_net_delta_heading_deg"] == 30.0
-    movement_rows = [row for row in bout_kin_rows if row["measurement_level"] == "movement"]
+    movement_rows = [
+        row for row in bout_kin_rows if row["measurement_level"] == "movement"
+    ]
     assert len(movement_rows) == 2
     assert movement_rows[0]["measurement_family"] == "movement"
     assert movement_rows[0]["physical_active_duration_s"] == 0.12
@@ -983,9 +1051,7 @@ def test_export_cross_recording_analytics_keeps_unsealed_chaser_tables_unavailab
         export_run_id="chaser_fail_closed",
         tables=(CHASER_SPATIAL_TABLE, *derived_tables),
         jobs=1,
-        registry=_RegistryReceiptTestDouble(
-            _registry_receipt(source, "goodcopbadcop")
-        ),
+        registry=_RegistryReceiptTestDouble(_registry_receipt(source, "goodcopbadcop")),
     )
 
     assert manifest["row_counts_by_table"][CHASER_SPATIAL_TABLE] == 12
@@ -999,12 +1065,10 @@ def test_export_cross_recording_analytics_keeps_unsealed_chaser_tables_unavailab
     }
     assert set(unavailable) == set(derived_tables)
     assert all(
-        diagnostic["status"] == "unavailable"
-        for diagnostic in unavailable.values()
+        diagnostic["status"] == "unavailable" for diagnostic in unavailable.values()
     )
     assert all(
-        "no independently verified sealed semantic authority"
-        in diagnostic["reason"]
+        "no independently verified sealed semantic authority" in diagnostic["reason"]
         for diagnostic in unavailable.values()
     )
     assert all(
@@ -1047,12 +1111,17 @@ def test_export_cross_recording_analytics_uses_bout_kinematics_source_refs_fallb
     assert manifest["row_counts_by_table"]["bout_kinematics_metrics"] == 6
     bout_kin_rows = _read_dataset(output, "bout_kinematics_metrics", "source_refs")
     assert all(row["source_swim_bout_run"] == "bouts_test" for row in bout_kin_rows)
-    assert all(row["source_swim_bout_speed_level"] == "speed_exponential" for row in bout_kin_rows)
+    assert all(
+        row["source_swim_bout_speed_level"] == "speed_exponential"
+        for row in bout_kin_rows
+    )
     assert all(row["source_track_kinematics_run"] == "tk_test" for row in bout_kin_rows)
     assert all(row["track_id"] == 0 for row in bout_kin_rows)
 
 
-def test_export_cross_recording_analytics_reads_compact_stimulus_response(tmp_path: Path) -> None:
+def test_export_cross_recording_analytics_reads_compact_stimulus_response(
+    tmp_path: Path,
+) -> None:
     source = _make_source_zarr(tmp_path / "recording_compact_response_analysis.zarr")
     _replace_stimulus_response_fixture_with_compact_v2(source)
     output = tmp_path / "exports" / "palette_analytics"
@@ -1074,19 +1143,27 @@ def test_export_cross_recording_analytics_reads_compact_stimulus_response(tmp_pa
     assert summary_rows[0]["global_fish_count"] == 1
     assert summary_rows[0]["total_distance_mm_sum"] == 25.0
 
-    response_rows = _read_dataset(output, "stimulus_response_per_fish_step", "compact_response")
-    moving = next(row for row in response_rows if row["stimulus_mode"] == "MOVING_GRATING")
+    response_rows = _read_dataset(
+        output, "stimulus_response_per_fish_step", "compact_response"
+    )
+    moving = next(
+        row for row in response_rows if row["stimulus_mode"] == "MOVING_GRATING"
+    )
     assert moving["omr_family"] == "moving_grating_omr"
     assert moving["omr_path_index"] == 0.75
     assert moving["first_aligned_bout_latency_s"] is None
 
-    radial = next(row for row in response_rows if row["stimulus_mode"] == "CONCENTRIC_GRATING")
+    radial = next(
+        row for row in response_rows if row["stimulus_mode"] == "CONCENTRIC_GRATING"
+    )
     assert radial["omr_family"] == "concentric_radial_omr"
     np.testing.assert_allclose(radial["radial_path_index"], -0.5)
     np.testing.assert_allclose(radial["first_aligned_bout_latency_s"], 0.2)
 
 
-def test_export_cross_recording_analytics_reads_compact_bout_kinematics(tmp_path: Path) -> None:
+def test_export_cross_recording_analytics_reads_compact_bout_kinematics(
+    tmp_path: Path,
+) -> None:
     source = _make_source_zarr(tmp_path / "recording_compact_analysis.zarr")
     _convert_bout_kinematics_fixture_to_compact_v2(source)
     output = tmp_path / "exports" / "palette_analytics"
@@ -1103,8 +1180,14 @@ def test_export_cross_recording_analytics_reads_compact_bout_kinematics(tmp_path
     assert manifest["row_counts_by_table"]["bout_kinematics_metrics"] == 6
     rows = _read_dataset(output, "bout_kinematics_metrics", "compact_export")
     assert len(rows) == 6
-    assert {row["measurement_level"] for row in rows} == {"movement", "heading_smoothed", "heading_raw"}
-    heading_rows = [row for row in rows if row["measurement_level"] == "heading_smoothed"]
+    assert {row["measurement_level"] for row in rows} == {
+        "movement",
+        "heading_smoothed",
+        "heading_raw",
+    }
+    heading_rows = [
+        row for row in rows if row["measurement_level"] == "heading_smoothed"
+    ]
     assert len(heading_rows) == 2
     assert heading_rows[0]["measurement_family"] == "heading"
     assert heading_rows[0]["is_default_heading_level"] is True
@@ -1136,7 +1219,9 @@ def test_export_cross_recording_analytics_can_limit_tables(tmp_path: Path) -> No
     assert rows[0]["protocol_step_count"] == 2
 
 
-def test_export_cross_recording_analytics_can_index_registry(tmp_path: Path, capsys) -> None:
+def test_export_cross_recording_analytics_can_index_registry(
+    tmp_path: Path, capsys
+) -> None:
     source = _make_source_zarr(tmp_path / "recording_c_analysis.zarr")
     output = tmp_path / "exports" / "palette_analytics"
     registry_path = tmp_path / "registry.sqlite"
