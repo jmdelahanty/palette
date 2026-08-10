@@ -3,7 +3,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-08-09
+last_verified: 2026-08-10
 implementation: partial
 -->
 
@@ -16,8 +16,12 @@ gh CLI, live-registry reads); everything else is from code reading by review age
 
 Queue refresh: re-verified read-only at `29598056` on 2026-08-09 after the CI
 reconciliation. Status paragraphs below are current; original findings remain as
-historical evidence. The current full reconciliation CI is green. Scientific findings
-W1.5 remains open; W1.4 is implemented in this checkpoint.
+historical evidence. The prior full reconciliation CI is green. The 2026-08-10 local
+production-readiness integration implements W1.4, W1.5, and the W1.6 guard described
+below, but is not production activation: no live registry assignments, cohort export,
+selector, or scientific publication was changed. Full-cohort rollout remains blocked
+until recordings have explicit experimental-session assignments and missing subject
+identities are repaired or excluded by an auditable cohort decision.
 
 Known-good patterns to copy are named per item. Do not invent new mechanisms where a
 proven one exists in-repo.
@@ -190,23 +194,42 @@ report which recordings resolved `circle` vs `dish_mask`. This determines whethe
 published escape/pursuit numbers need recomputation.
 Acceptance: a table (recording_id → geometry source) in a diagnostics doc.
 
-**W1.4 — Real FDR families + session clustering in group_statistics.**
-Status: **implemented on the design-review queue branch.** The statistics registry now
+**W1.4 — Real FDR families + session clustering in group_statistics. [IMPLEMENTED; ROLLOUT BLOCKED]**
+Status: **implemented on the design-review queue branch; live cohort rollout remains
+blocked.** The statistics registry now
 requires every metric to be exactly one of primary or exploratory, and the
 multiple-comparison family is `analysis_tier|metric_family`. Both naive and
 session-random-intercept estimates are persisted; a non-identifiable or failed mixed
 model is explicit `cluster_status=unavailable` and never falls back to an unclustered
-claim. The exact statistics Arrow contract carries clustered p/q values, confidence
-intervals, variance components, and ICC.
+claim. Naive and clustered inference use one eligibility gate, clustered inference has
+an explicit minimum-session policy, and actual FDR-family test counts/status are
+persisted. The exact statistics Arrow contract carries clustered p/q values, confidence
+intervals, variance components, and ICC. The viewer prefers a computed clustered result
+and explicitly reports clustering as unavailable instead of silently presenting naive
+p/q values as the current result.
 
 Chaser/baseline analytics rows now require registry-derived `session_id` and
-`subject_id`. `session_id` is `dataset_context_current.recording_started_utc`, which
-groups simultaneous arena recordings; it is deliberately not the arena-specific
-registry `session_uuid` and is never parsed from a recording name. `subject_id` uses
-the registry's effective subject identity (`subject_id`, with the maintained legacy
-fish-identity fallback). Exact export manifests bind those sources and fail closed
-when the source set or identity is missing. Baseline-strategy artifacts carry the same
-identity through all four derived tables.
+`subject_id`. `session_id` is now an explicitly created registry experimental-session
+entity, never an acquisition timestamp, name parse, path parse, or arena-local
+`session_uuid`. Assignment revisions are append-only and corrections use compare-and-
+swap against the current assignment snapshot. Existing registry rows remain explicitly
+unassigned; no heuristic backfill exists. The current exporter fails closed unless each
+source has one explicit session assignment and exactly one subject.
+
+The immutable export boundary is versioned as export schema v3 / Arrow envelope v2.
+The publisher resolves identities through an exact `Registry` instance or SQLite path;
+callers cannot supply a self-authored receipt. Its digest-bound receipt records session
+entity and assignment snapshots, schema versions, assignment revision/supersession,
+registry path, source path, and subject cardinality. Pre-visibility and published-
+payload validation compare actual Parquet row identities with the receipt. Historical
+v2 exports remain behind a self-contained versioned validator. Baseline-strategy and
+training-response v3 artifacts preserve the same session/subject identities.
+
+Rollout blocker: live recordings must be assigned to explicit experimental sessions,
+and known recordings lacking subject identity must be repaired or excluded with an
+auditable cohort receipt. The exporter intentionally refuses to synthesize either
+identity. Multi-subject sources also fail closed until a track/instance-to-subject
+binding contract exists.
 
 Acceptance evidence: `test_group_statistics.py` covers a computed random-intercept
 fit/ICC, explicit non-identifiability, the 36-result exploratory FDR family, and
@@ -228,7 +251,24 @@ Promote the session random-intercept + ICC fit from that script into
 Acceptance: no size-1 families for exploratory metrics; `session_id` a real exported
 column; clustered and naive estimates both reported.
 
-**W1.5 — Denominator and default hygiene in epoch summaries.**
+**W1.5 — Denominator and default hygiene in epoch summaries. [IMPLEMENTED]**
+Status: **implemented through current v2 producer and consumer contracts.** Authoritative
+epoch summaries require finite positive and matching FPS, the canonical offline track,
+an explicit physical speed level, a verified swim-bout source bound to that track, and
+aligned `sample_valid`/`transition_valid` arrays. Speed and path metrics use the joint
+validity mask. Bout and inter-bout rates use persisted valid-tracked duration, and wall
+fractions carry explicit denominator counts and semantics. All eleven validity and
+denominator receipts are required by the exact logical/Arrow export contract.
+
+Near-field occupancy also advances to v2: entry counts are observed transitions only,
+invalid gaps and phase boundaries have explicit censor semantics, and entry rates use
+valid tracked duration. Seven per-phase numerator/duration/censor fields and five
+summary-policy fields are required by export validation. Missing, wrong-shaped,
+wrong-dtype, negative, or non-finite evidence fails closed. Epoch and near-field v1
+remain available only through explicit legacy compatibility paths; current profiles,
+catalogs, exporters, and viewers select v2.
+
+Original findings:
 - `chaser_epoch_behavior_summary.py:295-297`: silent `"filtered"` speed-level default
   → require explicit level or fail.
 - `chaser_epoch_behavior_summary.py:663`: `bout_rate` uses wall-clock window duration;
@@ -243,6 +283,16 @@ column; clustered and naive estimates both reported.
   table (~:464-477).
 Acceptance: no silent speed-level default; bout_rate denominator is valid-tracked
 time; exported wall metrics carry denominator declarations.
+
+**W1.6 — Guard standalone GoodCopBadCop inferential scripts. [IMPLEMENTED AS A SAFETY BOUNDARY]**
+All twelve standalone analysis CLIs and both inferential plotting CLIs now reject their
+default invocation and require explicit `--exploratory-only` acknowledgement. Accepted
+runs emit machine-readable publication-ineligible status, declare that multiplicity is
+not controlled, watermark figures, use `_exploratory` artifact names, and write sidecar
+receipts. Historical calculations were not silently reinterpreted. Distance-resolved,
+trial/habituation, escape, mediation, and visit-clustered analyses remain scientific
+migration work documented in the standalone-inference inventory; until migrated, their
+outputs cannot be presented as registered confirmatory evidence.
 
 ---
 
