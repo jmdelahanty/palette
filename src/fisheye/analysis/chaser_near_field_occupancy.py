@@ -52,18 +52,21 @@ from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, wr
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.shared.system_metadata import get_git_info
 
-SCHEMA_ID = "palette.chaser.near_field_occupancy.v1"
-SCHEMA_VERSION = 1
+LEGACY_SCHEMA_ID = "palette.chaser.near_field_occupancy.v1"
+LEGACY_SCHEMA_VERSION = 1
+LEGACY_METHOD_VERSION = "2"
+SCHEMA_ID = "palette.chaser.near_field_occupancy.v2"
+SCHEMA_VERSION = 2
 METHOD = "chaser_near_field_occupancy"
-METHOD_VERSION = "2"
+METHOD_VERSION = "3"
 COMPONENT_PARENT_NAME = "chaser_near_field_occupancy"
-DEFAULT_COMPONENT_NAME = "chaser_relative_near_field_v2"
+DEFAULT_COMPONENT_NAME = "chaser_relative_near_field_v3"
 RADIAL_DENSITY_PNG_ARTIFACT_NAME = "chaser_near_field_occupancy_radial_density_png"
 DISTANCE_CDF_PNG_ARTIFACT_NAME = "chaser_near_field_occupancy_distance_cdf_png"
 SUMMARY_PNG_ARTIFACT_NAME = "chaser_near_field_occupancy_summary_png"
 INTERACTIVE_ARTIFACT_NAME = "chaser_near_field_occupancy_interactive"
 INTERACTIVE_RENDERER = "palette-chaser-near-field-occupancy-v1"
-INTERACTIVE_SPEC_SCHEMA_ID = "palette.chaser.near_field_occupancy.interactive_spec.v1"
+INTERACTIVE_SPEC_SCHEMA_ID = "palette.chaser.near_field_occupancy.interactive_spec.v2"
 PHASE_LABELS = ("pre_static", "post_static")
 DEFAULT_PERCENTILES = (5.0, 10.0)
 DEFAULT_R_ZONE_MM = 5.0
@@ -77,6 +80,36 @@ IMMOBILITY_SIGNAL_MODES = (
     "verified_track_motion",
     "raw_centroid_explicit",
 )
+VALID_TRACKED_VISIT_POLICY = "valid_tracked_observed_transitions_v2"
+LEGACY_VISIT_POLICY = "legacy_epoch_gap_split_v1"
+VISIT_POLICIES = (VALID_TRACKED_VISIT_POLICY, LEGACY_VISIT_POLICY)
+
+
+@dataclass(frozen=True)
+class HysteresisVisitResult:
+    """Near-zone visit statistics and their exact observation basis."""
+
+    entry_count: int
+    entry_rate_per_min: float
+    complete_visit_median_dwell_s: float
+    complete_visit_total_dwell_s: float
+    valid_sample_count: int
+    valid_tracked_duration_s: float
+    rate_denominator_duration_s: float
+    invalid_gap_count: int
+    censor_event_count: int
+    boundary_censor_event_count: int
+    invalid_gap_censor_event_count: int
+    policy_version: str
+    rate_denominator_semantics: str
+
+    def __iter__(self):
+        """Retain the historical four-value unpacking API during migration."""
+
+        yield self.entry_count
+        yield self.entry_rate_per_min
+        yield self.complete_visit_median_dwell_s
+        yield self.complete_visit_total_dwell_s
 
 
 @dataclass(frozen=True)
@@ -127,6 +160,7 @@ class ChaserNearFieldOccupancyResult:
     r_zone_mm: float
     r_in_mm: float
     r_out_mm: float
+    visit_policy_version: str
     percentile_values: np.ndarray
     radial_bin_edges_mm: np.ndarray
     radial_bin_centers_mm: np.ndarray
@@ -153,9 +187,16 @@ class ChaserNearFieldOccupancyResult:
     near_zone_density_per_mm2: np.ndarray
     near_zone_available_area_mm2: np.ndarray
     near_zone_entry_count: np.ndarray
+    near_zone_entry_rate_numerator_count: np.ndarray
+    near_zone_valid_tracked_duration_s: np.ndarray
+    near_zone_entry_rate_denominator_duration_s: np.ndarray
     near_zone_entry_rate_per_min: np.ndarray
     near_zone_visit_median_dwell_s: np.ndarray
     near_zone_visit_total_dwell_s: np.ndarray
+    near_zone_invalid_gap_count: np.ndarray
+    near_zone_censor_event_count: np.ndarray
+    near_zone_boundary_censor_event_count: np.ndarray
+    near_zone_invalid_gap_censor_event_count: np.ndarray
     valid_distance_count: np.ndarray
     missing_frame_count: np.ndarray
     tracking_dropout_fraction: np.ndarray
@@ -488,26 +529,164 @@ def compute_hysteresis_visits(
     fps: float,
     r_in_mm: float,
     r_out_mm: float,
-) -> tuple[int, float, float, float]:
-    """Count near-zone entries with enter/exit hysteresis."""
+    policy_version: str = VALID_TRACKED_VISIT_POLICY,
+) -> HysteresisVisitResult:
+    """Count observable near-zone entries with explicit censor semantics.
+
+    The maintained policy counts an entry only after a valid outside sample has
+    armed the transition and a later valid sample crosses ``r_in_mm``. Invalid
+    gaps reset the transition state to unknown: resuming inside the near zone is
+    censored and cannot manufacture another entry. Entry rate is normalized by
+    valid fish-to-chaser tracking time, not phase wall-clock time.
+
+    ``legacy_epoch_gap_split_v1`` is retained only for explicit historical
+    reproduction. It closes visits on invalid samples, treats resumed inside
+    samples as new entries, and uses the complete phase duration.
+    """
 
     if not float(r_out_mm) > float(r_in_mm):
         raise ValueError("r_out_mm must be greater than r_in_mm.")
+    normalized_policy = str(policy_version).strip()
+    if normalized_policy not in VISIT_POLICIES:
+        raise ValueError(
+            f"Unsupported visit policy {policy_version!r}; expected one of: "
+            f"{', '.join(VISIT_POLICIES)}."
+        )
+    if normalized_policy == LEGACY_VISIT_POLICY:
+        return _compute_legacy_hysteresis_visits(
+            distance_mm,
+            valid,
+            fps=fps,
+            r_in_mm=r_in_mm,
+            r_out_mm=r_out_mm,
+        )
+    safe_fps = float(fps)
+    if not math.isfinite(safe_fps) or safe_fps <= 0:
+        raise ValueError("fps must be finite and positive for valid-time visit rates.")
+    distances = np.asarray(distance_mm, dtype=np.float64).reshape(-1)
+    valid_arr = np.asarray(valid, dtype=bool).reshape(-1)
+    n = min(distances.shape[0], valid_arr.shape[0])
+    observed_valid = valid_arr[:n] & np.isfinite(distances[:n])
+    valid_sample_count = int(np.count_nonzero(observed_valid))
+    valid_tracked_duration_s = float(valid_sample_count) / safe_fps
+
+    state = "unknown"
+    unknown_origin = "phase_start"
+    frames_in_complete_candidate = 0
+    complete_dwell_frames: list[int] = []
+    entry_count = 0
+    invalid_gap_count = 0
+    censor_event_count = 0
+    boundary_censor_event_count = 0
+    invalid_gap_censor_event_count = 0
+    in_invalid_gap = False
+    for idx in range(n):
+        is_valid = bool(observed_valid[idx])
+        if not is_valid:
+            if not in_invalid_gap:
+                invalid_gap_count += 1
+            in_invalid_gap = True
+            if state in ("inside", "censored_inside"):
+                censor_event_count += 1
+                invalid_gap_censor_event_count += 1
+            state = "unknown"
+            unknown_origin = "invalid_gap"
+            frames_in_complete_candidate = 0
+            continue
+        in_invalid_gap = False
+        distance = float(distances[idx])
+        if state == "unknown":
+            if distance > float(r_out_mm):
+                state = "outside"
+            elif distance < float(r_in_mm):
+                state = "censored_inside"
+                censor_event_count += 1
+                if unknown_origin == "phase_start":
+                    boundary_censor_event_count += 1
+                else:
+                    invalid_gap_censor_event_count += 1
+            continue
+        if state == "outside":
+            if distance < float(r_in_mm):
+                state = "inside"
+                entry_count += 1
+                frames_in_complete_candidate = 1
+            continue
+        if state == "inside":
+            if distance > float(r_out_mm):
+                complete_dwell_frames.append(frames_in_complete_candidate)
+                state = "outside"
+                frames_in_complete_candidate = 0
+            else:
+                frames_in_complete_candidate += 1
+            continue
+        if state == "censored_inside" and distance > float(r_out_mm):
+            state = "outside"
+
+    if state in ("inside", "censored_inside"):
+        censor_event_count += 1
+        boundary_censor_event_count += 1
+
+    dwell_s = (
+        np.asarray(complete_dwell_frames, dtype=np.float64) / safe_fps
+        if complete_dwell_frames
+        else np.asarray([], dtype=np.float64)
+    )
+    rate = (
+        float(entry_count) / (valid_tracked_duration_s / 60.0)
+        if valid_tracked_duration_s > 0
+        else math.nan
+    )
+    median_dwell = float(np.nanmedian(dwell_s)) if dwell_s.size else math.nan
+    total_dwell = float(np.nansum(dwell_s)) if dwell_s.size else 0.0
+    return HysteresisVisitResult(
+        entry_count=entry_count,
+        entry_rate_per_min=rate,
+        complete_visit_median_dwell_s=median_dwell,
+        complete_visit_total_dwell_s=total_dwell,
+        valid_sample_count=valid_sample_count,
+        valid_tracked_duration_s=valid_tracked_duration_s,
+        rate_denominator_duration_s=valid_tracked_duration_s,
+        invalid_gap_count=invalid_gap_count,
+        censor_event_count=censor_event_count,
+        boundary_censor_event_count=boundary_censor_event_count,
+        invalid_gap_censor_event_count=invalid_gap_censor_event_count,
+        policy_version=VALID_TRACKED_VISIT_POLICY,
+        rate_denominator_semantics="valid_fish_to_chaser_distance_samples_divided_by_fps",
+    )
+
+
+def _compute_legacy_hysteresis_visits(
+    distance_mm: np.ndarray,
+    valid: np.ndarray,
+    *,
+    fps: float,
+    r_in_mm: float,
+    r_out_mm: float,
+) -> HysteresisVisitResult:
+    """Reproduce the v1 epoch-denominator and gap-splitting behavior."""
+
     safe_fps = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else 1.0
     distances = np.asarray(distance_mm, dtype=np.float64).reshape(-1)
     valid_arr = np.asarray(valid, dtype=bool).reshape(-1)
     n = min(distances.shape[0], valid_arr.shape[0])
+    observed_valid = valid_arr[:n] & np.isfinite(distances[:n])
     in_visit = False
     frames_in_visit = 0
     dwell_frames: list[int] = []
+    invalid_gap_count = 0
+    in_invalid_gap = False
     for idx in range(n):
-        is_valid = bool(valid_arr[idx]) and math.isfinite(float(distances[idx]))
-        if not is_valid:
+        if not bool(observed_valid[idx]):
+            if not in_invalid_gap:
+                invalid_gap_count += 1
+            in_invalid_gap = True
             if in_visit:
                 dwell_frames.append(frames_in_visit)
                 in_visit = False
                 frames_in_visit = 0
             continue
+        in_invalid_gap = False
         distance = float(distances[idx])
         if not in_visit:
             if distance < float(r_in_mm):
@@ -524,12 +703,38 @@ def compute_hysteresis_visits(
         dwell_frames.append(frames_in_visit)
 
     count = len(dwell_frames)
-    dwell_s = np.asarray(dwell_frames, dtype=np.float64) / safe_fps if dwell_frames else np.asarray([], dtype=np.float64)
+    dwell_s = (
+        np.asarray(dwell_frames, dtype=np.float64) / safe_fps
+        if dwell_frames
+        else np.asarray([], dtype=np.float64)
+    )
     total_duration_s = float(n) / safe_fps if n > 0 else math.nan
-    rate = float(count) / (total_duration_s / 60.0) if count > 0 and math.isfinite(total_duration_s) and total_duration_s > 0 else 0.0
-    median_dwell = float(np.nanmedian(dwell_s)) if dwell_s.size else math.nan
-    total_dwell = float(np.nansum(dwell_s)) if dwell_s.size else 0.0
-    return count, rate, median_dwell, total_dwell
+    rate = (
+        float(count) / (total_duration_s / 60.0)
+        if count > 0 and math.isfinite(total_duration_s) and total_duration_s > 0
+        else 0.0
+    )
+    return HysteresisVisitResult(
+        entry_count=count,
+        entry_rate_per_min=rate,
+        complete_visit_median_dwell_s=(
+            float(np.nanmedian(dwell_s)) if dwell_s.size else math.nan
+        ),
+        complete_visit_total_dwell_s=(
+            float(np.nansum(dwell_s)) if dwell_s.size else 0.0
+        ),
+        valid_sample_count=int(np.count_nonzero(observed_valid)),
+        valid_tracked_duration_s=(
+            float(np.count_nonzero(observed_valid)) / safe_fps
+        ),
+        rate_denominator_duration_s=total_duration_s,
+        invalid_gap_count=invalid_gap_count,
+        censor_event_count=0,
+        boundary_censor_event_count=0,
+        invalid_gap_censor_event_count=0,
+        policy_version=LEGACY_VISIT_POLICY,
+        rate_denominator_semantics="all_effective_phase_frames_divided_by_fps",
+    )
 
 
 def _rectangle_annulus_area_mm2(
@@ -816,6 +1021,7 @@ def _compute_near_field_arrays(
     r_zone_mm: float,
     r_in_mm: float,
     r_out_mm: float,
+    visit_policy_version: str,
     perimeter_band_mm: float,
     immobility_speed_threshold_mm_s: float,
     immobility_speed_mm_s: np.ndarray | None,
@@ -826,7 +1032,13 @@ def _compute_near_field_arrays(
     n_radial_bins = int(radial_bin_edges_mm.shape[0] - 1)
     n_thresholds = int(cdf_thresholds_mm.shape[0])
     total_frames = int(fish_xy.shape[0])
-    safe_fps = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else 1.0
+    safe_fps = float(fps)
+    if not math.isfinite(safe_fps) or safe_fps <= 0:
+        if visit_policy_version == VALID_TRACKED_VISIT_POLICY:
+            raise ValueError(
+                "fps must be finite and positive for valid-time near-field metrics."
+            )
+        safe_fps = 1.0
     by_chaser_index = {
         int(value): idx
         for idx, value in enumerate(np.asarray(chaser_indices).reshape(-1))
@@ -857,9 +1069,16 @@ def _compute_near_field_arrays(
     near_density = np.full(shape, np.nan, dtype=np.float32)
     near_area = np.full(shape, np.nan, dtype=np.float32)
     entry_count = np.zeros(shape, dtype=np.int64)
+    entry_rate_numerator_count = np.zeros(shape, dtype=np.int64)
+    valid_tracked_duration_s = np.zeros(shape, dtype=np.float64)
+    entry_rate_denominator_duration_s = np.zeros(shape, dtype=np.float64)
     entry_rate = np.full(shape, np.nan, dtype=np.float32)
     visit_median_dwell = np.full(shape, np.nan, dtype=np.float32)
     visit_total_dwell = np.full(shape, np.nan, dtype=np.float32)
+    invalid_gap_count = np.zeros(shape, dtype=np.int64)
+    censor_event_count = np.zeros(shape, dtype=np.int64)
+    boundary_censor_event_count = np.zeros(shape, dtype=np.int64)
+    invalid_gap_censor_event_count = np.zeros(shape, dtype=np.int64)
     valid_distance_count = np.zeros(shape, dtype=np.int64)
     missing_frame_count = np.zeros(shape, dtype=np.int64)
     dropout = np.full(shape, np.nan, dtype=np.float32)
@@ -1044,11 +1263,33 @@ def _compute_near_field_arrays(
                 fps=safe_fps,
                 r_in_mm=float(r_in_mm),
                 r_out_mm=float(r_out_mm),
+                policy_version=visit_policy_version,
             )
-            entry_count[p_idx, o_idx] = int(visit[0])
-            entry_rate[p_idx, o_idx] = float(visit[1])
-            visit_median_dwell[p_idx, o_idx] = float(visit[2]) if math.isfinite(float(visit[2])) else np.nan
-            visit_total_dwell[p_idx, o_idx] = float(visit[3])
+            entry_count[p_idx, o_idx] = int(visit.entry_count)
+            entry_rate_numerator_count[p_idx, o_idx] = int(visit.entry_count)
+            valid_tracked_duration_s[p_idx, o_idx] = float(
+                visit.valid_tracked_duration_s
+            )
+            entry_rate_denominator_duration_s[p_idx, o_idx] = float(
+                visit.rate_denominator_duration_s
+            )
+            entry_rate[p_idx, o_idx] = float(visit.entry_rate_per_min)
+            visit_median_dwell[p_idx, o_idx] = (
+                float(visit.complete_visit_median_dwell_s)
+                if math.isfinite(float(visit.complete_visit_median_dwell_s))
+                else np.nan
+            )
+            visit_total_dwell[p_idx, o_idx] = float(
+                visit.complete_visit_total_dwell_s
+            )
+            invalid_gap_count[p_idx, o_idx] = int(visit.invalid_gap_count)
+            censor_event_count[p_idx, o_idx] = int(visit.censor_event_count)
+            boundary_censor_event_count[p_idx, o_idx] = int(
+                visit.boundary_censor_event_count
+            )
+            invalid_gap_censor_event_count[p_idx, o_idx] = int(
+                visit.invalid_gap_censor_event_count
+            )
 
             x = float(chaser_phase_x_px[p_idx, o_idx])
             y = float(chaser_phase_y_px[p_idx, o_idx])
@@ -1105,9 +1346,20 @@ def _compute_near_field_arrays(
         "near_zone_density_per_mm2": near_density,
         "near_zone_available_area_mm2": near_area,
         "near_zone_entry_count": entry_count,
+        "near_zone_entry_rate_numerator_count": entry_rate_numerator_count,
+        "near_zone_valid_tracked_duration_s": valid_tracked_duration_s,
+        "near_zone_entry_rate_denominator_duration_s": (
+            entry_rate_denominator_duration_s
+        ),
         "near_zone_entry_rate_per_min": entry_rate,
         "near_zone_visit_median_dwell_s": visit_median_dwell,
         "near_zone_visit_total_dwell_s": visit_total_dwell,
+        "near_zone_invalid_gap_count": invalid_gap_count,
+        "near_zone_censor_event_count": censor_event_count,
+        "near_zone_boundary_censor_event_count": boundary_censor_event_count,
+        "near_zone_invalid_gap_censor_event_count": (
+            invalid_gap_censor_event_count
+        ),
         "valid_distance_count": valid_distance_count,
         "missing_frame_count": missing_frame_count,
         "tracking_dropout_fraction": dropout,
@@ -1146,7 +1398,28 @@ def _compute_near_field_arrays(
         "arena_center_y_px": geometry.center_y_px,
         "arena_radius_px": geometry.radius_px,
         "rectangle_area_grid_step_mm": DEFAULT_RECTANGLE_AREA_GRID_STEP_MM,
-        "invalid_gap_policy": "close_active_visit_on_invalid_sample",
+        "visit_policy_version": visit_policy_version,
+        "entry_rate_numerator_semantics": "observed_outside_to_inside_hysteresis_transitions",
+        "entry_rate_denominator_semantics": (
+            "valid_fish_to_chaser_distance_samples_divided_by_fps"
+            if visit_policy_version == VALID_TRACKED_VISIT_POLICY
+            else "all_effective_phase_frames_divided_by_fps"
+        ),
+        "invalid_gap_policy": (
+            "censor_active_interval_and_reset_transition_state_to_unknown"
+            if visit_policy_version == VALID_TRACKED_VISIT_POLICY
+            else "close_active_visit_and_allow_resumed_inside_sample_to_start_new_visit"
+        ),
+        "boundary_censor_policy": (
+            "phase_start_inside_is_not_an_entry;phase_end_inside_keeps_observed_entry_but_excludes_complete_dwell"
+            if visit_policy_version == VALID_TRACKED_VISIT_POLICY
+            else "phase_boundary_inside_counts_as_a_visit"
+        ),
+        "complete_visit_dwell_policy": (
+            "only_visits_with_observed_entry_and_exit_in_one_contiguous_valid_interval"
+            if visit_policy_version == VALID_TRACKED_VISIT_POLICY
+            else "all_visit_fragments_closed_by_exit_gap_or_phase_end"
+        ),
         "immobility_speed_threshold_mm_s": float(immobility_speed_threshold_mm_s),
         "wall_excluded_density_policy": "exclude fish samples and available area within perimeter_band_mm of arena wall",
     }
@@ -1170,7 +1443,12 @@ def _build_summary(
     approach_percentile_mm: np.ndarray,
     approach_percentile_cdf_fraction: np.ndarray,
     near_zone_occupancy_fraction: np.ndarray,
+    near_zone_entry_rate_numerator_count: np.ndarray,
+    near_zone_valid_tracked_duration_s: np.ndarray,
+    near_zone_entry_rate_denominator_duration_s: np.ndarray,
     near_zone_entry_rate_per_min: np.ndarray,
+    near_zone_invalid_gap_count: np.ndarray,
+    near_zone_censor_event_count: np.ndarray,
     tracking_dropout_fraction: np.ndarray,
     thigmotaxis_fraction: np.ndarray,
     mean_speed_mm_s: np.ndarray,
@@ -1210,8 +1488,29 @@ def _build_summary(
                     "near_zone_occupancy_fraction": _value(
                         near_zone_occupancy_fraction, phase_pos, chaser_pos
                     ),
+                    "near_zone_entry_rate_numerator_count": int(
+                        near_zone_entry_rate_numerator_count[
+                            phase_pos, chaser_pos
+                        ]
+                    ),
+                    "near_zone_valid_tracked_duration_s": _value(
+                        near_zone_valid_tracked_duration_s,
+                        phase_pos,
+                        chaser_pos,
+                    ),
+                    "near_zone_entry_rate_denominator_duration_s": _value(
+                        near_zone_entry_rate_denominator_duration_s,
+                        phase_pos,
+                        chaser_pos,
+                    ),
                     "near_zone_entry_rate_per_min": _value(
                         near_zone_entry_rate_per_min, phase_pos, chaser_pos
+                    ),
+                    "near_zone_invalid_gap_count": int(
+                        near_zone_invalid_gap_count[phase_pos, chaser_pos]
+                    ),
+                    "near_zone_censor_event_count": int(
+                        near_zone_censor_event_count[phase_pos, chaser_pos]
                     ),
                     "approach_percentiles_mm": {
                         _format_percentile_key(float(percentile)): _value(
@@ -1299,6 +1598,7 @@ def build_chaser_near_field_occupancy_result(
     r_zone_mm: float = DEFAULT_R_ZONE_MM,
     r_in_mm: float = DEFAULT_R_IN_MM,
     r_out_mm: float = DEFAULT_R_OUT_MM,
+    visit_policy_version: str = VALID_TRACKED_VISIT_POLICY,
     percentile_values: Sequence[float] = DEFAULT_PERCENTILES,
     radial_bin_edges_mm: Sequence[float] | None = None,
     cdf_thresholds_mm: Sequence[float] = DEFAULT_CDF_THRESHOLDS_MM,
@@ -1310,6 +1610,12 @@ def build_chaser_near_field_occupancy_result(
         raise ValueError("r_out_mm must be greater than r_in_mm.")
     if float(r_zone_mm) <= 0:
         raise ValueError("r_zone_mm must be positive.")
+    normalized_visit_policy = str(visit_policy_version).strip()
+    if normalized_visit_policy not in VISIT_POLICIES:
+        raise ValueError(
+            f"Unsupported visit_policy_version {visit_policy_version!r}; "
+            f"expected one of: {', '.join(VISIT_POLICIES)}."
+        )
     normalized_immobility_mode = str(immobility_signal_mode).strip()
     if normalized_immobility_mode not in IMMOBILITY_SIGNAL_MODES:
         raise ValueError(
@@ -1463,6 +1769,7 @@ def build_chaser_near_field_occupancy_result(
         r_zone_mm=float(r_zone_mm),
         r_in_mm=float(r_in_mm),
         r_out_mm=float(r_out_mm),
+        visit_policy_version=normalized_visit_policy,
         perimeter_band_mm=float(perimeter_band_mm),
         immobility_speed_threshold_mm_s=float(immobility_speed_threshold_mm_s),
         immobility_speed_mm_s=immobility_speed,
@@ -1484,7 +1791,18 @@ def build_chaser_near_field_occupancy_result(
         approach_percentile_mm=arrays["approach_percentile_mm"],
         approach_percentile_cdf_fraction=arrays["approach_percentile_cdf_fraction"],
         near_zone_occupancy_fraction=arrays["near_zone_occupancy_fraction"],
+        near_zone_entry_rate_numerator_count=arrays[
+            "near_zone_entry_rate_numerator_count"
+        ],
+        near_zone_valid_tracked_duration_s=arrays[
+            "near_zone_valid_tracked_duration_s"
+        ],
+        near_zone_entry_rate_denominator_duration_s=arrays[
+            "near_zone_entry_rate_denominator_duration_s"
+        ],
         near_zone_entry_rate_per_min=arrays["near_zone_entry_rate_per_min"],
+        near_zone_invalid_gap_count=arrays["near_zone_invalid_gap_count"],
+        near_zone_censor_event_count=arrays["near_zone_censor_event_count"],
         tracking_dropout_fraction=arrays["tracking_dropout_fraction"],
         thigmotaxis_fraction=arrays["thigmotaxis_fraction"],
         mean_speed_mm_s=arrays["mean_speed_mm_s"],
@@ -1493,6 +1811,19 @@ def build_chaser_near_field_occupancy_result(
         phases=phases,
     )
     summary["speed_source"] = speed_source
+    summary["visit_policy_version"] = normalized_visit_policy
+    summary["near_zone_entry_rate_numerator_semantics"] = diagnostics.get(
+        "entry_rate_numerator_semantics"
+    )
+    summary["near_zone_entry_rate_denominator_semantics"] = diagnostics.get(
+        "entry_rate_denominator_semantics"
+    )
+    summary["near_zone_invalid_gap_policy"] = diagnostics.get(
+        "invalid_gap_policy"
+    )
+    summary["near_zone_boundary_censor_policy"] = diagnostics.get(
+        "boundary_censor_policy"
+    )
     compute_warnings = tuple(
         dict.fromkeys(list(compute_warnings) + list(geometry_notes))
     )
@@ -1545,6 +1876,7 @@ def build_chaser_near_field_occupancy_result(
         r_zone_mm=float(r_zone_mm),
         r_in_mm=float(r_in_mm),
         r_out_mm=float(r_out_mm),
+        visit_policy_version=normalized_visit_policy,
         percentile_values=percentiles.astype(np.float32),
         radial_bin_edges_mm=radial_edges.astype(np.float32),
         radial_bin_centers_mm=radial_centers.astype(np.float32),
@@ -1571,9 +1903,26 @@ def build_chaser_near_field_occupancy_result(
         near_zone_density_per_mm2=arrays["near_zone_density_per_mm2"],
         near_zone_available_area_mm2=arrays["near_zone_available_area_mm2"],
         near_zone_entry_count=arrays["near_zone_entry_count"],
+        near_zone_entry_rate_numerator_count=arrays[
+            "near_zone_entry_rate_numerator_count"
+        ],
+        near_zone_valid_tracked_duration_s=arrays[
+            "near_zone_valid_tracked_duration_s"
+        ],
+        near_zone_entry_rate_denominator_duration_s=arrays[
+            "near_zone_entry_rate_denominator_duration_s"
+        ],
         near_zone_entry_rate_per_min=arrays["near_zone_entry_rate_per_min"],
         near_zone_visit_median_dwell_s=arrays["near_zone_visit_median_dwell_s"],
         near_zone_visit_total_dwell_s=arrays["near_zone_visit_total_dwell_s"],
+        near_zone_invalid_gap_count=arrays["near_zone_invalid_gap_count"],
+        near_zone_censor_event_count=arrays["near_zone_censor_event_count"],
+        near_zone_boundary_censor_event_count=arrays[
+            "near_zone_boundary_censor_event_count"
+        ],
+        near_zone_invalid_gap_censor_event_count=arrays[
+            "near_zone_invalid_gap_censor_event_count"
+        ],
         valid_distance_count=arrays["valid_distance_count"],
         missing_frame_count=arrays["missing_frame_count"],
         tracking_dropout_fraction=arrays["tracking_dropout_fraction"],
@@ -1744,7 +2093,7 @@ def _interactive_spec(
 ) -> dict[str, Any]:
     return {
         "schema_id": INTERACTIVE_SPEC_SCHEMA_ID,
-        "schema_version": 1,
+        "schema_version": 2,
         "renderer": INTERACTIVE_RENDERER,
         "recording_id": result.recording_id,
         "component_name": result.component_name,
@@ -1766,6 +2115,7 @@ def _interactive_spec(
             "r_zone_mm": result.r_zone_mm,
             "r_in_mm": result.r_in_mm,
             "r_out_mm": result.r_out_mm,
+            "visit_policy_version": result.visit_policy_version,
             "percentile_values": result.percentile_values,
             "radial_bin_edges_mm": result.radial_bin_edges_mm,
             "cdf_thresholds_mm": result.cdf_thresholds_mm,
@@ -1806,6 +2156,7 @@ def _parameters(result: ChaserNearFieldOccupancyResult) -> dict[str, Any]:
         "r_zone_mm": result.r_zone_mm,
         "r_in_mm": result.r_in_mm,
         "r_out_mm": result.r_out_mm,
+        "visit_policy_version": result.visit_policy_version,
         "percentile_values": result.percentile_values,
         "radial_bin_edges_mm": result.radial_bin_edges_mm,
         "cdf_thresholds_mm": result.cdf_thresholds_mm,
@@ -1820,6 +2171,18 @@ def _parameters(result: ChaserNearFieldOccupancyResult) -> dict[str, Any]:
         "arena_center_y_px": result.arena_center_y_px,
         "arena_radius_px": result.arena_radius_px,
         "invalid_gap_policy": result.diagnostics.get("invalid_gap_policy"),
+        "boundary_censor_policy": result.diagnostics.get(
+            "boundary_censor_policy"
+        ),
+        "complete_visit_dwell_policy": result.diagnostics.get(
+            "complete_visit_dwell_policy"
+        ),
+        "entry_rate_numerator_semantics": result.diagnostics.get(
+            "entry_rate_numerator_semantics"
+        ),
+        "entry_rate_denominator_semantics": result.diagnostics.get(
+            "entry_rate_denominator_semantics"
+        ),
     }
 
 
@@ -1863,6 +2226,7 @@ def write_chaser_near_field_occupancy_component(
             "r_zone_mm": float(result.r_zone_mm),
             "r_in_mm": float(result.r_in_mm),
             "r_out_mm": float(result.r_out_mm),
+            "visit_policy_version": result.visit_policy_version,
             "perimeter_band_mm": float(result.perimeter_band_mm),
             "immobility_speed_threshold_mm_s": float(result.immobility_speed_threshold_mm_s),
             "immobility_signal_mode": result.immobility_signal_mode,
@@ -1989,6 +2353,21 @@ def write_chaser_near_field_occupancy_component(
     )
     _write_array(per_chaser, "near_zone_entry_count", result.near_zone_entry_count)
     _write_array(
+        per_chaser,
+        "near_zone_entry_rate_numerator_count",
+        result.near_zone_entry_rate_numerator_count,
+    )
+    _write_array(
+        per_chaser,
+        "near_zone_valid_tracked_duration_s",
+        result.near_zone_valid_tracked_duration_s,
+    )
+    _write_array(
+        per_chaser,
+        "near_zone_entry_rate_denominator_duration_s",
+        result.near_zone_entry_rate_denominator_duration_s,
+    )
+    _write_array(
         per_chaser, "near_zone_entry_rate_per_min", result.near_zone_entry_rate_per_min
     )
     _write_array(
@@ -2000,6 +2379,26 @@ def write_chaser_near_field_occupancy_component(
         per_chaser,
         "near_zone_visit_total_dwell_s",
         result.near_zone_visit_total_dwell_s,
+    )
+    _write_array(
+        per_chaser,
+        "near_zone_invalid_gap_count",
+        result.near_zone_invalid_gap_count,
+    )
+    _write_array(
+        per_chaser,
+        "near_zone_censor_event_count",
+        result.near_zone_censor_event_count,
+    )
+    _write_array(
+        per_chaser,
+        "near_zone_boundary_censor_event_count",
+        result.near_zone_boundary_censor_event_count,
+    )
+    _write_array(
+        per_chaser,
+        "near_zone_invalid_gap_censor_event_count",
+        result.near_zone_invalid_gap_censor_event_count,
     )
     _write_array(per_chaser, "valid_distance_count", result.valid_distance_count)
     _write_array(per_chaser, "missing_frame_count", result.missing_frame_count)
@@ -2017,6 +2416,18 @@ def write_chaser_near_field_occupancy_component(
             "approach_percentile_cdf_fraction_definition": "fraction of valid distance samples <= persisted approach percentile; should match percentile/100 within interpolation/counting tolerance",
             "near_zone_occupancy_denominator": "valid fish-to-chaser distance frames in effective phase",
             "near_zone_occupancy_of_epoch_denominator": "all frames in effective phase",
+            "near_zone_entry_rate_numerator": "near_zone_entry_rate_numerator_count; observed outside-to-inside hysteresis transitions only",
+            "near_zone_valid_tracking_time": "near_zone_valid_tracked_duration_s; valid fish-to-chaser distance samples divided by fps",
+            "near_zone_entry_rate_denominator": "near_zone_entry_rate_denominator_duration_s; equals valid tracked duration under the maintained v2 policy",
+            "near_zone_entry_rate_formula": "60 * near_zone_entry_rate_numerator_count / near_zone_entry_rate_denominator_duration_s; NaN when denominator duration is zero",
+            "visit_policy_version": result.visit_policy_version,
+            "invalid_gap_policy": result.diagnostics.get("invalid_gap_policy"),
+            "boundary_censor_policy": result.diagnostics.get(
+                "boundary_censor_policy"
+            ),
+            "complete_visit_dwell_policy": result.diagnostics.get(
+                "complete_visit_dwell_policy"
+            ),
         }
     )
 
@@ -2243,6 +2654,8 @@ def _result_payload(
 ) -> dict[str, Any]:
     return {
         "schema_id": SCHEMA_ID,
+        "schema_version": SCHEMA_VERSION,
+        "method_version": METHOD_VERSION,
         "zarr_path": result.zarr_path,
         "recording_id": result.recording_id,
         "component_name": result.component_name,
@@ -2251,6 +2664,7 @@ def _result_payload(
         "source_quadrant_occupancy_component": result.source_quadrant_occupancy_component,
         "speed_source": result.speed_source,
         "immobility_signal_mode": result.immobility_signal_mode,
+        "visit_policy_version": result.visit_policy_version,
         "endpoint_status": result.endpoint_status,
         "qc_warnings": list(result.qc_warnings),
         "summary": result.summary,
@@ -2286,6 +2700,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--r-zone-mm", type=float, default=DEFAULT_R_ZONE_MM)
     parser.add_argument("--r-in-mm", type=float, default=DEFAULT_R_IN_MM)
     parser.add_argument("--r-out-mm", type=float, default=DEFAULT_R_OUT_MM)
+    parser.add_argument(
+        "--visit-policy-version",
+        choices=VISIT_POLICIES,
+        default=VALID_TRACKED_VISIT_POLICY,
+        help=(
+            "Visit/rate contract. The maintained default uses observed transitions "
+            "over valid tracking time; legacy v1 must be selected explicitly."
+        ),
+    )
     parser.add_argument("--percentiles", default=",".join(f"{value:g}" for value in DEFAULT_PERCENTILES))
     parser.add_argument("--radial-bin-edges-mm", default=None, help="Comma-separated edges. Defaults to data-driven bins.")
     parser.add_argument("--cdf-thresholds-mm", default=",".join(f"{value:g}" for value in DEFAULT_CDF_THRESHOLDS_MM))
@@ -2333,6 +2756,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         r_zone_mm=float(args.r_zone_mm),
         r_in_mm=float(args.r_in_mm),
         r_out_mm=float(args.r_out_mm),
+        visit_policy_version=str(args.visit_policy_version),
         percentile_values=_parse_float_list(str(args.percentiles)),
         radial_bin_edges_mm=None if args.radial_bin_edges_mm is None else _parse_float_list(str(args.radial_bin_edges_mm)),
         cdf_thresholds_mm=_parse_float_list(str(args.cdf_thresholds_mm)),

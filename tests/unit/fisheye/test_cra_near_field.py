@@ -25,9 +25,11 @@ from fisheye.analysis.chaser_near_field_occupancy import (
     DISTANCE_CDF_PNG_ARTIFACT_NAME,
     INTERACTIVE_ARTIFACT_NAME,
     INTERACTIVE_RENDERER,
+    LEGACY_VISIT_POLICY,
     RADIAL_DENSITY_PNG_ARTIFACT_NAME,
     SCHEMA_ID,
     SUMMARY_PNG_ARTIFACT_NAME,
+    VALID_TRACKED_VISIT_POLICY,
     ArenaGeometry,
     _available_annulus_area_mm2,
     _resolve_quadrant_occupancy_component,
@@ -287,11 +289,11 @@ def test_historical_cra_alias_cannot_weaken_exact_handle_path() -> None:
         )
 
 
-def test_hysteresis_visits_counts_entries_and_closes_on_invalid() -> None:
-    distance = np.asarray([6.0, 4.0, 4.5, 6.5, 4.0, np.nan, 4.0, 7.0], dtype=np.float32)
+def test_hysteresis_visits_censors_dropout_without_synthetic_reentry() -> None:
+    distance = np.asarray([7.0, 4.0, 4.5, 6.5, 4.0, np.nan, 4.0, 7.0], dtype=np.float32)
     valid = np.isfinite(distance)
 
-    count, rate, median_dwell, total_dwell = compute_hysteresis_visits(
+    result = compute_hysteresis_visits(
         distance,
         valid,
         fps=2.0,
@@ -299,10 +301,88 @@ def test_hysteresis_visits_counts_entries_and_closes_on_invalid() -> None:
         r_out_mm=6.0,
     )
 
-    assert count == 3
-    assert math.isclose(rate, 45.0)
-    assert math.isclose(median_dwell, 0.5)
-    assert math.isclose(total_dwell, 2.0)
+    assert result.policy_version == VALID_TRACKED_VISIT_POLICY
+    assert result.entry_count == 2
+    assert result.valid_sample_count == 7
+    assert math.isclose(result.valid_tracked_duration_s, 3.5)
+    assert math.isclose(result.rate_denominator_duration_s, 3.5)
+    assert math.isclose(result.entry_rate_per_min, 2.0 / (3.5 / 60.0))
+    assert math.isclose(result.complete_visit_median_dwell_s, 1.0)
+    assert math.isclose(result.complete_visit_total_dwell_s, 1.0)
+    assert result.invalid_gap_count == 1
+    assert result.invalid_gap_censor_event_count == 2
+
+
+def test_hysteresis_visits_records_boundary_censoring() -> None:
+    result = compute_hysteresis_visits(
+        np.asarray([4.0, 4.5, 7.0, 4.0, 4.5], dtype=np.float32),
+        np.ones(5, dtype=bool),
+        fps=1.0,
+        r_in_mm=5.0,
+        r_out_mm=6.0,
+    )
+
+    assert result.entry_count == 1
+    assert math.isclose(result.entry_rate_per_min, 12.0)
+    assert result.censor_event_count == 2
+    assert result.boundary_censor_event_count == 2
+    assert math.isnan(result.complete_visit_median_dwell_s)
+    assert result.complete_visit_total_dwell_s == 0.0
+
+
+def test_hysteresis_visits_all_invalid_has_no_rate_denominator() -> None:
+    result = compute_hysteresis_visits(
+        np.asarray([np.nan, np.nan, np.nan], dtype=np.float32),
+        np.zeros(3, dtype=bool),
+        fps=10.0,
+        r_in_mm=5.0,
+        r_out_mm=6.0,
+    )
+
+    assert result.entry_count == 0
+    assert result.valid_sample_count == 0
+    assert result.valid_tracked_duration_s == 0.0
+    assert result.rate_denominator_duration_s == 0.0
+    assert math.isnan(result.entry_rate_per_min)
+    assert result.invalid_gap_count == 1
+
+
+def test_hysteresis_visits_rate_uses_exact_valid_tracking_time() -> None:
+    result = compute_hysteresis_visits(
+        np.asarray([7.0, 4.0, 7.0, np.nan, 7.0, 4.0, 7.0], dtype=np.float32),
+        np.asarray([True, True, True, False, True, True, True]),
+        fps=2.0,
+        r_in_mm=5.0,
+        r_out_mm=6.0,
+    )
+
+    assert result.entry_count == 2
+    assert result.valid_sample_count == 6
+    assert math.isclose(result.valid_tracked_duration_s, 3.0)
+    assert math.isclose(result.rate_denominator_duration_s, 3.0)
+    assert math.isclose(result.entry_rate_per_min, 40.0)
+    assert math.isclose(result.complete_visit_median_dwell_s, 0.5)
+    assert math.isclose(result.complete_visit_total_dwell_s, 1.0)
+
+
+def test_hysteresis_visits_legacy_gap_split_requires_explicit_version() -> None:
+    result = compute_hysteresis_visits(
+        np.asarray([6.0, 4.0, 4.5, 6.5, 4.0, np.nan, 4.0, 7.0]),
+        np.asarray([True, True, True, True, True, False, True, True]),
+        fps=2.0,
+        r_in_mm=5.0,
+        r_out_mm=6.0,
+        policy_version=LEGACY_VISIT_POLICY,
+    )
+
+    assert result.policy_version == LEGACY_VISIT_POLICY
+    assert result.entry_count == 3
+    assert math.isclose(result.entry_rate_per_min, 45.0)
+    assert math.isclose(result.valid_tracked_duration_s, 3.5)
+    assert math.isclose(result.rate_denominator_duration_s, 4.0)
+    assert result.rate_denominator_semantics == (
+        "all_effective_phase_frames_divided_by_fps"
+    )
 
 
 def test_available_annulus_area_uses_circular_arena_mask() -> None:
@@ -435,6 +515,15 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
     assert component["per_chaser_phase"]["near_zone_occupancy_fraction"][
         :
     ].tolist() == [[1.0, 0.0], [0.0, 0.0]]
+    per_chaser = component["per_chaser_phase"]
+    assert "near_zone_entry_rate_numerator_count" in per_chaser
+    assert "near_zone_valid_tracked_duration_s" in per_chaser
+    assert "near_zone_entry_rate_denominator_duration_s" in per_chaser
+    assert "near_zone_censor_event_count" in per_chaser
+    assert per_chaser.attrs["visit_policy_version"] == VALID_TRACKED_VISIT_POLICY
+    assert per_chaser.attrs["near_zone_entry_rate_denominator"].startswith(
+        "near_zone_entry_rate_denominator_duration_s"
+    )
     assert "approach_percentile_cdf_fraction" in component["per_chaser_phase"]
     assert "chaser_distance_to_wall_mm" in component["per_chaser_phase"]
     assert "radial_density_wall_excluded_per_mm2" in component["radial_density"]

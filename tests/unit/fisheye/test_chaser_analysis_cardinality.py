@@ -122,7 +122,16 @@ def test_near_field_summary_preserves_every_chaser(chaser_count: int) -> None:
             (*shape, percentiles.size),
         ).copy(),
         near_zone_occupancy_fraction=np.full(shape, 0.25, dtype=np.float32),
+        near_zone_entry_rate_numerator_count=np.ones(shape, dtype=np.int64),
+        near_zone_valid_tracked_duration_s=np.full(
+            shape, 5.0, dtype=np.float64
+        ),
+        near_zone_entry_rate_denominator_duration_s=np.full(
+            shape, 5.0, dtype=np.float32
+        ),
         near_zone_entry_rate_per_min=np.ones(shape, dtype=np.float32),
+        near_zone_invalid_gap_count=np.zeros(shape, dtype=np.int64),
+        near_zone_censor_event_count=np.zeros(shape, dtype=np.int64),
         tracking_dropout_fraction=np.zeros(shape, dtype=np.float32),
         thigmotaxis_fraction=np.zeros(len(phases), dtype=np.float32),
         mean_speed_mm_s=np.ones(len(phases), dtype=np.float32),
