@@ -1632,15 +1632,28 @@ def run_inference_window(
             telemetry_sampler = None
             telemetry_path = None
     try:
+        performance_phase_durations: dict[str, float] = {}
+        phase_started = time.perf_counter()
         local_archive = _stage_reference_archive(plan, work / "draft.zarr")
+        performance_phase_durations["reference_archive_stage"] = float(
+            time.perf_counter() - phase_started
+        )
         staged_video = work / Path(window["source_video_path"]).name
+        phase_started = time.perf_counter()
         video_copy = _copy_file_with_digest(
             Path(window["source_video_path"]), staged_video
+        )
+        performance_phase_durations["video_copy"] = float(
+            time.perf_counter() - phase_started
         )
         if not _same_cluster_file_identity(video_copy["source"], window["source_file"]):
             raise RuntimeError("Window source-video identity changed after planning.")
         staged_model = work / Path(plan["model"]["path"]).name
+        phase_started = time.perf_counter()
         model_copy = _copy_file_with_digest(Path(plan["model"]["path"]), staged_model)
+        performance_phase_durations["model_copy"] = float(
+            time.perf_counter() - phase_started
+        )
         if model_copy["sha256"] != plan["model"]["sha256"]:
             raise RuntimeError("Staged model digest differs from the frozen plan.")
 
@@ -1660,6 +1673,7 @@ def run_inference_window(
             source_video_frame_count=int(window["frame_count"]),
         )
         package_manifest = work / "crop_pixel_work_package.json"
+        phase_started = time.perf_counter()
         try:
             package = build_crop_pixel_work_package_from_video_window(
                 source,
@@ -1691,6 +1705,9 @@ def run_inference_window(
             )
         finally:
             source.close()
+        performance_phase_durations["crop_pixel_materialization"] = float(
+            time.perf_counter() - phase_started
+        )
         execution = plan["execution"]["inference"]
         arguments = [
             str(local_archive),
@@ -1741,11 +1758,19 @@ def run_inference_window(
         ]
         if bool(execution.get("synchronized_stage_profiling", False)):
             arguments.append("--profile-timings")
+        phase_started = time.perf_counter()
         infer_unet_subject_masks.main(arguments)
+        performance_phase_durations["inference_cli"] = float(
+            time.perf_counter() - phase_started
+        )
+        phase_started = time.perf_counter()
         run = open_zarr_root(local_archive, mode="r")[
             f"subject_mask_shard_runs/{window['raw_run']}"
         ]
         proof = _worker_evidence(local_archive, run)
+        performance_phase_durations["local_proof"] = float(
+            time.perf_counter() - phase_started
+        )
         final_layout_package_path = work / "raw_final_layout_unit"
         final_layout_started = time.perf_counter()
         final_layout_package = build_subject_mask_final_layout_unit_package(
@@ -1762,6 +1787,10 @@ def run_inference_window(
                 "mask_probs_roi"
             ],
         )
+        performance_phase_durations["final_layout_unit"] = float(
+            time.perf_counter() - final_layout_started
+        )
+        worker_pre_bundle_seconds = float(time.perf_counter() - started)
         result = {
             "schema_id": WORKER_RESULT_SCHEMA_ID,
             "schema_version": WORKER_RESULT_SCHEMA_VERSION,
@@ -1784,14 +1813,18 @@ def run_inference_window(
                 "attempt_payload_digest": proof["attempt"]["payload_digest"],
                 "receipt_payload_digest": proof["receipt"]["payload_digest"],
             },
-            "compute_duration_seconds": float(time.perf_counter() - started),
+            "compute_duration_seconds": worker_pre_bundle_seconds,
+            "performance_phase_durations_seconds": {
+                **performance_phase_durations,
+                "worker_pre_bundle_total": worker_pre_bundle_seconds,
+            },
             "resource_usage": _resource_usage(),
             "local_final_layout_unit_payload_digest": final_layout_package[
                 "payload_digest"
             ],
-            "final_layout_unit_duration_seconds": float(
-                time.perf_counter() - final_layout_started
-            ),
+            "final_layout_unit_duration_seconds": performance_phase_durations[
+                "final_layout_unit"
+            ],
         }
         telemetry_error = telemetry_start_error
         if telemetry_sampler is not None:
