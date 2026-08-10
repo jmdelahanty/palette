@@ -13,7 +13,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 from uuid import UUID, uuid4
 
 
@@ -602,6 +602,150 @@ def resolve_dataset_assignment(
     )
 
 
+class RegistryExperimentalSessionMixin:
+    """Expose explicit experimental-session lifecycle operations on ``Registry``.
+
+    Persistence helpers remain usable independently for focused validation, while
+    this mixin owns the public transaction-aware registry API.  Concrete registry
+    classes provide ``conn``, ``_transaction_context()``, and
+    ``_current_schema_version()``.
+    """
+
+    def create_experimental_session(
+        self,
+        *,
+        experimental_session_id: str,
+        creation_method: str,
+        created_by: str,
+        evidence: Optional[Mapping[str, Any]] = None,
+        created_at_utc: Optional[str] = None,
+        session_snapshot_id: Optional[str] = None,
+    ) -> ExperimentalSessionRecord:
+        """Create an explicit cross-recording session entity.
+
+        Acquisition timestamps, names, paths, and ``session_uuid`` values are
+        deliberately not consulted. Existing session IDs fail closed.
+        """
+
+        with self._transaction_context():
+            return create_experimental_session_record(
+                self.conn,
+                experimental_session_id=experimental_session_id,
+                creation_method=creation_method,
+                created_by=created_by,
+                evidence=evidence,
+                registry_schema_version=int(self._current_schema_version() or 0),
+                created_at_utc=created_at_utc,
+                session_snapshot_id=session_snapshot_id,
+            )
+
+    def get_experimental_session(
+        self,
+        experimental_session_id: str,
+    ) -> ExperimentalSessionRecord:
+        """Return an exact registered experimental-session entity."""
+
+        return get_experimental_session_record(self.conn, experimental_session_id)
+
+    def assign_recordings_to_experimental_session(
+        self,
+        *,
+        experimental_session_id: str,
+        recording_ids: Iterable[str],
+        assignment_method: str,
+        assigned_by: str,
+        evidence: Optional[Mapping[str, Any]] = None,
+        assigned_at_utc: Optional[str] = None,
+        assignment_batch_id: Optional[str] = None,
+    ) -> tuple[ExperimentalSessionAssignment, ...]:
+        """Atomically assign known recordings to one explicit session.
+
+        A recording can have at most one immutable assignment. This API never
+        infers grouping and never replaces an existing assignment.
+        """
+
+        with self._transaction_context():
+            return assign_recordings(
+                self.conn,
+                experimental_session_id=experimental_session_id,
+                recording_ids=recording_ids,
+                assignment_method=assignment_method,
+                assigned_by=assigned_by,
+                evidence=evidence,
+                registry_schema_version=int(self._current_schema_version() or 0),
+                assigned_at_utc=assigned_at_utc,
+                assignment_batch_id=assignment_batch_id,
+            )
+
+    def get_recording_experimental_session_assignment(
+        self,
+        recording_id: str,
+        *,
+        require_assigned: bool = True,
+    ) -> Optional[ExperimentalSessionAssignment]:
+        """Resolve a recording assignment, raising on missing identity by default."""
+
+        return get_recording_assignment(
+            self.conn,
+            recording_id,
+            require_assigned=require_assigned,
+        )
+
+    def correct_recording_experimental_session_assignment(
+        self,
+        *,
+        recording_id: str,
+        experimental_session_id: str,
+        expected_current_assignment_snapshot_id: str,
+        assignment_method: str,
+        assigned_by: str,
+        evidence: Optional[Mapping[str, Any]] = None,
+        assigned_at_utc: Optional[str] = None,
+        assignment_batch_id: Optional[str] = None,
+        assignment_snapshot_id: Optional[str] = None,
+    ) -> ExperimentalSessionAssignment:
+        """Append an audited correction and move current authority atomically."""
+
+        with self._transaction_context():
+            return correct_recording_assignment(
+                self.conn,
+                recording_id=recording_id,
+                experimental_session_id=experimental_session_id,
+                expected_current_assignment_snapshot_id=(
+                    expected_current_assignment_snapshot_id
+                ),
+                assignment_method=assignment_method,
+                assigned_by=assigned_by,
+                evidence=evidence,
+                registry_schema_version=int(self._current_schema_version() or 0),
+                assigned_at_utc=assigned_at_utc,
+                assignment_batch_id=assignment_batch_id,
+                assignment_snapshot_id=assignment_snapshot_id,
+            )
+
+    def list_recording_experimental_session_assignment_history(
+        self,
+        recording_id: str,
+    ) -> tuple[ExperimentalSessionAssignment, ...]:
+        """Return every append-only assignment revision for a recording."""
+
+        return list_recording_assignment_history(self.conn, recording_id)
+
+    def resolve_dataset_experimental_session_assignment(
+        self,
+        dataset_id: str,
+        *,
+        require_assigned: bool = True,
+    ) -> Optional[ExperimentalSessionAssignment]:
+        """Resolve a dataset through its recording to an explicit assignment."""
+
+        return resolve_dataset_assignment(
+            self.conn,
+            dataset_id,
+            require_assigned=require_assigned,
+        )
+
+
 __all__ = [
     "EXPERIMENTAL_SESSION_ASSIGNMENT_SCHEMA_ID",
     "EXPERIMENTAL_SESSION_SCHEMA_ID",
@@ -610,6 +754,7 @@ __all__ = [
     "ExperimentalSessionIdentityError",
     "ExperimentalSessionRecord",
     "MissingExperimentalSessionIdentityError",
+    "RegistryExperimentalSessionMixin",
     "UnknownDatasetIdentityError",
     "UnknownExperimentalSessionError",
     "UnknownRecordingIdentityError",

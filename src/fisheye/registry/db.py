@@ -40,18 +40,7 @@ from .extractors.masks import (
     _extract_subject_mask_performance_rows,
 )
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
-from .experimental_sessions import (
-    ExperimentalSessionAssignment,
-    ExperimentalSessionRecord,
-    assign_recordings as _assign_experimental_session_recordings,
-    correct_recording_assignment,
-    create_experimental_session_record,
-    get_experimental_session_record,
-    get_recording_assignment,
-    list_recording_assignment_history,
-    resolve_dataset_assignment,
-    validate_experimental_session_id,
-)
+from .experimental_sessions import RegistryExperimentalSessionMixin, validate_experimental_session_id
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
 from .temp_store_guard import assert_temp_store_registration_allowed
@@ -1227,7 +1216,11 @@ def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:
     return records
 
 
-class Registry(RegistryAnalyticsReportMixin, RegistryMigrationMixin):
+class Registry(
+    RegistryExperimentalSessionMixin,
+    RegistryAnalyticsReportMixin,
+    RegistryMigrationMixin,
+):
     def __init__(self, path: Path):
         self.path = path
         _ensure_parent(self.path)
@@ -2681,140 +2674,6 @@ class Registry(RegistryAnalyticsReportMixin, RegistryMigrationMixin):
             payload,
         )
         self._commit_if_standalone()
-
-    def create_experimental_session(
-        self,
-        *,
-        experimental_session_id: str,
-        creation_method: str,
-        created_by: str,
-        evidence: Optional[Mapping[str, Any]] = None,
-        created_at_utc: Optional[str] = None,
-        session_snapshot_id: Optional[str] = None,
-    ) -> ExperimentalSessionRecord:
-        """Create an explicit cross-recording session entity.
-
-        Acquisition timestamps, names, paths, and ``session_uuid`` values are
-        deliberately not consulted.  Existing session IDs fail closed.
-        """
-
-        with self._transaction_context():
-            return create_experimental_session_record(
-                self.conn,
-                experimental_session_id=experimental_session_id,
-                creation_method=creation_method,
-                created_by=created_by,
-                evidence=evidence,
-                registry_schema_version=int(self._current_schema_version() or 0),
-                created_at_utc=created_at_utc,
-                session_snapshot_id=session_snapshot_id,
-            )
-
-    def get_experimental_session(
-        self,
-        experimental_session_id: str,
-    ) -> ExperimentalSessionRecord:
-        """Return an exact registered experimental-session entity."""
-
-        return get_experimental_session_record(self.conn, experimental_session_id)
-
-    def assign_recordings_to_experimental_session(
-        self,
-        *,
-        experimental_session_id: str,
-        recording_ids: Iterable[str],
-        assignment_method: str,
-        assigned_by: str,
-        evidence: Optional[Mapping[str, Any]] = None,
-        assigned_at_utc: Optional[str] = None,
-        assignment_batch_id: Optional[str] = None,
-    ) -> tuple[ExperimentalSessionAssignment, ...]:
-        """Atomically assign known recordings to one explicit session.
-
-        A recording can have at most one immutable assignment.  This API never
-        infers grouping and never replaces an existing assignment.
-        """
-
-        with self._transaction_context():
-            return _assign_experimental_session_recordings(
-                self.conn,
-                experimental_session_id=experimental_session_id,
-                recording_ids=recording_ids,
-                assignment_method=assignment_method,
-                assigned_by=assigned_by,
-                evidence=evidence,
-                registry_schema_version=int(self._current_schema_version() or 0),
-                assigned_at_utc=assigned_at_utc,
-                assignment_batch_id=assignment_batch_id,
-            )
-
-    def get_recording_experimental_session_assignment(
-        self,
-        recording_id: str,
-        *,
-        require_assigned: bool = True,
-    ) -> Optional[ExperimentalSessionAssignment]:
-        """Resolve a recording assignment, raising on missing identity by default."""
-
-        return get_recording_assignment(
-            self.conn,
-            recording_id,
-            require_assigned=require_assigned,
-        )
-
-    def correct_recording_experimental_session_assignment(
-        self,
-        *,
-        recording_id: str,
-        experimental_session_id: str,
-        expected_current_assignment_snapshot_id: str,
-        assignment_method: str,
-        assigned_by: str,
-        evidence: Optional[Mapping[str, Any]] = None,
-        assigned_at_utc: Optional[str] = None,
-        assignment_batch_id: Optional[str] = None,
-        assignment_snapshot_id: Optional[str] = None,
-    ) -> ExperimentalSessionAssignment:
-        """Append an audited correction and move current authority atomically."""
-
-        with self._transaction_context():
-            return correct_recording_assignment(
-                self.conn,
-                recording_id=recording_id,
-                experimental_session_id=experimental_session_id,
-                expected_current_assignment_snapshot_id=(
-                    expected_current_assignment_snapshot_id
-                ),
-                assignment_method=assignment_method,
-                assigned_by=assigned_by,
-                evidence=evidence,
-                registry_schema_version=int(self._current_schema_version() or 0),
-                assigned_at_utc=assigned_at_utc,
-                assignment_batch_id=assignment_batch_id,
-                assignment_snapshot_id=assignment_snapshot_id,
-            )
-
-    def list_recording_experimental_session_assignment_history(
-        self,
-        recording_id: str,
-    ) -> tuple[ExperimentalSessionAssignment, ...]:
-        """Return every append-only assignment revision for a recording."""
-
-        return list_recording_assignment_history(self.conn, recording_id)
-
-    def resolve_dataset_experimental_session_assignment(
-        self,
-        dataset_id: str,
-        *,
-        require_assigned: bool = True,
-    ) -> Optional[ExperimentalSessionAssignment]:
-        """Resolve a dataset through its recording to an explicit assignment."""
-
-        return resolve_dataset_assignment(
-            self.conn,
-            dataset_id,
-            require_assigned=require_assigned,
-        )
 
     def upsert_analytics_collection(
         self,
