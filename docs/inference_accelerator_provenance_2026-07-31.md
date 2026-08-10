@@ -112,6 +112,56 @@ This checkpoint must not block the selector-ineligible mask fixture or the
 Crimson presentation demo. Its purpose is later capacity planning and runtime
 tuning, not scientific or storage-contract acceptance.
 
+## Continuous runtime telemetry sidecar v1 — 2026-08-10
+
+Future full-duration subject-mask canary plans use plan schema v2 and require a
+one-second `palette.gpu_runtime_telemetry` v1 sampler for every inference work
+unit. The sampler starts before video/model staging and stops after the local
+inference result and proof envelopes are complete. The existing per-stage
+inference timing profile remains available for deliberately synchronized
+diagnostics, but is disabled for representative throughput by default. It uses
+per-batch CUDA synchronization to separate pixel materialization,
+model-forward execution, transfers, output writing, and validation, and can
+therefore perturb the hot path. Normal throughput trials use ordinary wall
+time plus the external telemetry trace. A future profiler may use deferred
+CUDA events when fine-grained attribution is needed without repeated
+device-wide barriers.
+
+The continuous sidecar records:
+
+- GPU, memory, and decoder utilization;
+- device memory use;
+- power, temperature, SM clock, and memory clock;
+- the physical LSF GPU selection, preferring
+  `CUDA_VISIBLE_DEVICES_ORIG` over the process-local remapped index;
+- job, array element, host, workflow, plan, commit, clip window, and row-range
+  context; and
+- exact samples, summary statistics, canonical payload digest, and file
+  SHA-256 receipt.
+
+Collection occurs in node-local scratch. After deep validation, the report is
+copied to:
+
+```text
+bundles/inference/<window>/performance/gpu_runtime.json
+```
+
+The report and its worker result are installed by the same hidden-directory
+plus `os.replace` publication boundary as the immutable inference bundle. The
+sidecar is outside `archive.zarr`; its identity policy is
+`performance_only_excluded_from_scientific_identity_and_payload_digests`.
+Missing `nvidia-smi` or sampler failure produces missing performance evidence
+and never changes scientific output validity. Recomputed-digest summary
+tampering, malformed samples, or a changed sidecar during bundle copy fail the
+telemetry receipt validation.
+
+This implementation does not attach to already-running processes. In
+particular, inference array `153303424` remains valid evidence from commit
+`7122bdc2`, but it predates continuous telemetry and retains only its exact
+stage timing profile and accelerator snapshot. Its throughput must be labelled
+as synchronized/instrumented rather than an unqualified production rate. A
+subsequent run is required for continuous utilization evidence.
+
 ## Checklist
 
 - [x] Version the accelerator document.
@@ -119,6 +169,8 @@ tuning, not scientific or storage-contract acceptance.
 - [x] Embed the document in every shared environment record.
 - [x] Reuse it when deriving final run provenance.
 - [x] Preserve U-Net inference provenance through raw publication receipts.
+- [x] Add continuous report-only GPU telemetry to future full-duration
+  subject-mask inference bundles.
 - [ ] Validate one new CUDA detection, keypoint, and mask artifact outside the
   sandbox.
 - [ ] After the Crimson mask demo, run the controlled current-code L4/A6000
