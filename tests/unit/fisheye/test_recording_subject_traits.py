@@ -103,10 +103,13 @@ def test_existing_version_63_registry_upgrades_to_strain_traits(tmp_path) -> Non
     registry.close()
 
     upgraded = Registry(registry_path)
+    latest_version = max(
+        migration[0] for migration in upgraded._schema_migrations()
+    )
     version = upgraded.conn.execute(
         "SELECT MAX(version) AS version FROM schema_version;"
     ).fetchone()["version"]
-    assert version == 66
+    assert version == latest_version
     objects = {
         row["name"]
         for row in upgraded.conn.execute(
@@ -143,10 +146,13 @@ def test_legacy_bootstrap_version_64_reconciles_missing_subject_trait_table(
     registry.close()
 
     reconciled = Registry(registry_path)
+    latest_version = max(
+        migration[0] for migration in reconciled._schema_migrations()
+    )
     version = reconciled.conn.execute(
         "SELECT MAX(version) AS version FROM schema_version;"
     ).fetchone()["version"]
-    assert version == 66
+    assert version == latest_version
     objects = {
         row["name"]
         for row in reconciled.conn.execute(
