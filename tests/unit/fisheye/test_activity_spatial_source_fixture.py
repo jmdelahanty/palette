@@ -152,10 +152,21 @@ def test_destination_must_be_benchmark_fixture_namespace(tmp_path: Path) -> None
 )
 def test_projection_requires_complete_eligible_historical_source(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     attribute: str,
     value: object,
     message: str,
 ) -> None:
+    monkeypatch.setattr(
+        fixture,
+        "git_identity",
+        lambda: {
+            "git_sha": "a" * 40,
+            "git_short_sha": "a" * 8,
+            "git_dirty": False,
+            "git_root": str(tmp_path),
+        },
+    )
     source = _source_archive(tmp_path / "source.zarr")
     root = open_zarr_root(source, mode="a")
     root[f"analysis/swim_bout_runs/{HISTORICAL_RUN}"].attrs[attribute] = value
