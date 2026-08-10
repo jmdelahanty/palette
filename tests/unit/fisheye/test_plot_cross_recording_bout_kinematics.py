@@ -6,6 +6,12 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from fisheye.analytics_exports.arrow_contracts import (
+    ARROW_TABLE_CONTRACTS,
+    arrow_contract_envelope,
+    exact_arrow_schema,
+)
+from fisheye.analytics_exports.capabilities import resolve_capabilities
 from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
@@ -29,7 +35,7 @@ def _write_parquet_export(root: Path, export_run_id: str) -> None:
     )
     table_dir = root / generation_path / "tables" / BOUT_KINEMATICS_TABLE
     table_dir.mkdir(parents=True)
-    rows = [
+    row_values = [
         {
             "recording_id": "rec_a",
             "measurement_level": "heading_smoothed",
@@ -64,17 +70,37 @@ def _write_parquet_export(root: Path, export_run_id: str) -> None:
             "within_angular_speed_max_deg_s": 99.0,
         },
     ]
-    table = pa.Table.from_pylist(rows).replace_schema_metadata(
-        {
-            b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
-            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
-            b"palette.table_contract": json.dumps(
-                TABLE_CONTRACTS[BOUT_KINEMATICS_TABLE].to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode(),
-        }
+    footer_metadata = {
+        b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
+        b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
+        b"palette.table_contract": json.dumps(
+            TABLE_CONTRACTS[BOUT_KINEMATICS_TABLE].to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+    }
+    schema = exact_arrow_schema(
+        BOUT_KINEMATICS_TABLE,
+        metadata=footer_metadata,
     )
+    rows = []
+    for bout_id, values in enumerate(row_values):
+        row = {field.name: None for field in schema}
+        row.update(
+            export_schema_version=EXPORT_SCHEMA_VERSION,
+            table_name=BOUT_KINEMATICS_TABLE,
+            recording_id="rec_a",
+            zarr_path="/data/rec_a_analysis.zarr",
+            source_lineage_hash="a" * 64,
+            bout_kinematics_run="bout_kinematics_test",
+            measurement_level=str(values["measurement_level"]),
+            measurement_family="heading",
+            is_default_heading_level=values["measurement_level"] == "heading_smoothed",
+            bout_id=bout_id,
+        )
+        row.update(values)
+        rows.append(row)
+    table = pa.Table.from_pylist(rows, schema=schema)
     part = table_dir / "part-00000.parquet"
     pq.write_table(table, part)
     manifest_dir = root / "v1" / "manifests"
@@ -86,8 +112,31 @@ def _write_parquet_export(root: Path, export_run_id: str) -> None:
                 "schema_id": EXPORT_SCHEMA_ID,
                 "schema_version": EXPORT_SCHEMA_VERSION,
                 "created_at_utc": "2026-05-08T00:00:00Z",
+                "source_recording_count": 1,
                 "tables_requested": [BOUT_KINEMATICS_TABLE],
                 "table_contracts": contract_snapshot([BOUT_KINEMATICS_TABLE]),
+                "arrow_schema_contracts": arrow_contract_envelope(
+                    [BOUT_KINEMATICS_TABLE]
+                ),
+                "capabilities": [
+                    status.capability_id
+                    for status in resolve_capabilities(
+                        {
+                            BOUT_KINEMATICS_TABLE: tuple(
+                                field.name
+                                for field in ARROW_TABLE_CONTRACTS[
+                                    BOUT_KINEMATICS_TABLE
+                                ].fields
+                            )
+                        }
+                    )
+                    if status.available
+                ],
+                "diagnostics": [],
+                "collection_manifest": {
+                    "collection_id": "collection_test",
+                    "collection_name": "Collection Test",
+                },
                 "row_counts_by_table": {BOUT_KINEMATICS_TABLE: len(rows)},
                 "part_files_by_table": {
                     BOUT_KINEMATICS_TABLE: [
@@ -99,7 +148,6 @@ def _write_parquet_export(root: Path, export_run_id: str) -> None:
                         ).as_posix()
                     ]
                 },
-                "capabilities": [],
                 "publication": {
                     "schema_id": "palette.analytics_export.publication",
                     "schema_version": 1,
