@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .db import Registry, RegistryPaths
+from .experimental_sessions import validate_experimental_session_id
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -76,6 +77,16 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--camera-id", type=str, help="Exact camera_id match.")
     parser.add_argument("--canvas-name", type=str, help="Exact canvas_name match.")
     parser.add_argument(
+        "--experimental-session-id",
+        type=str,
+        help="Exact explicit experimental_session_id match (never inferred from timestamps).",
+    )
+    parser.add_argument(
+        "--experimental-session-status",
+        choices=["explicit", "missing"],
+        help="Filter by explicit experimental-session assignment status.",
+    )
+    parser.add_argument(
         "--model-input",
         choices=["gray", "rgb"],
         help="Filter by required downsample modality for training input.",
@@ -124,6 +135,8 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
     select_cols = [
         "d.dataset_id",
         "d.session_uuid",
+        "dcc.experimental_session_id",
+        "dcc.experimental_session_identity_status",
         "d.zarr_path",
         "d.status",
         "dcc.dish_id",
@@ -300,6 +313,16 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         add_clause("AND dcc.camera_id = ?", args.camera_id)
     if args.canvas_name:
         add_clause("AND dcc.canvas_name = ?", args.canvas_name)
+    if args.experimental_session_id:
+        add_clause(
+            "AND dcc.experimental_session_id = ?",
+            validate_experimental_session_id(args.experimental_session_id),
+        )
+    if args.experimental_session_status:
+        add_clause(
+            "AND dcc.experimental_session_identity_status = ?",
+            args.experimental_session_status,
+        )
     if args.model_input == "gray":
         sql.append(
             "AND (COALESCE(dcc.has_images_ds, 0) = 1 OR dcc.downsample_formats_json LIKE '%\"gray\"%')"
@@ -353,6 +376,8 @@ def _print_table(rows: List[Dict[str, Any]], include_training: bool) -> None:
     columns = [
         "dataset_id",
         "status",
+        "experimental_session_id",
+        "experimental_session_identity_status",
         "dpf_at_acquisition",
         "snapshot_status",
         "protocol_name",

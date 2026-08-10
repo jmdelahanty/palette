@@ -6187,8 +6187,104 @@ class RegistryMigrationMixin:
             """
         )
 
+    def _ensure_experimental_session_tables(self) -> None:
+        """Create explicit session entities and immutable recording assignments."""
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS experimental_sessions (
+                experimental_session_id TEXT PRIMARY KEY,
+                session_snapshot_id TEXT NOT NULL UNIQUE,
+                schema_id TEXT NOT NULL,
+                creation_method TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                registry_schema_version INTEGER NOT NULL,
+                CHECK(length(trim(experimental_session_id)) > 0),
+                CHECK(experimental_session_id = trim(experimental_session_id)),
+                CHECK(schema_id = 'palette.registry.experimental_session.v1'),
+                CHECK(length(trim(creation_method)) > 0),
+                CHECK(length(trim(created_by)) > 0),
+                CHECK(json_valid(evidence_json)),
+                CHECK(json_type(evidence_json) = 'object'),
+                CHECK(registry_schema_version > 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_experimental_session_assignments (
+                assignment_snapshot_id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                experimental_session_id TEXT NOT NULL,
+                assignment_revision INTEGER NOT NULL,
+                supersedes_assignment_snapshot_id TEXT UNIQUE,
+                assignment_batch_id TEXT NOT NULL,
+                schema_id TEXT NOT NULL,
+                assignment_method TEXT NOT NULL,
+                assigned_by TEXT NOT NULL,
+                assigned_at_utc TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                registry_schema_version INTEGER NOT NULL,
+                FOREIGN KEY(recording_id) REFERENCES recordings(recording_id) ON DELETE RESTRICT,
+                FOREIGN KEY(experimental_session_id)
+                    REFERENCES experimental_sessions(experimental_session_id) ON DELETE RESTRICT,
+                FOREIGN KEY(recording_id, supersedes_assignment_snapshot_id)
+                    REFERENCES recording_experimental_session_assignments(
+                        recording_id, assignment_snapshot_id
+                    ) ON DELETE RESTRICT,
+                UNIQUE(recording_id, assignment_revision),
+                UNIQUE(recording_id, assignment_snapshot_id),
+                CHECK(schema_id = 'palette.registry.experimental_session_assignment.v1'),
+                CHECK(assignment_revision > 0),
+                CHECK(length(trim(assignment_method)) > 0),
+                CHECK(length(trim(assigned_by)) > 0),
+                CHECK(json_valid(evidence_json)),
+                CHECK(json_type(evidence_json) = 'object'),
+                CHECK(registry_schema_version > 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_experimental_session_current (
+                recording_id TEXT PRIMARY KEY,
+                assignment_snapshot_id TEXT NOT NULL UNIQUE,
+                updated_at_utc TEXT NOT NULL,
+                FOREIGN KEY(recording_id) REFERENCES recordings(recording_id) ON DELETE RESTRICT,
+                FOREIGN KEY(recording_id, assignment_snapshot_id)
+                    REFERENCES recording_experimental_session_assignments(
+                        recording_id, assignment_snapshot_id
+                    ) ON DELETE RESTRICT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_experimental_session_assignments_session
+            ON recording_experimental_session_assignments(
+                experimental_session_id, recording_id, assignment_revision
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_experimental_session_assignments_batch
+            ON recording_experimental_session_assignments(
+                assignment_batch_id, recording_id
+            );
+            """
+        )
+
     def _migration_034_dataset_context_current_view(self) -> None:
         cur = self.conn.cursor()
+        # Fresh databases execute the current view body at migration 34.  Create
+        # the append-only identity tables before the view references them; the
+        # numbered migration 67 remains the upgrade/refresh boundary for
+        # registries that already passed migration 34.
+        self._ensure_experimental_session_tables()
         self._ensure_columns(
             "datasets",
             {
@@ -6343,6 +6439,32 @@ class RegistryMigrationMixin:
                 d.dataset_id AS dataset_id,
                 d.recording_id AS recording_id,
                 d.session_uuid AS session_uuid,
+                resa.experimental_session_id AS experimental_session_id,
+                es.session_snapshot_id AS experimental_session_snapshot_id,
+                es.schema_id AS experimental_session_schema_id,
+                es.creation_method AS experimental_session_creation_method,
+                es.created_by AS experimental_session_created_by,
+                es.created_at_utc AS experimental_session_created_at_utc,
+                es.evidence_json AS experimental_session_creation_evidence_json,
+                es.registry_schema_version
+                    AS experimental_session_creation_registry_schema_version,
+                CASE
+                    WHEN resa.recording_id IS NOT NULL THEN 'explicit'
+                    ELSE 'missing'
+                END AS experimental_session_identity_status,
+                resa.assignment_snapshot_id AS experimental_session_assignment_snapshot_id,
+                resa.assignment_revision AS experimental_session_assignment_revision,
+                resa.supersedes_assignment_snapshot_id
+                    AS experimental_session_supersedes_assignment_snapshot_id,
+                resa.assignment_batch_id AS experimental_session_assignment_batch_id,
+                resa.schema_id AS experimental_session_assignment_schema_id,
+                resa.assignment_method AS experimental_session_assignment_method,
+                resa.assigned_by AS experimental_session_assigned_by,
+                resa.assigned_at_utc AS experimental_session_assigned_at_utc,
+                resc.updated_at_utc AS experimental_session_current_updated_at_utc,
+                resa.evidence_json AS experimental_session_assignment_evidence_json,
+                resa.registry_schema_version
+                    AS experimental_session_assignment_registry_schema_version,
                 d.zarr_path AS zarr_path,
                 d.artifact_kind AS artifact_kind,
                 d.zarr_origin AS zarr_origin,
@@ -6476,6 +6598,12 @@ class RegistryMigrationMixin:
                 rss.dpf_values_json AS dpf_values_json
             FROM datasets d
             LEFT JOIN recordings r ON r.recording_id = d.recording_id
+            LEFT JOIN recording_experimental_session_current resc
+              ON resc.recording_id = d.recording_id
+            LEFT JOIN recording_experimental_session_assignments resa
+              ON resa.assignment_snapshot_id = resc.assignment_snapshot_id
+            LEFT JOIN experimental_sessions es
+              ON es.experimental_session_id = resa.experimental_session_id
             LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
             LEFT JOIN recording_subject_summary rss ON rss.recording_id = d.recording_id;
             """
@@ -6491,6 +6619,8 @@ class RegistryMigrationMixin:
                 COALESCE(NULLIF(trim(rss.recording_id), ''), dcc.recording_id) AS recording_id,
                 rss.dataset_id,
                 dcc.session_uuid AS session_uuid,
+                dcc.experimental_session_id AS experimental_session_id,
+                dcc.experimental_session_identity_status AS experimental_session_identity_status,
                 dcc.zarr_path AS zarr_path,
                 dcc.zarr_use AS zarr_use,
                 dcc.artifact_kind AS artifact_kind,
@@ -8190,3 +8320,10 @@ class RegistryMigrationMixin:
         """Expose anonymous subject counts without implying biological identity."""
 
         self._migration_034_dataset_context_current_view()
+
+    def _migration_067_explicit_experimental_session_identity(self) -> None:
+        """Add explicit cross-recording session identity without heuristic backfill."""
+
+        self._ensure_experimental_session_tables()
+        self._migration_034_dataset_context_current_view()
+        self._migration_035_recording_step_status_latest_dataset_context_current()
