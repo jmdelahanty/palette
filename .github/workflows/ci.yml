@@ -54,7 +54,7 @@ jobs:
           git diff --exit-code -- scripts/file_size_ratchet_baseline.json
 
   quality:
-    name: package, boundaries, and collection
+    name: package and collection
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

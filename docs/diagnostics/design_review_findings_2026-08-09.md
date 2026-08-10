@@ -17,7 +17,7 @@ gh CLI, live-registry reads); everything else is from code reading by review age
 Queue refresh: re-verified read-only at `29598056` on 2026-08-09 after the CI
 reconciliation. Status paragraphs below are current; original findings remain as
 historical evidence. The current full reconciliation CI is green. Scientific findings
-W1.1-W1.5 remain open and are the highest-priority implementation surface.
+W1.4-W1.5 remain open and are the highest-priority implementation surface.
 
 Known-good patterns to copy are named per item. Do not invent new mechanisms where a
 proven one exists in-repo.
@@ -61,11 +61,14 @@ Fix: per import, either move the imported code down into `shared` or add a comme
 Prefer moving code down where the import target is small.
 Acceptance: `lint-imports` green; every new ratchet has a why-comment.
 
-**W0.3 — Make the three quality gates independent.**
+**W0.3 — Make the three quality gates independent. [VERIFIED]**
 Status: **implemented on the reconciliation branch** by `ac9aaf1e`. Import
 boundaries and the file-size ratchet are independent jobs; package installation
-and test collection remain in the quality job. Local reconciliation validation
-also collected all 8,830 tests successfully.
+and test collection remain in the quality job. The executable workflow contract in
+`tests/unit/fisheye/test_ci_quality_gate_independence.py` now prevents the three gate
+commands from sharing an owner or acquiring dependency edges between their jobs.
+Local reconciliation validation also collected all 8,830 tests successfully; the
+two workflow-contract tests pass independently.
 
 Original finding: in `.github/workflows/ci.yml`, a quality-job lint failure skipped the file-size
 ratchet and collect-only steps. Either split into separate jobs or add

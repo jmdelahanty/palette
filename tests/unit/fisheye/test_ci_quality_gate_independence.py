@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+CI_WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def _ci_jobs() -> dict[str, dict[str, Any]]:
+    payload = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    jobs = payload.get("jobs")
+    assert isinstance(jobs, dict), "CI workflow must declare a jobs mapping."
+    return jobs
+
+
+def _run_commands(job: dict[str, Any]) -> str:
+    steps = job.get("steps")
+    assert isinstance(steps, list), "Every quality gate job must declare steps."
+    return "\n".join(
+        str(step.get("run") or "") for step in steps if isinstance(step, dict)
+    )
+
+
+def _normalized_needs(job: dict[str, Any]) -> set[str]:
+    needs = job.get("needs", ())
+    if isinstance(needs, str):
+        return {needs}
+    assert isinstance(needs, (list, tuple)), "Job needs must be a string or sequence."
+    return {str(value) for value in needs}
+
+
+def test_ci_quality_gates_are_independent_jobs() -> None:
+    jobs = _ci_jobs()
+    gate_commands = {
+        "import-boundaries": "lint-imports --config pyproject.toml",
+        "file-size-ratchet": "python scripts/check_file_size_ratchet.py",
+        "quality": "python -m pytest --collect-only -q tests/",
+    }
+
+    for job_name, command in gate_commands.items():
+        assert job_name in jobs, f"Missing independent CI gate job: {job_name}."
+        assert command in _run_commands(jobs[job_name])
+
+    for job_name in gate_commands:
+        gate_dependencies = _normalized_needs(jobs[job_name]) & gate_commands.keys()
+        assert not gate_dependencies, (
+            f"CI gate {job_name!r} depends on other quality gates: "
+            f"{sorted(gate_dependencies)}. A failed gate must not suppress another."
+        )
+
+
+def test_each_quality_gate_command_has_exactly_one_job_owner() -> None:
+    jobs = _ci_jobs()
+    commands = {
+        "lint-imports --config pyproject.toml": "import-boundaries",
+        "python scripts/check_file_size_ratchet.py": "file-size-ratchet",
+        "python -m pytest --collect-only -q tests/": "quality",
+    }
+
+    for command, expected_owner in commands.items():
+        owners = [
+            job_name
+            for job_name, job in jobs.items()
+            if command in _run_commands(job)
+        ]
+        assert owners == [expected_owner]
