@@ -144,6 +144,15 @@ def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
 
     assert plan["recording"]["n_frames"] == 4
     assert plan["recording"]["n_rows"] == 4
+    assert plan["schema_version"] == canary.PLAN_SCHEMA_VERSION
+    assert plan["execution"]["inference"]["synchronized_stage_profiling"] is False
+    assert plan["execution"]["inference"]["gpu_runtime_telemetry"] == {
+        "enabled": True,
+        "sample_interval_seconds": 1,
+        "schema_id": canary.GPU_RUNTIME_TELEMETRY_SCHEMA_ID,
+        "schema_version": canary.GPU_RUNTIME_TELEMETRY_SCHEMA_VERSION,
+        "identity_policy": canary.GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY,
+    }
     assert [window["row_count"] for window in plan["windows"]] == [2, 2]
     assert [window["row_start"] for window in plan["windows"]] == [0, 2]
     assert [window["row_stop"] for window in plan["windows"]] == [2, 4]

@@ -57,6 +57,13 @@ from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.crop_pixel_work_package import (
     build_crop_pixel_work_package_from_video_window,
 )
+from fisheye.shared.gpu_runtime_telemetry import (
+    GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY,
+    GPU_RUNTIME_TELEMETRY_SCHEMA_ID,
+    GPU_RUNTIME_TELEMETRY_SCHEMA_VERSION,
+    GpuRuntimeTelemetrySampler,
+    require_gpu_runtime_telemetry,
+)
 from fisheye.shared.zarr.crop_manifest import validate_crop_run_manifest
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.refined_keypoint_manifest import (
@@ -74,15 +81,18 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
+PLAN_SCHEMA_LEGACY_VERSION = 1
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
 RESULT_SCHEMA_VERSION = 2
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
-WORKER_RESULT_SCHEMA_VERSION = 1
+WORKER_RESULT_SCHEMA_VERSION = 2
+WORKER_RESULT_SCHEMA_LEGACY_VERSION = 1
 FAMILY = "subject_mask_full_duration_canary"
 BENCHMARK_CLASSIFICATION = "selector_ineligible_full_duration_canary"
 DEFAULT_GPU_CONCURRENCY = 4
 DEFAULT_CPU_CONCURRENCY = 4
+DEFAULT_GPU_TELEMETRY_INTERVAL_SECONDS = 1
 _ATTEMPT_NAMESPACE = UUID("79676a9f-24f1-4be9-ac50-c374b0fdccae")
 
 
@@ -556,9 +566,18 @@ def prepare_canary(
     camera_identity: str | None = None,
     run_label: str,
     require_clean_repo: bool = True,
+    gpu_telemetry_interval_seconds: int = DEFAULT_GPU_TELEMETRY_INTERVAL_SECONDS,
+    synchronized_stage_profiling: bool = False,
 ) -> dict[str, Any]:
     """Freeze inputs and copy exact maintained references into an isolated store."""
 
+    if (
+        type(gpu_telemetry_interval_seconds) is not int
+        or gpu_telemetry_interval_seconds <= 0
+    ):
+        raise ValueError("GPU telemetry interval must be one positive integer.")
+    if type(synchronized_stage_profiling) is not bool:
+        raise ValueError("Synchronized stage profiling must be one exact boolean.")
     output = _require_benchmark_root(run_root)
     if output.exists():
         raise FileExistsError(f"Immutable canary run root already exists: {output}")
@@ -717,6 +736,14 @@ def prepare_canary(
                 "probability_dtype": "uint8",
                 "inner_chunk_rows": 32,
                 "outer_shard_rows": 2048,
+                "synchronized_stage_profiling": synchronized_stage_profiling,
+                "gpu_runtime_telemetry": {
+                    "enabled": True,
+                    "sample_interval_seconds": gpu_telemetry_interval_seconds,
+                    "schema_id": GPU_RUNTIME_TELEMETRY_SCHEMA_ID,
+                    "schema_version": GPU_RUNTIME_TELEMETRY_SCHEMA_VERSION,
+                    "identity_policy": GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY,
+                },
             },
             "refinement": {
                 "chunk_rows": 256,
@@ -746,7 +773,8 @@ def load_plan(path: Path) -> dict[str, Any]:
         raise ValueError("Canary plan root must be an object.")
     if (
         payload.get("schema_id") != PLAN_SCHEMA_ID
-        or payload.get("schema_version") != PLAN_SCHEMA_VERSION
+        or payload.get("schema_version")
+        not in {PLAN_SCHEMA_LEGACY_VERSION, PLAN_SCHEMA_VERSION}
         or payload.get("status") != "planned"
         or payload.get("classification") != BENCHMARK_CLASSIFICATION
     ):
@@ -770,6 +798,28 @@ def load_plan(path: Path) -> dict[str, Any]:
         raise ValueError("Canary analysis target escapes its benchmark run root.")
     if payload.get("safety", {}).get("bundle_activation_allowed") is not False:
         raise ValueError("Canary plan does not fail closed on activation.")
+    if payload["schema_version"] == PLAN_SCHEMA_VERSION:
+        inference = payload.get("execution", {}).get("inference", {})
+        telemetry = inference.get("gpu_runtime_telemetry")
+        if (
+            type(inference.get("synchronized_stage_profiling")) is not bool
+            or not isinstance(telemetry, Mapping)
+            or set(telemetry)
+            != {
+                "enabled",
+                "sample_interval_seconds",
+                "schema_id",
+                "schema_version",
+                "identity_policy",
+            }
+            or telemetry["enabled"] is not True
+            or type(telemetry["sample_interval_seconds"]) is not int
+            or telemetry["sample_interval_seconds"] <= 0
+            or telemetry["schema_id"] != GPU_RUNTIME_TELEMETRY_SCHEMA_ID
+            or telemetry["schema_version"] != GPU_RUNTIME_TELEMETRY_SCHEMA_VERSION
+            or telemetry["identity_policy"] != GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY
+        ):
+            raise ValueError("Canary GPU runtime telemetry plan differs.")
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
@@ -832,6 +882,8 @@ def _existing_worker_result(
     if (
         not isinstance(result, dict)
         or result.get("schema_id") != WORKER_RESULT_SCHEMA_ID
+        or result.get("schema_version")
+        not in {WORKER_RESULT_SCHEMA_LEGACY_VERSION, WORKER_RESULT_SCHEMA_VERSION}
         or result.get("status") != "complete"
         or result.get("stage") != stage
         or result.get("plan_digest") != plan["plan_digest"]
@@ -848,6 +900,7 @@ def _publish_worker_bundle(
     run_name: str,
     bundle: Path,
     result: dict[str, Any],
+    gpu_runtime_telemetry_path: Path | None = None,
 ) -> dict[str, Any]:
     destination = bundle.expanduser().resolve()
     if destination.exists():
@@ -876,6 +929,51 @@ def _publish_worker_bundle(
         if copied.attrs.get("stage_selector_eligible") is not False:
             raise RuntimeError("Copied worker run is unexpectedly selector eligible.")
         proof = _worker_evidence(archive, copied)
+        if gpu_runtime_telemetry_path is not None:
+            telemetry_directory = temporary / "performance"
+            try:
+                telemetry_source = gpu_runtime_telemetry_path.expanduser().resolve()
+                telemetry_document = _strict_json(telemetry_source)
+                if not isinstance(telemetry_document, Mapping):
+                    raise ValueError("GPU runtime telemetry sidecar is not an object.")
+                require_gpu_runtime_telemetry(telemetry_document)
+                telemetry_destination = telemetry_directory / "gpu_runtime.json"
+                telemetry_destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(telemetry_source, telemetry_destination)
+                copied_telemetry = _strict_json(telemetry_destination)
+                if not isinstance(copied_telemetry, Mapping):
+                    raise ValueError("Copied GPU runtime telemetry is not an object.")
+                require_gpu_runtime_telemetry(copied_telemetry)
+                source_sha256 = _sha256_file(telemetry_source)
+                copied_sha256 = _sha256_file(telemetry_destination)
+                if copied_sha256 != source_sha256:
+                    raise RuntimeError(
+                        "GPU runtime telemetry changed during bundle copy."
+                    )
+                result["performance_telemetry"] = {
+                    "identity_policy": GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY,
+                    "scientific_identity_included": False,
+                    "gpu_runtime": {
+                        "status": "captured",
+                        "capture_status": copied_telemetry["status"],
+                        "relative_path": "performance/gpu_runtime.json",
+                        "schema_id": GPU_RUNTIME_TELEMETRY_SCHEMA_ID,
+                        "schema_version": GPU_RUNTIME_TELEMETRY_SCHEMA_VERSION,
+                        "payload_digest": copied_telemetry["payload_digest"],
+                        "file_sha256": copied_sha256,
+                        "size_bytes": telemetry_destination.stat().st_size,
+                    },
+                }
+            except Exception as exc:
+                shutil.rmtree(telemetry_directory, ignore_errors=True)
+                result["performance_telemetry"] = {
+                    "identity_policy": GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY,
+                    "scientific_identity_included": False,
+                    "gpu_runtime": {
+                        "status": "missing",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    },
+                }
         result.update(
             {
                 "bundle_path": str(destination),
@@ -918,6 +1016,39 @@ def run_inference_window(
     started = time.perf_counter()
     work = scratch_root.expanduser().resolve() / f"inference_{window['window_id']}"
     work.mkdir(parents=True, exist_ok=False)
+    telemetry_sampler: GpuRuntimeTelemetrySampler | None = None
+    telemetry_path: Path | None = None
+    telemetry_stopped = False
+    telemetry_start_error: str | None = None
+    telemetry_config = (
+        plan.get("execution", {}).get("inference", {}).get("gpu_runtime_telemetry")
+    )
+    if (
+        isinstance(telemetry_config, Mapping)
+        and telemetry_config.get("enabled") is True
+    ):
+        telemetry_path = work / "performance" / "gpu_runtime.json"
+        try:
+            telemetry_sampler = GpuRuntimeTelemetrySampler(
+                output_path=telemetry_path,
+                sample_interval_seconds=int(
+                    telemetry_config["sample_interval_seconds"]
+                ),
+                execution_context={
+                    "workflow_id": plan["workflow_id"],
+                    "plan_digest": plan["plan_digest"],
+                    "palette_commit": plan["repo"]["commit"],
+                    "stage": "subject_mask_inference",
+                    "window_id": window["window_id"],
+                    "window_index": int(window["window_index"]),
+                    "row_start": int(window["row_start"]),
+                    "row_stop": int(window["row_stop"]),
+                },
+            ).start()
+        except Exception as exc:
+            telemetry_start_error = f"{type(exc).__name__}: {exc}"
+            telemetry_sampler = None
+            telemetry_path = None
     try:
         local_archive = _stage_reference_archive(plan, work / "draft.zarr")
         staged_video = work / Path(window["source_video_path"]).name
@@ -1024,9 +1155,10 @@ def run_inference_window(
             "--output-queue-size",
             "2",
             "--no-progress",
-            "--profile-timings",
             "--defer-registry-status",
         ]
+        if bool(execution.get("synchronized_stage_profiling", False)):
+            arguments.append("--profile-timings")
         infer_unet_subject_masks.main(arguments)
         run = open_zarr_root(local_archive, mode="r")[
             f"subject_mask_shard_runs/{window['raw_run']}"
@@ -1057,13 +1189,43 @@ def run_inference_window(
             "compute_duration_seconds": float(time.perf_counter() - started),
             "resource_usage": _resource_usage(),
         }
+        telemetry_error = telemetry_start_error
+        if telemetry_sampler is not None:
+            try:
+                telemetry_sampler.stop(workload_outcome="success")
+            except Exception as exc:  # telemetry cannot invalidate scientific output
+                telemetry_error = f"{type(exc).__name__}: {exc}"
+                telemetry_path = None
+            finally:
+                telemetry_stopped = True
+        if telemetry_error is not None:
+            result["performance_telemetry"] = {
+                "identity_policy": GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY,
+                "scientific_identity_included": False,
+                "gpu_runtime": {
+                    "status": "missing",
+                    "reason": telemetry_error,
+                },
+            }
         return _publish_worker_bundle(
             local_archive=local_archive,
             parent="subject_mask_shard_runs",
             run_name=str(window["raw_run"]),
             bundle=bundle,
             result=result,
+            gpu_runtime_telemetry_path=telemetry_path,
         )
+    except Exception as exc:
+        if telemetry_sampler is not None and not telemetry_stopped:
+            try:
+                telemetry_sampler.stop(
+                    workload_outcome="error",
+                    workload_error_type=type(exc).__name__,
+                )
+            except Exception:
+                pass
+            telemetry_stopped = True
+        raise
     finally:
         if not keep_scratch:
             shutil.rmtree(work, ignore_errors=True)
@@ -1544,6 +1706,23 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--camera-identity")
     prepare.add_argument("--run-label", required=True)
     prepare.add_argument(
+        "--gpu-telemetry-interval-seconds",
+        type=int,
+        default=DEFAULT_GPU_TELEMETRY_INTERVAL_SECONDS,
+        help=(
+            "Continuous nvidia-smi sampling interval for report-only inference "
+            "sidecars (default: 1 second)."
+        ),
+    )
+    prepare.add_argument(
+        "--synchronized-stage-profiling",
+        action="store_true",
+        help=(
+            "Opt into perturbative per-batch CUDA synchronization for exact phase "
+            "attribution. Disabled for representative throughput by default."
+        ),
+    )
+    prepare.add_argument(
         "--allow-dirty",
         action="store_true",
         help="Allow explicitly non-reproducible development preflight only.",
@@ -1591,6 +1770,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             camera_identity=args.camera_identity,
             run_label=args.run_label,
             require_clean_repo=not bool(args.allow_dirty),
+            gpu_telemetry_interval_seconds=args.gpu_telemetry_interval_seconds,
+            synchronized_stage_profiling=bool(args.synchronized_stage_profiling),
         )
     elif args.command == "inference-worker":
         result = run_inference_window(
