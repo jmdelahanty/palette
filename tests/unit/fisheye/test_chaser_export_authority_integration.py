@@ -120,6 +120,29 @@ def _component_handle(source: Path, component_path: str) -> dict[str, object]:
     )
 
 
+def _registry_identities(*sources: Path) -> dict[str, dict[str, str]]:
+    bindings: dict[str, dict[str, str]] = {}
+    for source in sources:
+        resolved = source.expanduser().resolve()
+        if source.exists():
+            root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+            if "analysis/chaser_distance_runs" in root:
+                recording_id = load_chaser_distance_run(
+                    root,
+                    run_name="chaser_distance_1",
+                ).recording_id
+            else:
+                recording_id = source.name.removesuffix("_analysis.zarr")
+        else:
+            recording_id = source.name.removesuffix("_analysis.zarr")
+        bindings[str(resolved)] = {
+            "recording_id": recording_id,
+            "session_id": "2026-08-09T12:00:00+00:00",
+            "subject_id": f"subject_{recording_id}",
+        }
+    return bindings
+
+
 def test_sealed_base_speed_distance_exports_with_exact_authority_in_process_pool(
     tmp_path: Path,
 ) -> None:
@@ -146,6 +169,7 @@ def test_sealed_base_speed_distance_exports_with_exact_authority_in_process_pool
         jobs=2,
         chaser_authority_manifest_path=authority_path,
         chaser_authority_sha256=authority_file_sha256,
+        source_registry_identities=_registry_identities(source),
     )
 
     assert manifest["row_counts_by_table"][CHASER_SPEED_DISTANCE_TABLE] > 0
@@ -186,6 +210,7 @@ def test_quadrant_component_exports_all_three_tables_from_one_explicit_handle(
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
+        source_registry_identities=_registry_identities(source),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -251,6 +276,7 @@ def test_near_field_component_exports_all_four_tables_from_one_explicit_handle(
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
+        source_registry_identities=_registry_identities(source),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -318,6 +344,7 @@ def test_egocentric_component_exports_both_tables_from_one_explicit_handle(
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
+        source_registry_identities=_registry_identities(source),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -471,6 +498,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
+        source_registry_identities=_registry_identities(source),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -497,6 +525,7 @@ def test_supported_chaser_table_requires_authority_before_staging(
             output_root=tmp_path / "exports",
             export_run_id="missing_authority",
             tables=(CHASER_SPEED_DISTANCE_TABLE,),
+            source_registry_identities=_registry_identities(source),
         )
 
     assert not (tmp_path / "exports").exists()
@@ -526,6 +555,7 @@ def test_chaser_authority_source_set_must_match_before_staging(
             export_run_id="source_mismatch",
             tables=(CHASER_SPEED_DISTANCE_TABLE,),
             chaser_authority_manifest_path=authority_path,
+            source_registry_identities=_registry_identities(source, extra_source),
         )
 
     assert not (tmp_path / "exports").exists()

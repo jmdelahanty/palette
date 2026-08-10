@@ -40,6 +40,7 @@ from fisheye.group_analytics_viewer.query import (
     resolve_statistics_run_id,
 )
 from fisheye.group_statistics.goodcopbadcop import (
+    DEFAULT_METRICS,
     DESCRIPTIVE_TABLE,
     GoodCopBadCopStatisticsConfig,
     SUMMARY_TABLE,
@@ -61,12 +62,20 @@ from fisheye.group_statistics.paired import (
     compute_one_sample_signed_rank,
     compute_paired_contrast,
 )
+from fisheye.group_statistics.session_cluster import fit_session_random_intercept
 from fisheye.utils.compute_group_statistics import main as compute_group_statistics_main
 
 
 def _write_rows(path: Path, rows: list[dict]) -> None:
     path.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows), path / "part-00000.parquet")
+
+
+def _registry_identity(recording_id: str) -> dict[str, str]:
+    return {
+        "session_id": f"session-{recording_id}",
+        "subject_id": f"subject-{recording_id}",
+    }
 
 
 def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export") -> Path:
@@ -89,6 +98,7 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
                 rows.append(
                     {
                         "recording_id": recording_id,
+                        **_registry_identity(recording_id),
                         "window_label": label_by_condition[condition],
                         "chaser_index": chaser_index,
                         "chaser_column_index": chaser_index,
@@ -112,6 +122,7 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
     object_phase_rows = [
         {
             "recording_id": recording_id,
+            **_registry_identity(recording_id),
             "object_column_index": object_column_index,
             "object_role": role,
         }
@@ -263,6 +274,7 @@ def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_expo
     rows = [
         {
             "recording_id": recording_id,
+            **_registry_identity(recording_id),
             "fish_id": "0",
             "endpoint_status": "computed",
             "chaser_count": 2,
@@ -289,6 +301,7 @@ def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_expo
                 phase_rows.append(
                     {
                         "recording_id": recording_id,
+                        **_registry_identity(recording_id),
                         "fish_id": "0",
                         "phase_axis_index": phase_axis_index,
                         "phase_label": phase_label,
@@ -360,6 +373,7 @@ def _make_goodcopbadcop_epoch_behavior_export(root: Path, export_run_id: str = "
             rows.append(
                 {
                     "recording_id": recording_id,
+                    **_registry_identity(recording_id),
                     "window_label": label_by_condition[condition],
                     "mean_speed_mm_s": speed,
                     "bout_count": int(speed / 10.0),
@@ -453,6 +467,45 @@ def test_benjamini_hochberg_adjusts_with_monotonicity() -> None:
     assert benjamini_hochberg([0.01, 0.04, 0.03, None]) == pytest.approx([0.03, 0.04, 0.04, None])
 
 
+def test_session_random_intercept_reports_clustered_inference_and_icc() -> None:
+    result = fit_session_random_intercept(
+        [1.0, 1.2, 2.0, 2.2, 3.0, 3.2, 4.0, 4.2],
+        ["s1", "s1", "s2", "s2", "s3", "s3", "s4", "s4"],
+        confidence_level=0.95,
+    )
+
+    assert result.status == "computed"
+    assert result.cluster_count == 4
+    assert result.unit_count == 8
+    assert result.mean == pytest.approx(2.6)
+    assert result.standard_error is not None
+    assert result.p_value is not None
+    assert result.intraclass_correlation is not None
+    assert 0.0 <= result.intraclass_correlation <= 1.0
+
+
+def test_session_random_intercept_requires_repeated_session_observations() -> None:
+    result = fit_session_random_intercept(
+        [1.0, 2.0, 3.0],
+        ["s1", "s2", "s3"],
+        confidence_level=0.95,
+    )
+
+    assert result.status == "unavailable"
+    assert result.reason == "no_repeated_session_observations"
+    assert result.cluster_count == result.unit_count == 3
+
+
+def test_default_exploratory_fdr_families_have_multiple_registered_metrics() -> None:
+    family_counts: dict[str, int] = {}
+    for spec in DEFAULT_METRICS:
+        if spec.exploratory:
+            family_counts[spec.metric_family] = family_counts.get(spec.metric_family, 0) + 1
+
+    assert family_counts
+    assert all(count > 1 for count in family_counts.values())
+
+
 def test_group_statistics_rejects_zero_minimum_recordings(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="minimum_recordings must be an integer >= 1"):
         GoodCopBadCopStatisticsConfig(
@@ -520,6 +573,15 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert target["mean_difference"] == pytest.approx(2.0)
     assert target["p_value"] == pytest.approx(0.25)
     assert target["q_value"] is not None
+    assert target["multiple_comparison_family"] == "primary|chaser_distance"
+    assert target["cluster_mode"] == "session"
+    assert target["cluster_method"] == "session_random_intercept_reml_v1"
+    assert target["cluster_count"] == 3
+    assert target["cluster_status"] == "unavailable"
+    assert target["cluster_reason"] == "no_repeated_session_observations"
+    assert target["clustered_p_value"] is None
+    assert target["clustered_q_value"] is None
+    assert target["intraclass_correlation"] is None
     assert target["test_method"] == "paired_sign_flip_exact"
     assert json.loads(target["parameters_json"])[
         "allow_legacy_export_layout"
@@ -1023,6 +1085,40 @@ def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path
     assert target["mean_a"] == pytest.approx(0.12)
     assert target["mean_b"] == pytest.approx(0.18)
     assert target["mean_difference"] == pytest.approx(0.06)
+    families = {row["multiple_comparison_family"] for row in rows}
+    assert families == {"exploratory|epoch_behavior"}
+    assert sum(
+        row["multiple_comparison_family"] == "exploratory|epoch_behavior"
+        for row in rows
+    ) == 36
+
+
+def test_group_statistics_rejects_missing_registry_subject_identity(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_epoch_behavior_export(tmp_path)
+    part = (
+        export_root
+        / "v1"
+        / "chaser_epoch_behavior_summary"
+        / "export_run_id=source_export"
+        / "part-00000.parquet"
+    )
+    table = pq.read_table(part).drop(["subject_id"])
+    pq.write_table(table, part)
+
+    with pytest.raises(ValueError, match="subject_id"):
+        compute_goodcopbadcop_statistics(
+            GoodCopBadCopStatisticsConfig(
+                export_root=export_root,
+                source_export_run_id="source_export",
+                stats_run_id="stats_missing_subject",
+                metrics=metric_specs_for_families(("epoch_behavior",)),
+                bootstrap_iterations=0,
+                minimum_recordings=3,
+                allow_legacy_export_layout=True,
+            )
+        )
 
 
 def test_compute_group_statistics_cli_dry_run_and_apply(tmp_path: Path, capsys) -> None:

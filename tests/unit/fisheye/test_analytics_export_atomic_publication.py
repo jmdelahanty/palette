@@ -513,6 +513,8 @@ def test_statistics_latest_skips_newer_legacy_manifest(
                 "allow_legacy_export_layout": False,
                 "bootstrap_iterations": 0,
                 "confidence_level": 0.95,
+                "cluster": "session",
+                "fdr_family_rule": "analysis_tier_metric_family_v1",
                 "fdr_method": "benjamini_hochberg",
                 "minimum_recordings": 1,
                 "permutation_iterations": 0,

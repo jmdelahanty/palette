@@ -64,6 +64,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confidence-level", type=float, default=0.95)
     parser.add_argument("--minimum-recordings", type=int, default=3)
     parser.add_argument("--random-seed", type=int, default=0)
+    parser.add_argument(
+        "--cluster",
+        choices=("session", "none"),
+        default="session",
+        help=(
+            "Clustered-inference mode. The default fits a registry-session random "
+            "intercept alongside the naive recording-level result."
+        ),
+    )
     parser.add_argument("--apply", action="store_true", help="Write statistics Parquet/manifest.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing stats run id.")
     parser.add_argument(
@@ -90,6 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         confidence_level=float(args.confidence_level),
         minimum_recordings=int(args.minimum_recordings),
         random_seed=int(args.random_seed),
+        cluster=str(args.cluster),
         overwrite=bool(args.overwrite),
         allow_legacy_export_layout=bool(args.allow_legacy_export_layout),
     )

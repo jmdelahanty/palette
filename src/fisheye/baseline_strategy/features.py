@@ -66,6 +66,8 @@ def expected_wall_fraction(arena_radius_mm: object, wall_band_mm: object) -> flo
 def _identity(summary: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "recording_id": summary.get("recording_id"),
+        "session_id": summary.get("session_id"),
+        "subject_id": summary.get("subject_id"),
         "track_id": _int(summary.get("track_id")),
         "baseline_window_id": _int(summary.get("baseline_window_id")),
         "baseline_window_label": summary.get("baseline_window_label"),

@@ -14,6 +14,7 @@ from .capabilities import resolve_capabilities
 from .contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
+    REGISTRY_IDENTITY_TABLES,
     TABLE_CONTRACTS,
     validate_table_columns,
 )
@@ -105,6 +106,56 @@ def validate_export_payload(
     unknown_tables = sorted(set(tables) - set(TABLE_CONTRACTS))
     if unknown_tables:
         errors.append(f"unknown table contracts: {unknown_tables}")
+
+    if set(tables) & REGISTRY_IDENTITY_TABLES:
+        identity = payload.get("registry_identity")
+        if not isinstance(identity, Mapping):
+            errors.append("missing registry identity envelope")
+        else:
+            expected_identity_fields = {
+                "schema_id",
+                "schema_version",
+                "session_id_source",
+                "subject_id_source",
+                "sources",
+            }
+            if set(identity) != expected_identity_fields:
+                errors.append("registry identity envelope has an invalid field set")
+            if (
+                identity.get("schema_id")
+                != "palette.analytics_export.registry_identity"
+                or identity.get("schema_version") != 1
+                or identity.get("session_id_source")
+                != "dataset_context_current.recording_started_utc"
+                or identity.get("subject_id_source")
+                != (
+                    "coalesce(dataset_context_current.subject_id,"
+                    "dataset_context_current.legacy_fish_id)"
+                )
+            ):
+                errors.append("registry identity envelope has invalid semantics")
+            sources = identity.get("sources")
+            source_zarrs = payload.get("source_zarrs")
+            if not isinstance(sources, Mapping) or not isinstance(source_zarrs, list):
+                errors.append("registry identity source bindings are invalid")
+            elif set(map(str, source_zarrs)) != set(map(str, sources)):
+                errors.append("registry identity source set differs from source_zarrs")
+            else:
+                for source_path, binding in sources.items():
+                    if (
+                        not isinstance(source_path, str)
+                        or not isinstance(binding, Mapping)
+                        or set(binding)
+                        != {"recording_id", "session_id", "subject_id"}
+                        or any(
+                            not isinstance(binding.get(name), str)
+                            or not str(binding[name]).strip()
+                            for name in ("recording_id", "session_id", "subject_id")
+                        )
+                    ):
+                        errors.append(
+                            f"registry identity binding is invalid: {source_path!r}"
+                        )
 
     arrow_contracts_valid = False
     arrow_contracts = payload.get("arrow_schema_contracts")

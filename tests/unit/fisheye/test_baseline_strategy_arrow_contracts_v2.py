@@ -37,6 +37,8 @@ EXPECTED_FIELD_NAMES = {
         "method",
         "method_version",
         "recording_id",
+        "session_id",
+        "subject_id",
         "track_id",
         "baseline_window_id",
         "baseline_window_label",
@@ -125,6 +127,8 @@ EXPECTED_FIELD_NAMES = {
         "method",
         "method_version",
         "recording_id",
+        "session_id",
+        "subject_id",
         "track_id",
         "baseline_window_id",
         "baseline_window_label",
@@ -157,6 +161,8 @@ EXPECTED_FIELD_NAMES = {
         "method",
         "method_version",
         "recording_id",
+        "session_id",
+        "subject_id",
         "track_id",
         "baseline_window_id",
         "baseline_window_label",
@@ -194,6 +200,8 @@ EXPECTED_FIELD_NAMES = {
         "method",
         "method_version",
         "recording_id",
+        "session_id",
+        "subject_id",
         "track_id",
         "baseline_window_id",
         "baseline_window_label",
@@ -219,16 +227,16 @@ EXPECTED_FIELD_NAMES = {
 # version independently from the human-readable field-name snapshot above.
 EXPECTED_CONTRACT_DIGESTS = {
     BASELINE_STRATEGY_FEATURES_TABLE: (
-        "6b7a4c941bb003637f45d1dbcb703b8d02aec1dc8716405c8896c919e10cd38a"
+        "8d3ab3b68ed34ecc16e8c316b3a5f891439e3df3a0d62e8bd6831267eb831d4b"
     ),
     BASELINE_EXPLORATION_EPISODES_TABLE: (
-        "46fa54a3d3a0c30d33373f2254d06f87f27dedeba3d483a6ff5bbf8e05c5223a"
+        "559e1fa497b8feef0df47835f4e81578f1cbd3a83a0afd9c485f7b5b53fe916b"
     ),
     BASELINE_STRATEGY_CLASSIFICATION_TABLE: (
-        "037a4009084423c45566c69cf3a7eb71842c3312539bac49bd561e503107e9cf"
+        "e34771ba686645180faca9d15370b8fac4d564eafb9b92ec9ed34959a5ccffdb"
     ),
     BASELINE_STRATEGY_CLUSTERS_TABLE: (
-        "7c4d0d8bb0851e0d84d6abd5c48616257ebe48deb042097ebeb16fdfbf9fd54b"
+        "63671d58146536662503d0e14441fa8a00e155983843af5745b55bf4e84c6edc"
     ),
 }
 

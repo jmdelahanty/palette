@@ -23,6 +23,7 @@ dependencies:
   # Numeric / image / tabular stack.
   - "numpy>=2,<2.3"
   - scipy
+  - "statsmodels>=0.14,<0.15"
   - scikit-image
   - scikit-learn
   - pyarrow

@@ -17,7 +17,7 @@ gh CLI, live-registry reads); everything else is from code reading by review age
 Queue refresh: re-verified read-only at `29598056` on 2026-08-09 after the CI
 reconciliation. Status paragraphs below are current; original findings remain as
 historical evidence. The current full reconciliation CI is green. Scientific findings
-W1.4-W1.5 remain open and are the highest-priority implementation surface.
+W1.5 remains open; W1.4 is implemented in this checkpoint.
 
 Known-good patterns to copy are named per item. Do not invent new mechanisms where a
 proven one exists in-repo.
@@ -191,6 +191,28 @@ published escape/pursuit numbers need recomputation.
 Acceptance: a table (recording_id → geometry source) in a diagnostics doc.
 
 **W1.4 — Real FDR families + session clustering in group_statistics.**
+Status: **implemented on the design-review queue branch.** The statistics registry now
+requires every metric to be exactly one of primary or exploratory, and the
+multiple-comparison family is `analysis_tier|metric_family`. Both naive and
+session-random-intercept estimates are persisted; a non-identifiable or failed mixed
+model is explicit `cluster_status=unavailable` and never falls back to an unclustered
+claim. The exact statistics Arrow contract carries clustered p/q values, confidence
+intervals, variance components, and ICC.
+
+Chaser/baseline analytics rows now require registry-derived `session_id` and
+`subject_id`. `session_id` is `dataset_context_current.recording_started_utc`, which
+groups simultaneous arena recordings; it is deliberately not the arena-specific
+registry `session_uuid` and is never parsed from a recording name. `subject_id` uses
+the registry's effective subject identity (`subject_id`, with the maintained legacy
+fish-identity fallback). Exact export manifests bind those sources and fail closed
+when the source set or identity is missing. Baseline-strategy artifacts carry the same
+identity through all four derived tables.
+
+Acceptance evidence: `test_group_statistics.py` covers a computed random-intercept
+fit/ICC, explicit non-identifiability, the 36-result exploratory FDR family, and
+missing-identity rejection. Exact Arrow/export and baseline-strategy suites cover the
+new physical fields, registry envelope, propagation, and fail-closed publication.
+
 `group_statistics/goodcopbadcop.py:1707-1713` defines
 `multiple_comparison_family = metric_family|metric_name|contrast` → 24 of 37 specs sit
 in size-1 families → `q_value == p_value` by construction across a ~111-test battery.

@@ -65,6 +65,7 @@ from .paired import (
     compute_one_sample_signed_rank,
     compute_paired_contrast,
 )
+from .session_cluster import SessionClusterResult, fit_session_random_intercept
 
 
 SUMMARY_TABLE = STATISTICS_TABLE
@@ -286,6 +287,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="delta_agg",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="cra_primary_endpoint",
@@ -293,6 +295,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="delta_occ_agg",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="cra_primary_endpoint",
@@ -306,6 +309,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="specificity_occupancy",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="cra_primary_endpoint",
@@ -313,6 +317,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="delta_inert",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="cra_primary_endpoint",
@@ -320,6 +325,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="delta_occ_inert",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="cra_near_field",
@@ -363,6 +369,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="approach_p05_delta_inert",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="cra_near_field",
@@ -370,6 +377,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="nearzone_occ_delta_inert",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="cra_near_field",
@@ -377,6 +385,7 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_name="nearzone_entry_rate_delta_inert",
         group_keys=(),
         primary=False,
+        exploratory=True,
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
@@ -423,12 +432,83 @@ class GoodCopBadCopStatisticsConfig:
     confidence_level: float = 0.95
     minimum_recordings: int = 3
     random_seed: int = 0
+    cluster: str = "session"
     overwrite: bool = False
     allow_legacy_export_layout: bool = False
 
     def __post_init__(self) -> None:
         if type(self.minimum_recordings) is not int or self.minimum_recordings < 1:
             raise ValueError("minimum_recordings must be an integer >= 1")
+        if self.cluster not in {"none", "session"}:
+            raise ValueError("cluster must be 'none' or 'session'")
+
+
+def _analysis_tier(spec: MetricSpec) -> str:
+    if bool(spec.primary) == bool(spec.exploratory):
+        raise ValueError(
+            f"Metric {spec.source_table}.{spec.metric_name} must be exactly one of "
+            "primary or exploratory."
+        )
+    return "primary" if spec.primary else "exploratory"
+
+
+def _multiple_comparison_family(spec: MetricSpec) -> str:
+    return f"{_analysis_tier(spec)}|{spec.metric_family}"
+
+
+def _disabled_cluster_result(unit_count: int) -> SessionClusterResult:
+    return SessionClusterResult(
+        status="disabled",
+        reason=None,
+        method="none",
+        unit="session",
+        unit_count=int(unit_count),
+        cluster_count=0,
+        mean=None,
+        standard_error=None,
+        ci_low=None,
+        ci_high=None,
+        p_value=None,
+        cluster_variance=None,
+        residual_variance=None,
+        intraclass_correlation=None,
+    )
+
+
+def _session_cluster_result(
+    *,
+    config: GoodCopBadCopStatisticsConfig,
+    values: np.ndarray,
+    session_ids: np.ndarray,
+) -> SessionClusterResult:
+    if config.cluster == "none":
+        return _disabled_cluster_result(int(values.size))
+    return fit_session_random_intercept(
+        values,
+        session_ids,
+        confidence_level=float(config.confidence_level),
+    )
+
+
+def _cluster_fields(result: SessionClusterResult) -> dict[str, Any]:
+    return {
+        "cluster_mode": "none" if result.status == "disabled" else "session",
+        "cluster_unit": result.unit,
+        "cluster_method": result.method,
+        "cluster_status": result.status,
+        "cluster_reason": result.reason,
+        "cluster_count": result.cluster_count,
+        "clustered_unit_count": result.unit_count,
+        "clustered_mean_difference": result.mean,
+        "clustered_standard_error": result.standard_error,
+        "clustered_ci_low": result.ci_low,
+        "clustered_ci_high": result.ci_high,
+        "clustered_p_value": result.p_value,
+        "clustered_q_value": None,
+        "session_variance": result.cluster_variance,
+        "residual_variance": result.residual_variance,
+        "intraclass_correlation": result.intraclass_correlation,
+    }
 
 
 def utc_run_id() -> str:
@@ -999,6 +1079,77 @@ def _validate_result_rows(
             raise ValueError(
                 f"{table_name}: row {row_index} has q_value for skipped result"
             )
+        cluster_mode = row.get("cluster_mode")
+        cluster_status = row.get("cluster_status")
+        if cluster_mode not in {"none", "session"}:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid cluster_mode"
+            )
+        if row.get("cluster_unit") != "session":
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid cluster_unit"
+            )
+        cluster_count = row.get("cluster_count")
+        clustered_unit_count = row.get("clustered_unit_count")
+        if (
+            type(cluster_count) is not int
+            or cluster_count < 0
+            or type(clustered_unit_count) is not int
+            or clustered_unit_count < 0
+        ):
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid cluster counts"
+            )
+        clustered_values = (
+            "clustered_mean_difference",
+            "clustered_standard_error",
+            "clustered_ci_low",
+            "clustered_ci_high",
+            "clustered_p_value",
+            "clustered_q_value",
+            "session_variance",
+            "residual_variance",
+            "intraclass_correlation",
+        )
+        if cluster_mode == "none":
+            if (
+                cluster_status != "disabled"
+                or row.get("cluster_method") != "none"
+                or row.get("cluster_reason") is not None
+                or cluster_count != 0
+                or any(row.get(name) is not None for name in clustered_values)
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has inconsistent disabled clustering"
+                )
+        elif cluster_status == "unavailable":
+            if (
+                row.get("cluster_method") != "session_random_intercept_reml_v1"
+                or not isinstance(row.get("cluster_reason"), str)
+                or not row.get("cluster_reason")
+                or any(row.get(name) is not None for name in clustered_values)
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has inconsistent unavailable clustering"
+                )
+        elif cluster_status in {"computed", "boundary_zero_variance"}:
+            if (
+                row.get("cluster_method") != "session_random_intercept_reml_v1"
+                or row.get("cluster_reason") is not None
+                or cluster_count < 2
+                or any(
+                    row.get(name) is None
+                    for name in clustered_values
+                    if name != "clustered_q_value"
+                )
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has inconsistent computed clustering"
+                )
+        else:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid cluster_status"
+            )
         one_sample = (
             row.get("contrast_name") == "vs-zero"
             and row.get("condition_a") == "zero"
@@ -1039,6 +1190,15 @@ def _validate_result_rows(
             "ci_high",
             "p_value",
             "q_value",
+            "clustered_mean_difference",
+            "clustered_standard_error",
+            "clustered_ci_low",
+            "clustered_ci_high",
+            "clustered_p_value",
+            "clustered_q_value",
+            "session_variance",
+            "residual_variance",
+            "intraclass_correlation",
         )
         if any(
             row.get(name) is not None
@@ -1052,7 +1212,13 @@ def _validate_result_rows(
             raise ValueError(
                 f"{table_name}: row {row_index} has a nonfinite statistical value"
             )
-        for field_name in ("p_value", "q_value"):
+        for field_name in (
+            "p_value",
+            "q_value",
+            "clustered_p_value",
+            "clustered_q_value",
+            "intraclass_correlation",
+        ):
             value = row.get(field_name)
             if value is not None and not 0.0 <= float(value) <= 1.0:
                 raise ValueError(
@@ -1065,6 +1231,15 @@ def _validate_result_rows(
         ):
             raise ValueError(
                 f"{table_name}: row {row_index} has invalid CI bounds"
+            )
+        clustered_ci_low = row.get("clustered_ci_low")
+        clustered_ci_high = row.get("clustered_ci_high")
+        if (clustered_ci_low is None) != (clustered_ci_high is None) or (
+            clustered_ci_low is not None
+            and float(clustered_ci_low) > float(clustered_ci_high)
+        ):
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid clustered CI bounds"
             )
         allowed_methods = (
             {
@@ -1146,10 +1321,18 @@ def _validate_result_rows(
 
     if table_name == SUMMARY_TABLE:
         by_family: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
+        clustered_by_family: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
         for row_index, row in enumerate(rows):
             if row.get("status") == "computed":
                 family = str(row.get("multiple_comparison_family") or "")
                 by_family.setdefault(family, []).append((row_index, row))
+                if row.get("cluster_status") in {
+                    "computed",
+                    "boundary_zero_variance",
+                }:
+                    clustered_by_family.setdefault(family, []).append(
+                        (row_index, row)
+                    )
         for family_rows in by_family.values():
             expected_q_values = benjamini_hochberg(
                 [_safe_float(row.get("p_value")) for _index, row in family_rows]
@@ -1172,6 +1355,32 @@ def _validate_result_rows(
                 if not valid:
                     raise ValueError(
                         f"{table_name}: row {row_index} has an invalid FDR q_value"
+                    )
+        for family_rows in clustered_by_family.values():
+            expected_q_values = benjamini_hochberg(
+                [
+                    _safe_float(row.get("clustered_p_value"))
+                    for _index, row in family_rows
+                ]
+            )
+            for (row_index, row), expected_q in zip(
+                family_rows,
+                expected_q_values,
+                strict=True,
+            ):
+                actual_q = row.get("clustered_q_value")
+                if expected_q is None:
+                    valid = actual_q is None
+                else:
+                    valid = actual_q is not None and math.isclose(
+                        float(actual_q),
+                        float(expected_q),
+                        rel_tol=1e-12,
+                        abs_tol=1e-12,
+                    )
+                if not valid:
+                    raise ValueError(
+                        f"{table_name}: row {row_index} has an invalid clustered FDR q_value"
                     )
 
 
@@ -1210,6 +1419,10 @@ def _validate_result_rows_against_manifest(
             item.get("exploratory")
         ) is not bool:
             raise ValueError("Statistics manifest metric flags are invalid")
+        if bool(item.get("primary")) == bool(item.get("exploratory")):
+            raise ValueError(
+                "Statistics manifest metrics must be exactly one of primary or exploratory"
+            )
         metric_specs[key] = item
 
     raw_contrasts = manifest.get("contrasts")
@@ -1238,7 +1451,9 @@ def _validate_result_rows_against_manifest(
         "allow_legacy_export_layout",
         "bootstrap_iterations",
         "confidence_level",
+        "cluster",
         "fdr_method",
+        "fdr_family_rule",
         "minimum_recordings",
         "permutation_iterations",
         "random_seed",
@@ -1248,6 +1463,10 @@ def _validate_result_rows_against_manifest(
         raise ValueError("Statistics manifest parameters have an invalid field set")
     if manifest_parameters.get("fdr_method") != "benjamini_hochberg":
         raise ValueError("Statistics manifest FDR method is invalid")
+    if manifest_parameters.get("fdr_family_rule") != "analysis_tier_metric_family_v1":
+        raise ValueError("Statistics manifest FDR family rule is invalid")
+    if manifest_parameters.get("cluster") not in {"none", "session"}:
+        raise ValueError("Statistics manifest cluster mode is invalid")
     if type(manifest_parameters.get("allow_legacy_export_layout")) is not bool:
         raise ValueError("Statistics manifest legacy-layout policy is invalid")
     for parameter_name in (
@@ -1369,6 +1588,7 @@ def _validate_result_rows_against_manifest(
                 manifest_parameters["bootstrap_iterations"]
             ),
             "confidence_level": float(manifest_parameters["confidence_level"]),
+            "cluster": str(manifest_parameters["cluster"]),
             "minimum_recordings": int(manifest_parameters["minimum_recordings"]),
             "missing_policy": row.get("missing_policy"),
             "permutation_iterations_requested": int(
@@ -1383,13 +1603,8 @@ def _validate_result_rows_against_manifest(
                 f"{table_name}: row {row_index} has invalid parameters_json"
             )
         if table_name == SUMMARY_TABLE:
-            expected_family = "|".join(
-                (
-                    str(row.get("metric_family")),
-                    str(row.get("metric_name")),
-                    str(row.get("contrast_name")),
-                )
-            )
+            tier = "primary" if row.get("primary") else "exploratory"
+            expected_family = f"{tier}|{row.get('metric_family')}"
             if row.get("multiple_comparison_family") != expected_family:
                 raise ValueError(
                     f"{table_name}: row {row_index} has invalid multiple-comparison binding"
@@ -1479,7 +1694,14 @@ def _descriptive_stats(values: Sequence[Any]) -> dict[str, Any]:
 
 
 def _prepare_metric_frame(frame: pl.DataFrame, spec: MetricSpec) -> pl.DataFrame:
-    required = {"recording_id", "window_label", spec.metric_name, *spec.group_keys}
+    required = {
+        "recording_id",
+        "session_id",
+        "subject_id",
+        "window_label",
+        spec.metric_name,
+        *spec.group_keys,
+    }
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}")
@@ -1487,6 +1709,8 @@ def _prepare_metric_frame(frame: pl.DataFrame, spec: MetricSpec) -> pl.DataFrame
     selected = frame.select(
         [
             "recording_id",
+            "session_id",
+            "subject_id",
             "window_label",
             spec.metric_name,
             *spec.group_keys,
@@ -1496,11 +1720,32 @@ def _prepare_metric_frame(frame: pl.DataFrame, spec: MetricSpec) -> pl.DataFrame
         .map_elements(canonical_condition, return_dtype=pl.String)
         .alias("condition")
     )
+    invalid_identity = selected.filter(
+        pl.col("recording_id").is_null()
+        | pl.col("session_id").is_null()
+        | pl.col("subject_id").is_null()
+        | (pl.col("recording_id").cast(pl.String).str.strip_chars() == "")
+        | (pl.col("session_id").cast(pl.String).str.strip_chars() == "")
+        | (pl.col("subject_id").cast(pl.String).str.strip_chars() == "")
+    )
+    if invalid_identity.height:
+        raise ValueError(
+            f"{spec.source_table} contains rows without registry-backed "
+            "recording_id, session_id, or subject_id."
+        )
     value_column = "_value"
     selected = selected.rename({spec.metric_name: value_column})
     return (
-        selected.drop_nulls(["recording_id", "condition", value_column])
-        .group_by(["recording_id", "condition", *spec.group_keys])
+        selected.drop_nulls(["condition", value_column])
+        .group_by(
+            [
+                "recording_id",
+                "session_id",
+                "subject_id",
+                "condition",
+                *spec.group_keys,
+            ]
+        )
         .agg(pl.col(value_column).mean().alias(value_column))
     )
 
@@ -1526,6 +1771,7 @@ def _base_descriptive_row(
         "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
         "bootstrap_iterations_requested": int(config.bootstrap_iterations),
         "confidence_level": float(config.confidence_level),
+        "cluster": config.cluster,
         "minimum_recordings": int(config.minimum_recordings),
         "missing_policy": "available_recording_values_by_condition",
         "permutation_iterations_requested": int(config.permutation_iterations),
@@ -1614,18 +1860,23 @@ def _descriptive_rows_for_cra_summary_metric(
     source_manifest: Mapping[str, Any],
     source_manifest_sha256: str,
 ) -> list[dict[str, Any]]:
-    required = {"recording_id", spec.metric_name}
+    required = {"recording_id", "session_id", "subject_id", spec.metric_name}
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}")
     selected = (
-        frame.select(["recording_id", spec.metric_name])
+        frame.select(["recording_id", "session_id", "subject_id", spec.metric_name])
         .rename({spec.metric_name: "_value"})
-        .drop_nulls(["recording_id", "_value"])
-        .group_by("recording_id")
+        .drop_nulls(["recording_id", "session_id", "subject_id", "_value"])
+        .group_by(["recording_id", "session_id", "subject_id"])
         .agg(pl.col("_value").mean().alias("_value"))
         .sort("recording_id")
     )
+    if selected.height != frame.select("recording_id").drop_nulls().unique().height:
+        raise ValueError(
+            f"{spec.source_table} lacks one registry-backed session_id/subject_id "
+            "identity per recording."
+        )
     values = selected["_value"].to_numpy() if selected.height else np.asarray([], dtype=np.float64)
     return [
         _base_descriptive_row(
@@ -1673,13 +1924,31 @@ def _rows_for_metric(
         for contrast in config.contrasts:
             a = (
                 group_frame.filter(pl.col("condition") == contrast.condition_a)
-                .select(["recording_id", pl.col("_value").alias("value_a")])
+                .select(
+                    [
+                        "recording_id",
+                        "session_id",
+                        "subject_id",
+                        pl.col("_value").alias("value_a"),
+                    ]
+                )
             )
             b = (
                 group_frame.filter(pl.col("condition") == contrast.condition_b)
-                .select(["recording_id", pl.col("_value").alias("value_b")])
+                .select(
+                    [
+                        "recording_id",
+                        "session_id",
+                        "subject_id",
+                        pl.col("_value").alias("value_b"),
+                    ]
+                )
             )
-            paired = a.join(b, on="recording_id", how="inner").sort("recording_id")
+            paired = a.join(
+                b,
+                on=["recording_id", "session_id", "subject_id"],
+                how="inner",
+            ).sort("recording_id")
             values_a = paired["value_a"].to_numpy() if paired.height else np.asarray([], dtype=np.float64)
             values_b = paired["value_b"].to_numpy() if paired.height else np.asarray([], dtype=np.float64)
             stats = compute_paired_contrast(
@@ -1692,6 +1961,19 @@ def _rows_for_metric(
                 confidence_level=float(config.confidence_level),
                 rng=rng,
             )
+            differences = np.asarray(values_b, dtype=np.float64) - np.asarray(
+                values_a,
+                dtype=np.float64,
+            )
+            clustered = _session_cluster_result(
+                config=config,
+                values=differences,
+                session_ids=(
+                    paired["session_id"].to_numpy()
+                    if paired.height
+                    else np.asarray([], dtype=object)
+                ),
+            )
             group_key = _group_key_payload(group_row, spec.group_keys)
             parameters = {
                 "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
@@ -1703,14 +1985,9 @@ def _rows_for_metric(
                     config.permutation_iterations
                 ),
                 "random_seed": int(config.random_seed),
+                "cluster": config.cluster,
             }
-            multiple_comparison_family = "|".join(
-                [
-                    spec.metric_family,
-                    spec.metric_name,
-                    contrast.name,
-                ]
-            )
+            multiple_comparison_family = _multiple_comparison_family(spec)
             row: dict[str, Any] = {
                 "export_schema_version": SCHEMA_VERSION,
                 "stats_run_id": config.stats_run_id,
@@ -1755,6 +2032,7 @@ def _rows_for_metric(
                 "skip_reason": stats.skip_reason,
                 "parameters_json": _json_dumps(parameters),
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                **_cluster_fields(clustered),
             }
             row["stat_result_id"] = _result_id(row)
             rows.append(row)
@@ -1770,19 +2048,24 @@ def _rows_for_cra_summary_metric(
     source_manifest_sha256: str,
     rng: np.random.Generator,
 ) -> list[dict[str, Any]]:
-    required = {"recording_id", spec.metric_name}
+    required = {"recording_id", "session_id", "subject_id", spec.metric_name}
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"{spec.source_table} is missing required column(s) for {spec.metric_name}: {missing}")
 
     selected = (
-        frame.select(["recording_id", spec.metric_name])
+        frame.select(["recording_id", "session_id", "subject_id", spec.metric_name])
         .rename({spec.metric_name: "_value"})
-        .drop_nulls(["recording_id", "_value"])
-        .group_by("recording_id")
+        .drop_nulls(["recording_id", "session_id", "subject_id", "_value"])
+        .group_by(["recording_id", "session_id", "subject_id"])
         .agg(pl.col("_value").mean().alias("_value"))
         .sort("recording_id")
     )
+    if selected.height != frame.select("recording_id").drop_nulls().unique().height:
+        raise ValueError(
+            f"{spec.source_table} lacks one registry-backed session_id/subject_id "
+            "identity per recording."
+        )
     values = selected["_value"].to_numpy() if selected.height else np.asarray([], dtype=np.float64)
     unit_count = int(frame.select("recording_id").drop_nulls().unique().height)
     stats = compute_one_sample_signed_rank(
@@ -1792,6 +2075,15 @@ def _rows_for_cra_summary_metric(
         bootstrap_iterations=int(config.bootstrap_iterations),
         confidence_level=float(config.confidence_level),
         rng=rng,
+    )
+    clustered = _session_cluster_result(
+        config=config,
+        values=np.asarray(values, dtype=np.float64),
+        session_ids=(
+            selected["session_id"].to_numpy()
+            if selected.height
+            else np.asarray([], dtype=object)
+        ),
     )
     collection = source_manifest.get("collection_manifest")
     if not isinstance(collection, Mapping):
@@ -1808,6 +2100,7 @@ def _rows_for_cra_summary_metric(
         "missing_policy": "one_row_per_recording_complete_cases",
         "permutation_iterations_requested": int(config.permutation_iterations),
         "random_seed": int(config.random_seed),
+        "cluster": config.cluster,
         "test_target": 0.0,
     }
     row: dict[str, Any] = {
@@ -1846,7 +2139,7 @@ def _rows_for_cra_summary_metric(
         "ci_high": stats.ci_high,
         "p_value": stats.p_value,
         "q_value": None,
-        "multiple_comparison_family": f"{spec.metric_family}|{spec.metric_name}|vs-zero",
+        "multiple_comparison_family": _multiple_comparison_family(spec),
         "test_method": stats.test_method,
         "bootstrap_iterations": stats.bootstrap_iterations,
         "permutation_iterations": stats.permutation_iterations,
@@ -1854,6 +2147,7 @@ def _rows_for_cra_summary_metric(
         "skip_reason": stats.skip_reason,
         "parameters_json": _json_dumps(parameters),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        **_cluster_fields(clustered),
     }
     row["stat_result_id"] = _result_id(row)
     return [row]
@@ -1861,14 +2155,24 @@ def _rows_for_cra_summary_metric(
 
 def apply_fdr(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_family: dict[str, list[int]] = {}
+    clustered_by_family: dict[str, list[int]] = {}
     for index, row in enumerate(rows):
         if row.get("status") != "computed":
             continue
-        by_family.setdefault(str(row.get("multiple_comparison_family") or ""), []).append(index)
+        family = str(row.get("multiple_comparison_family") or "")
+        by_family.setdefault(family, []).append(index)
+        if row.get("cluster_status") in {"computed", "boundary_zero_variance"}:
+            clustered_by_family.setdefault(family, []).append(index)
     for indices in by_family.values():
         q_values = benjamini_hochberg([_safe_float(rows[index].get("p_value")) for index in indices])
         for index, q_value in zip(indices, q_values):
             rows[index]["q_value"] = q_value
+    for indices in clustered_by_family.values():
+        q_values = benjamini_hochberg(
+            [_safe_float(rows[index].get("clustered_p_value")) for index in indices]
+        )
+        for index, q_value in zip(indices, q_values, strict=True):
+            rows[index]["clustered_q_value"] = q_value
     return rows
 
 
@@ -1946,6 +2250,7 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
             random_seed=config.random_seed,
+            cluster=config.cluster,
             overwrite=config.overwrite,
             allow_legacy_export_layout=config.allow_legacy_export_layout,
         )
@@ -1993,6 +2298,7 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
             random_seed=config.random_seed,
+            cluster=config.cluster,
             overwrite=config.overwrite,
             allow_legacy_export_layout=config.allow_legacy_export_layout,
         ),
@@ -2026,6 +2332,7 @@ def _compute_goodcopbadcop_descriptive_from_snapshot(
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
             random_seed=config.random_seed,
+            cluster=config.cluster,
             overwrite=config.overwrite,
             allow_legacy_export_layout=config.allow_legacy_export_layout,
         )
@@ -2161,7 +2468,9 @@ def _build_stats_manifest(
             "confidence_level": float(config.confidence_level),
             "minimum_recordings": int(config.minimum_recordings),
             "random_seed": int(config.random_seed),
+            "cluster": config.cluster,
             "fdr_method": "benjamini_hochberg",
+            "fdr_family_rule": "analysis_tier_metric_family_v1",
             "role_mapping_table": (
                 CRA_OBJECT_PHASE_TABLE
                 if CRA_OBJECT_PHASE_TABLE in _statistics_input_tables(config.metrics)

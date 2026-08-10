@@ -8276,7 +8276,7 @@ class Registry(RegistryAnalyticsReportMixin, RegistryMigrationMixin):
     ) -> List[sqlite3.Row]:
         sql = [
             "SELECT dcc.dataset_id, dcc.session_uuid, dcc.zarr_path,",
-            "dcc.recording_id, dcc.zarr_origin, dcc.zarr_use, dcc.dataset_status AS status,",
+            "dcc.recording_id, dcc.recording_started_utc, dcc.zarr_origin, dcc.zarr_use, dcc.dataset_status AS status,",
             "dcc.source_layout, dcc.source_frame_index_path, dcc.source_recording_frame_index_path,",
             "dcc.source_frame_index_schema,",
             "dcc.experiment_context_status, dcc.experiment_context_source,",

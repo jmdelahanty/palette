@@ -67,7 +67,7 @@ from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.utils.export_cross_recording_analytics import (
     SourceExportResult,
     _write_table_parts,
-    export_sources,
+    export_sources as _export_sources,
 )
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
@@ -87,6 +87,32 @@ def _canonical_sha256(value: object) -> str:
         allow_nan=False,
     ).encode("ascii")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _test_registry_identities(
+    zarr_paths: list[Path] | tuple[Path, ...],
+) -> dict[str, dict[str, str]]:
+    identities: dict[str, dict[str, str]] = {}
+    for raw_path in zarr_paths:
+        path = Path(raw_path).expanduser().resolve()
+        recording_id = path.name.removesuffix(".zarr").removesuffix("_analysis")
+        identities[str(path)] = {
+            "recording_id": recording_id,
+            "session_id": f"session-{recording_id}",
+            "subject_id": f"subject-{recording_id}",
+        }
+    return identities
+
+
+def export_sources(zarr_paths, **kwargs):
+    """Test adapter supplying the registry evidence required by exact tables."""
+
+    paths = [Path(path) for path in zarr_paths]
+    kwargs.setdefault(
+        "source_registry_identities",
+        _test_registry_identities(paths),
+    )
+    return _export_sources(paths, **kwargs)
 
 
 def _rehash(envelope: dict[str, Any]) -> None:
@@ -710,7 +736,7 @@ def test_tail_trace_samples_freeze_exact_long_form_body_frame_schema() -> None:
     assert "variable_length_tail_samples" not in names
 
 
-def test_group_statistics_contract_freezes_all_45_fields_in_order() -> None:
+def test_group_statistics_contract_freezes_all_61_fields_in_order() -> None:
     fields = ARROW_TABLE_CONTRACTS[STATISTICS_TABLE].fields
     assert tuple(
         (field.name, field.arrow_type, field.nullable) for field in fields
@@ -753,6 +779,22 @@ def test_group_statistics_contract_freezes_all_45_fields_in_order() -> None:
         ("p_value", "float64", True),
         ("q_value", "float64", True),
         ("multiple_comparison_family", "string", False),
+        ("cluster_mode", "string", False),
+        ("cluster_unit", "string", False),
+        ("cluster_method", "string", False),
+        ("cluster_status", "string", False),
+        ("cluster_reason", "string", True),
+        ("cluster_count", "int64", False),
+        ("clustered_unit_count", "int64", False),
+        ("clustered_mean_difference", "float64", True),
+        ("clustered_standard_error", "float64", True),
+        ("clustered_ci_low", "float64", True),
+        ("clustered_ci_high", "float64", True),
+        ("clustered_p_value", "float64", True),
+        ("clustered_q_value", "float64", True),
+        ("session_variance", "float64", True),
+        ("residual_variance", "float64", True),
+        ("intraclass_correlation", "float64", True),
         ("test_method", "string", False),
         ("bootstrap_iterations", "int64", False),
         ("permutation_iterations", "int64", False),
@@ -969,24 +1011,24 @@ def test_every_analytics_table_has_an_exact_arrow_contract() -> None:
 @pytest.mark.parametrize(
     ("table_name", "field_count"),
     (
-        (CHASER_SPATIAL_TABLE, 59),
-        (CHASER_DISTANCE_SUMMARY_TABLE, 46),
-        (CHASER_EPOCH_BEHAVIOR_TABLE, 94),
-        (CHASER_BOUT_EVENTS_TABLE, 66),
-        (CHASER_BOUT_HISTOGRAM_TABLE, 68),
-        (CHASER_IBI_HISTOGRAM_TABLE, 68),
-        (CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE, 58),
-        (CHASER_SPEED_DISTANCE_TABLE, 50),
-        (CHASER_DISTANCE_HISTOGRAM_TABLE, 47),
-        (CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE, 60),
-        (CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE, 87),
-        (CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE, 86),
-        (CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE, 73),
-        (CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE, 90),
-        (CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE, 87),
-        (CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE, 76),
-        (CHASER_EGOCENTRIC_SUMMARY_TABLE, 69),
-        (CHASER_EGOCENTRIC_HISTOGRAM_TABLE, 70),
+        (CHASER_SPATIAL_TABLE, 61),
+        (CHASER_DISTANCE_SUMMARY_TABLE, 48),
+        (CHASER_EPOCH_BEHAVIOR_TABLE, 96),
+        (CHASER_BOUT_EVENTS_TABLE, 68),
+        (CHASER_BOUT_HISTOGRAM_TABLE, 70),
+        (CHASER_IBI_HISTOGRAM_TABLE, 70),
+        (CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE, 60),
+        (CHASER_SPEED_DISTANCE_TABLE, 52),
+        (CHASER_DISTANCE_HISTOGRAM_TABLE, 49),
+        (CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE, 62),
+        (CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE, 89),
+        (CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE, 88),
+        (CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE, 75),
+        (CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE, 92),
+        (CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE, 89),
+        (CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE, 78),
+        (CHASER_EGOCENTRIC_SUMMARY_TABLE, 71),
+        (CHASER_EGOCENTRIC_HISTOGRAM_TABLE, 72),
     ),
 )
 def test_chaser_arrow_contracts_are_closed_unique_and_keyed(
@@ -999,10 +1041,12 @@ def test_chaser_arrow_contracts_are_closed_unique_and_keyed(
 
     assert len(fields) == field_count
     assert len(set(names)) == field_count
-    assert names[:5] == (
+    assert names[:7] == (
         "export_schema_version",
         "table_name",
         "recording_id",
+        "session_id",
+        "subject_id",
         "zarr_path",
         "source_lineage_hash",
     )
@@ -1122,7 +1166,7 @@ def test_core_analytics_exact_types_preserve_semantic_text_and_nullable_unions()
     assert "failure_reason_bytes" not in bout
 
 
-def test_baseline_summary_contract_freezes_all_95_fields_in_order() -> None:
+def test_baseline_summary_contract_freezes_all_97_fields_in_order() -> None:
     fields = ARROW_TABLE_CONTRACTS[BASELINE_BEHAVIOR_SUMMARY_TABLE].fields
     assert tuple(
         (field.name, field.arrow_type, field.nullable) for field in fields
@@ -1130,6 +1174,8 @@ def test_baseline_summary_contract_freezes_all_95_fields_in_order() -> None:
         ("export_schema_version", "int32", False),
         ("table_name", "string", False),
         ("recording_id", "string", False),
+        ("session_id", "string", False),
+        ("subject_id", "string", False),
         ("zarr_path", "string", False),
         ("source_lineage_hash", "string", False),
         ("chaser_distance_run", "string", False),
@@ -1225,7 +1271,7 @@ def test_baseline_summary_contract_freezes_all_95_fields_in_order() -> None:
     )
 
 
-def test_baseline_time_bins_contract_freezes_all_77_fields_in_order() -> None:
+def test_baseline_time_bins_contract_freezes_all_79_fields_in_order() -> None:
     fields = ARROW_TABLE_CONTRACTS[BASELINE_BEHAVIOR_TIME_BINS_TABLE].fields
     assert tuple(
         (field.name, field.arrow_type, field.nullable) for field in fields
@@ -1233,6 +1279,8 @@ def test_baseline_time_bins_contract_freezes_all_77_fields_in_order() -> None:
         ("export_schema_version", "int32", False),
         ("table_name", "string", False),
         ("recording_id", "string", False),
+        ("session_id", "string", False),
+        ("subject_id", "string", False),
         ("zarr_path", "string", False),
         ("source_lineage_hash", "string", False),
         ("chaser_distance_run", "string", False),
@@ -1310,7 +1358,7 @@ def test_baseline_time_bins_contract_freezes_all_77_fields_in_order() -> None:
     )
 
 
-def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
+def test_baseline_samples_contract_freezes_all_73_fields_in_order() -> None:
     fields = ARROW_TABLE_CONTRACTS[BASELINE_KINEMATIC_SAMPLES_TABLE].fields
     assert tuple(
         (field.name, field.arrow_type, field.nullable) for field in fields
@@ -1318,6 +1366,8 @@ def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
         ("export_schema_version", "int32", False),
         ("table_name", "string", False),
         ("recording_id", "string", False),
+        ("session_id", "string", False),
+        ("subject_id", "string", False),
         ("zarr_path", "string", False),
         ("source_lineage_hash", "string", False),
         ("chaser_distance_run", "string", False),

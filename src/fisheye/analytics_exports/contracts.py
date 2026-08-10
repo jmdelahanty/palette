@@ -57,6 +57,36 @@ CHASER_EGOCENTRIC_HISTOGRAM_TABLE = "chaser_egocentric_distance_bearing_histogra
 STATISTICS_TABLE = "group_statistical_summary"
 DESCRIPTIVE_TABLE = "group_descriptive_summary"
 
+BASELINE_TABLES = (
+    BASELINE_BEHAVIOR_SUMMARY_TABLE,
+    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+    BASELINE_KINEMATIC_SAMPLES_TABLE,
+)
+
+CHASER_TABLES = (
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
+    CHASER_SPATIAL_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_BOUT_EVENTS_TABLE,
+    CHASER_BOUT_HISTOGRAM_TABLE,
+    CHASER_IBI_HISTOGRAM_TABLE,
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_SPEED_DISTANCE_TABLE,
+    CHASER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+)
+
+REGISTRY_IDENTITY_TABLES = frozenset((*BASELINE_TABLES, *CHASER_TABLES))
+
 
 @dataclass(frozen=True)
 class TableContract:
@@ -95,13 +125,22 @@ def _contract(
     contract_version: int = TABLE_CONTRACT_VERSION,
 ) -> TableContract:
     base = ("export_schema_version", "table_name", *primary_key)
+    identity_columns = (
+        ("session_id", "subject_id") if table_name in REGISTRY_IDENTITY_TABLES else ()
+    )
     return TableContract(
         table_name=table_name,
         grain=grain,
         primary_key=tuple(primary_key),
-        required_columns=tuple(dict.fromkeys((*base, *required_columns))),
+        required_columns=tuple(
+            dict.fromkeys((*base, *identity_columns, *required_columns))
+        ),
         units=dict(units or {}),
-        contract_version=contract_version,
+        contract_version=(
+            max(2, contract_version)
+            if table_name in REGISTRY_IDENTITY_TABLES
+            else contract_version
+        ),
     )
 
 
@@ -741,9 +780,12 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
             "metric_unit",
             "effect_size_kind",
             "ci_estimand",
+            "cluster_mode",
+            "cluster_method",
+            "cluster_status",
             "status",
         ),
-        contract_version=2,
+        contract_version=3,
     ),
     DESCRIPTIVE_TABLE: _contract(
         DESCRIPTIVE_TABLE,
@@ -771,12 +813,6 @@ DEFAULT_TABLES = (
     BOUT_KINEMATICS_METRICS_TABLE,
 )
 
-BASELINE_TABLES = (
-    BASELINE_BEHAVIOR_SUMMARY_TABLE,
-    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
-    BASELINE_KINEMATIC_SAMPLES_TABLE,
-)
-
 # Framewise trace products are explicit opt-ins.  They are intentionally not
 # part of ``DEFAULT_TABLES`` because a full-duration export is much larger than
 # the compact summary tables and must bind one exact recording-local authority.
@@ -788,28 +824,6 @@ PORTABLE_SAMPLE_TABLES = (KINEMATICS_SAMPLES_TABLE,)
 PORTABLE_SUMMARY_TABLES = (ACTIVITY_SPATIAL_TIME_BINS_TABLE,)
 DEDICATED_STREAMING_TABLES = (
     TRACE_TABLES + PORTABLE_SAMPLE_TABLES + PORTABLE_SUMMARY_TABLES
-)
-
-CHASER_TABLES = (
-    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
-    CHASER_SPATIAL_TABLE,
-    CHASER_DISTANCE_SUMMARY_TABLE,
-    CHASER_EPOCH_BEHAVIOR_TABLE,
-    CHASER_BOUT_EVENTS_TABLE,
-    CHASER_BOUT_HISTOGRAM_TABLE,
-    CHASER_IBI_HISTOGRAM_TABLE,
-    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
-    CHASER_SPEED_DISTANCE_TABLE,
-    CHASER_DISTANCE_HISTOGRAM_TABLE,
-    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
-    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
-    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
-    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
-    CHASER_EGOCENTRIC_SUMMARY_TABLE,
-    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
 )
 
 ALL_TABLES = (

@@ -41,10 +41,18 @@ from fisheye.baseline_strategy.workflow import build_strategy_tables, run_strate
 from fisheye.baseline_strategy.validation import validate_strategy_analytics_run
 
 
+def _registry_identity(recording_id: str) -> dict[str, str]:
+    return {
+        "session_id": f"session-{recording_id}",
+        "subject_id": f"subject-{recording_id}",
+    }
+
+
 def _summary(recording_id: str = "recording_001", **overrides):
     row = {
         "export_run_id": "export_001",
         "recording_id": recording_id,
+        **_registry_identity(recording_id),
         "track_id": 0,
         "baseline_window_id": 0,
         "baseline_window_label": "pre",
@@ -80,6 +88,7 @@ def _samples() -> list[dict[str, object]]:
         rows.append(
             {
                 "recording_id": "recording_001",
+                **_registry_identity("recording_001"),
                 "track_id": 0,
                 "baseline_window_id": 0,
                 "source_frame": index,
@@ -106,6 +115,7 @@ def test_feature_builder_combines_summary_time_samples_and_episodes() -> None:
     time_bins = [
         {
             "recording_id": "recording_001",
+            **_registry_identity("recording_001"),
             "track_id": 0,
             "baseline_window_id": 0,
             "time_bin_index": index,
@@ -168,6 +178,7 @@ def test_exported_boundary_distance_is_authoritative_for_wall_samples() -> None:
 def _feature(recording_id: str, value: float, *, wall: bool = False) -> dict[str, object]:
     return {
         "recording_id": recording_id,
+        **_registry_identity(recording_id),
         "track_id": 0,
         "baseline_window_id": 0,
         "feature_status": "complete",
@@ -222,6 +233,7 @@ def test_cluster_discovery_reports_model_selection_and_assignment_uncertainty() 
         rows.append(
             {
                 "recording_id": f"recording_{index}",
+                **_registry_identity(f"recording_{index}"),
                 "track_id": 0,
                 "baseline_window_id": 0,
                 "classification_status": "complete",
@@ -353,6 +365,7 @@ def _write_summary_only_export(
                         "export_schema_version": EXPORT_SCHEMA_VERSION,
                         "table_name": time_table,
                         "recording_id": recording_id,
+                        **_registry_identity(recording_id),
                         "zarr_path": f"/{recording_id}_analysis.zarr",
                         "source_lineage_hash": hashlib.sha256(
                             recording_id.encode("utf-8")
@@ -430,6 +443,7 @@ def _write_summary_only_export(
                         "export_schema_version": EXPORT_SCHEMA_VERSION,
                         "table_name": sample_table,
                         "recording_id": recording_id,
+                        **_registry_identity(recording_id),
                         "zarr_path": f"/{recording_id}_analysis.zarr",
                         "source_lineage_hash": hashlib.sha256(
                             recording_id.encode("utf-8")
@@ -503,12 +517,32 @@ def _write_summary_only_export(
         for name, paths in parts_by_table.items()
     }
     table_names = list(parts_by_table)
+    source_zarrs = [f"/recording_{index}_analysis.zarr" for index in range(6)]
     manifest.write_text(
         json.dumps(
             {
                 "export_run_id": run_id,
                 "schema_id": EXPORT_SCHEMA_ID,
                 "schema_version": EXPORT_SCHEMA_VERSION,
+                "source_zarrs": source_zarrs,
+                "registry_identity": {
+                    "schema_id": "palette.analytics_export.registry_identity",
+                    "schema_version": 1,
+                    "session_id_source": (
+                        "dataset_context_current.recording_started_utc"
+                    ),
+                    "subject_id_source": (
+                        "coalesce(dataset_context_current.subject_id,"
+                        "dataset_context_current.legacy_fish_id)"
+                    ),
+                    "sources": {
+                        path: {
+                            "recording_id": f"recording_{index}",
+                            **_registry_identity(f"recording_{index}"),
+                        }
+                        for index, path in enumerate(source_zarrs)
+                    },
+                },
                 "tables_requested": table_names,
                 "table_contracts": contract_snapshot(table_names),
                 "arrow_schema_contracts": arrow_contract_envelope(table_names),

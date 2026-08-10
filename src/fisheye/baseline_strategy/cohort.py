@@ -12,6 +12,7 @@ from .contracts import (
     BASELINE_STRATEGY_CLUSTERS_TABLE,
     METHOD,
     METHOD_VERSION,
+    IDENTITY_COLUMNS,
     SCHEMA_ID,
     SCHEMA_VERSION,
     StrategyFeatureConfig,
@@ -29,6 +30,8 @@ def _float(value: object) -> float | None:
 def _identity(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "recording_id": row.get("recording_id"),
+        "session_id": row.get("session_id"),
+        "subject_id": row.get("subject_id"),
         "track_id": row.get("track_id"),
         "baseline_window_id": row.get("baseline_window_id"),
         "baseline_window_label": row.get("baseline_window_label"),
@@ -48,8 +51,8 @@ def _common(table_name: str, row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _identity_key(row: Mapping[str, Any]) -> tuple[object, object, object]:
-    return row.get("recording_id"), row.get("track_id"), row.get("baseline_window_id")
+def _identity_key(row: Mapping[str, Any]) -> tuple[object, ...]:
+    return tuple(row.get(name) for name in IDENTITY_COLUMNS)
 
 
 def _log1p(value: float) -> float:

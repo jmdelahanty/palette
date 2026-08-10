@@ -65,6 +65,7 @@ from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
+    REGISTRY_IDENTITY_TABLES,
     STIMULUS_RESPONSE_TABLE,
     SWIM_BOUT_METRICS_TABLE,
     TABLE_CONTRACTS,
@@ -262,6 +263,7 @@ class SourceExportResult:
     rows_by_table: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
     chaser_authority_binding: dict[str, Any] | None = None
+    registry_identity: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -292,6 +294,103 @@ def _recording_id_from_path(zarr_path: Path) -> str:
     if name.endswith("_analysis"):
         name = name[:-9]
     return name
+
+
+def _nonempty_unique(values: Sequence[object]) -> set[str]:
+    return {
+        text
+        for value in values
+        if value is not None and (text := str(value).strip())
+    }
+
+
+def resolve_registry_export_identities(
+    registry: Registry,
+    zarr_paths: Sequence[Path],
+) -> dict[str, dict[str, str]]:
+    """Resolve persisted analysis identities without parsing recording names.
+
+    An experimental session is the registry's acquisition start identity.  The
+    registry's ``session_uuid`` is arena-specific and therefore cannot cluster
+    simultaneous multi-arena recordings as one experimental session.
+    """
+
+    resolved: dict[str, dict[str, str]] = {}
+    for raw_path in zarr_paths:
+        path = Path(raw_path).expanduser().resolve()
+        rows = registry.query_datasets(
+            path_contains=path.name,
+            zarr_use="analysis",
+            exclude_status="missing",
+            require_recording=True,
+        )
+        exact_rows = [
+            row
+            for row in rows
+            if Path(str(row["zarr_path"])).expanduser().resolve() == path
+        ]
+        if not exact_rows:
+            raise ValueError(
+                f"No live registry analysis identity matches source Zarr: {path}"
+            )
+        recording_ids = _nonempty_unique(
+            [row["recording_id"] for row in exact_rows]
+        )
+        session_ids = _nonempty_unique(
+            [row["recording_started_utc"] for row in exact_rows]
+        )
+        subject_ids = _nonempty_unique([row["fish_id"] for row in exact_rows])
+        if len(recording_ids) != 1:
+            raise ValueError(
+                f"Registry source has ambiguous recording identity: {path}: "
+                f"{sorted(recording_ids)!r}"
+            )
+        if len(session_ids) != 1:
+            raise ValueError(
+                f"Registry source has ambiguous or missing experimental session "
+                f"identity: {path}: {sorted(session_ids)!r}"
+            )
+        if len(subject_ids) != 1:
+            raise ValueError(
+                f"Registry source has ambiguous or missing effective subject "
+                f"identity: {path}: {sorted(subject_ids)!r}"
+            )
+        identity = {
+            "recording_id": next(iter(recording_ids)),
+            "session_id": next(iter(session_ids)),
+            "subject_id": next(iter(subject_ids)),
+        }
+        path_recording_id = _recording_id_from_path(path)
+        if identity["recording_id"] != path_recording_id:
+            raise ValueError(
+                "Registry recording identity does not match the source Zarr name: "
+                f"registry={identity['recording_id']!r}, "
+                f"path={path_recording_id!r}."
+            )
+        resolved[str(path)] = identity
+    return resolved
+
+
+def _validate_registry_export_identity(
+    identity: Mapping[str, Any] | None,
+    *,
+    zarr_path: Path,
+) -> dict[str, str]:
+    if identity is None:
+        raise ValueError(
+            "Registry-backed recording, session, and subject identity is required "
+            f"for analytics source {zarr_path}."
+        )
+    required = {"recording_id", "session_id", "subject_id"}
+    if set(identity) != required:
+        raise ValueError("Registry export identity must have the exact v1 field set.")
+    normalized = {
+        key: str(identity[key]).strip()
+        for key in ("recording_id", "session_id", "subject_id")
+    }
+    if any(not value for value in normalized.values()):
+        raise ValueError("Registry export identity fields must be non-empty.")
+    return normalized
 
 
 def _required_chaser_component_families(tables: set[str]) -> frozenset[str]:
@@ -5084,6 +5183,7 @@ def export_one_zarr(
     tables: Sequence[str],
     export_run_id: str,
     chaser_source_authority: Mapping[str, Any] | None = None,
+    registry_identity: Mapping[str, Any] | None = None,
     baseline_time_bin_s: float = 5.0,
     baseline_sample_rate_hz: float = 10.0,
     baseline_full_resolution_samples: bool = False,
@@ -5095,6 +5195,16 @@ def export_one_zarr(
     result = SourceExportResult(zarr_path=str(zarr_path), recording_id=recording_id)
     requested_table_set = set(tables)
     table_set = {_SOURCE_TABLE_BY_V2.get(table, table) for table in requested_table_set}
+    requires_registry_identity = bool(requested_table_set & REGISTRY_IDENTITY_TABLES)
+    normalized_registry_identity = (
+        _validate_registry_export_identity(
+            registry_identity,
+            zarr_path=zarr_path,
+        )
+        if requires_registry_identity
+        else None
+    )
+    result.registry_identity = normalized_registry_identity
     requires_chaser_authority = bool(
         table_set & _SUPPORTED_CHASER_EXPORT_SOURCE_TABLES
     )
@@ -5124,8 +5234,22 @@ def export_one_zarr(
         )
         recording_id = chaser_authority.snapshot.recording_id
         result.recording_id = recording_id
+        if (
+            normalized_registry_identity is not None
+            and normalized_registry_identity["recording_id"] != recording_id
+        ):
+            raise ValueError(
+                "Chaser authority and registry identities belong to different recordings."
+            )
         result.chaser_authority_binding = _chaser_authority_binding(
             chaser_authority
+        )
+    elif (
+        normalized_registry_identity is not None
+        and normalized_registry_identity["recording_id"] != recording_id
+    ):
+        raise ValueError(
+            "Registry export recording identity does not match the selected source."
         )
 
     stimulus_run, steps, step_rows, protocol_signature = _load_stimulus_steps(
@@ -5498,6 +5622,15 @@ def export_one_zarr(
         table = _V2_TABLE_BY_SOURCE.get(source_table, source_table)
         if table not in requested_table_set:
             continue
+        if table in REGISTRY_IDENTITY_TABLES:
+            assert normalized_registry_identity is not None
+            for row in rows:
+                if row.get("recording_id") != normalized_registry_identity["recording_id"]:
+                    raise ValueError(
+                        f"{table} row recording identity differs from its registry binding."
+                    )
+                row["session_id"] = normalized_registry_identity["session_id"]
+                row["subject_id"] = normalized_registry_identity["subject_id"]
         canonical_rows[table] = [canonicalize_export_row(table, row) for row in rows]
     for table in requested_table_set:
         canonical_rows.setdefault(table, [])
@@ -5753,6 +5886,7 @@ def export_sources(
     collection_manifest_path: Path | None = None,
     chaser_authority_manifest_path: Path | None = None,
     chaser_authority_sha256: str | None = None,
+    source_registry_identities: Mapping[str, Mapping[str, Any]] | None = None,
     baseline_time_bin_s: float = 5.0,
     baseline_sample_rate_hz: float = 10.0,
     baseline_full_resolution_samples: bool = False,
@@ -5761,6 +5895,7 @@ def export_sources(
 ) -> dict[str, Any]:
     tables = _parse_tables(tables)
     source_table_set = {_SOURCE_TABLE_BY_V2.get(table, table) for table in tables}
+    requires_registry_identity = bool(set(tables) & REGISTRY_IDENTITY_TABLES)
     requires_chaser_authority = bool(
         source_table_set & _SUPPORTED_CHASER_EXPORT_SOURCE_TABLES
     )
@@ -5772,6 +5907,24 @@ def export_sources(
     zarr_paths = [Path(path).expanduser().resolve() for path in zarr_paths]
     if not zarr_paths:
         raise ValueError("No analysis Zarr sources were provided or discovered.")
+    registry_identities = dict(source_registry_identities or {})
+    if requires_registry_identity:
+        expected_identity_paths = {str(path) for path in zarr_paths}
+        if set(registry_identities) != expected_identity_paths:
+            raise ValueError(
+                "Registry identity source set must exactly match the requested Zarr "
+                f"set: missing={sorted(expected_identity_paths - set(registry_identities))!r}, "
+                f"unexpected={sorted(set(registry_identities) - expected_identity_paths)!r}."
+            )
+        registry_identity_bindings = {
+            path: _validate_registry_export_identity(
+                registry_identities[path],
+                zarr_path=Path(path),
+            )
+            for path in sorted(expected_identity_paths)
+        }
+    else:
+        registry_identity_bindings = {}
     chaser_authority_set: LoadedChaserExportAuthoritySet | None = None
     if chaser_authority_manifest_path is not None:
         chaser_authority_set = load_chaser_export_authority_set(
@@ -5830,6 +5983,7 @@ def export_sources(
                         if chaser_authority_set is not None
                         else None
                     ),
+                    registry_identity=registry_identities.get(str(path)),
                     baseline_time_bin_s=baseline_time_bin_s,
                     baseline_sample_rate_hz=baseline_sample_rate_hz,
                     baseline_full_resolution_samples=baseline_full_resolution_samples,
@@ -5850,6 +6004,7 @@ def export_sources(
                         if chaser_authority_set is not None
                         else None
                     ),
+                    registry_identity=registry_identities.get(str(path)),
                     baseline_time_bin_s=baseline_time_bin_s,
                     baseline_sample_rate_hz=baseline_sample_rate_hz,
                     baseline_full_resolution_samples=baseline_full_resolution_samples,
@@ -5872,6 +6027,12 @@ def export_sources(
             chaser_authority_bindings[result.zarr_path] = (
                 result.chaser_authority_binding
             )
+        if result.registry_identity is not None:
+            expected_identity = registry_identity_bindings.get(result.zarr_path)
+            if result.registry_identity != expected_identity:
+                raise ValueError(
+                    "Worker registry identity differs from its parent-process binding."
+                )
         diagnostics.extend(
             {"zarr_path": result.zarr_path, "recording_id": result.recording_id, **diag}
             for diag in result.diagnostics
@@ -5953,6 +6114,16 @@ def export_sources(
         "palette_git_dirty": git.get("is_dirty"),
         "source_recording_count": len(zarr_paths),
         "source_zarrs": [str(path) for path in zarr_paths],
+        "registry_identity": {
+            "schema_id": "palette.analytics_export.registry_identity",
+            "schema_version": 1,
+            "session_id_source": "dataset_context_current.recording_started_utc",
+            "subject_id_source": (
+                "coalesce(dataset_context_current.subject_id,"
+                "dataset_context_current.legacy_fish_id)"
+            ),
+            "sources": registry_identity_bindings,
+        },
         "tables_requested": list(tables),
         "table_contracts": contract_snapshot(tables),
         "arrow_schema_contracts": arrow_contract_envelope(tables),
@@ -6115,7 +6286,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "sources. Current exact schemas remain required by default."
         ),
     )
-    parser.add_argument("--registry", type=Path, help="Palette registry SQLite path for optional export indexing.")
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "Palette registry SQLite path. Required implicitly for registry-bound "
+            "session/subject export identity and reused for optional indexing."
+        ),
+    )
     parser.add_argument(
         "--index-registry",
         action="store_true",
@@ -6129,6 +6307,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     tables = _parse_tables(args.tables)
     sources = _collect_sources(args)
+    registry_path = (
+        args.registry.expanduser().resolve()
+        if args.registry is not None
+        else RegistryPaths.from_env(Path.cwd()).path
+    )
+    source_registry_identities: dict[str, dict[str, str]] | None = None
+    if set(tables) & REGISTRY_IDENTITY_TABLES:
+        registry = Registry(registry_path)
+        try:
+            source_registry_identities = resolve_registry_export_identities(
+                registry,
+                sources,
+            )
+        finally:
+            registry.close()
     manifest = export_sources(
         sources,
         output_root=args.output_root,
@@ -6139,6 +6332,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         collection_manifest_path=args.collection_manifest,
         chaser_authority_manifest_path=args.chaser_authority_manifest,
         chaser_authority_sha256=args.chaser_authority_sha256,
+        source_registry_identities=source_registry_identities,
         baseline_time_bin_s=float(args.baseline_time_bin_s),
         baseline_sample_rate_hz=float(args.baseline_sample_rate_hz),
         baseline_full_resolution_samples=bool(args.baseline_full_resolution_samples),
@@ -6152,11 +6346,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     if manifest["diagnostics"]:
         print(f"diagnostics\t{len(manifest['diagnostics'])}")
     if args.index_registry:
-        registry_path = (
-            args.registry.expanduser().resolve()
-            if args.registry is not None
-            else RegistryPaths.from_env(Path.cwd()).path
-        )
         registry = Registry(registry_path)
         try:
             export_run_id = index_export_manifest(registry, Path(manifest["manifest_path"]))

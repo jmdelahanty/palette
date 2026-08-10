@@ -29,6 +29,7 @@ from fisheye.analysis.stimulus_response_omr import OMRStepData
 from fisheye.utils.export_cross_recording_analytics import (
     _chaser_behaviors_for_run,
     export_sources,
+    resolve_registry_export_identities,
 )
 from fisheye.utils.export_cross_recording_analytics import main as export_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
@@ -44,6 +45,32 @@ from tests.unit.fisheye.test_stimulus_response import (
 
 def _array(group, name: str, values) -> None:
     group.create_array(name, data=np.asarray(values), overwrite=True)
+
+
+def test_registry_export_identity_uses_persisted_session_and_subject(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "recording_a_analysis.zarr"
+    source.mkdir()
+
+    class FakeRegistry:
+        def query_datasets(self, **_kwargs):
+            return [
+                {
+                    "zarr_path": str(source),
+                    "recording_id": "recording_a",
+                    "recording_started_utc": "2026-08-09T12:00:00+00:00",
+                    "fish_id": "subject-uuid",
+                }
+            ]
+
+    identities = resolve_registry_export_identities(FakeRegistry(), [source])
+
+    assert identities[str(source.resolve())] == {
+        "recording_id": "recording_a",
+        "session_id": "2026-08-09T12:00:00+00:00",
+        "subject_id": "subject-uuid",
+    }
 
 
 def test_exporter_does_not_guess_unknown_roles_from_derived_components() -> None:
@@ -690,12 +717,28 @@ def test_export_cross_recording_analytics_keeps_unsealed_chaser_tables_unavailab
         CHASER_DISTANCE_HISTOGRAM_TABLE,
     )
 
+    with pytest.raises(ValueError, match="Registry identity source set"):
+        export_sources(
+            [source],
+            output_root=output,
+            export_run_id="chaser_missing_registry_identity",
+            tables=(CHASER_SPATIAL_TABLE,),
+            jobs=1,
+        )
+
     manifest = export_sources(
         [source],
         output_root=output,
         export_run_id="chaser_fail_closed",
         tables=(CHASER_SPATIAL_TABLE, *derived_tables),
         jobs=1,
+        source_registry_identities={
+            str(source.resolve()): {
+                "recording_id": "goodcopbadcop",
+                "session_id": "session-test",
+                "subject_id": "subject-test",
+            }
+        },
     )
 
     assert manifest["row_counts_by_table"][CHASER_SPATIAL_TABLE] == 12

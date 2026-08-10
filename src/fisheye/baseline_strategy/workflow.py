@@ -37,6 +37,7 @@ from .contracts import (
     BASELINE_STRATEGY_ARROW_CONTRACTS,
     ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
     ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+    IDENTITY_COLUMNS,
     SCHEMA_ID,
     SCHEMA_VERSION,
     StrategyFeatureConfig,
@@ -62,8 +63,8 @@ def _safe_component(value: object, *, label: str) -> str:
     return text
 
 
-def _identity_key(row: Mapping[str, Any]) -> tuple[object, object, object]:
-    return row.get("recording_id"), row.get("track_id"), row.get("baseline_window_id")
+def _identity_key(row: Mapping[str, Any]) -> tuple[object, ...]:
+    return tuple(row.get(name) for name in IDENTITY_COLUMNS)
 
 
 def _load_manifest_snapshot(
@@ -127,8 +128,10 @@ def _read_rows(paths: Iterable[Path]) -> list[dict[str, Any]]:
     return rows
 
 
-def _group_rows(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[object, object, object], list[dict[str, Any]]]:
-    grouped: dict[tuple[object, object, object], list[dict[str, Any]]] = defaultdict(list)
+def _group_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[tuple[object, ...], list[dict[str, Any]]]:
+    grouped: dict[tuple[object, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[_identity_key(row)].append(dict(row))
     return dict(grouped)
@@ -139,7 +142,7 @@ def build_strategy_tables(
     summary_rows: Sequence[Mapping[str, Any]],
     time_bin_rows: Sequence[Mapping[str, Any]] = (),
     sample_rows_by_identity: Mapping[
-        tuple[object, object, object], Sequence[Mapping[str, Any]]
+        tuple[object, ...], Sequence[Mapping[str, Any]]
     ] | None = None,
     config: StrategyFeatureConfig | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -151,7 +154,7 @@ def build_strategy_tables(
     samples = sample_rows_by_identity or {}
     features = []
     episodes = []
-    seen: set[tuple[object, object, object]] = set()
+    seen: set[tuple[object, ...]] = set()
     for summary in summary_rows:
         key = _identity_key(summary)
         if key in seen:
@@ -223,7 +226,7 @@ def run_strategy_analytics(
     )
 
     time_by_identity = _group_rows(time_rows)
-    summary_by_identity: dict[tuple[object, object, object], dict[str, Any]] = {}
+    summary_by_identity: dict[tuple[object, ...], dict[str, Any]] = {}
     for summary in summary_rows:
         key = _identity_key(summary)
         if key in summary_by_identity:
@@ -232,7 +235,7 @@ def run_strategy_analytics(
 
     features: list[dict[str, Any]] = []
     episodes: list[dict[str, Any]] = []
-    processed: set[tuple[object, object, object]] = set()
+    processed: set[tuple[object, ...]] = set()
     for sample_part in _declared_parts(
         source_root, source_run_id, manifest, BASELINE_KINEMATIC_SAMPLES_TABLE
     ):

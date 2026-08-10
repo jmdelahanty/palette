@@ -44,6 +44,8 @@ BASELINE_STRATEGY_TABLES = (
 
 IDENTITY_COLUMNS = (
     "recording_id",
+    "session_id",
+    "subject_id",
     "track_id",
     "baseline_window_id",
 )
@@ -55,6 +57,8 @@ _ARROW_COMMON_FIELDS = (
     field("method", "string"),
     field("method_version", "string"),
     field("recording_id", "string"),
+    field("session_id", "string"),
+    field("subject_id", "string"),
     field("track_id", "int64"),
     field("baseline_window_id", "int64"),
     field("baseline_window_label", "string"),

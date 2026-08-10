@@ -15,6 +15,7 @@ dependencies = [
   # Curated from environment.yml. Keep load-bearing pins aligned there.
   "numpy>=2,<2.3",
   "scipy",
+  "statsmodels>=0.14,<0.15",
   "scikit-image",
   "scikit-learn",
   "pyarrow",
