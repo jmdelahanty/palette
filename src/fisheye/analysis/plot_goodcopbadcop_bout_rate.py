@@ -13,8 +13,8 @@ Modes:
       distributions of bout duration, inter-bout interval, and peak speed.
 
 Run (palette env):
-    python -m fisheye.analysis.plot_goodcopbadcop_bout_rate                            # cohort
-    python -m fisheye.analysis.plot_goodcopbadcop_bout_rate --recording-id 21-50-10Z_arena_3
+    scripts/py -m fisheye.analysis.plot_goodcopbadcop_bout_rate --exploratory-only
+    scripts/py -m fisheye.analysis.plot_goodcopbadcop_bout_rate --exploratory-only --recording-id 21-50-10Z_arena_3
 
 Figures are written OUTSIDE the repo (to $PALETTE_RECORDINGS_ROOT/figures); this script is
 committed but its output is not. Options: --recording-id (single-fish mode), --example
@@ -35,7 +35,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from fisheye.analysis.goodcopbadcop_common import resolve_cohort as cohort
+from fisheye.analysis.goodcopbadcop_common import (
+    parse_standalone_exploratory_args,
+    resolve_cohort as cohort,
+    save_standalone_exploratory_figure,
+)
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
     load_chaser_distance_run,
@@ -114,7 +118,7 @@ def plot_cohort(recs, example_sub, out):
         if key == "rate":
             pc = wilcoxon_signed_rank_p_value(C[key]["chase"] - C[key]["pre"])[0]
             pp = wilcoxon_signed_rank_p_value(C[key]["post"] - C[key]["pre"])[0]
-            ax.text(0.02, 0.02, f"pre→chase p={pc:.3f}\npre→post p={pp:.3f}", transform=ax.transAxes,
+            ax.text(0.02, 0.02, f"exploratory p_unadj\npre→chase {pc:.3f}\npre→post {pp:.3f}", transform=ax.transAxes,
                     fontsize=8.5, va="bottom", color="#555")
     axes[0].legend(frameon=False, fontsize=8.5, loc="upper right")
     fig.suptitle(f"GoodCopBadCop bout statistics per epoch — n={n} recordings"
@@ -123,7 +127,14 @@ def plot_cohort(recs, example_sub, out):
     fig.text(0.5, -0.02, "Bout rate = valid bouts / validly-tracked minute (denominator excludes tracking dropout). "
              "Robust bout-level metrics. Chase drop is chase-driven; pre-vs-post has a time-in-arena confound.",
              ha="center", fontsize=8, color="#666")
-    fig.tight_layout(); fig.savefig(out, bbox_inches="tight"); plt.close(fig)
+    fig.tight_layout()
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_bout_rate",
+        bbox_inches="tight",
+    )
+    plt.close(fig)
     print(f"wrote {out}  (cohort, n={n})")
 
 
@@ -155,7 +166,14 @@ def plot_single(rid, zp, out):
     fig.text(0.5, -0.02, "Bout rate = valid bouts / validly-tracked minute. Boxes = per-bout distributions "
              "(median, IQR). Bouts from chaser_bout_response (robust, above the speed noise floor).",
              ha="center", fontsize=8, color="#666")
-    fig.tight_layout(); fig.savefig(out, bbox_inches="tight"); plt.close(fig)
+    fig.tight_layout()
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_bout_rate",
+        bbox_inches="tight",
+    )
+    plt.close(fig)
     print(f"wrote {out}  (single: {rid})")
 
 
@@ -165,7 +183,11 @@ def main(argv=None) -> int:
     ap.add_argument("--example", default=DEFAULT_EXAMPLE, help="recording to highlight in cohort mode")
     ap.add_argument("--out-dir", type=Path, default=FIGURES_DIR)
     ap.add_argument("--tag", default="2026-07-17")
-    args = ap.parse_args(argv)
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_bout_rate",
+        argv=argv,
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False,
                          "axes.grid": True, "grid.color": GRID, "font.family": "DejaVu Sans", "savefig.dpi": 160})

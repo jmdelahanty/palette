@@ -21,8 +21,8 @@ mean-virtual lateral fraction per epoch. Tests: (1) does object laterality rise 
 wall-following? (3) does the object-minus-virtual excess itself develop pre->post?
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze                # epoch-level
-    python -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze --by-distance  # distance-resolved
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze --exploratory-only
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze --exploratory-only --by-distance
 
 `--by-distance` profiles front/lateral/behind vs distance to the object, object vs virtual,
 per epoch. Key finding (n=33): object-specific lateral-keeping (excess over the virtual
@@ -44,7 +44,9 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
+    parse_standalone_exploratory_args,
     resolve_cohort,
+    save_standalone_exploratory_figure,
 )
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
@@ -182,7 +184,12 @@ def emit_by_distance(bydist, n, args, out_dir):
              ha="center", fontsize=8, color="#666")
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_lateral_gaze_by_distance_{args.tag}.png"
-    fig.savefig(out, bbox_inches="tight")
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_lateral_gaze",
+        bbox_inches="tight",
+    )
     print("wrote", out, f" (n_fish={n})\n")
 
     # ---- text report ----
@@ -219,7 +226,10 @@ def main() -> None:
                     help="Profile orientation as a function of distance to the object (distance-resolved figure + tests).")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-18")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_lateral_gaze",
+    )
     out_dir = args.out_dir or figures_dir()
 
     # per fish: object & mean-virtual lateral fraction per epoch (all + near), + bearing hists
@@ -310,7 +320,12 @@ def main() -> None:
                  fontsize=13, weight="bold", y=1.01)
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_lateral_gaze_{args.tag}.png"
-    fig.savefig(out, bbox_inches="tight")
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_lateral_gaze",
+        bbox_inches="tight",
+    )
     print("wrote", out, f" (n_fish={n})\n")
 
     # ---- text report ----

@@ -19,7 +19,7 @@ response (12x during chase, 12/12, p=0.0005). See docs/archive/goodcopbadcop_avo
 item 1 and the chaser_response_regimes contract.
 
 Run (palette env):
-    ~/miniconda3/envs/palette-py311/bin/python -m fisheye.analysis.plot_goodcopbadcop_freeze
+    scripts/py -m fisheye.analysis.plot_goodcopbadcop_freeze --exploratory-only
 
 Figures are written OUTSIDE the repo (to $PALETTE_RECORDINGS_ROOT/figures); this script is
 committed but its output is not.
@@ -45,8 +45,13 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.chaser_response_regimes import build_chaser_response_regimes_result as build
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
-from fisheye.analysis.goodcopbadcop_common import resolve_cohort as cohort
-from fisheye.analysis.goodcopbadcop_common import role_index, role_name
+from fisheye.analysis.goodcopbadcop_common import (
+    parse_standalone_exploratory_args,
+    resolve_cohort as cohort,
+    role_index,
+    role_name,
+    save_standalone_exploratory_figure,
+)
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value, paired_sign_flip_p_value
 
 # Figures live OUTSIDE the repo (this script is committed; its output is not).
@@ -87,7 +92,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", type=Path, default=FIGURES_DIR)
     ap.add_argument("--tag", default="2026-07-17")
-    args = ap.parse_args(argv)
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_freeze",
+        argv=argv,
+    )
     OUT = args.out_dir; OUT.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.size": 12, "axes.spines.top": False, "axes.spines.right": False,
                          "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.8,
@@ -162,7 +171,13 @@ def main(argv=None) -> int:
             "Immobility = centroid speed < 1 mm/s (provisional; see caveats).",
             transform=ax.transAxes, ha="center", fontsize=8, color="#666")
     ax.text(0.5, -0.205, color_note, transform=ax.transAxes, ha="center", fontsize=7.5, color="#888")
-    fig.tight_layout(); fig.savefig(OUT / f"goodcopbadcop_freeze_curve_{args.tag}.png", bbox_inches="tight")
+    fig.tight_layout()
+    curve_out, _ = save_standalone_exploratory_figure(
+        fig,
+        OUT / f"goodcopbadcop_freeze_curve_{args.tag}.png",
+        analysis_id="goodcopbadcop_freeze",
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
     # FIG 2 -- paired slopegraph
@@ -180,12 +195,18 @@ def main(argv=None) -> int:
         ax.plot([0, 1], [mpre, mpost], "-", color="black", lw=3, zorder=4)
         ax.scatter([0, 1], [mpre, mpost], color="black", s=55, zorder=5)
         ax.set_xticks([0, 1]); ax.set_xticklabels(["pre", "post"]); ax.set_xlim(-0.25, 1.25)
-        ax.set_title(f"{ttl}\nΔ={np.nanmean(d):+.3f}  ({int((d>0).sum())}/{nn} up)  Wilcoxon p={wp:.3f}", fontsize=11)
+        ax.set_title(f"{ttl}\nΔ={np.nanmean(d):+.3f}  ({int((d>0).sum())}/{nn} up)  exploratory p_unadj={wp:.3f}", fontsize=11)
         ax.grid(axis="x", visible=False)
     axes[0].set_ylabel("P(fish immobile), 7–18 mm band"); axes[0].set_ylim(0.15, 0.8)
     fig.suptitle("No post-training immobility change near either object (smoothed signal)",
                  fontsize=13, weight="bold", y=1.0)
-    fig.tight_layout(); fig.savefig(OUT / f"goodcopbadcop_freeze_paired_{args.tag}.png", bbox_inches="tight")
+    fig.tight_layout()
+    paired_out, _ = save_standalone_exploratory_figure(
+        fig,
+        OUT / f"goodcopbadcop_freeze_paired_{args.tag}.png",
+        analysis_id="goodcopbadcop_freeze",
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
     # FIG 3 -- summary deltas
@@ -201,7 +222,7 @@ def main(argv=None) -> int:
                    color=col, s=26, alpha=0.6, zorder=2)
         md = np.nanmean(d); se = np.nanstd(d) / np.sqrt(len(d))
         ax.errorbar(md, y, xerr=se, fmt="o", color="black", ms=9, capsize=4, lw=2, zorder=4)
-        ax.text(0.63, y, f"Δ={md:+.3f}\np={wp:.3f}\nn={nn}", va="center", fontsize=9.5)
+        ax.text(0.63, y, f"Δ={md:+.3f}\np_unadj={wp:.3f}\nn={nn}", va="center", fontsize=9.5)
         summary.append((name.replace("\n", " "), md, wp, nn))
     ax.axvline(0, color="#999", lw=1, ls="--")
     ax.set_yticks(ys); ax.set_yticklabels([r[0] for r in rows]); ax.set_ylim(-0.6, len(rows) - 0.4)
@@ -210,14 +231,20 @@ def main(argv=None) -> int:
     ax.text(0.5, -0.17, "Each dot = one recording (post − pre Δ); black = mean ± SEM across recordings.",
             transform=ax.transAxes, ha="center", fontsize=8, color="#666")
     ax.grid(axis="y", visible=False)
-    fig.tight_layout(); fig.savefig(OUT / f"goodcopbadcop_freeze_summary_{args.tag}.png", bbox_inches="tight")
+    fig.tight_layout()
+    summary_out, _ = save_standalone_exploratory_figure(
+        fig,
+        OUT / f"goodcopbadcop_freeze_summary_{args.tag}.png",
+        analysis_id="goodcopbadcop_freeze",
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
     print(f"n_rec = {n_rec}   tag = {args.tag}   out = {OUT}")
     for name, md, wp, nn in summary:
         print(f"  {name:34s} Δ={md:+.3f}  p={wp:.3f}  n={nn}")
-    for stem in ("curve", "paired", "summary"):
-        print(f"  wrote goodcopbadcop_freeze_{stem}_{args.tag}.png")
+    for output in (curve_out, paired_out, summary_out):
+        print(f"  wrote {output}")
     return 0
 
 

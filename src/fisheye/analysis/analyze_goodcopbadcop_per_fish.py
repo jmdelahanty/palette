@@ -36,7 +36,7 @@ little genuine learner/non-learner variance. Use the continuous indices as covar
 with a session random effect, not as individual verdicts.
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_per_fish        # table + CSV + figure
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_per_fish --exploratory-only
 
 Writes a CSV + scatter to $PALETTE_RECORDINGS_ROOT/figures. Reads the canonical registry.
 """
@@ -54,8 +54,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
+    exploratory_artifact_path,
     figures_dir,
+    parse_standalone_exploratory_args,
     resolve_cohort,
+    save_standalone_exploratory_figure,
+    write_standalone_exploratory_sidecar,
 )
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
@@ -182,7 +186,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-18")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_per_fish",
+    )
     out_dir = args.out_dir or figures_dir()
 
     metric_fns = (learning_index, escape_fold, steering_excess, lateral_excess_chase,
@@ -212,12 +219,19 @@ def main() -> None:
     n = len(rows)
 
     # CSV
-    csv_path = out_dir / f"goodcopbadcop_per_fish_metrics_{args.tag}.csv"
+    csv_path = exploratory_artifact_path(
+        out_dir / f"goodcopbadcop_per_fish_metrics_{args.tag}.csv"
+    )
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["recording_id", "session"] + cols)
         for r in rows:
             w.writerow([r["recording_id"], r["session"]] + [f"{r[c]:.4f}" if np.isfinite(r[c]) else "" for c in cols])
+    write_standalone_exploratory_sidecar(
+        csv_path,
+        analysis_id="goodcopbadcop_per_fish",
+        extra={"artifact_kind": "per_recording_metrics_csv"},
+    )
     print(f"n={n} fish. wrote {csv_path}\n")
 
     def col(name):
@@ -276,7 +290,12 @@ def main() -> None:
                  fontsize=12, weight="bold", y=1.02)
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_per_fish_{args.tag}.png"
-    fig.savefig(out, bbox_inches="tight")
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_per_fish",
+        bbox_inches="tight",
+    )
     print(f"\nwrote {out}")
 
 

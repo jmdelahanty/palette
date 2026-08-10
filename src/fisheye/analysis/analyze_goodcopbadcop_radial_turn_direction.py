@@ -24,8 +24,8 @@ subsampled; the effective n is visits, not bouts. So the cluster bootstrap resam
 CIs and the object-vs-virtual test are at the cluster level, never raw bout counts.
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_radial_turn_direction
-    python -m fisheye.analysis.analyze_goodcopbadcop_radial_turn_direction --reps 4000
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_radial_turn_direction --exploratory-only
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_radial_turn_direction --exploratory-only --reps 4000
 
 Reads the canonical registry (see goodcopbadcop_common); n=32 usable (June 14 + June 21).
 """
@@ -42,7 +42,9 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
+    parse_standalone_exploratory_args,
     resolve_cohort,
+    save_standalone_exploratory_figure,
 )
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
@@ -191,7 +193,10 @@ def main() -> None:
                     help="Min object-ahead bouts per fish/epoch to contribute a shell mean.")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-18")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_radial_turn_direction",
+    )
     out_dir = args.out_dir or figures_dir()
     rng = np.random.default_rng(0)
 
@@ -258,7 +263,12 @@ def main() -> None:
              "Steering restricted to object-ahead bouts.", ha="center", fontsize=8, color="#666")
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_radial_turn_direction_{args.tag}.png"
-    fig.savefig(out, bbox_inches="tight")
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_radial_turn_direction",
+        bbox_inches="tight",
+    )
     print("wrote", out, f" (n_fish={n}, reps={args.reps})\n")
 
     # text report

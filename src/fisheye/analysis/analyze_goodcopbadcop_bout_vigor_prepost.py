@@ -6,7 +6,7 @@ The near-object bout-vigor gradient = median bout peak speed near (7-18 mm) minu
 would grow from pre to post. This script splits the gradient by epoch and tests growth.
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_bout_vigor_prepost
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_bout_vigor_prepost --exploratory-only
 
 Key result (full canonical cohort, n=29): the near-object bout-vigor gradient WEAKENS to
 non-significance -- aggressive pre gradient ~+1.05 mm/s, p~0.14 vs 0 (was +1.54, p~0.042
@@ -27,7 +27,9 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
+    parse_standalone_exploratory_args,
     resolve_cohort,
+    save_standalone_exploratory_figure,
 )
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
@@ -71,7 +73,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-17")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_bout_vigor_prepost",
+    )
     out_dir = args.out_dir or figures_dir()
 
     grad = {obj: {ep: [] for ep in ("pre", "post")} for obj in ("agg", "inert")}
@@ -150,7 +155,12 @@ def main() -> None:
              f"post {np.nanmean(grad['agg']['post']):+.2f} mm/s.", ha="center", fontsize=8.5, color="#555")
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_bout_vigor_prepost_{args.tag}.png"
-    fig.savefig(out, bbox_inches="tight")
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_bout_vigor_prepost",
+        bbox_inches="tight",
+    )
     print("\nwrote", out)
 
 

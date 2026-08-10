@@ -17,7 +17,7 @@ individual, near-universal learned signal should keep a nonzero population mean 
 session RE, whereas a batch-driven one collapses.
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_learning_mixed_model
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_learning_mixed_model --exploratory-only
 
 Reads the canonical registry (goodcopbadcop_common).
 """
@@ -32,7 +32,10 @@ import pandas as pd
 import statsmodels.formula.api as smf
 from scipy import stats
 
-from fisheye.analysis.goodcopbadcop_common import resolve_cohort
+from fisheye.analysis.goodcopbadcop_common import (
+    parse_standalone_exploratory_args,
+    resolve_cohort,
+)
 from fisheye.analysis.analyze_goodcopbadcop_per_fish import spatial_avoidance_did, learning_index
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
@@ -87,7 +90,10 @@ def fit_random_intercept(df, metric):
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    parse_standalone_exploratory_args(
+        argparse.ArgumentParser(description=__doc__),
+        analysis_id="goodcopbadcop_learning_mixed_model",
+    )
     df = build_frame()
 
     for metric, label in METRICS:

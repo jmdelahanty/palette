@@ -13,8 +13,8 @@ avoidance (Δ+0.177, p=0.002). It was measuring the raw-centroid tracking noise 
               ~1.6 mm/s noise floor (the tell that it was distributional noise, not stillness).
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_immobility_artifact           # both
-    python -m fisheye.analysis.analyze_goodcopbadcop_immobility_artifact --sweep-only
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_immobility_artifact --exploratory-only
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_immobility_artifact --exploratory-only --sweep-only
 
 See docs/diagnostics/goodcopbadcop_behavior_synthesis_handoff_2026-07-17.md and the
 memory note project_immobility_speed_artifact. The component fix landed as sun 7e931481
@@ -31,7 +31,10 @@ from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
     load_chaser_distance_run,
 )
-from fisheye.analysis.goodcopbadcop_common import resolve_cohort
+from fisheye.analysis.goodcopbadcop_common import (
+    parse_standalone_exploratory_args,
+    resolve_cohort,
+)
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 MID_BAND_MM = (7.0, 18.0)
@@ -173,7 +176,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sweep-only", action="store_true", help="Only the threshold sweep.")
     ap.add_argument("--recompute-only", action="store_true", help="Only the raw-vs-smoothed recompute.")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_immobility_artifact",
+    )
 
     loaded = []
     for rid, zp in resolve_cohort():

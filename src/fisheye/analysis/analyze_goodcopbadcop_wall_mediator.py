@@ -20,7 +20,7 @@ habituation:
 Open dish, no physical trapping -- this is a position/mediation question, not "cornered".
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_wall_mediator
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_wall_mediator --exploratory-only
 
 Key result (full canonical cohort): chase is heavily near-wall and angular R rises from
 pre to chase (localized, NOT uniform thigmotaxis) -- the chaser drives the fish to a
@@ -41,7 +41,10 @@ from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
     load_chaser_distance_run,
 )
-from fisheye.analysis.goodcopbadcop_common import resolve_cohort
+from fisheye.analysis.goodcopbadcop_common import (
+    parse_standalone_exploratory_args,
+    resolve_cohort,
+)
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 OUTER_WALL_FRAC = 0.8   # positions with center-distance > 0.8 * radius = "near wall" (outer 20%)
@@ -139,7 +142,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--angular-only", action="store_true")
     ap.add_argument("--partial-only", action="store_true")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_wall_mediator",
+    )
     cohort = resolve_cohort()
     if not args.partial_only:
         run_angular(cohort)

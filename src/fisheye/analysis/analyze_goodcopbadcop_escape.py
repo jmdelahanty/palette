@@ -7,7 +7,7 @@ minute, computed pre vs chase. The per-bout peak is taken from `speed_smoothed_m
 `peak_speed_mm_s` is reported as a cross-check.
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_escape
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_escape --exploratory-only
 
 Key result (full canonical cohort, n=32): escape rate pre ~0.35 -> chase ~7.8 per
 validly-tracked minute (~22x, 32/32, p<0.0001 on the smoothed peak; ~10x on the
@@ -22,6 +22,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.goodcopbadcop_common import (
+    parse_standalone_exploratory_args,
     resolve_cohort,
 )
 from fisheye.analysis.chaser_distance_io import (
@@ -50,7 +51,10 @@ def escape_rate(d: dict, epoch: str, peaks: np.ndarray) -> float:
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    parse_standalone_exploratory_args(
+        argparse.ArgumentParser(description=__doc__),
+        analysis_id="goodcopbadcop_escape",
+    )
     cols = {"sm_pre": [], "sm_chase": [], "tab_pre": [], "tab_chase": []}
     for rid, zp in resolve_cohort():
         try:

@@ -7,7 +7,7 @@ inert. Tests whether the fish bouts more vigorously when NEAR the aggressive obj
 near the inert one. Bout-level -> robust, above the raw-speed noise floor.
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_bout_kinematics_distance
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_bout_kinematics_distance --exploratory-only
 
 Key result (full canonical cohort, n=32): peak-speed near-minus-far, aggressive vs inert
 (diff-in-diff) ~+1.24 mm/s, p~0.063 -- MARGINAL (the n=12 June-14 slice gave +2.7,
@@ -27,7 +27,9 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
+    parse_standalone_exploratory_args,
     resolve_cohort,
+    save_standalone_exploratory_figure,
 )
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
@@ -60,7 +62,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-17")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_bout_kinematics_distance",
+    )
     out_dir = args.out_dir or figures_dir()
 
     pool = {obj: {k: {"d": [], "v": []} for k in KIN_FIELDS} for obj in ("agg", "inert")}
@@ -126,7 +131,12 @@ def main() -> None:
              ha="center", fontsize=8.5, color="#555")
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_bout_kinematics_distance_{args.tag}.png"
-    fig.savefig(out, bbox_inches="tight")
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_bout_kinematics_distance",
+        bbox_inches="tight",
+    )
     print("wrote", out)
     print(f"n={n}  diff-in-diff peak (near-far, agg-inert) Δ={dd_val:+.2f} mm/s p={dd_p:.3f} n={int(m.sum())}")
     for obj in ("agg", "inert"):

@@ -16,16 +16,23 @@ querying it silently resolves only the 12 June-14 recordings.
 Figures: `$PALETTE_RECORDINGS_ROOT/figures` (default `/nvme1/recordings/figures`) --
 committed scripts, out-of-repo figures.
 """
+
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sqlite3
+import sys
+import tempfile
 from pathlib import Path
+from typing import Any, Sequence
 
 import numpy as np
 
-from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
+from fisheye.analysis.cra_primary_endpoint import (
+    resolve_object_roles_from_protocol_payload,
+)
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadSnapshot,
     load_chaser_distance_run,
@@ -37,7 +44,159 @@ EPOCHS = ("pre", "chase", "post")
 
 # The live registry on /groups (matches DEFAULT_REGISTRY in fisheye.cluster.*). The
 # /nvme1 copy is stale (June-14 only, plus retired May duplicate rows).
-CANONICAL_REGISTRY = "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
+CANONICAL_REGISTRY = (
+    "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
+)
+
+STANDALONE_EXPLORATORY_STATUS_SCHEMA = (
+    "palette.goodcopbadcop.standalone_exploratory_status"
+)
+STANDALONE_EXPLORATORY_STATUS_VERSION = 1
+STANDALONE_EXPLORATORY_BANNER = (
+    "EXPLORATORY ONLY — standalone inference is unregistered, unclustered unless "
+    "the script says otherwise, and outside the multiplicity-controlled group-statistics "
+    "publication contract. Do not cite its p-values or annotations as confirmatory."
+)
+
+
+def standalone_exploratory_status(*, analysis_id: str) -> dict[str, object]:
+    """Return the exact machine-readable status for one standalone analysis.
+
+    These historical scripts remain useful for inspection and method development, but
+    their inferential results do not pass through the immutable analytics-export and
+    registered group-statistics contracts.  This receipt deliberately does not imply
+    scientific validation or publication eligibility.
+    """
+
+    normalized_id = str(analysis_id).strip()
+    if not normalized_id:
+        raise ValueError("analysis_id must be nonempty.")
+    return {
+        "schema": STANDALONE_EXPLORATORY_STATUS_SCHEMA,
+        "version": STANDALONE_EXPLORATORY_STATUS_VERSION,
+        "analysis_id": normalized_id,
+        "analysis_tier": "exploratory",
+        "publication_eligibility": "ineligible",
+        "confirmatory_use": False,
+        "multiplicity_control": "none",
+        "registered_group_statistics": False,
+        "warning": STANDALONE_EXPLORATORY_BANNER,
+    }
+
+
+def parse_standalone_exploratory_args(
+    parser: argparse.ArgumentParser,
+    *,
+    analysis_id: str,
+    argv: Sequence[str] | None = None,
+) -> argparse.Namespace:
+    """Require acknowledgement before running a historical standalone analysis.
+
+    The one-line JSON receipt on stderr makes console-only runs machine detectable.  A
+    missing acknowledgement is an invocation error rather than an implicit legacy mode.
+    """
+
+    parser.add_argument(
+        "--exploratory-only",
+        action="store_true",
+        help=(
+            "Acknowledge that all standalone statistics and annotations are exploratory, "
+            "unadjusted, and ineligible for confirmatory publication."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if not bool(args.exploratory_only):
+        parser.error(
+            "standalone GoodCopBadCop inference is exploratory-only; rerun with "
+            "--exploratory-only after reviewing the warning"
+        )
+    status = standalone_exploratory_status(analysis_id=analysis_id)
+    print(
+        "PALETTE_STANDALONE_ANALYSIS_STATUS="
+        + json.dumps(status, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+        flush=True,
+    )
+    print(STANDALONE_EXPLORATORY_BANNER, file=sys.stderr, flush=True)
+    return args
+
+
+def exploratory_artifact_path(path: Path) -> Path:
+    """Return a visibly exploratory sibling path without overwriting prior artifacts."""
+
+    artifact = Path(path)
+    if artifact.stem.endswith("_exploratory"):
+        return artifact
+    return artifact.with_name(f"{artifact.stem}_exploratory{artifact.suffix}")
+
+
+def write_standalone_exploratory_sidecar(
+    artifact_path: Path,
+    *,
+    analysis_id: str,
+    extra: dict[str, Any] | None = None,
+) -> Path:
+    """Atomically write an exploratory-only receipt beside an artifact."""
+
+    artifact = Path(artifact_path)
+    payload = standalone_exploratory_status(analysis_id=analysis_id)
+    payload["artifact_name"] = artifact.name
+    if extra:
+        overlap = set(payload).intersection(extra)
+        if overlap:
+            raise ValueError(
+                "extra standalone-status fields may not replace contract fields: "
+                + ", ".join(sorted(overlap))
+            )
+        payload.update(extra)
+    sidecar = artifact.with_name(f"{artifact.name}.exploratory.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=sidecar.parent,
+        prefix=f".{sidecar.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(serialized)
+        temporary = Path(handle.name)
+    try:
+        os.replace(temporary, sidecar)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return sidecar
+
+
+def save_standalone_exploratory_figure(
+    figure: Any,
+    path: Path,
+    *,
+    analysis_id: str,
+    **savefig_kwargs: Any,
+) -> tuple[Path, Path]:
+    """Watermark and save a figure with an adjacent machine-readable receipt."""
+
+    output = exploratory_artifact_path(Path(path))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.text(
+        0.5,
+        0.995,
+        "EXPLORATORY ONLY — unregistered / no multiplicity-controlled publication",
+        ha="center",
+        va="top",
+        fontsize=8,
+        color="#8b0000",
+        weight="bold",
+    )
+    figure.savefig(output, **savefig_kwargs)
+    sidecar = write_standalone_exploratory_sidecar(
+        output,
+        analysis_id=analysis_id,
+        extra={"artifact_kind": "figure"},
+    )
+    return output, sidecar
 
 
 def registry_db() -> str:
@@ -122,7 +281,10 @@ def load_epochs(root) -> dict:
     w = latest(nav(root, ["analysis", "stimulus_epoch_runs"]))["windows"]
     starts = np.asarray(w["start_frame"][:])
     ends = np.asarray(w["end_frame"][:])
-    labels = [x.tobytes().decode("utf-8", "ignore").strip("\x00") for x in np.asarray(w["label_bytes"][:])]
+    labels = [
+        x.tobytes().decode("utf-8", "ignore").strip("\x00")
+        for x in np.asarray(w["label_bytes"][:])
+    ]
     ep: dict[str, tuple[int, int]] = {}
     for s, e, lab in zip(starts, ends, labels):
         low = lab.lower()
@@ -153,9 +315,16 @@ def role_index(o) -> int:
 def resolve_object_roles(root) -> dict:
     """{role: chaser/object index} from the recording's stimulus protocol payload."""
     stim_par = nav(root, ["analysis", "stimulus_runs"])
-    stim = next(stim_par[k] for k in stim_par.group_keys() if "protocol_json" in dict(stim_par[k].attrs))
+    stim = next(
+        stim_par[k]
+        for k in stim_par.group_keys()
+        if "protocol_json" in dict(stim_par[k].attrs)
+    )
     payload = json.loads(str(stim.attrs["protocol_json"]))
-    return {role_name(o): role_index(o) for o in resolve_object_roles_from_protocol_payload(payload)}
+    return {
+        role_name(o): role_index(o)
+        for o in resolve_object_roles_from_protocol_payload(payload)
+    }
 
 
 _DENSE_TRACK_FIELDS = {
@@ -193,8 +362,7 @@ def load_dense_kinematics(
     )
     if unsupported:
         raise ValueError(
-            "Unsupported verified dense-track field(s): "
-            + ", ".join(unsupported)
+            "Unsupported verified dense-track field(s): " + ", ".join(unsupported)
         )
     required_levels = tuple(
         dict.fromkeys(_DENSE_TRACK_FIELDS[field] for field in requested_fields)
@@ -233,7 +401,9 @@ def load_dense_kinematics(
     out = {}
     for field in requested_fields:
         level = _DENSE_TRACK_FIELDS[field]
-        values = np.asarray(track.speed_mm_by_level[level], dtype=np.float64).reshape(-1)
+        values = np.asarray(track.speed_mm_by_level[level], dtype=np.float64).reshape(
+            -1
+        )
         if values.shape != fi.shape:
             raise ValueError(
                 f"Verified {field} length {values.shape[0]} does not match "

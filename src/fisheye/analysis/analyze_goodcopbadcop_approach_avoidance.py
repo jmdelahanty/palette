@@ -9,7 +9,7 @@ are robust to the speed noise floor because they are direction, not magnitude:
   min_distance_mm    (scalar)  (higher = doesn't get as close)
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_approach_avoidance
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_approach_avoidance --exploratory-only
 
 Kept as a durable NEGATIVE control: no learned directional avoidance survives (radial
 velocity no change; fraction-moving-away decreased via selection bias; min-distance only
@@ -28,7 +28,12 @@ import zarr
 
 from fisheye.analysis.chaser_response_regimes import build_chaser_response_regimes_result as build
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
-from fisheye.analysis.goodcopbadcop_common import resolve_cohort, role_index, role_name
+from fisheye.analysis.goodcopbadcop_common import (
+    parse_standalone_exploratory_args,
+    resolve_cohort,
+    role_index,
+    role_name,
+)
 from fisheye.group_statistics.paired import paired_sign_flip_p_value, wilcoxon_signed_rank_p_value
 
 MID_BAND_MM = (7.0, 18.0)
@@ -57,7 +62,10 @@ def band_weighted(res, ei, ch, arr, wt) -> float:
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    parse_standalone_exploratory_args(
+        argparse.ArgumentParser(description=__doc__),
+        analysis_id="goodcopbadcop_approach_avoidance",
+    )
     metrics = {k: {r: {e: [] for e in ("pre", "post")} for r in ("agg", "inert")}
                for k in ("radvel_moving", "frac_away", "approach", "min_dist")}
     n = 0

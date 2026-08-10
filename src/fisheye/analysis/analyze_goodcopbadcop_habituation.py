@@ -7,8 +7,8 @@ early-vs-late paired test. Escapes are bout peak > 100 mm/s (robust). Escape rat
 validly-tracked second (dropout excluded). This is the best *learning* candidate.
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_habituation
-    python -m fisheye.analysis.analyze_goodcopbadcop_habituation --example 21-50-10Z_arena_3
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_habituation --exploratory-only
+    scripts/py -m fisheye.analysis.analyze_goodcopbadcop_habituation --exploratory-only --example 21-50-10Z_arena_3
 
 Key result (full canonical cohort): the within-training learning signal is STRONGLY
 significant -- freeze fraction early ~0.41 -> late ~0.60 (p<0.001, n=29); escape rate
@@ -33,7 +33,12 @@ from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
     load_chaser_distance_run,
 )
-from fisheye.analysis.goodcopbadcop_common import figures_dir, resolve_cohort
+from fisheye.analysis.goodcopbadcop_common import (
+    figures_dir,
+    parse_standalone_exploratory_args,
+    resolve_cohort,
+    save_standalone_exploratory_figure,
+)
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 MAX_ORDINAL = 8
@@ -57,7 +62,10 @@ def main() -> None:
     ap.add_argument("--example", default=DEFAULT_EXAMPLE, help="Substring of the recording to highlight.")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-17")
-    args = ap.parse_args()
+    args = parse_standalone_exploratory_args(
+        ap,
+        analysis_id="goodcopbadcop_habituation",
+    )
     out_dir = args.out_dir or figures_dir()
 
     per_rec = []
@@ -119,7 +127,12 @@ def main() -> None:
              ha="center", fontsize=8, color="#666")
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_habituation_{args.tag}.png"
-    fig.savefig(out, bbox_inches="tight")
+    out, _ = save_standalone_exploratory_figure(
+        fig,
+        out,
+        analysis_id="goodcopbadcop_habituation",
+        bbox_inches="tight",
+    )
     print("wrote", out, f" (n_rec={len(per_rec)})")
     for key in ("esc", "frz", "lat"):
         e0, e1, p, n = early_late(key)
