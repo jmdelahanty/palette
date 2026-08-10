@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -90,6 +91,10 @@ from fisheye.shared.refined_subject_mask_coordinate_publication import (
     BoundRefinedSubjectMaskCoordinateSurfaces,
     load_persisted_refined_subject_mask_coordinate_surfaces,
 )
+from fisheye.shared.pixel_frame_authority import (
+    BoundAcquisitionCameraFrame,
+    BoundPixelFrameAuthority,
+)
 from fisheye.shared.proof_verification import (
     finish_proof_verification,
     proof_verification_operation,
@@ -101,6 +106,12 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
+)
+from fisheye.shared.zarr.subject_shape_bundle_source import (
+    SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+    BoundSubjectShapeBundleSource,
+    load_subject_shape_bundle_source,
+    require_bound_subject_shape_bundle_source,
 )
 
 
@@ -117,6 +128,14 @@ SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR = "subject_shape_publication_lease"
 SUBJECT_SHAPE_DERIVATION_ATTR = "subject_shape_coordinate_derivation"
 SUBJECT_SHAPE_COMPONENT_SCHEMA_ATTR = "subject_shape_component_schema"
 SUBJECT_SHAPE_MANIFEST_ATTR = "subject_shape_publication_manifest"
+SUBJECT_SHAPE_SOURCE_BINDING_ATTR = "subject_shape_source_binding"
+SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR = "subject_shape_source_binding_sha256"
+SUBJECT_SHAPE_SOURCE_KIND_ATTR = "subject_shape_source_kind"
+SUBJECT_SHAPE_BUNDLE_ID_ATTR = "source_subject_mask_bundle_id"
+SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR = (
+    "source_subject_mask_bundle_active_at_derivation"
+)
+SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND = "historical_refined_coordinate_surfaces_v4"
 SUBJECT_SHAPE_SCIENTIFIC_CONFIGURATION_ATTR = (
     "subject_shape_scientific_configuration"
 )
@@ -187,6 +206,12 @@ CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID = "analysis.subject_shape_runs"
 CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION = 4
 CANONICAL_SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v11"
 CANONICAL_SUBJECT_SHAPE_METHOD_VERSION = 11
+CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID = "analysis.subject_shape.full_anatomy_v5"
+CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION = 5
+CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD = "subject_shape_from_recording_mask_bundle_v12"
+CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD_VERSION = 12
+SUBJECT_SHAPE_BUNDLE_DERIVATION_SCHEMA_VERSION = 2
+SUBJECT_SHAPE_BUNDLE_MANIFEST_SCHEMA_VERSION = 2
 CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER = (
     "subject_body",
     "swim_bladder",
@@ -327,6 +352,145 @@ def _refined_source_path(run: Any) -> str:
     return f"refined_subject_masks_runs/{name}"
 
 
+SubjectShapeCoordinateSource = (
+    BoundRefinedSubjectMaskCoordinateSurfaces | BoundSubjectShapeBundleSource
+)
+
+
+def _is_bundle_source(source: SubjectShapeCoordinateSource) -> bool:
+    return type(source) is BoundSubjectShapeBundleSource
+
+
+def _local_archive_path(root: Any) -> str:
+    identity = archive_identity(root)
+    if identity.kind != "local_store_root" or not identity.key:
+        _fail(
+            "Recording-bundle subject-shape publication currently requires one "
+            "local Zarr archive so its sealed bundle validator can reopen it."
+        )
+    return str(identity.key[0])
+
+
+def _source_run_group(source: SubjectShapeCoordinateSource) -> Any:
+    if _is_bundle_source(source):
+        return require_bound_subject_shape_bundle_source(source).authority.refined_run
+    return source.context._run_group
+
+
+def _source_row_node(source: SubjectShapeCoordinateSource, name: str) -> Any:
+    if _is_bundle_source(source):
+        bundle = require_bound_subject_shape_bundle_source(source)
+        nodes = {
+            "instance_key": bundle.instance_key_node,
+            "source_crop_row_ids": bundle.source_crop_row_ids_node,
+            "source_acquisition_frame_index": bundle.source_acquisition_frame_index_node,
+        }
+        node = nodes.get(name)
+    else:
+        node = source.context._run_group.get(name)
+    if node is None:
+        _fail(f"Subject-shape source lacks required row array {name!r}.")
+    return node
+
+
+def _source_acquisition_frame(
+    source: SubjectShapeCoordinateSource,
+) -> BoundAcquisitionCameraFrame:
+    if _is_bundle_source(source):
+        return require_bound_subject_shape_bundle_source(source).acquisition_frame
+    return source.context.temporal_authority.acquisition_frame
+
+
+def _source_camera_frames(
+    source: SubjectShapeCoordinateSource,
+) -> tuple[BoundPixelFrameAuthority, BoundPixelFrameAuthority]:
+    if _is_bundle_source(source):
+        bundle = require_bound_subject_shape_bundle_source(source)
+        return (
+            bundle.continuous_source_camera_frame,
+            bundle.edge_source_camera_frame,
+        )
+    return (
+        source.context.continuous_chain.source_camera_frame_authority,
+        source.context.pixel_edge_chain.source_camera_frame_authority,
+    )
+
+
+def _source_binding_record(
+    source: SubjectShapeCoordinateSource,
+) -> Mapping[str, Any] | None:
+    if not _is_bundle_source(source):
+        return None
+    return require_bound_subject_shape_bundle_source(source).source_record
+
+
+def _stamp_source_binding(
+    run: Any,
+    source: SubjectShapeCoordinateSource,
+) -> BoundCoordinateRecord | None:
+    record = _source_binding_record(source)
+    if record is None:
+        return None
+    expected_digest = _canonical_sha256(record)
+    if (
+        run.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_ATTR) != record
+        or run.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR)
+        != expected_digest
+    ):
+        _fail("Subject-shape unbound source-binding receipt is absent or stale.")
+    node = run.require_group("coordinate_records").require_group("source_binding")
+    return stamp_and_bind_persisted_coordinate_record(
+        node,
+        record,
+        attr_name=SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
+    )
+
+
+def _load_source_binding(
+    run: Any,
+    source: SubjectShapeCoordinateSource,
+) -> BoundCoordinateRecord | None:
+    record = _source_binding_record(source)
+    if record is None:
+        return None
+    node = run["coordinate_records/source_binding"]
+    binding = bind_persisted_coordinate_record(
+        node,
+        attr_name=SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
+    )
+    if binding.record != record:
+        _fail("Subject-shape bundle-source binding differs from live exact authority.")
+    return binding
+
+
+@proof_verification_operation
+def load_exact_subject_shape_source(
+    root: Any,
+    run: Any,
+) -> SubjectShapeCoordinateSource:
+    kind = run.attrs.get(
+        SUBJECT_SHAPE_SOURCE_KIND_ATTR,
+        SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
+    )
+    if kind == SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND:
+        return load_exact_subject_shape_refined_source(root, run)
+    if kind != SUBJECT_SHAPE_BUNDLE_SOURCE_KIND:
+        _fail(f"Unsupported subject-shape source kind {kind!r}.")
+    bundle_id = run.attrs.get(SUBJECT_SHAPE_BUNDLE_ID_ATTR)
+    if not isinstance(bundle_id, str) or not bundle_id or "/" in bundle_id:
+        _fail("Bundle-bound subject-shape run lacks one exact source bundle ID.")
+    source = load_subject_shape_bundle_source(
+        Path(_local_archive_path(root)),
+        bundle_id=bundle_id,
+        allow_inactive=True,
+    )
+    if archive_identity(source.authority.refined_run) != archive_identity(run):
+        _fail("Subject-shape and recording-bundle source span archives/stores.")
+    if type(run.attrs.get(SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR)) is not bool:
+        _fail("Subject-shape bundle derivation lacks an exact activation-state receipt.")
+    return source
+
+
 @proof_verification_operation
 def load_exact_subject_shape_refined_source(
     root: Any,
@@ -395,6 +559,17 @@ def require_translation_only_refined_placement(
     return offsets[0], offsets[1]
 
 
+def require_translation_only_subject_shape_placement(
+    source: SubjectShapeCoordinateSource,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return exact continuous/edge offsets for either maintained source kind."""
+
+    if _is_bundle_source(source):
+        offsets = require_bound_subject_shape_bundle_source(source).translation_offsets()
+        return offsets, offsets.copy()
+    return require_translation_only_refined_placement(source)
+
+
 def _translate_points_node(node: Any, offsets: np.ndarray) -> None:
     values = np.asarray(node[:])
     if values.dtype.kind != "f" or values.ndim < 2 or values.shape[0] != offsets.shape[0] or values.shape[-1] != 2:
@@ -443,13 +618,15 @@ def _mask_invalid(node: Any, valid_node: Any) -> None:
 
 def transform_subject_shape_geometry_to_source_camera(
     run: Any,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
     *,
     component_names: Sequence[str],
 ) -> None:
     """Translate every persisted positional geometry surface exactly once."""
 
-    continuous_offsets, edge_offsets = require_translation_only_refined_placement(source)
+    continuous_offsets, edge_offsets = require_translation_only_subject_shape_placement(
+        source
+    )
     components = run["components"]
     for name in component_names:
         group = components[str(name)]
@@ -857,20 +1034,74 @@ def subject_shape_maintained_profile_record() -> dict[str, Any]:
     }
 
 
+def subject_shape_bundle_maintained_profile_record() -> dict[str, Any]:
+    """Return the closed recording-bundle profile for new publications."""
+
+    return {
+        "profile_id": CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID,
+        "run_schema_id": CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID,
+        "run_schema_version": CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION,
+        "method": CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD,
+        "method_version": CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD_VERSION,
+        "source_kind": SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+        "component_order": list(CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER),
+        "relation_order": list(CANONICAL_SUBJECT_SHAPE_RELATION_ORDER),
+        "row_index_arrays": list(CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS),
+        "row_lineage_copied": list(CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS),
+        "row_lineage_missing": list(CANONICAL_SUBJECT_SHAPE_ROW_LINEAGE_MISSING),
+        "historical_variant_policy": "separate_v4_reader_only",
+        "closed_component_inventory": True,
+        "closed_relation_inventory": True,
+        "closed_row_index_inventory": True,
+    }
+
+
 def _require_subject_shape_maintained_profile(run: Any) -> dict[str, Any]:
-    profile = subject_shape_maintained_profile_record()
+    source_kind = run.attrs.get(
+        SUBJECT_SHAPE_SOURCE_KIND_ATTR,
+        SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
+    )
+    bundle = source_kind == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+    if source_kind not in {
+        SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
+        SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+    }:
+        _fail(f"Unsupported maintained subject-shape source kind {source_kind!r}.")
+    profile = (
+        subject_shape_bundle_maintained_profile_record()
+        if bundle
+        else subject_shape_maintained_profile_record()
+    )
+    expected_schema_version = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION
+        if bundle
+        else CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION
+    )
+    expected_method = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD
+        if bundle
+        else CANONICAL_SUBJECT_SHAPE_METHOD
+    )
+    expected_method_version = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD_VERSION
+        if bundle
+        else CANONICAL_SUBJECT_SHAPE_METHOD_VERSION
+    )
+    expected_row_axis = (
+        "recording_subject_mask_bundle_rows"
+        if bundle
+        else "refined_subject_mask_rows"
+    )
     if (
         run.attrs.get("schema_id") != CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID
-        or run.attrs.get("schema_version")
-        != CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION
-        or run.attrs.get("method") != CANONICAL_SUBJECT_SHAPE_METHOD
-        or run.attrs.get("method_version")
-        != CANONICAL_SUBJECT_SHAPE_METHOD_VERSION
-        or run.attrs.get("row_axis") != "refined_subject_mask_rows"
+        or run.attrs.get("schema_version") != expected_schema_version
+        or run.attrs.get("method") != expected_method
+        or run.attrs.get("method_version") != expected_method_version
+        or run.attrs.get("row_axis") != expected_row_axis
     ):
         _fail(
             "Maintained subject-shape run identity differs from the exact "
-            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile."
+            f"{profile['profile_id']!r} profile."
         )
     component_names = tuple(
         str(value) for value in (run.attrs.get("component_names") or ())
@@ -881,14 +1112,14 @@ def _require_subject_shape_maintained_profile(run: Any) -> dict[str, Any]:
     if component_names != CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER:
         _fail(
             "Maintained subject-shape component order differs from the exact "
-            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile: "
+            f"{profile['profile_id']!r} profile: "
             f"expected={CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER!r}, "
             f"observed={component_names!r}."
         )
     if relation_names != CANONICAL_SUBJECT_SHAPE_RELATION_ORDER:
         _fail(
             "Maintained subject-shape relation order differs from the exact "
-            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile: "
+            f"{profile['profile_id']!r} profile: "
             f"expected={CANONICAL_SUBJECT_SHAPE_RELATION_ORDER!r}, "
             f"observed={relation_names!r}."
         )
@@ -902,7 +1133,7 @@ def _require_subject_shape_maintained_profile(run: Any) -> dict[str, Any]:
     if observed_row_arrays != expected_row_arrays:
         _fail(
             "Maintained subject-shape row_index bundle differs from the exact "
-            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile: "
+            f"{profile['profile_id']!r} profile: "
             f"expected={sorted(expected_row_arrays)!r}, "
             f"observed={sorted(observed_row_arrays)!r}."
         )
@@ -1035,6 +1266,11 @@ _RUN_AUTHORITATIVE_ATTRS = frozenset(
         "body_frame_source_refs",
         "row_lineage_copied",
         "row_lineage_missing",
+        SUBJECT_SHAPE_SOURCE_KIND_ATTR,
+        SUBJECT_SHAPE_BUNDLE_ID_ATTR,
+        SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR,
+        SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
+        SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR,
     }
 )
 _RUN_FINAL_AUTHORITATIVE_ATTRS = frozenset(
@@ -1138,7 +1374,12 @@ def build_subject_shape_scientific_configuration_record(run: Any) -> dict[str, A
         "closed_group_attr_vocabulary": {
             path: sorted(attrs) for path, attrs in groups.items()
         },
-        "scope": "all_controlled_scientific_parameters_used_by_subject_shape_v11",
+        "scope": (
+            "all_controlled_scientific_parameters_used_by_subject_shape_v12"
+            if run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+            == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+            else "all_controlled_scientific_parameters_used_by_subject_shape_v11"
+        ),
     }
 
 
@@ -1197,6 +1438,11 @@ def _expected_subject_shape_group_paths(
                 "coordinate_records/scalar_surface_inventory",
             }
         )
+        if (
+            run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+            == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+        ):
+            paths.add("coordinate_records/source_binding")
     return tuple(sorted(paths))
 
 
@@ -1368,6 +1614,16 @@ def _expected_subject_shape_group_attrs(
                 ),
             }
         )
+        if (
+            run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+            == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+        ):
+            expected["coordinate_records/source_binding"] = frozenset(
+                {
+                    SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
+                    f"{SUBJECT_SHAPE_SOURCE_BINDING_ATTR}_sha256",
+                }
+            )
     return expected
 
 
@@ -1539,6 +1795,19 @@ def build_subject_shape_schema_inventory_record(
         "row_lineage_copied",
         "row_lineage_missing",
     }
+    if (
+        run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+        == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+    ):
+        required_run_names.update(
+            {
+                SUBJECT_SHAPE_SOURCE_KIND_ATTR,
+                SUBJECT_SHAPE_BUNDLE_ID_ATTR,
+                SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR,
+                SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
+                SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR,
+            }
+        )
     if phase == "bound":
         required_run_names.update(_RUN_FINAL_AUTHORITATIVE_ATTRS)
     missing_run_names = required_run_names - observed_run_names
@@ -1589,7 +1858,7 @@ def build_subject_shape_unbound_numeric_manifest_record(
         for path in schema_inventory["arrays"]
         for node in (run[path],)
     }
-    return {
+    result = {
         "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
         "schema_version": 1,
         "run_name": run.attrs.get("palette_run_name"),
@@ -1610,6 +1879,19 @@ def build_subject_shape_unbound_numeric_manifest_record(
         "closed_attr_inventory": True,
         "coordinate_descriptors_present": False,
     }
+    if (
+        run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+        == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+    ):
+        result["source_binding"] = {
+            "source_kind": run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR),
+            "bundle_id": run.attrs.get(SUBJECT_SHAPE_BUNDLE_ID_ATTR),
+            "bundle_active_at_derivation": run.attrs.get(
+                SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR
+            ),
+            "record_sha256": run.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR),
+        }
+    return result
 
 
 def stamp_unbound_subject_shape_manifest(run: Any) -> BoundCoordinateRecord:
@@ -1696,12 +1978,17 @@ def _validate_retained_unbound_schema(run: Any, record: Mapping[str, Any]) -> No
     expected_run_ref = f"/{canonical_node_path(run)}"
     expected_groups = _expected_subject_shape_group_paths(run, phase="unbound")
     expected_arrays = _expected_subject_shape_array_paths(run, phase="unbound")
+    expected_profile = (
+        subject_shape_bundle_maintained_profile_record()
+        if run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+        == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+        else subject_shape_maintained_profile_record()
+    )
     if (
         not isinstance(inventory, Mapping)
         or inventory.get("schema_id") != SUBJECT_SHAPE_SCHEMA_INVENTORY_SCHEMA_ID
         or inventory.get("schema_version") != SUBJECT_SHAPE_SCHEMA_VERSION
-        or inventory.get("maintained_profile")
-        != subject_shape_maintained_profile_record()
+        or inventory.get("maintained_profile") != expected_profile
         or inventory.get("phase") != "unbound"
         or inventory.get("run_ref") != expected_run_ref
         or inventory.get("groups") != list(expected_groups)
@@ -1893,21 +2180,18 @@ def _load_tail_sample_axis(run: Any) -> BoundCoordinateRecord:
 
 def prepare_subject_shape_identity_and_schema(
     run: Any,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
     *,
     component_names: Sequence[str],
 ) -> tuple[BoundRowIdentityContract, BoundCoordinateRecord]:
     """Copy exact identity to direct rowset children and seal it."""
 
-    source_identity = source.context.row_identity
-    source_keys = np.asarray(source_identity._key_array_node[:])
+    source_keys = np.asarray(_source_row_node(source, "instance_key")[:])
     if source_keys.dtype != np.dtype("uint64"):
         _fail("Future subject-shape identity requires exact uint64 instance_key.")
     key = _create_array(run, "instance_key", source_keys)
     for name in ("source_crop_row_ids", "source_acquisition_frame_index"):
-        source_node = source.context._run_group.get(name)
-        if source_node is None:
-            _fail(f"Refined coordinate authority lacks required {name!r}.")
+        source_node = _source_row_node(source, name)
         _create_array(run, name, np.asarray(source_node[:]))
     identity = stamp_and_bind_row_identity_contract(
         run,
@@ -1929,41 +2213,70 @@ def prepare_subject_shape_identity_and_schema(
 
 def stamp_subject_shape_temporal_authority(
     run: Any,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
     identity: BoundRowIdentityContract,
 ) -> BoundSourceRowTemporalAuthority:
     return stamp_source_row_temporal_authority(
         run,
         run["source_acquisition_frame_index"],
         source_row_identity=identity,
-        acquisition_frame=source.context.temporal_authority.acquisition_frame,
+        acquisition_frame=_source_acquisition_frame(source),
     )
 
 
 def load_subject_shape_temporal_authority(
     run: Any,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
     identity: BoundRowIdentityContract,
 ) -> BoundSourceRowTemporalAuthority:
     result = load_bound_source_row_temporal_authority(
         run,
         run["source_acquisition_frame_index"],
         source_row_identity=identity,
-        acquisition_frame=source.context.temporal_authority.acquisition_frame,
+        acquisition_frame=_source_acquisition_frame(source),
     )
-    if (
-        result.record.recording_id
-        != source.context.temporal_authority.record.recording_id
-        or result.record.camera_id
-        != source.context.temporal_authority.record.camera_id
-        or result.record.source_total_frames
-        != source.context.temporal_authority.record.source_total_frames
-    ):
+    if _is_bundle_source(source):
+        bundle = require_bound_subject_shape_bundle_source(source)
+        expected = (
+            bundle.authority.recording_identity,
+            bundle.authority.camera_identity,
+            bundle.authority.source_total_frames,
+        )
+    else:
+        expected = (
+            source.context.temporal_authority.record.recording_id,
+            source.context.temporal_authority.record.camera_id,
+            source.context.temporal_authority.record.source_total_frames,
+        )
+    observed = (
+        result.record.recording_id,
+        result.record.camera_id,
+        result.record.source_total_frames,
+    )
+    if observed != expected:
         _fail("Subject-shape temporal authority differs from its exact refined source.")
     return result
 
 
-def _transform_refs(source: BoundRefinedSubjectMaskCoordinateSurfaces) -> dict[str, Any]:
+def _transform_refs(
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
+) -> dict[str, Any]:
+    if _is_bundle_source(source):
+        if source_binding is None:
+            _fail("Bundle-bound subject shape lacks its exact source binding record.")
+        bundle = require_bound_subject_shape_bundle_source(source)
+        return {
+            "recording_bundle_roi_to_source_camera": {
+                "source_binding": _record_pointer(source_binding),
+                "placement_array": copy.deepcopy(
+                    bundle.source_record["row_arrays"]["source_crop_xywh"]
+                ),
+                "policy": copy.deepcopy(
+                    bundle.source_record["coordinate_transform"]
+                ),
+            }
+        }
     return {
         "continuous_roi_to_source_camera": [
             {
@@ -1990,7 +2303,8 @@ def _transform_refs(source: BoundRefinedSubjectMaskCoordinateSurfaces) -> dict[s
 
 def _derivation_record(
     run: Any,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
     identity: BoundRowIdentityContract,
     component_schema: BoundCoordinateRecord,
     temporal: BoundSourceRowTemporalAuthority,
@@ -2009,9 +2323,45 @@ def _derivation_record(
     consumed_unbound_stage = load_subject_shape_consumed_unbound_stage(run)
     if consumed_unbound_stage.record_sha256 != unbound_manifest_sha256:
         _fail("Subject-shape derivation names the wrong consumed unbound-stage record.")
+    if _is_bundle_source(source):
+        if source_binding is None:
+            _fail("Bundle-bound derivation lacks its persisted source binding.")
+        bundle = require_bound_subject_shape_bundle_source(source)
+        source_section = {
+            "source_kind": SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+            "bundle_id": bundle.bundle_id,
+            "source_binding": _record_pointer(source_binding),
+            "bundle_manifest_payload_digest": bundle.authority.bundle_manifest[
+                "payload_digest"
+            ],
+            "bundle_coordinate_authority_digest": bundle.authority.authority_digest,
+            "refined_run_path": bundle.authority.refined_run_path,
+            "refined_manifest_payload_digest": bundle.authority.refined_manifest[
+                "payload_digest"
+            ],
+        }
+        schema_version = SUBJECT_SHAPE_BUNDLE_DERIVATION_SCHEMA_VERSION
+    else:
+        source_section = {
+            "run_path": source.context.run_path,
+            "context": _record_pointer(source.context.context_record),
+            "surface_inventory": _record_pointer(source.inventory),
+            "component_qc_inventory": _record_pointer(
+                source.component_qc_inventory
+            ),
+            "source_authority": _record_pointer(source.context.source_authority),
+            "refinement_authority": _record_pointer(
+                source.context.refinement_authority
+            ),
+            "row_identity": {
+                "record_ref": source.context.row_identity.record_ref,
+                "record_sha256": source.context.row_identity.record_sha256,
+            },
+        }
+        schema_version = SUBJECT_SHAPE_SCHEMA_VERSION
     return {
         "schema_id": SUBJECT_SHAPE_DERIVATION_SCHEMA_ID,
-        "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "run_ref": f"/{canonical_node_path(run)}",
         "method": run.attrs.get("method"),
         "method_version": run.attrs.get("method_version"),
@@ -2023,20 +2373,7 @@ def _derivation_record(
             "coordinate_status": "roi_local_numeric_unbound",
             "consumption_policy": "validate_then_final_path_bind_and_transform_v1",
         },
-        "source_refined_subject_masks": {
-            "run_path": source.context.run_path,
-            "context": _record_pointer(source.context.context_record),
-            "surface_inventory": _record_pointer(source.inventory),
-            "component_qc_inventory": _record_pointer(
-                source.component_qc_inventory
-            ),
-            "source_authority": _record_pointer(source.context.source_authority),
-            "refinement_authority": _record_pointer(source.context.refinement_authority),
-            "row_identity": {
-                "record_ref": source.context.row_identity.record_ref,
-                "record_sha256": source.context.row_identity.record_sha256,
-            },
-        },
+        "source_refined_subject_masks": source_section,
         "output_row_identity": {
             "record_ref": identity.record_ref,
             "record_sha256": identity.record_sha256,
@@ -2048,7 +2385,7 @@ def _derivation_record(
         "scalar_surface_inventory": _record_pointer(scalar_surface_inventory),
         "transform_direction": "roi_local_px_to_source_camera_image_px",
         "transform_policy": "exact_translation_only_v1",
-        "transforms": _transform_refs(source),
+        "transforms": _transform_refs(source, source_binding),
         "bbox_derivation": "foreground_half_open_pixel_edges_then_exact_placement_v1",
         "roi_local_point_arrays_retained": False,
     }
@@ -2056,7 +2393,8 @@ def _derivation_record(
 
 def stamp_subject_shape_derivation(
     run: Any,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
     identity: BoundRowIdentityContract,
     component_schema: BoundCoordinateRecord,
     temporal: BoundSourceRowTemporalAuthority,
@@ -2069,6 +2407,7 @@ def stamp_subject_shape_derivation(
         _derivation_record(
             run,
             source,
+            source_binding,
             identity,
             component_schema,
             temporal,
@@ -2081,7 +2420,8 @@ def stamp_subject_shape_derivation(
 
 
 def _lineage_records(
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
     component_schema: BoundCoordinateRecord,
     scientific_configuration: BoundCoordinateRecord,
     derivation: BoundCoordinateRecord,
@@ -2091,16 +2431,21 @@ def _lineage_records(
     # descriptor builder inserts that same authority immediately after its
     # reference-frame authority; matching this order keeps collected and
     # non-collected array descriptors deterministic under the strict rebinder.
-    prefix = (
-        component_schema,
-        source.context.component_labels,
-        source.context.source_authority,
-        source.context.refinement_authority,
-        source.context.context_record,
-        source.inventory,
-        source.component_qc_inventory,
-        scientific_configuration,
-    )
+    if _is_bundle_source(source):
+        if source_binding is None:
+            _fail("Bundle-bound descriptor lineage lacks its source binding.")
+        prefix = (component_schema, source_binding, scientific_configuration)
+    else:
+        prefix = (
+            component_schema,
+            source.context.component_labels,
+            source.context.source_authority,
+            source.context.refinement_authority,
+            source.context.context_record,
+            source.inventory,
+            source.component_qc_inventory,
+            scientific_configuration,
+        )
     return (
         *prefix,
         *((tail_sample_axis,) if tail_sample_axis is not None else ()),
@@ -2240,7 +2585,8 @@ def _geometry_specs(run: Any, component_names: Sequence[str]) -> dict[str, dict[
 def _descriptor_bindings(
     run: Any,
     *,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
     identity: BoundRowIdentityContract,
     component_schema: BoundCoordinateRecord,
     scientific_configuration: BoundCoordinateRecord,
@@ -2264,6 +2610,7 @@ def _descriptor_bindings(
         node = run[path]
         lineage = _lineage_records(
             source,
+            source_binding,
             component_schema,
             scientific_configuration,
             derivation,
@@ -2271,11 +2618,8 @@ def _descriptor_bindings(
                 tail_sample_axis if spec.get("tail_sample_axis") else None
             ),
         )
-        frame = (
-            source.context.pixel_edge_chain.source_camera_frame_authority
-            if spec["pixel_convention"] == "pixel_edge_half_open"
-            else source.context.continuous_chain.source_camera_frame_authority
-        )
+        continuous_frame, edge_frame = _source_camera_frames(source)
+        frame = edge_frame if spec["pixel_convention"] == "pixel_edge_half_open" else continuous_frame
         kwargs = {
             "row_identity": identity,
             "reference_frame_authority": frame,
@@ -2406,7 +2750,8 @@ def _rewrite_body_frame_from_camera_components(
 def _stamp_body_frame(
     run: Any,
     *,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
     identity: BoundRowIdentityContract,
     component_schema: BoundCoordinateRecord,
     scientific_configuration: BoundCoordinateRecord,
@@ -2435,14 +2780,16 @@ def _stamp_body_frame(
     )
     lineage = _lineage_records(
         source,
+        source_binding,
         component_schema,
         scientific_configuration,
         derivation,
     )
+    continuous_frame, _edge_frame = _source_camera_frames(source)
     source_descriptor = bind_body_source_coordinate_descriptor(
         run["component_centroid_xy"],
         row_identity=identity,
-        source_camera_pixels=source.context.continuous_chain.source_camera_frame_authority,
+        source_camera_pixels=continuous_frame,
         lineage_records=lineage,
     )
     source_manifest = stamp_and_bind_persisted_coordinate_record(
@@ -3081,7 +3428,8 @@ def _scalar_surface_bindings(
 def _manifest_record(
     run: Any,
     *,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
     identity: BoundRowIdentityContract,
     temporal: BoundSourceRowTemporalAuthority,
     component_schema: BoundCoordinateRecord,
@@ -3107,23 +3455,43 @@ def _manifest_record(
         for path in schema_inventory["arrays"]
     }
     consumed_unbound_stage = load_subject_shape_consumed_unbound_stage(run)
-    return {
-        "schema_id": SUBJECT_SHAPE_MANIFEST_SCHEMA_ID,
-        "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
-        "run_ref": f"/{canonical_node_path(run)}",
-        "row_identity": {
-            "record_ref": identity.record_ref,
-            "record_sha256": identity.record_sha256,
-        },
-        "temporal_authority": _temporal_pointer(temporal),
-        "source_refined_subject_masks": {
+    if _is_bundle_source(source):
+        if source_binding is None:
+            _fail("Bundle-bound manifest lacks its persisted source binding.")
+        bundle = require_bound_subject_shape_bundle_source(source)
+        source_section = {
+            "source_kind": SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+            "bundle_id": bundle.bundle_id,
+            "source_binding": _record_pointer(source_binding),
+            "bundle_manifest_payload_digest": bundle.authority.bundle_manifest[
+                "payload_digest"
+            ],
+            "refined_run_path": bundle.authority.refined_run_path,
+            "refined_manifest_payload_digest": bundle.authority.refined_manifest[
+                "payload_digest"
+            ],
+        }
+        schema_version = SUBJECT_SHAPE_BUNDLE_MANIFEST_SCHEMA_VERSION
+    else:
+        source_section = {
             "run_path": source.context.run_path,
             "context": _record_pointer(source.context.context_record),
             "surface_inventory": _record_pointer(source.inventory),
             "component_qc_inventory": _record_pointer(
                 source.component_qc_inventory
             ),
+        }
+        schema_version = SUBJECT_SHAPE_SCHEMA_VERSION
+    return {
+        "schema_id": SUBJECT_SHAPE_MANIFEST_SCHEMA_ID,
+        "schema_version": schema_version,
+        "run_ref": f"/{canonical_node_path(run)}",
+        "row_identity": {
+            "record_ref": identity.record_ref,
+            "record_sha256": identity.record_sha256,
         },
+        "temporal_authority": _temporal_pointer(temporal),
+        "source_refined_subject_masks": source_section,
         "component_schema": _record_pointer(component_schema),
         "scientific_configuration": _record_pointer(scientific_configuration),
         "consumed_unbound_stage": _record_pointer(consumed_unbound_stage),
@@ -3160,7 +3528,8 @@ def _manifest_record(
 @dataclass(frozen=True, init=False)
 class BoundSubjectShapeCoordinatePublication:
     run_path: str
-    source: BoundRefinedSubjectMaskCoordinateSurfaces = field(repr=False)
+    source: SubjectShapeCoordinateSource = field(repr=False)
+    source_binding: BoundCoordinateRecord | None = field(repr=False)
     row_identity: BoundRowIdentityContract = field(repr=False)
     temporal_authority: BoundSourceRowTemporalAuthority = field(repr=False)
     component_schema: BoundCoordinateRecord = field(repr=False)
@@ -3232,7 +3601,8 @@ class DeferredSubjectShapeCoordinateActivation:
 def _load_body_frame(
     run: Any,
     *,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
+    source_binding: BoundCoordinateRecord | None,
     identity: BoundRowIdentityContract,
     component_schema: BoundCoordinateRecord,
     scientific_configuration: BoundCoordinateRecord,
@@ -3252,12 +3622,14 @@ def _load_body_frame(
         expected_record_ref=f"/{canonical_node_path(estimator_node)}@{BODY_FRAME_ESTIMATOR_ATTR}",
         expected_record_sha256=estimator_node.attrs[f"{BODY_FRAME_ESTIMATOR_ATTR}_sha256"],
     )
+    continuous_frame, _edge_frame = _source_camera_frames(source)
     source_descriptor = bind_body_source_coordinate_descriptor(
         run["component_centroid_xy"],
         row_identity=identity,
-        source_camera_pixels=source.context.continuous_chain.source_camera_frame_authority,
+        source_camera_pixels=continuous_frame,
         lineage_records=_lineage_records(
             source,
+            source_binding,
             component_schema,
             scientific_configuration,
             derivation,
@@ -3322,17 +3694,18 @@ def _load_subject_shape_publication(
         _fail("Subject-shape run lacks exact bound canonical coordinate status.")
     _require_subject_shape_maintained_profile(run)
     component_names = tuple(str(value) for value in (run.attrs.get("component_names") or ()))
-    source = load_exact_subject_shape_refined_source(root, run)
+    source = load_exact_subject_shape_source(root, run)
+    source_binding = _load_source_binding(run, source)
     identity = load_bound_row_identity_contract(run, run["instance_key"])
     if not np.array_equal(
         np.asarray(run["instance_key"][:]),
-        np.asarray(source.context.row_identity._key_array_node[:]),
+        np.asarray(_source_row_node(source, "instance_key")[:]),
     ):
         _fail("Subject-shape instance_key order differs from selected refined rows.")
     for name in ("source_crop_row_ids", "source_acquisition_frame_index"):
         if not np.array_equal(
             np.asarray(run[name][:]),
-            np.asarray(source.context._run_group[name][:]),
+            np.asarray(_source_row_node(source, name)[:]),
         ):
             _fail(f"Subject-shape {name} differs from selected refined rows.")
     for name in CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS:
@@ -3368,6 +3741,7 @@ def _load_subject_shape_publication(
     if derivation.record != _derivation_record(
         run,
         source,
+        source_binding,
         identity,
         component_schema,
         temporal,
@@ -3379,6 +3753,7 @@ def _load_subject_shape_publication(
     descriptors = _descriptor_bindings(
         run,
         source=source,
+        source_binding=source_binding,
         identity=identity,
         component_schema=component_schema,
         scientific_configuration=scientific_configuration,
@@ -3390,6 +3765,7 @@ def _load_subject_shape_publication(
     body_frame = _load_body_frame(
         run,
         source=source,
+        source_binding=source_binding,
         identity=identity,
         component_schema=component_schema,
         scientific_configuration=scientific_configuration,
@@ -3406,6 +3782,7 @@ def _load_subject_shape_publication(
     expected_manifest = _manifest_record(
         run,
         source=source,
+        source_binding=source_binding,
         identity=identity,
         temporal=temporal,
         component_schema=component_schema,
@@ -3425,6 +3802,7 @@ def _load_subject_shape_publication(
     return BoundSubjectShapeCoordinatePublication(
         run_path=path,
         source=source,
+        source_binding=source_binding,
         row_identity=identity,
         temporal_authority=temporal,
         component_schema=component_schema,
@@ -3496,7 +3874,7 @@ def load_completed_ineligible_subject_shape_coordinate_publication(
 def publish_subject_shape_coordinate_surfaces(
     root: Any,
     run: Any,
-    source: BoundRefinedSubjectMaskCoordinateSurfaces,
+    source: SubjectShapeCoordinateSource,
     *,
     component_names: Sequence[str],
     identity: BoundRowIdentityContract,
@@ -3509,8 +3887,9 @@ def publish_subject_shape_coordinate_surfaces(
     # directed chain below freshly rechecks placement/identity metadata.  The
     # owning writer performs one complete source+output reload immediately
     # before activation, avoiding another full refined-raster hash pass here.
-    if archive_identity(source.context._run_group) != archive_identity(run):
+    if archive_identity(_source_run_group(source)) != archive_identity(run):
         _fail("Subject-shape and refined-mask source span archives/stores.")
+    source_binding = _stamp_source_binding(run, source)
     transform_subject_shape_geometry_to_source_camera(
         run,
         source,
@@ -3531,6 +3910,7 @@ def publish_subject_shape_coordinate_surfaces(
     derivation = stamp_subject_shape_derivation(
         run,
         source,
+        source_binding,
         identity,
         component_schema,
         temporal,
@@ -3541,6 +3921,7 @@ def publish_subject_shape_coordinate_surfaces(
     descriptors = _descriptor_bindings(
         run,
         source=source,
+        source_binding=source_binding,
         identity=identity,
         component_schema=component_schema,
         scientific_configuration=scientific_configuration,
@@ -3553,6 +3934,7 @@ def publish_subject_shape_coordinate_surfaces(
     body_frame = _stamp_body_frame(
         run,
         source=source,
+        source_binding=source_binding,
         identity=identity,
         component_schema=component_schema,
         scientific_configuration=scientific_configuration,
@@ -3568,6 +3950,7 @@ def publish_subject_shape_coordinate_surfaces(
     manifest_record = _manifest_record(
         run,
         source=source,
+        source_binding=source_binding,
         identity=identity,
         temporal=temporal,
         component_schema=component_schema,
@@ -3598,6 +3981,7 @@ def publish_subject_shape_coordinate_surfaces(
     return BoundSubjectShapeCoordinatePublication(
         run_path=canonical_node_path(run),
         source=source,
+        source_binding=source_binding,
         row_identity=identity,
         temporal_authority=temporal,
         component_schema=component_schema,
@@ -3937,6 +4321,14 @@ def activate_subject_shape_coordinate_publication(
         _fail("Subject-shape activation requires a sealed proof.")
     expected_path = f"analysis/subject_shape_runs/{run_name}"
     run = _node(root, expected_path, label="subject-shape activation child")
+    if (
+        run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+        == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+    ):
+        _fail(
+            "Recording-bundle subject-shape v5 is an unpromoted candidate and "
+            "cannot become selector-visible through the historical activation path."
+        )
     if proof.run_path != expected_path or proof.selector_eligible is not False:
         _fail("Subject-shape activation proof names the wrong child/state.")
     _require_state(run, complete=True, eligible=False, expected_owner=owner)
@@ -4346,6 +4738,10 @@ def rollback_deferred_subject_shape_coordinate_activation(
 
 
 __all__ = [
+    "CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD",
+    "CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD_VERSION",
+    "CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID",
+    "CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION",
     "CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER",
     "CANONICAL_SUBJECT_SHAPE_METHOD",
     "CANONICAL_SUBJECT_SHAPE_METHOD_VERSION",
@@ -4357,6 +4753,9 @@ __all__ = [
     "CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION",
     "SUBJECT_SHAPE_COMPONENT_SCHEMA_ATTR",
     "SUBJECT_SHAPE_BOUND_CANONICAL_STATUS",
+    "SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR",
+    "SUBJECT_SHAPE_BUNDLE_ID_ATTR",
+    "SUBJECT_SHAPE_BUNDLE_SOURCE_KIND",
     "SUBJECT_SHAPE_COMPUTING_UNBOUND_STATUS",
     "SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR",
     "SUBJECT_SHAPE_COORDINATE_CONTRACT",
@@ -4372,6 +4771,10 @@ __all__ = [
     "SUBJECT_SHAPE_SCALAR_SURFACE_ATTR",
     "SUBJECT_SHAPE_SCALAR_SURFACE_INVENTORY_ATTR",
     "SUBJECT_SHAPE_SCIENTIFIC_CONFIGURATION_ATTR",
+    "SUBJECT_SHAPE_SOURCE_BINDING_ATTR",
+    "SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR",
+    "SUBJECT_SHAPE_SOURCE_KIND_ATTR",
+    "SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND",
     "SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS",
     "SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR",
     "SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR",
@@ -4389,6 +4792,7 @@ __all__ = [
     "BoundSubjectShapeScalarSurface",
     "BoundSubjectShapeCoordinatePublication",
     "DeferredSubjectShapeCoordinateActivation",
+    "SubjectShapeCoordinateSource",
     "SubjectShapeCoordinatePublicationError",
     "activate_subject_shape_coordinate_publication",
     "build_subject_shape_schema_inventory_record",
@@ -4397,6 +4801,7 @@ __all__ = [
     "build_subject_shape_pending_receipt",
     "commit_deferred_subject_shape_coordinate_activation",
     "load_completed_ineligible_subject_shape_coordinate_publication",
+    "load_exact_subject_shape_source",
     "load_exact_subject_shape_refined_source",
     "load_subject_shape_consumed_unbound_stage",
     "load_subject_shape_temporal_authority",
@@ -4405,10 +4810,12 @@ __all__ = [
     "prepare_subject_shape_identity_and_schema",
     "publish_subject_shape_coordinate_surfaces",
     "require_translation_only_refined_placement",
+    "require_translation_only_subject_shape_placement",
     "rollback_subject_shape_activation",
     "rollback_deferred_subject_shape_coordinate_activation",
     "selector_snapshot",
     "subject_shape_maintained_profile_record",
+    "subject_shape_bundle_maintained_profile_record",
     "stamp_subject_shape_derivation",
     "stamp_subject_shape_temporal_authority",
     "stamp_unbound_subject_shape_manifest",

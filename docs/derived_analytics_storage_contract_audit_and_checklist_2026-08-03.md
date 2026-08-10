@@ -1460,12 +1460,15 @@ Recommended benchmark and promotion-review order:
       members, crop-v2, the source receipts, and every retained worker record.
       The 41-test real-Zarr core/bundle matrix and the active/inactive reader
       integration gate pass. A newly published recording-scale canary and the
-      subject-shape publication adapter remain required. The sealed
+      recording-scale subject-shape canary remains required. The sealed
       subject-shape bundle-source bridge now proves row/frame/camera/placement
       geometry and the ordered per-worker keypoint-assignment collection
-      without impersonating the historical rich-coordinate source; see
+      without impersonating the historical rich-coordinate source. The
+      bundle-bound v5/method-v12 publisher now consumes that bridge through the
+      access-aware materializer, remains selector-ineligible, and preserves the
+      v4/method-v11 historical path; see
       `docs/subject_mask_recording_coordinate_aggregation_2026-08-04.md` and
-      `docs/subject_mask_provenance_contract_hardening_2026-08-05.md`.
+      `docs/subject_shape_recording_bundle_publication_2026-08-10.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.
 - [ ] Exercise real access patterns: eager small arrays, random frame/row,

@@ -8,6 +8,14 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis.subject_shape_storage import (
+    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+)
+from fisheye.analysis.subject_shape_runs import write_subject_shape_run_group
+from fisheye.analysis_workflows.materializers.subject_shape import (
+    build_subject_shape_materialization_plan,
+    materialize_subject_shape,
+)
 from fisheye.cluster.subject_masks.publish_recording_bundle import (
     publish_recording_subject_mask_bundle,
 )
@@ -15,11 +23,33 @@ from fisheye.shared.subject_mask_attempt import (
     build_subject_mask_attempt,
     build_subject_mask_scientific_identity,
 )
+from fisheye.shared.subject_shape_coordinate_publication import (
+    CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD,
+    CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID,
+    CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION,
+    SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+    SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
+    SUBJECT_SHAPE_SOURCE_KIND_ATTR,
+    SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
+    SubjectShapeCoordinatePublicationError,
+    activate_subject_shape_coordinate_publication,
+    load_completed_ineligible_subject_shape_coordinate_publication,
+    selector_snapshot,
+)
 from fisheye.shared.subject_mask_worker_receipt import (
     RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     build_subject_mask_worker_semantic_receipt,
 )
+from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from fisheye.shared.import_video_metadata import (
+    publish_external_video_acquisition_authority,
+)
+from fisheye.shared.pixel_frame_authority import (
+    load_persisted_acquisition_camera_authority,
+    stamp_source_camera_pixel_frame_authority,
+)
+from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_bytes,
     canonical_json_sha256,
@@ -273,6 +303,67 @@ def _install_crop_v2(draft_path: Path) -> None:
         consolidated_metadata_declarations=consolidated,
         selector_eligible=False,
     )
+
+
+def _install_source_camera_authorities(
+    root: zarr.Group,
+    *,
+    archive_path: Path,
+) -> None:
+    recording = archive_path.parent / "recording"
+    recording.mkdir(exist_ok=True)
+    video = recording / "cam2010095.mp4"
+    video.write_bytes(b"subject-shape-bundle-test-video")
+    source = {
+        "source_path": str(video),
+        "camera_id": "cam2010095",
+        "width": 100,
+        "height": 80,
+        "total_frames": 4,
+        "fps": 10.0,
+        "codec": "h264",
+        "pix_fmt": "yuv420p",
+    }
+    fingerprint = source_stat_fingerprint_attrs(
+        video,
+        attr_prefix="source_video",
+        extra={
+            "codec": source["codec"],
+            "pix_fmt": source["pix_fmt"],
+            "width": source["width"],
+            "height": source["height"],
+            "fps": source["fps"],
+            "frame_count": source["total_frames"],
+        },
+    )
+    root.attrs.update(
+        {
+            "camera_id": "cam2010095",
+            "recording_path": str(recording),
+            "source_video_path": str(video),
+            "source_path": str(video),
+            "source_video_metadata": build_source_video_metadata_v2(
+                source,
+                recording_path=recording,
+                fingerprint_attrs=fingerprint,
+            ),
+        }
+    )
+    publish_external_video_acquisition_authority(root)
+    _ownership, acquisition = load_persisted_acquisition_camera_authority(
+        root,
+        expected_camera_id="cam2010095",
+    )
+    camera = root.require_group(
+        "analysis/coordinate_frames/source_camera/cam2010095"
+    )
+    for convention in ("continuous", "pixel_edge_half_open"):
+        stamp_source_camera_pixel_frame_authority(
+            camera.require_group(convention),
+            frame_id=f"cam2010095_{convention}",
+            pixel_convention=convention,
+            acquisition_frame=acquisition,
+        )
 
 
 def _array_reference(value: np.ndarray) -> dict[str, object]:
@@ -576,7 +667,7 @@ def test_recording_bundle_requires_crop_v2_by_default(tmp_path: Path) -> None:
         )
 
 
-def test_recording_bundle_publishes_coordinate_bound_v4_members(
+def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v5(
     tmp_path: Path,
 ) -> None:
     draft = _draft(
@@ -593,6 +684,7 @@ def test_recording_bundle_publishes_coordinate_bound_v4_members(
     analysis = tmp_path / "analysis_coordinate_v4.zarr"
     root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
     root.attrs["recording_id"] = "crop_manifest_test"
+    _install_source_camera_authorities(root, archive_path=analysis)
     _install_crop_v2(analysis)
 
     result = publish_recording_subject_mask_bundle(
@@ -713,6 +805,111 @@ def test_recording_bundle_publishes_coordinate_bound_v4_members(
         shape_source.transform_roi_boxes(np.zeros((4, 4), dtype=np.float32)),
         np.concatenate((offsets, offsets), axis=1),
     )
+    with pytest.raises(
+        SubjectMaskBundleCoordinateAuthorityError,
+        match="allow_inactive=True",
+    ):
+        build_subject_shape_materialization_plan(
+            analysis,
+            scratch_root=tmp_path / "inactive_bundle_rejected",
+            refined_run=None,
+            subject_mask_bundle_id="bundle_coordinate_v4",
+            run_name="must_not_plan",
+            storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        )
+    with pytest.raises(ValueError, match="differs from the selected"):
+        build_subject_shape_materialization_plan(
+            analysis,
+            scratch_root=tmp_path / "conflicting_refined_rejected",
+            refined_run="another_refined_run",
+            subject_mask_bundle_id="bundle_coordinate_v4",
+            allow_inactive_subject_mask_bundle=True,
+            run_name="must_not_plan_either",
+            storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        )
+    with pytest.raises(ValueError, match="access-aware materializer"):
+        write_subject_shape_run_group(
+            published,
+            zarr_path=analysis,
+            subject_mask_bundle_id="bundle_coordinate_v4",
+            allow_inactive_subject_mask_bundle=True,
+            run_name="direct_bundle_v5_forbidden",
+        )
+
+    mutable = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    parent = mutable.get("analysis/subject_shape_runs")
+    selectors_before = {
+        name: (
+            parent is not None and name in parent.attrs,
+            parent.attrs.get(name) if parent is not None else None,
+        )
+        for name in ("latest", "latest_complete")
+    }
+    shape_result = materialize_subject_shape(
+        analysis,
+        scratch_root=tmp_path / "shape_bundle_scratch",
+        refined_run=None,
+        subject_mask_bundle_id="bundle_coordinate_v4",
+        allow_inactive_subject_mask_bundle=True,
+        run_name="shape_bundle_v5",
+        storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        components=("subject_body", "swim_bladder", "eye_left", "eye_right"),
+        block_rows=2,
+        output_shard_rows=4,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_copy_workers=1,
+        native_threads=1,
+        copy_backend="python",
+        apply=True,
+        check_capacity=False,
+    )
+    assert shape_result["status"] == "complete"
+    mutable = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    shape_parent = mutable["analysis/subject_shape_runs"]
+    assert {
+        name: (name in shape_parent.attrs, shape_parent.attrs.get(name))
+        for name in ("latest", "latest_complete")
+    } == selectors_before
+    shape_run = mutable["analysis/subject_shape_runs/shape_bundle_v5"]
+    assert shape_run.attrs["schema_version"] == (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION
+    )
+    assert shape_run.attrs["method"] == CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD
+    assert shape_run.attrs[SUBJECT_SHAPE_SOURCE_KIND_ATTR] == (
+        SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+    )
+    assert shape_run.attrs["stage_selector_eligible"] is False
+    assert shape_run.attrs[SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR][
+        "logical_profile_id"
+    ] == CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID
+    owner = shape_run.attrs["subject_shape_publication_owner_uuid"]
+    publication = load_completed_ineligible_subject_shape_coordinate_publication(
+        mutable,
+        "analysis/subject_shape_runs/shape_bundle_v5",
+        expected_publication_owner=owner,
+    )
+    assert publication.source_binding is not None
+    assert publication.source_binding.record_sha256 == shape_source.source_digest
+    assert set(
+        publication.source_binding.record["source_camera_authorities"]
+    ) == {
+        "acquisition_frame",
+        "continuous_pixel_frame",
+        "pixel_edge_half_open_frame",
+    }
+    assert publication.manifest.record["schema_version"] == 2
+    assert publication.derivation.record["schema_version"] == 2
+    with pytest.raises(SubjectShapeCoordinatePublicationError, match="unpromoted"):
+        activate_subject_shape_coordinate_publication(
+            mutable,
+            shape_parent,
+            publication,
+            run_name="shape_bundle_v5",
+            owner=owner,
+            snapshot=selector_snapshot(shape_parent),
+        )
 
     activate_subject_mask_bundle(
         analysis_zarr=analysis,
@@ -725,6 +922,22 @@ def test_recording_bundle_publishes_coordinate_bound_v4_members(
     assert active_shape_source.active is True
     assert active_shape_source.source_digest == shape_source.source_digest
     shape_source.assert_verified()
+    reloaded = zarr.open_group(str(analysis), mode="a", use_consolidated=False)
+    load_completed_ineligible_subject_shape_coordinate_publication(
+        reloaded,
+        "analysis/subject_shape_runs/shape_bundle_v5",
+        expected_publication_owner=owner,
+    )
+    source_binding = reloaded[
+        "analysis/subject_shape_runs/shape_bundle_v5/coordinate_records/source_binding"
+    ]
+    source_binding.attrs[SUBJECT_SHAPE_SOURCE_BINDING_ATTR] = {"tampered": True}
+    with pytest.raises(SubjectShapeCoordinatePublicationError):
+        load_completed_ineligible_subject_shape_coordinate_publication(
+            reloaded,
+            "analysis/subject_shape_runs/shape_bundle_v5",
+            expected_publication_owner=owner,
+        )
 
 
 def test_recording_bundle_composes_multiple_raw_clip_shards_without_reordering(

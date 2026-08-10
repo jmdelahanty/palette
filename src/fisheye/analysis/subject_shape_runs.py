@@ -72,6 +72,9 @@ from ..shared.subject_mask_chunks import (
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.subject_shape_coordinate_publication import (
+    CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD,
+    CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD_VERSION,
+    CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION,
     CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER,
     CANONICAL_SUBJECT_SHAPE_METHOD,
     CANONICAL_SUBJECT_SHAPE_METHOD_VERSION,
@@ -79,12 +82,18 @@ from ..shared.subject_shape_coordinate_publication import (
     CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID,
     CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION,
     SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+    SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR,
+    SUBJECT_SHAPE_BUNDLE_ID_ATTR,
+    SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
     SUBJECT_SHAPE_COMPUTING_UNBOUND_STATUS,
     SUBJECT_SHAPE_COORDINATE_CONTRACT,
     SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
     SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
+    SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR,
+    SUBJECT_SHAPE_SOURCE_KIND_ATTR,
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
@@ -93,12 +102,17 @@ from ..shared.subject_shape_coordinate_publication import (
     activate_subject_shape_coordinate_publication,
     build_subject_shape_unbound_numeric_manifest_record,
     load_completed_ineligible_subject_shape_coordinate_publication,
+    load_exact_subject_shape_source,
     load_sealed_unbound_subject_shape_manifest as _load_shared_sealed_unbound_manifest,
     load_unbound_subject_shape_manifest as _load_shared_unbound_manifest,
     prepare_subject_shape_identity_and_schema,
     publish_subject_shape_coordinate_surfaces,
     selector_snapshot,
     stamp_unbound_subject_shape_manifest,
+)
+from ..shared.zarr.subject_shape_bundle_source import (
+    BoundSubjectShapeBundleSource,
+    load_subject_shape_bundle_source,
 )
 from ..shared.zarr_io import open_zarr_root
 from .subject_shape_spline import (
@@ -1071,6 +1085,7 @@ def _prepare_subject_shape_run(
     publication_owner: str,
     write_best_effort_lineage: bool,
     overwrite: bool,
+    bundle_source: BoundSubjectShapeBundleSource | None = None,
 ) -> zarr.Group:
     total_rows = int(source_mask_store.n_rows)
     components = tuple(name for name, _idx in component_indices)
@@ -1163,15 +1178,46 @@ def _prepare_subject_shape_run(
     if "source_subject_mask_run" in refined_group.attrs:
         source_refs["source_subject_mask_run"] = str(refined_group.attrs["source_subject_mask_run"])
 
+    bundle_bound = bundle_source is not None
+    schema_version = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION
+        if bundle_bound
+        else SUBJECT_SHAPE_SCHEMA_VERSION
+    )
+    method = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD
+        if bundle_bound
+        else SUBJECT_SHAPE_METHOD
+    )
+    method_version = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD_VERSION
+        if bundle_bound
+        else SUBJECT_SHAPE_METHOD_VERSION
+    )
+    source_binding_attrs: dict[str, object] = {}
+    if bundle_source is not None:
+        source_binding_attrs = {
+            SUBJECT_SHAPE_SOURCE_KIND_ATTR: SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+            SUBJECT_SHAPE_BUNDLE_ID_ATTR: bundle_source.bundle_id,
+            SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR: bundle_source.active,
+            SUBJECT_SHAPE_SOURCE_BINDING_ATTR: json_attr_safe(
+                dict(bundle_source.source_record)
+            ),
+            SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR: bundle_source.source_digest,
+        }
     run_group.attrs.update(
         {
             "schema_id": SUBJECT_SHAPE_SCHEMA_ID,
-            "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
-            "method": SUBJECT_SHAPE_METHOD,
-            "method_version": SUBJECT_SHAPE_METHOD_VERSION,
+            "schema_version": schema_version,
+            "method": method,
+            "method_version": method_version,
             "created_at_utc": created,
             "created_utc": created,
-            "row_axis": "refined_subject_mask_rows",
+            "row_axis": (
+                "recording_subject_mask_bundle_rows"
+                if bundle_bound
+                else "refined_subject_mask_rows"
+            ),
             "source_refined_subject_masks_run": refined_run_name,
             "source_refined_subject_masks_stage": "refined_subject_masks_runs",
             "source_mask_labels": source_labels,
@@ -1240,6 +1286,7 @@ def _prepare_subject_shape_run(
                 max(1, int(native_threads)) if native_threads is not None else None
             ),
             **dask_metadata,
+            **source_binding_attrs,
         }
     )
 
@@ -1272,7 +1319,7 @@ def _prepare_subject_shape_run(
         },
         scheduler=dask_metadata,
         parameters={
-            "method": SUBJECT_SHAPE_METHOD,
+            "method": method,
             "components": list(components),
             "relations": list(relation_names),
             "body_frame_estimator": (
@@ -1304,6 +1351,14 @@ def _prepare_subject_shape_run(
             "source_mask_storage_surface": source_mask_store.storage_surface,
             "source_mask_store_path": mask_store_path,
             "source_refs": source_refs,
+            **(
+                {
+                    "source_subject_mask_bundle_id": bundle_source.bundle_id,
+                    "source_subject_mask_bundle_digest": bundle_source.source_digest,
+                }
+                if bundle_source is not None
+                else {}
+            ),
         },
     )
     write_stage_provenance(run_group, provenance)
@@ -2784,6 +2839,7 @@ def _validate_unbound_subject_shape_payload(
     expected_run_name: str,
     expected_binding_status: str,
     require_complete: bool,
+    expected_subject_mask_bundle_id: str | None = None,
 ) -> dict[str, object]:
     expected_path = f"analysis/subject_shape_runs/{expected_run_name}"
     if str(run_group.path) != expected_path:
@@ -2808,15 +2864,65 @@ def _validate_unbound_subject_shape_payload(
         owner_is_uuid = False
     if not owner_is_uuid:
         raise ValueError("Unbound subject-shape run lacks a canonical owner UUID.")
+    bundle_bound = expected_subject_mask_bundle_id is not None
+    expected_schema_version = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_RUN_SCHEMA_VERSION
+        if bundle_bound
+        else SUBJECT_SHAPE_SCHEMA_VERSION
+    )
+    expected_method = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD
+        if bundle_bound
+        else SUBJECT_SHAPE_METHOD
+    )
+    expected_method_version = (
+        CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD_VERSION
+        if bundle_bound
+        else SUBJECT_SHAPE_METHOD_VERSION
+    )
     if (
         run_group.attrs.get("schema_id") != SUBJECT_SHAPE_SCHEMA_ID
-        or run_group.attrs.get("schema_version") != SUBJECT_SHAPE_SCHEMA_VERSION
-        or run_group.attrs.get("method") != SUBJECT_SHAPE_METHOD
-        or run_group.attrs.get("method_version") != SUBJECT_SHAPE_METHOD_VERSION
+        or run_group.attrs.get("schema_version") != expected_schema_version
+        or run_group.attrs.get("method") != expected_method
+        or run_group.attrs.get("method_version") != expected_method_version
         or run_group.attrs.get("source_refined_subject_masks_run")
         != expected_refined_run
     ):
         raise ValueError("Unbound subject-shape identity/configuration is invalid.")
+    if bundle_bound:
+        if (
+            run_group.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+            != SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+            or run_group.attrs.get(SUBJECT_SHAPE_BUNDLE_ID_ATTR)
+            != expected_subject_mask_bundle_id
+        ):
+            raise ValueError("Unbound subject-shape bundle source identity is invalid.")
+        archive = archive_identity(authoritative_root)
+        if archive.kind != "local_store_root":
+            raise ValueError(
+                "Bundle-bound unbound validation requires a local authoritative archive."
+            )
+        source = load_subject_shape_bundle_source(
+            Path(str(archive.key[0])),
+            bundle_id=expected_subject_mask_bundle_id,
+            allow_inactive=True,
+        )
+        if (
+            run_group.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_ATTR)
+            != source.source_record
+            or run_group.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR)
+            != source.source_digest
+            or run_group.attrs.get(SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR)
+            is not source.active
+        ):
+            raise ValueError(
+                "Unbound subject-shape source-binding receipt differs from the live bundle."
+            )
+    else:
+        source = load_persisted_refined_subject_mask_coordinate_surfaces(
+            authoritative_root,
+            f"refined_subject_masks_runs/{expected_refined_run}",
+        )
     component_names = tuple(run_group.attrs.get("component_names") or ())
     if (
         len(component_names) != len(COMPONENT_ORDER)
@@ -2853,14 +2959,21 @@ def _validate_unbound_subject_shape_payload(
                 "Unbound subject-shape stage contains a coordinate descriptor."
             )
 
-    source = load_persisted_refined_subject_mask_coordinate_surfaces(
-        authoritative_root,
-        f"refined_subject_masks_runs/{expected_refined_run}",
+    row_count = (
+        int(source.row_count)
+        if isinstance(source, BoundSubjectShapeBundleSource)
+        else int(source.context.row_identity.leading_dimension)
     )
-    row_count = int(source.context.row_identity.leading_dimension)
     for name in ("instance_key", "source_crop_row_ids"):
         staged = run_group.get(f"row_index/{name}")
-        source_node = source.context._run_group.get(name)
+        source_node = (
+            source.instance_key_node
+            if isinstance(source, BoundSubjectShapeBundleSource)
+            and name == "instance_key"
+            else source.source_crop_row_ids_node
+            if isinstance(source, BoundSubjectShapeBundleSource)
+            else source.context._run_group.get(name)
+        )
         if staged is None or source_node is None or not np.array_equal(
             np.asarray(staged[:]),
             np.asarray(source_node[:]),
@@ -2904,6 +3017,7 @@ def validate_unbound_subject_shape_run(
     expected_run_name: str,
     expected_binding_status: str = SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
     require_complete: bool = True,
+    expected_subject_mask_bundle_id: str | None = None,
 ) -> dict[str, object]:
     """Validate one numeric-only ROI-local stage against its exact source."""
 
@@ -2914,6 +3028,7 @@ def validate_unbound_subject_shape_run(
         expected_run_name=expected_run_name,
         expected_binding_status=expected_binding_status,
         require_complete=require_complete,
+        expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
     )
 
 
@@ -2924,6 +3039,7 @@ def bind_staged_subject_shape_run(
     *,
     expected_refined_run: str,
     expected_run_name: str,
+    expected_subject_mask_bundle_id: str | None = None,
 ) -> dict[str, object]:
     """Bind and transform an unbound stage only at its authoritative path."""
 
@@ -2938,6 +3054,7 @@ def bind_staged_subject_shape_run(
         expected_run_name=expected_run_name,
         expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
         require_complete=False,
+        expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
     )
     source_revision_audit = audit_subject_shape_source_revisions_group(
         authoritative_root,
@@ -2949,10 +3066,7 @@ def bind_staged_subject_shape_run(
             "Refined subject-mask revisions changed before final-path binding: "
             f"{source_revision_audit!r}."
         )
-    source = load_persisted_refined_subject_mask_coordinate_surfaces(
-        authoritative_root,
-        f"refined_subject_masks_runs/{expected_refined_run}",
-    )
+    source = load_exact_subject_shape_source(authoritative_root, final_run_group)
     unbound_manifest = _load_unbound_numeric_manifest(final_run_group)
     manifest_sha256 = str(validation["unbound_manifest_sha256"])
     if unbound_manifest.record_sha256 != manifest_sha256:
@@ -3215,6 +3329,8 @@ def write_subject_shape_run_group(
     centerline_crop_to_foreground: bool = False,
     native_threads: Optional[int] = None,
     stage_command: Optional[str] = None,
+    subject_mask_bundle_id: str | None = None,
+    allow_inactive_subject_mask_bundle: bool = False,
     _unbound_coordinate_stage: bool = False,
 ) -> dict[str, object]:
     """Write one row-aligned subject-shape analysis run."""
@@ -3236,13 +3352,51 @@ def write_subject_shape_run_group(
         raise ValueError(
             "execution_backend='dask_worker_chunks' requires filesystem source and output Zarr paths."
         )
-    refined_run_name, refined_group = _resolve_refined_run(root, refined_run)
-    refined_coordinate_source = load_persisted_refined_subject_mask_coordinate_surfaces(
-        root,
-        f"refined_subject_masks_runs/{refined_run_name}",
-    )
-    if refined_coordinate_source.context._run_group.path != refined_group.path:
-        raise ValueError("Logical refined-mask selection differs from canonical coordinate authority.")
+    if type(allow_inactive_subject_mask_bundle) is not bool:
+        raise TypeError("allow_inactive_subject_mask_bundle must be an exact bool.")
+    if subject_mask_bundle_id is not None and not _unbound_coordinate_stage:
+        raise ValueError(
+            "Recording-bundle subject-shape v5 must be finalized through the "
+            "access-aware materializer; direct legacy-layout publication is forbidden."
+        )
+    bundle_source: BoundSubjectShapeBundleSource | None = None
+    if subject_mask_bundle_id is not None:
+        archive = archive_identity(root)
+        if archive.kind != "local_store_root":
+            raise ValueError(
+                "Recording-bundle subject-shape computation requires a local Zarr archive."
+            )
+        bundle_source = load_subject_shape_bundle_source(
+            Path(str(archive.key[0])),
+            bundle_id=str(subject_mask_bundle_id),
+            allow_inactive=allow_inactive_subject_mask_bundle,
+        )
+        refined_run_path = bundle_source.authority.refined_run_path
+        prefix = "refined_subject_masks_runs/"
+        if not refined_run_path.startswith(prefix) or "/" in refined_run_path[len(prefix) :]:
+            raise ValueError("Subject-mask bundle refined member path is invalid.")
+        refined_run_name = refined_run_path[len(prefix) :]
+        if refined_run is not None and str(refined_run) != refined_run_name:
+            raise ValueError(
+                "Explicit refined_run differs from the selected subject-mask bundle member."
+            )
+        refined_group = bundle_source.authority.refined_run
+    else:
+        if allow_inactive_subject_mask_bundle:
+            raise ValueError(
+                "allow_inactive_subject_mask_bundle requires subject_mask_bundle_id."
+            )
+        refined_run_name, refined_group = _resolve_refined_run(root, refined_run)
+        refined_coordinate_source = (
+            load_persisted_refined_subject_mask_coordinate_surfaces(
+                root,
+                f"refined_subject_masks_runs/{refined_run_name}",
+            )
+        )
+        if refined_coordinate_source.context._run_group.path != refined_group.path:
+            raise ValueError(
+                "Logical refined-mask selection differs from canonical coordinate authority."
+            )
     refined_tables = load_refined_subject_masks_run_tables(
         root,
         run_name=refined_run_name,
@@ -3296,6 +3450,12 @@ def write_subject_shape_run_group(
             if _unbound_coordinate_stage
             else "canonical_v2"
         ),
+        "subject_mask_bundle_id": (
+            bundle_source.bundle_id if bundle_source is not None else None
+        ),
+        "subject_mask_bundle_active": (
+            bundle_source.active if bundle_source is not None else None
+        ),
         "point_coordinate_space": (
             "roi_local_px_unbound_numeric"
             if _unbound_coordinate_stage
@@ -3327,6 +3487,7 @@ def write_subject_shape_run_group(
         publication_owner=publication_owner,
         write_best_effort_lineage=not _unbound_coordinate_stage,
         overwrite=overwrite,
+        bundle_source=bundle_source,
     )
     chunk_timings: list[dict[str, object]] = []
     rows_with_component: dict[str, int] = {name: 0 for name, _idx in component_indices}
@@ -3422,6 +3583,9 @@ def write_subject_shape_run_group(
             expected_run_name=target_run,
             expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
             require_complete=True,
+            expected_subject_mask_bundle_id=(
+                bundle_source.bundle_id if bundle_source is not None else None
+            ),
         )
         summary.update(
             {
@@ -3448,6 +3612,9 @@ def write_subject_shape_run_group(
             run_group,
             expected_refined_run=refined_run_name,
             expected_run_name=target_run,
+            expected_subject_mask_bundle_id=(
+                bundle_source.bundle_id if bundle_source is not None else None
+            ),
         )
     except BaseException as exc:
         try:

@@ -39,6 +39,7 @@ from ...analysis.subject_shape_runs import (
     write_subject_shape_run_group,
 )
 from ...analysis.subject_shape_storage import (
+    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
     SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
     SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES,
     finalize_bound_subject_shape_storage_receipt,
@@ -77,6 +78,10 @@ from ...shared.zarr_run_completion import (
 )
 from ...shared.zarr.benchmark_runtime import storage_stats
 from ...shared.zarr.manifest_digest import canonical_json_sha256
+from ...shared.zarr.subject_shape_bundle_source import (
+    SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+    load_subject_shape_bundle_source,
+)
 from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
 from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 from fisheye.shared.atomic_run_publisher import ATOMIC_PUBLICATION_TOMBSTONE_ATTR
@@ -141,6 +146,8 @@ class SubjectShapeMaterializationPlan:
     native_threads: int
     estimated_scratch_bytes: int
     source_contract: dict[str, Any]
+    subject_mask_bundle_id: str | None = None
+    allow_inactive_subject_mask_bundle: bool = False
 
     @property
     def compute_run_path(self) -> Path:
@@ -181,6 +188,10 @@ class SubjectShapeMaterializationPlan:
                 "centerline_crop_to_foreground": True,
                 "estimated_scratch_bytes": self.estimated_scratch_bytes,
                 "source_contract": self.source_contract,
+                "subject_mask_bundle_id": self.subject_mask_bundle_id,
+                "allow_inactive_subject_mask_bundle": (
+                    self.allow_inactive_subject_mask_bundle
+                ),
             }
         )
 
@@ -227,6 +238,8 @@ def build_subject_shape_materialization_plan(
     num_workers: int = DEFAULT_NUM_WORKERS,
     shard_copy_workers: int = DEFAULT_SHARD_COPY_WORKERS,
     native_threads: int = DEFAULT_NATIVE_THREADS,
+    subject_mask_bundle_id: str | None = None,
+    allow_inactive_subject_mask_bundle: bool = False,
 ) -> SubjectShapeMaterializationPlan:
     """Resolve a read-only plan without creating scratch or mutating the archive."""
 
@@ -274,18 +287,78 @@ def build_subject_shape_materialization_plan(
             f"expected one of {SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES!r}."
         )
 
+    if type(allow_inactive_subject_mask_bundle) is not bool:
+        raise TypeError("allow_inactive_subject_mask_bundle must be an exact bool.")
     root = open_zarr_root(source, mode="r")
-    refined_group, resolved_refined_run, _path = resolve_refined_subject_masks_run(
-        root, refined_run
-    )
-    refined_coordinates = load_persisted_refined_subject_mask_coordinate_surfaces(
-        root,
-        f"refined_subject_masks_runs/{resolved_refined_run}",
-    )
-    if refined_coordinates.context._run_group.path != refined_group.path:
-        raise ValueError(
-            "Logical refined-mask selection differs from its canonical authority."
+    bundle_source = None
+    if subject_mask_bundle_id is not None:
+        if storage_profile_id != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID:
+            raise ValueError(
+                "Recording-bundle subject shape is initially authorized only as the "
+                "selector-ineligible access-aware storage candidate."
+            )
+        bundle_source = load_subject_shape_bundle_source(
+            source,
+            bundle_id=str(subject_mask_bundle_id),
+            allow_inactive=allow_inactive_subject_mask_bundle,
         )
+        refined_path = bundle_source.authority.refined_run_path
+        prefix = "refined_subject_masks_runs/"
+        if not refined_path.startswith(prefix) or "/" in refined_path[len(prefix) :]:
+            raise ValueError("Subject-mask bundle refined member path is invalid.")
+        resolved_refined_run = refined_path[len(prefix) :]
+        if refined_run is not None and str(refined_run) != resolved_refined_run:
+            raise ValueError(
+                "Explicit refined_run differs from the selected subject-mask bundle member."
+            )
+        refined_group = root[refined_path]
+        source_contract = {
+            "source_kind": SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+            "bundle_id": bundle_source.bundle_id,
+            "bundle_active": bundle_source.active,
+            "source_binding_sha256": bundle_source.source_digest,
+            "bundle_coordinate_authority_digest": (
+                bundle_source.authority.authority_digest
+            ),
+            "bundle_manifest_payload_digest": (
+                bundle_source.authority.bundle_manifest["payload_digest"]
+            ),
+            "refined_manifest_payload_digest": (
+                bundle_source.authority.refined_manifest["payload_digest"]
+            ),
+        }
+    else:
+        if allow_inactive_subject_mask_bundle:
+            raise ValueError(
+                "allow_inactive_subject_mask_bundle requires subject_mask_bundle_id."
+            )
+        refined_group, resolved_refined_run, _path = resolve_refined_subject_masks_run(
+            root, refined_run
+        )
+        refined_coordinates = load_persisted_refined_subject_mask_coordinate_surfaces(
+            root,
+            f"refined_subject_masks_runs/{resolved_refined_run}",
+        )
+        if refined_coordinates.context._run_group.path != refined_group.path:
+            raise ValueError(
+                "Logical refined-mask selection differs from its canonical authority."
+            )
+        source_contract = {
+            "schema_id": refined_group.attrs.get("schema_id"),
+            "schema_version": refined_group.attrs.get("schema_version"),
+            "method": refined_group.attrs.get("method"),
+            "method_version": refined_group.attrs.get("method_version"),
+            "palette_run_completion_status": refined_group.attrs.get(
+                "palette_run_completion_status"
+            ),
+            "coordinate_context_sha256": (
+                refined_coordinates.context.context_record.record_sha256
+            ),
+            "surface_inventory_sha256": refined_coordinates.inventory.record_sha256,
+            "component_qc_inventory_sha256": (
+                refined_coordinates.component_qc_inventory.record_sha256
+            ),
+        }
     tables = load_refined_subject_masks_run_tables(
         root,
         run_name=resolved_refined_run,
@@ -350,26 +423,17 @@ def build_subject_shape_materialization_plan(
         estimated_scratch_bytes=int(estimated),
         source_contract=json_attr_safe(
             {
-                "schema_id": refined_group.attrs.get("schema_id"),
-                "schema_version": refined_group.attrs.get("schema_version"),
-                "method": refined_group.attrs.get("method"),
-                "method_version": refined_group.attrs.get("method_version"),
-                "palette_run_completion_status": refined_group.attrs.get(
-                    "palette_run_completion_status"
-                ),
+                **source_contract,
                 "mask_labels": list(available),
                 "mask_store_encoding": mask_store.encoding,
                 "mask_storage_surface": mask_store.storage_surface,
-                "coordinate_context_sha256": (
-                    refined_coordinates.context.context_record.record_sha256
-                ),
-                "surface_inventory_sha256": (
-                    refined_coordinates.inventory.record_sha256
-                ),
-                "component_qc_inventory_sha256": (
-                    refined_coordinates.component_qc_inventory.record_sha256
-                ),
             }
+        ),
+        subject_mask_bundle_id=(
+            bundle_source.bundle_id if bundle_source is not None else None
+        ),
+        allow_inactive_subject_mask_bundle=(
+            allow_inactive_subject_mask_bundle if bundle_source is not None else False
         ),
     )
 
@@ -588,6 +652,11 @@ def publish_subject_shape_run(
             run_group,
             expected_refined_run=plan.refined_run,
             expected_run_name=plan.run_name,
+            expected_subject_mask_bundle_id=getattr(
+                plan,
+                "subject_mask_bundle_id",
+                None,
+            ),
         )
         if binding.get("valid") is not True:
             raise RuntimeError(f"Final-path subject-shape binding failed: {binding!r}")
@@ -850,6 +919,8 @@ def materialize_subject_shape(
     keep_scratch: bool = False,
     check_capacity: bool = True,
     stage_command: str | None = None,
+    subject_mask_bundle_id: str | None = None,
+    allow_inactive_subject_mask_bundle: bool = False,
 ) -> dict[str, Any]:
     plan = build_subject_shape_materialization_plan(
         source_zarr,
@@ -865,6 +936,8 @@ def materialize_subject_shape(
         num_workers=num_workers,
         shard_copy_workers=shard_copy_workers,
         native_threads=native_threads,
+        subject_mask_bundle_id=subject_mask_bundle_id,
+        allow_inactive_subject_mask_bundle=allow_inactive_subject_mask_bundle,
     )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -907,6 +980,10 @@ def materialize_subject_shape(
             native_threads=plan.native_threads,
             stage_command=stage_command
             or (" ".join(sys.argv) if sys.argv else "unknown"),
+            subject_mask_bundle_id=getattr(plan, "subject_mask_bundle_id", None),
+            allow_inactive_subject_mask_bundle=(
+                getattr(plan, "allow_inactive_subject_mask_bundle", False)
+            ),
             _unbound_coordinate_stage=True,
         )
         compute_validation = _validate_subject_shape_run(
@@ -1585,6 +1662,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--refined-run")
+    parser.add_argument("--subject-mask-bundle-id")
+    parser.add_argument(
+        "--allow-inactive-subject-mask-bundle",
+        action="store_true",
+        help="Authorize exactly the named inactive bundle for a selector-ineligible canary.",
+    )
     parser.add_argument("--run-name", required=True)
     parser.add_argument(
         "--storage-profile",
@@ -1642,6 +1725,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         apply=bool(args.apply),
         keep_scratch=bool(args.keep_scratch),
         check_capacity=not bool(args.no_capacity_check),
+        subject_mask_bundle_id=args.subject_mask_bundle_id,
+        allow_inactive_subject_mask_bundle=(
+            args.allow_inactive_subject_mask_bundle
+        ),
     )
     if args.report is not None:
         _write_json_atomic(args.report.expanduser().resolve(), result)

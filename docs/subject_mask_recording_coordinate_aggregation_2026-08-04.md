@@ -2,10 +2,11 @@
 
 Date: 2026-08-04
 
-Status: selector-ineligible contract and strict bundle-authority reader
-implemented; no production archive, selector, registry authority, physical
-profile, or canonical data was changed. A future recording-level canary and
-downstream subject-shape adapter remain required.
+Status: selector-ineligible contract, strict bundle-authority reader, and the
+bundle-bound subject-shape v5 publication path are implemented. No production
+archive, selector, registry authority, physical-profile promotion, or canonical
+data was changed. A recording-scale canary remains required. See
+`subject_shape_recording_bundle_publication_2026-08-10.md`.
 
 The provenance envelope described here as coordinate core v3 is superseded by
 coordinate core v4 in
@@ -113,13 +114,12 @@ collection, and exposes typed point/box translation helpers. The adapter does
 not construct or masquerade as the historical
 `BoundRefinedSubjectMaskCoordinateSurfaces` type.
 
-The subject-shape logical array layout may remain v4 only if the publisher
-reconstructs every existing semantic guarantee from this new source record.
-Because multi-clip assignment may legitimately bind distinct keypoint runs,
-the conservative publication target is a new source-binding/derivation
-manifest version and, unless a recording-level equivalence proof restores the
-old single-source semantics, subject-shape profile v5/method v12. The output
-camera-pixel/body-frame coordinate contract itself need not change.
+The implemented publisher uses the conservative target: subject-shape profile
+v5/method v12 with a distinct source-binding/derivation envelope. It preserves
+the output camera-pixel/body-frame coordinate contract while binding the exact
+recording bundle, its refined member, row identities, source-camera frames, and
+camera-pixel conventions. Historical v4/method v11 remains unchanged and is
+not used to represent the recording-bundle source.
 
 ## Validation
 
@@ -153,12 +153,8 @@ republished from the still-verifiable worker/crop inputs or recomputed.
 
 The remaining safe sequence is:
 
-- add the versioned subject-shape publication/derivation path that consumes
-  the sealed bundle source alongside the unchanged historical rich-coordinate
-  reader;
-- bind the recording/camera/frame-axis identity required by subject-shape v4;
-- prove a realistic multi-clip canary, including an empty-only frame window;
-- materialize a selector-ineligible subject-shape-v4 source;
+- prove a realistic multi-clip v5 canary, including an empty-only frame window;
+- measure the selector-ineligible access-aware physical candidate;
 - resume eye-angle-v7 and tail-kinematics-v2 short/full query-export matrices;
 - obtain Palette and, where user-facing, Crimson consumer evidence before any
   activation or physical-profile promotion.

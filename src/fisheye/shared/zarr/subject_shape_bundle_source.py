@@ -13,11 +13,18 @@ from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
     BoundRecordingSubjectMaskCoordinateAuthority,
     load_recording_subject_mask_coordinate_authority,
 )
+from fisheye.shared.pixel_frame_authority import (
+    BoundAcquisitionCameraFrame,
+    BoundPixelFrameAuthority,
+    load_persisted_acquisition_camera_authority,
+    load_source_camera_pixel_frame_authority,
+)
 
 SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID = (
     "palette.subject_shape.recording_mask_bundle_source"
 )
 SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_VERSION = 1
+SUBJECT_SHAPE_BUNDLE_SOURCE_KIND = "recording_subject_mask_bundle_v3"
 SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS = (
     "subject_body",
     "swim_bladder",
@@ -53,8 +60,49 @@ def _array_declarations(
     return {path: dict(arrays[path]) for path in paths}
 
 
+def _camera_frame_authorities(
+    authority: BoundRecordingSubjectMaskCoordinateAuthority,
+) -> tuple[
+    BoundAcquisitionCameraFrame,
+    BoundPixelFrameAuthority,
+    BoundPixelFrameAuthority,
+]:
+    _ownership, acquisition = load_persisted_acquisition_camera_authority(
+        authority._root,
+        expected_camera_id=authority.camera_identity,
+    )
+    camera_root = authority._root[
+        f"analysis/coordinate_frames/source_camera/{authority.camera_identity}"
+    ]
+    continuous = load_source_camera_pixel_frame_authority(
+        camera_root["continuous"],
+        acquisition_frame=acquisition,
+    )
+    edge = load_source_camera_pixel_frame_authority(
+        camera_root["pixel_edge_half_open"],
+        acquisition_frame=acquisition,
+    )
+    expected_extent = (authority.source_width, authority.source_height)
+    if (
+        (acquisition.width, acquisition.height) != expected_extent
+        or (continuous.endpoint.width, continuous.endpoint.height) != expected_extent
+        or (edge.endpoint.width, edge.endpoint.height) != expected_extent
+        or continuous.pixel_convention != "continuous"
+        or edge.pixel_convention != "pixel_edge_half_open"
+    ):
+        raise SubjectShapeBundleSourceError(
+            "Bundle camera-frame authorities differ from the exact source extent "
+            "or required pixel conventions."
+        )
+    return acquisition, continuous, edge
+
+
 def _source_record(
     authority: BoundRecordingSubjectMaskCoordinateAuthority,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+    continuous_frame: BoundPixelFrameAuthority,
+    edge_frame: BoundPixelFrameAuthority,
 ) -> dict[str, object]:
     components = authority.refined_manifest["payload"]["logical_schema"][
         "components"
@@ -70,7 +118,7 @@ def _source_record(
     return {
         "schema_id": SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID,
         "schema_version": SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_VERSION,
-        "source_kind": "recording_subject_mask_bundle_v3",
+        "source_kind": SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
         "recording_identity": authority.recording_identity,
         "camera_identity": authority.camera_identity,
         "frame_axis": {
@@ -81,6 +129,20 @@ def _source_record(
         "source_camera_extent": {
             "width_px": authority.source_width,
             "height_px": authority.source_height,
+        },
+        "source_camera_authorities": {
+            "acquisition_frame": {
+                "record_ref": acquisition_frame.record_ref,
+                "record_sha256": acquisition_frame.record_sha256,
+            },
+            "continuous_pixel_frame": {
+                "record_ref": continuous_frame.record_ref,
+                "record_sha256": continuous_frame.record_sha256,
+            },
+            "pixel_edge_half_open_frame": {
+                "record_ref": edge_frame.record_ref,
+                "record_sha256": edge_frame.record_sha256,
+            },
         },
         "roi_raster_extent": {
             "width_px": authority.roi_width,
@@ -128,6 +190,18 @@ class BoundSubjectShapeBundleSource:
     source_digest: str
     active: bool
     authority: BoundRecordingSubjectMaskCoordinateAuthority = field(
+        repr=False,
+        compare=False,
+    )
+    acquisition_frame: BoundAcquisitionCameraFrame = field(
+        repr=False,
+        compare=False,
+    )
+    continuous_source_camera_frame: BoundPixelFrameAuthority = field(
+        repr=False,
+        compare=False,
+    )
+    edge_source_camera_frame: BoundPixelFrameAuthority = field(
         repr=False,
         compare=False,
     )
@@ -216,7 +290,13 @@ def load_subject_shape_bundle_source(
         bundle_id=bundle_id,
         allow_inactive=allow_inactive,
     )
-    record = _source_record(authority)
+    acquisition, continuous, edge = _camera_frame_authorities(authority)
+    record = _source_record(
+        authority,
+        acquisition_frame=acquisition,
+        continuous_frame=continuous,
+        edge_frame=edge,
+    )
     authority.require_translation_only_offsets()
     return BoundSubjectShapeBundleSource(
         archive_path=authority.archive_path,
@@ -225,6 +305,9 @@ def load_subject_shape_bundle_source(
         source_digest=canonical_json_sha256(record),
         active=authority.active,
         authority=authority,
+        acquisition_frame=acquisition,
+        continuous_source_camera_frame=continuous,
+        edge_source_camera_frame=edge,
         _verification_seal=_BOUND_SOURCE_SEAL,
     )
 
@@ -246,6 +329,7 @@ __all__ = [
     "BoundSubjectShapeBundleSource",
     "SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID",
     "SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_VERSION",
+    "SUBJECT_SHAPE_BUNDLE_SOURCE_KIND",
     "SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS",
     "SubjectShapeBundleSourceError",
     "load_subject_shape_bundle_source",

@@ -1,4 +1,4 @@
-"""Shared byte-planned physical storage for exact subject-shape v4 runs.
+"""Shared byte-planned physical storage for maintained subject-shape runs.
 
 The logical full-anatomy schema remains owned by
 ``subject_shape_coordinate_publication``.  This module only adapts that exact
@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import math
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 import numpy as np
@@ -22,6 +23,11 @@ from fisheye.shared.coordinate_record import (
     coordinate_record_sha256,
 )
 from fisheye.shared.subject_shape_coordinate_publication import (
+    CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID,
+    CANONICAL_SUBJECT_SHAPE_PROFILE_ID,
+    SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+    SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
+    SUBJECT_SHAPE_SOURCE_KIND_ATTR,
     SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
     SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR,
     SUBJECT_SHAPE_STORAGE_PLAN_ATTR,
@@ -160,6 +166,17 @@ def _row_count(run_group: Any) -> int:
     return int(node.shape[0])
 
 
+def _logical_profile_id(run_group: Any) -> str:
+    """Return the exact logical profile that owns one physical candidate."""
+
+    source_kind = run_group.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+    if source_kind == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND:
+        return CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID
+    if source_kind in {None, SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND}:
+        return CANONICAL_SUBJECT_SHAPE_PROFILE_ID
+    raise ValueError(f"Unsupported subject-shape source kind {source_kind!r}.")
+
+
 def _is_row_aligned(path: str, shape: tuple[int, ...], row_count: int) -> bool:
     return bool(path not in _STATIC_AXIS_PATHS and shape and shape[0] == row_count)
 
@@ -227,7 +244,7 @@ def _schema_array_roles(run_group: Any, *, phase: str) -> Mapping[str, Mapping[s
 
 
 def subject_shape_fill_value(path: str, dtype: Any) -> object:
-    """Return the exact candidate fill for one maintained v4 array."""
+    """Return the exact candidate fill for one maintained array."""
 
     resolved = np.dtype(dtype)
     if resolved.kind == "f":
@@ -249,12 +266,23 @@ def _declaration(
     array: Any,
     role: str,
     row_count: int,
+    logical_profile_id: str,
 ) -> AnalysisArrayDeclaration:
     shape = tuple(int(value) for value in array.shape)
     dtype = np.dtype(array.dtype)
     row_aligned = _is_row_aligned(path, shape, row_count)
     authority = _authority_role(role)
     fill_value = subject_shape_fill_value(path, dtype)
+    contract_schema_prefix = (
+        "analysis.subject_shape_runs.v4"
+        if logical_profile_id == CANONICAL_SUBJECT_SHAPE_PROFILE_ID
+        else "analysis.subject_shape_runs.v5"
+    )
+    description = (
+        f"Exact maintained subject-shape v4 array {path}."
+        if logical_profile_id == CANONICAL_SUBJECT_SHAPE_PROFILE_ID
+        else f"Exact maintained subject-shape v5 array {path}."
+    )
     if path in _NEGATIVE_ONE_FILL_INT_PATHS:
         fill_semantics = "minus_one_means_invalid"
     elif isinstance(fill_value, float) and math.isnan(float(fill_value)):
@@ -264,7 +292,7 @@ def _declaration(
     return AnalysisArrayDeclaration(
         path=path,
         contract=ArrayContract(
-            schema_id=f"analysis.subject_shape_runs.v4.array.{path.replace('/', '.')}",
+            schema_id=f"{contract_schema_prefix}.array.{path.replace('/', '.')}",
             schema_version=1,
             dtype=DTypeContract(
                 dtype_id=f"numpy.{dtype.name}",
@@ -273,7 +301,7 @@ def _declaration(
             ),
             shape_template=_shape_template(path, shape, row_count),
             axis_names=_axis_names(path, shape, row_count),
-            description=f"Exact maintained subject-shape v4 array {path}.",
+            description=description,
         ),
         required=True,
         access_pattern=(AccessPattern.PER_ROW if row_aligned else AccessPattern.EAGER),
@@ -294,12 +322,15 @@ def build_subject_shape_storage_receipt(
     phase: str,
     profile: StorageProfile = SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1,
 ) -> AnalysisStoragePlanReceipt:
-    """Recompute one complete byte-derived plan from the exact v4 inventory."""
+    """Recompute one byte-derived plan from the exact maintained inventory."""
 
     if profile != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1:
-        raise ValueError("Subject-shape v4 accepts only its explicit candidate profile.")
+        raise ValueError(
+            "Subject-shape runs accept only their explicit candidate profile."
+        )
     roles = _schema_array_roles(run_group, phase=phase)
     row_count = _row_count(run_group)
+    logical_profile_id = _logical_profile_id(run_group)
     arrays = dict(_iter_arrays(run_group))
     if set(arrays) != set(roles):
         raise ValueError("Subject-shape live arrays differ from the closed schema inventory.")
@@ -309,6 +340,7 @@ def build_subject_shape_storage_receipt(
             array=arrays[path],
             role=str(roles[path]["role"]),
             row_count=row_count,
+            logical_profile_id=logical_profile_id,
         )
         for path in sorted(arrays)
     )
@@ -357,7 +389,7 @@ def persist_subject_shape_storage_receipt(
         "schema_id": "palette.subject_shape_storage_candidate",
         "schema_version": 1,
         "profile_id": receipt.profile.profile_id,
-        "logical_profile_id": "analysis.subject_shape.full_anatomy_v4",
+        "logical_profile_id": _logical_profile_id(run_group),
         "phase": phase,
         "selector_eligible": False,
         "promotion_status": "unpromoted_candidate",
@@ -520,28 +552,71 @@ def validate_subject_shape_storage_source_manifest_link(
         if isinstance(source_inventory, Mapping)
         else None
     )
+    expected_manifest_fields = {
+        "schema_id",
+        "schema_version",
+        "run_name",
+        "binding_status",
+        "source_refined_subject_masks_run",
+        "method",
+        "method_version",
+        "component_names",
+        "scientific_configuration",
+        "schema_inventory",
+        "arrays",
+        "closed_array_inventory",
+        "closed_group_inventory",
+        "closed_attr_inventory",
+        "coordinate_descriptors_present",
+    }
+    maintained_profile = (
+        source_inventory.get("maintained_profile")
+        if isinstance(source_inventory, Mapping)
+        else None
+    )
+    logical_profile_id = (
+        maintained_profile.get("profile_id")
+        if isinstance(maintained_profile, Mapping)
+        else None
+    )
+    bundle_source_binding = source_manifest.get("source_binding")
+    if logical_profile_id == CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID:
+        expected_manifest_fields.add("source_binding")
+        bundle_binding_valid = (
+            isinstance(bundle_source_binding, Mapping)
+            and set(bundle_source_binding)
+            == {
+                "source_kind",
+                "bundle_id",
+                "bundle_active_at_derivation",
+                "record_sha256",
+            }
+            and bundle_source_binding.get("source_kind")
+            == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+            and isinstance(bundle_source_binding.get("bundle_id"), str)
+            and bool(bundle_source_binding.get("bundle_id"))
+            and type(bundle_source_binding.get("bundle_active_at_derivation"))
+            is bool
+            and isinstance(bundle_source_binding.get("record_sha256"), str)
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                bundle_source_binding["record_sha256"],
+            )
+            is not None
+        )
+    else:
+        bundle_binding_valid = bundle_source_binding is None
     if (
         source_manifest.get("schema_id")
         != SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID
         or source_manifest.get("schema_version") != 1
-        or set(source_manifest)
-        != {
-            "schema_id",
-            "schema_version",
-            "run_name",
-            "binding_status",
-            "source_refined_subject_masks_run",
-            "method",
-            "method_version",
-            "component_names",
-            "scientific_configuration",
-            "schema_inventory",
-            "arrays",
-            "closed_array_inventory",
-            "closed_group_inventory",
-            "closed_attr_inventory",
-            "coordinate_descriptors_present",
+        or set(source_manifest) != expected_manifest_fields
+        or logical_profile_id
+        not in {
+            CANONICAL_SUBJECT_SHAPE_PROFILE_ID,
+            CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID,
         }
+        or not bundle_binding_valid
         or source_manifest.get("closed_array_inventory") is not True
         or not isinstance(source_arrays, Mapping)
         or not isinstance(inventory_arrays, Mapping)
@@ -701,6 +776,7 @@ def create_bound_subject_shape_candidate_array(
             else "coordinate_geometry"
         ),
         row_count=row_count,
+        logical_profile_id=_logical_profile_id(run_group),
     )
     facts = AnalysisArrayStorageFacts(
         path=relative_path,
@@ -796,7 +872,7 @@ def validate_subject_shape_candidate_storage(
         "schema_id": "palette.subject_shape_storage_candidate",
         "schema_version": 1,
         "profile_id": SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
-        "logical_profile_id": "analysis.subject_shape.full_anatomy_v4",
+        "logical_profile_id": _logical_profile_id(run_group),
         "phase": phase,
         "selector_eligible": False,
         "promotion_status": "unpromoted_candidate",
