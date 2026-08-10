@@ -319,6 +319,11 @@ def _build_fake_root() -> _FakeGroup:
         overwrite=True,
     )
     crop.create_array(
+        "source_crop_xywh",
+        data=np.array([[0, 0, 4, 4], [1, 1, 4, 4]], dtype=np.float32),
+        overwrite=True,
+    )
+    crop.create_array(
         "detection_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True
     )
     crop.create_array(
@@ -1149,6 +1154,15 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
     assert "masks_roi" not in run_group
     np.testing.assert_array_equal(
+        np.asarray(run_group["source_crop_xywh"][:]),
+        np.asarray([[0, 0, 4, 4], [1, 1, 4, 4]], dtype=np.float32),
+    )
+    scientific_arrays = run_group.attrs[mod.SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR][
+        "payload"
+    ]["row_identity"]["arrays"]
+    assert scientific_arrays["source_crop_xywh"]["dtype"] == "float32"
+    assert scientific_arrays["source_crop_xywh"]["shape"] == [2, 4]
+    np.testing.assert_array_equal(
         np.asarray(run_group["detection_source"][:]),
         np.asarray([0, 0], dtype=np.int8),
     )
@@ -1175,7 +1189,7 @@ def test_canonical_writer_omits_legacy_detection_source_through_publication(
         "source_acquisition_frame_index": np.asarray([0, 1], dtype="<i8"),
         "source_crop_xywh": np.asarray(
             [[1, 2, 4, 4], [3, 4, 4, 4]],
-            dtype="<i4",
+            dtype="<f4",
         ),
     }
 

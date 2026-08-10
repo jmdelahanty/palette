@@ -385,6 +385,37 @@ def test_worker_semantic_receipt_binds_exact_row_units() -> None:
         )
 
 
+def test_raw_v2_identity_validates_optional_exact_crop_placement() -> None:
+    science = _raw_science_v2()
+    payload = deepcopy(science["payload"])
+    payload["row_identity"]["arrays"]["source_crop_xywh"] = {
+        "shape": [2, 4],
+        "dtype": "float32",
+        "sha256": "1" * 64,
+    }
+
+    exact = build_subject_mask_scientific_identity(
+        stage_kind="raw_subject_mask",
+        model=payload["model"],
+        crop=payload["crop"],
+        pixels=payload["pixels"],
+        row_identity=payload["row_identity"],
+        inference_contract=payload["inference_contract"],
+    )
+    assert validate_subject_mask_scientific_identity(exact) == ()
+
+    payload["row_identity"]["arrays"]["source_crop_xywh"]["dtype"] = "float64"
+    with pytest.raises(ValueError, match="source_crop_xywh array dtype is invalid"):
+        build_subject_mask_scientific_identity(
+            stage_kind="raw_subject_mask",
+            model=payload["model"],
+            crop=payload["crop"],
+            pixels=payload["pixels"],
+            row_identity=payload["row_identity"],
+            inference_contract=payload["inference_contract"],
+        )
+
+
 def test_recording_receipt_concatenates_real_worker_intervals() -> None:
     n_rows, n_channels, height, width = 4, 2, 2, 2
     dimensions = SubjectMaskDimensions(

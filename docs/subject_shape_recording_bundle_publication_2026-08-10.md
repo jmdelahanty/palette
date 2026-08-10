@@ -114,3 +114,60 @@ warnings during these tests; no correctness gate failed.
       these subject-shape surfaces.
 - [ ] Promote a selector or physical profile only through a separate recorded
       decision with rollback retained.
+
+## Recording-Scale Acceptance Gate
+
+`fisheye.diagnostics.benchmark_subject_shape_v5_canary` is the read-only gate
+for the first recording-scale publication. It accepts only an exact named,
+complete, selector-ineligible v5 child bound to an exact inactive recording
+subject-mask bundle. It does not activate selectors or storage profiles.
+
+The gate replays the canonical coordinate publication, executable storage
+plan, and direct/consolidated metadata contracts. It then proves the complete
+`frame_row_offsets`/`source_acquisition_frame_index` relationship, requires an
+empty frame and a multi-row frame, exercises the eye-geometry and
+tail-kinematics consumer boundaries, and records deterministic random-frame,
+windowed-row, and full-array traversal measurements. The full traversal hashes
+must equal the sealed publication manifest.
+
+Run it only after the materializer report exists:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_subject_shape_v5_canary \
+  /path/to/recording_analysis.zarr \
+  --run-name <exact-v5-run> \
+  --bundle-id <exact-recording-mask-bundle> \
+  --publication-report /path/to/subject_shape_v5_result.json \
+  --output /path/below/.palette_benchmarks/subject_shape_v5_acceptance.json
+```
+
+The two `--allow-missing-...` options are diagnostic relaxations only. Evidence
+created with either relaxation is not sufficient for promotion. Filesystem or
+TensorStore tracing remains necessary for physical request/transfer telemetry,
+and immutable LSF accounting remains necessary for the publication job's peak
+RSS because the current materializer report does not capture it. The gate says
+so explicitly rather than substituting process-read RSS for publication RSS.
+
+Historical v4 runs remain available through their existing canonical reader
+and explicit historical-inspection paths. The v5 gate neither migrates nor
+relabels them.
+
+## First Canary Prepublication Finding
+
+The first 22-clip inference array (`153302219`) completed, but the dependent
+refinement array (`153302220`) failed before any recording-level publication.
+The shard writer had copied crop-row, instance, and acquisition-frame identity
+but not the crop-v2 `source_crop_xywh` placement array. Refined scientific
+identity correctly rejected the incomplete row inventory, and the recording
+publisher and v5 materializer exited through failed dependencies. The 22
+completed inference bundles remain immutable evidence; they are not eligible
+for refinement or publication.
+
+New non-authoritative shard writes now copy exact float32 `[N,4]`
+`source_crop_xywh` values from the crop-v2 rowset, select the same keyed rows as
+the pixel work package, and bind the resulting array digest into raw scientific
+identity. The array remains a coordinate surface rather than being folded into
+the generic row-lineage inventory. Historical raw-v2 identities that omit it
+remain readable, but production refined publication continues to require it
+and fail closed. The canary must be rerun from inference with a new immutable
+run ID; the incomplete bundles must not be patched in place.

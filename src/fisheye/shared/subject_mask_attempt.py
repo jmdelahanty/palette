@@ -156,6 +156,7 @@ def _validate_row_identity(
     *,
     required_arrays: Mapping[str, tuple[str, tuple[int, ...]]],
     allowed_arrays: set[str],
+    optional_array_contracts: Mapping[str, tuple[str, tuple[int, ...]]] | None = None,
     non_row_aligned_arrays: set[str] | None = None,
 ) -> tuple[list[str], int | None]:
     if not isinstance(value, Mapping) or set(value) != {"row_count", "arrays"}:
@@ -169,8 +170,12 @@ def _validate_row_identity(
     errors: list[str] = []
     if not set(required_arrays) <= set(arrays) or not set(arrays) <= allowed_arrays:
         errors.append("scientific row_identity array inventory is invalid")
+    array_contracts = {
+        **dict(optional_array_contracts or {}),
+        **dict(required_arrays),
+    }
     for name, record in arrays.items():
-        expected = required_arrays.get(str(name))
+        expected = array_contracts.get(str(name))
         shape = record.get("shape") if isinstance(record, Mapping) else None
         expected_rows = (
             shape[0]
@@ -511,12 +516,21 @@ def _validate_raw_scientific_payload(payload: Mapping[str, Any]) -> list[str]:
             "source_crop_row_ids",
             "instance_key",
             "source_acquisition_frame_index",
+            "source_crop_xywh",
             "frame_indices",
             "source_frame_indices",
             "source_clip_indices",
             "source_clip_local_frame_indices",
             "source_refined_row_ids",
             "source_detect_row_index",
+        },
+        optional_array_contracts={
+            # Historical v2 worker identities omitted placement because the
+            # crop block separately bound integer origins and fixed ROI shape.
+            # New shard writers include the exact canonical float32 placement
+            # so recording-level refined publication can bind the physical
+            # source array without invalidating those historical identities.
+            "source_crop_xywh": ("float32", (4,)),
         },
     )
     errors.extend(row_errors)

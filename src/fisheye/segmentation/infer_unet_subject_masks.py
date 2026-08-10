@@ -1113,6 +1113,61 @@ def _write_canonical_subject_mask_selection(
     return selected
 
 
+def _copy_subject_mask_source_crop_placement(
+    run_group: zarr.Group,
+    crop_group: zarr.Group,
+    *,
+    total_rois: int,
+    selected_crop_rows: np.ndarray | None,
+) -> bool:
+    """Copy exact crop-v2 placement into a non-authoritative mask shard.
+
+    ``source_crop_xywh`` is coordinate evidence, not generic row lineage.  It
+    therefore remains outside ``ROW_LINEAGE_ARRAYS`` and is copied explicitly
+    at this writer boundary.  Legacy crop sources may omit it, but any source
+    that declares it must satisfy the canonical float32 ``[N,4]`` contract.
+    Production refined publication independently requires the array and will
+    continue to fail closed for incomplete legacy shard inputs.
+    """
+
+    source = crop_group.get("source_crop_xywh")
+    if source is None:
+        return False
+    if len(source.shape) != 2 or int(source.shape[1]) != 4:
+        raise ValueError("Crop source_crop_xywh must have shape [N,4].")
+    if np.dtype(source.dtype) != np.dtype(np.float32):
+        raise ValueError("Crop source_crop_xywh must have exact float32 dtype.")
+
+    if selected_crop_rows is None:
+        if int(source.shape[0]) != int(total_rois):
+            raise ValueError(
+                "Crop source_crop_xywh row count does not match mask inference rows."
+            )
+        placement = np.ascontiguousarray(np.asarray(source[:], dtype=np.float32))
+    else:
+        rows = np.asarray(selected_crop_rows, dtype=np.int64).reshape(-1)
+        if int(rows.shape[0]) != int(total_rois):
+            raise ValueError(
+                "Selected crop rows do not match mask inference row count."
+            )
+        if rows.size and (
+            int(rows.min()) < 0 or int(rows.max()) >= int(source.shape[0])
+        ):
+            raise ValueError(
+                "Selected crop rows exceed the source_crop_xywh row domain."
+            )
+        placement = np.ascontiguousarray(np.asarray(source[rows], dtype=np.float32))
+
+    row_chunk = max(1, min(int(total_rois), 4096))
+    run_group.create_array(
+        "source_crop_xywh",
+        data=placement,
+        chunks=(row_chunk, 4),
+        overwrite=True,
+    )
+    return True
+
+
 def _output_parent_from_args(args: argparse.Namespace) -> str:
     output_parent = str(
         getattr(args, "output_parent", SUBJECT_MASK_CANONICAL_OUTPUT_PARENT)
@@ -1458,6 +1513,7 @@ def _subject_mask_scientific_documents(
         "source_crop_row_ids",
         "instance_key",
         "source_acquisition_frame_index",
+        "source_crop_xywh",
         "frame_indices",
         "source_frame_indices",
         "source_clip_indices",
@@ -3138,6 +3194,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             else:
                 copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
                 write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
+            _copy_subject_mask_source_crop_placement(
+                run_group,
+                crop_group,
+                total_rois=total_rois,
+                selected_crop_rows=selected_crop_rows,
+            )
         if getattr(crop_source, "pixel_materialization_id", None) is not None:
             if selected_crop_rows is None:
                 raise ValueError(
