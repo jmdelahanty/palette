@@ -650,7 +650,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
             tables=tables,
             jobs=1,
             chaser_authority_manifest_path=legacy_authority_path,
-            source_registry_identities=_registry_identities(source),
+            registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
         )
 
     n_track_frames = int(run.attrs["total_frames"])
@@ -722,7 +722,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
             tables=tables,
             jobs=1,
             chaser_authority_manifest_path=wrong_name_authority,
-            source_registry_identities=_registry_identities(source),
+            registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
         )
 
     component_path = str(
