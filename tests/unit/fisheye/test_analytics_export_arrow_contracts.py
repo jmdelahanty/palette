@@ -1065,7 +1065,7 @@ def test_every_analytics_table_has_an_exact_arrow_contract() -> None:
     (
         (CHASER_SPATIAL_TABLE, 61),
         (CHASER_DISTANCE_SUMMARY_TABLE, 48),
-        (CHASER_EPOCH_BEHAVIOR_TABLE, 96),
+        (CHASER_EPOCH_BEHAVIOR_TABLE, 107),
         (CHASER_BOUT_EVENTS_TABLE, 68),
         (CHASER_BOUT_HISTOGRAM_TABLE, 70),
         (CHASER_IBI_HISTOGRAM_TABLE, 70),
@@ -1144,6 +1144,32 @@ def test_near_field_v2_freezes_percentiles_and_denominator_evidence() -> None:
         )
         assert field.arrow_type == arrow_type
         assert field.nullable is False
+
+
+def test_epoch_behavior_v2_freezes_validity_and_denominator_receipts() -> None:
+    by_name = {
+        field.name: field
+        for field in ARROW_TABLE_CONTRACTS[CHASER_EPOCH_BEHAVIOR_TABLE].fields
+    }
+    expected = {
+        "valid_tracked_frame_count": "int64",
+        "valid_tracked_duration_s": "float64",
+        "valid_tracked_duration_source": "string",
+        "motion_valid_sample_count": "int64",
+        "motion_validity_rule": "string",
+        "wall_fraction_denominator_count": "int64",
+        "wall_fraction_denominator": "string",
+        "bout_rate_denominator_s": "float64",
+        "bout_rate_denominator": "string",
+        "inter_bout_interval_rate_denominator_s": "float64",
+        "inter_bout_interval_rate_denominator": "string",
+    }
+
+    assert {name: by_name[name].arrow_type for name in expected} == expected
+    assert all(not by_name[name].nullable for name in expected)
+    assert set(expected).issubset(
+        TABLE_CONTRACTS[CHASER_EPOCH_BEHAVIOR_TABLE].required_columns
+    )
 
 
 @pytest.mark.parametrize("table_name", CHASER_ARROW_TABLES)
@@ -2622,12 +2648,15 @@ def _make_baseline_representation_source(
     positions.create_array("fish_valid", data=np.ones(20, dtype=bool))
 
     components = chaser.create_group("epoch_behavior_summary")
-    components.attrs.update({"latest": "component-1", "latest_complete": "component-1"})
-    component = components.create_group("component-1")
+    components.attrs.update(
+        {"latest": "kinematics_bouts_v2", "latest_complete": "kinematics_bouts_v2"}
+    )
+    component = components.create_group("kinematics_bouts_v2")
     component.attrs.update(
         {
             "status": "complete",
-            "schema_id": "palette.chaser.epoch_behavior_summary.v1",
+            "schema_id": "palette.chaser.epoch_behavior_summary.v2",
+            "schema_version": 2,
             "source_refs": {
                 "source_track_kinematics_run": "track-1",
                 "source_track_kinematics_scope": "offline",
@@ -2654,6 +2683,17 @@ def _make_baseline_representation_source(
                 6.0,
                 7.0,
                 8.0,
+                10,
+                1.0,
+                b"track_kinematics.sample_valid_count_over_fps",
+                9,
+                b"sample_valid_and_transition_valid",
+                10,
+                b"valid_in_arena_center_samples",
+                1.0,
+                b"valid_tracked_duration_s",
+                1.0,
+                b"valid_tracked_duration_s",
                 999.0,
             )
         ],
@@ -2673,6 +2713,17 @@ def _make_baseline_representation_source(
             ("mean_abs_bout_net_heading_change_deg", "f8"),
             ("median_inter_bout_interval_s", "f8"),
             ("mean_inter_bout_interval_s", "f8"),
+            ("valid_tracked_frame_count", "i8"),
+            ("valid_tracked_duration_s", "f8"),
+            ("valid_tracked_duration_source", "S64"),
+            ("motion_valid_sample_count", "i8"),
+            ("motion_validity_rule", "S64"),
+            ("wall_fraction_denominator_count", "i8"),
+            ("wall_fraction_denominator", "S64"),
+            ("bout_rate_denominator_s", "f8"),
+            ("bout_rate_denominator", "S64"),
+            ("inter_bout_interval_rate_denominator_s", "f8"),
+            ("inter_bout_interval_rate_denominator", "S64"),
             ("future_source_metric", "f8"),
         ],
     )
@@ -2701,6 +2752,7 @@ def _make_baseline_representation_source(
         smoothed_heading_degrees=np.linspace(-45.0, 45.0, 20),
         heading_degrees=np.linspace(-45.0, 45.0, 20),
         sample_valid=np.ones(20, dtype=bool),
+        transition_valid=np.ones(20, dtype=bool),
     )
     monkeypatch.setattr(
         "fisheye.utils.export_cross_recording_analytics._latest_run",

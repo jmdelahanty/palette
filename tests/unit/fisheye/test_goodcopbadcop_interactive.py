@@ -18,6 +18,8 @@ from fisheye.analysis.chaser_distance_runs import (
     write_chaser_distance_run,
 )
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID
+from fisheye.shared.zarr.columnar import write_columnar_dataset
+from fisheye.visualization import goodcopbadcop_interactive as interactive_module
 from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERER,
     CHASER_DASHBOARD_SPEC_SCHEMA_ID,
@@ -28,6 +30,7 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     discover_goodcopbadcop_chaser_dashboard_options,
     discover_chaser_dashboard_options,
     load_chaser_dashboard_data,
+    load_goodcopbadcop_epoch_behavior_data,
     load_goodcopbadcop_interactive_data,
 )
 
@@ -44,6 +47,67 @@ def test_near_field_visualization_allowlist_distinguishes_current_and_legacy() -
     )
     assert LEGACY_CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS < (
         CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS
+    )
+
+
+def test_epoch_behavior_v1_is_explicit_legacy_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = tmp_path / "legacy_epoch_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    component_path = (
+        "analysis/chaser_distance_runs/run-1/epoch_behavior_summary/legacy_v1"
+    )
+    component = root.create_group(component_path)
+    component.attrs.update(
+        {
+            "schema_id": "palette.chaser.epoch_behavior_summary.v1",
+            "schema_version": 1,
+        }
+    )
+    rows = np.asarray([(0,)], dtype=[("window_id", np.int32)])
+    write_columnar_dataset(component, "per_epoch_fish", rows, shard_rows=None)
+    write_columnar_dataset(component, "per_epoch_chaser", rows, shard_rows=None)
+    monkeypatch.setattr(
+        interactive_module,
+        "_verified_dashboard_run",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        interactive_module,
+        "_raise_unsealed_component",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        interactive_module,
+        "resolve_latest_epoch_behavior_summary_component_path",
+        lambda *_args, **_kwargs: component_path,
+    )
+
+    assert (
+        load_goodcopbadcop_epoch_behavior_data(
+            zarr_path,
+            run_path="analysis/chaser_distance_runs/run-1",
+        )
+        is None
+    )
+    explicit = load_goodcopbadcop_epoch_behavior_data(
+        zarr_path,
+        run_path="analysis/chaser_distance_runs/run-1",
+        component_name="legacy_v1",
+    )
+    assert explicit is not None
+    assert explicit.per_epoch_fish_df.height == 1
+
+    component.attrs["schema_version"] = 2
+    assert (
+        load_goodcopbadcop_epoch_behavior_data(
+            zarr_path,
+            run_path="analysis/chaser_distance_runs/run-1",
+            component_name="legacy_v1",
+        )
+        is None
     )
 
 

@@ -48,11 +48,16 @@ from fisheye.analysis.chaser_component_publication import (
 from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_epoch_behavior_summary import (
+    AUTHORITATIVE_EXECUTION_MODE,
     ChaserEpochBehaviorSummaryResult,
+    DEFAULT_COMPONENT_NAME,
     LEGACY_EXECUTION_MODE,
     LEGACY_METHOD_VERSION,
     LEGACY_SCHEMA_ID,
     LEGACY_SCHEMA_VERSION,
+    METHOD_VERSION,
+    SCHEMA_ID,
+    SCHEMA_VERSION,
     _load_windows,
     _make_center_distance_histogram,
     _make_per_epoch_bout_histograms,
@@ -61,6 +66,7 @@ from fisheye.analysis.chaser_epoch_behavior_summary import (
     _make_per_epoch_fish,
     _make_per_epoch_inter_bout_interval_histograms,
     _resolve_arena_geometry,
+    write_chaser_epoch_behavior_summary_component,
     write_legacy_chaser_epoch_behavior_summary_component,
 )
 from fisheye.analysis.chaser_egocentric_bearing import (
@@ -553,7 +559,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         ],
     )
     interval_source = SimpleNamespace(inter_bout_intervals=interval_rows)
-    result = ChaserEpochBehaviorSummaryResult(
+    legacy_result = ChaserEpochBehaviorSummaryResult(
         zarr_path=str(source),
         recording_id=snapshot.recording_id,
         component_name="export_fixture_v1",
@@ -613,8 +619,114 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         wall_band_mm=5.0,
         warnings=(),
     )
-    component_path = str(
+    legacy_component_path = str(
         write_legacy_chaser_epoch_behavior_summary_component(
+            source,
+            legacy_result,
+            overwrite=True,
+        )
+    )
+    legacy_handle = _component_handle(source, legacy_component_path)
+    legacy_authority_path = _write_authority(
+        tmp_path,
+        source,
+        component_handles={EPOCH_BEHAVIOR_FAMILY: legacy_handle},
+        name="legacy-epoch-behavior-authority.json",
+    )
+    output = tmp_path / "exports"
+    tables = (
+        CHASER_EPOCH_BEHAVIOR_TABLE,
+        CHASER_BOUT_EVENTS_TABLE,
+        CHASER_BOUT_HISTOGRAM_TABLE,
+        CHASER_IBI_HISTOGRAM_TABLE,
+        CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    )
+
+    with pytest.raises(ValueError, match="semantic schema"):
+        export_sources(
+            [source],
+            output_root=output,
+            export_run_id="sealed_epoch_behavior_legacy_rejected",
+            tables=tables,
+            jobs=1,
+            chaser_authority_manifest_path=legacy_authority_path,
+            source_registry_identities=_registry_identities(source),
+        )
+
+    n_track_frames = int(run.attrs["total_frames"])
+    track = SimpleNamespace(
+        frame_indices=np.arange(n_track_frames, dtype=np.int64),
+        speed_mm_by_level={"filtered": np.ones(n_track_frames, dtype=np.float64)},
+        frame_path_distance_mm_by_level={
+            "filtered": np.ones(n_track_frames, dtype=np.float64)
+        },
+        sample_valid=np.ones(n_track_frames, dtype=bool),
+        transition_valid=np.ones(n_track_frames, dtype=bool),
+        smoothed_heading_degrees=np.zeros(n_track_frames, dtype=np.float64),
+        heading_degrees=np.zeros(n_track_frames, dtype=np.float64),
+    )
+    result = ChaserEpochBehaviorSummaryResult(
+        **{
+            **legacy_result.__dict__,
+            "component_name": DEFAULT_COMPONENT_NAME,
+            "execution_mode": AUTHORITATIVE_EXECUTION_MODE,
+            "schema_id": SCHEMA_ID,
+            "schema_version": SCHEMA_VERSION,
+            "method_version": METHOD_VERSION,
+            "source_track_kinematics_run": "track_fixture",
+            "source_track_kinematics_scope": "offline",
+            "source_track_kinematics_track_id": 0,
+            "source_track_kinematics_track_path": (
+                "analysis/track_kinematics_runs/track_fixture/tracks/id_0"
+            ),
+            "source_speed_level_selection": "explicit_physical_track_speed_level",
+            "source_swim_bout_run": "fixture_bouts",
+            "source_swim_bout_path": "analysis/swim_bout_runs/fixture_bouts",
+            "source_swim_bout_level_path": "levels/filtered",
+            "per_epoch_fish": _make_per_epoch_fish(
+                windows=windows,
+                run_group=run,
+                swim_tables=None,
+                track=track,
+                source_speed_level="filtered",
+                geometry=geometry,
+                wall_band_mm=5.0,
+                fps=snapshot.fps,
+                execution_mode=AUTHORITATIVE_EXECUTION_MODE,
+            ),
+        }
+    )
+    wrong_name_result = ChaserEpochBehaviorSummaryResult(
+        **{**result.__dict__, "component_name": "custom_epoch_v2"}
+    )
+    wrong_name_path = str(
+        write_chaser_epoch_behavior_summary_component(
+            source,
+            wrong_name_result,
+            overwrite=True,
+        )
+    )
+    wrong_name_authority = _write_authority(
+        tmp_path,
+        source,
+        component_handles={
+            EPOCH_BEHAVIOR_FAMILY: _component_handle(source, wrong_name_path)
+        },
+        name="wrong-name-epoch-behavior-authority.json",
+    )
+    with pytest.raises(ValueError, match="kinematics_bouts_v2"):
+        export_sources(
+            [source],
+            output_root=output,
+            export_run_id="sealed_epoch_behavior_wrong_name_rejected",
+            tables=tables,
+            jobs=1,
+            chaser_authority_manifest_path=wrong_name_authority,
+            source_registry_identities=_registry_identities(source),
+        )
+
+    component_path = str(
+        write_chaser_epoch_behavior_summary_component(
             source,
             result,
             overwrite=True,
@@ -627,15 +739,6 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         component_handles={EPOCH_BEHAVIOR_FAMILY: handle},
         name="epoch-behavior-authority.json",
     )
-    output = tmp_path / "exports"
-    tables = (
-        CHASER_EPOCH_BEHAVIOR_TABLE,
-        CHASER_BOUT_EVENTS_TABLE,
-        CHASER_BOUT_HISTOGRAM_TABLE,
-        CHASER_IBI_HISTOGRAM_TABLE,
-        CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
-    )
-
     manifest = export_sources(
         [source],
         output_root=output,
@@ -647,6 +750,36 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
+    rows = _read_rows(output, "sealed_epoch_behavior", CHASER_EPOCH_BEHAVIOR_TABLE)
+    assert rows[0]["valid_tracked_duration_source"] == (
+        "track_kinematics.sample_valid_count_over_fps"
+    )
+    assert rows[0]["motion_validity_rule"] == "sample_valid_and_transition_valid"
+    assert rows[0]["bout_rate_denominator"] == "valid_tracked_duration_s"
+    source_row = result.per_epoch_fish[0]
+    text_receipts = (
+        "valid_tracked_duration_source",
+        "motion_validity_rule",
+        "wall_fraction_denominator",
+        "bout_rate_denominator",
+        "inter_bout_interval_rate_denominator",
+    )
+    integer_receipts = (
+        "valid_tracked_frame_count",
+        "motion_valid_sample_count",
+        "wall_fraction_denominator_count",
+    )
+    float_receipts = (
+        "valid_tracked_duration_s",
+        "bout_rate_denominator_s",
+        "inter_bout_interval_rate_denominator_s",
+    )
+    for field in text_receipts:
+        assert rows[0][field] == bytes(source_row[field]).rstrip(b"\x00").decode()
+    for field in integer_receipts:
+        assert rows[0][field] == int(source_row[field])
+    for field in float_receipts:
+        assert rows[0][field] == pytest.approx(float(source_row[field]))
     binding = manifest["chaser_export_authority"]["resolved_sources"][str(source)]
     assert (
         binding["component_handles"][EPOCH_BEHAVIOR_FAMILY]["component_path"]

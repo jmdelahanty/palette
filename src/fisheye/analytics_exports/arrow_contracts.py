@@ -268,6 +268,9 @@ _CHASER_EPOCH_BEHAVIOR_FIELDS = (
     + (
         _field("total_span_frames", "int64"),
         _field("valid_frame_count", "int64"),
+        _field("valid_tracked_frame_count", "int64"),
+        _field("valid_tracked_duration_s", "float64"),
+        _field("valid_tracked_duration_source", "string"),
         _field("missing_frame_count", "int64"),
         _field("tracking_dropout_fraction", "float64", nullable=True),
         _field("center_distance_sample_count", "int64"),
@@ -280,8 +283,12 @@ _CHASER_EPOCH_BEHAVIOR_FIELDS = (
         _field("wall_band_mm", "float64"),
         _field("wall_frame_count", "int64"),
         _field("wall_fraction", "float64", nullable=True),
+        _field("wall_fraction_denominator_count", "int64"),
+        _field("wall_fraction_denominator", "string"),
         _field("wall_time_s", "float64"),
         _field("speed_sample_count", "int64"),
+        _field("motion_valid_sample_count", "int64"),
+        _field("motion_validity_rule", "string"),
         _field("mean_speed_mm_s", "float64", nullable=True),
         _field("median_speed_mm_s", "float64", nullable=True),
         _field("p05_speed_mm_s", "float64", nullable=True),
@@ -290,6 +297,8 @@ _CHASER_EPOCH_BEHAVIOR_FIELDS = (
         _field("total_path_mm", "float64", nullable=True),
         _field("bout_count", "int64"),
         _field("bout_rate_per_min", "float64", nullable=True),
+        _field("bout_rate_denominator_s", "float64"),
+        _field("bout_rate_denominator", "string"),
         _field("median_bout_duration_s", "float64", nullable=True),
         _field("mean_bout_duration_s", "float64", nullable=True),
         _field("median_bout_path_length_mm", "float64", nullable=True),
@@ -307,6 +316,8 @@ _CHASER_EPOCH_BEHAVIOR_FIELDS = (
         _field("p05_inter_bout_interval_s", "float64", nullable=True),
         _field("p95_inter_bout_interval_s", "float64", nullable=True),
         _field("inter_bout_interval_rate_per_min", "float64", nullable=True),
+        _field("inter_bout_interval_rate_denominator_s", "float64"),
+        _field("inter_bout_interval_rate_denominator", "string"),
     )
     + _COLLECTION_FIELDS
 )

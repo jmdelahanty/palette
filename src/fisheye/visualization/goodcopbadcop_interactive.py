@@ -92,10 +92,17 @@ GOODCOPBADCOP_EPOCH_BEHAVIOR_COMPONENT_PARENT = "epoch_behavior_summary"
 GOODCOPBADCOP_EPOCH_BEHAVIOR_SCHEMA_ID = (
     "palette.goodcopbadcop.epoch_behavior_summary.v1"
 )
-CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS = frozenset(
+CHASER_EPOCH_BEHAVIOR_SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v2"
+LEGACY_CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS = frozenset(
     {
         GOODCOPBADCOP_EPOCH_BEHAVIOR_SCHEMA_ID,
         "palette.chaser.epoch_behavior_summary.v1",
+    }
+)
+CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS = frozenset(
+    {
+        CHASER_EPOCH_BEHAVIOR_SCHEMA_ID,
+        *LEGACY_CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS,
     }
 )
 GOODCOPBADCOP_ESCAPE_FREEZE_COMPONENT_PARENT = "chaser_escape_freeze"
@@ -1918,7 +1925,22 @@ def load_goodcopbadcop_epoch_behavior_data(
 
     attrs = dict(getattr(component, "attrs", {}))
     schema_id = str(attrs.get("schema_id") or "")
-    if schema_id and schema_id not in CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS:
+    schema_version = attrs.get("schema_version")
+    if schema_id == CHASER_EPOCH_BEHAVIOR_SCHEMA_ID:
+        if schema_version != 2:
+            return None
+    elif schema_id in LEGACY_CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS:
+        if schema_version != 1:
+            return None
+    else:
+        return None
+    if (
+        schema_id in LEGACY_CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS
+        and str(component_name or "").strip() in {"", "latest"}
+    ):
+        # Historical v1 is an explicit compatibility request only. It must never
+        # satisfy current/latest discovery now that v2 owns the denominator and
+        # validity receipts used for scientific interpretation.
         return None
 
     try:

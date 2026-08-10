@@ -234,7 +234,7 @@ _SUPPORTED_CHASER_EXPORT_SOURCE_TABLES = frozenset(
     | set(_CHASER_EXPORT_BASE_ONLY_SOURCE_TABLES)
 )
 _COMPONENT_SCHEMA_BY_FAMILY = {
-    EPOCH_BEHAVIOR_FAMILY: ("palette.chaser.epoch_behavior_summary.v1", 1),
+    EPOCH_BEHAVIOR_FAMILY: ("palette.chaser.epoch_behavior_summary.v2", 2),
     QUADRANT_OCCUPANCY_FAMILY: ("palette.chaser.quadrant_occupancy.v1", 1),
     NEAR_FIELD_OCCUPANCY_FAMILY: ("palette.chaser.near_field_occupancy.v2", 2),
     EGOCENTRIC_BEARING_FAMILY: ("palette.chaser_egocentric_bearing.v1", 1),
@@ -243,7 +243,9 @@ _COMPONENT_SCHEMA_BY_FAMILY = {
 CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT = "chaser_quadrant_occupancy"
 CRA_NEAR_FIELD_COMPONENT_PARENT = "chaser_near_field_occupancy"
 EPOCH_BEHAVIOR_COMPONENT_PARENT = "epoch_behavior_summary"
-EPOCH_BEHAVIOR_SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v1"
+EPOCH_BEHAVIOR_SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v2"
+EPOCH_BEHAVIOR_SCHEMA_VERSION = 2
+EPOCH_BEHAVIOR_COMPONENT_NAME = "kinematics_bouts_v2"
 
 
 @dataclass(frozen=True)
@@ -413,6 +415,14 @@ def _open_verified_chaser_export_source(
             expected_semantic_schema_id=schema_id,
             expected_semantic_schema_version=schema_version,
         )
+        if (
+            family == EPOCH_BEHAVIOR_FAMILY
+            and components[family].component_name != EPOCH_BEHAVIOR_COMPONENT_NAME
+        ):
+            raise ValueError(
+                "Current epoch-behavior export authority must bind the exact "
+                f"{EPOCH_BEHAVIOR_COMPONENT_NAME!r} component."
+            )
     required = _required_chaser_component_families(tables)
     missing = sorted(required - set(components))
     if missing:
@@ -2425,7 +2435,12 @@ def _latest_epoch_behavior_component(
         if candidate and candidate in keys:
             component = parent[candidate]
             attrs = _attrs_dict(component)
-            if str(attrs.get("schema_id") or "") in {"", EPOCH_BEHAVIOR_SCHEMA_ID}:
+            if (
+                candidate == EPOCH_BEHAVIOR_COMPONENT_NAME
+                and str(attrs.get("schema_id") or "") == EPOCH_BEHAVIOR_SCHEMA_ID
+                and _safe_int(attrs.get("schema_version"))
+                == EPOCH_BEHAVIOR_SCHEMA_VERSION
+            ):
                 return (
                     component,
                     candidate,
@@ -2439,10 +2454,13 @@ def _latest_epoch_behavior_component(
         except Exception:
             continue
         attrs = _attrs_dict(component)
-        if str(attrs.get("status") or "").strip() == "complete" and str(attrs.get("schema_id") or "") in {
-            "",
-            EPOCH_BEHAVIOR_SCHEMA_ID,
-        }:
+        if (
+            name == EPOCH_BEHAVIOR_COMPONENT_NAME
+            and str(attrs.get("status") or "").strip() == "complete"
+            and str(attrs.get("schema_id") or "") == EPOCH_BEHAVIOR_SCHEMA_ID
+            and _safe_int(attrs.get("schema_version"))
+            == EPOCH_BEHAVIOR_SCHEMA_VERSION
+        ):
             complete_candidates.append(name)
     if not complete_candidates:
         return None, None, "no complete epoch_behavior_summary component"
