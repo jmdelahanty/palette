@@ -8,12 +8,16 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from fisheye.analysis.chaser_epoch_behavior_summary import (
+    AUTHORITATIVE_EXECUTION_MODE,
     DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM,
     DEFAULT_COMPONENT_NAME,
     DEFAULT_WALL_BAND_MM,
+    LEGACY_DEFAULT_COMPONENT_NAME,
+    LEGACY_EXECUTION_MODE,
     REQUIRED_TRACK_SCOPE,
     build_chaser_epoch_behavior_summary_result,
     write_chaser_epoch_behavior_summary_component,
+    write_legacy_chaser_epoch_behavior_summary_component,
 )
 from fisheye.registry.db import RegistryPaths
 from fisheye.shared.json_safety import json_attr_safe
@@ -34,11 +38,20 @@ def run_for_targets(
     track_kinematics_scope: str,
     track_id: int | None,
     speed_level: str | None,
+    execution_mode: str = AUTHORITATIVE_EXECUTION_MODE,
     center_distance_bin_width_mm: float = DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM,
     wall_band_mm: float = DEFAULT_WALL_BAND_MM,
     apply: bool = False,
     overwrite: bool = False,
 ) -> list[dict[str, Any]]:
+    mode = str(execution_mode).strip()
+    if mode not in {AUTHORITATIVE_EXECUTION_MODE, LEGACY_EXECUTION_MODE}:
+        raise ValueError(f"Unsupported epoch-summary execution mode {mode!r}.")
+    if mode == AUTHORITATIVE_EXECUTION_MODE and not str(speed_level or "").strip():
+        raise ValueError(
+            "Authoritative epoch-summary execution requires an explicit speed_level "
+            "before target processing."
+        )
     results: list[dict[str, Any]] = []
     for target in targets:
         zarr_path = Path(str(target["zarr_path"]))
@@ -59,6 +72,7 @@ def run_for_targets(
                 track_kinematics_scope=track_kinematics_scope,
                 track_id=track_id,
                 speed_level=speed_level,
+                execution_mode=mode,
                 center_distance_bin_width_mm=float(center_distance_bin_width_mm),
                 wall_band_mm=float(wall_band_mm),
             )
@@ -87,7 +101,12 @@ def run_for_targets(
                 "warnings": list(result.warnings),
             }
             if apply:
-                applied_path = write_chaser_epoch_behavior_summary_component(
+                writer = (
+                    write_chaser_epoch_behavior_summary_component
+                    if mode == AUTHORITATIVE_EXECUTION_MODE
+                    else write_legacy_chaser_epoch_behavior_summary_component
+                )
+                applied_path = writer(
                     zarr_path,
                     result,
                     overwrite=overwrite,
@@ -107,6 +126,7 @@ def run_for_targets(
                 "source_swim_bout_run": source_swim_bout_run,
                 "source_track_kinematics_run": source_track_kinematics_run,
                 "component_name": component_name,
+                "execution_mode": mode,
                 "epoch_behavior_summary_path": applied_path,
                 "status": status,
                 "error": error,
@@ -145,6 +165,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-kinematics-scope", default=REQUIRED_TRACK_SCOPE)
     parser.add_argument("--track-id", type=int)
     parser.add_argument("--speed-level")
+    parser.add_argument(
+        "--legacy-v1-compatibility",
+        action="store_true",
+        help=(
+            "Explicitly run the permissive v1 compatibility builder/writer. "
+            "Authoritative v2 remains the default and requires --speed-level."
+        ),
+    )
     parser.add_argument("--center-distance-bin-width-mm", type=float, default=DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM)
     parser.add_argument("--wall-band-mm", type=float, default=DEFAULT_WALL_BAND_MM)
     parser.add_argument("--apply", action="store_true")
@@ -154,7 +182,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    execution_mode = (
+        LEGACY_EXECUTION_MODE
+        if args.legacy_v1_compatibility
+        else AUTHORITATIVE_EXECUTION_MODE
+    )
+    if (
+        execution_mode == AUTHORITATIVE_EXECUTION_MODE
+        and not str(args.speed_level or "").strip()
+    ):
+        parser.error("authoritative v2 requires --speed-level")
+    component_name = str(args.component_name)
+    if (
+        execution_mode == LEGACY_EXECUTION_MODE
+        and component_name == DEFAULT_COMPONENT_NAME
+    ):
+        component_name = LEGACY_DEFAULT_COMPONENT_NAME
     registry = None
     if args.zarr:
         targets = _explicit_zarr_targets(args.zarr)
@@ -177,12 +222,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     results = run_for_targets(
         targets,
         chaser_distance_run=str(args.chaser_distance_run),
-        component_name=str(args.component_name),
+        component_name=component_name,
         swim_bout_run=args.swim_bout_run,
         track_kinematics_run=args.track_kinematics_run,
         track_kinematics_scope=str(args.track_kinematics_scope),
         track_id=args.track_id,
         speed_level=args.speed_level,
+        execution_mode=execution_mode,
         center_distance_bin_width_mm=float(args.center_distance_bin_width_mm),
         wall_band_mm=float(args.wall_band_mm),
         apply=bool(args.apply),
@@ -190,6 +236,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     payload = {
         "apply": bool(args.apply),
+        "execution_mode": execution_mode,
         "registry": str(registry) if registry is not None else None,
         "recording_like": str(args.recording_like),
         "coverage_min": None if args.zarr or args.recordings_root else float(args.coverage_min),

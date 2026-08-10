@@ -468,6 +468,7 @@ interpretation.
 | Treating image `y` as math `y` | Flip `y` when computing angles with `atan2` |
 | Treating ROI coordinates as image coordinates | Check coordinate-space metadata and crop offsets |
 | Treating missing frames as zero speed | Use validity arrays and gap-aware path-distance fields |
+| Treating raw centroid jitter as biological speed | Select an explicit verified physical speed level, require `sample_valid & transition_valid`, and report the selected level in provenance |
 | Treating centered smoothing as causal | Use filtered or causal traces for onset timing |
 | Treating `vergence_gaze_deg` as the Johnson mean | Use `mean_eye_vergence_gaze_deg` for mean per-eye vergence |
 | Treating eye-axis angle as target fixation | Eye angle gives orientation; target tracking needs target coordinates too |

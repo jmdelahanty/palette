@@ -541,8 +541,8 @@ ANALYTICS_SURFACE_CLASSIFICATIONS: tuple[AnalyticsSurfaceClassification, ...] = 
         owner_module="fisheye.analysis.chaser_epoch_behavior_summary",
         owner_entrypoint="write_chaser_epoch_behavior_summary_component",
         component_parent="epoch_behavior_summary",
-        schema_id="palette.chaser.epoch_behavior_summary.v1",
-        schema_version=1,
+        schema_id="palette.chaser.epoch_behavior_summary.v2",
+        schema_version=2,
     ),
     _chaser_component(
         surface_id="chaser_egocentric_bearing",

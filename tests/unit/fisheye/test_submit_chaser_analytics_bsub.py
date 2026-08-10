@@ -68,6 +68,8 @@ def _render(
             "--skip-stimulus-epoch",
             "--skip-detection-occupancy",
             "--skip-chaser-distance",
+            "--speed-level",
+            "filtered",
             "--dry-run",
             *selectors,
         ],
@@ -111,9 +113,9 @@ def test_skipped_producers_resolve_authoritative_inputs_per_recording(
         assert config[f"{key}_SELECTION"] == "authoritative_latest_complete"
     assert "resolve_authoritative_run_name" in job_script
     assert 'chasers = parent[resolved]["chasers"]' in job_script
-    assert config["SPEED_LEVEL"] == "''"
-    assert 'if [[ -n "$SPEED_LEVEL" ]]' in job_script
-    assert 'epoch_speed_args+=(--speed-level "$SPEED_LEVEL")' in job_script
+    assert config["SPEED_LEVEL"] == "filtered"
+    assert '--speed-level "$SPEED_LEVEL"' in job_script
+    assert "epoch_speed_args" not in job_script
     assert "export PALETTE_DISABLE_REGISTRY_WRITES=1" in job_script
     assert '"registry_write_mode": "deferred_to_serial_finalizer"' in job_script
     assert '"schema_version": 2' in job_script
@@ -283,3 +285,41 @@ def test_profile_selection_rejects_explicitly_disabled_dependency(
 
     assert result.returncode != 0
     assert "requires explicitly disabled" in result.stderr
+
+
+def test_enabled_epoch_summary_requires_explicit_speed_before_rendering(
+    tmp_path: Path,
+) -> None:
+    palette_repo = tmp_path / "palette-checkout"
+    _build_clean_palette_checkout(palette_repo)
+    zarr_path = tmp_path / "recording" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--zarr",
+            str(zarr_path),
+            "--palette-repo",
+            str(palette_repo),
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--run-id",
+            "missing_speed",
+            "--skip-movement",
+            "--skip-stimulus-epoch",
+            "--skip-detection-occupancy",
+            "--skip-chaser-distance",
+            "--dry-run",
+        ],
+        cwd=palette_repo,
+        check=False,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "PALETTE_PYTHON": sys.executable},
+    )
+
+    assert result.returncode == 2
+    assert "--speed-level is required" in result.stderr
+    assert not (tmp_path / "logs" / "chaser_analytics_missing_speed" / "config.env").exists()

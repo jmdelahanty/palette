@@ -69,7 +69,7 @@ EPOCH_RUN_EXPLICIT=0
 CHASER_DISTANCE_RUN_EXPLICIT=0
 QUADRANT_OCCUPANCY_COMPONENT="quadrant_occupancy_v1_20260717"
 NEAR_FIELD_OCCUPANCY_COMPONENT="near_field_occupancy_v1_20260717"
-EPOCH_BEHAVIOR_COMPONENT="epoch_behavior_v1_20260717"
+EPOCH_BEHAVIOR_COMPONENT="kinematics_bouts_v2_20260810"
 EGOCENTRIC_COMPONENT="egocentric_bearing_v1"
 ESCAPE_FREEZE_COMPONENT="escape_freeze_chaser_{chaser_index}_v1_20260717"
 EYE_ANGLE_OUTPUT_RUN="eye_angles_chaser_gaze_v1_20260714"
@@ -86,9 +86,8 @@ OCCUPANCY_SMOOTH_SIGMA=1.0
 CHASER_THRESHOLD_MM=20.0
 CHASER_DISTRIBUTION_BIN_WIDTH_MM=2.0
 TRACK_ID=0
-# Optional physical track-kinematics override for epoch speed/path summaries.
-# Empty means follow the persisted swim-bout detector signal's physical source
-# level (commonly speed_exponential derived from speed_filtered).
+# Required physical track-kinematics level for authoritative epoch speed/path
+# summaries. It is intentionally not inferred from the bout detector signal.
 SPEED_LEVEL=""
 EGOCENTRIC_DISTANCE_BIN_WIDTH_MM=""
 EGOCENTRIC_BEARING_BIN_WIDTH_DEG=""
@@ -107,7 +106,7 @@ apply_preset() {
       CHASER_DISTANCE_RUN="chaser_distance_chaser_v1_20260717"
       QUADRANT_OCCUPANCY_COMPONENT="quadrant_occupancy_v1_20260717"
       NEAR_FIELD_OCCUPANCY_COMPONENT="near_field_occupancy_v1_20260717"
-      EPOCH_BEHAVIOR_COMPONENT="epoch_behavior_v1_20260717"
+      EPOCH_BEHAVIOR_COMPONENT="kinematics_bouts_v2_20260810"
       EGOCENTRIC_COMPONENT="egocentric_bearing_v1_20260717"
       ESCAPE_FREEZE_COMPONENT="escape_freeze_chaser_{chaser_index}_v1_20260717"
       ;;
@@ -120,7 +119,7 @@ apply_preset() {
       CHASER_DISTANCE_RUN="goodcopbadcop_chaser_distance_v1_20260617"
       QUADRANT_OCCUPANCY_COMPONENT="quadrant_occupancy_v1_20260717"
       NEAR_FIELD_OCCUPANCY_COMPONENT="near_field_occupancy_v1_20260717"
-      EPOCH_BEHAVIOR_COMPONENT="epoch_behavior_v1_20260717"
+      EPOCH_BEHAVIOR_COMPONENT="kinematics_bouts_v2_20260810"
       EGOCENTRIC_COMPONENT="egocentric_bearing_v1"
       ESCAPE_FREEZE_COMPONENT="escape_freeze_chaser_{chaser_index}_v1_20260717"
       ;;
@@ -134,7 +133,7 @@ apply_preset() {
       CHASER_DISTANCE_RUN="chaser_distance_chaser_v2_20260717"
       QUADRANT_OCCUPANCY_COMPONENT="quadrant_occupancy_v2_20260717"
       NEAR_FIELD_OCCUPANCY_COMPONENT="near_field_occupancy_v2_20260717"
-      EPOCH_BEHAVIOR_COMPONENT="epoch_behavior_v2_20260717"
+      EPOCH_BEHAVIOR_COMPONENT="kinematics_bouts_v2_20260810"
       EGOCENTRIC_COMPONENT="egocentric_bearing_v2_20260717"
       ESCAPE_FREEZE_COMPONENT="escape_freeze_chaser_{chaser_index}_v2_20260717"
       CHASER_BOUT_RESPONSE_COMPONENT="chaser_bout_response_v2_20260717"
@@ -151,7 +150,7 @@ apply_preset() {
       CHASER_DISTANCE_RUN="chaser_distance_redscare_v1_20260708"
       QUADRANT_OCCUPANCY_COMPONENT="quadrant_occupancy_redscare_v1_20260708"
       NEAR_FIELD_OCCUPANCY_COMPONENT="near_field_occupancy_redscare_v1_20260708"
-      EPOCH_BEHAVIOR_COMPONENT="kinematics_bouts_v1"
+      EPOCH_BEHAVIOR_COMPONENT="kinematics_bouts_v2_20260810"
       EGOCENTRIC_COMPONENT="egocentric_bearing_redscare_v1_20260708"
       ESCAPE_FREEZE_COMPONENT="escape_freeze_chaser_{chaser_index}_redscare_v1_20260708"
       ;;
@@ -272,9 +271,9 @@ Parameters:
   --chaser-threshold-mm X
   --chaser-distribution-bin-width-mm X
   --track-id N
-  --speed-level NAME          Physical track speed for epoch summaries
-                              (default: detector signal's persisted physical source;
-                              does not select the bout detector signal).
+  --speed-level NAME          Required physical track speed for authoritative epoch
+                              summaries: raw, filtered, smoothed, or averaged. This
+                              does not select the bout detector signal.
   --egocentric-distance-bin-width-mm X
   --egocentric-bearing-bin-width-deg X
   --escape-chaser-index N     Selected chaser, or all_applicable (default).
@@ -602,6 +601,20 @@ if profile_selects_module chaser_bout_response; then RUN_CHASER_BOUT_RESPONSE=1;
 if profile_selects_module chaser_escape_events; then RUN_CHASER_ESCAPE_EVENTS=1; fi
 if profile_selects_module chaser_radial_occupancy; then RUN_CHASER_RADIAL_OCCUPANCY=1; fi
 if profile_selects_module chaser_response_regimes; then RUN_CHASER_RESPONSE_REGIMES=1; fi
+
+if [[ "$RUN_EPOCH_BEHAVIOR" == "1" ]]; then
+  if [[ -z "$SPEED_LEVEL" ]]; then
+    echo "--speed-level is required when chaser_epoch_behavior_summary is enabled." >&2
+    exit 2
+  fi
+  case "$SPEED_LEVEL" in
+    raw|filtered|smoothed|averaged) ;;
+    *)
+      echo "Unsupported --speed-level '$SPEED_LEVEL'; expected raw, filtered, smoothed, or averaged." >&2
+      exit 2
+      ;;
+  esac
+fi
 
 SELECTED_CHASER_MODULES_CSV="$(IFS=,; echo "${SELECTED_CHASER_MODULES[*]}")"
 EXPLICIT_ENABLE_CHASER_MODULES_CSV="$(IFS=,; echo "${ENABLE_CHASER_MODULES[*]}")"
@@ -1056,10 +1069,6 @@ if [[ "$RUN_NEAR_FIELD_OCCUPANCY" == "1" ]]; then
 fi
 
 if [[ "$RUN_EPOCH_BEHAVIOR" == "1" ]]; then
-  epoch_speed_args=()
-  if [[ -n "$SPEED_LEVEL" ]]; then
-    epoch_speed_args+=(--speed-level "$SPEED_LEVEL")
-  fi
   run_log_step epoch_behavior "$py" -m fisheye.analysis.chaser_epoch_behavior_summary \
     "$zarr_path" \
     --chaser-distance-run "$CHASER_DISTANCE_RUN" \
@@ -1068,7 +1077,7 @@ if [[ "$RUN_EPOCH_BEHAVIOR" == "1" ]]; then
     --track-kinematics-run "$TRACK_RUN" \
     --track-kinematics-scope offline \
     --track-id "$TRACK_ID" \
-    "${epoch_speed_args[@]}" \
+    --speed-level "$SPEED_LEVEL" \
     "${overwrite_args[@]}"
   published_component_args+=(--component "epoch_behavior_summary=$EPOCH_BEHAVIOR_COMPONENT")
 fi

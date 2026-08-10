@@ -38,8 +38,8 @@ modules:
 
   - id: chaser_epoch_behavior_summary
     implementation: fisheye.analysis.chaser_epoch_behavior_summary
-    schema_id: palette.chaser.epoch_behavior_summary.v1
-    schema_version: 1
+    schema_id: palette.chaser.epoch_behavior_summary.v2
+    schema_version: 2
     depends_on: [chaser_distance]
     execution_cardinality: recording
     default_enabled: true

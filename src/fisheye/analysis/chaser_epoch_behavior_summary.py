@@ -42,13 +42,19 @@ from fisheye.shared.run_lineage_fingerprint import (
 )
 from fisheye.shared.system_metadata import get_git_info
 
-SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v1"
-SCHEMA_VERSION = 1
+SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v2"
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v1"
+LEGACY_SCHEMA_VERSION = 1
 METHOD = "chaser_epoch_behavior_summary"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
+LEGACY_METHOD_VERSION = "1"
 COMPONENT_PARENT_NAME = "epoch_behavior_summary"
-DEFAULT_COMPONENT_NAME = "kinematics_bouts_v1"
+DEFAULT_COMPONENT_NAME = "kinematics_bouts_v2"
+LEGACY_DEFAULT_COMPONENT_NAME = "kinematics_bouts_v1"
 REQUIRED_TRACK_SCOPE = "offline"
+AUTHORITATIVE_EXECUTION_MODE = "authoritative_v2"
+LEGACY_EXECUTION_MODE = "legacy_v1_compatibility"
 DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM = 2.5
 DEFAULT_WALL_BAND_MM = 5.0
 DEFAULT_BOUT_DURATION_BIN_WIDTH_S = 0.02
@@ -74,6 +80,10 @@ class ChaserEpochBehaviorSummaryResult:
     zarr_path: str
     recording_id: str
     component_name: str
+    execution_mode: str
+    schema_id: str
+    schema_version: int
+    method_version: str
     chaser_distance_run_name: str
     chaser_distance_run_path: str
     source_track_kinematics_run: Optional[str]
@@ -150,8 +160,8 @@ def _load_windows(run_group: zarr.Group, *, fps: float) -> tuple[ChaserDistanceW
     for idx in range(n):
         start = int(starts[idx])
         end = int(ends[idx])
-        start_s = start / float(fps) if fps > 0 else float(idx)
-        end_s = (end + 1) / float(fps) if fps > 0 else float(idx + 1)
+        start_s = start / float(fps)
+        end_s = (end + 1) / float(fps)
         out.append(
             ChaserDistanceWindow(
                 window_id=int(ids[idx]) if idx < ids.shape[0] else int(idx),
@@ -232,6 +242,30 @@ def _speed_level_key(value: object | None) -> Optional[str]:
     return level
 
 
+def _require_positive_fps(value: object, *, source: str) -> float:
+    try:
+        fps = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{source} must declare a finite positive fps; observed {value!r}."
+        ) from exc
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError(
+            f"{source} must declare a finite positive fps; observed {value!r}."
+        )
+    return fps
+
+
+def _execution_mode(value: object) -> str:
+    mode = str(value or "").strip()
+    if mode not in {AUTHORITATIVE_EXECUTION_MODE, LEGACY_EXECUTION_MODE}:
+        raise ValueError(
+            "Unsupported epoch-summary execution mode; expected "
+            f"{AUTHORITATIVE_EXECUTION_MODE!r} or {LEGACY_EXECUTION_MODE!r}."
+        )
+    return mode
+
+
 def _resolve_speed_sources(
     root: zarr.Group,
     *,
@@ -240,6 +274,7 @@ def _resolve_speed_sources(
     track_kinematics_scope: str,
     track_id: int | None,
     speed_level: str | None,
+    execution_mode: str,
 ) -> tuple[
     Optional[Any],
     Optional[Any],
@@ -250,11 +285,31 @@ def _resolve_speed_sources(
     str,
     list[str],
 ]:
+    mode = _execution_mode(execution_mode)
+    if (
+        mode == AUTHORITATIVE_EXECUTION_MODE
+        and str(track_kinematics_scope).strip() != REQUIRED_TRACK_SCOPE
+    ):
+        raise ValueError(
+            "Authoritative epoch summary requires the canonical offline "
+            "track-kinematics scope."
+        )
+    source_speed_level = _speed_level_key(speed_level)
+    if mode == AUTHORITATIVE_EXECUTION_MODE and source_speed_level is None:
+        raise ValueError(
+            "Authoritative epoch summary requires an explicit --speed-level; "
+            "the historical implicit 'filtered' selection is available only in "
+            f"{LEGACY_EXECUTION_MODE!r}."
+        )
     warnings: list[str] = []
     swim_tables = None
     try:
         swim_tables = load_default_swim_bout_tables(root, run_name=swim_bout_run or "latest")
     except Exception as exc:
+        if mode == AUTHORITATIVE_EXECUTION_MODE:
+            raise ValueError(
+                "Authoritative epoch summary requires one verified swim-bout run."
+            ) from exc
         warnings.append(f"swim_bout_unavailable: {exc}")
 
     track_selector = str(track_kinematics_run or "").strip()
@@ -262,7 +317,6 @@ def _resolve_speed_sources(
         None if track_selector in {"", "latest"} else track_selector
     )
     source_track_id = track_id
-    source_speed_level = _speed_level_key(speed_level)
     speed_level_selection = (
         "explicit_physical_track_speed_level"
         if source_speed_level is not None
@@ -282,17 +336,21 @@ def _resolve_speed_sources(
             if swim_tables.candidate.track_id is not None
             else _safe_int(swim_tables.run_attrs.get("track_id"))
         )
-        if source_speed_level is None and swim_tables.signal.source_level:
+        if (
+            mode == LEGACY_EXECUTION_MODE
+            and source_speed_level is None
+            and swim_tables.signal.source_level
+        ):
             source_speed_level = _speed_level_key(swim_tables.signal.source_level)
             speed_level_selection = "persisted_swim_bout_signal_physical_source_level"
-        if source_speed_level is None:
+        if mode == LEGACY_EXECUTION_MODE and source_speed_level is None:
             source_speed_level = _speed_level_key(swim_tables.signal.speed_level)
             speed_level_selection = "persisted_swim_bout_signal_level"
     if source_track_run is None and track_selector == "latest":
         source_track_run = "latest"
     if source_track_id is None:
         source_track_id = 0
-    if source_speed_level is None:
+    if mode == LEGACY_EXECUTION_MODE and source_speed_level is None:
         source_speed_level = "filtered"
         speed_level_selection = "default_filtered_physical_track_speed_level"
 
@@ -308,9 +366,54 @@ def _resolve_speed_sources(
             )
             source_track_run = track.run_name
         except Exception as exc:
+            if mode == AUTHORITATIVE_EXECUTION_MODE:
+                raise ValueError(
+                    "Authoritative epoch summary requires one verified track-kinematics "
+                    f"run with speed level {source_speed_level!r}."
+                ) from exc
             warnings.append(f"track_kinematics_unavailable: {exc}")
     else:
-        warnings.append("track_kinematics_unavailable: no source track run resolved")
+        message = "track_kinematics_unavailable: no source track run resolved"
+        if mode == AUTHORITATIVE_EXECUTION_MODE:
+            raise ValueError(
+                "Authoritative epoch summary requires an exact source track run."
+            )
+        warnings.append(message)
+
+    if mode == AUTHORITATIVE_EXECUTION_MODE:
+        _require_authoritative_track_inputs(
+            track,
+            source_speed_level=source_speed_level,
+        )
+        bound_bout_track_run = (
+            str(swim_tables.candidate.source_track_kinematics_run or "").strip()
+            or str(swim_tables.run_attrs.get("source_track_kinematics_run") or "").strip()
+        )
+        if not bound_bout_track_run:
+            raise ValueError(
+                "Authoritative swim-bout run lacks its source track-kinematics "
+                "run binding."
+            )
+        if bound_bout_track_run != str(source_track_run):
+            raise ValueError(
+                "Authoritative epoch-summary track differs from the track authority "
+                f"bound by the swim-bout run: {source_track_run!r} != "
+                f"{bound_bout_track_run!r}."
+            )
+        bound_bout_track_id = (
+            swim_tables.candidate.track_id
+            if swim_tables.candidate.track_id is not None
+            else _safe_int(swim_tables.run_attrs.get("track_id"))
+        )
+        if bound_bout_track_id is None:
+            raise ValueError(
+                "Authoritative swim-bout run lacks its source track-id binding."
+            )
+        if int(bound_bout_track_id) != int(source_track_id):
+            raise ValueError(
+                "Authoritative epoch-summary track id differs from the swim-bout "
+                f"authority: {source_track_id!r} != {bound_bout_track_id!r}."
+            )
     return (
         swim_tables,
         track,
@@ -321,6 +424,66 @@ def _resolve_speed_sources(
         speed_level_selection,
         warnings,
     )
+
+
+def _require_authoritative_track_inputs(
+    track: Any,
+    *,
+    source_speed_level: Optional[str],
+) -> None:
+    if track is None or source_speed_level is None:
+        raise ValueError(
+            "Authoritative epoch summary requires verified track and speed sources."
+        )
+    raw_frames = np.asarray(track.frame_indices)
+    if raw_frames.ndim != 1:
+        raise ValueError("Authoritative epoch-summary frame_indices must be rank 1.")
+    frames = raw_frames.astype(np.int64, copy=False)
+    if frames.size == 0:
+        raise ValueError("Authoritative epoch-summary track has no frame rows.")
+    if frames.size > 1 and np.any(np.diff(frames) <= 0):
+        raise ValueError(
+            "Authoritative epoch-summary frame_indices must be strictly increasing."
+        )
+    for name in ("sample_valid", "transition_valid"):
+        values = getattr(track, name, None)
+        if values is None:
+            raise ValueError(
+                "Authoritative epoch summary requires persisted track validity array "
+                f"{name!r}."
+            )
+        if np.asarray(values).reshape(-1).shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"Track validity array {name!r} is not aligned to frame_indices."
+            )
+    for collection_name in (
+        "speed_mm_by_level",
+        "frame_path_distance_mm_by_level",
+    ):
+        collection = getattr(track, collection_name, {})
+        values = collection.get(source_speed_level)
+        if values is None:
+            raise ValueError(
+                f"Authoritative epoch summary is missing {collection_name} for "
+                f"speed level {source_speed_level!r}."
+            )
+        if np.asarray(values).reshape(-1).shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"{collection_name}[{source_speed_level!r}] is not aligned to "
+                "frame_indices."
+            )
+
+
+def _require_matching_track_fps(track: Any, *, fps: float) -> None:
+    track_fps = _require_positive_fps(
+        getattr(track, "run_attrs", {}).get("fps"),
+        source="verified track-kinematics run attributes",
+    )
+    if not math.isclose(track_fps, fps, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError(
+            "Chaser-distance and track-kinematics FPS differ: "
+            f"{fps!r} != {track_fps!r}."
+        )
 
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -515,9 +678,11 @@ def _make_per_epoch_fish(
     source_speed_level: Optional[str],
     geometry: ArenaGeometry,
     wall_band_mm: float,
+    fps: float,
+    execution_mode: str,
 ) -> np.ndarray:
-    dtype = np.dtype(
-        [
+    mode = _execution_mode(execution_mode)
+    dtype_fields: list[tuple[str, Any]] = [
             ("window_id", np.int32),
             ("window_index", np.int32),
             ("window_label", "S96"),
@@ -568,7 +733,23 @@ def _make_per_epoch_fish(
             ("p95_inter_bout_interval_s", np.float64),
             ("inter_bout_interval_rate_per_min", np.float64),
         ]
-    )
+    if mode == AUTHORITATIVE_EXECUTION_MODE:
+        dtype_fields.extend(
+            [
+                ("valid_tracked_frame_count", np.int64),
+                ("valid_tracked_duration_s", np.float64),
+                ("valid_tracked_duration_source", "S64"),
+                ("motion_valid_sample_count", np.int64),
+                ("motion_validity_rule", "S64"),
+                ("wall_fraction_denominator_count", np.int64),
+                ("wall_fraction_denominator", "S64"),
+                ("bout_rate_denominator_s", np.float64),
+                ("bout_rate_denominator", "S64"),
+                ("inter_bout_interval_rate_denominator_s", np.float64),
+                ("inter_bout_interval_rate_denominator", "S64"),
+            ]
+        )
+    dtype = np.dtype(dtype_fields)
     out = np.zeros(len(windows), dtype=dtype)
     for name in out.dtype.names or ():
         if out.dtype[name].kind == "f":
@@ -593,16 +774,22 @@ def _make_per_epoch_fish(
     speed_frames = np.zeros(0, dtype=np.int64)
     speed_values = np.asarray([], dtype=np.float64)
     path_values = np.asarray([], dtype=np.float64)
+    track_sample_valid = np.zeros(0, dtype=bool)
+    track_transition_valid = np.zeros(0, dtype=bool)
     if track is not None:
         speed_frames = np.asarray(track.frame_indices, dtype=np.int64)
         if source_speed_level and source_speed_level in track.speed_mm_by_level:
             speed_values = np.asarray(track.speed_mm_by_level[source_speed_level], dtype=np.float64)
-        elif "filtered" in track.speed_mm_by_level:
+        elif mode == LEGACY_EXECUTION_MODE and "filtered" in track.speed_mm_by_level:
             speed_values = np.asarray(track.speed_mm_by_level["filtered"], dtype=np.float64)
         if source_speed_level and source_speed_level in track.frame_path_distance_mm_by_level:
             path_values = np.asarray(track.frame_path_distance_mm_by_level[source_speed_level], dtype=np.float64)
-        elif "filtered" in track.frame_path_distance_mm_by_level:
+        elif mode == LEGACY_EXECUTION_MODE and "filtered" in track.frame_path_distance_mm_by_level:
             path_values = np.asarray(track.frame_path_distance_mm_by_level["filtered"], dtype=np.float64)
+        if track.sample_valid is not None:
+            track_sample_valid = np.asarray(track.sample_valid, dtype=bool).reshape(-1)
+        if track.transition_valid is not None:
+            track_transition_valid = np.asarray(track.transition_valid, dtype=bool).reshape(-1)
 
     bouts = swim_tables.bouts if swim_tables is not None else np.zeros(0, dtype=[])
     intervals = swim_tables.inter_bout_intervals if swim_tables is not None else np.zeros(0, dtype=[])
@@ -619,7 +806,7 @@ def _make_per_epoch_fish(
     bout_net_heading_change_deg, bout_heading_path_deg = _bout_heading_values(
         bouts=bouts,
         track=track,
-        fps=float(run_group.attrs.get("fps") or 0.0),
+        fps=float(fps),
     )
 
     for window_index, window in enumerate(windows):
@@ -657,18 +844,34 @@ def _make_per_epoch_fish(
         else:
             wall_frame_count = 0
         wall_fraction = float(wall_frame_count) / float(center_count) if center_count > 0 else np.nan
-        wall_time_s = float(wall_frame_count) / float(run_group.attrs.get("fps") or 1.0) if wall_frame_count else 0.0
+        wall_time_s = float(wall_frame_count) / float(fps) if wall_frame_count else 0.0
 
-        speed_mask = (
+        track_window_mask = (
             (speed_frames >= int(window.start_frame))
             & (speed_frames <= int(window.end_frame))
+        )
+        if mode == AUTHORITATIVE_EXECUTION_MODE:
+            valid_tracked_mask = track_window_mask & track_sample_valid
+            motion_valid_mask = (
+                track_window_mask & track_sample_valid & track_transition_valid
+            )
+            valid_tracked_frame_count = int(np.count_nonzero(valid_tracked_mask))
+            valid_tracked_duration_s = float(valid_tracked_frame_count) / float(fps)
+        else:
+            valid_tracked_mask = track_window_mask
+            motion_valid_mask = track_window_mask
+            valid_tracked_frame_count = int(valid_frame_count)
+            valid_tracked_duration_s = duration_s
+
+        speed_mask = (
+            motion_valid_mask
             & (speed_frames.shape[0] == speed_values.shape[0])
         )
         speed_count, speed_mean, speed_median, speed_p05, speed_p95, speed_max = _finite_summary(
             speed_values[speed_mask] if speed_frames.shape[0] == speed_values.shape[0] else np.asarray([])
         )
         if speed_frames.shape[0] == path_values.shape[0]:
-            path_mask = (speed_frames >= int(window.start_frame)) & (speed_frames <= int(window.end_frame))
+            path_mask = motion_valid_mask
             finite_path = path_values[path_mask]
             total_path_mm = float(np.nansum(finite_path[np.isfinite(finite_path)])) if finite_path.size else np.nan
         else:
@@ -680,7 +883,16 @@ def _make_per_epoch_fish(
         else:
             bout_mask = _window_time_mask(bout_time_s, start_s=window.start_time_s, end_s=window.end_time_s)
         bout_count = int(np.sum(bout_mask))
-        bout_rate = (float(bout_count) / (duration_s / 60.0)) if duration_s > 0 else np.nan
+        rate_denominator_s = (
+            valid_tracked_duration_s
+            if mode == AUTHORITATIVE_EXECUTION_MODE
+            else duration_s
+        )
+        bout_rate = (
+            float(bout_count) / (rate_denominator_s / 60.0)
+            if rate_denominator_s > 0
+            else np.nan
+        )
         _dur_count, bout_duration_mean, bout_duration_median, _dur_p05, _dur_p95, _dur_max = _finite_summary(
             np.asarray(bout_duration_s, dtype=np.float64)[bout_mask] if bout_duration_s is not None else np.asarray([])
         )
@@ -739,9 +951,13 @@ def _make_per_epoch_fish(
         interval_count, interval_mean, interval_median, interval_p05, interval_p95, _interval_max = _finite_summary(
             interval_values[interval_mask] if interval_values.size else np.asarray([])
         )
-        interval_rate = (float(interval_count) / (duration_s / 60.0)) if duration_s > 0 else np.nan
+        interval_rate = (
+            float(interval_count) / (rate_denominator_s / 60.0)
+            if rate_denominator_s > 0
+            else np.nan
+        )
 
-        out[window_index] = (
+        row: tuple[Any, ...] = (
             int(window.window_id),
             int(window_index),
             str(window.label).encode("utf-8", "ignore")[:95],
@@ -792,6 +1008,21 @@ def _make_per_epoch_fish(
             interval_p95,
             interval_rate,
         )
+        if mode == AUTHORITATIVE_EXECUTION_MODE:
+            row += (
+                int(valid_tracked_frame_count),
+                float(valid_tracked_duration_s),
+                b"track_kinematics.sample_valid_count_over_fps",
+                int(np.count_nonzero(motion_valid_mask)),
+                b"sample_valid_and_transition_valid",
+                int(center_count),
+                b"valid_in_arena_center_samples",
+                float(valid_tracked_duration_s),
+                b"valid_tracked_duration_s",
+                float(valid_tracked_duration_s),
+                b"valid_tracked_duration_s",
+            )
+        out[window_index] = row
     return out
 
 
@@ -895,9 +1126,9 @@ def _make_center_distance_histogram(
 def _make_per_epoch_bouts(
     *,
     windows: Sequence[ChaserDistanceWindow],
-    run_group: zarr.Group,
     swim_tables: Optional[Any],
     track: Optional[Any],
+    fps: float,
 ) -> np.ndarray:
     dtype = np.dtype(
         [
@@ -928,7 +1159,6 @@ def _make_per_epoch_bouts(
         return np.zeros(0, dtype=dtype)
 
     bouts = swim_tables.bouts
-    fps = float(run_group.attrs.get("fps") or 0.0)
     bout_event_frame = _first_nonnegative_frame(bouts, "peak_frame", "core_start_frame", "start_frame")
     bout_time_s = _structured_field(bouts, "peak_time_s", "start_time_s", "start_s")
     start_frame, end_frame = _bout_frame_bounds(bouts, fps=fps)
@@ -1304,9 +1534,11 @@ def build_chaser_epoch_behavior_summary_result(
     track_kinematics_scope: str = REQUIRED_TRACK_SCOPE,
     track_id: int | None = None,
     speed_level: str | None = None,
+    execution_mode: str = AUTHORITATIVE_EXECUTION_MODE,
     center_distance_bin_width_mm: float = DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM,
     wall_band_mm: float = DEFAULT_WALL_BAND_MM,
 ) -> ChaserEpochBehaviorSummaryResult:
+    mode = _execution_mode(execution_mode)
     archive = Path(zarr_path)
     root = _open_root(archive, mode="r")
     distance, run_name, run_path = _resolve_chaser_distance_run(
@@ -1318,7 +1550,10 @@ def build_chaser_epoch_behavior_summary_result(
     distance.require_behavior_authority()
     run_group = root[run_path]
     attrs = _attrs_dict(run_group)
-    fps = float(attrs.get("fps") or 1.0)
+    fps = _require_positive_fps(
+        attrs.get("fps"),
+        source=f"{run_path} attributes",
+    )
     windows = _load_windows(run_group, fps=fps)
     if not windows:
         raise ValueError(f"{run_path} has no epoch_summary windows.")
@@ -1339,7 +1574,10 @@ def build_chaser_epoch_behavior_summary_result(
         track_kinematics_scope=track_kinematics_scope,
         track_id=track_id,
         speed_level=speed_level,
+        execution_mode=mode,
     )
+    if mode == AUTHORITATIVE_EXECUTION_MODE:
+        _require_matching_track_fps(track, fps=fps)
     geometry, geometry_notes = _resolve_arena_geometry(root, run_group)
     warnings.extend(geometry_notes)
     if geometry.shape != "circle":
@@ -1352,13 +1590,15 @@ def build_chaser_epoch_behavior_summary_result(
         source_speed_level=source_speed_level,
         geometry=geometry,
         wall_band_mm=float(wall_band_mm),
+        fps=fps,
+        execution_mode=mode,
     )
     per_epoch_chaser = _make_per_epoch_chaser(windows=windows, run_group=run_group)
     per_epoch_bouts = _make_per_epoch_bouts(
         windows=windows,
-        run_group=run_group,
         swim_tables=swim_tables,
         track=track,
+        fps=fps,
     )
     per_epoch_bout_histograms = _make_per_epoch_bout_histograms(
         windows=windows,
@@ -1382,6 +1622,18 @@ def build_chaser_epoch_behavior_summary_result(
         zarr_path=str(archive),
         recording_id=recording_id,
         component_name=str(component_name),
+        execution_mode=mode,
+        schema_id=SCHEMA_ID if mode == AUTHORITATIVE_EXECUTION_MODE else LEGACY_SCHEMA_ID,
+        schema_version=(
+            SCHEMA_VERSION
+            if mode == AUTHORITATIVE_EXECUTION_MODE
+            else LEGACY_SCHEMA_VERSION
+        ),
+        method_version=(
+            METHOD_VERSION
+            if mode == AUTHORITATIVE_EXECUTION_MODE
+            else LEGACY_METHOD_VERSION
+        ),
         chaser_distance_run_name=run_name,
         chaser_distance_run_path=run_path,
         source_track_kinematics_run=source_track_run,
@@ -1409,14 +1661,100 @@ def build_chaser_epoch_behavior_summary_result(
     )
 
 
-@sealed_chaser_component_writer(
-    component_family=COMPONENT_PARENT_NAME,
-    semantic_schema_id=SCHEMA_ID,
-    semantic_schema_version=SCHEMA_VERSION,
-    method_id=METHOD,
-    method_version=METHOD_VERSION,
-)
-def write_chaser_epoch_behavior_summary_component(
+def _validate_result_publication_identity(
+    result: ChaserEpochBehaviorSummaryResult,
+    *,
+    expected_mode: str,
+    expected_schema_id: str,
+    expected_schema_version: int,
+    expected_method_version: str,
+) -> None:
+    observed = (
+        result.execution_mode,
+        result.schema_id,
+        result.schema_version,
+        result.method_version,
+    )
+    expected = (
+        expected_mode,
+        expected_schema_id,
+        expected_schema_version,
+        expected_method_version,
+    )
+    if observed != expected:
+        raise ValueError(
+            "Epoch-summary result does not match the selected publication contract: "
+            f"expected={expected!r}, observed={observed!r}."
+        )
+    if expected_mode != AUTHORITATIVE_EXECUTION_MODE:
+        return
+    missing = [
+        field
+        for field in (
+            "source_track_kinematics_run",
+            "source_track_kinematics_scope",
+            "source_track_kinematics_track_path",
+            "source_speed_level",
+            "source_swim_bout_run",
+            "source_swim_bout_path",
+            "source_swim_bout_level_path",
+        )
+        if not str(getattr(result, field) or "").strip()
+    ]
+    if missing:
+        raise ValueError(
+            "Authoritative epoch-summary publication lacks required source bindings: "
+            + ", ".join(missing)
+        )
+    if result.source_track_kinematics_track_id is None:
+        raise ValueError(
+            "Authoritative epoch-summary publication lacks its exact source track id."
+        )
+    if result.source_track_kinematics_scope != REQUIRED_TRACK_SCOPE:
+        raise ValueError(
+            "Authoritative epoch-summary publication requires the canonical offline "
+            "track-kinematics scope."
+        )
+    if result.source_speed_level_selection != "explicit_physical_track_speed_level":
+        raise ValueError(
+            "Authoritative epoch-summary publication requires an explicitly selected "
+            "physical track speed level."
+        )
+    _require_positive_fps(result.fps, source="epoch-summary result")
+    source_warning_prefixes = (
+        "swim_bout_unavailable:",
+        "track_kinematics_unavailable:",
+    )
+    if any(
+        str(warning).startswith(source_warning_prefixes)
+        for warning in result.warnings
+    ):
+        raise ValueError(
+            "Authoritative epoch-summary publication cannot complete with missing "
+            "speed or bout sources."
+        )
+    expected_fields = {
+        "valid_tracked_frame_count",
+        "valid_tracked_duration_s",
+        "valid_tracked_duration_source",
+        "motion_valid_sample_count",
+        "motion_validity_rule",
+        "wall_fraction_denominator_count",
+        "wall_fraction_denominator",
+        "bout_rate_denominator_s",
+        "bout_rate_denominator",
+        "inter_bout_interval_rate_denominator_s",
+        "inter_bout_interval_rate_denominator",
+    }
+    observed_fields = set(result.per_epoch_fish.dtype.names or ())
+    if not expected_fields.issubset(observed_fields):
+        raise ValueError(
+            "Authoritative epoch-summary table lacks required denominator/validity "
+            f"receipts: {sorted(expected_fields - observed_fields)!r}."
+        )
+
+
+def _write_chaser_epoch_behavior_summary_payload(
     zarr_path: Path | str,
     result: ChaserEpochBehaviorSummaryResult,
     *,
@@ -1440,7 +1778,21 @@ def write_chaser_epoch_behavior_summary_component(
         component,
         "per_epoch_fish",
         result.per_epoch_fish,
-        {"row_axis": "stimulus_epoch_windows"},
+        {
+            "row_axis": "stimulus_epoch_windows",
+            "execution_mode": result.execution_mode,
+            "speed_path_validity_rule": (
+                "sample_valid_and_transition_valid"
+                if result.execution_mode == AUTHORITATIVE_EXECUTION_MODE
+                else "legacy_unfiltered_window_membership"
+            ),
+            "rate_denominator": (
+                "valid_tracked_duration_s"
+                if result.execution_mode == AUTHORITATIVE_EXECUTION_MODE
+                else "wall_clock_window_duration_s"
+            ),
+            "wall_fraction_denominator": "valid_in_arena_center_samples",
+        },
     )
     write_columnar_dataset(
         component,
@@ -1519,6 +1871,23 @@ def write_chaser_epoch_behavior_summary_component(
         "bout_heading_bin_width_deg": float(DEFAULT_BOUT_HEADING_BIN_WIDTH_DEG),
         "inter_bout_interval_bin_width_s": float(DEFAULT_IBI_BIN_WIDTH_S),
         "histogram_bin_contract": "analysis_owned_shared_bins_per_metric_within_component",
+        "execution_mode": result.execution_mode,
+        "speed_path_validity_rule": (
+            "sample_valid_and_transition_valid"
+            if result.execution_mode == AUTHORITATIVE_EXECUTION_MODE
+            else "legacy_unfiltered_window_membership"
+        ),
+        "rate_denominator": (
+            "valid_tracked_duration_s"
+            if result.execution_mode == AUTHORITATIVE_EXECUTION_MODE
+            else "wall_clock_window_duration_s"
+        ),
+        "valid_tracked_duration_semantics": (
+            "count of persisted track sample_valid rows in the inclusive epoch divided by fps"
+            if result.execution_mode == AUTHORITATIVE_EXECUTION_MODE
+            else "not_available_in_legacy_v1"
+        ),
+        "wall_fraction_denominator": "valid_in_arena_center_samples",
     }
     summary = {
         "epoch_labels": [
@@ -1536,10 +1905,11 @@ def write_chaser_epoch_behavior_summary_component(
     component.attrs.update(
         json_attr_safe(
             {
-                "schema_id": SCHEMA_ID,
-                "schema_version": SCHEMA_VERSION,
+                "schema_id": result.schema_id,
+                "schema_version": result.schema_version,
                 "method": METHOD,
-                "method_version": METHOD_VERSION,
+                "method_version": result.method_version,
+                "execution_mode": result.execution_mode,
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "component_name": component_name,
                 "recording_id": result.recording_id,
@@ -1574,12 +1944,12 @@ def write_chaser_epoch_behavior_summary_component(
         build_run_lineage_payload(
             run_family=f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}",
             analysis_schema={
-                "schema_id": SCHEMA_ID,
-                "schema_version": SCHEMA_VERSION,
+                "schema_id": result.schema_id,
+                "schema_version": result.schema_version,
                 "row_axis": "fish_recording",
             },
             method=METHOD,
-            method_version=METHOD_VERSION,
+            method_version=result.method_version,
             source_refs=source_refs,
             parameters=parameters,
             code={
@@ -1593,6 +1963,74 @@ def write_chaser_epoch_behavior_summary_component(
     return f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{component_name}"
 
 
+@sealed_chaser_component_writer(
+    component_family=COMPONENT_PARENT_NAME,
+    semantic_schema_id=SCHEMA_ID,
+    semantic_schema_version=SCHEMA_VERSION,
+    method_id=METHOD,
+    method_version=METHOD_VERSION,
+)
+def write_chaser_epoch_behavior_summary_component(
+    zarr_path: Path | str,
+    result: ChaserEpochBehaviorSummaryResult,
+    *,
+    overwrite: bool = False,
+    _chaser_component_staging_capability: object | None = None,
+) -> str:
+    """Publish one strict v2 epoch summary through the sealed writer boundary."""
+
+    require_chaser_component_staging_capability(
+        _chaser_component_staging_capability
+    )
+    _validate_result_publication_identity(
+        result,
+        expected_mode=AUTHORITATIVE_EXECUTION_MODE,
+        expected_schema_id=SCHEMA_ID,
+        expected_schema_version=SCHEMA_VERSION,
+        expected_method_version=METHOD_VERSION,
+    )
+    return _write_chaser_epoch_behavior_summary_payload(
+        zarr_path,
+        result,
+        overwrite=overwrite,
+        _chaser_component_staging_capability=_chaser_component_staging_capability,
+    )
+
+
+@sealed_chaser_component_writer(
+    component_family=COMPONENT_PARENT_NAME,
+    semantic_schema_id=LEGACY_SCHEMA_ID,
+    semantic_schema_version=LEGACY_SCHEMA_VERSION,
+    method_id=METHOD,
+    method_version=LEGACY_METHOD_VERSION,
+)
+def write_legacy_chaser_epoch_behavior_summary_component(
+    zarr_path: Path | str,
+    result: ChaserEpochBehaviorSummaryResult,
+    *,
+    overwrite: bool = False,
+    _chaser_component_staging_capability: object | None = None,
+) -> str:
+    """Publish the explicitly requested historical v1 compatibility schema."""
+
+    require_chaser_component_staging_capability(
+        _chaser_component_staging_capability
+    )
+    _validate_result_publication_identity(
+        result,
+        expected_mode=LEGACY_EXECUTION_MODE,
+        expected_schema_id=LEGACY_SCHEMA_ID,
+        expected_schema_version=LEGACY_SCHEMA_VERSION,
+        expected_method_version=LEGACY_METHOD_VERSION,
+    )
+    return _write_chaser_epoch_behavior_summary_payload(
+        zarr_path,
+        result,
+        overwrite=overwrite,
+        _chaser_component_staging_capability=_chaser_component_staging_capability,
+    )
+
+
 def run_for_zarr(
     zarr_path: Path | str,
     *,
@@ -1603,6 +2041,7 @@ def run_for_zarr(
     track_kinematics_scope: str = REQUIRED_TRACK_SCOPE,
     track_id: int | None = None,
     speed_level: str | None = None,
+    execution_mode: str = AUTHORITATIVE_EXECUTION_MODE,
     center_distance_bin_width_mm: float = DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM,
     wall_band_mm: float = DEFAULT_WALL_BAND_MM,
     overwrite: bool = False,
@@ -1616,14 +2055,16 @@ def run_for_zarr(
         track_kinematics_scope=track_kinematics_scope,
         track_id=track_id,
         speed_level=speed_level,
+        execution_mode=execution_mode,
         center_distance_bin_width_mm=float(center_distance_bin_width_mm),
         wall_band_mm=float(wall_band_mm),
     )
-    return write_chaser_epoch_behavior_summary_component(
-        zarr_path,
-        result,
-        overwrite=overwrite,
+    writer = (
+        write_chaser_epoch_behavior_summary_component
+        if result.execution_mode == AUTHORITATIVE_EXECUTION_MODE
+        else write_legacy_chaser_epoch_behavior_summary_component
     )
+    return writer(zarr_path, result, overwrite=overwrite)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1636,6 +2077,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-kinematics-scope", default=REQUIRED_TRACK_SCOPE)
     parser.add_argument("--track-id", type=int)
     parser.add_argument("--speed-level")
+    parser.add_argument(
+        "--legacy-v1-compatibility",
+        action="store_true",
+        help=(
+            "Explicitly use the historical permissive v1 schema. This mode may "
+            "default speed level and tolerate missing maintained sources; it is not "
+            "an authoritative production result."
+        ),
+    )
     parser.add_argument("--center-distance-bin-width-mm", type=float, default=DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM)
     parser.add_argument("--wall-band-mm", type=float, default=DEFAULT_WALL_BAND_MM)
     parser.add_argument("--overwrite", action="store_true")
@@ -1653,6 +2103,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         track_kinematics_scope=args.track_kinematics_scope,
         track_id=args.track_id,
         speed_level=args.speed_level,
+        execution_mode=(
+            LEGACY_EXECUTION_MODE
+            if args.legacy_v1_compatibility
+            else AUTHORITATIVE_EXECUTION_MODE
+        ),
         center_distance_bin_width_mm=args.center_distance_bin_width_mm,
         wall_band_mm=args.wall_band_mm,
         overwrite=bool(args.overwrite),

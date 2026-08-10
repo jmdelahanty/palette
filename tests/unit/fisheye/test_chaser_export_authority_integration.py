@@ -44,6 +44,10 @@ from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_epoch_behavior_summary import (
     ChaserEpochBehaviorSummaryResult,
+    LEGACY_EXECUTION_MODE,
+    LEGACY_METHOD_VERSION,
+    LEGACY_SCHEMA_ID,
+    LEGACY_SCHEMA_VERSION,
     _load_windows,
     _make_center_distance_histogram,
     _make_per_epoch_bout_histograms,
@@ -52,7 +56,7 @@ from fisheye.analysis.chaser_epoch_behavior_summary import (
     _make_per_epoch_fish,
     _make_per_epoch_inter_bout_interval_histograms,
     _resolve_arena_geometry,
-    write_chaser_epoch_behavior_summary_component,
+    write_legacy_chaser_epoch_behavior_summary_component,
 )
 from fisheye.analysis.chaser_egocentric_bearing import (
     build_chaser_egocentric_bearing_result,
@@ -378,9 +382,9 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
     geometry, _geometry_notes = _resolve_arena_geometry(root, run)
     empty_bouts = _make_per_epoch_bouts(
         windows=windows,
-        run_group=run,
         swim_tables=None,
         track=None,
+        fps=snapshot.fps,
     )
     per_epoch_bouts = np.zeros(1, dtype=empty_bouts.dtype)
     per_epoch_bouts["window_id"] = windows[0].window_id
@@ -418,6 +422,10 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         zarr_path=str(source),
         recording_id=snapshot.recording_id,
         component_name="export_fixture_v1",
+        execution_mode=LEGACY_EXECUTION_MODE,
+        schema_id=LEGACY_SCHEMA_ID,
+        schema_version=LEGACY_SCHEMA_VERSION,
+        method_version=LEGACY_METHOD_VERSION,
         chaser_distance_run_name=snapshot.run_name,
         chaser_distance_run_path=snapshot.run_path,
         source_track_kinematics_run=None,
@@ -440,6 +448,8 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
             source_speed_level=None,
             geometry=geometry,
             wall_band_mm=5.0,
+            fps=snapshot.fps,
+            execution_mode=LEGACY_EXECUTION_MODE,
         ),
         per_epoch_chaser=_make_per_epoch_chaser(
             windows=windows,
@@ -469,7 +479,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         warnings=(),
     )
     component_path = str(
-        write_chaser_epoch_behavior_summary_component(
+        write_legacy_chaser_epoch_behavior_summary_component(
             source,
             result,
             overwrite=True,
