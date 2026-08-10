@@ -252,3 +252,83 @@ with ≥30 s gaps; the recovery curve then SETS the final ISI: correct spacing
 is the spacing at which freeze probability visibly returns toward baseline
 between chases. If it doesn't return, the session is still saturated — adjust
 by curve, not by feel.
+
+### Implementation status (2026-08-10) and parameter-budget correction
+
+Citrus reports implementation of `fixed_n_min_gap_v1` (legacy mode named
+`bernoulli_tonic_v1`; absent field = legacy) with the exact sort-and-transform
+sampler (deterministic `splitmix64_u53_v1`), planned-vs-realized separation
+(`/chaser_schedule/planned/step_N`, onset due/missed + actual motion
+start/end events, `clock_source = protocol_step_steady_clock`), schedule
+folded into the semantic hash, a 512-seed property test, and a headless
+example H5. Palette must verify this report against that H5 before implementing
+the importer. A0 must use realized, not planned, onsets.
+
+**However, the first evaluated protocol candidate (goodbatbadbat: T=180 s,
+n=4, min_gap=30, lead_in=45, tail_guard=29) is over-constrained and defeats
+the design intent:**
+- usable = (180−29) − 45 − 3×30 = **16 s**; expected extra spacing per gap =
+  usable/(n+1) = 3.2 s → typical schedules are quasi-periodic at ~33 s.
+  First sampled schedule (seed 20260810): onsets 45.7/78.3/110.2/142.4 →
+  gaps 32.6/31.8/32.2 s. Functionally the rejected fixed-interval design;
+  each onset sits in a learnable 16 s window.
+- min_gap is onset-to-onset, but the episode is 19 s of chaser activity
+  (10 positioning + 5 chase + 4 retreat) + 10 s cooldown, so true quiet time
+  between chaser activity and next onset = gap − 19 ≈ 11-14 s — far below
+  the ≥30 s recovery target. Recovery-true spacing needs onset gap ≥ ~49 s.
+
+Budget identity: usable = (T − tail_guard) − lead_in − (n−1)·min_gap;
+expected gap = min_gap + usable/(n+1). Feasible corrections:
+- T=180, n=2, gap=49, lead=45 → usable 57 s, gaps 49-106 s (works; low dose)
+- T=180, n=3, gap=49, lead=30 → usable 23 s (near-periodic ~55 s; marginal)
+- **T=300, n=4, gap=49, lead=45 → usable 79 s, typical gap ~65 s
+  (preferred: keeps dose AND recovery AND jitter)**
+
+Open question for citrus before finalizing parameters: is the 10 s
+positioning phase VISIBLE to the fish? If yes, the paradigm is accidentally
+signaled (≤10 s warning cue). Either way, define whether `planned_onset` and
+all latency/hazard analyses reference positioning start or chase-motion
+start — i.e. what the fish can perceive. The actual-motion-start events
+carry the data; the definition is the missing piece.
+
+### Resolved semantics (citrus confirmation, 2026-08-10)
+
+Positioning IS visible: the aggressive chaser is continuously rendered and
+wanders between episodes, so the pre-chase cue is a CHANGE IN MOVEMENT
+POLICY (wander → directed approach to 30 mm stand-off), not an appearance.
+The paradigm is therefore partially signaled with a ~10 s ambiguous CS.
+
+Event/onset semantics (authoritative for all palette analyses):
+- `planned_onset_s_training` / `CHASER_SCHEDULED_ONSET_DUE` = planned
+  positioning start (scheduler bookkeeping, NOT a perceptual event).
+- `CHASER_POSITIONING_START/END` = visible pre-chase approach window
+  (potential warning cue).
+- `CHASER_CHASE_MOTION_START/END` = target-directed chase proper.
+
+Analysis bindings:
+- A0 frame table + A1 hazard: threat onset = realized
+  `CHASER_CHASE_MOTION_START`.
+- Positioning window (`POSITIONING_START` → `CHASE_MOTION_START`) is a
+  separate covariate/epoch — NOT part of the quiet interval, NOT part of
+  the chase.
+- Free experiment inside A4: anticipatory responding. If fish respond
+  (speed/heading change, wall-ward movement) during the positioning window
+  at rates above wander-matched control windows, they have learned the
+  movement-policy cue — a signaled-avoidance readout with zero additional
+  hardware. Control: sample virtual "positioning windows" from wander
+  periods matched for chaser-fish distance.
+
+Citrus metadata additions (agreed): `planned_onset_semantics =
+"positioning_start"`, `chase_motion_onset_event =
+"CHASER_CHASE_MOTION_START"`, `positioning_visibility = "visible"`.
+Suggest also `positioning_cue_kind = "movement_policy_change"` so
+downstream readers don't misread "visible" as "sudden appearance."
+
+Proposed production candidate, pending explicit protocol approval and
+verification against the Citrus H5 contract fixture: training = 300 s, n = 4,
+min_gap = 49 s, lead_in = 45 s, tail_guard = 29 s → usable 79 s, approximately
+30 s true quiet minimum between visible activity and the next episode. If
+accepted, the full protocol step changes from 1380 to 1500 s (+8.7% recording
+duration). New protocol identity/hash is required under the schedule-mode
+contract. Palette stimulus epochs must always obtain the observed step duration
+from imported metadata; neither duration is an analysis constant.
