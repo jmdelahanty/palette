@@ -386,7 +386,7 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
             row.update(raw)
             recording_id = str(raw["recording_id"])
             row["zarr_path"] = f"/{recording_id}_analysis.zarr"
-            row["session_id"] = f"session-{recording_id}"
+            row["session_id"] = _identity(recording_id)["session_id"]
             row["subject_id"] = f"subject-{recording_id}"
             row["export_schema_version"] = EXPORT_SCHEMA_VERSION
             row["table_name"] = table_name
@@ -429,9 +429,12 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                     {
                         "dataset_id": index + 1,
                         "recording_id": recording_id,
-                        "experimental_session_id": f"session-{recording_id}",
+                        "experimental_session_id": _identity(recording_id)[
+                            "session_id"
+                        ],
                         "experimental_session_snapshot_id": (
-                            f"00000000-0000-4000-8000-{index + 1:012d}"
+                            "00000000-0000-4000-8000-"
+                            f"{index // 2 + 1:012d}"
                         ),
                         "experimental_session_schema_id": (
                             "palette.registry.experimental_session.v1"
@@ -737,12 +740,9 @@ def test_training_response_validation_rejects_rehashed_identity_binding_tamper(
         / "analysis_run_id=training_identity_tamper.json"
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    first_source = next(
-        iter(manifest["source_registry_identity_receipt"]["sources"])
+    manifest["source_registry_identity_receipt"]["sources"][0]["subject_id"] = (
+        "tampered_subject"
     )
-    manifest["source_registry_identity_receipt"]["sources"][first_source][
-        "subject_id"
-    ] = "tampered_subject"
     manifest["manifest_payload_sha256"] = payload_sha256(
         {
             key: value
