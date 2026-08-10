@@ -1,6 +1,6 @@
 """Manifest-committed physical publication for analytics exports.
 
-The logical analytics schema remains ``palette.analytics_export`` v2.  This
+The current logical analytics schema is ``palette.analytics_export`` v3.  This
 module owns the independent physical publication envelope: one immutable
 generation directory, an exact part inventory, and one manifest rename as the
 only visibility commit.
@@ -496,8 +496,14 @@ def validate_staged_publication(
     from .contracts import (
         EXPORT_SCHEMA_ID,
         EXPORT_SCHEMA_VERSION,
+        REGISTRY_IDENTITY_TABLES,
         TABLE_CONTRACTS,
         validate_table_columns,
+    )
+    from .chaser_authority import validate_chaser_export_authority_receipt
+    from .registry_identity import (
+        registry_identity_sources_by_path,
+        validate_registry_identity_receipt,
     )
 
     raw_staging_root = Path(staging_root)
@@ -518,10 +524,35 @@ def validate_staged_publication(
             declared_tables.update(str(item) for item in value)
     if set(inventory) != declared_tables:
         raise ValueError("Staged publication inventory does not match declared tables")
+    if payload.get("schema_id") != EXPORT_SCHEMA_ID or payload.get(
+        "schema_version"
+    ) != EXPORT_SCHEMA_VERSION:
+        raise ValueError("Staged publication must use the current export schema")
     validate_arrow_contract_envelope(
         payload.get("arrow_schema_contracts"),
         tuple(sorted(declared_tables)),
     )
+    source_zarrs = payload.get("source_zarrs")
+    if source_zarrs is None:
+        source_zarrs = []
+    if not isinstance(source_zarrs, list):
+        raise ValueError("Staged publication source_zarrs declaration is invalid")
+    registry_sources: Mapping[str, Mapping[str, Any]] = {}
+    if declared_tables & REGISTRY_IDENTITY_TABLES:
+        registry_receipt = validate_registry_identity_receipt(
+            payload.get("registry_identity"),
+            expected_zarr_paths=source_zarrs,
+        )
+        registry_sources = registry_identity_sources_by_path(registry_receipt)
+    elif payload.get("registry_identity") is not None:
+        raise ValueError(
+            "Staged publication has registry identity evidence without identity tables"
+        )
+    if payload.get("chaser_export_authority") is not None:
+        validate_chaser_export_authority_receipt(
+            payload.get("chaser_export_authority"),
+            expected_zarr_paths=source_zarrs,
+        )
 
     part_files = payload.get("part_files_by_table")
     row_counts = payload.get("row_counts_by_table")
@@ -602,11 +633,54 @@ def validate_staged_publication(
             missing = validate_table_columns(table, columns)
             if missing:
                 raise ValueError(f"{table}: staged part is missing required columns")
+            part_rows = int(parquet_file.metadata.num_rows)
+            if table in REGISTRY_IDENTITY_TABLES and part_rows:
+                identity_table = parquet_file.read(
+                    columns=[
+                        "zarr_path",
+                        "recording_id",
+                        "session_id",
+                        "subject_id",
+                    ]
+                )
+                identity_values = set(
+                    zip(
+                        *(
+                            identity_table.column(name).to_pylist()
+                            for name in (
+                                "zarr_path",
+                                "recording_id",
+                                "session_id",
+                                "subject_id",
+                            )
+                        ),
+                        strict=True,
+                    )
+                )
+                if identity_table.num_rows != part_rows or not identity_values:
+                    raise ValueError(
+                        f"{table}: staged part identity columns are incomplete"
+                    )
+                for source_path, recording_id, session_id, subject_id in identity_values:
+                    binding = registry_sources.get(str(source_path))
+                    if binding is None or (
+                        recording_id,
+                        session_id,
+                        subject_id,
+                    ) != (
+                        binding["recording_id"],
+                        binding["session_id"],
+                        binding["subject_id"],
+                    ):
+                        raise ValueError(
+                            f"{table}: staged persisted registry identity differs "
+                            f"from receipt for {source_path!r}"
+                        )
             if reference_columns is None:
                 reference_columns = columns
             elif columns != reference_columns:
                 raise ValueError(f"{table}: staged part schemas differ")
-            table_rows += int(parquet_file.metadata.num_rows)
+            table_rows += part_rows
         if table_rows != row_counts.get(table):
             raise ValueError(f"{table}: staged rows differ from manifest")
         if reference_columns is not None:

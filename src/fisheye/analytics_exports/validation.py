@@ -9,14 +9,22 @@ from typing import Any, Mapping, Sequence
 from .arrow_contracts import (
     validate_arrow_contract_envelope,
     validate_arrow_schema,
+    validate_declared_v2_arrow_contract_envelope,
+    validate_declared_v2_arrow_schema,
 )
+from .chaser_authority import validate_chaser_export_authority_receipt
 from .capabilities import resolve_capabilities
 from .contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
+    EXPORT_SCHEMA_VERSION_V2,
     REGISTRY_IDENTITY_TABLES,
     TABLE_CONTRACTS,
     validate_table_columns,
+)
+from .registry_identity import (
+    registry_identity_sources_by_path,
+    validate_registry_identity_receipt,
 )
 from .publication import (
     export_manifest_path,
@@ -58,6 +66,55 @@ def _declared_tables(payload: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(tables))
 
 
+def _validate_declared_v2_table_contract(
+    table: str,
+    value: object,
+) -> dict[str, Any]:
+    """Validate one historical self-contained table declaration."""
+
+    fields = {
+        "contract_id",
+        "contract_version",
+        "table_name",
+        "grain",
+        "primary_key",
+        "required_columns",
+        "units",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError(f"{table}: historical table contract field set is invalid")
+    if (
+        value.get("contract_id") != f"palette.analytics.table.{table}"
+        or value.get("table_name") != table
+        or type(value.get("contract_version")) is not int
+        or int(value["contract_version"]) < 1
+        or not isinstance(value.get("grain"), str)
+        or not value["grain"]
+        or not isinstance(value.get("units"), Mapping)
+    ):
+        raise ValueError(f"{table}: historical table contract identity is invalid")
+    primary_key = value.get("primary_key")
+    required = value.get("required_columns")
+    if (
+        not isinstance(primary_key, list)
+        or not isinstance(required, list)
+        or any(not isinstance(item, str) or not item for item in primary_key)
+        or any(not isinstance(item, str) or not item for item in required)
+        or len(primary_key) != len(set(primary_key))
+        or len(required) != len(set(required))
+        or not set(primary_key).issubset(required)
+    ):
+        raise ValueError(f"{table}: historical table contract columns are invalid")
+    return dict(value)
+
+
+def _part_identity_values(parquet_file: Any) -> tuple[set[tuple[Any, ...]], int]:
+    names = ("zarr_path", "recording_id", "session_id", "subject_id")
+    table = parquet_file.read(columns=list(names))
+    values = set(zip(*(table.column(name).to_pylist() for name in names), strict=True))
+    return values, int(table.num_rows)
+
+
 def validate_export_payload(
     export_root: Path,
     export_run_id: str,
@@ -83,8 +140,15 @@ def validate_export_payload(
         )
     if payload.get("schema_id") != EXPORT_SCHEMA_ID:
         errors.append(f"unsupported schema_id {payload.get('schema_id')!r}")
-    if payload.get("schema_version") != EXPORT_SCHEMA_VERSION:
+    raw_schema_version = payload.get("schema_version")
+    if raw_schema_version not in (EXPORT_SCHEMA_VERSION_V2, EXPORT_SCHEMA_VERSION):
         errors.append(f"unsupported schema_version {payload.get('schema_version')!r}")
+    export_schema_version = (
+        raw_schema_version
+        if raw_schema_version in (EXPORT_SCHEMA_VERSION_V2, EXPORT_SCHEMA_VERSION)
+        else EXPORT_SCHEMA_VERSION
+    )
+    current_schema = export_schema_version == EXPORT_SCHEMA_VERSION
     strict_publication = has_exclusive_inventory(payload)
     exact_publication = False
     publication_declared = "publication" in payload
@@ -107,55 +171,36 @@ def validate_export_payload(
     if unknown_tables:
         errors.append(f"unknown table contracts: {unknown_tables}")
 
-    if set(tables) & REGISTRY_IDENTITY_TABLES:
+    registry_sources: Mapping[str, Mapping[str, Any]] = {}
+    if current_schema and set(tables) & REGISTRY_IDENTITY_TABLES:
         identity = payload.get("registry_identity")
-        if not isinstance(identity, Mapping):
-            errors.append("missing registry identity envelope")
+        source_zarrs = payload.get("source_zarrs")
+        if not isinstance(source_zarrs, list):
+            errors.append("registry identity source_zarrs declaration is invalid")
         else:
-            expected_identity_fields = {
-                "schema_id",
-                "schema_version",
-                "session_id_source",
-                "subject_id_source",
-                "sources",
-            }
-            if set(identity) != expected_identity_fields:
-                errors.append("registry identity envelope has an invalid field set")
-            if (
-                identity.get("schema_id")
-                != "palette.analytics_export.registry_identity"
-                or identity.get("schema_version") != 1
-                or identity.get("session_id_source")
-                != "dataset_context_current.recording_started_utc"
-                or identity.get("subject_id_source")
-                != (
-                    "coalesce(dataset_context_current.subject_id,"
-                    "dataset_context_current.legacy_fish_id)"
+            try:
+                validated_identity = validate_registry_identity_receipt(
+                    identity,
+                    expected_zarr_paths=source_zarrs,
                 )
-            ):
-                errors.append("registry identity envelope has invalid semantics")
-            sources = identity.get("sources")
-            source_zarrs = payload.get("source_zarrs")
-            if not isinstance(sources, Mapping) or not isinstance(source_zarrs, list):
-                errors.append("registry identity source bindings are invalid")
-            elif set(map(str, source_zarrs)) != set(map(str, sources)):
-                errors.append("registry identity source set differs from source_zarrs")
-            else:
-                for source_path, binding in sources.items():
-                    if (
-                        not isinstance(source_path, str)
-                        or not isinstance(binding, Mapping)
-                        or set(binding)
-                        != {"recording_id", "session_id", "subject_id"}
-                        or any(
-                            not isinstance(binding.get(name), str)
-                            or not str(binding[name]).strip()
-                            for name in ("recording_id", "session_id", "subject_id")
-                        )
-                    ):
-                        errors.append(
-                            f"registry identity binding is invalid: {source_path!r}"
-                        )
+                registry_sources = registry_identity_sources_by_path(
+                    validated_identity
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+
+    if current_schema and payload.get("chaser_export_authority") is not None:
+        source_zarrs = payload.get("source_zarrs")
+        if not isinstance(source_zarrs, list):
+            errors.append("chaser authority source_zarrs declaration is invalid")
+        else:
+            try:
+                validate_chaser_export_authority_receipt(
+                    payload.get("chaser_export_authority"),
+                    expected_zarr_paths=source_zarrs,
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
 
     arrow_contracts_valid = False
     arrow_contracts = payload.get("arrow_schema_contracts")
@@ -167,7 +212,13 @@ def validate_export_payload(
             )
     else:
         try:
-            validate_arrow_contract_envelope(arrow_contracts, tables)
+            if current_schema:
+                validate_arrow_contract_envelope(arrow_contracts, tables)
+            else:
+                validate_declared_v2_arrow_contract_envelope(
+                    arrow_contracts,
+                    tables,
+                )
         except ValueError as exc:
             errors.append(str(exc))
         else:
@@ -178,13 +229,21 @@ def validate_export_payload(
         errors.append("manifest table_contracts is missing or is not an object")
         declared_contracts = {}
     for table in tables:
-        if (
-            table in TABLE_CONTRACTS
-            and declared_contracts.get(table) != TABLE_CONTRACTS[table].to_dict()
-        ):
-            errors.append(
-                f"{table}: manifest table contract does not match installed V2"
-            )
+        if table not in TABLE_CONTRACTS:
+            continue
+        if current_schema:
+            if declared_contracts.get(table) != TABLE_CONTRACTS[table].to_dict():
+                errors.append(
+                    f"{table}: manifest table contract does not match installed V3"
+                )
+        else:
+            try:
+                _validate_declared_v2_table_contract(
+                    table,
+                    declared_contracts.get(table),
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
 
     parts_by_table = payload.get("part_files_by_table")
     row_counts_by_table = payload.get("row_counts_by_table")
@@ -335,17 +394,39 @@ def validate_export_payload(
                 errors.append(f"{table}/{part_name}: invalid footer schema ID")
             if metadata.get(b"palette.export_schema_version", b"").decode(
                 "utf-8"
-            ) != str(EXPORT_SCHEMA_VERSION):
+            ) != str(export_schema_version):
                 errors.append(f"{table}/{part_name}: invalid footer schema version")
-            if footer_contract != TABLE_CONTRACTS[table].to_dict():
+            expected_table_contract = (
+                TABLE_CONTRACTS[table].to_dict()
+                if current_schema
+                else declared_contracts.get(table)
+            )
+            if footer_contract != expected_table_contract:
                 errors.append(f"{table}/{part_name}: invalid footer table contract")
             if arrow_contracts_valid:
                 try:
-                    validate_arrow_schema(table, schema)
+                    if current_schema:
+                        validate_arrow_schema(table, schema)
+                    else:
+                        assert isinstance(arrow_contracts, Mapping)
+                        validate_declared_v2_arrow_schema(
+                            table,
+                            schema,
+                            arrow_contracts,
+                        )
                 except ValueError as exc:
                     errors.append(f"{table}/{part_name}: {exc}")
             columns = tuple(field.name for field in schema)
-            missing = validate_table_columns(table, columns)
+            if current_schema:
+                missing = validate_table_columns(table, columns)
+            else:
+                declared = declared_contracts.get(table)
+                required_columns = (
+                    declared.get("required_columns", [])
+                    if isinstance(declared, Mapping)
+                    else []
+                )
+                missing = tuple(sorted(set(required_columns) - set(columns)))
             if missing:
                 errors.append(
                     f"{table}/{part_name}: missing required columns {list(missing)}"
@@ -363,6 +444,41 @@ def validate_export_payload(
                     f"{table}/{part_name}: schema differs from the first part"
                 )
             part_rows = int(parquet_file.metadata.num_rows)
+            if current_schema and table in REGISTRY_IDENTITY_TABLES and part_rows:
+                try:
+                    identity_values, identity_rows = _part_identity_values(parquet_file)
+                except Exception as exc:
+                    errors.append(
+                        f"{table}/{part_name}: cannot read persisted registry identity: {exc}"
+                    )
+                else:
+                    if identity_rows != part_rows or not identity_values:
+                        errors.append(
+                            f"{table}/{part_name}: part identity columns are incomplete"
+                        )
+                    else:
+                        mismatched = []
+                        for source_path, recording_id, session_id, subject_id in sorted(
+                            identity_values,
+                            key=lambda item: tuple(map(str, item)),
+                        ):
+                            binding = registry_sources.get(str(source_path))
+                            if binding is None or (
+                                recording_id,
+                                session_id,
+                                subject_id,
+                            ) != (
+                                binding["recording_id"],
+                                binding["session_id"],
+                                binding["subject_id"],
+                            ):
+                                mismatched.append(str(source_path))
+                        if mismatched:
+                            errors.append(
+                                f"{table}/{part_name}: persisted registry identity "
+                                "differs from its receipt binding for "
+                                f"{mismatched!r}"
+                            )
             if strict_publication and inventory_entry.get("row_count") != part_rows:
                 errors.append(f"{table}/{part_name}: row-count mismatch")
             table_rows += part_rows
@@ -380,16 +496,24 @@ def validate_export_payload(
                     f"{table}: Parquet row count {table_rows} does not match manifest {expected_rows}"
                 )
 
-    resolved = resolve_capabilities(columns_by_table)
-    resolved_capabilities = [
-        status.capability_id for status in resolved if status.available
-    ]
-    if payload.get("capabilities") != resolved_capabilities:
-        errors.append(
-            "manifest capabilities do not match capabilities resolved from Parquet schemas"
+    if current_schema:
+        resolved = resolve_capabilities(columns_by_table)
+        resolved_capabilities = [
+            status.capability_id for status in resolved if status.available
+        ]
+        if payload.get("capabilities") != resolved_capabilities:
+            errors.append(
+                "manifest capabilities do not match capabilities resolved from Parquet schemas"
+            )
+    else:
+        raw_capabilities = payload.get("capabilities", [])
+        resolved_capabilities = (
+            [str(value) for value in raw_capabilities]
+            if isinstance(raw_capabilities, list)
+            else []
         )
 
-    if "eye_trace_samples" in tables:
+    if current_schema and "eye_trace_samples" in tables:
         try:
             from .eye_trace_samples import validate_eye_trace_export_payload
 
@@ -397,7 +521,7 @@ def validate_export_payload(
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(f"eye_trace_samples: {exc}")
 
-    if "kinematics_samples" in tables:
+    if current_schema and "kinematics_samples" in tables:
         try:
             from .kinematics_samples import (
                 validate_kinematics_samples_export_payload,
@@ -407,7 +531,7 @@ def validate_export_payload(
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(f"kinematics_samples: {exc}")
 
-    if "activity_spatial_time_bins" in tables:
+    if current_schema and "activity_spatial_time_bins" in tables:
         try:
             from .activity_spatial_time_bins import (
                 validate_activity_spatial_time_bins_export_payload,
@@ -417,7 +541,7 @@ def validate_export_payload(
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(f"activity_spatial_time_bins: {exc}")
 
-    if "tail_trace_samples" in tables:
+    if current_schema and "tail_trace_samples" in tables:
         try:
             from .tail_trace_samples import validate_tail_trace_export_payload
 
@@ -434,7 +558,7 @@ def validate_export_payload(
         "export_run_id": run_id,
         "manifest_path": str(manifest_path),
         "schema_id": EXPORT_SCHEMA_ID,
-        "schema_version": EXPORT_SCHEMA_VERSION,
+        "schema_version": export_schema_version,
         "table_count": len(tables),
         "part_count": checked_parts,
         "row_count": checked_rows,

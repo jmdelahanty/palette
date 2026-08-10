@@ -30,9 +30,13 @@ from fisheye.analytics_exports.contracts import (
     TABLE_CONTRACTS,
     contract_snapshot,
 )
-from fisheye.analytics_exports.publication import sha256_file
 from fisheye.analytics_exports.derived_publication import (
     publish_derived_table_generation,
+)
+from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.registry_identity import (
+    build_registry_identity_receipt,
+    build_registry_identity_source,
 )
 from fisheye.training_response.cohort import (
     classify_training_response_features,
@@ -380,6 +384,10 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                 else:
                     row[field.name] = "fixture"
             row.update(raw)
+            recording_id = str(raw["recording_id"])
+            row["zarr_path"] = f"/{recording_id}_analysis.zarr"
+            row["session_id"] = f"session-{recording_id}"
+            row["subject_id"] = f"subject-{recording_id}"
             row["export_schema_version"] = EXPORT_SCHEMA_VERSION
             row["table_name"] = table_name
             rows.append(row)
@@ -410,37 +418,62 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
         name: (generation_path / "tables" / name / path.name).as_posix()
         for name, path in parts.items()
     }
+    recording_ids = [f"recording_{index}" for index in range(6)]
+    source_zarrs = [f"/{recording_id}_analysis.zarr" for recording_id in recording_ids]
+    registry_identity = build_registry_identity_receipt(
+        registry_path=Path("/registry/test.sqlite"),
+        sources=[
+            build_registry_identity_source(
+                zarr_path=path,
+                rows=[
+                    {
+                        "dataset_id": index + 1,
+                        "recording_id": recording_id,
+                        "experimental_session_id": f"session-{recording_id}",
+                        "experimental_session_snapshot_id": (
+                            f"00000000-0000-4000-8000-{index + 1:012d}"
+                        ),
+                        "experimental_session_schema_id": (
+                            "palette.registry.experimental_session.v1"
+                        ),
+                        "experimental_session_creation_registry_schema_version": 1,
+                        "experimental_session_identity_status": "explicit",
+                        "experimental_session_assignment_snapshot_id": (
+                            f"10000000-0000-4000-8000-{index + 1:012d}"
+                        ),
+                        "experimental_session_assignment_batch_id": (
+                            "20000000-0000-4000-8000-000000000001"
+                        ),
+                        "experimental_session_assignment_revision": 1,
+                        "experimental_session_supersedes_assignment_snapshot_id": None,
+                        "experimental_session_assignment_schema_id": (
+                            "palette.registry.experimental_session_assignment.v1"
+                        ),
+                        "experimental_session_assignment_registry_schema_version": 1,
+                        "experimental_session_assignment_method": "manual_test",
+                        "experimental_session_assigned_by": "test",
+                        "experimental_session_assigned_at_utc": (
+                            "2026-08-10T00:00:00+00:00"
+                        ),
+                        "fish_id": f"subject-{recording_id}",
+                        "subject_count": 1,
+                        "subject_ids_json": None,
+                    }
+                ],
+            )
+            for index, (recording_id, path) in enumerate(
+                zip(recording_ids, source_zarrs, strict=True)
+            )
+        ],
+    )
     manifest.write_text(
         json.dumps(
             {
                 "export_run_id": run_id,
                 "schema_id": EXPORT_SCHEMA_ID,
                 "schema_version": EXPORT_SCHEMA_VERSION,
-                "source_zarrs": [
-                    f"/{recording_id}_analysis.zarr"
-                    for recording_id in sorted(
-                        {row["recording_id"] for rows in rows_by_table.values() for row in rows}
-                    )
-                ],
-                "registry_identity": {
-                    "schema_id": "palette.analytics_export.registry_identity",
-                    "schema_version": 1,
-                    "session_id_source": "dataset_context_current.recording_started_utc",
-                    "subject_id_source": (
-                        "coalesce(dataset_context_current.subject_id,"
-                        "dataset_context_current.legacy_fish_id)"
-                    ),
-                    "sources": {
-                        f"/{recording_id}_analysis.zarr": _identity(recording_id)
-                        for recording_id in sorted(
-                            {
-                                row["recording_id"]
-                                for rows in rows_by_table.values()
-                                for row in rows
-                            }
-                        )
-                    },
-                },
+                "source_zarrs": source_zarrs,
+                "registry_identity": registry_identity,
                 "tables_requested": list(rows_by_table),
                 "table_contracts": contract_snapshot(list(rows_by_table)),
                 "arrow_schema_contracts": arrow_contract_envelope(list(rows_by_table)),

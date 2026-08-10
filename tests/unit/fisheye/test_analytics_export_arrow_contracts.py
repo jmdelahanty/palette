@@ -45,11 +45,13 @@ from fisheye.analytics_exports.contracts import (
     CHASER_SPATIAL_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
     DESCRIPTIVE_TABLE,
+    DEFAULT_TABLES,
     EYE_TRACE_SAMPLES_TABLE,
     EXPORT_SCHEMA_VERSION,
     KINEMATICS_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    REGISTRY_IDENTITY_TABLES,
     STATISTICS_TABLE,
     STIMULUS_RESPONSE_TABLE,
     STIMULUS_STEP_SUMMARY_TABLE,
@@ -62,6 +64,10 @@ from fisheye.analytics_exports.publication import (
     manifest_selected_part_files,
     sha256_file,
 )
+from fisheye.analytics_exports.registry_identity import (
+    build_registry_identity_receipt,
+    build_registry_identity_source,
+)
 from fisheye.analytics_exports.validation import ExportValidationError, validate_export_run
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.utils.export_cross_recording_analytics import (
@@ -73,6 +79,7 @@ from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
 )
 from tests.unit.fisheye.test_export_cross_recording_analytics import (
+    _RegistryReceiptTestDouble,
     _make_source_zarr,
     _write_collection_manifest,
 )
@@ -89,29 +96,69 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _test_registry_identities(
+def _test_registry_identity_receipt(
     zarr_paths: list[Path] | tuple[Path, ...],
-) -> dict[str, dict[str, str]]:
-    identities: dict[str, dict[str, str]] = {}
+) -> dict[str, object]:
+    sources: list[dict[str, object]] = []
     for raw_path in zarr_paths:
         path = Path(raw_path).expanduser().resolve()
         recording_id = path.name.removesuffix(".zarr").removesuffix("_analysis")
-        identities[str(path)] = {
-            "recording_id": recording_id,
-            "session_id": f"session-{recording_id}",
-            "subject_id": f"subject-{recording_id}",
-        }
-    return identities
+        sources.append(
+            build_registry_identity_source(
+                zarr_path=path,
+                rows=[
+                    {
+                        "dataset_id": len(sources) + 1,
+                        "recording_id": recording_id,
+                        "experimental_session_id": f"session-{recording_id}",
+                        "experimental_session_snapshot_id": (
+                            "00000000-0000-4000-8000-000000000001"
+                        ),
+                        "experimental_session_schema_id": (
+                            "palette.registry.experimental_session.v1"
+                        ),
+                        "experimental_session_creation_registry_schema_version": 1,
+                        "experimental_session_identity_status": "explicit",
+                        "experimental_session_assignment_snapshot_id": (
+                            "00000000-0000-4000-8000-000000000002"
+                        ),
+                        "experimental_session_assignment_batch_id": (
+                            "00000000-0000-4000-8000-000000000003"
+                        ),
+                        "experimental_session_assignment_revision": 1,
+                        "experimental_session_supersedes_assignment_snapshot_id": None,
+                        "experimental_session_assignment_schema_id": (
+                            "palette.registry.experimental_session_assignment.v1"
+                        ),
+                        "experimental_session_assignment_registry_schema_version": 1,
+                        "experimental_session_assignment_method": "manual_test",
+                        "experimental_session_assigned_by": "test",
+                        "experimental_session_assigned_at_utc": (
+                            "2026-08-10T00:00:00+00:00"
+                        ),
+                        "fish_id": f"subject-{recording_id}",
+                        "subject_count": 1,
+                        "subject_ids_json": None,
+                    }
+                ],
+            )
+        )
+    return build_registry_identity_receipt(
+        registry_path=Path("/registry/test.sqlite"),
+        sources=sources,
+    )
 
 
 def export_sources(zarr_paths, **kwargs):
     """Test adapter supplying the registry evidence required by exact tables."""
 
     paths = [Path(path) for path in zarr_paths]
-    kwargs.setdefault(
-        "source_registry_identities",
-        _test_registry_identities(paths),
-    )
+    tables = kwargs.get("tables", DEFAULT_TABLES)
+    if set(tables) & REGISTRY_IDENTITY_TABLES:
+        kwargs.setdefault(
+            "registry",
+            _RegistryReceiptTestDouble(_test_registry_identity_receipt(paths)),
+        )
     return _export_sources(paths, **kwargs)
 
 
@@ -425,6 +472,11 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
         DESCRIPTIVE_TABLE,
     )
     assert envelope["inferred_v2_compatibility_tables"] == []
+    assert envelope["schema_version"] == 2
+    assert {
+        contract["schema_version"]
+        for contract in envelope["exact_tables"].values()
+    } == {2}
     assert (
         validate_arrow_contract_envelope(
             envelope,
@@ -2039,6 +2091,9 @@ def test_baseline_summary_zero_rows_publish_no_parts_but_retain_exact_contract(
             zarr_path=str(path),
             recording_id="recording-1",
             rows_by_table={BASELINE_BEHAVIOR_SUMMARY_TABLE: []},
+            registry_identity_record_sha256=_kwargs["registry_identity"][
+                "record_sha256"
+            ],
         )
 
     monkeypatch.setattr(
@@ -2076,6 +2131,9 @@ def test_baseline_time_bins_zero_rows_retain_exact_contract_without_parts(
             zarr_path=str(path),
             recording_id="recording-1",
             rows_by_table={BASELINE_BEHAVIOR_TIME_BINS_TABLE: []},
+            registry_identity_record_sha256=_kwargs["registry_identity"][
+                "record_sha256"
+            ],
         )
 
     monkeypatch.setattr(
@@ -2113,6 +2171,9 @@ def test_baseline_samples_zero_rows_retain_exact_contract_without_parts(
             zarr_path=str(path),
             recording_id="recording-1",
             rows_by_table={BASELINE_KINEMATIC_SAMPLES_TABLE: []},
+            registry_identity_record_sha256=_kwargs["registry_identity"][
+                "record_sha256"
+            ],
         )
 
     monkeypatch.setattr(
@@ -2394,7 +2455,7 @@ def test_selected_stimulus_step_summary_rejects_old_two_field_primary_key(
 
     with pytest.raises(
         ExportValidationError,
-        match="manifest table contract does not match installed V2",
+        match="manifest table contract does not match installed V3",
     ):
         validate_export_run(root, run_id)
 
@@ -2757,10 +2818,23 @@ def test_manifest_selected_reader_rejects_rehashed_wrong_physical_type(
     table_name = POSITION_OCCUPANCY_HISTOGRAM_TABLE
 
     def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        row = _valid_position_row()
+        recording_id = path.name.removesuffix(".zarr").removesuffix("_analysis")
+        row.update(
+            {
+                "zarr_path": str(path.resolve()),
+                "recording_id": recording_id,
+                "session_id": f"session-{recording_id}",
+                "subject_id": f"subject-{recording_id}",
+            }
+        )
         return SourceExportResult(
             zarr_path=str(path),
-            recording_id="recording-1",
-            rows_by_table={table_name: [_valid_position_row()]},
+            recording_id=recording_id,
+            rows_by_table={table_name: [row]},
+            registry_identity_record_sha256=_kwargs["registry_identity"][
+                "record_sha256"
+            ],
         )
 
     monkeypatch.setattr(
@@ -2800,6 +2874,93 @@ def test_manifest_selected_reader_rejects_rehashed_wrong_physical_type(
 
     with pytest.raises(ExportValidationError, match="physical Arrow fields"):
         validate_export_run(root, "exact-arrow")
+
+
+def test_rehashed_registry_receipt_tamper_is_rejected_by_persisted_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _make_baseline_representation_source(tmp_path, monkeypatch)
+    root = tmp_path / "exports"
+    manifest = export_sources(
+        [source],
+        output_root=root,
+        export_run_id="identity-rehash",
+        tables=(BASELINE_BEHAVIOR_SUMMARY_TABLE,),
+    )
+    manifest_path = Path(manifest["manifest_path"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receipt = payload["registry_identity"]
+    source_record = receipt["sources"][0]
+    source_record["subject_id"] = "forged-subject"
+    source_record["record_sha256"] = _canonical_sha256(
+        {
+            key: value
+            for key, value in source_record.items()
+            if key != "record_sha256"
+        }
+    )
+    receipt["payload_sha256"] = _canonical_sha256(
+        {key: value for key, value in receipt.items() if key != "payload_sha256"}
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ExportValidationError,
+        match="persisted registry identity differs from its receipt binding",
+    ):
+        validate_export_run(root, "identity-rehash")
+
+
+def test_staged_identity_mismatch_is_cleaned_before_visibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table_name = BASELINE_BEHAVIOR_SUMMARY_TABLE
+
+    def source(path: Path, **kwargs: object) -> SourceExportResult:
+        row = _valid_baseline_summary_row()
+        recording_id = path.name.removesuffix(".zarr").removesuffix("_analysis")
+        row.update(
+            {
+                "zarr_path": str(path.resolve()),
+                "recording_id": recording_id,
+                "session_id": "forged-session",
+                "subject_id": f"subject-{recording_id}",
+            }
+        )
+        identity = kwargs["registry_identity"]
+        assert isinstance(identity, dict)
+        return SourceExportResult(
+            zarr_path=str(path),
+            recording_id=recording_id,
+            rows_by_table={table_name: [row]},
+            registry_identity_record_sha256=identity["record_sha256"],
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.export_one_zarr",
+        source,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.get_git_info",
+        lambda _path: {"commit_hash": "test", "is_dirty": False},
+    )
+    root = tmp_path / "exports"
+
+    with pytest.raises(ValueError, match="staged persisted registry identity"):
+        export_sources(
+            [tmp_path / "source.zarr"],
+            output_root=root,
+            export_run_id="staged-identity-mismatch",
+            tables=(table_name,),
+        )
+
+    assert not (root / "v1" / "manifests").exists()
+    staging = root / "v1" / ".staging"
+    assert not staging.exists() or not list(staging.iterdir())
+    generations = root / "v1" / ".generations"
+    assert not generations.exists() or not list(generations.rglob("generation=*"))
 
 
 @pytest.mark.parametrize(
@@ -3097,10 +3258,23 @@ def test_baseline_tables_manifest_reader_rejects_rehashed_physical_tampering(
     integer_field: str,
 ) -> None:
     def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        row = row_factory()
+        recording_id = path.name.removesuffix(".zarr").removesuffix("_analysis")
+        row.update(
+            {
+                "zarr_path": str(path.resolve()),
+                "recording_id": recording_id,
+                "session_id": f"session-{recording_id}",
+                "subject_id": f"subject-{recording_id}",
+            }
+        )
         return SourceExportResult(
             zarr_path=str(path),
-            recording_id="recording-1",
-            rows_by_table={table_name: [row_factory()]},
+            recording_id=recording_id,
+            rows_by_table={table_name: [row]},
+            registry_identity_record_sha256=_kwargs["registry_identity"][
+                "record_sha256"
+            ],
         )
 
     monkeypatch.setattr(

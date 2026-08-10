@@ -7,9 +7,12 @@ import hashlib
 from pathlib import Path
 import threading
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from fisheye.analytics_exports.contracts import (
+    EXPORT_SCHEMA_VERSION_V2,
     RECORDING_SUMMARY_TABLE,
     STATISTICS_TABLE,
     canonicalize_export_row,
@@ -17,6 +20,7 @@ from fisheye.analytics_exports.contracts import (
 from fisheye.analytics_exports.publication import (
     load_export_manifest,
     manifest_selected_part_files,
+    sha256_file,
 )
 from fisheye.analytics_exports.validation import ExportValidationError, validate_export_run
 from fisheye.group_analytics_viewer.query import (
@@ -107,6 +111,78 @@ def test_overwrite_commits_one_new_immutable_generation(
     assert len(selected) == 1
     assert first_generation not in str(selected[0])
     assert validate_export_run(root, "atomic_test")["part_count"] == 1
+
+
+def test_historical_v2_export_is_validated_by_its_embedded_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "exports"
+    manifest = _publish(monkeypatch, root, [tmp_path / "a.zarr"])
+    manifest_path = Path(manifest["manifest_path"])
+    part = manifest_selected_part_files(
+        root,
+        "atomic_test",
+        RECORDING_SUMMARY_TABLE,
+    )[0]
+    original = pq.ParquetFile(part).read()
+    version_index = original.schema.get_field_index("export_schema_version")
+    columns = list(original.columns)
+    columns[version_index] = pa.array(
+        [EXPORT_SCHEMA_VERSION_V2],
+        type=pa.int32(),
+    )
+    metadata = dict(original.schema.metadata or {})
+    metadata[b"palette.export_schema_version"] = str(
+        EXPORT_SCHEMA_VERSION_V2
+    ).encode("ascii")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = EXPORT_SCHEMA_VERSION_V2
+    arrow = payload["arrow_schema_contracts"]
+    arrow["schema_version"] = 1
+    table_contract = arrow["exact_tables"][RECORDING_SUMMARY_TABLE]
+    table_contract["schema_version"] = 1
+    table_contract["payload_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in table_contract.items()
+                if key != "payload_sha256"
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    ).hexdigest()
+    arrow_body = {key: value for key, value in arrow.items() if key != "payload_sha256"}
+    arrow["payload_sha256"] = hashlib.sha256(
+        json.dumps(
+            arrow_body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    ).hexdigest()
+    metadata[b"palette.arrow_schema_version"] = b"1"
+    metadata[b"palette.arrow_schema_sha256"] = table_contract[
+        "payload_sha256"
+    ].encode("ascii")
+    pq.write_table(
+        pa.Table.from_arrays(
+            columns,
+            schema=pa.schema(list(original.schema), metadata=metadata),
+        ),
+        part,
+    )
+    entry = payload["publication"]["parts_by_table"][RECORDING_SUMMARY_TABLE][0]
+    entry["sha256"] = sha256_file(part)
+    entry["size_bytes"] = part.stat().st_size
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = validate_export_run(root, "atomic_test")
+
+    assert report["status"] == "valid"
+    assert report["schema_version"] == EXPORT_SCHEMA_VERSION_V2
 
 
 def test_manifest_commit_failure_preserves_previous_authority(

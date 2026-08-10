@@ -27,6 +27,10 @@ CHASER_EXPORT_AUTHORITY_SCHEMA_VERSION = 1
 CHASER_EXPORT_AUTHORITY_RESOLUTION_POLICY = (
     "exact_base_and_component_handles_no_selector_fallback"
 )
+CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_ID = (
+    "palette.analytics_export.chaser_authority_receipt"
+)
+CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_VERSION = 1
 
 EPOCH_BEHAVIOR_FAMILY = "epoch_behavior_summary"
 QUADRANT_OCCUPANCY_FAMILY = "chaser_quadrant_occupancy"
@@ -62,6 +66,34 @@ _SOURCE_BODY_FIELDS = frozenset(
     }
 )
 _SOURCE_FIELDS = _SOURCE_BODY_FIELDS | {"record_sha256"}
+_RECEIPT_BODY_FIELDS = frozenset(
+    {
+        "schema_id",
+        "schema_version",
+        "path",
+        "file_sha256",
+        "authority_record_sha256",
+        "record",
+        "resolved_sources",
+    }
+)
+_RECEIPT_FIELDS = _RECEIPT_BODY_FIELDS | {"payload_sha256"}
+_RESOLVED_SOURCE_FIELDS = frozenset(
+    {
+        "source_record_sha256",
+        "base_run_name",
+        "base_run_path",
+        "base_publication_seal_sha256",
+        "component_handles",
+    }
+)
+_RESOLVED_COMPONENT_FIELDS = frozenset(
+    {
+        "component_path",
+        "component_manifest_sha256",
+        "handle_record_sha256",
+    }
+)
 
 
 class ChaserExportAuthorityError(ValueError):
@@ -307,10 +339,152 @@ def write_chaser_export_authority_set(
     return destination
 
 
+def build_chaser_export_authority_receipt(
+    authority: LoadedChaserExportAuthoritySet,
+    resolved_sources: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Bind the input authority bytes to the exact sources actually opened."""
+
+    body = {
+        "schema_id": CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_ID,
+        "schema_version": CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_VERSION,
+        "path": str(authority.path),
+        "file_sha256": authority.file_sha256,
+        "authority_record_sha256": authority.record["record_sha256"],
+        "record": dict(authority.record),
+        "resolved_sources": {
+            str(path): dict(binding)
+            for path, binding in sorted(resolved_sources.items())
+        },
+    }
+    validate_chaser_export_authority_receipt(
+        {**body, "payload_sha256": canonical_json_sha256(body)}
+    )
+    return {**body, "payload_sha256": canonical_json_sha256(body)}
+
+
+def validate_chaser_export_authority_receipt(
+    value: object,
+    *,
+    expected_zarr_paths: Sequence[str | Path] | None = None,
+) -> Mapping[str, Any]:
+    """Deeply validate a persisted chaser-authority publication receipt."""
+
+    receipt = _exact_mapping(
+        value,
+        _RECEIPT_FIELDS,
+        label="chaser export authority receipt",
+    )
+    if receipt["schema_id"] != CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_ID:
+        _fail("chaser export authority receipt has an incompatible schema_id.")
+    if receipt["schema_version"] != CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_VERSION:
+        _fail("chaser export authority receipt has an incompatible schema_version.")
+    path = _canonical_zarr_path(receipt["path"], label="authority receipt path")
+    file_sha256 = _sha256(receipt["file_sha256"], label="authority file_sha256")
+    authority_record = validate_chaser_export_authority_set(receipt["record"])
+    authority_digest = _sha256(
+        receipt["authority_record_sha256"],
+        label="authority_record_sha256",
+    )
+    if authority_digest != authority_record["record_sha256"]:
+        _fail("authority receipt record digest does not match its embedded record.")
+    raw_resolved = receipt["resolved_sources"]
+    if not isinstance(raw_resolved, Mapping):
+        _fail("authority receipt resolved_sources must be an object.")
+    resolved = {str(key): item for key, item in raw_resolved.items()}
+    authority_sources = {
+        source["zarr_path"]: source for source in authority_record["sources"]
+    }
+    if set(resolved) != set(authority_sources):
+        _fail("authority receipt resolved-source set differs from its authority set.")
+    if expected_zarr_paths is not None:
+        expected = {
+            str(Path(item).expanduser().resolve()) for item in expected_zarr_paths
+        }
+        if set(resolved) != expected:
+            _fail("authority receipt source set differs from export source_zarrs.")
+    normalized_resolved: dict[str, dict[str, Any]] = {}
+    for source_path, raw_binding in sorted(resolved.items()):
+        canonical_path = _canonical_zarr_path(
+            source_path,
+            label="resolved authority source path",
+        )
+        binding = _exact_mapping(
+            raw_binding,
+            _RESOLVED_SOURCE_FIELDS,
+            label=f"resolved authority source {source_path}",
+        )
+        source = authority_sources[canonical_path]
+        if (
+            binding["source_record_sha256"] != source["record_sha256"]
+            or binding["base_run_name"] != source["base_run_name"]
+            or binding["base_run_path"] != source["base_run_path"]
+            or binding["base_publication_seal_sha256"]
+            != source["base_publication_seal_sha256"]
+        ):
+            _fail(f"resolved authority source {source_path!r} differs from authority.")
+        raw_components = binding["component_handles"]
+        if not isinstance(raw_components, Mapping) or set(raw_components) != set(
+            source["component_handles"]
+        ):
+            _fail(f"resolved authority source {source_path!r} has invalid components.")
+        components: dict[str, dict[str, str]] = {}
+        for family, raw_component in sorted(raw_components.items()):
+            component = _exact_mapping(
+                raw_component,
+                _RESOLVED_COMPONENT_FIELDS,
+                label=f"resolved component {family}",
+            )
+            source_handle = source["component_handles"][family]
+            if (
+                component["component_path"] != source_handle["component_path"]
+                or component["component_manifest_sha256"]
+                != source_handle["component_manifest_sha256"]
+                or component["handle_record_sha256"] != source_handle["record_sha256"]
+            ):
+                _fail(f"resolved component {family!r} differs from authority handle.")
+            components[str(family)] = {
+                key: _nonempty_string(component[key], label=f"{family} {key}")
+                for key in _RESOLVED_COMPONENT_FIELDS
+            }
+        normalized_resolved[canonical_path] = {
+            "source_record_sha256": _sha256(
+                binding["source_record_sha256"],
+                label="source_record_sha256",
+            ),
+            "base_run_name": _nonempty_string(
+                binding["base_run_name"], label="base_run_name"
+            ),
+            "base_run_path": _nonempty_string(
+                binding["base_run_path"], label="base_run_path"
+            ),
+            "base_publication_seal_sha256": _sha256(
+                binding["base_publication_seal_sha256"],
+                label="base_publication_seal_sha256",
+            ),
+            "component_handles": components,
+        }
+    body = {
+        "schema_id": receipt["schema_id"],
+        "schema_version": receipt["schema_version"],
+        "path": path,
+        "file_sha256": file_sha256,
+        "authority_record_sha256": authority_digest,
+        "record": dict(authority_record),
+        "resolved_sources": normalized_resolved,
+    }
+    digest = _sha256(receipt["payload_sha256"], label="receipt payload_sha256")
+    if canonical_json_sha256(body) != digest:
+        _fail("chaser export authority receipt payload digest mismatch.")
+    return MappingProxyType({**body, "payload_sha256": digest})
+
+
 __all__ = [
     "CHASER_EXPORT_AUTHORITY_RESOLUTION_POLICY",
     "CHASER_EXPORT_AUTHORITY_SCHEMA_ID",
     "CHASER_EXPORT_AUTHORITY_SCHEMA_VERSION",
+    "CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_ID",
+    "CHASER_EXPORT_AUTHORITY_RECEIPT_SCHEMA_VERSION",
     "CHASER_EXPORT_COMPONENT_FAMILIES",
     "EGOCENTRIC_BEARING_FAMILY",
     "EPOCH_BEHAVIOR_FAMILY",
@@ -319,9 +493,11 @@ __all__ = [
     "NEAR_FIELD_OCCUPANCY_FAMILY",
     "QUADRANT_OCCUPANCY_FAMILY",
     "build_chaser_export_authority_set",
+    "build_chaser_export_authority_receipt",
     "build_chaser_export_source_authority",
     "load_chaser_export_authority_set",
     "validate_chaser_export_authority_set",
+    "validate_chaser_export_authority_receipt",
     "validate_chaser_export_source_authority",
     "write_chaser_export_authority_set",
 ]

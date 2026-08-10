@@ -25,6 +25,10 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
 )
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.registry_identity import (
+    build_registry_identity_receipt,
+    build_registry_identity_source,
+)
 from fisheye.analytics_exports.validation import ExportValidationError
 from fisheye.baseline_strategy.cohort import (
     classify_strategy_features,
@@ -518,6 +522,50 @@ def _write_summary_only_export(
     }
     table_names = list(parts_by_table)
     source_zarrs = [f"/recording_{index}_analysis.zarr" for index in range(6)]
+    registry_identity = build_registry_identity_receipt(
+        registry_path=Path("/registry/test.sqlite"),
+        sources=[
+            build_registry_identity_source(
+                zarr_path=path,
+                rows=[
+                    {
+                        "dataset_id": index + 1,
+                        "recording_id": f"recording_{index}",
+                        "experimental_session_id": f"session-recording_{index}",
+                        "experimental_session_snapshot_id": (
+                            f"00000000-0000-4000-8000-{index + 1:012d}"
+                        ),
+                        "experimental_session_schema_id": (
+                            "palette.registry.experimental_session.v1"
+                        ),
+                        "experimental_session_creation_registry_schema_version": 1,
+                        "experimental_session_identity_status": "explicit",
+                        "experimental_session_assignment_snapshot_id": (
+                            f"10000000-0000-4000-8000-{index + 1:012d}"
+                        ),
+                        "experimental_session_assignment_batch_id": (
+                            "20000000-0000-4000-8000-000000000001"
+                        ),
+                        "experimental_session_assignment_revision": 1,
+                        "experimental_session_supersedes_assignment_snapshot_id": None,
+                        "experimental_session_assignment_schema_id": (
+                            "palette.registry.experimental_session_assignment.v1"
+                        ),
+                        "experimental_session_assignment_registry_schema_version": 1,
+                        "experimental_session_assignment_method": "manual_test",
+                        "experimental_session_assigned_by": "test",
+                        "experimental_session_assigned_at_utc": (
+                            "2026-08-10T00:00:00+00:00"
+                        ),
+                        "fish_id": f"subject-recording_{index}",
+                        "subject_count": 1,
+                        "subject_ids_json": None,
+                    }
+                ],
+            )
+            for index, path in enumerate(source_zarrs)
+        ],
+    )
     manifest.write_text(
         json.dumps(
             {
@@ -525,24 +573,7 @@ def _write_summary_only_export(
                 "schema_id": EXPORT_SCHEMA_ID,
                 "schema_version": EXPORT_SCHEMA_VERSION,
                 "source_zarrs": source_zarrs,
-                "registry_identity": {
-                    "schema_id": "palette.analytics_export.registry_identity",
-                    "schema_version": 1,
-                    "session_id_source": (
-                        "dataset_context_current.recording_started_utc"
-                    ),
-                    "subject_id_source": (
-                        "coalesce(dataset_context_current.subject_id,"
-                        "dataset_context_current.legacy_fish_id)"
-                    ),
-                    "sources": {
-                        path: {
-                            "recording_id": f"recording_{index}",
-                            **_registry_identity(f"recording_{index}"),
-                        }
-                        for index, path in enumerate(source_zarrs)
-                    },
-                },
+                "registry_identity": registry_identity,
                 "tables_requested": table_names,
                 "table_contracts": contract_snapshot(table_names),
                 "arrow_schema_contracts": arrow_contract_envelope(table_names),

@@ -1,9 +1,9 @@
 """Exact physical Arrow contracts for immutable analytics exports.
 
-The logical V2 table contracts intentionally began as minimum-column
-contracts.  This module versions the independent physical Arrow layer.  A
+Historical logical-v2 table contracts began as minimum-column contracts. This
+module versions the independent physical Arrow layer. A
 table is either governed by one installed exact schema or is named explicitly
-as an inferred-V2 compatibility table in the closed manifest envelope.
+as an inferred compatibility table in the closed manifest envelope.
 """
 
 from __future__ import annotations
@@ -60,7 +60,9 @@ from .contracts import (
 
 
 ARROW_CONTRACT_ENVELOPE_SCHEMA_ID = "palette.analytics_export.arrow_contracts"
-ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION = 1
+ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION_V1 = 1
+ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION = 2
+ARROW_TABLE_SCHEMA_VERSION = 2
 EXACT_ARROW_SCHEMA_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
@@ -2214,6 +2216,20 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     ),
 }
 
+# Export v3 is a physical-schema boundary, not merely a new suite envelope.
+# Rebuild every installed table declaration under Arrow-table v2 so a changed
+# field list can never retain the historical v1 schema identity.
+ARROW_TABLE_CONTRACTS = {
+    table_name: ArrowTableContract(
+        table_name=contract.table_name,
+        fields=contract.fields,
+        schema_version=ARROW_TABLE_SCHEMA_VERSION,
+        schema_namespace=contract.schema_namespace,
+        primary_key=contract.primary_key,
+    )
+    for table_name, contract in ARROW_TABLE_CONTRACTS.items()
+}
+
 
 def arrow_contract_envelope(table_names: Sequence[str]) -> dict[str, object]:
     """Build the closed exact/inferred partition for one export manifest."""
@@ -2261,10 +2277,139 @@ def validate_arrow_schema(table_name: str, schema: Any) -> None:
     validate_exact_schema(contract, schema)
 
 
+def validate_declared_v2_arrow_contract_envelope(
+    value: object,
+    table_names: Sequence[str],
+) -> dict[str, object]:
+    """Validate a historical v2 declaration against itself, never v3 schemas.
+
+    Export-v2 envelopes predate the W1.4 identity and clustered-statistics
+    fields.  Their embedded exact declarations remain the authority for those
+    immutable files.  This compatibility parser validates all nested digests,
+    field declarations, and the closed table partition without comparing the
+    payload to the installed v3 declarations.
+    """
+
+    from .arrow_contract_core import payload_sha256
+
+    envelope_fields = {
+        "schema_id",
+        "schema_version",
+        "exact_tables",
+        "inferred_v2_compatibility_tables",
+        "payload_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != envelope_fields:
+        raise ValueError("Arrow contract envelope has an unexpected field set")
+    if value.get("schema_id") != ARROW_CONTRACT_ENVELOPE_SCHEMA_ID:
+        raise ValueError("Arrow contract envelope schema ID is invalid")
+    if value.get("schema_version") != ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION_V1:
+        raise ValueError("Arrow contract envelope is not the historical v1 format")
+    body = {key: value[key] for key in envelope_fields - {"payload_sha256"}}
+    if value.get("payload_sha256") != payload_sha256(body):
+        raise ValueError("Arrow contract envelope payload digest is invalid")
+    exact = value.get("exact_tables")
+    inferred = value.get("inferred_v2_compatibility_tables")
+    if not isinstance(exact, Mapping) or not isinstance(inferred, list):
+        raise ValueError("Arrow contract envelope table partition is invalid")
+    names = tuple(table_names)
+    if len(names) != len(set(names)):
+        raise ValueError("Arrow contract table names must be unique")
+    exact_names = {str(name) for name in exact}
+    inferred_names = [str(name) for name in inferred]
+    if inferred_names != sorted(inferred_names) or len(inferred_names) != len(
+        set(inferred_names)
+    ):
+        raise ValueError("Arrow inferred-v2 table names must be sorted and unique")
+    if exact_names & set(inferred_names) or exact_names | set(inferred_names) != set(
+        names
+    ):
+        raise ValueError("Arrow contract envelope does not partition declared tables")
+    for table_name, raw_contract in exact.items():
+        _declared_v2_arrow_table_contract(str(table_name), raw_contract)
+    return dict(value)
+
+
+def _declared_v2_arrow_table_contract(
+    table_name: str,
+    value: object,
+) -> ArrowTableContract:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{table_name}: Arrow table contract must be an object")
+    fields = {"schema_id", "schema_version", "table_name", "fields", "payload_sha256"}
+    keyed_fields = fields | {"primary_key"}
+    if set(value) not in (fields, keyed_fields):
+        raise ValueError(f"{table_name}: Arrow table contract field set is invalid")
+    if value.get("table_name") != table_name or value.get("schema_version") != 1:
+        raise ValueError(f"{table_name}: Arrow table identity is invalid")
+    raw_fields = value.get("fields")
+    if not isinstance(raw_fields, list):
+        raise ValueError(f"{table_name}: Arrow field declarations are invalid")
+    parsed_fields: list[ArrowFieldContract] = []
+    for item in raw_fields:
+        if not isinstance(item, Mapping) or set(item) != {
+            "name",
+            "arrow_type",
+            "nullable",
+        }:
+            raise ValueError(f"{table_name}: Arrow field declaration is invalid")
+        if (
+            not isinstance(item.get("name"), str)
+            or not item["name"]
+            or not isinstance(item.get("arrow_type"), str)
+            or type(item.get("nullable")) is not bool
+        ):
+            raise ValueError(f"{table_name}: Arrow field declaration is invalid")
+        parsed_fields.append(
+            ArrowFieldContract(
+                name=item["name"],
+                arrow_type=item["arrow_type"],
+                nullable=item["nullable"],
+            )
+        )
+    raw_primary_key = value.get("primary_key", [])
+    if not isinstance(raw_primary_key, list) or any(
+        not isinstance(item, str) or not item for item in raw_primary_key
+    ):
+        raise ValueError(f"{table_name}: Arrow primary key is invalid")
+    contract = ArrowTableContract(
+        table_name=table_name,
+        fields=tuple(parsed_fields),
+        schema_version=1,
+        primary_key=tuple(raw_primary_key),
+    )
+    if value.get("schema_id") != contract.schema_id:
+        raise ValueError(f"{table_name}: Arrow schema ID is invalid")
+    if value.get("payload_sha256") != contract.payload_sha256:
+        raise ValueError(f"{table_name}: Arrow table contract digest is invalid")
+    return contract
+
+
+def validate_declared_v2_arrow_schema(
+    table_name: str,
+    schema: Any,
+    envelope: Mapping[str, Any],
+) -> None:
+    """Validate a v2 Parquet schema against its embedded v1 declaration."""
+
+    exact = envelope["exact_tables"]
+    if table_name in exact:
+        validate_exact_schema(
+            _declared_v2_arrow_table_contract(table_name, exact[table_name]),
+            schema,
+        )
+    elif (schema.metadata or {}).get(b"palette.arrow_schema_mode") != (
+        b"inferred_v2_compatibility"
+    ):
+        raise ValueError(f"{table_name}: Arrow schema compatibility mode is missing")
+
+
 __all__ = [
     "ARROW_CONTRACT_ENVELOPE_SCHEMA_ID",
     "ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION",
+    "ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION_V1",
     "ARROW_TABLE_CONTRACTS",
+    "ARROW_TABLE_SCHEMA_VERSION",
     "EXACT_ARROW_SCHEMA_TABLES",
     "ArrowFieldContract",
     "ArrowTableContract",
@@ -2272,4 +2417,6 @@ __all__ = [
     "exact_arrow_schema",
     "validate_arrow_contract_envelope",
     "validate_arrow_schema",
+    "validate_declared_v2_arrow_contract_envelope",
+    "validate_declared_v2_arrow_schema",
 ]

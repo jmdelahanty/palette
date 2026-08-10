@@ -1,4 +1,4 @@
-"""Version-2 table contracts for Palette analytics exports.
+"""Version-3 table contracts for Palette analytics exports.
 
 Table names describe analysis semantics and grain. Protocol/cohort identity is
 metadata and never part of a table name.
@@ -11,7 +11,9 @@ from typing import Any, Mapping, Sequence
 
 
 EXPORT_SCHEMA_ID = "palette.analytics_export"
-EXPORT_SCHEMA_VERSION = 2
+EXPORT_SCHEMA_VERSION_V2 = 2
+EXPORT_SCHEMA_VERSION = 3
+SUPPORTED_EXPORT_SCHEMA_VERSIONS = (EXPORT_SCHEMA_VERSION_V2, EXPORT_SCHEMA_VERSION)
 TABLE_CONTRACT_VERSION = 1
 
 RECORDING_SUMMARY_TABLE = "recording_summary"
@@ -839,7 +841,7 @@ ALL_TABLES = (
 def contract_snapshot(table_names: Sequence[str]) -> dict[str, dict[str, Any]]:
     unknown = sorted(set(table_names) - set(TABLE_CONTRACTS))
     if unknown:
-        raise ValueError(f"No version-2 table contract is registered for: {', '.join(unknown)}")
+        raise ValueError(f"No version-3 table contract is registered for: {', '.join(unknown)}")
     return {table_name: TABLE_CONTRACTS[table_name].to_dict() for table_name in table_names}
 
 
@@ -859,10 +861,10 @@ def _canonical_value(value: Any) -> Any:
 
 
 def canonicalize_export_row(table_name: str, row: Mapping[str, Any]) -> dict[str, Any]:
-    """Convert source-analysis vocabulary into the strict V2 export schema."""
+    """Convert source-analysis vocabulary into the strict V3 export schema."""
 
     if table_name not in TABLE_CONTRACTS:
-        raise ValueError(f"Unknown version-2 table: {table_name}")
+        raise ValueError(f"Unknown version-3 table: {table_name}")
     out: dict[str, Any] = {}
     for raw_key, raw_value in row.items():
         key = str(raw_key).replace("benign", "inert")
@@ -874,7 +876,7 @@ def canonicalize_export_row(table_name: str, row: Mapping[str, Any]) -> dict[str
     out["table_name"] = table_name
     forbidden = sorted(key for key in out if "benign" in key.lower())
     if forbidden:
-        raise ValueError(f"Version-2 row contains forbidden legacy columns: {forbidden}")
+        raise ValueError(f"Version-3 row contains forbidden legacy columns: {forbidden}")
     return out
 
 

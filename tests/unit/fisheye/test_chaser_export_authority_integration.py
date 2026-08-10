@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +37,10 @@ from fisheye.analytics_exports.contracts import (
     CHASER_SPEED_DISTANCE_TABLE,
 )
 from fisheye.analytics_exports.publication import manifest_selected_part_files
+from fisheye.analytics_exports.registry_identity import (
+    build_registry_identity_receipt,
+    build_registry_identity_source,
+)
 from fisheye.analytics_exports.validation import validate_export_run
 from fisheye.analysis.chaser_component_publication import (
     build_chaser_component_handle,
@@ -67,6 +72,7 @@ from fisheye.analysis.chaser_near_field_occupancy import (
     write_chaser_near_field_occupancy_component,
 )
 from fisheye.utils.export_cross_recording_analytics import export_sources
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye.test_cra_near_field import (
     _add_circle_geometry,
     _quadrant_handle,
@@ -79,6 +85,9 @@ from tests.unit.fisheye.test_chaser_egocentric_bearing import (
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
     _make_chaser_result,
+)
+from tests.unit.fisheye.test_export_cross_recording_analytics import (
+    _RegistryReceiptTestDouble,
 )
 
 
@@ -124,8 +133,8 @@ def _component_handle(source: Path, component_path: str) -> dict[str, object]:
     )
 
 
-def _registry_identities(*sources: Path) -> dict[str, dict[str, str]]:
-    bindings: dict[str, dict[str, str]] = {}
+def _registry_identity_receipt(*sources: Path) -> dict[str, object]:
+    bindings: list[dict[str, object]] = []
     for source in sources:
         resolved = source.expanduser().resolve()
         if source.exists():
@@ -139,12 +148,50 @@ def _registry_identities(*sources: Path) -> dict[str, dict[str, str]]:
                 recording_id = source.name.removesuffix("_analysis.zarr")
         else:
             recording_id = source.name.removesuffix("_analysis.zarr")
-        bindings[str(resolved)] = {
-            "recording_id": recording_id,
-            "session_id": "2026-08-09T12:00:00+00:00",
-            "subject_id": f"subject_{recording_id}",
-        }
-    return bindings
+        bindings.append(
+            build_registry_identity_source(
+                zarr_path=resolved,
+                rows=[
+                    {
+                        "dataset_id": len(bindings) + 1,
+                        "recording_id": recording_id,
+                        "experimental_session_id": "session-test",
+                        "experimental_session_snapshot_id": (
+                            "00000000-0000-4000-8000-000000000001"
+                        ),
+                        "experimental_session_schema_id": (
+                            "palette.registry.experimental_session.v1"
+                        ),
+                        "experimental_session_creation_registry_schema_version": 1,
+                        "experimental_session_identity_status": "explicit",
+                        "experimental_session_assignment_snapshot_id": (
+                            "00000000-0000-4000-8000-000000000002"
+                        ),
+                        "experimental_session_assignment_batch_id": (
+                            "00000000-0000-4000-8000-000000000003"
+                        ),
+                        "experimental_session_assignment_revision": 1,
+                        "experimental_session_supersedes_assignment_snapshot_id": None,
+                        "experimental_session_assignment_schema_id": (
+                            "palette.registry.experimental_session_assignment.v1"
+                        ),
+                        "experimental_session_assignment_registry_schema_version": 1,
+                        "experimental_session_assignment_method": "manual_test",
+                        "experimental_session_assigned_by": "test",
+                        "experimental_session_assigned_at_utc": (
+                            "2026-08-10T00:00:00+00:00"
+                        ),
+                        "fish_id": f"subject_{recording_id}",
+                        "subject_count": 1,
+                        "subject_ids_json": None,
+                    }
+                ],
+            )
+        )
+    return build_registry_identity_receipt(
+        registry_path=Path("/registry/test.sqlite"),
+        sources=bindings,
+    )
 
 
 def test_sealed_base_speed_distance_exports_with_exact_authority_in_process_pool(
@@ -173,7 +220,7 @@ def test_sealed_base_speed_distance_exports_with_exact_authority_in_process_pool
         jobs=2,
         chaser_authority_manifest_path=authority_path,
         chaser_authority_sha256=authority_file_sha256,
-        source_registry_identities=_registry_identities(source),
+        registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
     )
 
     assert manifest["row_counts_by_table"][CHASER_SPEED_DISTANCE_TABLE] > 0
@@ -186,6 +233,39 @@ def test_sealed_base_speed_distance_exports_with_exact_authority_in_process_pool
     assert rows[0]["distance_bin_left_mm"] == 0.0
     assert rows[0]["distance_bin_right_mm"] == 2.0
     assert validate_export_run(output, "sealed_base_speed")["status"] == "valid"
+
+
+def test_rehashed_chaser_authority_receipt_tamper_fails_validation(
+    tmp_path: Path,
+) -> None:
+    source = _make_archive_with_detection_occupancy(tmp_path)
+    write_chaser_distance_run(
+        source,
+        _make_chaser_result(source),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
+    authority_path = _write_authority(tmp_path, source, component_handles={})
+    output = tmp_path / "exports"
+    manifest = export_sources(
+        [source],
+        output_root=output,
+        export_run_id="tampered-authority-receipt",
+        tables=(CHASER_SPEED_DISTANCE_TABLE,),
+        chaser_authority_manifest_path=authority_path,
+        registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
+    )
+    manifest_path = Path(manifest["manifest_path"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receipt = payload["chaser_export_authority"]
+    receipt["resolved_sources"][str(source)]["base_run_name"] = "forged-run"
+    receipt["payload_sha256"] = canonical_json_sha256(
+        {key: value for key, value in receipt.items() if key != "payload_sha256"}
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="differs from authority"):
+        validate_export_run(output, "tampered-authority-receipt")
 
 
 def test_quadrant_component_exports_all_three_tables_from_one_explicit_handle(
@@ -214,7 +294,7 @@ def test_quadrant_component_exports_all_three_tables_from_one_explicit_handle(
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
-        source_registry_identities=_registry_identities(source),
+        registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -280,7 +360,7 @@ def test_near_field_component_exports_all_four_tables_from_one_explicit_handle(
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
-        source_registry_identities=_registry_identities(source),
+        registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -348,7 +428,7 @@ def test_egocentric_component_exports_both_tables_from_one_explicit_handle(
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
-        source_registry_identities=_registry_identities(source),
+        registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -508,7 +588,7 @@ def test_epoch_behavior_component_exports_all_five_tables_from_one_explicit_hand
         tables=tables,
         jobs=1,
         chaser_authority_manifest_path=authority_path,
-        source_registry_identities=_registry_identities(source),
+        registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
     )
 
     assert all(manifest["row_counts_by_table"][table] > 0 for table in tables)
@@ -535,7 +615,7 @@ def test_supported_chaser_table_requires_authority_before_staging(
             output_root=tmp_path / "exports",
             export_run_id="missing_authority",
             tables=(CHASER_SPEED_DISTANCE_TABLE,),
-            source_registry_identities=_registry_identities(source),
+            registry=_RegistryReceiptTestDouble(_registry_identity_receipt(source)),
         )
 
     assert not (tmp_path / "exports").exists()
@@ -565,7 +645,9 @@ def test_chaser_authority_source_set_must_match_before_staging(
             export_run_id="source_mismatch",
             tables=(CHASER_SPEED_DISTANCE_TABLE,),
             chaser_authority_manifest_path=authority_path,
-            source_registry_identities=_registry_identities(source, extra_source),
+            registry=_RegistryReceiptTestDouble(
+                _registry_identity_receipt(source, extra_source)
+            ),
         )
 
     assert not (tmp_path / "exports").exists()

@@ -15,6 +15,11 @@ from fisheye.analytics_exports.contracts import (
     CHASER_SPATIAL_TABLE,
 )
 from fisheye.analytics_exports.publication import manifest_selected_part_files
+from fisheye.analytics_exports.registry_identity import (
+    build_registry_identity_receipt,
+    build_registry_identity_source,
+)
+from fisheye.registry.db import Registry
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.stimulus_response import (
@@ -47,6 +52,125 @@ def _array(group, name: str, values) -> None:
     group.create_array(name, data=np.asarray(values), overwrite=True)
 
 
+def _registry_receipt(source: Path, recording_id: str) -> dict[str, object]:
+    return _registry_receipt_for_sources([(source, recording_id)])
+
+
+def _registry_receipt_for_sources(
+    sources: list[tuple[Path, str]],
+) -> dict[str, object]:
+    identities = []
+    for index, (source, recording_id) in enumerate(sources, start=1):
+        identity = build_registry_identity_source(
+            zarr_path=source,
+            rows=[
+            {
+                "dataset_id": index,
+                "recording_id": recording_id,
+                "experimental_session_id": "session-test",
+                "experimental_session_snapshot_id": (
+                    "00000000-0000-4000-8000-000000000001"
+                ),
+                "experimental_session_schema_id": (
+                    "palette.registry.experimental_session.v1"
+                ),
+                "experimental_session_creation_registry_schema_version": 1,
+                "experimental_session_identity_status": "explicit",
+                "experimental_session_assignment_snapshot_id": (
+                    "00000000-0000-4000-8000-000000000002"
+                ),
+                "experimental_session_assignment_batch_id": (
+                    "00000000-0000-4000-8000-000000000003"
+                ),
+                "experimental_session_assignment_revision": 1,
+                "experimental_session_supersedes_assignment_snapshot_id": None,
+                "experimental_session_assignment_schema_id": (
+                    "palette.registry.experimental_session_assignment.v1"
+                ),
+                "experimental_session_assignment_registry_schema_version": 1,
+                "experimental_session_assignment_method": "manual_test",
+                "experimental_session_assigned_by": "test",
+                "experimental_session_assigned_at_utc": (
+                    "2026-08-10T00:00:00+00:00"
+                ),
+                "fish_id": "subject-test",
+                "subject_count": 1,
+                "subject_ids_json": None,
+            }
+            ],
+        )
+        identities.append(identity)
+    return build_registry_identity_receipt(
+        registry_path=Path("/registry/test.sqlite"),
+        sources=identities,
+    )
+
+
+class _RegistryReceiptTestDouble(Registry):
+    """Registry-shaped test authority reconstructed from a validated receipt."""
+
+    def __init__(self, receipt: dict[str, object]) -> None:
+        self.path = Path(str(receipt["registry_path"]))
+        self._sources = tuple(dict(source) for source in receipt["sources"])
+
+    def query_datasets(self, **kwargs):
+        path_name = str(kwargs.get("path_contains", ""))
+        rows = []
+        for source in self._sources:
+            if Path(str(source["zarr_path"])).name != path_name:
+                continue
+            rows.append(
+                {
+                    "dataset_id": source["dataset_id"],
+                    "zarr_path": source["zarr_path"],
+                    "recording_id": source["recording_id"],
+                    "experimental_session_id": source["experimental_session_id"],
+                    "experimental_session_snapshot_id": source[
+                        "experimental_session_snapshot_id"
+                    ],
+                    "experimental_session_schema_id": source[
+                        "experimental_session_schema_id"
+                    ],
+                    "experimental_session_creation_registry_schema_version": source[
+                        "experimental_session_schema_version"
+                    ],
+                    "experimental_session_identity_status": source[
+                        "experimental_session_identity_status"
+                    ],
+                    "experimental_session_assignment_snapshot_id": source[
+                        "assignment_snapshot_id"
+                    ],
+                    "experimental_session_assignment_batch_id": source[
+                        "assignment_batch_id"
+                    ],
+                    "experimental_session_assignment_revision": source[
+                        "assignment_revision"
+                    ],
+                    "experimental_session_supersedes_assignment_snapshot_id": source[
+                        "supersedes_assignment_snapshot_id"
+                    ],
+                    "experimental_session_assignment_schema_id": source[
+                        "assignment_schema_id"
+                    ],
+                    "experimental_session_assignment_registry_schema_version": source[
+                        "assignment_schema_version"
+                    ],
+                    "experimental_session_assignment_method": source[
+                        "assignment_method"
+                    ],
+                    "experimental_session_assigned_by": source["assigned_by"],
+                    "experimental_session_assigned_at_utc": source["assigned_at_utc"],
+                    "fish_id": source["subject_id"],
+                    "subject_count": source["subject_count"],
+                    "subject_ids_json": json.dumps([source["subject_id"]]),
+                }
+            )
+        return rows
+
+    def close(self) -> None:
+        return None
+
+
 def test_registry_export_identity_uses_persisted_session_and_subject(
     tmp_path: Path,
 ) -> None:
@@ -54,23 +178,150 @@ def test_registry_export_identity_uses_persisted_session_and_subject(
     source.mkdir()
 
     class FakeRegistry:
+        path = tmp_path / "registry.sqlite"
+
         def query_datasets(self, **_kwargs):
             return [
                 {
+                    "dataset_id": 17,
                     "zarr_path": str(source),
                     "recording_id": "recording_a",
-                    "recording_started_utc": "2026-08-09T12:00:00+00:00",
+                    "experimental_session_id": "session-a",
+                    "experimental_session_snapshot_id": (
+                        "10000000-0000-4000-8000-000000000001"
+                    ),
+                    "experimental_session_schema_id": (
+                        "palette.registry.experimental_session.v1"
+                    ),
+                    "experimental_session_creation_registry_schema_version": 1,
+                    "experimental_session_identity_status": "explicit",
+                    "experimental_session_assignment_snapshot_id": (
+                        "10000000-0000-4000-8000-000000000002"
+                    ),
+                    "experimental_session_assignment_batch_id": (
+                        "10000000-0000-4000-8000-000000000003"
+                    ),
+                    "experimental_session_assignment_revision": 1,
+                    "experimental_session_supersedes_assignment_snapshot_id": None,
+                    "experimental_session_assignment_schema_id": (
+                        "palette.registry.experimental_session_assignment.v1"
+                    ),
+                    "experimental_session_assignment_registry_schema_version": 1,
+                    "experimental_session_assignment_method": "manual_test",
+                    "experimental_session_assigned_by": "test",
+                    "experimental_session_assigned_at_utc": (
+                        "2026-08-10T00:00:00+00:00"
+                    ),
                     "fish_id": "subject-uuid",
+                    "subject_count": 1,
+                    "subject_ids_json": '["subject-uuid"]',
                 }
             ]
 
     identities = resolve_registry_export_identities(FakeRegistry(), [source])
 
-    assert identities[str(source.resolve())] == {
-        "recording_id": "recording_a",
-        "session_id": "2026-08-09T12:00:00+00:00",
-        "subject_id": "subject-uuid",
-    }
+    assert identities["schema_version"] == 2
+    assert identities["registry_path"] == str(FakeRegistry.path.resolve())
+    assert identities["sources"][0]["zarr_path"] == str(source.resolve())
+    assert identities["sources"][0]["recording_id"] == "recording_a"
+    assert identities["sources"][0]["session_id"] == "session-a"
+    assert identities["sources"][0]["assignment_snapshot_id"] == (
+        "10000000-0000-4000-8000-000000000002"
+    )
+    assert identities["sources"][0]["subject_id"] == "subject-uuid"
+
+
+def test_registry_export_identity_rejects_multi_subject_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "recording_multi_analysis.zarr"
+    source.mkdir()
+
+    class FakeRegistry:
+        path = tmp_path / "registry.sqlite"
+
+        def query_datasets(self, **_kwargs):
+            return [
+                {
+                    "dataset_id": 18,
+                    "zarr_path": str(source),
+                    "recording_id": "recording_multi",
+                    "experimental_session_id": "session-multi",
+                    "experimental_session_snapshot_id": (
+                        "20000000-0000-4000-8000-000000000001"
+                    ),
+                    "experimental_session_schema_id": (
+                        "palette.registry.experimental_session.v1"
+                    ),
+                    "experimental_session_creation_registry_schema_version": 1,
+                    "experimental_session_identity_status": "explicit",
+                    "experimental_session_assignment_snapshot_id": (
+                        "20000000-0000-4000-8000-000000000002"
+                    ),
+                    "experimental_session_assignment_batch_id": (
+                        "20000000-0000-4000-8000-000000000003"
+                    ),
+                    "experimental_session_assignment_revision": 1,
+                    "experimental_session_supersedes_assignment_snapshot_id": None,
+                    "experimental_session_assignment_schema_id": (
+                        "palette.registry.experimental_session_assignment.v1"
+                    ),
+                    "experimental_session_assignment_registry_schema_version": 1,
+                    "experimental_session_assignment_method": "manual_test",
+                    "experimental_session_assigned_by": "test",
+                    "experimental_session_assigned_at_utc": (
+                        "2026-08-10T00:00:00+00:00"
+                    ),
+                    "fish_id": "subject-a",
+                    "subject_count": 2,
+                    "subject_ids_json": '["subject-a","subject-b"]',
+                }
+            ]
+
+    with pytest.raises(ValueError, match="requires exactly one registry subject"):
+        resolve_registry_export_identities(FakeRegistry(), [source])
+
+
+def test_duplicate_table_request_fails_before_staging(tmp_path: Path) -> None:
+    output = tmp_path / "exports"
+
+    with pytest.raises(ValueError, match="Duplicate table request"):
+        export_sources(
+            [tmp_path / "missing.zarr"],
+            output_root=output,
+            export_run_id="duplicate-table",
+            tables=("recording_summary", "recording_summary"),
+        )
+
+    assert not output.exists()
+
+
+def test_export_library_rejects_caller_supplied_registry_receipt(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TypeError, match="registry_identity_receipt"):
+        export_sources(
+            [tmp_path / "source_analysis.zarr"],
+            output_root=tmp_path / "exports",
+            tables=(CHASER_DISTANCE_SUMMARY_TABLE,),
+            registry_identity_receipt={},
+        )
+
+
+def test_unreadable_requested_source_fails_without_partial_publication(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "exports"
+
+    with pytest.raises(ValueError, match="Requested analytics source could not be opened"):
+        export_sources(
+            [tmp_path / "missing_analysis.zarr"],
+            output_root=output,
+            export_run_id="unreadable-source",
+            tables=("recording_summary",),
+        )
+
+    assert not output.exists()
 
 
 def test_exporter_does_not_guess_unknown_roles_from_derived_components() -> None:
@@ -717,7 +968,7 @@ def test_export_cross_recording_analytics_keeps_unsealed_chaser_tables_unavailab
         CHASER_DISTANCE_HISTOGRAM_TABLE,
     )
 
-    with pytest.raises(ValueError, match="Registry identity source set"):
+    with pytest.raises(ValueError, match="Registry instance or SQLite path"):
         export_sources(
             [source],
             output_root=output,
@@ -732,13 +983,9 @@ def test_export_cross_recording_analytics_keeps_unsealed_chaser_tables_unavailab
         export_run_id="chaser_fail_closed",
         tables=(CHASER_SPATIAL_TABLE, *derived_tables),
         jobs=1,
-        source_registry_identities={
-            str(source.resolve()): {
-                "recording_id": "goodcopbadcop",
-                "session_id": "session-test",
-                "subject_id": "subject-test",
-            }
-        },
+        registry=_RegistryReceiptTestDouble(
+            _registry_receipt(source, "goodcopbadcop")
+        ),
     )
 
     assert manifest["row_counts_by_table"][CHASER_SPATIAL_TABLE] == 12
