@@ -78,9 +78,16 @@ CHASER_QUADRANT_OCCUPANCY_SCHEMA_IDS = frozenset(
 GOODCOPBADCOP_CRA_NEAR_FIELD_COMPONENT_PARENT = "cra_near_field"
 GOODCOPBADCOP_CRA_NEAR_FIELD_SCHEMA_ID = "palette.goodcopbadcop.cra_near_field.v1"
 CHASER_NEAR_FIELD_OCCUPANCY_COMPONENT_PARENT = "chaser_near_field_occupancy"
-CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS = frozenset(
-    {GOODCOPBADCOP_CRA_NEAR_FIELD_SCHEMA_ID, "palette.chaser.near_field_occupancy.v1"}
+CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_ID = "palette.chaser.near_field_occupancy.v2"
+LEGACY_CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS = frozenset(
+    {
+        GOODCOPBADCOP_CRA_NEAR_FIELD_SCHEMA_ID,
+        "palette.chaser.near_field_occupancy.v1",
+    }
 )
+CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS = frozenset(
+    {CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_ID}
+) | LEGACY_CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS
 GOODCOPBADCOP_EPOCH_BEHAVIOR_COMPONENT_PARENT = "epoch_behavior_summary"
 GOODCOPBADCOP_EPOCH_BEHAVIOR_SCHEMA_ID = (
     "palette.goodcopbadcop.epoch_behavior_summary.v1"

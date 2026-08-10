@@ -71,8 +71,11 @@ from fisheye.analysis.chaser_near_field_occupancy import (
     build_chaser_near_field_occupancy_result,
     write_chaser_near_field_occupancy_component,
 )
-from fisheye.utils.export_cross_recording_analytics import export_sources
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.utils.export_cross_recording_analytics import (
+    _required_near_field_v2_phase_array,
+    export_sources,
+)
 from tests.unit.fisheye.test_cra_near_field import (
     _add_circle_geometry,
     _quadrant_handle,
@@ -377,7 +380,59 @@ def test_near_field_component_exports_all_four_tables_from_one_explicit_handle(
         exported[CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE][0]["speed_source"]
         == "raw_centroid_explicit"
     )
+    summary_row = exported[CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE][0]
+    assert summary_row["visit_policy_version"] == (
+        "valid_tracked_observed_transitions_v2"
+    )
+    assert summary_row["near_zone_entry_rate_denominator_semantics"] == (
+        "valid_fish_to_chaser_distance_samples_divided_by_fps"
+    )
+    phase_rows = exported[CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE]
+    for row in phase_rows:
+        assert row["near_zone_entry_rate_numerator_count"] >= 0
+        assert row["near_zone_valid_tracked_duration_s"] >= 0.0
+        assert (
+            row["near_zone_entry_rate_denominator_duration_s"]
+            == row["near_zone_valid_tracked_duration_s"]
+        )
+        assert row["near_zone_invalid_gap_count"] >= 0
+        assert row["near_zone_censor_event_count"] >= 0
+        assert row["near_zone_boundary_censor_event_count"] >= 0
+        assert row["near_zone_invalid_gap_censor_event_count"] >= 0
     assert validate_export_run(output, "sealed_near_field")["status"] == "valid"
+
+
+def test_near_field_v2_phase_array_requires_exact_shape_and_dtype() -> None:
+    exact = {"metric": np.zeros((2, 3), dtype=np.int64)}
+    values = _required_near_field_v2_phase_array(
+        exact,
+        "metric",
+        shape=(2, 3),
+        dtype=np.int64,
+    )
+    assert values.dtype == np.dtype(np.int64)
+
+    with pytest.raises(ValueError, match="requires per_chaser_phase/missing"):
+        _required_near_field_v2_phase_array(
+            exact,
+            "missing",
+            shape=(2, 3),
+            dtype=np.int64,
+        )
+    with pytest.raises(ValueError, match="has shape"):
+        _required_near_field_v2_phase_array(
+            {"metric": np.zeros((2, 2), dtype=np.int64)},
+            "metric",
+            shape=(2, 3),
+            dtype=np.int64,
+        )
+    with pytest.raises(ValueError, match="has dtype"):
+        _required_near_field_v2_phase_array(
+            {"metric": np.zeros((2, 3), dtype=np.int32)},
+            "metric",
+            shape=(2, 3),
+            dtype=np.int64,
+        )
 
 
 def test_egocentric_component_exports_both_tables_from_one_explicit_handle(

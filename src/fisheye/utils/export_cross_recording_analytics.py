@@ -236,7 +236,7 @@ _SUPPORTED_CHASER_EXPORT_SOURCE_TABLES = frozenset(
 _COMPONENT_SCHEMA_BY_FAMILY = {
     EPOCH_BEHAVIOR_FAMILY: ("palette.chaser.epoch_behavior_summary.v1", 1),
     QUADRANT_OCCUPANCY_FAMILY: ("palette.chaser.quadrant_occupancy.v1", 1),
-    NEAR_FIELD_OCCUPANCY_FAMILY: ("palette.chaser.near_field_occupancy.v1", 1),
+    NEAR_FIELD_OCCUPANCY_FAMILY: ("palette.chaser.near_field_occupancy.v2", 2),
     EGOCENTRIC_BEARING_FAMILY: ("palette.chaser_egocentric_bearing.v1", 1),
 }
 
@@ -4375,6 +4375,35 @@ def _near_field_percentile_columns(component: Any, approach: np.ndarray | None) 
     return out
 
 
+def _required_near_field_v2_phase_array(
+    group: Any,
+    name: str,
+    *,
+    shape: tuple[int, int],
+    dtype: np.dtype[Any] | str,
+) -> np.ndarray:
+    """Read one exact v2 phase array without nullable legacy fallback."""
+
+    values = _read_array(group, name)
+    expected_dtype = np.dtype(dtype)
+    if values is None:
+        raise ValueError(
+            f"near-field v2 requires per_chaser_phase/{name}."
+        )
+    array = np.asarray(values)
+    if tuple(array.shape) != tuple(shape):
+        raise ValueError(
+            f"near-field v2 per_chaser_phase/{name} has shape "
+            f"{tuple(array.shape)!r}; expected {tuple(shape)!r}."
+        )
+    if np.dtype(array.dtype) != expected_dtype:
+        raise ValueError(
+            f"near-field v2 per_chaser_phase/{name} has dtype "
+            f"{np.dtype(array.dtype).str!r}; expected {expected_dtype.str!r}."
+        )
+    return array
+
+
 def _load_goodcopbadcop_cra_near_field_object_phase(
     root: Any,
     *,
@@ -4457,9 +4486,72 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
     near_zone_density = _read_array(per_object, "near_zone_density_per_mm2")
     near_zone_area = _read_array(per_object, "near_zone_available_area_mm2")
     entry_count = _read_array(per_object, "near_zone_entry_count")
+    exact_shape = (n_phases, n_objects)
+    entry_rate_numerator_count = _required_near_field_v2_phase_array(
+        per_object,
+        "near_zone_entry_rate_numerator_count",
+        shape=exact_shape,
+        dtype=np.int64,
+    )
+    valid_tracked_duration_s = _required_near_field_v2_phase_array(
+        per_object,
+        "near_zone_valid_tracked_duration_s",
+        shape=exact_shape,
+        dtype=np.float64,
+    )
+    entry_rate_denominator_duration_s = _required_near_field_v2_phase_array(
+        per_object,
+        "near_zone_entry_rate_denominator_duration_s",
+        shape=exact_shape,
+        dtype=np.float64,
+    )
     entry_rate = _read_array(per_object, "near_zone_entry_rate_per_min")
     visit_median_dwell = _read_array(per_object, "near_zone_visit_median_dwell_s")
     visit_total_dwell = _read_array(per_object, "near_zone_visit_total_dwell_s")
+    invalid_gap_count = _required_near_field_v2_phase_array(
+        per_object,
+        "near_zone_invalid_gap_count",
+        shape=exact_shape,
+        dtype=np.int64,
+    )
+    censor_event_count = _required_near_field_v2_phase_array(
+        per_object,
+        "near_zone_censor_event_count",
+        shape=exact_shape,
+        dtype=np.int64,
+    )
+    boundary_censor_event_count = _required_near_field_v2_phase_array(
+        per_object,
+        "near_zone_boundary_censor_event_count",
+        shape=exact_shape,
+        dtype=np.int64,
+    )
+    invalid_gap_censor_event_count = _required_near_field_v2_phase_array(
+        per_object,
+        "near_zone_invalid_gap_censor_event_count",
+        shape=exact_shape,
+        dtype=np.int64,
+    )
+    for name, values in (
+        ("near_zone_entry_rate_numerator_count", entry_rate_numerator_count),
+        ("near_zone_valid_tracked_duration_s", valid_tracked_duration_s),
+        (
+            "near_zone_entry_rate_denominator_duration_s",
+            entry_rate_denominator_duration_s,
+        ),
+        ("near_zone_invalid_gap_count", invalid_gap_count),
+        ("near_zone_censor_event_count", censor_event_count),
+        ("near_zone_boundary_censor_event_count", boundary_censor_event_count),
+        (
+            "near_zone_invalid_gap_censor_event_count",
+            invalid_gap_censor_event_count,
+        ),
+    ):
+        if np.any(~np.isfinite(values)) or np.any(values < 0):
+            raise ValueError(
+                f"near-field v2 per_chaser_phase/{name} must be finite and "
+                "nonnegative."
+            )
     valid_count = _read_array(per_object, "valid_distance_count")
     missing_count = _read_array(per_object, "missing_frame_count")
     dropout = _read_array(per_object, "tracking_dropout_fraction")
@@ -4515,9 +4607,30 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
                 "near_zone_density_per_mm2": _array_float(near_zone_density, phase_idx, object_col),
                 "near_zone_available_area_mm2": _array_float(near_zone_area, phase_idx, object_col),
                 "near_zone_entry_count": _array_int(entry_count, phase_idx, object_col),
+                "near_zone_entry_rate_numerator_count": _array_int(
+                    entry_rate_numerator_count, phase_idx, object_col
+                ),
+                "near_zone_valid_tracked_duration_s": _array_float(
+                    valid_tracked_duration_s, phase_idx, object_col
+                ),
+                "near_zone_entry_rate_denominator_duration_s": _array_float(
+                    entry_rate_denominator_duration_s, phase_idx, object_col
+                ),
                 "near_zone_entry_rate_per_min": _array_float(entry_rate, phase_idx, object_col),
                 "near_zone_visit_median_dwell_s": _array_float(visit_median_dwell, phase_idx, object_col),
                 "near_zone_visit_total_dwell_s": _array_float(visit_total_dwell, phase_idx, object_col),
+                "near_zone_invalid_gap_count": _array_int(
+                    invalid_gap_count, phase_idx, object_col
+                ),
+                "near_zone_censor_event_count": _array_int(
+                    censor_event_count, phase_idx, object_col
+                ),
+                "near_zone_boundary_censor_event_count": _array_int(
+                    boundary_censor_event_count, phase_idx, object_col
+                ),
+                "near_zone_invalid_gap_censor_event_count": _array_int(
+                    invalid_gap_censor_event_count, phase_idx, object_col
+                ),
                 "valid_distance_count": _array_int(valid_count, phase_idx, object_col),
                 "missing_frame_count": _array_int(missing_count, phase_idx, object_col),
                 "tracking_dropout_fraction": _array_float(dropout, phase_idx, object_col),

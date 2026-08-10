@@ -533,8 +533,8 @@ ANALYTICS_SURFACE_CLASSIFICATIONS: tuple[AnalyticsSurfaceClassification, ...] = 
         owner_module="fisheye.analysis.chaser_near_field_occupancy",
         owner_entrypoint="write_chaser_near_field_occupancy_component",
         component_parent="chaser_near_field_occupancy",
-        schema_id="palette.chaser.near_field_occupancy.v1",
-        schema_version=1,
+        schema_id="palette.chaser.near_field_occupancy.v2",
+        schema_version=2,
     ),
     _chaser_component(
         surface_id="chaser_epoch_behavior_summary",

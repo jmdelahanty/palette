@@ -30,8 +30,8 @@ modules:
 
   - id: chaser_near_field_occupancy
     implementation: fisheye.analysis.chaser_near_field_occupancy
-    schema_id: palette.chaser.near_field_occupancy.v1
-    schema_version: 1
+    schema_id: palette.chaser.near_field_occupancy.v2
+    schema_version: 2
     depends_on: [chaser_quadrant_occupancy]
     execution_cardinality: recording
     default_enabled: true

@@ -21,12 +21,30 @@ from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID
 from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERER,
     CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+    CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_ID,
+    CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS,
     DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+    LEGACY_CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS,
     discover_goodcopbadcop_chaser_dashboard_options,
     discover_chaser_dashboard_options,
     load_chaser_dashboard_data,
     load_goodcopbadcop_interactive_data,
 )
+
+
+def test_near_field_visualization_allowlist_distinguishes_current_and_legacy() -> None:
+    assert CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_ID == (
+        "palette.chaser.near_field_occupancy.v2"
+    )
+    assert CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_ID in (
+        CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS
+    )
+    assert "palette.chaser.near_field_occupancy.v1" in (
+        LEGACY_CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS
+    )
+    assert LEGACY_CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS < (
+        CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS
+    )
 
 
 def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:

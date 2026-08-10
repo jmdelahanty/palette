@@ -40,6 +40,10 @@ def test_generic_profile_contains_renamed_modules_and_per_chaser_escape() -> Non
     assert "chaser_quadrant_occupancy" in modules
     assert "chaser_near_field_occupancy" in modules
     assert "chaser_epoch_behavior_summary" in modules
+    assert modules["chaser_near_field_occupancy"].schema_id == (
+        "palette.chaser.near_field_occupancy.v2"
+    )
+    assert modules["chaser_near_field_occupancy"].schema_version == 2
     assert modules["chaser_escape_freeze_summary"].execution_cardinality == "per_chaser"
 
 

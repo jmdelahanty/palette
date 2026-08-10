@@ -1075,8 +1075,8 @@ def test_every_analytics_table_has_an_exact_arrow_contract() -> None:
         (CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE, 62),
         (CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE, 89),
         (CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE, 88),
-        (CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE, 75),
-        (CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE, 92),
+        (CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE, 80),
+        (CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE, 99),
         (CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE, 89),
         (CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE, 78),
         (CHASER_EGOCENTRIC_SUMMARY_TABLE, 71),
@@ -1112,7 +1112,7 @@ def test_chaser_arrow_contracts_are_closed_unique_and_keyed(
         assert not by_name[key].nullable
 
 
-def test_near_field_v1_freezes_percentiles_without_dynamic_columns() -> None:
+def test_near_field_v2_freezes_percentiles_and_denominator_evidence() -> None:
     names = tuple(
         field.name
         for field in ARROW_TABLE_CONTRACTS[
@@ -1126,6 +1126,24 @@ def test_near_field_v1_freezes_percentiles_without_dynamic_columns() -> None:
         "approach_p10_mm",
         "approach_p10_mm_percentile",
     )
+    for name, arrow_type in (
+        ("near_zone_entry_rate_numerator_count", "int64"),
+        ("near_zone_valid_tracked_duration_s", "float64"),
+        ("near_zone_entry_rate_denominator_duration_s", "float64"),
+        ("near_zone_invalid_gap_count", "int64"),
+        ("near_zone_censor_event_count", "int64"),
+        ("near_zone_boundary_censor_event_count", "int64"),
+        ("near_zone_invalid_gap_censor_event_count", "int64"),
+    ):
+        field = next(
+            field
+            for field in ARROW_TABLE_CONTRACTS[
+                CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE
+            ].fields
+            if field.name == name
+        )
+        assert field.arrow_type == arrow_type
+        assert field.nullable is False
 
 
 @pytest.mark.parametrize("table_name", CHASER_ARROW_TABLES)
