@@ -43,6 +43,7 @@ from fisheye.group_statistics.goodcopbadcop import (
     DEFAULT_METRICS,
     DESCRIPTIVE_TABLE,
     GoodCopBadCopStatisticsConfig,
+    MetricSpec,
     SUMMARY_TABLE,
     compute_goodcopbadcop_outputs,
     compute_goodcopbadcop_descriptive_summaries,
@@ -71,17 +72,28 @@ def _write_rows(path: Path, rows: list[dict]) -> None:
     pq.write_table(pa.Table.from_pylist(rows), path / "part-00000.parquet")
 
 
-def _registry_identity(recording_id: str) -> dict[str, str]:
+def _registry_identity(
+    recording_id: str,
+    *,
+    session_id: str | None = None,
+) -> dict[str, str]:
     return {
-        "session_id": f"session-{recording_id}",
+        "session_id": session_id or f"session-{recording_id}",
         "subject_id": f"subject-{recording_id}",
     }
 
 
-def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export") -> Path:
+def _make_goodcopbadcop_export(
+    root: Path,
+    export_run_id: str = "source_export",
+    *,
+    values_by_recording: dict[str, dict[str, float]] | None = None,
+    session_by_recording: dict[str, str] | None = None,
+    roles_by_recording: dict[str, tuple[str, str]] | None = None,
+) -> Path:
     export_root = root / "palette_analytics"
     rows: list[dict] = []
-    values = {
+    values = values_by_recording or {
         "r1": {"pre": 1.0, "training": 2.0, "post": 1.5},
         "r2": {"pre": 2.0, "training": 4.0, "post": 2.5},
         "r3": {"pre": 3.0, "training": 6.0, "post": 4.0},
@@ -98,7 +110,10 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
                 rows.append(
                     {
                         "recording_id": recording_id,
-                        **_registry_identity(recording_id),
+                        **_registry_identity(
+                            recording_id,
+                            session_id=(session_by_recording or {}).get(recording_id),
+                        ),
                         "window_label": label_by_condition[condition],
                         "chaser_index": chaser_index,
                         "chaser_column_index": chaser_index,
@@ -114,7 +129,7 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
         export_root / "v1" / "chaser_epoch_distance_summary" / f"export_run_id={export_run_id}",
         rows,
     )
-    role_by_recording = {
+    role_by_recording = roles_by_recording or {
         "r1": ("aggressive", "inert"),
         "r2": ("inert", "aggressive"),
         "r3": ("aggressive", "inert"),
@@ -122,7 +137,10 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
     object_phase_rows = [
         {
             "recording_id": recording_id,
-            **_registry_identity(recording_id),
+            **_registry_identity(
+                recording_id,
+                session_id=(session_by_recording or {}).get(recording_id),
+            ),
             "object_column_index": object_column_index,
             "object_role": role,
         }
@@ -269,20 +287,33 @@ def _publish_legacy_group_statistics_copy(
     return legacy_payload
 
 
-def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_export") -> Path:
+def _make_goodcopbadcop_cra_export(
+    root: Path,
+    export_run_id: str = "source_export",
+    *,
+    deltas_by_recording: dict[str, dict[str, tuple[float, float]]] | None = None,
+    session_by_recording: dict[str, str] | None = None,
+) -> Path:
     export_root = root / "palette_analytics"
     rows = [
         {
             "recording_id": recording_id,
-            **_registry_identity(recording_id),
+            **_registry_identity(
+                recording_id,
+                session_id=(session_by_recording or {}).get(recording_id),
+            ),
             "fish_id": "0",
             "endpoint_status": "computed",
             "chaser_count": 2,
             "pairwise_role_contrast_policy": "not_computed_at_recording_level",
         }
-        for recording_id in ("r1", "r2", "r3")
+        for recording_id in (
+            (deltas_by_recording or {}).keys()
+            if deltas_by_recording is not None
+            else ("r1", "r2", "r3")
+        )
     ]
-    deltas = {
+    deltas = deltas_by_recording or {
         "r1": {"aggressive": (1.0, -0.1), "inert": (0.5, 0.1)},
         "r2": {"aggressive": (2.0, -0.2), "inert": (1.0, -0.1)},
         "r3": {"aggressive": (3.0, -0.3), "inert": (1.5, 0.0)},
@@ -301,7 +332,10 @@ def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_expo
                 phase_rows.append(
                     {
                         "recording_id": recording_id,
-                        **_registry_identity(recording_id),
+                        **_registry_identity(
+                            recording_id,
+                            session_id=(session_by_recording or {}).get(recording_id),
+                        ),
                         "fish_id": "0",
                         "phase_axis_index": phase_axis_index,
                         "phase_label": phase_label,
@@ -423,6 +457,41 @@ def _make_goodcopbadcop_epoch_behavior_export(root: Path, export_run_id: str = "
     return export_root
 
 
+def _repeated_session_design() -> tuple[
+    dict[str, str],
+    dict[str, dict[str, float]],
+    dict[str, tuple[str, str]],
+    dict[str, dict[str, tuple[float, float]]],
+]:
+    sessions: dict[str, str] = {}
+    paired_values: dict[str, dict[str, float]] = {}
+    roles: dict[str, tuple[str, str]] = {}
+    cra_deltas: dict[str, dict[str, tuple[float, float]]] = {}
+    for session_index in range(1, 6):
+        for replicate_index in range(2):
+            recording_id = f"s{session_index}-r{replicate_index + 1}"
+            sessions[recording_id] = f"session-{session_index}"
+            baseline = 10.0 + float(session_index) + 0.2 * replicate_index
+            training_delta = 0.6 * session_index + 0.1 * replicate_index
+            paired_values[recording_id] = {
+                "pre": baseline,
+                "training": baseline + training_delta,
+                "post": baseline + 0.45 * training_delta,
+            }
+            roles[recording_id] = ("aggressive", "inert")
+            cra_deltas[recording_id] = {
+                "aggressive": (
+                    0.5 + 0.3 * session_index + 0.05 * replicate_index,
+                    -0.02 * session_index - 0.005 * replicate_index,
+                ),
+                "inert": (
+                    0.1 + 0.1 * session_index + 0.02 * replicate_index,
+                    0.01 * session_index + 0.002 * replicate_index,
+                ),
+            }
+    return sessions, paired_values, roles, cra_deltas
+
+
 def test_paired_contrast_uses_recording_level_sign_flip() -> None:
     stats = compute_paired_contrast(
         [1.0, 2.0, 3.0],
@@ -472,6 +541,7 @@ def test_session_random_intercept_reports_clustered_inference_and_icc() -> None:
         [1.0, 1.2, 2.0, 2.2, 3.0, 3.2, 4.0, 4.2],
         ["s1", "s1", "s2", "s2", "s3", "s3", "s4", "s4"],
         confidence_level=0.95,
+        minimum_sessions=4,
     )
 
     assert result.status == "computed"
@@ -489,6 +559,7 @@ def test_session_random_intercept_requires_repeated_session_observations() -> No
         [1.0, 2.0, 3.0],
         ["s1", "s2", "s3"],
         confidence_level=0.95,
+        minimum_sessions=3,
     )
 
     assert result.status == "unavailable"
@@ -513,6 +584,45 @@ def test_group_statistics_rejects_zero_minimum_recordings(tmp_path: Path) -> Non
             source_export_run_id="source_export",
             stats_run_id="stats_invalid",
             minimum_recordings=0,
+        )
+
+
+def test_group_statistics_requires_explicit_metric_tier() -> None:
+    with pytest.raises(TypeError, match="primary"):
+        MetricSpec(
+            metric_family="new_family",
+            source_table="new_table",
+            metric_name="new_metric",
+            group_keys=(),
+        )
+
+    with pytest.raises(ValueError, match="exactly one"):
+        GoodCopBadCopStatisticsConfig(
+            export_root=Path("/tmp/unused"),
+            source_export_run_id="source_export",
+            stats_run_id="stats_invalid_tier",
+            metrics=(
+                MetricSpec(
+                    metric_family="new_family",
+                    source_table="new_table",
+                    metric_name="new_metric",
+                    group_keys=(),
+                    primary=True,
+                    exploratory=True,
+                ),
+            ),
+        )
+
+
+def test_group_statistics_rejects_nonconservative_minimum_sessions(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="minimum_sessions must be an integer >= 3"):
+        GoodCopBadCopStatisticsConfig(
+            export_root=tmp_path,
+            source_export_run_id="source_export",
+            stats_run_id="stats_invalid_sessions",
+            minimum_sessions=2,
         )
 
 
@@ -578,7 +688,7 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert target["cluster_method"] == "session_random_intercept_reml_v1"
     assert target["cluster_count"] == 3
     assert target["cluster_status"] == "unavailable"
-    assert target["cluster_reason"] == "no_repeated_session_observations"
+    assert target["cluster_reason"] == "session_count<10"
     assert target["clustered_p_value"] is None
     assert target["clustered_q_value"] is None
     assert target["intraclass_correlation"] is None
@@ -633,6 +743,208 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
         "group.statistics",
         "group.descriptive_statistics",
     }
+
+
+def test_paired_session_cluster_inference_survives_arrow_publication_and_readback(
+    tmp_path: Path,
+) -> None:
+    sessions, paired_values, roles, _cra_deltas = _repeated_session_design()
+    export_root = _make_goodcopbadcop_export(
+        tmp_path,
+        values_by_recording=paired_values,
+        session_by_recording=sessions,
+        roles_by_recording=roles,
+    )
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_repeated_paired",
+        metrics=metric_specs_for_families(("chaser_distance",)),
+        bootstrap_iterations=0,
+        minimum_recordings=10,
+        minimum_sessions=5,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+
+    rows, descriptive_rows, manifest = compute_goodcopbadcop_outputs(config)
+    assert rows
+    assert all(row["status"] == "computed" for row in rows)
+    assert all(
+        row["cluster_status"] in {"computed", "boundary_zero_variance"}
+        for row in rows
+    )
+    assert all(row["cluster_count"] == 5 for row in rows)
+    assert all(row["clustered_p_value"] is not None for row in rows)
+    assert all(row["clustered_q_value"] is not None for row in rows)
+    assert manifest["parameters"]["minimum_sessions"] == 5
+    assert manifest["fdr_families"] == [
+        {
+            "family_id": "primary|chaser_distance",
+            "analysis_tier": "primary",
+            "metric_family": "chaser_distance",
+            "result_count": len(rows),
+            "naive_test_count": len(rows),
+            "naive_test_status": "multiple_tests",
+            "clustered_test_count": len(rows),
+            "clustered_test_status": "multiple_tests",
+        }
+    ]
+
+    write_goodcopbadcop_statistics(
+        rows,
+        manifest,
+        export_root=export_root,
+        stats_run_id="stats_repeated_paired",
+        descriptive_rows=descriptive_rows,
+    )
+    assert validate_export_run(
+        export_root,
+        "stats_repeated_paired",
+    )["status"] == "valid"
+    persisted = {
+        row["stat_result_id"]: row
+        for row in pq.read_table(
+            manifest_selected_part_files(
+                export_root,
+                "stats_repeated_paired",
+                SUMMARY_TABLE,
+            )[0]
+        ).to_pylist()
+    }
+    assert set(persisted) == {row["stat_result_id"] for row in rows}
+    for row in rows:
+        actual = persisted[row["stat_result_id"]]
+        assert actual["clustered_p_value"] == pytest.approx(
+            row["clustered_p_value"]
+        )
+        assert actual["clustered_q_value"] == pytest.approx(
+            row["clustered_q_value"]
+        )
+        assert actual["intraclass_correlation"] == pytest.approx(
+            row["intraclass_correlation"]
+        )
+
+
+def test_one_sample_session_cluster_inference_survives_arrow_publication_and_readback(
+    tmp_path: Path,
+) -> None:
+    sessions, _paired_values, _roles, cra_deltas = _repeated_session_design()
+    export_root = _make_goodcopbadcop_cra_export(
+        tmp_path,
+        deltas_by_recording=cra_deltas,
+        session_by_recording=sessions,
+    )
+    metrics = tuple(
+        spec
+        for spec in metric_specs_for_families(("cra_primary_endpoint",))
+        if spec.metric_name in {"delta_agg", "delta_inert"}
+    )
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_repeated_one_sample",
+        metrics=metrics,
+        bootstrap_iterations=0,
+        minimum_recordings=10,
+        minimum_sessions=5,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+
+    rows, descriptive_rows, manifest = compute_goodcopbadcop_outputs(config)
+    assert len(rows) == 2
+    assert all(row["contrast_name"] == "vs-zero" for row in rows)
+    assert all(row["status"] == "computed" for row in rows)
+    assert all(
+        row["cluster_status"] in {"computed", "boundary_zero_variance"}
+        for row in rows
+    )
+    assert all(row["cluster_count"] == 5 for row in rows)
+    assert all(row["clustered_q_value"] is not None for row in rows)
+    assert manifest["fdr_families"] == [
+        {
+            "family_id": "exploratory|cra_primary_endpoint",
+            "analysis_tier": "exploratory",
+            "metric_family": "cra_primary_endpoint",
+            "result_count": 2,
+            "naive_test_count": 2,
+            "naive_test_status": "multiple_tests",
+            "clustered_test_count": 2,
+            "clustered_test_status": "multiple_tests",
+        }
+    ]
+
+    write_goodcopbadcop_statistics(
+        rows,
+        manifest,
+        export_root=export_root,
+        stats_run_id="stats_repeated_one_sample",
+        descriptive_rows=descriptive_rows,
+    )
+    assert validate_export_run(
+        export_root,
+        "stats_repeated_one_sample",
+    )["status"] == "valid"
+    persisted_rows = pq.read_table(
+        manifest_selected_part_files(
+            export_root,
+            "stats_repeated_one_sample",
+            SUMMARY_TABLE,
+        )[0]
+    ).to_pylist()
+    assert [row["stat_result_id"] for row in persisted_rows] == [
+        row["stat_result_id"] for row in rows
+    ]
+    assert [row["clustered_q_value"] for row in persisted_rows] == pytest.approx(
+        [row["clustered_q_value"] for row in rows]
+    )
+
+
+def test_singleton_exploratory_family_persists_explicit_test_count_status(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_cra_export(tmp_path)
+    metric = next(
+        spec
+        for spec in metric_specs_for_families(("cra_primary_endpoint",))
+        if spec.metric_name == "delta_agg"
+    )
+    rows, manifest = compute_goodcopbadcop_statistics(
+        GoodCopBadCopStatisticsConfig(
+            export_root=export_root,
+            source_export_run_id="source_export",
+            stats_run_id="stats_singleton_family",
+            metrics=(metric,),
+            bootstrap_iterations=0,
+            minimum_recordings=3,
+            allow_legacy_export_layout=True,
+        )
+    )
+
+    assert len(rows) == 1
+    assert manifest["fdr_families"] == [
+        {
+            "family_id": "exploratory|cra_primary_endpoint",
+            "analysis_tier": "exploratory",
+            "metric_family": "cra_primary_endpoint",
+            "result_count": 1,
+            "naive_test_count": 1,
+            "naive_test_status": "singleton_test",
+            "clustered_test_count": 0,
+            "clustered_test_status": "no_eligible_tests",
+        }
+    ]
+    written = write_goodcopbadcop_statistics(
+        rows,
+        manifest,
+        export_root=export_root,
+        stats_run_id="stats_singleton_family",
+    )
+    persisted_manifest = json.loads(
+        Path(written["manifest_path"]).read_text(encoding="utf-8")
+    )
+    assert persisted_manifest["fdr_families"] == manifest["fdr_families"]
 
 
 def test_group_statistics_legacy_reader_is_explicit_and_exact_is_preferred(
@@ -907,6 +1219,13 @@ def test_group_statistics_all_null_inference_columns_keep_exact_physical_types(
     assert all(row["status"] == "skipped" for row in rows)
     assert all(row["q_value"] is None for row in rows)
     assert all(row["effect_size"] is None for row in rows)
+    assert all(row["cluster_status"] == "unavailable" for row in rows)
+    assert all(
+        str(row["cluster_reason"]).startswith("naive_inference_ineligible:")
+        for row in rows
+    )
+    assert all(row["clustered_p_value"] is None for row in rows)
+    assert all(row["clustered_q_value"] is None for row in rows)
 
     tampered_skipped = [dict(row) for row in rows]
     tampered_skipped[0]["effect_size"] = 1.0

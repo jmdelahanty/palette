@@ -65,7 +65,12 @@ from .paired import (
     compute_one_sample_signed_rank,
     compute_paired_contrast,
 )
-from .session_cluster import SessionClusterResult, fit_session_random_intercept
+from .session_cluster import (
+    DEFAULT_MINIMUM_SESSIONS,
+    SESSION_RANDOM_INTERCEPT_METHOD,
+    SessionClusterResult,
+    fit_session_random_intercept,
+)
 
 
 SUMMARY_TABLE = STATISTICS_TABLE
@@ -88,8 +93,8 @@ class MetricSpec:
     source_table: str
     metric_name: str
     group_keys: tuple[str, ...]
-    primary: bool = True
-    exploratory: bool = False
+    primary: bool
+    exploratory: bool
 
 
 _METRIC_UNITS: dict[tuple[str, str], str] = {
@@ -154,36 +159,48 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="mean_distance_mm",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="chaser_distance",
         source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="p50_distance_mm",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="chaser_distance",
         source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="fraction_within_threshold",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="spatial_occupancy",
         source_table=CHASER_SPATIAL_TABLE,
         metric_name="time_s",
         group_keys=("zone_set_id", "zone_id", "zone_label"),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="spatial_occupancy",
         source_table=CHASER_SPATIAL_TABLE,
         metric_name="fraction_of_epoch",
         group_keys=("zone_set_id", "zone_id", "zone_label"),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="spatial_occupancy",
         source_table=CHASER_SPATIAL_TABLE,
         metric_name="fraction_of_detected",
         group_keys=("zone_set_id", "zone_id", "zone_label"),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="epoch_behavior",
@@ -302,6 +319,8 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         source_table=CRA_SUMMARY_TABLE,
         metric_name="specificity_distance",
         group_keys=(),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="cra_primary_endpoint",
@@ -332,36 +351,48 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
         metric_name="approach_p05_delta_agg",
         group_keys=(),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
         metric_name="approach_p05_specificity",
         group_keys=(),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
         metric_name="nearzone_occ_delta_agg",
         group_keys=(),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
         metric_name="nearzone_occ_specificity",
         group_keys=(),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
         metric_name="nearzone_entry_rate_delta_agg",
         group_keys=(),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
         metric_name="nearzone_entry_rate_specificity",
         group_keys=(),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
@@ -392,30 +423,40 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="mean_alignment_cos",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="mean_lateral_sin",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_front_45",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_lateral_45",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_behind_45",
         group_keys=("behavior_class",),
+        primary=True,
+        exploratory=False,
     ),
 )
 
@@ -431,6 +472,7 @@ class GoodCopBadCopStatisticsConfig:
     permutation_iterations: int = 10000
     confidence_level: float = 0.95
     minimum_recordings: int = 3
+    minimum_sessions: int = DEFAULT_MINIMUM_SESSIONS
     random_seed: int = 0
     cluster: str = "session"
     overwrite: bool = False
@@ -439,11 +481,19 @@ class GoodCopBadCopStatisticsConfig:
     def __post_init__(self) -> None:
         if type(self.minimum_recordings) is not int or self.minimum_recordings < 1:
             raise ValueError("minimum_recordings must be an integer >= 1")
+        if type(self.minimum_sessions) is not int or self.minimum_sessions < 3:
+            raise ValueError("minimum_sessions must be an integer >= 3")
         if self.cluster not in {"none", "session"}:
             raise ValueError("cluster must be 'none' or 'session'")
+        for spec in self.metrics:
+            _analysis_tier(spec)
 
 
 def _analysis_tier(spec: MetricSpec) -> str:
+    if type(spec.primary) is not bool or type(spec.exploratory) is not bool:
+        raise ValueError(
+            f"Metric {spec.source_table}.{spec.metric_name} tier flags must be booleans."
+        )
     if bool(spec.primary) == bool(spec.exploratory):
         raise ValueError(
             f"Metric {spec.source_table}.{spec.metric_name} must be exactly one of "
@@ -480,13 +530,53 @@ def _session_cluster_result(
     config: GoodCopBadCopStatisticsConfig,
     values: np.ndarray,
     session_ids: np.ndarray,
+    naive_status: str,
+    naive_skip_reason: str | None,
 ) -> SessionClusterResult:
     if config.cluster == "none":
         return _disabled_cluster_result(int(values.size))
+    if naive_status != "computed":
+        numeric_values = np.asarray(values, dtype=np.float64).reshape(-1)
+        raw_sessions = np.asarray(session_ids, dtype=object).reshape(-1)
+        if numeric_values.shape != raw_sessions.shape:
+            raise ValueError(
+                "Cluster values and session identities must have equal length."
+            )
+        normalized_session_values = np.asarray(
+            [
+                str(value).strip() if value is not None else ""
+                for value in raw_sessions
+            ],
+            dtype=object,
+        )
+        usable = np.isfinite(numeric_values) & (normalized_session_values != "")
+        normalized_sessions = {
+            str(value) for value in normalized_session_values[usable]
+        }
+        return SessionClusterResult(
+            status="unavailable",
+            reason=(
+                "naive_inference_ineligible:"
+                f"{naive_skip_reason or naive_status}"
+            ),
+            method=SESSION_RANDOM_INTERCEPT_METHOD,
+            unit="session",
+            unit_count=int(np.count_nonzero(usable)),
+            cluster_count=len(normalized_sessions),
+            mean=None,
+            standard_error=None,
+            ci_low=None,
+            ci_high=None,
+            p_value=None,
+            cluster_variance=None,
+            residual_variance=None,
+            intraclass_correlation=None,
+        )
     return fit_session_random_intercept(
         values,
         session_ids,
         confidence_level=float(config.confidence_level),
+        minimum_sessions=int(config.minimum_sessions),
     )
 
 
@@ -509,6 +599,113 @@ def _cluster_fields(result: SessionClusterResult) -> dict[str, Any]:
         "residual_variance": result.residual_variance,
         "intraclass_correlation": result.intraclass_correlation,
     }
+
+
+def _test_count_status(test_count: int) -> str:
+    if test_count == 0:
+        return "no_eligible_tests"
+    if test_count == 1:
+        return "singleton_test"
+    return "multiple_tests"
+
+
+def _fdr_family_test_registry(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        family_id = str(row.get("multiple_comparison_family") or "")
+        grouped.setdefault(family_id, []).append(row)
+
+    registry: list[dict[str, Any]] = []
+    for family_id, family_rows in sorted(grouped.items()):
+        try:
+            analysis_tier, metric_family = family_id.split("|", 1)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid multiple-comparison family identifier: {family_id!r}"
+            ) from exc
+        naive_test_count = sum(
+            row.get("status") == "computed" and row.get("p_value") is not None
+            for row in family_rows
+        )
+        clustered_test_count = sum(
+            row.get("status") == "computed"
+            and row.get("cluster_status") in {"computed", "boundary_zero_variance"}
+            and row.get("clustered_p_value") is not None
+            for row in family_rows
+        )
+        registry.append(
+            {
+                "family_id": family_id,
+                "analysis_tier": analysis_tier,
+                "metric_family": metric_family,
+                "result_count": len(family_rows),
+                "naive_test_count": naive_test_count,
+                "naive_test_status": _test_count_status(naive_test_count),
+                "clustered_test_count": clustered_test_count,
+                "clustered_test_status": _test_count_status(
+                    clustered_test_count
+                ),
+            }
+        )
+    return registry
+
+
+def _validate_fdr_family_test_registry(
+    declared: object,
+    *,
+    rows: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
+    if not isinstance(declared, list):
+        raise ValueError("Statistics manifest lacks FDR family test counts")
+    exact_fields = {
+        "family_id",
+        "analysis_tier",
+        "metric_family",
+        "result_count",
+        "naive_test_count",
+        "naive_test_status",
+        "clustered_test_count",
+        "clustered_test_status",
+    }
+    previous_family = ""
+    for item in declared:
+        if not isinstance(item, Mapping) or set(item) != exact_fields:
+            raise ValueError("Statistics manifest FDR family test counts are invalid")
+        family_id = item.get("family_id")
+        tier = item.get("analysis_tier")
+        metric_family = item.get("metric_family")
+        if (
+            not isinstance(family_id, str)
+            or not family_id
+            or family_id <= previous_family
+            or tier not in {"primary", "exploratory"}
+            or not isinstance(metric_family, str)
+            or not metric_family
+            or family_id != f"{tier}|{metric_family}"
+        ):
+            raise ValueError("Statistics manifest FDR family identity is invalid")
+        previous_family = family_id
+        for count_name, status_name in (
+            ("naive_test_count", "naive_test_status"),
+            ("clustered_test_count", "clustered_test_status"),
+        ):
+            count = item.get(count_name)
+            if type(count) is not int or count < 0:
+                raise ValueError("Statistics manifest FDR family test count is invalid")
+            if item.get(status_name) != _test_count_status(count):
+                raise ValueError("Statistics manifest FDR family test status is invalid")
+        result_count = item.get("result_count")
+        if (
+            type(result_count) is not int
+            or result_count < 1
+            or item["naive_test_count"] > result_count
+            or item["clustered_test_count"] > result_count
+        ):
+            raise ValueError("Statistics manifest FDR family result count is invalid")
+    if rows is not None and declared != _fdr_family_test_registry(rows):
+        raise ValueError("Statistics manifest FDR family test counts do not match rows")
 
 
 def utc_run_id() -> str:
@@ -1111,6 +1308,14 @@ def _validate_result_rows(
             "residual_variance",
             "intraclass_correlation",
         )
+        if status != "computed" and cluster_status in {
+            "computed",
+            "boundary_zero_variance",
+        }:
+            raise ValueError(
+                f"{table_name}: row {row_index} has clustered inference for a "
+                "naive-ineligible result"
+            )
         if cluster_mode == "none":
             if (
                 cluster_status != "disabled"
@@ -1389,6 +1594,10 @@ def _validate_result_rows_against_manifest(
     rows: Sequence[Mapping[str, Any]],
     manifest: Mapping[str, Any],
 ) -> None:
+    _validate_fdr_family_test_registry(
+        manifest.get("fdr_families"),
+        rows=rows if table_name == SUMMARY_TABLE else None,
+    )
     raw_metrics = manifest.get("metrics")
     if not isinstance(raw_metrics, list):
         raise ValueError("Statistics manifest lacks an exact metric registry")
@@ -1455,6 +1664,7 @@ def _validate_result_rows_against_manifest(
         "fdr_method",
         "fdr_family_rule",
         "minimum_recordings",
+        "minimum_sessions",
         "permutation_iterations",
         "random_seed",
         "role_mapping_table",
@@ -1484,6 +1694,10 @@ def _validate_result_rows_against_manifest(
         manifest_parameters["minimum_recordings"]
     ) < 1:
         raise ValueError("Statistics manifest minimum_recordings is invalid")
+    if type(manifest_parameters.get("minimum_sessions")) is not int or int(
+        manifest_parameters["minimum_sessions"]
+    ) < 3:
+        raise ValueError("Statistics manifest minimum_sessions is invalid")
     confidence = manifest_parameters.get("confidence_level")
     if (
         isinstance(confidence, bool)
@@ -1590,6 +1804,7 @@ def _validate_result_rows_against_manifest(
             "confidence_level": float(manifest_parameters["confidence_level"]),
             "cluster": str(manifest_parameters["cluster"]),
             "minimum_recordings": int(manifest_parameters["minimum_recordings"]),
+            "minimum_sessions": int(manifest_parameters["minimum_sessions"]),
             "missing_policy": row.get("missing_policy"),
             "permutation_iterations_requested": int(
                 manifest_parameters["permutation_iterations"]
@@ -1603,6 +1818,16 @@ def _validate_result_rows_against_manifest(
                 f"{table_name}: row {row_index} has invalid parameters_json"
             )
         if table_name == SUMMARY_TABLE:
+            if row.get("cluster_status") in {
+                "computed",
+                "boundary_zero_variance",
+            } and int(row.get("cluster_count") or 0) < int(
+                manifest_parameters["minimum_sessions"]
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has clustered inference below "
+                    "minimum_sessions"
+                )
             tier = "primary" if row.get("primary") else "exploratory"
             expected_family = f"{tier}|{row.get('metric_family')}"
             if row.get("multiple_comparison_family") != expected_family:
@@ -1773,6 +1998,7 @@ def _base_descriptive_row(
         "confidence_level": float(config.confidence_level),
         "cluster": config.cluster,
         "minimum_recordings": int(config.minimum_recordings),
+        "minimum_sessions": int(config.minimum_sessions),
         "missing_policy": "available_recording_values_by_condition",
         "permutation_iterations_requested": int(config.permutation_iterations),
         "random_seed": int(config.random_seed),
@@ -1973,6 +2199,8 @@ def _rows_for_metric(
                     if paired.height
                     else np.asarray([], dtype=object)
                 ),
+                naive_status=stats.status,
+                naive_skip_reason=stats.skip_reason,
             )
             group_key = _group_key_payload(group_row, spec.group_keys)
             parameters = {
@@ -1980,6 +2208,7 @@ def _rows_for_metric(
                 "bootstrap_iterations_requested": int(config.bootstrap_iterations),
                 "confidence_level": float(config.confidence_level),
                 "minimum_recordings": int(config.minimum_recordings),
+                "minimum_sessions": int(config.minimum_sessions),
                 "missing_policy": "paired_complete_recordings",
                 "permutation_iterations_requested": int(
                     config.permutation_iterations
@@ -2084,6 +2313,8 @@ def _rows_for_cra_summary_metric(
             if selected.height
             else np.asarray([], dtype=object)
         ),
+        naive_status=stats.status,
+        naive_skip_reason=stats.skip_reason,
     )
     collection = source_manifest.get("collection_manifest")
     if not isinstance(collection, Mapping):
@@ -2097,6 +2328,7 @@ def _rows_for_cra_summary_metric(
         "bootstrap_iterations_requested": int(config.bootstrap_iterations),
         "confidence_level": float(config.confidence_level),
         "minimum_recordings": int(config.minimum_recordings),
+        "minimum_sessions": int(config.minimum_sessions),
         "missing_policy": "one_row_per_recording_complete_cases",
         "permutation_iterations_requested": int(config.permutation_iterations),
         "random_seed": int(config.random_seed),
@@ -2249,6 +2481,7 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
             permutation_iterations=config.permutation_iterations,
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
+            minimum_sessions=config.minimum_sessions,
             random_seed=config.random_seed,
             cluster=config.cluster,
             overwrite=config.overwrite,
@@ -2297,6 +2530,7 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
             permutation_iterations=config.permutation_iterations,
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
+            minimum_sessions=config.minimum_sessions,
             random_seed=config.random_seed,
             cluster=config.cluster,
             overwrite=config.overwrite,
@@ -2331,6 +2565,7 @@ def _compute_goodcopbadcop_descriptive_from_snapshot(
             permutation_iterations=config.permutation_iterations,
             confidence_level=config.confidence_level,
             minimum_recordings=config.minimum_recordings,
+            minimum_sessions=config.minimum_sessions,
             random_seed=config.random_seed,
             cluster=config.cluster,
             overwrite=config.overwrite,
@@ -2441,6 +2676,7 @@ def _build_stats_manifest(
         "arrow_schema_contracts": arrow_contract_envelope(output_tables),
         "row_counts_by_table": row_counts_by_table,
         "status_counts": status_counts,
+        "fdr_families": _fdr_family_test_registry(rows),
         "metrics": [
             {
                 "metric_family": spec.metric_family,
@@ -2467,6 +2703,7 @@ def _build_stats_manifest(
             "permutation_iterations": int(config.permutation_iterations),
             "confidence_level": float(config.confidence_level),
             "minimum_recordings": int(config.minimum_recordings),
+            "minimum_sessions": int(config.minimum_sessions),
             "random_seed": int(config.random_seed),
             "cluster": config.cluster,
             "fdr_method": "benjamini_hochberg",

@@ -12,6 +12,10 @@ from scipy import stats
 
 
 SESSION_RANDOM_INTERCEPT_METHOD = "session_random_intercept_reml_v1"
+# A random-effect variance and asymptotic Wald test are fragile with only a
+# handful of groups. Ten independent sessions is the fail-closed publication
+# default; smaller predeclared designs remain possible down to three sessions.
+DEFAULT_MINIMUM_SESSIONS = 10
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ def fit_session_random_intercept(
     session_ids: Sequence[object] | np.ndarray,
     *,
     confidence_level: float,
+    minimum_sessions: int = DEFAULT_MINIMUM_SESSIONS,
 ) -> SessionClusterResult:
     """Fit ``value ~ 1 + (1 | session)`` without parsing recording names.
 
@@ -73,6 +78,8 @@ def fit_session_random_intercept(
 
     if not 0.0 < float(confidence_level) < 1.0:
         raise ValueError("confidence_level must be in (0, 1).")
+    if type(minimum_sessions) is not int or minimum_sessions < 3:
+        raise ValueError("minimum_sessions must be an integer >= 3.")
     y = np.asarray(values, dtype=np.float64).reshape(-1)
     raw_sessions = np.asarray(session_ids, dtype=object).reshape(-1)
     if y.shape != raw_sessions.shape:
@@ -93,9 +100,9 @@ def fit_session_random_intercept(
             unit_count=unit_count,
             cluster_count=cluster_count,
         )
-    if cluster_count < 2:
+    if cluster_count < int(minimum_sessions):
         return _unavailable(
-            reason="insufficient_sessions",
+            reason=f"session_count<{int(minimum_sessions)}",
             unit_count=unit_count,
             cluster_count=cluster_count,
         )

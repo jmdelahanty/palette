@@ -16,6 +16,7 @@ from fisheye.group_statistics.goodcopbadcop import (
     utc_run_id,
     write_goodcopbadcop_statistics,
 )
+from fisheye.group_statistics.session_cluster import DEFAULT_MINIMUM_SESSIONS
 
 
 def _parse_csv(value: str | None) -> tuple[str, ...]:
@@ -63,6 +64,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--permutation-iterations", type=int, default=10000)
     parser.add_argument("--confidence-level", type=float, default=0.95)
     parser.add_argument("--minimum-recordings", type=int, default=3)
+    parser.add_argument(
+        "--minimum-sessions",
+        type=int,
+        default=DEFAULT_MINIMUM_SESSIONS,
+        help=(
+            "Minimum independent registry sessions required for session-random-"
+            "intercept inference. Must be at least 3; default: 10."
+        ),
+    )
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument(
         "--cluster",
@@ -98,6 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         permutation_iterations=int(args.permutation_iterations),
         confidence_level=float(args.confidence_level),
         minimum_recordings=int(args.minimum_recordings),
+        minimum_sessions=int(args.minimum_sessions),
         random_seed=int(args.random_seed),
         cluster=str(args.cluster),
         overwrite=bool(args.overwrite),
