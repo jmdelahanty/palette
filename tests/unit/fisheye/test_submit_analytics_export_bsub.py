@@ -11,11 +11,18 @@ def _authority_manifest(tmp_path: Path) -> Path:
     return path
 
 
+def _registry(tmp_path: Path) -> Path:
+    path = tmp_path / "palette_registry.sqlite"
+    path.touch()
+    return path
+
+
 def test_submit_analytics_export_bsub_renders_fail_closed_job(tmp_path: Path) -> None:
     repo = Path(__file__).resolve().parents[3]
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
     authority = _authority_manifest(tmp_path)
+    registry = _registry(tmp_path)
     output_root = tmp_path / "shared" / "palette_analytics"
     log_dir = tmp_path / "logs"
     run_id = "chaser_v2_test_20260712T000000Z"
@@ -30,6 +37,8 @@ def test_submit_analytics_export_bsub_renders_fail_closed_job(tmp_path: Path) ->
             str(authority),
             "--export-run-id",
             run_id,
+            "--registry",
+            str(registry),
             "--output-root",
             str(output_root),
             "--palette-repo",
@@ -58,6 +67,11 @@ def test_submit_analytics_export_bsub_renders_fail_closed_job(tmp_path: Path) ->
     assert "chaser_quadrant_occupancy_summary" in text
     assert "chaser_near_field_occupancy_summary" in text
     assert "chaser_cra_" not in text
+    assert f"REGISTRY={registry.resolve()}" in text
+    assert '--registry "${REGISTRY}"' in text
+    assert 'export_cmd+=(--index-registry)' in text
+    assert 'export_cmd+=(--index-registry --registry' not in text
+    assert f"registry_path={registry.resolve()}" in result.stdout
 
 
 def test_submit_analytics_export_bsub_rejects_unsafe_run_id(tmp_path: Path) -> None:
@@ -65,6 +79,7 @@ def test_submit_analytics_export_bsub_rejects_unsafe_run_id(tmp_path: Path) -> N
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
     authority = _authority_manifest(tmp_path)
+    registry = _registry(tmp_path)
 
     result = subprocess.run(
         [
@@ -76,6 +91,8 @@ def test_submit_analytics_export_bsub_rejects_unsafe_run_id(tmp_path: Path) -> N
             str(authority),
             "--export-run-id",
             "../unsafe",
+            "--registry",
+            str(registry),
             "--palette-repo",
             str(repo),
             "--log-dir",
@@ -95,6 +112,7 @@ def test_submit_analytics_export_bsub_uses_cluster_default_queue(tmp_path: Path)
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
     authority = _authority_manifest(tmp_path)
+    registry = _registry(tmp_path)
 
     result = subprocess.run(
         [
@@ -106,6 +124,8 @@ def test_submit_analytics_export_bsub_uses_cluster_default_queue(tmp_path: Path)
             str(authority),
             "--export-run-id",
             "chaser_v2_default_queue_test",
+            "--registry",
+            str(registry),
             "--output-root",
             str(tmp_path / "shared" / "palette_analytics"),
             "--palette-repo",
@@ -130,6 +150,7 @@ def test_submit_analytics_export_accepts_future_manifest_with_dependency(
     repo = Path(__file__).resolve().parents[3]
     future_collection = tmp_path / "future_collection.manifest.json"
     future_authority = tmp_path / "future_chaser_authority.json"
+    registry = _registry(tmp_path)
     output_root = tmp_path / "shared" / "palette_analytics"
     log_dir = tmp_path / "logs"
 
@@ -143,6 +164,8 @@ def test_submit_analytics_export_accepts_future_manifest_with_dependency(
             str(future_authority),
             "--export-run-id",
             "future_collection_export_v1",
+            "--registry",
+            str(registry),
             "--output-root",
             str(output_root),
             "--palette-repo",
@@ -175,6 +198,7 @@ def test_submit_analytics_export_bsub_sshes_only_bsub_command(tmp_path: Path) ->
     collection = tmp_path / "collection.manifest.json"
     collection.write_text("{}\n", encoding="utf-8")
     authority = _authority_manifest(tmp_path)
+    registry = _registry(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     ssh_args = tmp_path / "ssh_args.txt"
@@ -203,6 +227,8 @@ def test_submit_analytics_export_bsub_sshes_only_bsub_command(tmp_path: Path) ->
             str(authority),
             "--export-run-id",
             run_id,
+            "--registry",
+            str(registry),
             "--output-root",
             str(output_root),
             "--palette-repo",
@@ -234,3 +260,132 @@ def test_submit_analytics_export_bsub_sshes_only_bsub_command(tmp_path: Path) ->
     ).read_text(encoding="utf-8")
     assert "submit_mode=ssh_bsub" in submission
     assert "job_id=123456" in submission
+    assert f"registry_path={registry.resolve()}" in submission
+
+
+def test_submit_analytics_export_bsub_keeps_indexing_explicit(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[3]
+    collection = tmp_path / "collection.manifest.json"
+    collection.write_text("{}\n", encoding="utf-8")
+    authority = _authority_manifest(tmp_path)
+    registry = _registry(tmp_path)
+    log_dir = tmp_path / "logs"
+
+    subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
+            "--collection-manifest",
+            str(collection),
+            "--chaser-authority-manifest",
+            str(authority),
+            "--export-run-id",
+            "indexed_export",
+            "--registry",
+            str(registry),
+            "--index-registry",
+            "--output-root",
+            str(tmp_path / "output"),
+            "--palette-repo",
+            str(repo),
+            "--log-dir",
+            str(log_dir),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    job = (
+        log_dir / "analytics_export_indexed_export" / "run_analytics_export.sh"
+    ).read_text(encoding="utf-8")
+    assert "INDEX_REGISTRY=1" in job
+    assert '--registry "${REGISTRY}"' in job
+    assert 'export_cmd+=(--index-registry)' in job
+
+
+def test_submit_analytics_export_bsub_uses_environment_registry_without_indexing(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[3]
+    collection = tmp_path / "collection.manifest.json"
+    collection.write_text("{}\n", encoding="utf-8")
+    authority = _authority_manifest(tmp_path)
+    registry = _registry(tmp_path)
+    log_dir = tmp_path / "logs"
+    env = dict(os.environ)
+    env["PALETTE_REGISTRY_PATH"] = str(registry)
+
+    subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
+            "--collection-manifest",
+            str(collection),
+            "--chaser-authority-manifest",
+            str(authority),
+            "--export-run-id",
+            "environment_registry_export",
+            "--output-root",
+            str(tmp_path / "output"),
+            "--palette-repo",
+            str(repo),
+            "--log-dir",
+            str(log_dir),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    job = (
+        log_dir
+        / "analytics_export_environment_registry_export"
+        / "run_analytics_export.sh"
+    ).read_text(encoding="utf-8")
+    assert f"REGISTRY={registry.resolve()}" in job
+    assert '  --registry "${REGISTRY}"' in job
+    assert "INDEX_REGISTRY=0" in job
+    assert "RegistryPaths.from_env" not in job
+    assert "Path.cwd" not in job
+
+
+def test_submit_analytics_export_bsub_rejects_unusable_registry(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[3]
+    collection = tmp_path / "collection.manifest.json"
+    collection.write_text("{}\n", encoding="utf-8")
+    authority = _authority_manifest(tmp_path)
+    missing_registry = tmp_path / "missing.sqlite"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
+            "--collection-manifest",
+            str(collection),
+            "--chaser-authority-manifest",
+            str(authority),
+            "--export-run-id",
+            "missing_registry_export",
+            "--registry",
+            str(missing_registry),
+            "--output-root",
+            str(tmp_path / "output"),
+            "--palette-repo",
+            str(repo),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "Analytics identity registry is not a readable file" in result.stderr
+    assert not (tmp_path / "logs").exists()

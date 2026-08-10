@@ -62,6 +62,7 @@ Render and inspect a job without submitting it:
 ```bash
 scripts/submit_analytics_export_bsub.sh \
   --collection-manifest /groups/johnson/johnsonlab/palette_analytics/collections/example.manifest.json \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --export-run-id chaser_v2_example_20260712T180000Z
 ```
 
@@ -70,6 +71,7 @@ Submit after inspecting the generated script and command:
 ```bash
 scripts/submit_analytics_export_bsub.sh \
   --collection-manifest /groups/johnson/johnsonlab/palette_analytics/collections/example.manifest.json \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --export-run-id chaser_v2_example_20260712T180000Z \
   --submit
 ```
@@ -100,9 +102,17 @@ fails if that checkout changes before execution. Submission logs, the rendered
 job script, parsed LSF job ID, validation JSON, and completion status are retained below
 `palette_analytics/logs/lsf/analytics_export_<run-id>/`.
 
-Registry indexing is optional and occurs only after the base exporter has
-successfully written its manifest. Use `--index-registry` when the shared
-registry should advertise the completed export.
+The resolved registry path is always passed to the exporter because the
+identity-bearing tables require registry-owned recording, session, and subject
+identity. The submitter and generated job both fail closed if that registry is
+unavailable. This prevents execution-host working directories from silently
+selecting a different default registry. The exact path is retained in the
+rendered command, completion status, and submission receipt.
+
+Registry **indexing** remains optional and occurs only after the base exporter
+has successfully written its manifest. Use `--index-registry` when the same
+registry should advertise the completed export; omitting it does not make the
+registry optional for identity resolution.
 
 ## Baseline behavior products
 

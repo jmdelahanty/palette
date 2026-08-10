@@ -61,7 +61,8 @@ Options:
                                Per-axis entropy grid size (default: 12)
   --skip-statistics            Do not compute the linked chaser statistics export
   --index-registry             Index the completed base export in the shared registry
-  --registry PATH              Registry path used with --index-registry
+  --registry PATH              Registry used for required session/subject identity
+                               and, when requested, completed-export indexing
   --queue NAME                 LSF queue (default: cluster default)
   --ncores N                   CPU slots and exporter workers (default: 4)
   --mem-gb N                   Memory request in GB (default: 16)
@@ -149,9 +150,11 @@ fi
 git -C "$PALETTE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
   fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable: $PALETTE_REPO"
-if [[ "$INDEX_REGISTRY" == "1" ]]; then
-  [[ -n "$REGISTRY" ]] || fail "--index-registry requires --registry"
-fi
+[[ -n "$REGISTRY" ]] || \
+  fail "Analytics exports require --registry for session/subject identity"
+[[ -f "$REGISTRY" && -r "$REGISTRY" ]] || \
+  fail "Analytics identity registry is not a readable file: $REGISTRY"
+REGISTRY="$(realpath -- "$REGISTRY")"
 
 if [[ -z "$LOG_DIR" ]]; then LOG_DIR="${OUTPUT_ROOT}/logs/lsf"; fi
 RUN_DIR="${LOG_DIR}/analytics_export_${EXPORT_RUN_ID}"
@@ -227,6 +230,11 @@ if [[ ! -f "\${CHASER_AUTHORITY_MANIFEST}" ]]; then
     "\${CHASER_AUTHORITY_MANIFEST}" >&2
   exit 2
 fi
+if [[ ! -f "\${REGISTRY}" || ! -r "\${REGISTRY}" ]]; then
+  printf 'Analytics identity registry is unavailable or unreadable: %s\n' \
+    "\${REGISTRY}" >&2
+  exit 2
+fi
 mkdir -p "\${OUTPUT_ROOT}" "\$(dirname -- "\${VALIDATION_JSON}")"
 export MPLCONFIGDIR="\$(dirname -- "\${VALIDATION_JSON}")/matplotlib"
 
@@ -238,6 +246,7 @@ export_cmd=(
   --tables "\${TABLES}"
   --jobs "\${NCORES}"
   --export-run-id "\${EXPORT_RUN_ID}"
+  --registry "\${REGISTRY}"
   --baseline-time-bin-s "\${BASELINE_TIME_BIN_S}"
   --baseline-sample-rate-hz "\${BASELINE_SAMPLE_RATE_HZ}"
   --baseline-spatial-grid-size "\${BASELINE_SPATIAL_GRID_SIZE}"
@@ -249,7 +258,7 @@ if [[ "\${BASELINE_FULL_RESOLUTION_SAMPLES}" == "1" ]]; then
   export_cmd+=(--baseline-full-resolution-samples)
 fi
 if [[ "\${INDEX_REGISTRY}" == "1" ]]; then
-  export_cmd+=(--index-registry --registry "\${REGISTRY}")
+  export_cmd+=(--index-registry)
 fi
 printf 'export_command='; printf '%q ' "\${export_cmd[@]}"; printf '\n'
 "\${export_cmd[@]}"
@@ -277,6 +286,7 @@ fi
   printf 'host=%s\n' "\$(hostname)"
   printf 'job_id=%s\n' "\${LSB_JOBID:-manual}"
   printf 'palette_commit=%s\n' "\${ACTUAL_COMMIT}"
+  printf 'registry_path=%s\n' "\${REGISTRY}"
   printf 'export_root=%s\n' "\${OUTPUT_ROOT}"
   printf 'export_run_id=%s\n' "\${EXPORT_RUN_ID}"
   printf 'stats_run_id=%s\n' "\${STATS_RUN_ID}"
@@ -306,6 +316,7 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 printf 'mode=%s\n' "$([[ "$SUBMIT" == "1" ]] && printf submit || printf render-only)"
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'collection_manifest=%s\n' "$COLLECTION_MANIFEST"
+printf 'registry_path=%s\n' "$REGISTRY"
 printf 'output_root=%s\n' "$OUTPUT_ROOT"
 printf 'export_run_id=%s\n' "$EXPORT_RUN_ID"
 printf 'stats_run_id=%s\n' "$STATS_RUN_ID"
@@ -338,6 +349,7 @@ if [[ "$SUBMIT" == "1" ]]; then
     printf 'lsf_stderr=%s\n' "${RUN_DIR}/${job_id}.err"
     printf 'status_file=%s\n' "$STATUS_FILE"
     printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
+    printf 'registry_path=%s\n' "$REGISTRY"
   } >"$submission_tmp"
   mv "$submission_tmp" "$SUBMISSION_FILE"
   printf 'job_id=%s\n' "$job_id"
