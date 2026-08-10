@@ -21,7 +21,10 @@ from .contracts import (
     ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
     ARROW_TABLE_CONTRACTS,
     IDENTITY_COLUMNS,
+    LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+    LEGACY_EXACT_SCHEMA_VERSION,
     LEGACY_SCHEMA_VERSION,
+    LEGACY_V2_ARROW_TABLE_CONTRACTS,
     SCHEMA_ID,
     SCHEMA_VERSION,
     TRAINING_RESPONSE_CLASSIFICATION_TABLE,
@@ -30,7 +33,10 @@ from .contracts import (
     TRAINING_RESPONSE_TABLES,
     contract_fields,
 )
-from .validation import validate_training_response_run
+from .validation import (
+    validate_training_response_run,
+    validate_training_response_v2_compatibility_run,
+)
 
 
 @dataclass(frozen=True)
@@ -95,7 +101,10 @@ def load_training_response_manifest(
     analysis_run_id: str,
     *,
     allow_legacy_layout: bool = False,
+    allow_legacy_v2: bool = False,
 ) -> dict[str, Any]:
+    if allow_legacy_layout and allow_legacy_v2:
+        raise ValueError("choose only one legacy training-response compatibility mode")
     root = Path(output_root).expanduser().resolve()
     run_id = _safe_component(analysis_run_id, label="analysis run ID")
     version = "v1" if allow_legacy_layout else "v2"
@@ -105,14 +114,20 @@ def load_training_response_manifest(
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("training-response manifest must contain an object")
-    expected_version = LEGACY_SCHEMA_VERSION if allow_legacy_layout else SCHEMA_VERSION
+    expected_version = (
+        LEGACY_SCHEMA_VERSION
+        if allow_legacy_layout
+        else LEGACY_EXACT_SCHEMA_VERSION if allow_legacy_v2 else SCHEMA_VERSION
+    )
     if payload.get("schema_id") != SCHEMA_ID or payload.get(
         "schema_version"
     ) != expected_version:
         raise ValueError(f"unsupported training-response schema in {path}")
     if payload.get("analysis_run_id") != run_id:
         raise ValueError(f"analysis_run_id mismatch in {path}")
-    if not allow_legacy_layout:
+    if allow_legacy_v2:
+        validate_training_response_v2_compatibility_run(root, run_id)
+    elif not allow_legacy_layout:
         validate_training_response_run(root, run_id)
     return payload
 
@@ -240,11 +255,14 @@ def training_response_table_parts(
     table_name: str,
     *,
     allow_legacy_layout: bool = False,
+    allow_legacy_v2: bool = False,
 ) -> tuple[Path, ...]:
     root = Path(output_root).expanduser().resolve()
     run_id = _safe_component(analysis_run_id, label="analysis run ID")
     table = _safe_component(table_name, label="table name")
     contract_fields(table)
+    if allow_legacy_layout and allow_legacy_v2:
+        raise ValueError("choose only one legacy training-response compatibility mode")
     if allow_legacy_layout:
         payload = load_training_response_manifest(
             root,
@@ -271,6 +289,28 @@ def training_response_table_parts(
                 raise FileNotFoundError(path)
             parts.append(path)
         return tuple(parts)
+    if allow_legacy_v2:
+        payload = load_training_response_manifest(
+            root,
+            run_id,
+            allow_legacy_v2=True,
+        )
+        validate_derived_manifest_envelope(
+            payload,
+            analysis_run_id=run_id,
+            table_names=TRAINING_RESPONSE_TABLES,
+            contracts=LEGACY_V2_ARROW_TABLE_CONTRACTS,
+            arrow_envelope_schema_id=ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
+            arrow_envelope_schema_version=(
+                LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION
+            ),
+        )
+        return derived_manifest_selected_parts(
+            root,
+            payload,
+            table,
+            table_names=TRAINING_RESPONSE_TABLES,
+        )
     manifest_path = derived_manifest_path(root, run_id)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
@@ -279,7 +319,7 @@ def training_response_table_parts(
         payload.get("schema_id") != SCHEMA_ID
         or payload.get("schema_version") != SCHEMA_VERSION
     ):
-        raise ValueError("strict training-response reader requires schema v2")
+        raise ValueError("strict training-response reader requires schema v3")
     validate_derived_manifest_envelope(
         payload,
         analysis_run_id=run_id,
@@ -303,12 +343,14 @@ def scan_training_response_table(
     *,
     columns: Sequence[str] | None = None,
     allow_legacy_layout: bool = False,
+    allow_legacy_v2: bool = False,
 ) -> pl.LazyFrame:
     parts = training_response_table_parts(
         output_root,
         analysis_run_id,
         table_name,
         allow_legacy_layout=allow_legacy_layout,
+        allow_legacy_v2=allow_legacy_v2,
     )
     if not parts:
         return (

@@ -104,15 +104,46 @@ def _read_rows(paths: Iterable[Path]) -> list[dict[str, Any]]:
     return rows
 
 
+IdentityKey = tuple[str, str, str]
+
+
 def _group_recordings(
     rows: Iterable[Mapping[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-    output: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        recording_id = str(row.get("recording_id") or "").strip()
-        if recording_id:
-            output[recording_id].append(dict(row))
+) -> dict[IdentityKey, list[dict[str, Any]]]:
+    output: dict[IdentityKey, list[dict[str, Any]]] = defaultdict(list)
+    binding_by_recording: dict[str, tuple[str, str]] = {}
+    for row_index, row in enumerate(rows):
+        values = tuple(
+            str(row.get(name) or "").strip()
+            for name in ("recording_id", "session_id", "subject_id")
+        )
+        if any(not value for value in values):
+            raise ValueError(
+                f"source row {row_index} is missing recording/session/subject identity"
+            )
+        recording_id, session_id, subject_id = values
+        binding = (session_id, subject_id)
+        previous = binding_by_recording.setdefault(recording_id, binding)
+        if previous != binding:
+            raise ValueError(
+                f"recording {recording_id!r} has conflicting session/subject bindings"
+            )
+        output[(recording_id, session_id, subject_id)].append(dict(row))
     return dict(output)
+
+
+def _source_registry_identity_receipt(
+    source_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = source_manifest.get("registry_identity_receipt")
+    if raw is None:
+        raw = source_manifest.get("registry_identity")
+    if not isinstance(raw, Mapping):
+        raise ValueError("validated source export has no registry identity receipt")
+    # The analytics-export validator owns receipt semantics and schema dispatch.
+    # Training response preserves the validated receipt opaquely and binds it to
+    # the immutable source-manifest digest rather than duplicating that contract.
+    return json.loads(json.dumps(raw, sort_keys=True, separators=(",", ":")))
 
 
 def _recording_protocols(
@@ -172,18 +203,36 @@ def build_training_response_tables(
     egocentric_by_recording = _group_recordings(egocentric_rows)
     speed_by_recording = _group_recordings(speed_distance_rows)
     protocols = recording_protocols or {}
+    all_groups = (
+        behavior_by_recording,
+        distance_by_recording,
+        egocentric_by_recording,
+        speed_by_recording,
+    )
+    binding_by_recording: dict[str, tuple[str, str]] = {}
+    for grouped in all_groups:
+        for recording_id, session_id, subject_id in grouped:
+            binding = (session_id, subject_id)
+            previous = binding_by_recording.setdefault(recording_id, binding)
+            if previous != binding:
+                raise ValueError(
+                    f"recording {recording_id!r} has conflicting identities across source tables"
+                )
     features = [
         derive_training_response_features(
             recording_id=recording_id,
+            session_id=session_id,
+            subject_id=subject_id,
             source_export_run_id=source_export_run_id,
             behavior_rows=rows,
-            distance_rows=distance_by_recording.get(recording_id, ()),
-            egocentric_rows=egocentric_by_recording.get(recording_id, ()),
-            speed_distance_rows=speed_by_recording.get(recording_id, ()),
+            distance_rows=distance_by_recording.get(identity_key, ()),
+            egocentric_rows=egocentric_by_recording.get(identity_key, ()),
+            speed_distance_rows=speed_by_recording.get(identity_key, ()),
             protocol_name=protocols.get(recording_id),
             config=config,
         )
-        for recording_id, rows in sorted(behavior_by_recording.items())
+        for identity_key, rows in sorted(behavior_by_recording.items())
+        for recording_id, session_id, subject_id in (identity_key,)
     ]
     classifications = classify_training_response_features(features, config=config)
     clusters = discover_training_response_clusters(classifications, config=config)
@@ -254,6 +303,9 @@ def run_training_response_analytics(
         for table_name in OUTPUT_TABLES
     }
     collection = source_manifest.get("collection_manifest")
+    source_registry_identity_receipt = _source_registry_identity_receipt(
+        source_manifest
+    )
     manifest_fields = {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
@@ -267,6 +319,7 @@ def run_training_response_analytics(
             else None
         ),
         "source_validation": source_validation,
+        "source_registry_identity_receipt": source_registry_identity_receipt,
         "feature_config": config.to_dict(),
         "source_export_mutated": False,
         "interpretation_guardrail": (
@@ -275,6 +328,8 @@ def run_training_response_analytics(
         ),
         "temporal_adaptation_status": "unavailable_without_training_time_bins_or_samples",
     }
+    if hashlib.sha256(source_manifest_path.read_bytes()).hexdigest() != source_manifest_sha256:
+        raise ValueError("source export manifest changed during training-response planning")
     payload = publish_derived_table_generation(
         output_root=destination,
         analysis_run_id=run_id,

@@ -29,6 +29,8 @@ def _float(value: object) -> float | None:
 def _identity(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "recording_id": row.get("recording_id"),
+        "session_id": row.get("session_id"),
+        "subject_id": row.get("subject_id"),
         "training_window_id": row.get("training_window_id"),
         "source_export_run_id": row.get("source_export_run_id"),
         "protocol_name": row.get("protocol_name"),

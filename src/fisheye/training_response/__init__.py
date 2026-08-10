@@ -13,7 +13,10 @@ from .query import (
     scan_training_response_table,
     select_training_response_run_id,
 )
-from .validation import validate_training_response_run
+from .validation import (
+    validate_training_response_run,
+    validate_training_response_v2_compatibility_run,
+)
 from .cohort import (
     classify_training_response_features,
     discover_training_response_clusters,
@@ -32,4 +35,5 @@ __all__ = [
     "scan_training_response_table",
     "select_training_response_run_id",
     "validate_training_response_run",
+    "validate_training_response_v2_compatibility_run",
 ]

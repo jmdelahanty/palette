@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import math
 from pathlib import Path
 
@@ -32,17 +31,31 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
 )
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.derived_publication import (
+    publish_derived_table_generation,
+)
 from fisheye.training_response.cohort import (
     classify_training_response_features,
     discover_training_response_clusters,
 )
-from fisheye.training_response.contracts import TrainingResponseConfig
+from fisheye.training_response.contracts import (
+    ARROW_CONTRACT_ENVELOPE_SCHEMA_ID as RESPONSE_ARROW_ENVELOPE_SCHEMA_ID,
+    LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+    LEGACY_EXACT_SCHEMA_VERSION,
+    LEGACY_V2_ARROW_TABLE_CONTRACTS,
+    SCHEMA_ID as RESPONSE_SCHEMA_ID,
+    TRAINING_RESPONSE_TABLES,
+    TrainingResponseConfig,
+    normalize_training_response_rows,
+    training_response_arrow_contract_envelope,
+)
 from fisheye.training_response.features import derive_training_response_features
 from fisheye.training_response.query import (
     discover_training_response_catalog,
     scan_training_response_qc_rows,
     scan_training_response_table,
     select_training_response_run_id,
+    load_training_response_manifest,
 )
 from fisheye.training_response.validation import validate_training_response_run
 from fisheye.training_response.workflow import (
@@ -51,9 +64,17 @@ from fisheye.training_response.workflow import (
 )
 
 
+def _identity(recording_id: str) -> dict[str, str]:
+    return {
+        "recording_id": recording_id,
+        "session_id": f"session_{int(recording_id.rsplit('_', 1)[-1]) // 2}",
+        "subject_id": f"subject_{recording_id}",
+    }
+
+
 def _behavior_rows(recording_id: str, *, scale: float = 1.0, dropout: float = 0.0):
     common = {
-        "recording_id": recording_id,
+        **_identity(recording_id),
         "zarr_path": f"/{recording_id}_analysis.zarr",
         "duration_s": 60.0,
         "tracking_dropout_fraction": dropout,
@@ -107,7 +128,7 @@ def _distance_rows(recording_id: str, *, aggressive_training_p50: float = 30.0):
             chaser_index, p50, p05, within = values[(window, role)]
             rows.append(
                 {
-                    "recording_id": recording_id,
+                    **_identity(recording_id),
                     "window_id": window_id,
                     "window_label": window,
                     "chaser_index": chaser_index,
@@ -125,7 +146,7 @@ def _distance_rows(recording_id: str, *, aggressive_training_p50: float = 30.0):
 def _egocentric_rows(recording_id: str):
     return [
         {
-            "recording_id": recording_id,
+            **_identity(recording_id),
             "window_id": window_id,
             "window_label": window,
             "chaser_index": chaser_index,
@@ -146,7 +167,7 @@ def _egocentric_rows(recording_id: str):
 def _speed_distance_rows(recording_id: str):
     return [
         {
-            "recording_id": recording_id,
+            **_identity(recording_id),
             "window_id": 1,
             "window_label": "training_event",
             "chaser_index": chaser_index,
@@ -163,6 +184,8 @@ def _speed_distance_rows(recording_id: str):
 def test_feature_builder_separates_pre_change_role_and_proximity_metrics() -> None:
     row = derive_training_response_features(
         recording_id="recording_001",
+        session_id="session_0",
+        subject_id="subject_recording_001",
         source_export_run_id="source_001",
         behavior_rows=_behavior_rows("recording_001", scale=2.0),
         distance_rows=_distance_rows("recording_001"),
@@ -186,6 +209,8 @@ def test_feature_builder_separates_pre_change_role_and_proximity_metrics() -> No
 def test_feature_builder_rejects_low_tracking_coverage() -> None:
     row = derive_training_response_features(
         recording_id="recording_001",
+        session_id="session_0",
+        subject_id="subject_recording_001",
         source_export_run_id="source_001",
         behavior_rows=_behavior_rows("recording_001", dropout=0.30),
         distance_rows=_distance_rows("recording_001"),
@@ -207,6 +232,8 @@ def test_classification_uses_clear_cohort_proximity_vocabulary() -> None:
         features.append(
             derive_training_response_features(
                 recording_id=recording_id,
+                session_id=_identity(recording_id)["session_id"],
+                subject_id=_identity(recording_id)["subject_id"],
                 source_export_run_id="source_001",
                 behavior_rows=_behavior_rows(recording_id, scale=0.5 + index * 0.3),
                 distance_rows=_distance_rows(
@@ -227,7 +254,7 @@ def test_classification_uses_clear_cohort_proximity_vocabulary() -> None:
     assert all("profile_separation_score" in row for row in rows)
 
 
-def test_build_tables_returns_one_row_per_recording_per_table() -> None:
+def test_build_tables_preserves_multi_session_multi_subject_identity() -> None:
     recording_ids = [f"recording_{index}" for index in range(6)]
     tables = build_training_response_tables(
         source_export_run_id="source_001",
@@ -250,6 +277,31 @@ def test_build_tables_returns_one_row_per_recording_per_table() -> None:
     assert {
         row["protocol_name"] for row in tables["training_response_features"]
     } == {"GoodCopBadCop"}
+    for rows in tables.values():
+        assert {
+            (row["recording_id"], row["session_id"], row["subject_id"])
+            for row in rows
+        } == {
+            (
+                recording_id,
+                _identity(recording_id)["session_id"],
+                _identity(recording_id)["subject_id"],
+            )
+            for recording_id in recording_ids
+        }
+
+
+def test_build_tables_rejects_conflicting_subject_binding_for_recording() -> None:
+    behavior = _behavior_rows("recording_0")
+    distance = _distance_rows("recording_0")
+    distance[0] = {**distance[0], "subject_id": "different_subject"}
+
+    with pytest.raises(ValueError, match="conflicting session/subject bindings"):
+        build_training_response_tables(
+            source_export_run_id="source_001",
+            behavior_rows=behavior,
+            distance_rows=distance,
+        )
 
 
 def test_cluster_discovery_reports_missing_stability_instead_of_validating_it() -> None:
@@ -259,6 +311,8 @@ def test_cluster_discovery_reports_missing_stability_instead_of_validating_it() 
         rows.append(
             {
                 "recording_id": f"recording_{index}",
+                "session_id": f"session_{index // 2}",
+                "subject_id": f"subject_recording_{index}",
                 "training_window_id": 1,
                 "classification_status": "complete",
                 "locomotor_response_score": group,
@@ -362,6 +416,31 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                 "export_run_id": run_id,
                 "schema_id": EXPORT_SCHEMA_ID,
                 "schema_version": EXPORT_SCHEMA_VERSION,
+                "source_zarrs": [
+                    f"/{recording_id}_analysis.zarr"
+                    for recording_id in sorted(
+                        {row["recording_id"] for rows in rows_by_table.values() for row in rows}
+                    )
+                ],
+                "registry_identity": {
+                    "schema_id": "palette.analytics_export.registry_identity",
+                    "schema_version": 1,
+                    "session_id_source": "dataset_context_current.recording_started_utc",
+                    "subject_id_source": (
+                        "coalesce(dataset_context_current.subject_id,"
+                        "dataset_context_current.legacy_fish_id)"
+                    ),
+                    "sources": {
+                        f"/{recording_id}_analysis.zarr": _identity(recording_id)
+                        for recording_id in sorted(
+                            {
+                                row["recording_id"]
+                                for rows in rows_by_table.values()
+                                for row in rows
+                            }
+                        )
+                    },
+                },
                 "tables_requested": list(rows_by_table),
                 "table_contracts": contract_snapshot(list(rows_by_table)),
                 "arrow_schema_contracts": arrow_contract_envelope(list(rows_by_table)),
@@ -412,6 +491,8 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
     )
 
     assert result["source_export_mutated"] is False
+    assert result["schema_version"] == 3
+    assert result["source_registry_identity_receipt"]["sources"]
     assert result["temporal_adaptation_status"].startswith("unavailable")
     assert result["output_validation"]["status"] == "valid"
     assert validate_training_response_run(output_root, "training_001")["table_count"] == 3
@@ -423,6 +504,10 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
         columns=("recording_id", "aggressive_proximity_state"),
     )
     assert lazy.collect().shape == (6, 2)
+    qc = scan_training_response_qc_rows(output_root, "training_001").collect()
+    assert qc.height == 6
+    assert qc["session_id"].n_unique() == 3
+    assert qc["subject_id"].n_unique() == 6
     catalog = discover_training_response_catalog(output_root)
     assert select_training_response_run_id(
         catalog, "latest", source_export_run_id="source_001"
@@ -436,7 +521,7 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
         )
 
 
-def test_training_catalog_rejects_digest_valid_but_ineligible_v2_run(
+def test_training_catalog_rejects_digest_valid_but_ineligible_v3_run(
     tmp_path: Path,
 ) -> None:
     source_root = tmp_path / "source"
@@ -473,20 +558,104 @@ def test_training_catalog_rejects_digest_valid_but_ineligible_v2_run(
     assert "not selector eligible" in catalog.diagnostics[0].message
 
 
-def test_training_workflow_binds_digest_to_loaded_manifest_generation(
+def test_strict_v3_reader_rejects_v2_and_explicit_v2_adapter_accepts_it(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "legacy_training"
+    recording_ids = [f"recording_{index}" for index in range(6)]
+    current = build_training_response_tables(
+        source_export_run_id="source_001",
+        behavior_rows=[row for item in recording_ids for row in _behavior_rows(item)],
+        distance_rows=[row for item in recording_ids for row in _distance_rows(item)],
+        egocentric_rows=[row for item in recording_ids for row in _egocentric_rows(item)],
+        speed_distance_rows=[
+            row for item in recording_ids for row in _speed_distance_rows(item)
+        ],
+        config=TrainingResponseConfig(cluster_stability_resamples=0),
+    )
+    normalized = {
+        table_name: normalize_training_response_rows(
+            table_name,
+            rows,
+            analysis_run_id="legacy_v2",
+        )
+        for table_name, rows in current.items()
+    }
+    legacy_rows: dict[str, list[dict[str, object]]] = {}
+    for table_name, rows in normalized.items():
+        names = tuple(
+            field.name for field in LEGACY_V2_ARROW_TABLE_CONTRACTS[table_name].fields
+        )
+        legacy_rows[table_name] = [
+            {
+                **{name: row[name] for name in names},
+                "schema_version": LEGACY_EXACT_SCHEMA_VERSION,
+                "method_version": "1",
+            }
+            for row in rows
+        ]
+    config = TrainingResponseConfig(cluster_stability_resamples=0)
+    publish_derived_table_generation(
+        output_root=output_root,
+        analysis_run_id="legacy_v2",
+        rows_by_table=legacy_rows,
+        table_names=TRAINING_RESPONSE_TABLES,
+        contracts=LEGACY_V2_ARROW_TABLE_CONTRACTS,
+        arrow_contract_envelope=training_response_arrow_contract_envelope(
+            schema_version=LEGACY_EXACT_SCHEMA_VERSION
+        ),
+        arrow_envelope_schema_id=RESPONSE_ARROW_ENVELOPE_SCHEMA_ID,
+        arrow_envelope_schema_version=(
+            LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION
+        ),
+        manifest_fields={
+            "schema_id": RESPONSE_SCHEMA_ID,
+            "schema_version": LEGACY_EXACT_SCHEMA_VERSION,
+            "created_at_utc": "2026-08-10T00:00:00+00:00",
+            "source_export_root": "/immutable/source",
+            "source_export_run_id": "source_001",
+            "source_export_manifest_sha256": "a" * 64,
+            "source_collection_manifest_sha256": None,
+            "source_validation": {"status": "valid"},
+            "feature_config": config.to_dict(),
+            "source_export_mutated": False,
+            "interpretation_guardrail": "legacy v2 compatibility fixture",
+            "temporal_adaptation_status": "unavailable",
+        },
+        footer_metadata={
+            b"palette.schema_id": RESPONSE_SCHEMA_ID.encode(),
+            b"palette.schema_version": b"2",
+            b"palette.training_response_config": json.dumps(
+                config.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode(),
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported training-response schema"):
+        load_training_response_manifest(output_root, "legacy_v2")
+    manifest = load_training_response_manifest(
+        output_root,
+        "legacy_v2",
+        allow_legacy_v2=True,
+    )
+    assert manifest["schema_version"] == LEGACY_EXACT_SCHEMA_VERSION
+    rows = scan_training_response_table(
+        output_root,
+        "legacy_v2",
+        "training_response_features",
+        columns=("recording_id",),
+        allow_legacy_v2=True,
+    ).collect()
+    assert rows.height == 6
+
+
+def test_training_workflow_rejects_source_manifest_generation_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_root = tmp_path / "source"
     output_root = tmp_path / "training"
     _write_source_export(source_root, "source_001")
-    manifest_path = (
-        source_root
-        / "v1"
-        / "manifests"
-        / "export_run_id=source_001.json"
-    )
-    expected_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     import fisheye.training_response.workflow as workflow
 
     real_load = workflow._load_object_snapshot
@@ -499,19 +668,59 @@ def test_training_workflow_binds_digest_to_loaded_manifest_generation(
         return snapshot
 
     monkeypatch.setattr(workflow, "_load_object_snapshot", replace_after_snapshot)
-    result = run_training_response_analytics(
+    with pytest.raises(ValueError, match="changed during training-response planning"):
+        run_training_response_analytics(
+            source_export_root=source_root,
+            source_export_run_id="source_001",
+            output_root=output_root,
+            analysis_run_id="training_snapshot",
+            config=TrainingResponseConfig(cluster_stability_resamples=2),
+        )
+    assert not (
+        output_root
+        / "v2"
+        / "manifests"
+        / "analysis_run_id=training_snapshot.json"
+    ).exists()
+
+
+def test_training_response_validation_rejects_rehashed_identity_binding_tamper(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    output_root = tmp_path / "training"
+    _write_source_export(source_root, "source_001")
+    run_training_response_analytics(
         source_export_root=source_root,
         source_export_run_id="source_001",
         output_root=output_root,
-        analysis_run_id="training_snapshot",
-        config=TrainingResponseConfig(cluster_stability_resamples=2),
+        analysis_run_id="training_identity_tamper",
+        config=TrainingResponseConfig(cluster_stability_resamples=0),
     )
+    manifest_path = (
+        output_root
+        / "v2"
+        / "manifests"
+        / "analysis_run_id=training_identity_tamper.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first_source = next(
+        iter(manifest["source_registry_identity_receipt"]["sources"])
+    )
+    manifest["source_registry_identity_receipt"]["sources"][first_source][
+        "subject_id"
+    ] = "tampered_subject"
+    manifest["manifest_payload_sha256"] = payload_sha256(
+        {
+            key: value
+            for key, value in manifest.items()
+            if key != "manifest_payload_sha256"
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    assert result["source_export_manifest_sha256"] == expected_digest
-    qc_rows = scan_training_response_qc_rows(output_root, "training_snapshot").collect()
-    assert qc_rows.shape[0] == 6
-    assert "primary_training_profile" in qc_rows.columns
-    assert "selected_component_count" in qc_rows.columns
+    with pytest.raises(ValueError, match="receipt differs from the digest-bound"):
+        validate_training_response_run(output_root, "training_identity_tamper")
 
 
 def test_training_workflow_rejects_symlinked_source_manifest_namespace(

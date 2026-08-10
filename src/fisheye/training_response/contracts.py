@@ -20,14 +20,16 @@ from fisheye.analytics_exports.arrow_contract_core import (
 
 SCHEMA_ID = "palette.training_response_analytics"
 LEGACY_SCHEMA_VERSION = 1
-SCHEMA_VERSION = 2
+LEGACY_EXACT_SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 METHOD = "whole_training_chaser_response"
 METHOD_VERSION = "1"
 
 ARROW_CONTRACT_ENVELOPE_SCHEMA_ID = (
     "palette.training_response_analytics.arrow_contracts"
 )
-ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION = 1
+LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION = 1
+ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION = 2
 ARROW_TABLE_SCHEMA_NAMESPACE = "palette.training_response_analytics.arrow_table"
 
 TRAINING_RESPONSE_FEATURES_TABLE = "training_response_features"
@@ -40,8 +42,19 @@ TRAINING_RESPONSE_TABLES = (
     TRAINING_RESPONSE_CLUSTERS_TABLE,
 )
 
-IDENTITY_COLUMNS = ("recording_id", "training_window_id")
-PRIMARY_KEY_COLUMNS = ("analysis_run_id", "recording_id")
+IDENTITY_COLUMNS = (
+    "recording_id",
+    "session_id",
+    "subject_id",
+    "training_window_id",
+)
+PRIMARY_KEY_COLUMNS = (
+    "analysis_run_id",
+    "recording_id",
+    "session_id",
+    "subject_id",
+)
+LEGACY_V2_PRIMARY_KEY_COLUMNS = ("analysis_run_id", "recording_id")
 
 AGGRESSIVE_ROLE = "aggressive"
 INERT_ROLE = "inert"
@@ -78,7 +91,7 @@ class TrainingResponseConfig:
             raise ValueError("pre and training window labels must differ")
         if self.aggressive_role != AGGRESSIVE_ROLE or self.inert_role != INERT_ROLE:
             raise ValueError(
-                "training-response v2 freezes role-derived columns to "
+                "training-response v3 freezes role-derived columns to "
                 "aggressive_role='aggressive' and inert_role='inert'"
             )
         if not 0 <= self.min_valid_position_fraction <= 1:
@@ -110,11 +123,17 @@ _COMMON_ARROW_FIELDS = (
     field("method", "string"),
     field("method_version", "string"),
     field("recording_id", "string"),
+    field("session_id", "string"),
+    field("subject_id", "string"),
     # A missing training window is a valid invalid-feature outcome. It is
-    # lineage, not part of the v2 primary key.
+    # lineage, not part of the v3 primary key.
     field("training_window_id", "int64", nullable=True),
     field("source_export_run_id", "string"),
     field("protocol_name", "string", nullable=True),
+)
+
+_LEGACY_V2_COMMON_ARROW_FIELDS = tuple(
+    item for item in _COMMON_ARROW_FIELDS if item.name not in {"session_id", "subject_id"}
 )
 
 _FEATURE_FLOAT_FIELDS = (
@@ -272,6 +291,19 @@ _CLUSTER_ARROW_FIELDS = _COMMON_ARROW_FIELDS + (
     field("analysis_run_id", "string"),
 )
 
+_LEGACY_V2_FEATURE_ARROW_FIELDS = (
+    _LEGACY_V2_COMMON_ARROW_FIELDS
+    + _FEATURE_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
+)
+_LEGACY_V2_CLASSIFICATION_ARROW_FIELDS = (
+    _LEGACY_V2_COMMON_ARROW_FIELDS
+    + _CLASSIFICATION_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
+)
+_LEGACY_V2_CLUSTER_ARROW_FIELDS = (
+    _LEGACY_V2_COMMON_ARROW_FIELDS
+    + _CLUSTER_ARROW_FIELDS[len(_COMMON_ARROW_FIELDS) :]
+)
+
 ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     TRAINING_RESPONSE_FEATURES_TABLE: ArrowTableContract(
         table_name=TRAINING_RESPONSE_FEATURES_TABLE,
@@ -296,6 +328,30 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     ),
 }
 
+LEGACY_V2_ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
+    TRAINING_RESPONSE_FEATURES_TABLE: ArrowTableContract(
+        table_name=TRAINING_RESPONSE_FEATURES_TABLE,
+        fields=_LEGACY_V2_FEATURE_ARROW_FIELDS,
+        schema_version=LEGACY_EXACT_SCHEMA_VERSION,
+        schema_namespace=ARROW_TABLE_SCHEMA_NAMESPACE,
+        primary_key=LEGACY_V2_PRIMARY_KEY_COLUMNS,
+    ),
+    TRAINING_RESPONSE_CLASSIFICATION_TABLE: ArrowTableContract(
+        table_name=TRAINING_RESPONSE_CLASSIFICATION_TABLE,
+        fields=_LEGACY_V2_CLASSIFICATION_ARROW_FIELDS,
+        schema_version=LEGACY_EXACT_SCHEMA_VERSION,
+        schema_namespace=ARROW_TABLE_SCHEMA_NAMESPACE,
+        primary_key=LEGACY_V2_PRIMARY_KEY_COLUMNS,
+    ),
+    TRAINING_RESPONSE_CLUSTERS_TABLE: ArrowTableContract(
+        table_name=TRAINING_RESPONSE_CLUSTERS_TABLE,
+        fields=_LEGACY_V2_CLUSTER_ARROW_FIELDS,
+        schema_version=LEGACY_EXACT_SCHEMA_VERSION,
+        schema_namespace=ARROW_TABLE_SCHEMA_NAMESPACE,
+        primary_key=LEGACY_V2_PRIMARY_KEY_COLUMNS,
+    ),
+}
+
 INTERPRETATION_GUARDRAIL = (
     "descriptive response profile; fear, anxiety, and escape success are not inferred"
 )
@@ -306,31 +362,54 @@ CLUSTER_SEMANTICS = "unsupervised_ids_require_posthoc_interpretation"
 
 def training_response_arrow_contract_envelope(
     table_names: Sequence[str] = TRAINING_RESPONSE_TABLES,
+    *,
+    schema_version: int = SCHEMA_VERSION,
 ) -> dict[str, object]:
-    """Return the closed exact Arrow envelope for training-response v2."""
+    """Return a closed exact Arrow envelope for one supported schema."""
+
+    contracts, envelope_version = _contracts_for_schema_version(schema_version)
 
     return contract_envelope(
         table_names,
         known_table_names=TRAINING_RESPONSE_TABLES,
-        contracts=ARROW_TABLE_CONTRACTS,
+        contracts=contracts,
         schema_id=ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
-        schema_version=ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+        schema_version=envelope_version,
     )
 
 
 def validate_training_response_arrow_contract_envelope(
     value: object,
     table_names: Sequence[str] = TRAINING_RESPONSE_TABLES,
+    *,
+    schema_version: int = SCHEMA_VERSION,
 ) -> dict[str, object]:
     """Validate an envelope against the installed declarations."""
+
+    contracts, envelope_version = _contracts_for_schema_version(schema_version)
 
     return validate_contract_envelope(
         value,
         table_names,
         known_table_names=TRAINING_RESPONSE_TABLES,
-        contracts=ARROW_TABLE_CONTRACTS,
+        contracts=contracts,
         schema_id=ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
-        schema_version=ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+        schema_version=envelope_version,
+    )
+
+
+def _contracts_for_schema_version(
+    schema_version: int,
+) -> tuple[dict[str, ArrowTableContract], int]:
+    if schema_version == SCHEMA_VERSION:
+        return ARROW_TABLE_CONTRACTS, ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION
+    if schema_version == LEGACY_EXACT_SCHEMA_VERSION:
+        return (
+            LEGACY_V2_ARROW_TABLE_CONTRACTS,
+            LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+        )
+    raise ValueError(
+        "training-response exact schemas support only v3 and explicit legacy v2"
     )
 
 
@@ -338,21 +417,29 @@ def exact_training_response_arrow_schema(
     table_name: str,
     *,
     metadata: Mapping[bytes, bytes] | None = None,
+    schema_version: int = SCHEMA_VERSION,
 ) -> Any:
-    """Return the digest-bound exact Arrow schema for one v2 table."""
+    """Return the digest-bound exact Arrow schema for one supported version."""
 
+    contracts, _ = _contracts_for_schema_version(schema_version)
     try:
-        contract = ARROW_TABLE_CONTRACTS[table_name]
+        contract = contracts[table_name]
     except KeyError as exc:
         raise KeyError(f"unknown training-response table: {table_name}") from exc
     return exact_schema(contract, metadata=metadata or {})
 
 
-def validate_training_response_arrow_schema(table_name: str, schema: Any) -> None:
+def validate_training_response_arrow_schema(
+    table_name: str,
+    schema: Any,
+    *,
+    schema_version: int = SCHEMA_VERSION,
+) -> None:
     """Reject any physical field or exact footer-contract drift."""
 
+    contracts, _ = _contracts_for_schema_version(schema_version)
     try:
-        contract = ARROW_TABLE_CONTRACTS[table_name]
+        contract = contracts[table_name]
     except KeyError as exc:
         raise KeyError(f"unknown training-response table: {table_name}") from exc
     validate_exact_schema(contract, schema)
@@ -472,7 +559,7 @@ def normalize_training_response_row(
     analysis_run_id: str | None = None,
     config: TrainingResponseConfig | None = None,
 ) -> dict[str, Any]:
-    """Normalize one producer or legacy-v1 row to the closed v2 vocabulary."""
+    """Normalize one producer row to the closed v3 vocabulary."""
 
     try:
         contract = ARROW_TABLE_CONTRACTS[table_name]
@@ -503,14 +590,11 @@ def normalize_training_response_row(
         normalized["analysis_run_id"] = analysis_run_id
     for name, value in _normalization_defaults(table_name, config).items():
         normalized.setdefault(name, value)
-    if normalized.get("schema_version") == LEGACY_SCHEMA_VERSION:
-        normalized["schema_version"] = SCHEMA_VERSION
-
     expected_names = tuple(item.name for item in contract.fields)
     unexpected = sorted(set(normalized) - set(expected_names))
     if unexpected:
         raise ValueError(
-            f"{table_name}: unexpected fields outside the frozen v2 role vocabulary: "
+            f"{table_name}: unexpected fields outside the frozen v3 role vocabulary: "
             f"{unexpected}"
         )
     output: dict[str, Any] = {}
@@ -536,7 +620,7 @@ def normalize_training_response_row(
     for name, expected in expected_constants.items():
         if output[name] != expected:
             raise ValueError(
-                f"{table_name}: {name} must equal the installed v2 value {expected!r}"
+                f"{table_name}: {name} must equal the installed v3 value {expected!r}"
             )
     return output
 
@@ -544,15 +628,19 @@ def normalize_training_response_row(
 def validate_training_response_primary_keys(
     table_name: str,
     rows: Sequence[Mapping[str, Any]],
+    *,
+    schema_version: int = SCHEMA_VERSION,
 ) -> None:
-    """Reject null, empty, or duplicate v2 table primary keys."""
+    """Reject null, empty, or duplicate table primary keys."""
 
-    if table_name not in ARROW_TABLE_CONTRACTS:
+    contracts, _ = _contracts_for_schema_version(schema_version)
+    if table_name not in contracts:
         raise KeyError(f"unknown training-response table: {table_name}")
-    observed: set[tuple[str, str]] = set()
+    primary_key = contracts[table_name].primary_key
+    observed: set[tuple[str, ...]] = set()
     for row_index, row in enumerate(rows):
         values: list[str] = []
-        for column in PRIMARY_KEY_COLUMNS:
+        for column in primary_key:
             value = row.get(column)
             if type(value) is not str or not value.strip():
                 raise ValueError(
@@ -560,7 +648,7 @@ def validate_training_response_primary_keys(
                     f"field {column}"
                 )
             values.append(value)
-        key = (values[0], values[1])
+        key = tuple(values)
         if key in observed:
             raise ValueError(f"{table_name}: duplicate primary key {key!r}")
         observed.add(key)
@@ -573,7 +661,7 @@ def normalize_training_response_rows(
     analysis_run_id: str,
     config: TrainingResponseConfig | None = None,
 ) -> list[dict[str, Any]]:
-    """Normalize a complete batch and prove its v2 primary-key contract."""
+    """Normalize a complete batch and prove its v3 primary-key contract."""
 
     normalized = [
         normalize_training_response_row(
@@ -637,6 +725,10 @@ __all__ = [
     "INTERPRETATION_GUARDRAIL",
     "INERT_ROLE",
     "LEGACY_SCHEMA_VERSION",
+    "LEGACY_EXACT_SCHEMA_VERSION",
+    "LEGACY_ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION",
+    "LEGACY_V2_ARROW_TABLE_CONTRACTS",
+    "LEGACY_V2_PRIMARY_KEY_COLUMNS",
     "METHOD",
     "METHOD_VERSION",
     "PRIMARY_KEY_COLUMNS",

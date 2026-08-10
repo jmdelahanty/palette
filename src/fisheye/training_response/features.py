@@ -76,6 +76,24 @@ def _role_windows(
     return output
 
 
+def _validate_source_identity(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    recording_id: str,
+    session_id: str,
+    subject_id: str,
+    label: str,
+) -> None:
+    expected = (recording_id, session_id, subject_id)
+    for row_index, row in enumerate(rows):
+        observed = tuple(row.get(name) for name in ("recording_id", "session_id", "subject_id"))
+        if observed != expected:
+            raise ValueError(
+                f"{label} row {row_index} identity {observed!r} differs from "
+                f"the requested feature identity {expected!r}"
+            )
+
+
 def _weighted_speed(
     rows: Sequence[Mapping[str, Any]], *, maximum_distance_mm: float | None
 ) -> float | None:
@@ -121,6 +139,8 @@ def _weighted_far_speed(
 def derive_training_response_features(
     *,
     recording_id: str,
+    session_id: str,
+    subject_id: str,
     source_export_run_id: str,
     behavior_rows: Sequence[Mapping[str, Any]],
     distance_rows: Sequence[Mapping[str, Any]],
@@ -133,6 +153,26 @@ def derive_training_response_features(
 
     config = config or TrainingResponseConfig()
     config.validate()
+    for name, value in (
+        ("recording_id", recording_id),
+        ("session_id", session_id),
+        ("subject_id", subject_id),
+    ):
+        if type(value) is not str or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    for label, rows in (
+        ("behavior", behavior_rows),
+        ("distance", distance_rows),
+        ("egocentric", egocentric_rows),
+        ("speed-distance", speed_distance_rows),
+    ):
+        _validate_source_identity(
+            rows,
+            recording_id=recording_id,
+            session_id=session_id,
+            subject_id=subject_id,
+            label=label,
+        )
     behaviors = _one_by_key(behavior_rows, "window_label")
     pre = behaviors.get(config.pre_window_label.lower())
     training = behaviors.get(config.training_window_label.lower())
@@ -146,6 +186,8 @@ def derive_training_response_features(
         "method": METHOD,
         "method_version": METHOD_VERSION,
         "recording_id": recording_id,
+        "session_id": session_id,
+        "subject_id": subject_id,
         "training_window_id": training_window_id,
         "source_export_run_id": source_export_run_id,
         "protocol_name": protocol_name,
