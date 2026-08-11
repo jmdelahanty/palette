@@ -1005,6 +1005,7 @@ def run_inference_window(
     keep_scratch: bool = False,
 ) -> dict[str, Any]:
     plan = load_plan(plan_path)
+    execution_repo = _repo_identity(Path(__file__).resolve().parents[4])
     window = _window(plan, window_index)
     run_root = Path(plan["run_root"])
     bundle = run_root / "bundles" / "inference" / str(window["window_id"])
@@ -1037,7 +1038,8 @@ def run_inference_window(
                 execution_context={
                     "workflow_id": plan["workflow_id"],
                     "plan_digest": plan["plan_digest"],
-                    "palette_commit": plan["repo"]["commit"],
+                    "planned_palette_commit": plan["repo"]["commit"],
+                    "execution_palette_commit": execution_repo["commit"],
                     "stage": "subject_mask_inference",
                     "window_id": window["window_id"],
                     "window_index": int(window["window_index"]),
@@ -1197,7 +1199,9 @@ def run_inference_window(
             "stage": "inference",
             "finished_at_utc": _utc_now(),
             "plan_digest": plan["plan_digest"],
-            "palette_commit": plan["repo"]["commit"],
+            "palette_commit": execution_repo["commit"],
+            "planned_palette_commit": plan["repo"]["commit"],
+            "execution_repo": execution_repo,
             "window_id": window["window_id"],
             "window_index": int(window["window_index"]),
             "row_start": int(window["row_start"]),
@@ -1269,6 +1273,7 @@ def run_refinement_window(
     keep_scratch: bool = False,
 ) -> dict[str, Any]:
     plan = load_plan(plan_path)
+    execution_repo = _repo_identity(Path(__file__).resolve().parents[4])
     window = _window(plan, window_index)
     run_root = Path(plan["run_root"])
     inference_bundle = run_root / "bundles" / "inference" / str(window["window_id"])
@@ -1342,7 +1347,9 @@ def run_refinement_window(
             "stage": "refinement",
             "finished_at_utc": _utc_now(),
             "plan_digest": plan["plan_digest"],
-            "palette_commit": plan["repo"]["commit"],
+            "palette_commit": execution_repo["commit"],
+            "planned_palette_commit": plan["repo"]["commit"],
+            "execution_repo": execution_repo,
             "window_id": window["window_id"],
             "window_index": int(window["window_index"]),
             "row_start": int(window["row_start"]),
@@ -1544,6 +1551,15 @@ def finalize_canary(
             ]
             for stage in ("inference", "refinement")
         }
+        worker_execution_palette_commits = {
+            stage: sorted(
+                {
+                    str(value.get("palette_commit") or plan["repo"]["commit"])
+                    for value in values
+                }
+            )
+            for stage, values in worker_results.items()
+        }
         result = {
             "schema_id": RESULT_SCHEMA_ID,
             "schema_version": RESULT_SCHEMA_VERSION,
@@ -1553,6 +1569,7 @@ def finalize_canary(
             "plan_digest": plan["plan_digest"],
             "palette_commit": publication_repo["commit"],
             "worker_palette_commit": plan["repo"]["commit"],
+            "worker_execution_palette_commits": worker_execution_palette_commits,
             "publication_repo": publication_repo,
             "recording": plan["recording"],
             "publication": publication,
