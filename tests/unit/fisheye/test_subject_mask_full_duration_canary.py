@@ -140,6 +140,90 @@ def _prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
     )
 
 
+def _seal_inference_bundles(
+    plan: dict[str, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for window in plan["windows"]:
+        if int(window["row_count"]) <= 0:
+            continue
+        window_id = str(window["window_id"])
+        local_archive = tmp_path / f"worker_{window_id}.zarr"
+        root = zarr.open_group(str(local_archive), mode="w", zarr_format=3)
+        run = root.create_group("subject_mask_shard_runs").create_group(
+            str(window["raw_run"])
+        )
+        run.attrs[canary.RUN_COMPLETION_STATUS_ATTR] = canary.RUN_STATUS_COMPLETE
+        run.attrs["stage_selector_eligible"] = False
+        row_count = int(window["row_count"])
+        payload_values = np.ones((row_count, 3, 8, 8), dtype=np.uint8)
+        run.create_array("mask_probs_roi", data=payload_values)
+        run.create_array(
+            "source_crop_row_ids",
+            data=np.arange(
+                int(window["row_start"]),
+                int(window["row_stop"]),
+                dtype=np.int64,
+            ),
+        )
+        payload_record = subject_mask_array_unit_document(
+            {"mask_probs_roi": payload_values},
+            ("mask_probs_roi",),
+            unit_rows=row_count,
+        )["mask_probs_roi"]
+        proof = {
+            "scientific_identity": {"digest": "1" * 64},
+            "attempt": {"payload_digest": "2" * 64},
+            "receipt": {
+                "payload_digest": "3" * 64,
+                "payload": {
+                    "run_path": f"subject_mask_shard_runs/{window['raw_run']}",
+                    "arrays": {"mask_probs_roi": payload_record},
+                },
+            },
+        }
+        monkeypatch.setattr(
+            canary,
+            "_worker_evidence",
+            lambda *_args, _proof=proof, **_kwargs: _proof,
+        )
+        package = tmp_path / f"unit_package_{window_id}"
+        canary.build_subject_mask_final_layout_unit_package(
+            source_array=payload_values,
+            source_crop_row_ids=np.arange(
+                int(window["row_start"]),
+                int(window["row_stop"]),
+                dtype=np.int64,
+            ),
+            destination=package,
+            kind="raw_probability_uint8",
+            dimensions=canary._final_layout_dimensions(plan, stage="inference"),
+            global_start_row=int(window["row_start"]),
+            source_run_path=f"subject_mask_shard_runs/{window['raw_run']}",
+            worker_receipt_payload_digest="3" * 64,
+            producer_commit=str(plan["repo"]["commit"]),
+            worker_array_validation_record=payload_record,
+        )
+        result = {
+            "schema_id": canary.WORKER_RESULT_SCHEMA_ID,
+            "schema_version": canary.WORKER_RESULT_SCHEMA_VERSION,
+            "status": "complete",
+            "stage": "inference",
+            "plan_digest": plan["plan_digest"],
+            "window_id": window_id,
+        }
+        bundle = Path(str(plan["run_root"])) / "bundles" / "inference" / window_id
+        canary._publish_worker_bundle(
+            local_archive=local_archive,
+            parent="subject_mask_shard_runs",
+            run_name=str(window["raw_run"]),
+            bundle=bundle,
+            result=result,
+            final_layout_unit_package=package,
+        )
+
+
 def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,6 +418,82 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     }
     assert publication.resources.ncores == 16
     assert "--activate" not in publication.command
+
+
+def test_receipt_bound_retry_plan_reuses_inference_and_submits_no_gpu_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_plan = _prepare(tmp_path, monkeypatch)
+    _seal_inference_bundles(source_plan, tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        canary,
+        "_repo_identity",
+        lambda _repo, require_clean=True: {
+            "path": str(tmp_path / "retry_repo"),
+            "commit": "b" * 40,
+            "branch": "retry",
+            "dirty": False,
+        },
+    )
+    clip_index = Path(str(source_plan["recording"]["video_source"]["clip_index_path"]))
+    retry = canary.prepare_canary(
+        run_root=tmp_path / ".palette_benchmarks" / "canary_retry",
+        repo=tmp_path / "retry_repo",
+        source_crop_zarr=Path(str(source_plan["references"]["crop"]["source_archive"])),
+        crop_run=str(source_plan["references"]["crop"]["run"]),
+        source_refined_keypoint_zarr=Path(
+            str(source_plan["references"]["refined_keypoints"]["source_archive"])
+        ),
+        refined_keypoint_run=str(source_plan["references"]["refined_keypoints"]["run"]),
+        model_path=Path(str(source_plan["model"]["path"])),
+        model_sha256=str(source_plan["model"]["sha256"]),
+        recording_id=str(source_plan["recording"]["recording_id"]),
+        recording_dir=clip_index.parent,
+        clip_index=clip_index,
+        run_label=str(source_plan["workflow_id"]),
+        reuse_inference_plan=Path(str(source_plan["run_root"])) / "plan.json",
+    )
+
+    reuse = retry["inference_reuse"]
+    assert reuse["source_plan_digest"] == source_plan["plan_digest"]
+    assert reuse["source_palette_commit"] == "a" * 40
+    assert set(reuse["window_results"]) == {"clip_000000", "clip_000001"}
+    for window in retry["windows"]:
+        bundle, result = canary._resolve_inference_bundle(
+            plan=retry,
+            window=window,
+        )
+        assert bundle.parent.name == "inference"
+        assert result["plan_digest"] == source_plan["plan_digest"]
+
+    tampered = json.loads(json.dumps(retry))
+    tampered["inference_reuse"]["window_results"]["clip_000000"]["result_sha256"] = (
+        "f" * 64
+    )
+    with pytest.raises(RuntimeError, match="result digest differs"):
+        canary._resolve_inference_bundle(
+            plan=tampered,
+            window=tampered["windows"][0],
+        )
+
+    workflow = canary.build_lsf_workflow(
+        plan_path=Path(str(retry["run_root"])) / "plan.json",
+        gpu_concurrency=10,
+        cpu_concurrency=2,
+    )
+    assert [job.job_key for job in workflow.topological_jobs()] == [
+        "subject_mask_refinement_array",
+        "subject_mask_recording_publication",
+    ]
+    refinement, publication = workflow.jobs
+    assert refinement.resources.gpus == 0
+    assert refinement.dependency is None
+    assert publication.dependency is not None
+    assert publication.dependency.upstream_job_keys == (
+        "subject_mask_refinement_array",
+    )
+    assert workflow.metadata["inference_reused"] is True
 
 
 def test_plan_digest_and_benchmark_namespace_fail_closed(

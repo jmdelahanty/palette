@@ -97,7 +97,10 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
-PLAN_SCHEMA_VERSION = 4
+PLAN_SCHEMA_LEGACY_VERSION = 4
+PLAN_SCHEMA_VERSION = 5
+INFERENCE_REUSE_SCHEMA_ID = "palette.subject_mask.inference_reuse"
+INFERENCE_REUSE_SCHEMA_VERSION = 1
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
 RESULT_SCHEMA_VERSION = 5
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
@@ -585,6 +588,7 @@ def prepare_canary(
     whole_video: Path | None = None,
     camera_identity: str | None = None,
     run_label: str,
+    reuse_inference_plan: Path | None = None,
     require_clean_repo: bool = True,
     core_physical_unit_workers: int = 4,
 ) -> dict[str, Any]:
@@ -835,6 +839,14 @@ def prepare_canary(
             "full_ragged_contours_allowed": False,
         },
     }
+    payload["inference_reuse"] = (
+        _build_inference_reuse_contract(
+            source_plan_path=reuse_inference_plan,
+            candidate_plan=payload,
+        )
+        if reuse_inference_plan is not None
+        else None
+    )
     payload["plan_digest"] = canonical_json_sha256(payload)
     _write_json_atomic(output / "plan.json", payload)
     return payload
@@ -847,7 +859,8 @@ def load_plan(path: Path) -> dict[str, Any]:
         raise ValueError("Canary plan root must be an object.")
     if (
         payload.get("schema_id") != PLAN_SCHEMA_ID
-        or payload.get("schema_version") != PLAN_SCHEMA_VERSION
+        or payload.get("schema_version")
+        not in {PLAN_SCHEMA_LEGACY_VERSION, PLAN_SCHEMA_VERSION}
         or payload.get("status") != "planned"
         or payload.get("classification") != BENCHMARK_CLASSIFICATION
     ):
@@ -871,6 +884,11 @@ def load_plan(path: Path) -> dict[str, Any]:
         raise ValueError("Canary analysis target escapes its benchmark run root.")
     if payload.get("safety", {}).get("bundle_activation_allowed") is not False:
         raise ValueError("Canary plan does not fail closed on activation.")
+    reuse = payload.get("inference_reuse")
+    if payload.get("schema_version") == PLAN_SCHEMA_VERSION:
+        _validate_inference_reuse_contract(reuse)
+    elif reuse is not None:
+        raise ValueError("Legacy canary plans cannot declare inference reuse.")
     if (
         payload.get("safety", {}).get("worker_sampled_contours_required") is not True
         or payload.get("safety", {}).get("full_ragged_contours_allowed") is not False
@@ -893,6 +911,16 @@ def load_plan(path: Path) -> dict[str, Any]:
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
+    if reuse is not None:
+        if Path(str(reuse["source_plan_path"])).resolve() == plan_path:
+            raise ValueError("Inference-reuse source plan cannot be the retry plan.")
+        expected_reused_windows = {
+            str(window["window_id"])
+            for window in windows
+            if isinstance(window, Mapping) and int(window.get("row_count", 0)) > 0
+        }
+        if set(reuse["window_results"]) != expected_reused_windows:
+            raise ValueError("Inference-reuse window coverage differs from the plan.")
     for stage, kind, role in (
         ("inference", "raw_probability_uint8", "raw"),
         ("refinement", "refined_dense_core", "refined"),
@@ -1115,6 +1143,216 @@ def _existing_worker_result(
     return result
 
 
+def _is_sha256_text(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_git_commit_text(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_inference_reuse_contract(value: object) -> None:
+    if value is None:
+        return
+    fields = {
+        "schema_id",
+        "schema_version",
+        "source_plan_path",
+        "source_plan_digest",
+        "source_run_root",
+        "source_palette_commit",
+        "window_results",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError("Inference-reuse contract fields are not exact.")
+    if (
+        value.get("schema_id") != INFERENCE_REUSE_SCHEMA_ID
+        or value.get("schema_version") != INFERENCE_REUSE_SCHEMA_VERSION
+        or not _is_sha256_text(value.get("source_plan_digest"))
+        or not _is_git_commit_text(value.get("source_palette_commit"))
+    ):
+        raise ValueError("Inference-reuse contract envelope is invalid.")
+    for name in ("source_plan_path", "source_run_root"):
+        raw = value.get(name)
+        if type(raw) is not str or not raw.strip() or not Path(raw).is_absolute():
+            raise ValueError(f"Inference-reuse {name} is invalid.")
+    windows = value.get("window_results")
+    if not isinstance(windows, Mapping) or not windows:
+        raise ValueError("Inference-reuse window results are absent.")
+    expected_window_fields = {
+        "window_index",
+        "raw_run",
+        "bundle_path",
+        "result_sha256",
+        "final_layout_payload_digest",
+    }
+    for window_id, record in windows.items():
+        if type(window_id) is not str or not window_id:
+            raise ValueError("Inference-reuse window ID is invalid.")
+        if not isinstance(record, Mapping) or set(record) != expected_window_fields:
+            raise ValueError(f"Inference-reuse record fields differ for {window_id!r}.")
+        if type(record.get("window_index")) is not int or record["window_index"] < 0:
+            raise ValueError(
+                f"Inference-reuse window index is invalid for {window_id!r}."
+            )
+        if type(record.get("raw_run")) is not str or not record["raw_run"]:
+            raise ValueError(f"Inference-reuse raw run is invalid for {window_id!r}.")
+        bundle = record.get("bundle_path")
+        if type(bundle) is not str or not bundle or not Path(bundle).is_absolute():
+            raise ValueError(
+                f"Inference-reuse bundle path is invalid for {window_id!r}."
+            )
+        for digest_name in ("result_sha256", "final_layout_payload_digest"):
+            if not _is_sha256_text(record.get(digest_name)):
+                raise ValueError(
+                    f"Inference-reuse {digest_name} is invalid for {window_id!r}."
+                )
+
+
+def _reference_contract_identity(plan: Mapping[str, Any], name: str) -> dict[str, Any]:
+    reference = plan["references"][name]
+    return {
+        "parent": reference["parent"],
+        "run": reference["run"],
+        "manifest": reference["manifest"],
+    }
+
+
+def _build_inference_reuse_contract(
+    *,
+    source_plan_path: Path,
+    candidate_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    source_path = source_plan_path.expanduser().resolve()
+    source_plan = load_plan(source_path)
+    if source_plan.get("inference_reuse") is not None:
+        raise ValueError(
+            "Inference reuse cannot currently chain through another retry."
+        )
+    if source_plan.get("workflow_id") != candidate_plan.get("workflow_id"):
+        raise ValueError("Inference reuse requires the same workflow/run label.")
+    for name in ("recording", "windows"):
+        if source_plan.get(name) != candidate_plan.get(name):
+            raise ValueError(f"Inference reuse {name} identity differs.")
+    if source_plan.get("model", {}).get("sha256") != candidate_plan.get(
+        "model", {}
+    ).get("sha256"):
+        raise ValueError("Inference reuse model digest differs.")
+    if source_plan.get("final_layout", {}).get("raw") != candidate_plan.get(
+        "final_layout", {}
+    ).get("raw"):
+        raise ValueError("Inference reuse raw final-layout plan differs.")
+    for name in ("crop", "refined_keypoints"):
+        if _reference_contract_identity(source_plan, name) != (
+            _reference_contract_identity(candidate_plan, name)
+        ):
+            raise ValueError(f"Inference reuse {name} reference differs.")
+
+    source_root = Path(source_plan["run_root"])
+    window_results: dict[str, dict[str, Any]] = {}
+    for window in source_plan["windows"]:
+        if int(window["row_count"]) <= 0:
+            continue
+        window_id = str(window["window_id"])
+        bundle = source_root / "bundles" / "inference" / window_id
+        result = _existing_worker_result(
+            bundle=bundle,
+            plan=source_plan,
+            window=window,
+            stage="inference",
+        )
+        if result is None:
+            raise ValueError(f"Inference reuse bundle is absent for {window_id!r}.")
+        window_results[window_id] = {
+            "window_index": int(window["window_index"]),
+            "raw_run": str(window["raw_run"]),
+            "bundle_path": str(bundle.resolve()),
+            "result_sha256": _sha256_file(bundle / "result.json"),
+            "final_layout_payload_digest": result["final_layout_unit_package"][
+                "payload_digest"
+            ],
+        }
+    contract = {
+        "schema_id": INFERENCE_REUSE_SCHEMA_ID,
+        "schema_version": INFERENCE_REUSE_SCHEMA_VERSION,
+        "source_plan_path": str(source_path),
+        "source_plan_digest": source_plan["plan_digest"],
+        "source_run_root": str(source_root.resolve()),
+        "source_palette_commit": source_plan["repo"]["commit"],
+        "window_results": window_results,
+    }
+    _validate_inference_reuse_contract(contract)
+    return contract
+
+
+def _resolve_inference_bundle(
+    *,
+    plan: Mapping[str, Any],
+    window: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    reuse = plan.get("inference_reuse")
+    if reuse is None:
+        bundle = (
+            Path(plan["run_root"]) / "bundles" / "inference" / str(window["window_id"])
+        )
+        result = _existing_worker_result(
+            bundle=bundle,
+            plan=plan,
+            window=window,
+            stage="inference",
+        )
+        if result is None:
+            raise RuntimeError("Inference bundle is missing.")
+        return bundle, result
+
+    _validate_inference_reuse_contract(reuse)
+    source_plan = load_plan(Path(str(reuse["source_plan_path"])))
+    if (
+        source_plan["plan_digest"] != reuse["source_plan_digest"]
+        or source_plan["repo"]["commit"] != reuse["source_palette_commit"]
+        or str(Path(source_plan["run_root"]).resolve()) != reuse["source_run_root"]
+    ):
+        raise RuntimeError("Inference-reuse source plan identity differs.")
+    source_window = _window(source_plan, int(window["window_index"]))
+    if source_window != window:
+        raise RuntimeError("Inference-reuse window identity differs.")
+    record = reuse["window_results"].get(str(window["window_id"]))
+    if not isinstance(record, Mapping):
+        raise RuntimeError("Inference-reuse window receipt is absent.")
+    bundle = Path(str(record["bundle_path"])).resolve()
+    expected_bundle = (
+        Path(source_plan["run_root"])
+        / "bundles"
+        / "inference"
+        / str(source_window["window_id"])
+    ).resolve()
+    if bundle != expected_bundle:
+        raise RuntimeError("Inference-reuse bundle path differs from its source plan.")
+    if _sha256_file(bundle / "result.json") != record["result_sha256"]:
+        raise RuntimeError("Inference-reuse result digest differs.")
+    result = _existing_worker_result(
+        bundle=bundle,
+        plan=source_plan,
+        window=source_window,
+        stage="inference",
+    )
+    if (
+        result is None
+        or result["final_layout_unit_package"]["payload_digest"]
+        != record["final_layout_payload_digest"]
+    ):
+        raise RuntimeError("Inference-reuse final-layout receipt differs.")
+    return bundle, result
+
+
 def _publish_worker_bundle(
     *,
     local_archive: Path,
@@ -1254,6 +1492,8 @@ def run_inference_window(
     plan = load_plan(plan_path)
     window = _window(plan, window_index)
     run_root = Path(plan["run_root"])
+    if plan.get("inference_reuse") is not None:
+        raise RuntimeError("Inference-reuse plans do not authorize inference workers.")
     bundle = run_root / "bundles" / "inference" / str(window["window_id"])
     existing = _existing_worker_result(
         bundle=bundle, plan=plan, window=window, stage="inference"
@@ -1447,12 +1687,10 @@ def run_refinement_window(
     plan = load_plan(plan_path)
     window = _window(plan, window_index)
     run_root = Path(plan["run_root"])
-    inference_bundle = run_root / "bundles" / "inference" / str(window["window_id"])
-    inference_result = _existing_worker_result(
-        bundle=inference_bundle, plan=plan, window=window, stage="inference"
+    inference_bundle, _ = _resolve_inference_bundle(
+        plan=plan,
+        window=window,
     )
-    if inference_result is None:
-        raise RuntimeError("Inference bundle is missing.")
     bundle = run_root / "bundles" / "refinement" / str(window["window_id"])
     existing = _existing_worker_result(
         bundle=bundle, plan=plan, window=window, stage="refinement"
@@ -1620,19 +1858,12 @@ def _assemble_draft(
         if int(window["row_count"]) == 0:
             continue
         window_id = str(window["window_id"])
-        inference_bundle = Path(plan["run_root"]) / "bundles" / "inference" / window_id
+        inference_bundle, _ = _resolve_inference_bundle(plan=plan, window=window)
         refinement_bundle = (
             Path(plan["run_root"]) / "bundles" / "refinement" / window_id
         )
         if (
             _existing_worker_result(
-                bundle=inference_bundle,
-                plan=plan,
-                window=window,
-                stage="inference",
-            )
-            is None
-            or _existing_worker_result(
                 bundle=refinement_bundle,
                 plan=plan,
                 window=window,
@@ -1693,17 +1924,21 @@ def finalize_canary(
     try:
         assembly = work / "assembly.zarr"
         raw_runs, refined_runs = _assemble_draft(plan, assembly)
-        nonempty_window_ids = [
-            str(window["window_id"])
-            for window in plan["windows"]
-            if int(window["row_count"]) > 0
+        nonempty_windows = [
+            window for window in plan["windows"] if int(window["row_count"]) > 0
         ]
+        nonempty_window_ids = [
+            str(window["window_id"]) for window in nonempty_windows
+        ]
+        inference_bundles = {
+            str(window["window_id"]): _resolve_inference_bundle(
+                plan=plan,
+                window=window,
+            )[0]
+            for window in nonempty_windows
+        }
         raw_final_layout_packages = [
-            Path(plan["run_root"])
-            / "bundles"
-            / "inference"
-            / window_id
-            / "final_layout_unit"
+            inference_bundles[window_id] / "final_layout_unit"
             for window_id in nonempty_window_ids
         ]
         refined_final_layout_packages = [
@@ -1789,18 +2024,20 @@ def finalize_canary(
                     f"Published canary member is selector eligible: {parent}/{run_name}"
                 )
         worker_results = {
-            stage: [
+            "inference": [
+                _resolve_inference_bundle(plan=plan, window=window)[1]
+                for window in nonempty_windows
+            ],
+            "refinement": [
                 _strict_json(
                     Path(plan["run_root"])
                     / "bundles"
-                    / stage
+                    / "refinement"
                     / str(window["window_id"])
                     / "result.json"
                 )
-                for window in plan["windows"]
-                if int(window["row_count"]) > 0
-            ]
-            for stage in ("inference", "refinement")
+                for window in nonempty_windows
+            ],
         }
         result = {
             "schema_id": RESULT_SCHEMA_ID,
@@ -1811,6 +2048,7 @@ def finalize_canary(
             "plan_digest": plan["plan_digest"],
             "palette_commit": publication_repo["commit"],
             "worker_palette_commit": plan["repo"]["commit"],
+            "inference_reuse": plan.get("inference_reuse"),
             "publication_repo": publication_repo,
             "recording": plan["recording"],
             "publication": publication,
@@ -1851,6 +2089,7 @@ def build_lsf_workflow(
     plan = load_plan(plan_path)
     repo = Path(plan["repo"]["path"])
     run_root = Path(plan["run_root"])
+    inference_reused = plan.get("inference_reuse") is not None
     nonempty = [window for window in plan["windows"] if int(window["row_count"]) > 0]
     scratch_template = (
         f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}_"
@@ -1909,19 +2148,23 @@ def build_lsf_workflow(
                 array_indexed=True,
             )
         )
-    inference = build_task_group_job(
-        workflow_id=str(plan["workflow_id"]),
-        family=FAMILY,
-        repo=repo,
-        run_root=run_root,
-        job_key="subject_mask_inference_array",
-        stage="subject_mask_inference",
-        tasks=inference_tasks,
-        mode=LsfExecutionMode.ARRAY,
-        max_concurrent=int(gpu_concurrency),
-        resources=LsfResources(
-            queue="gpu_l4", ncores=8, mem_gb=64, gpus=1, walltime="8:00"
-        ),
+    inference = (
+        None
+        if inference_reused
+        else build_task_group_job(
+            workflow_id=str(plan["workflow_id"]),
+            family=FAMILY,
+            repo=repo,
+            run_root=run_root,
+            job_key="subject_mask_inference_array",
+            stage="subject_mask_inference",
+            tasks=inference_tasks,
+            mode=LsfExecutionMode.ARRAY,
+            max_concurrent=int(gpu_concurrency),
+            resources=LsfResources(
+                queue="gpu_l4", ncores=8, mem_gb=64, gpus=1, walltime="8:00"
+            ),
+        )
     )
     refinement = build_task_group_job(
         workflow_id=str(plan["workflow_id"]),
@@ -1934,7 +2177,7 @@ def build_lsf_workflow(
         mode=LsfExecutionMode.ARRAY,
         max_concurrent=int(cpu_concurrency),
         resources=LsfResources(queue="short", ncores=16, mem_gb=64, walltime="1:00"),
-        upstream=("subject_mask_inference_array",),
+        upstream=() if inference_reused else ("subject_mask_inference_array",),
     )
     final_scratch = (
         f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
@@ -1962,10 +2205,15 @@ def build_lsf_workflow(
         expected_outputs=(Path(plan["outputs"]["result_path"]),),
         cleanup_paths=(final_scratch,),
     )
+    jobs = (
+        (refinement, publication)
+        if inference is None
+        else (inference, refinement, publication)
+    )
     return LsfWorkflow(
         workflow_id=str(plan["workflow_id"]),
         family=FAMILY,
-        jobs=(inference, refinement, publication),
+        jobs=jobs,
         metadata={
             "classification": BENCHMARK_CLASSIFICATION,
             "plan_digest": plan["plan_digest"],
@@ -1974,6 +2222,7 @@ def build_lsf_workflow(
             "nonempty_window_count": len(nonempty),
             "gpu_concurrency": int(gpu_concurrency),
             "cpu_concurrency": int(cpu_concurrency),
+            "inference_reused": bool(inference_reused),
             "production_state_changes": False,
         },
     )
@@ -1998,6 +2247,14 @@ def _parser() -> argparse.ArgumentParser:
     video.add_argument("--whole-video", type=Path)
     prepare.add_argument("--camera-identity")
     prepare.add_argument("--run-label", required=True)
+    prepare.add_argument(
+        "--reuse-inference-plan",
+        type=Path,
+        help=(
+            "Bind and reuse terminal inference bundles from an exact prior canary "
+            "plan; the new workflow submits refinement and publication only."
+        ),
+    )
     prepare.add_argument(
         "--core-physical-unit-workers",
         type=int,
@@ -2054,6 +2311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             whole_video=args.whole_video,
             camera_identity=args.camera_identity,
             run_label=args.run_label,
+            reuse_inference_plan=args.reuse_inference_plan,
             require_clean_repo=not bool(args.allow_dirty),
             core_physical_unit_workers=args.core_physical_unit_workers,
         )
