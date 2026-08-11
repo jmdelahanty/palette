@@ -1,7 +1,6 @@
 """Unit tests for system utilities."""
 
 import pytest
-import json
 from pathlib import Path
 import sys
 
@@ -99,10 +98,12 @@ class TestSystemInfo:
         assert 'git' in info
         assert 'platform' in info
         assert 'gpu' in info
+        assert 'execution_placement' in info
         assert 'environment' in info
         assert info['gpu']['schema_id'] == 'palette.accelerator_runtime'
         assert info['gpu']['schema_version'] == 1
         assert info['environment']['accelerator'] == info['gpu']
+        assert info['environment']['execution_placement'] == info['execution_placement']
         
         # Should not have all packages
         assert 'all_packages' not in info

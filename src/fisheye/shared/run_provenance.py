@@ -13,6 +13,7 @@ import socket
 import subprocess
 from typing import Any, Mapping, Sequence
 
+from fisheye.shared.execution_placement import get_execution_placement_info
 from fisheye.shared.system_metadata import get_environment_summary, get_gpu_info
 
 RUN_PROVENANCE_SCHEMA = "palette.run_provenance.v1"
@@ -205,7 +206,7 @@ def _runtime_cpu_model() -> str:
 
 
 def runtime_context() -> dict[str, Any]:
-    """Return lightweight host and CPU identity for every finalized run."""
+    """Return host, CPU, and observed execution placement for every run."""
 
     return {
         "host": {
@@ -220,6 +221,7 @@ def runtime_context() -> dict[str, Any]:
             "system": platform.system() or "unknown",
             "kernel_release": platform.release() or "unknown",
         },
+        "execution_placement": get_execution_placement_info(),
     }
 
 
@@ -321,18 +323,24 @@ def build_run_provenance_from_stage_record(
     # This avoids a second hardware probe and ensures short-lived inference
     # workers retain the same device identity in both provenance surfaces.
     raw_environment = stage_record.get("environment")
-    if not include_system_context and isinstance(raw_environment, Mapping):
-        accelerator = raw_environment.get("accelerator")
-        if isinstance(accelerator, Mapping):
-            environment = {
-                str(key): value
-                for key, value in raw_environment.items()
-                if key != "accelerator"
-            }
-            provenance["system"] = {
-                "environment": json_ready(environment),
-                "gpu": json_ready(accelerator),
-            }
+    if isinstance(raw_environment, Mapping):
+        execution_placement = raw_environment.get("execution_placement")
+        if isinstance(execution_placement, Mapping):
+            provenance["runtime"]["execution_placement"] = json_ready(
+                execution_placement
+            )
+        if not include_system_context:
+            accelerator = raw_environment.get("accelerator")
+            if isinstance(accelerator, Mapping):
+                environment = {
+                    str(key): value
+                    for key, value in raw_environment.items()
+                    if key not in {"accelerator", "execution_placement"}
+                }
+                provenance["system"] = {
+                    "environment": json_ready(environment),
+                    "gpu": json_ready(accelerator),
+                }
     return provenance
 
 

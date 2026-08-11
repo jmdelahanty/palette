@@ -15,6 +15,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
+from fisheye.shared.execution_placement import get_execution_placement_info
+
 ACCELERATOR_PROVENANCE_SCHEMA_ID = "palette.accelerator_runtime"
 ACCELERATOR_PROVENANCE_SCHEMA_VERSION = 1
 
@@ -812,15 +814,20 @@ def get_environment_info(
 ) -> Dict[str, Any]:
     """Get comprehensive environment information."""
     gpu_info = get_gpu_info()
+    execution_placement = get_execution_placement_info()
     environment = get_environment_summary()
     # Stage provenance has historically persisted ``environment`` but not the
     # sibling ``gpu`` result.  Embed the exact same versioned document so every
     # current caller automatically retains accelerator identity.
     environment['accelerator'] = gpu_info
+    # Stage writers historically retain this subdocument rather than the
+    # complete environment result, so embed the exact placement envelope too.
+    environment['execution_placement'] = execution_placement
     env_info = {
         'git': get_git_info(),
         'platform': get_platform_info(collect_ip=collect_ip, disk_path=disk_path),
         'gpu': gpu_info,
+        'execution_placement': execution_placement,
         'environment': environment
     }
     

@@ -244,6 +244,12 @@ def test_build_run_provenance_from_stage_record_reuses_accelerator_snapshot() ->
             }
         ],
     }
+    execution_placement = {
+        "schema_id": "palette.execution_placement",
+        "schema_version": 1,
+        "platform": "Linux",
+        "topology": {"available": True, "node_count": 2},
+    }
 
     payload = build_run_provenance_from_stage_record(
         {
@@ -253,6 +259,7 @@ def test_build_run_provenance_from_stage_record_reuses_accelerator_snapshot() ->
             "environment": {
                 "python_version": "3.11.15",
                 "accelerator": accelerator,
+                "execution_placement": execution_placement,
             },
         }
     )
@@ -261,6 +268,7 @@ def test_build_run_provenance_from_stage_record_reuses_accelerator_snapshot() ->
         "environment": {"python_version": "3.11.15"},
         "gpu": accelerator,
     }
+    assert payload["runtime"]["execution_placement"] == execution_placement
 
 
 def test_provenance_resolves_source_checkout_outside_git_working_directory(
@@ -307,6 +315,16 @@ def test_runtime_context_captures_lightweight_host_and_cpu_identity(
     monkeypatch.setattr(run_provenance_module.platform, "system", lambda: "TestOS")
     monkeypatch.setattr(run_provenance_module.platform, "release", lambda: "1.2.3")
     monkeypatch.setattr(run_provenance_module.os, "cpu_count", lambda: 64)
+    placement = {
+        "schema_id": "palette.execution_placement",
+        "schema_version": 1,
+        "platform": "TestOS",
+    }
+    monkeypatch.setattr(
+        run_provenance_module,
+        "get_execution_placement_info",
+        lambda: placement,
+    )
 
     runtime = run_provenance_module.runtime_context()
 
@@ -321,4 +339,5 @@ def test_runtime_context_captures_lightweight_host_and_cpu_identity(
             "system": "TestOS",
             "kernel_release": "1.2.3",
         },
+        "execution_placement": placement,
     }
