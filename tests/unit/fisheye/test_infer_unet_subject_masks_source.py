@@ -911,6 +911,11 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
 
     seen: dict[str, object] = {}
     fake_root = _build_fake_root()
+    # Opening crop_runs as a standalone Zarr root makes the child handle's
+    # path relative to that subgroup.  Scientific identity must still retain
+    # the canonical archive-relative crop_runs/<run> path.
+    detached_crop_group = fake_root["crop_runs"]["crop_geometry"]
+    detached_crop_group.path = "crop_geometry"
     cache_dir = tmp_path / "roi-cache" / "fake-cache.zarr"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1011,7 +1016,7 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
     monkeypatch.setattr(
         mod.CropImageSource,
         "open",
-        lambda root, **_kwargs: _FakeCropSource(root["crop_runs"]["crop_geometry"]),
+        lambda _root, **_kwargs: _FakeCropSource(detached_crop_group),
     )
     monkeypatch.setattr(
         mod,
@@ -1160,6 +1165,10 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
     scientific_arrays = run_group.attrs[mod.SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR][
         "payload"
     ]["row_identity"]["arrays"]
+    scientific_crop = run_group.attrs[mod.SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR][
+        "payload"
+    ]["crop"]
+    assert scientific_crop["run_group_path"] == "crop_runs/crop_geometry"
     assert scientific_arrays["source_crop_xywh"]["dtype"] == "float32"
     assert scientific_arrays["source_crop_xywh"]["shape"] == [2, 4]
     np.testing.assert_array_equal(

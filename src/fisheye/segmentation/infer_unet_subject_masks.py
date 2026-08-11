@@ -1558,7 +1558,13 @@ def _subject_mask_scientific_documents(
         )
     crop = {
         "run_id": str(crop_run_name),
-        "run_group_path": str(getattr(crop_group, "path", "")).strip("/"),
+        # ``resolve_crop_run`` may open ``crop_runs`` directly from its
+        # filesystem path to avoid a stale/consolidated root view.  Zarr then
+        # reports child paths relative to that subgroup (``<run>``), even
+        # though the scientific authority is archive-relative.  Derive the
+        # contract path from the already resolved run identity instead of the
+        # handle's view-dependent ``Group.path``.
+        "run_group_path": f"crop_runs/{str(crop_run_name).strip().strip('/')}",
         "run_manifest": crop_manifest_reference,
         "storage_mode": str(crop_source.storage_mode),
         "roi_shape_hw": [int(value) for value in crop_source.roi_shape],
