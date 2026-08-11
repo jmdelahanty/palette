@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import threading
+import time
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
@@ -93,6 +96,105 @@ def test_incremental_row_hashes_reject_gaps_and_dtype_changes() -> None:
         accumulator.append(1, np.zeros((1, 2), dtype=np.uint16))
     with pytest.raises(ValueError, match="dtype differs"):
         accumulator.append(0, np.zeros((1, 2), dtype=np.uint8))
+
+
+def test_physical_row_band_writes_are_bounded_disjoint_and_parallel() -> None:
+    source = np.arange(8 * 2 * 4 * 4, dtype=np.uint8).reshape(8, 2, 4, 4)
+
+    class RecordingDestination:
+        def __init__(self) -> None:
+            self.values = np.zeros_like(source)
+            self.selections: list[tuple[slice, ...]] = []
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def __setitem__(self, selection: tuple[slice, ...], values: np.ndarray) -> None:
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                self.selections.append(selection)
+            time.sleep(0.01)
+            self.values[selection] = values
+            with self.lock:
+                self.active -= 1
+
+    destination = RecordingDestination()
+    receipt = core_publication._write_physical_units(
+        destination,
+        source,
+        SimpleNamespace(shard_shape=(2, 1, 4, 4), chunk_shape=(1, 1, 4, 4)),
+        physical_unit_workers=3,
+    )
+
+    np.testing.assert_array_equal(destination.values, source)
+    assert destination.max_active > 1
+    assert len(destination.selections) == 4
+    assert [selection[0] for selection in destination.selections] == [
+        slice(0, 2),
+        slice(2, 4),
+        slice(4, 6),
+        slice(6, 8),
+    ]
+    assert receipt["physical_write_count"] == 4
+    assert receipt["effective_physical_unit_workers"] == 3
+    assert receipt["sha256"] == hashlib.sha256(source.view(np.uint8)).hexdigest()
+
+
+def test_physical_row_band_write_failure_propagates() -> None:
+    source = np.arange(6 * 2, dtype=np.uint8).reshape(6, 2)
+
+    class FailingDestination:
+        def __setitem__(self, selection: tuple[slice, ...], values: np.ndarray) -> None:
+            del values
+            if selection[0].start == 2:
+                raise OSError("synthetic physical-unit failure")
+
+    with pytest.raises(OSError, match="synthetic physical-unit failure"):
+        core_publication._write_physical_units(
+            FailingDestination(),
+            source,
+            SimpleNamespace(shard_shape=(2, 2), chunk_shape=(1, 2)),
+            physical_unit_workers=2,
+        )
+
+
+def test_parallel_physical_row_bands_write_real_sharded_zarr(
+    tmp_path: object,
+) -> None:
+    source = np.arange(12 * 2, dtype=np.uint8).reshape(12, 2)
+    root = zarr.open_group(f"{tmp_path}/parallel_sharded.zarr", mode="w", zarr_format=3)
+    destination = root.create_array(
+        "values",
+        shape=source.shape,
+        dtype=source.dtype,
+        chunks=(4, 2),
+        serializer=zarr.codecs.ShardingCodec(
+            chunk_shape=(2, 2),
+            codecs=(
+                zarr.codecs.BytesCodec(endian="little"),
+                zarr.codecs.ZstdCodec(level=1, checksum=False),
+            ),
+            index_codecs=(
+                zarr.codecs.BytesCodec(endian="little"),
+                zarr.codecs.Crc32cCodec(),
+            ),
+            index_location="end",
+        ),
+        compressors=None,
+        filters=None,
+    )
+
+    receipt = core_publication._write_physical_units(
+        destination,
+        source,
+        SimpleNamespace(shard_shape=(4, 2), chunk_shape=(2, 2)),
+        physical_unit_workers=3,
+    )
+
+    np.testing.assert_array_equal(destination[...], source)
+    assert receipt["physical_write_count"] == 3
+    assert receipt["effective_physical_unit_workers"] == 3
 
 
 def _components() -> SubjectMaskComponentRegistry:
@@ -516,6 +618,7 @@ def test_subject_mask_core_publication_round_trip(
         source_run_path="subject_mask_shard_runs/source_001",
         source_attributes={"source_crop_run": "crop_001"},
         created_by="pytest",
+        physical_unit_workers=2,
     )
 
     root = zarr.open_group(
@@ -525,6 +628,15 @@ def test_subject_mask_core_publication_round_trip(
     assert run.attrs["stage_selector_eligible"] is False
     assert run.attrs["status"] == "complete"
     assert run.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE] == publication.manifest
+    assert run.attrs["physical_unit_workers_requested"] == 2
+    assert run.attrs["physical_unit_workers_effective_max"] >= 1
+    assert run.attrs["parallel_write_policy"] == (
+        "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+    )
+    assert (
+        publication.manifest["payload"]["write_receipt"]["parallel_write_policy"]
+        == "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+    )
     assert set(run.array_keys()) | {
         f"metrics/{name}" for name in run["metrics"].array_keys()
     } == set(

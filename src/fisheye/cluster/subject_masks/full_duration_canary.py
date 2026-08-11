@@ -556,9 +556,12 @@ def prepare_canary(
     camera_identity: str | None = None,
     run_label: str,
     require_clean_repo: bool = True,
+    core_physical_unit_workers: int = 4,
 ) -> dict[str, Any]:
     """Freeze inputs and copy exact maintained references into an isolated store."""
 
+    if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
+        raise ValueError("core_physical_unit_workers must be a positive integer.")
     output = _require_benchmark_root(run_root)
     if output.exists():
         raise FileExistsError(f"Immutable canary run root already exists: {output}")
@@ -723,6 +726,14 @@ def prepare_canary(
                 "dense_mask_chunk_rows": 256,
                 "workers": 16,
                 "metric_level": "cheap",
+            },
+            "publication": {
+                "core_physical_unit_workers": int(core_physical_unit_workers),
+                "ownership_policy": (
+                    "single_writer_v1_future_workers_require_disjoint_whole_shards"
+                    if int(core_physical_unit_workers) == 1
+                    else "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+                ),
             },
         },
         "safety": {
@@ -1316,6 +1327,9 @@ def finalize_canary(
                 }
                 for window in plan["windows"]
             ],
+            core_physical_unit_workers=int(
+                plan["execution"]["publication"]["core_physical_unit_workers"]
+            ),
         )
         target = open_zarr_root(Path(plan["references"]["analysis_zarr"]), mode="r")
         if "subject_mask_authority" in target.attrs:
@@ -1544,6 +1558,15 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--camera-identity")
     prepare.add_argument("--run-label", required=True)
     prepare.add_argument(
+        "--core-physical-unit-workers",
+        type=int,
+        default=4,
+        help=(
+            "Bounded final raw/refined physical row-band writers recorded in "
+            "the immutable canary plan (default: 4)."
+        ),
+    )
+    prepare.add_argument(
         "--allow-dirty",
         action="store_true",
         help="Allow explicitly non-reproducible development preflight only.",
@@ -1591,6 +1614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             camera_identity=args.camera_identity,
             run_label=args.run_label,
             require_clean_repo=not bool(args.allow_dirty),
+            core_physical_unit_workers=args.core_physical_unit_workers,
         )
     elif args.command == "inference-worker":
         result = run_inference_window(

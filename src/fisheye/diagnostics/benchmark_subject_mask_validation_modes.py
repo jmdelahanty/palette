@@ -11,6 +11,8 @@ refined logical arrays twice:
 
 The resulting stores are benchmark-only and selector-ineligible.  This module
 never writes to the reference fixture, a registry, or a production selector.
+The production-streaming arm accepts an explicit physical-unit worker count so
+fresh scratch runs can compare the serial and bounded-parallel write policies.
 """
 
 from __future__ import annotations
@@ -67,7 +69,7 @@ from fisheye.shared.zarr.subject_mask_validation_receipt import (
 )
 
 CANARY_SCHEMA_ID = "palette.subject_mask.validation_mode_canary"
-CANARY_SCHEMA_VERSION = 1
+CANARY_SCHEMA_VERSION = 2
 REFERENCE_HANDOFF_SCHEMA_ID = "palette.subject_mask_cache_pipeline_benchmark"
 REFERENCE_HANDOFF_SCHEMA_VERSION = 1
 LEGACY_REFERENCE_METADATA_DIGEST_SCOPE = (
@@ -524,6 +526,7 @@ def _publish_pair(
     output_root: Path,
     progress: dict[str, Any],
     progress_path: Path,
+    physical_unit_workers: int,
 ) -> dict[str, object]:
     def checkpoint(phase: str) -> None:
         progress["phase"] = phase
@@ -578,6 +581,7 @@ def _publish_pair(
             created_by=CANARY_SCHEMA_ID,
             validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
             source_validation_receipt=receipt,
+            physical_unit_workers=physical_unit_workers,
         )
     )
     checkpoint("compare_pair")
@@ -609,7 +613,14 @@ def _publish_pair(
     }
 
 
-def run_canary(*, reference_root: Path, scratch_root: Path) -> dict[str, object]:
+def run_canary(
+    *,
+    reference_root: Path,
+    scratch_root: Path,
+    physical_unit_workers: int = 1,
+) -> dict[str, object]:
+    if type(physical_unit_workers) is not int or physical_unit_workers <= 0:
+        raise ValueError("physical_unit_workers must be a positive integer.")
     reference = reference_root.expanduser().resolve()
     handoff_path = reference / "handoff_manifest.json"
     handoff = _validate_handoff(handoff_path)
@@ -679,6 +690,7 @@ def run_canary(*, reference_root: Path, scratch_root: Path) -> dict[str, object]
                 output_root=output_root,
                 progress=progress,
                 progress_path=progress_path,
+                physical_unit_workers=physical_unit_workers,
             )
         result_payload: dict[str, object] = {
             "schema_id": CANARY_SCHEMA_ID,
@@ -701,6 +713,14 @@ def run_canary(*, reference_root: Path, scratch_root: Path) -> dict[str, object]
                 **local_environment_manifest(),
                 "platform": platform.platform(),
                 "executable": sys.executable,
+            },
+            "execution": {
+                "physical_unit_workers_requested": int(physical_unit_workers),
+                "parallel_write_policy": (
+                    "single_writer_v1_future_workers_require_disjoint_whole_shards"
+                    if int(physical_unit_workers) == 1
+                    else "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+                ),
             },
             "reference": {
                 "root": str(reference),
@@ -766,6 +786,15 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="New node-local directory for staged inputs and paired outputs.",
     )
+    parser.add_argument(
+        "--physical-unit-workers",
+        type=int,
+        default=1,
+        help=(
+            "Bounded production-streaming physical row-band writer threads. "
+            "Use separate immutable scratch roots for a 1/2/4 comparison."
+        ),
+    )
     return parser
 
 
@@ -774,6 +803,7 @@ def main(argv: list[str] | None = None) -> int:
     result = run_canary(
         reference_root=args.reference_root,
         scratch_root=args.scratch_root,
+        physical_unit_workers=args.physical_unit_workers,
     )
     print(
         json.dumps(
@@ -781,7 +811,9 @@ def main(argv: list[str] | None = None) -> int:
                 "status": result["payload"]["status"],
                 "result": result["payload"]["result"],
                 "payload_digest": result["payload_digest"],
-                "result_path": str(args.scratch_root.expanduser().resolve() / "result.json"),
+                "result_path": str(
+                    args.scratch_root.expanduser().resolve() / "result.json"
+                ),
             },
             indent=2,
             sort_keys=True,

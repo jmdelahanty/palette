@@ -508,9 +508,12 @@ def publish_recording_subject_mask_bundle(
     refined_draft_runs: Sequence[str] | None = None,
     cache_source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     cache_compute_workers: int = 1,
+    core_physical_unit_workers: int = 1,
     coordinate_contract_policy: str = "require_crop_v2",
     expected_work_units: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
+    if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
+        raise ValueError("core_physical_unit_workers must be a positive integer.")
     target = analysis_zarr.expanduser().resolve()
     draft_path = draft_zarr.expanduser().resolve()
     output = local_output_root.expanduser().resolve()
@@ -703,6 +706,7 @@ def publish_recording_subject_mask_bundle(
         source_validation_receipt=raw_receipt,
         coordinate_dependencies=raw_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
+        physical_unit_workers=core_physical_unit_workers,
     )
     refined_documents = (
         _prebuilt_source_documents(
@@ -774,6 +778,7 @@ def publish_recording_subject_mask_bundle(
         source_validation_receipt=refined_receipt,
         coordinate_dependencies=refined_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
+        physical_unit_workers=core_physical_unit_workers,
     )
     cache_publication = None
     cache_store = output / "cache.zarr"
@@ -870,6 +875,16 @@ def publish_recording_subject_mask_bundle(
             if cache_publication is not None
             else None
         ),
+        "publication_execution": {
+            "core_physical_unit_workers_requested": int(core_physical_unit_workers),
+            "parallel_write_policy": (
+                "single_writer_v1_future_workers_require_disjoint_whole_shards"
+                if int(core_physical_unit_workers) == 1
+                else "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+            ),
+            "raw_phase_seconds": dict(raw_publication.phase_seconds),
+            "refined_phase_seconds": dict(refined_publication.phase_seconds),
+        },
         "bundle": bundle,
         "authority": authority,
     }
@@ -922,6 +937,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "remains single-owner (default: 1)."
         ),
     )
+    parser.add_argument(
+        "--core-physical-unit-workers",
+        type=int,
+        default=1,
+        help=(
+            "Bounded raw/refined physical row-band writer threads. Each thread "
+            "owns complete, non-overlapping chunks or shards (default: 1)."
+        ),
+    )
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -968,6 +992,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         quality_scratch_root=args.quality_scratch_root,
         cache_source_compute_block_bytes=args.cache_source_compute_block_bytes,
         cache_compute_workers=args.cache_compute_workers,
+        core_physical_unit_workers=args.core_physical_unit_workers,
         activate=bool(args.activate),
         expected_work_units=expected_work_units,
     )

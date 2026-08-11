@@ -310,6 +310,11 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     assert publication.dependency.upstream_job_keys == (
         "subject_mask_refinement_array",
     )
+    assert plan["execution"]["publication"] == {
+        "core_physical_unit_workers": 4,
+        "ownership_policy": ("bounded_threaded_disjoint_whole_physical_row_bands_v1"),
+    }
+    assert publication.resources.ncores == 16
     assert "--activate" not in publication.command
 
 

@@ -354,9 +354,7 @@ def _install_source_camera_authorities(
         root,
         expected_camera_id="cam2010095",
     )
-    camera = root.require_group(
-        "analysis/coordinate_frames/source_camera/cam2010095"
-    )
+    camera = root.require_group("analysis/coordinate_frames/source_camera/cam2010095")
     for convention in ("continuous", "pixel_edge_half_open"):
         stamp_source_camera_pixel_frame_authority(
             camera.require_group(convention),
@@ -625,9 +623,14 @@ def test_recording_bundle_publication_is_proof_bound_and_inactive(
         local_output_root=tmp_path / "local_outputs",
         quality_scratch_root=tmp_path / "quality_scratch",
         coordinate_contract_policy="legacy_allow_missing",
+        core_physical_unit_workers=2,
     )
 
     assert result["status"] == "complete"
+    assert result["publication_execution"]["core_physical_unit_workers_requested"] == 2
+    assert result["publication_execution"]["parallel_write_policy"] == (
+        "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+    )
     published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
     assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
     assert (
@@ -642,6 +645,14 @@ def test_recording_bundle_publication_is_proof_bound_and_inactive(
         "subject_mask_quality_runs/quality_001",
     ):
         assert published[path].attrs["stage_selector_eligible"] is False
+    for path in (
+        "subject_mask_runs/raw_001",
+        "refined_subject_masks_runs/refined_001",
+    ):
+        assert published[path].attrs["physical_unit_workers_requested"] == 2
+        assert published[path].attrs["parallel_write_policy"] == (
+            "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+        )
 
 
 def test_recording_bundle_requires_crop_v2_by_default(tmp_path: Path) -> None:
@@ -881,9 +892,10 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
         SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
     )
     assert shape_run.attrs["stage_selector_eligible"] is False
-    assert shape_run.attrs[SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR][
-        "logical_profile_id"
-    ] == CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID
+    assert (
+        shape_run.attrs[SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR]["logical_profile_id"]
+        == CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID
+    )
     owner = shape_run.attrs["subject_shape_publication_owner_uuid"]
     publication = load_completed_ineligible_subject_shape_coordinate_publication(
         mutable,
@@ -892,9 +904,7 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
     )
     assert publication.source_binding is not None
     assert publication.source_binding.record_sha256 == shape_source.source_digest
-    assert set(
-        publication.source_binding.record["source_camera_authorities"]
-    ) == {
+    assert set(publication.source_binding.record["source_camera_authorities"]) == {
         "acquisition_frame",
         "continuous_pixel_frame",
         "pixel_edge_half_open_frame",

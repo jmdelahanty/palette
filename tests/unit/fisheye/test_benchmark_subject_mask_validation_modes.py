@@ -204,6 +204,7 @@ def test_small_real_zarr_canary_proves_validation_mode_equivalence(
     result = run_canary(
         reference_root=reference,
         scratch_root=tmp_path / "canary",
+        physical_unit_workers=2,
     )
 
     assert result["payload_digest"] == canonical_json_sha256(result["payload"])
@@ -211,6 +212,12 @@ def test_small_real_zarr_canary_proves_validation_mode_equivalence(
     assert payload["schema_id"] == CANARY_SCHEMA_ID
     assert payload["status"] == "complete"
     assert payload["result"] == "pass"
+    assert payload["execution"] == {
+        "physical_unit_workers_requested": 2,
+        "parallel_write_policy": (
+            "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+        ),
+    }
     assert payload["production_state_changes"] == []
     for name in ("raw", "refined"):
         case = payload["cases"][name]

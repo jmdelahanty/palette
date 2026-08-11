@@ -8,6 +8,7 @@ publishes a closed-world Zarr v3 store with consolidated metadata.
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
@@ -900,8 +901,18 @@ def _write_physical_units(
     plan: Any,
     *,
     source_validation_record: Mapping[str, Any] | None = None,
+    physical_unit_workers: int = 1,
 ) -> dict[str, object]:
-    """Write whole physical units and hash the exact source bytes once."""
+    """Write whole physical row bands and hash exact source bytes once.
+
+    The driver reads and hashes first-axis bands in canonical order.  Optional
+    worker threads receive only bands aligned to the outer-shard grid, or to
+    the chunk grid for an unsharded array.  A band may contain several trailing
+    physical units, but bands never share a chunk or shard.
+    """
+
+    if type(physical_unit_workers) is not int or physical_unit_workers <= 0:
+        raise ValueError("physical_unit_workers must be a positive integer.")
 
     unit = plan.shard_shape or plan.chunk_shape
     if unit is None:
@@ -924,54 +935,82 @@ def _write_physical_units(
         elif algorithm != SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM:
             raise ValueError("Source-validation array digest algorithm is unsupported.")
     starts = tuple(range(0, shape[0], max(1, int(unit[0]))))
-    for index, start in enumerate(starts):
-        stop = min(shape[0], start + max(1, int(unit[0])))
-        selection = (slice(start, stop), *trailing)
-        values = np.ascontiguousarray(np.asarray(source[selection]))
-        if values.dtype.hasobject:
-            raise TypeError("Subject-mask core arrays cannot use object dtype.")
-        unit_bytes = values.view(np.uint8)
-        logical_digest.update(unit_bytes)
-        if expected_units is not None:
-            cursor = int(start)
-            while cursor < int(stop):
-                if expected_unit_index >= len(expected_units):
-                    raise RuntimeError(
-                        "Bytes streamed into the subject-mask publication differ "
-                        "from the validated source receipt."
-                    )
-                expected = expected_units[expected_unit_index]
-                expected_start = int(expected["start_row"])
-                expected_stop = int(expected["stop_row"])
-                if not (expected_start <= cursor < expected_stop):
-                    raise RuntimeError(
-                        "Bytes streamed into the subject-mask publication differ "
-                        "from the validated source receipt."
-                    )
-                segment_stop = min(int(stop), expected_stop)
-                local_start = cursor - int(start)
-                local_stop = segment_stop - int(start)
-                segment = np.ascontiguousarray(values[local_start:local_stop])
-                expected_unit_digest.update(segment.view(np.uint8))
-                if segment_stop == expected_stop:
-                    if expected_unit_digest.hexdigest() != expected.get("sha256"):
+    effective_workers = min(int(physical_unit_workers), len(starts))
+    executor = (
+        ThreadPoolExecutor(
+            max_workers=effective_workers,
+            thread_name_prefix="subject-mask-zarr-write",
+        )
+        if effective_workers > 1
+        else None
+    )
+    pending: list[Future[None]] = []
+    try:
+        for index, start in enumerate(starts):
+            stop = min(shape[0], start + max(1, int(unit[0])))
+            selection = (slice(start, stop), *trailing)
+            values = np.ascontiguousarray(np.asarray(source[selection]))
+            if values.dtype.hasobject:
+                raise TypeError("Subject-mask core arrays cannot use object dtype.")
+            unit_bytes = values.view(np.uint8)
+            logical_digest.update(unit_bytes)
+            if expected_units is not None:
+                cursor = int(start)
+                while cursor < int(stop):
+                    if expected_unit_index >= len(expected_units):
                         raise RuntimeError(
                             "Bytes streamed into the subject-mask publication differ "
                             "from the validated source receipt."
                         )
-                    expected_unit_index += 1
-                    expected_unit_digest = hashlib.sha256()
-                cursor = segment_stop
-        destination[selection] = values
-        if index == 0 or index == len(starts) - 1:
-            samples.append(
-                {
-                    "start_row": int(start),
-                    "stop_row": int(stop),
-                    "sha256": hashlib.sha256(unit_bytes).hexdigest(),
-                }
-            )
-        writes += 1
+                    expected = expected_units[expected_unit_index]
+                    expected_start = int(expected["start_row"])
+                    expected_stop = int(expected["stop_row"])
+                    if not (expected_start <= cursor < expected_stop):
+                        raise RuntimeError(
+                            "Bytes streamed into the subject-mask publication differ "
+                            "from the validated source receipt."
+                        )
+                    segment_stop = min(int(stop), expected_stop)
+                    local_start = cursor - int(start)
+                    local_stop = segment_stop - int(start)
+                    segment = np.ascontiguousarray(values[local_start:local_stop])
+                    expected_unit_digest.update(segment.view(np.uint8))
+                    if segment_stop == expected_stop:
+                        if expected_unit_digest.hexdigest() != expected.get("sha256"):
+                            raise RuntimeError(
+                                "Bytes streamed into the subject-mask publication "
+                                "differ from the validated source receipt."
+                            )
+                        expected_unit_index += 1
+                        expected_unit_digest = hashlib.sha256()
+                    cursor = segment_stop
+            if executor is None:
+                destination[selection] = values
+            else:
+                pending.append(
+                    executor.submit(
+                        _write_one_physical_row_band,
+                        destination,
+                        selection,
+                        values,
+                    )
+                )
+                if len(pending) >= effective_workers:
+                    pending.pop(0).result()
+            if index == 0 or index == len(starts) - 1:
+                samples.append(
+                    {
+                        "start_row": int(start),
+                        "stop_row": int(stop),
+                        "sha256": hashlib.sha256(unit_bytes).hexdigest(),
+                    }
+                )
+            writes += 1
+        for future in pending:
+            future.result()
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
     logical_sha256 = logical_digest.hexdigest()
     if source_validation_record is not None:
         if expected_units is not None:
@@ -991,8 +1030,17 @@ def _write_physical_units(
         "digest_algorithm": SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM,
         "sha256": logical_sha256,
         "physical_write_count": writes,
+        "effective_physical_unit_workers": effective_workers,
         "bounded_reopen_samples": samples,
     }
+
+
+def _write_one_physical_row_band(
+    destination: Any,
+    selection: tuple[slice, ...],
+    values: np.ndarray,
+) -> None:
+    destination[selection] = values
 
 
 def _streamed_array_document(
@@ -1402,6 +1450,11 @@ def validate_subject_mask_core_run_manifest(
     if not isinstance(receipt, Mapping) or set(receipt) != expected_receipt_fields:
         errors.append("subject-mask core write_receipt is not exact")
     elif plans is not None:
+        if receipt.get("parallel_write_policy") not in {
+            "single_writer_v1_future_workers_require_disjoint_whole_shards",
+            "bounded_threaded_disjoint_whole_physical_row_bands_v1",
+        }:
+            errors.append("subject-mask core parallel write policy is unsupported")
         paths = tuple(entry.rule.path for entry in plans.entries)
         counts = receipt.get("physical_write_counts")
         samples = receipt.get("bounded_reopen_samples")
@@ -1523,10 +1576,13 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     ),
     source_validation_receipt: Mapping[str, Any] | None = None,
     coordinate_dependencies: Mapping[str, Any] | None = None,
+    physical_unit_workers: int = 1,
 ) -> SubjectMaskCorePublication:
     """Validate and rematerialize one complete raw or refined core."""
 
     validation_mode = SubjectMaskCoreValidationMode(validation_mode)
+    if type(physical_unit_workers) is not int or physical_unit_workers <= 0:
+        raise ValueError("physical_unit_workers must be a positive integer.")
     output_path = destination.expanduser().resolve()
     if output_path.exists():
         raise FileExistsError(f"Subject-mask core destination exists: {output_path}")
@@ -1684,6 +1740,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "component_registry": components.as_manifest(),
             "validation_mode": validation_mode.value,
             "derived_metric_canonicalization": canonicalization,
+            "physical_unit_workers_requested": int(physical_unit_workers),
         }
     )
     destination_arrays: dict[str, Any] = {}
@@ -1720,6 +1777,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
                 arrays[path],
                 entry.plan,
                 source_validation_record=source_array_validation.get(path),
+                physical_unit_workers=physical_unit_workers,
             )
         except Exception as exc:
             run.attrs["status"] = "failed"
@@ -1736,6 +1794,21 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         write_counts[path] = int(write_receipt["physical_write_count"])
         destination_arrays[path] = destination_array
     phases["physical_unit_publication"] = time.perf_counter() - phase
+    effective_physical_unit_workers = max(
+        int(receipt["effective_physical_unit_workers"])
+        for receipt in write_receipts.values()
+    )
+    parallel_write_policy = (
+        "single_writer_v1_future_workers_require_disjoint_whole_shards"
+        if int(physical_unit_workers) == 1
+        else "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+    )
+    run.attrs.update(
+        {
+            "physical_unit_workers_effective_max": effective_physical_unit_workers,
+            "parallel_write_policy": parallel_write_policy,
+        }
+    )
     streamed_array_document: dict[str, object] | None = None
     if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_STREAMING:
         assert source_validation_receipt is not None
@@ -1824,9 +1897,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "bounded_reopen_samples": {
                 path: write_receipts[path]["bounded_reopen_samples"] for path in paths
             },
-            "parallel_write_policy": (
-                "single_writer_v1_future_workers_require_disjoint_whole_shards"
-            ),
+            "parallel_write_policy": parallel_write_policy,
             "derived_metric_canonicalization": canonicalization,
         },
         "logical_content": {
