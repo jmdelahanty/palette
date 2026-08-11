@@ -1,9 +1,10 @@
 """Bounded publication for immutable recording-level subject-mask caches.
 
-The v1 publisher derives fixed-count sampled contours from the complete dense
-``masks_roi`` authority, writes access-aware Zarr v3 arrays on local scratch,
-and seals a selector-ineligible cache run only after logical, physical,
-metadata, and source-binding checks pass.
+The current publisher normally assembles receipt-bound fixed-count contours
+that refinement workers computed beside their final dense rows.  Explicit
+repair and compatibility calls may still regenerate them from complete dense
+``masks_roi``.  Both paths write the same access-aware Zarr v3 contract and
+remain selector-ineligible until the enclosing bundle is activated.
 """
 
 from __future__ import annotations
@@ -71,6 +72,9 @@ from fisheye.shared.zarr.subject_mask_schema import (
     SubjectMaskComponentRegistry,
     SubjectMaskDimensions,
 )
+from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
+    validate_subject_mask_sampled_contour_worker_assembly,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -89,7 +93,8 @@ SUBJECT_MASK_CACHE_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_ID = (
     "palette.subject_mask.derived_cache_run_manifest"
 )
-SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION = 1
+SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION = 2
+SUBJECT_MASK_CACHE_RUN_MANIFEST_SUPPORTED_VERSIONS = (1, 2)
 SUBJECT_MASK_CACHE_PUBLICATION_SCHEMA_ID = (
     "palette.subject_mask.derived_cache_publication"
 )
@@ -640,6 +645,8 @@ def build_subject_mask_cache_run_manifest(
     effective_compute_block_rows: int,
     requested_compute_workers: int,
     effective_compute_workers: int,
+    source_mode: str,
+    worker_assembly: Mapping[str, Any] | None,
 ) -> dict[str, object]:
     resolved_run = _safe_run_id(run_id, name="run_id")
     payload = {
@@ -663,12 +670,18 @@ def build_subject_mask_cache_run_manifest(
         "cache_extension": dict(cache_extension),
         "write_receipt": {
             "generation": (
-                "bounded_dense_rows_to_disjoint_node_local_memmap_ranges_v1"
+                "receipt_bound_worker_sampled_contour_assembly_v1"
+                if source_mode == "receipt_bound_worker_arrays"
+                else "bounded_dense_rows_to_disjoint_node_local_memmap_ranges_v1"
             ),
             "compute_backend": (
-                "serial_blocks"
-                if int(effective_compute_workers) == 1
-                else "process_blocks"
+                "precomputed_worker_sampled_contours"
+                if source_mode == "receipt_bound_worker_arrays"
+                else (
+                    "serial_blocks"
+                    if int(effective_compute_workers) == 1
+                    else "process_blocks"
+                )
             ),
             "source_compute_block_bytes": int(source_compute_block_bytes),
             "effective_compute_block_rows": int(effective_compute_block_rows),
@@ -684,6 +697,10 @@ def build_subject_mask_cache_run_manifest(
                 path: list(receipt["bounded_reopen_samples"])
                 for path, receipt in sorted(write_receipts.items())
             },
+            "source_mode": str(source_mode),
+            "worker_assembly": (
+                dict(worker_assembly) if worker_assembly is not None else None
+            ),
         },
     }
     manifest = {
@@ -715,7 +732,7 @@ def validate_subject_mask_cache_run_manifest(
     if (
         manifest.get("schema_id") != SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_ID
         or manifest.get("schema_version")
-        != SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION
+        not in SUBJECT_MASK_CACHE_RUN_MANIFEST_SUPPORTED_VERSIONS
         or manifest.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
         or not isinstance(payload, Mapping)
     ):
@@ -1006,6 +1023,7 @@ def validate_subject_mask_cache_run_manifest(
                         f"subject-mask cache receipt generator differs at {cache_path}"
                     )
 
+    manifest_version = int(manifest["schema_version"])
     write_receipt = payload.get("write_receipt")
     expected_write_fields = {
         "generation",
@@ -1019,11 +1037,11 @@ def validate_subject_mask_cache_run_manifest(
         "physical_write_counts",
         "bounded_reopen_samples",
     }
+    if manifest_version >= 2:
+        expected_write_fields.update({"source_mode", "worker_assembly"})
     if (
         not isinstance(write_receipt, Mapping)
         or set(write_receipt) != expected_write_fields
-        or write_receipt.get("generation")
-        != "bounded_dense_rows_to_disjoint_node_local_memmap_ranges_v1"
         or write_receipt.get("publication")
         != "one_process_owns_every_complete_output_shard"
         or write_receipt.get("full_dense_equivalence") is not True
@@ -1033,25 +1051,61 @@ def validate_subject_mask_cache_run_manifest(
         or set(write_receipt["bounded_reopen_samples"]) != expected_paths
     ):
         errors.append("subject-mask cache write receipt differs")
-    elif (
-        not isinstance(write_receipt.get("source_compute_block_bytes"), int)
-        or int(write_receipt["source_compute_block_bytes"]) <= 0
-        or not isinstance(write_receipt.get("effective_compute_block_rows"), int)
-        or int(write_receipt["effective_compute_block_rows"]) <= 0
-        or not isinstance(write_receipt.get("requested_compute_workers"), int)
-        or int(write_receipt["requested_compute_workers"]) <= 0
-        or not isinstance(write_receipt.get("effective_compute_workers"), int)
-        or int(write_receipt["effective_compute_workers"]) <= 0
-        or int(write_receipt["effective_compute_workers"])
-        > int(write_receipt["requested_compute_workers"])
-        or write_receipt.get("compute_backend")
-        != (
-            "serial_blocks"
-            if int(write_receipt["effective_compute_workers"]) == 1
-            else "process_blocks"
-        )
+    elif manifest_version == 1 or write_receipt.get("source_mode") == (
+        "dense_authority_recompute"
     ):
-        errors.append("subject-mask cache generation execution differs")
+        if (
+            write_receipt.get("generation")
+            != "bounded_dense_rows_to_disjoint_node_local_memmap_ranges_v1"
+            or (
+                manifest_version >= 2
+                and write_receipt.get("worker_assembly") is not None
+            )
+            or not isinstance(write_receipt.get("source_compute_block_bytes"), int)
+            or int(write_receipt["source_compute_block_bytes"]) <= 0
+            or not isinstance(write_receipt.get("effective_compute_block_rows"), int)
+            or int(write_receipt["effective_compute_block_rows"]) <= 0
+            or not isinstance(write_receipt.get("requested_compute_workers"), int)
+            or int(write_receipt["requested_compute_workers"]) <= 0
+            or not isinstance(write_receipt.get("effective_compute_workers"), int)
+            or int(write_receipt["effective_compute_workers"]) <= 0
+            or int(write_receipt["effective_compute_workers"])
+            > int(write_receipt["requested_compute_workers"])
+            or write_receipt.get("compute_backend")
+            != (
+                "serial_blocks"
+                if int(write_receipt["effective_compute_workers"]) == 1
+                else "process_blocks"
+            )
+        ):
+            errors.append("subject-mask cache dense generation execution differs")
+    elif write_receipt.get("source_mode") == "receipt_bound_worker_arrays":
+        assembly = write_receipt.get("worker_assembly")
+        if (
+            write_receipt.get("generation")
+            != "receipt_bound_worker_sampled_contour_assembly_v1"
+            or write_receipt.get("compute_backend")
+            != "precomputed_worker_sampled_contours"
+            or write_receipt.get("source_compute_block_bytes") != 0
+            or write_receipt.get("effective_compute_block_rows") != 0
+            or write_receipt.get("requested_compute_workers") != 0
+            or write_receipt.get("effective_compute_workers") != 0
+            or not isinstance(assembly, Mapping)
+            or dimensions is None
+            or components is None
+        ):
+            errors.append("subject-mask cache worker assembly execution differs")
+        else:
+            try:
+                validate_subject_mask_sampled_contour_worker_assembly(
+                    assembly,
+                    n_rois=dimensions.n_rois,
+                    components=components,
+                )
+            except (TypeError, ValueError) as exc:
+                errors.append(str(exc))
+    else:
+        errors.append("subject-mask cache source mode is unsupported")
     return tuple(errors)
 
 
@@ -1116,9 +1170,11 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
     storage_profile: StorageProfile = SUBJECT_MASK_PRESENTATION_CANDIDATE_V1,
     source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     compute_workers: int = 1,
+    precomputed_arrays: Mapping[str, Any] | None = None,
+    worker_assembly: Mapping[str, Any] | None = None,
     created_by: str = SUBJECT_MASK_CACHE_GENERATOR_ID,
 ) -> SubjectMaskCachePublication:
-    """Derive and seal a complete recording-level sampled-contour cache."""
+    """Assemble or explicitly regenerate one recording-level contour cache."""
 
     started = time.perf_counter()
     phase_seconds: dict[str, float] = {}
@@ -1128,12 +1184,21 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
     resolved_cache_run = _safe_run_id(cache_run_id, name="cache_run_id")
     if output_path.exists():
         raise FileExistsError(f"Subject-mask cache destination exists: {output_path}")
-    budget = int(source_compute_block_bytes)
-    if budget <= 0:
-        raise ValueError("source_compute_block_bytes must be positive.")
-    requested_compute_workers = int(compute_workers)
-    if requested_compute_workers <= 0:
-        raise ValueError("compute_workers must be positive.")
+    adopting_workers = precomputed_arrays is not None or worker_assembly is not None
+    if (precomputed_arrays is None) != (worker_assembly is None):
+        raise ValueError(
+            "precomputed_arrays and worker_assembly must be supplied together."
+        )
+    if adopting_workers:
+        budget = 0
+        requested_compute_workers = 0
+    else:
+        budget = int(source_compute_block_bytes)
+        if budget <= 0:
+            raise ValueError("source_compute_block_bytes must be positive.")
+        requested_compute_workers = int(compute_workers)
+        if requested_compute_workers <= 0:
+            raise ValueError("compute_workers must be positive.")
 
     phase = time.perf_counter()
     source_run, source_manifest, dimensions, components, source = (
@@ -1148,6 +1213,27 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
         contour_profile=contour_profile,
         profile=storage_profile,
     )
+    if worker_assembly is not None:
+        validate_subject_mask_sampled_contour_worker_assembly(
+            worker_assembly,
+            n_rois=dimensions.n_rois,
+            components=components,
+        )
+        expected_paths = set(plans.by_path())
+        if set(precomputed_arrays or {}) != expected_paths:
+            raise ValueError(
+                "Precomputed sampled-contour array inventory differs from policy."
+            )
+        for path, entry in plans.by_path().items():
+            value = precomputed_arrays[path]  # type: ignore[index]
+            if (
+                tuple(int(item) for item in value.shape)
+                != tuple(entry.plan.logical_shape)
+                or str(np.dtype(value.dtype)) != entry.plan.logical_dtype
+            ):
+                raise ValueError(
+                    f"Precomputed sampled-contour array contract differs at {path}."
+                )
     phase_seconds["source_validation_and_storage_plan"] = time.perf_counter() - phase
 
     root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
@@ -1214,65 +1300,81 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
     bytes_per_source_row = (
         dimensions.n_channels * dimensions.roi_height * dimensions.roi_width
     )
-    block_rows = max(1, budget // max(1, bytes_per_source_row))
+    block_rows = (
+        0 if adopting_workers else max(1, budget // max(1, bytes_per_source_row))
+    )
     temp_parent = output_path.parent
     temp_parent.mkdir(parents=True, exist_ok=True)
     try:
-        with tempfile.TemporaryDirectory(
-            prefix=f".{resolved_cache_run}.contour_memmap.", dir=temp_parent
-        ) as temp_dir_text:
-            temp_dir = Path(temp_dir_text)
-            memmaps: dict[str, np.memmap] = {}
-            for component in components.labels:
-                sample_count = contour_profile.sample_counts[component]
-                prefix = f"components/{component}/sampled_contours"
-                memmaps[f"{prefix}/points_xy"] = np.lib.format.open_memmap(
-                    temp_dir / f"{component}.points.npy",
-                    mode="w+",
-                    dtype=np.float32,
-                    shape=(dimensions.n_rois, sample_count, 2),
-                )
-                memmaps[f"{prefix}/valid"] = np.lib.format.open_memmap(
-                    temp_dir / f"{component}.valid.npy",
-                    mode="w+",
-                    dtype=bool,
-                    shape=(dimensions.n_rois,),
-                )
-                memmaps[f"{prefix}/source_point_count"] = np.lib.format.open_memmap(
-                    temp_dir / f"{component}.source_count.npy",
-                    mode="w+",
-                    dtype=np.int32,
-                    shape=(dimensions.n_rois,),
-                )
-
+        by_path = plans.by_path()
+        if adopting_workers:
+            assert precomputed_arrays is not None
             phase = time.perf_counter()
-            effective_compute_workers = _generate_sampled_contours(
-                source_root=source_root,
-                source_run=source_run,
-                refined_run_id=resolved_source_run,
-                dimensions=dimensions,
-                components=components,
-                contour_profile=contour_profile,
-                block_rows=block_rows,
-                compute_workers=requested_compute_workers,
-                memmaps=memmaps,
-            )
-            for memmap in memmaps.values():
-                memmap.flush()
-            phase_seconds["bounded_dense_contour_generation"] = (
-                time.perf_counter() - phase
-            )
-
-            phase = time.perf_counter()
-            by_path = plans.by_path()
-            for path in sorted(memmaps):
+            for path in sorted(precomputed_arrays):
                 write_receipts[path] = _write_memmap_by_physical_units(
                     destination_arrays[path],
-                    memmaps[path],
+                    precomputed_arrays[path],
                     plan=by_path[path].plan,
                 )
-            phase_seconds["physical_unit_publication"] = time.perf_counter() - phase
-            del memmaps
+            effective_compute_workers = 0
+            phase_seconds["receipt_bound_worker_contour_assembly"] = (
+                time.perf_counter() - phase
+            )
+        else:
+            with tempfile.TemporaryDirectory(
+                prefix=f".{resolved_cache_run}.contour_memmap.", dir=temp_parent
+            ) as temp_dir_text:
+                temp_dir = Path(temp_dir_text)
+                memmaps: dict[str, np.memmap] = {}
+                for component in components.labels:
+                    sample_count = contour_profile.sample_counts[component]
+                    prefix = f"components/{component}/sampled_contours"
+                    memmaps[f"{prefix}/points_xy"] = np.lib.format.open_memmap(
+                        temp_dir / f"{component}.points.npy",
+                        mode="w+",
+                        dtype=np.float32,
+                        shape=(dimensions.n_rois, sample_count, 2),
+                    )
+                    memmaps[f"{prefix}/valid"] = np.lib.format.open_memmap(
+                        temp_dir / f"{component}.valid.npy",
+                        mode="w+",
+                        dtype=bool,
+                        shape=(dimensions.n_rois,),
+                    )
+                    memmaps[f"{prefix}/source_point_count"] = np.lib.format.open_memmap(
+                        temp_dir / f"{component}.source_count.npy",
+                        mode="w+",
+                        dtype=np.int32,
+                        shape=(dimensions.n_rois,),
+                    )
+
+                phase = time.perf_counter()
+                effective_compute_workers = _generate_sampled_contours(
+                    source_root=source_root,
+                    source_run=source_run,
+                    refined_run_id=resolved_source_run,
+                    dimensions=dimensions,
+                    components=components,
+                    contour_profile=contour_profile,
+                    block_rows=block_rows,
+                    compute_workers=requested_compute_workers,
+                    memmaps=memmaps,
+                )
+                for memmap in memmaps.values():
+                    memmap.flush()
+                phase_seconds["bounded_dense_contour_generation"] = (
+                    time.perf_counter() - phase
+                )
+
+                phase = time.perf_counter()
+                for path in sorted(memmaps):
+                    write_receipts[path] = _write_memmap_by_physical_units(
+                        destination_arrays[path],
+                        memmaps[path],
+                        plan=by_path[path].plan,
+                    )
+                phase_seconds["physical_unit_publication"] = time.perf_counter() - phase
+                del memmaps
 
         phase = time.perf_counter()
         consolidate_metadata_capture_expected_warnings(output_path)
@@ -1304,6 +1406,12 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
             effective_compute_block_rows=block_rows,
             requested_compute_workers=requested_compute_workers,
             effective_compute_workers=effective_compute_workers,
+            source_mode=(
+                "receipt_bound_worker_arrays"
+                if adopting_workers
+                else "dense_authority_recompute"
+            ),
+            worker_assembly=worker_assembly,
         )
         errors = validate_subject_mask_cache_run_manifest(
             manifest, source_manifest=source_manifest

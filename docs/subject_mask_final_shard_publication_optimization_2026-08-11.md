@@ -134,20 +134,31 @@ Implementation validation at this checkpoint:
 
 ### Contour publication boundary
 
-Per-clip refinement already defaults to full ragged contours disabled and
-fixed-count sampled contours enabled. The current recording publisher drops
-those clip-local sampled products unless a separate `cache_run` is requested.
-The next cache-lifecycle change should assemble the already computed row-local
-sampled contours, bind them to the exact final dense-mask digest and sampling
-contract, and make that cache a standard bundle member. It should not
-re-extract contours at publication when complete worker evidence is valid.
+Per-clip refinement defaults to full ragged contours disabled and fixed-count
+sampled contours enabled. Phase C now seals each worker's sampled arrays
+against that worker's dense-mask semantic receipt and carries the receipt with
+the immutable worker bundle. The recording publisher validates exact,
+contiguous row coverage and assembles those arrays into the access-aware cache
+without a second dense-mask extraction pass. The full-duration canary requires
+this four-member bundle-v3 path; the older three-member and dense-regeneration
+paths remain explicit compatibility/repair surfaces.
+
 Regeneration is required only after a dense edit, an algorithm/version change,
-or stale/failed evidence. Full ragged contours remain optional cold
-inspection/export data and legacy-readable, not part of the new default
-profile.
+or stale/failed evidence. The default worker receipt rejects stale contours
+and rejects any full ragged `contours` group. Historical full contours remain
+readable and migratable as optional cold inspection/export data.
 
 ## Phase C — quality and cache reuse
 
+- [x] Bind worker-produced fixed-count sampled contours to exact refined worker
+  receipts, algorithm semantics, component registry, row interval, and logical
+  unit hashes.
+- [x] Assemble complete sampled-contour worker coverage without a second dense
+  extraction pass.
+- [x] Make the sampled-contour cache a required full-duration canary bundle-v3
+  member while preserving explicit legacy three-member publication.
+- [x] Forbid full ragged contours in the new worker default while retaining
+  historical readers and migration.
 - [ ] Compute row-local quality evidence with the same final physical-unit
   ownership where scientifically valid.
 - [ ] Define explicit boundary/global reducers for non-row-local metrics.

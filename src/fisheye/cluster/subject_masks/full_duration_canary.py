@@ -63,13 +63,25 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
     validate_refined_keypoint_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_schema import (
+    SubjectMaskComponentRegistry,
     SubjectMaskDimensions,
     derive_subject_mask_frame_row_offsets,
+)
+from fisheye.shared.zarr.refined_subject_mask_extensions import (
+    default_subject_mask_sampled_contour_profile,
+)
+from fisheye.shared.zarr.subject_mask_cache_storage import (
+    plan_subject_mask_sampled_contour_storage,
 )
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
     build_subject_mask_final_layout_unit_package,
     subject_mask_final_layout_payload_plan,
     validate_subject_mask_final_layout_unit_package,
+)
+from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
+    load_subject_mask_sampled_contour_worker_receipt,
+    validate_subject_mask_sampled_contour_worker_receipt,
+    write_subject_mask_sampled_contour_worker_receipt,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -80,11 +92,11 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
-PLAN_SCHEMA_VERSION = 2
+PLAN_SCHEMA_VERSION = 3
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
-RESULT_SCHEMA_VERSION = 3
+RESULT_SCHEMA_VERSION = 4
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
-WORKER_RESULT_SCHEMA_VERSION = 1
+WORKER_RESULT_SCHEMA_VERSION = 2
 FAMILY = "subject_mask_full_duration_canary"
 BENCHMARK_CLASSIFICATION = "selector_ineligible_full_duration_canary"
 DEFAULT_GPU_CONCURRENCY = 4
@@ -670,6 +682,10 @@ def prepare_canary(
         roi_height=roi_height,
         roi_width=roi_width,
     )
+    refined_components = SubjectMaskComponentRegistry(_REFINED_MASK_LABELS)
+    sampled_contour_profile = default_subject_mask_sampled_contour_profile(
+        refined_components
+    )
     output.mkdir(parents=True)
     for child in ("logs", "status", "workers", "bundles", "publish"):
         (output / child).mkdir()
@@ -756,12 +772,18 @@ def prepare_canary(
                 kind="refined_dense_core",
                 dimensions=refined_final_dimensions,
             ),
+            "sampled_contours": plan_subject_mask_sampled_contour_storage(
+                refined_final_dimensions,
+                components=refined_components,
+                contour_profile=sampled_contour_profile,
+            ).as_manifest(),
         },
         "windows": windows,
         "outputs": {
             "raw_run": f"subject_masks_{label}",
             "refined_run": f"refined_subject_masks_{label}",
             "quality_run": f"subject_mask_quality_{label}",
+            "cache_run": f"subject_mask_sampled_contours_{label}",
             "bundle_id": f"subject_mask_bundle_{label}",
             "result_path": str(output / "result.json"),
         },
@@ -796,6 +818,8 @@ def prepare_canary(
             "worker_writes_are_node_local_until_atomic_bundle_publish": True,
             "window_rows_are_exact_nonoverlapping_complete": True,
             "final_layout_units_are_selector_ineligible_transport": True,
+            "worker_sampled_contours_required": True,
+            "full_ragged_contours_allowed": False,
         },
     }
     payload["plan_digest"] = canonical_json_sha256(payload)
@@ -834,6 +858,11 @@ def load_plan(path: Path) -> dict[str, Any]:
         raise ValueError("Canary analysis target escapes its benchmark run root.")
     if payload.get("safety", {}).get("bundle_activation_allowed") is not False:
         raise ValueError("Canary plan does not fail closed on activation.")
+    if (
+        payload.get("safety", {}).get("worker_sampled_contours_required") is not True
+        or payload.get("safety", {}).get("full_ragged_contours_allowed") is not False
+    ):
+        raise ValueError("Canary plan does not enforce the sampled-contour profile.")
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
@@ -850,6 +879,21 @@ def load_plan(path: Path) -> dict[str, Any]:
         observed = final_layout.get(role) if isinstance(final_layout, Mapping) else None
         if observed != expected:
             raise ValueError(f"Canary {role} final-layout plan differs from policy.")
+    refined_dimensions = _final_layout_dimensions(payload, stage="refinement")
+    refined_components = SubjectMaskComponentRegistry(_REFINED_MASK_LABELS)
+    expected_sampled = plan_subject_mask_sampled_contour_storage(
+        refined_dimensions,
+        components=refined_components,
+        contour_profile=default_subject_mask_sampled_contour_profile(
+            refined_components
+        ),
+    ).as_manifest()
+    final_layout = payload.get("final_layout")
+    if (
+        not isinstance(final_layout, Mapping)
+        or final_layout.get("sampled_contours") != expected_sampled
+    ):
+        raise ValueError("Canary sampled-contour final layout differs from policy.")
     return payload
 
 
@@ -935,6 +979,7 @@ def _existing_worker_result(
     if (
         not isinstance(result, dict)
         or result.get("schema_id") != WORKER_RESULT_SCHEMA_ID
+        or result.get("schema_version") != WORKER_RESULT_SCHEMA_VERSION
         or result.get("status") != "complete"
         or result.get("stage") != stage
         or result.get("plan_digest") != plan["plan_digest"]
@@ -972,6 +1017,61 @@ def _existing_worker_result(
         or package_receipt["payload"]["producer_commit"] != plan["repo"]["commit"]
     ):
         raise RuntimeError(f"Worker final-layout package binding differs: {bundle}")
+    sampled_binding = result.get("sampled_contour_worker_receipt")
+    if stage == "inference":
+        if sampled_binding is not None:
+            raise RuntimeError(
+                f"Inference worker unexpectedly carries sampled contours: {bundle}"
+            )
+    else:
+        expected_fields = {
+            "relative_path",
+            "payload_digest",
+            "source_run_path",
+            "global_row_interval",
+            "array_document_digest",
+            "source_worker_receipt_payload_digest",
+            "producer_commit",
+        }
+        if not isinstance(sampled_binding, Mapping) or set(sampled_binding) != (
+            expected_fields
+        ):
+            raise RuntimeError(
+                f"Refinement worker lacks exact sampled-contour evidence: {bundle}"
+            )
+        relative = str(sampled_binding.get("relative_path") or "")
+        if relative != "sampled_contour_receipt.json":
+            raise RuntimeError(
+                f"Worker sampled-contour receipt path is unsafe: {bundle}"
+            )
+        sampled_receipt = load_subject_mask_sampled_contour_worker_receipt(
+            bundle / relative
+        )
+        run = open_zarr_root(bundle / "archive.zarr", mode="r")[
+            f"refined_subject_masks_runs/{window['refined_run']}"
+        ]
+        proof = _worker_evidence(bundle / "archive.zarr", run)
+        validated = validate_subject_mask_sampled_contour_worker_receipt(
+            sampled_receipt,
+            run=run,
+            worker_receipt=proof["receipt"],
+            verify_values=False,
+        )
+        payload = validated["payload"]
+        if (
+            sampled_binding.get("payload_digest") != validated["payload_digest"]
+            or sampled_binding.get("source_run_path") != payload["source_run_path"]
+            or sampled_binding.get("global_row_interval")
+            != payload["global_row_interval"]
+            or sampled_binding.get("array_document_digest")
+            != payload["array_document_digest"]
+            or sampled_binding.get("source_worker_receipt_payload_digest")
+            != payload["source_dense_worker"]["worker_receipt_payload_digest"]
+            or sampled_binding.get("producer_commit") != plan["repo"]["commit"]
+        ):
+            raise RuntimeError(
+                f"Worker sampled-contour receipt binding differs: {bundle}"
+            )
     return result
 
 
@@ -983,6 +1083,7 @@ def _publish_worker_bundle(
     bundle: Path,
     result: dict[str, Any],
     final_layout_unit_package: Path | None = None,
+    sampled_contour_receipt: Path | None = None,
 ) -> dict[str, Any]:
     destination = bundle.expanduser().resolve()
     if destination.exists():
@@ -1038,6 +1139,32 @@ def _publish_worker_bundle(
                 ],
                 "encoded_bytes": package_receipt["payload"]["encoded_bytes"],
             }
+        sampled_contour_binding = None
+        if sampled_contour_receipt is not None:
+            receipt_destination = temporary / "sampled_contour_receipt.json"
+            shutil.copy2(
+                sampled_contour_receipt.expanduser().resolve(), receipt_destination
+            )
+            sampled_receipt = load_subject_mask_sampled_contour_worker_receipt(
+                receipt_destination
+            )
+            sampled_receipt = validate_subject_mask_sampled_contour_worker_receipt(
+                sampled_receipt,
+                run=copied,
+                worker_receipt=proof["receipt"],
+            )
+            sampled_payload = sampled_receipt["payload"]
+            sampled_contour_binding = {
+                "relative_path": "sampled_contour_receipt.json",
+                "payload_digest": sampled_receipt["payload_digest"],
+                "source_run_path": sampled_payload["source_run_path"],
+                "global_row_interval": sampled_payload["global_row_interval"],
+                "array_document_digest": sampled_payload["array_document_digest"],
+                "source_worker_receipt_payload_digest": sampled_payload[
+                    "source_dense_worker"
+                ]["worker_receipt_payload_digest"],
+                "producer_commit": sampled_payload["producer_commit"],
+            }
         result.update(
             {
                 "bundle_path": str(destination),
@@ -1052,6 +1179,7 @@ def _publish_worker_bundle(
                     "receipt_payload_digest": proof["receipt"]["payload_digest"],
                 },
                 "final_layout_unit_package": final_layout_binding,
+                "sampled_contour_worker_receipt": sampled_contour_binding,
             }
         )
         _write_json_atomic(temporary / "result.json", result)
@@ -1339,6 +1467,15 @@ def run_refinement_window(
             worker_receipt_payload_digest=str(proof["receipt"]["payload_digest"]),
             producer_commit=str(plan["repo"]["commit"]),
         )
+        sampled_contour_receipt_path = work / "sampled_contour_receipt.json"
+        sampled_contour_started = time.perf_counter()
+        sampled_contour_receipt = write_subject_mask_sampled_contour_worker_receipt(
+            run,
+            destination=sampled_contour_receipt_path,
+            global_start_row=int(window["row_start"]),
+            worker_receipt=proof["receipt"],
+            producer_commit=str(plan["repo"]["commit"]),
+        )
         result = {
             "schema_id": WORKER_RESULT_SCHEMA_ID,
             "schema_version": WORKER_RESULT_SCHEMA_VERSION,
@@ -1366,6 +1503,12 @@ def run_refinement_window(
             "final_layout_unit_duration_seconds": float(
                 time.perf_counter() - final_layout_started
             ),
+            "local_sampled_contour_payload_digest": sampled_contour_receipt[
+                "payload_digest"
+            ],
+            "sampled_contour_receipt_duration_seconds": float(
+                time.perf_counter() - sampled_contour_started
+            ),
         }
         return _publish_worker_bundle(
             local_archive=local_archive,
@@ -1374,6 +1517,7 @@ def run_refinement_window(
             bundle=bundle,
             result=result,
             final_layout_unit_package=final_layout_package_path,
+            sampled_contour_receipt=sampled_contour_receipt_path,
         )
     finally:
         if not keep_scratch:
@@ -1510,6 +1654,14 @@ def finalize_canary(
             / "final_layout_unit"
             for window_id in nonempty_window_ids
         ]
+        sampled_contour_worker_receipts = [
+            Path(plan["run_root"])
+            / "bundles"
+            / "refinement"
+            / window_id
+            / "sampled_contour_receipt.json"
+            for window_id in nonempty_window_ids
+        ]
         output = plan["outputs"]
         publication = publish_recording_subject_mask_bundle(
             analysis_zarr=Path(plan["references"]["analysis_zarr"]),
@@ -1523,6 +1675,7 @@ def finalize_canary(
             raw_run=str(output["raw_run"]),
             refined_run=str(output["refined_run"]),
             quality_run=str(output["quality_run"]),
+            cache_run=str(output["cache_run"]),
             bundle_id=str(output["bundle_id"]),
             local_output_root=work / "snapshots",
             quality_scratch_root=work / "quality_scratch",
@@ -1546,6 +1699,9 @@ def finalize_canary(
             raw_final_layout_unit_packages=raw_final_layout_packages,
             refined_final_layout_unit_packages=refined_final_layout_packages,
             require_complete_final_layout_units=True,
+            sampled_contour_worker_receipts=sampled_contour_worker_receipts,
+            require_worker_sampled_contours=True,
+            sampled_contour_producer_commit=str(plan["repo"]["commit"]),
         )
         target = open_zarr_root(Path(plan["references"]["analysis_zarr"]), mode="r")
         if "subject_mask_authority" in target.attrs:
@@ -1556,6 +1712,7 @@ def finalize_canary(
             "subject_mask_runs": output["raw_run"],
             "refined_subject_masks_runs": output["refined_run"],
             "subject_mask_quality_runs": output["quality_run"],
+            "subject_mask_cache_runs": output["cache_run"],
             "subject_mask_bundle_runs": output["bundle_id"],
         }
         for parent, run_name in expected_paths.items():
@@ -1607,6 +1764,11 @@ def finalize_canary(
                 "production_paths_written": False,
                 "all_bundle_members_selector_ineligible": True,
                 "exact_window_row_coverage": True,
+                "worker_sampled_contours_assembled": (
+                    publication["publication_execution"]["sampled_contour_source_mode"]
+                    == "receipt_bound_worker_arrays"
+                ),
+                "full_ragged_contours_published": False,
             },
         }
         result["payload_digest"] = canonical_json_sha256(result)

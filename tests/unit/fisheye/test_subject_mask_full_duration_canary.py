@@ -155,11 +155,17 @@ def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
         "worker_writes_are_node_local_until_atomic_bundle_publish": True,
         "window_rows_are_exact_nonoverlapping_complete": True,
         "final_layout_units_are_selector_ineligible_transport": True,
+        "worker_sampled_contours_required": True,
+        "full_ragged_contours_allowed": False,
     }
     assert plan["final_layout"]["raw"]["array_path"] == "mask_probs_roi"
     assert plan["final_layout"]["refined"]["array_path"] == "masks_roi"
     assert plan["final_layout"]["raw"]["dimensions"]["n_rois"] == 4
     assert plan["final_layout"]["refined"]["dimensions"]["n_channels"] == 4
+    assert plan["final_layout"]["sampled_contours"]["stage_kind"] == (
+        "sampled_contour_display_cache"
+    )
+    assert plan["outputs"]["cache_run"] == ("subject_mask_sampled_contours_fixture_v1")
     target = Path(plan["references"]["analysis_zarr"])
     assert (target / "crop_runs" / "crop_v2" / "zarr.json").is_file()
     assert (target / "refined_keypoints_runs" / "refined_v2" / "zarr.json").is_file()

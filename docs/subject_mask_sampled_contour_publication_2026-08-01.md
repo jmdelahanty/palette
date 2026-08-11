@@ -2,8 +2,8 @@
 
 Date: 2026-08-01
 
-Status: Palette full-duration selector-ineligible canary passed; Crimson
-mounted-read and visual-equivalence gate pending.
+Status: Receipt-bound worker assembly implemented; a new selector-ineligible
+full-duration canary and Crimson mounted-read/visual gate remain pending.
 
 ## Decision
 
@@ -56,22 +56,20 @@ Every cache manifest binds:
 - the exact storage plan and direct/consolidated metadata declarations;
 - one freshness receipt per component proving full dense-derived generation.
 
-The recording-level publisher currently computes contours in bounded dense-row
-blocks on local scratch, stages the 2.53 GiB logical result through disk-backed
-memmaps, and writes complete immutable output shards from a single owner.
-Dense-row contour extraction may use bounded worker processes, but workers
-return only disjoint row blocks to node-local memmaps; they never write Zarr.
-It never materializes the full contour surface in heap memory.
+The current full-duration path reuses contours computed inside each refinement
+worker. A strict terminal receipt binds each worker's row-local contour arrays
+to its exact dense-mask semantic receipt, component registry, sampling
+algorithm/version, sample count, winding, canonical start rule, producer
+commit, and global row interval. The recording finalizer proves complete,
+nonoverlapping coverage, assembles rows in canonical crop order, and writes the
+access-aware recording cache. There is no second dense-mask contour extraction
+pass and no cross-clip scientific reducer for this observation-local product.
 
-The intended successor avoids repeating that extraction when refinement
-workers already produced exact fixed-count contours. Each worker will bind its
-row-local contour arrays to the exact dense-mask unit digest, component
-registry, sampling algorithm/version, sample count, winding, and canonical
-start rule. The recording finalizer will assemble those rows in canonical crop
-order and bind the cache run to the final dense authority. It will regenerate
-only missing/stale rows, or all rows after a dense edit or sampling-contract
-change. There is no cross-clip scientific reducer for an observation-local
-contour.
+The bounded dense-to-contour memmap path remains available only for explicit
+repair and compatibility calls. It is used when historical inputs lack worker
+receipts or after an edit/contract change deliberately invalidates the old
+cache. It never silently substitutes for a full-duration canary that requires
+worker evidence.
 
 ## Physical Candidate
 
@@ -105,8 +103,9 @@ not change contour semantics.
 - Bundle v1/v2 remains readable and contains raw, refined, and quality members.
 - Bundle v3 contains exactly four members: raw, refined, quality, and
   `presentation_cache`.
-- Cache generation is opt-in through `--cache-run` while the profile is under
-  evaluation; existing publication commands continue to emit v2.
+- The current full-duration canary freezes a `cache_run`, requires one worker
+  receipt per nonempty refinement window, and emits bundle v3. Older callers
+  may still omit `cache_run` to produce a legacy-compatible v2 bundle.
 - A v3 bundle proves the cache and refined dense member share exact dimensions,
   components, dense hash, manifest identity, and row identity before importing
   any member.
@@ -154,10 +153,13 @@ explicit bundle-v3 cache to an unrelated contour source.
   cancellation, RSS, and Metal visual-equivalence gates.
 - [ ] Promote or revise the physical profile from that evidence.
 - [ ] Make bundle v3 the production publisher default only after promotion.
-- [ ] Carry worker-produced sampled contours through strict terminal receipts
+- [x] Carry worker-produced sampled contours through strict terminal receipts
   and assemble them without a second dense-mask extraction pass.
-- [ ] Make full ragged contour publication opt-in in the new default profile
-  while retaining historical read/migration compatibility.
+- [x] Make full ragged contour publication forbidden in the new default worker
+  profile while retaining historical read/migration compatibility.
+- [ ] Run the new receipt-bound full-duration selector-ineligible canary and
+  compare extraction, publication, transfer, and RSS telemetry with the prior
+  dense-regeneration canary.
 - [ ] Add compact bitpacked/RLE recording-level members in a later independent
   cache profile; do not couple them to contour promotion.
 

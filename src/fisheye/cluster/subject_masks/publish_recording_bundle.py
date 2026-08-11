@@ -3,10 +3,10 @@
 The compute archive is treated as a selector-ineligible draft.  This command
 turns its raw and refined producer receipts into production-streaming source
 receipts, rematerializes both cores through the shared storage planner,
-computes the independent quality run, and atomically imports the three members
-as one inactive bundle.  When ``--cache-run`` is supplied, it also derives the
-recording-level sampled-contour presentation cache and emits bundle v3.
-Activation is a separate explicit operation.
+computes the independent quality run, and atomically imports the members as one
+inactive bundle.  The current profile assembles a receipt-bound sampled-contour
+cache as the fourth bundle-v3 member.  Omitting ``--cache-run`` remains an
+explicit legacy three-member compatibility path.  Activation is separate.
 """
 
 from __future__ import annotations
@@ -44,6 +44,12 @@ from fisheye.shared.zarr.crop_manifest import (
 from fisheye.shared.zarr.subject_mask_cache_publication import (
     DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     publish_selector_ineligible_subject_mask_sampled_contours,
+)
+from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
+    build_subject_mask_sampled_contour_worker_assembly,
+    load_subject_mask_sampled_contour_worker_receipt,
+    sampled_contour_worker_arrays,
+    validate_subject_mask_sampled_contour_worker_receipt,
 )
 from fisheye.shared.zarr.subject_mask_quality_manifest import (
     SubjectMaskQualitySourceReference,
@@ -410,6 +416,78 @@ def _refined_shard_collection(
     return arrays, workers
 
 
+def _sampled_contour_worker_inputs(
+    runs: Sequence[Any],
+    receipt_paths: Sequence[Path],
+    *,
+    source_producer_evidence: Mapping[str, Any],
+    dimensions: SubjectMaskDimensions,
+    components: SubjectMaskComponentRegistry,
+    producer_commit: str,
+) -> tuple[dict[str, Any], dict[str, object]]:
+    """Validate and concatenate worker-produced fixed-count contour rows."""
+
+    if len(runs) != len(receipt_paths) or not runs:
+        raise ValueError(
+            "Sampled-contour receipts must cover every refined worker exactly once."
+        )
+    run_by_path = {str(run.path).strip("/"): run for run in runs}
+    evidence_workers = source_producer_evidence.get("workers")
+    if not isinstance(evidence_workers, list):
+        raise ValueError("Refined producer evidence lacks its worker inventory.")
+    dense_receipt_by_path = {
+        str(worker.get("run_path")): worker.get("worker_receipt")
+        for worker in evidence_workers
+        if isinstance(worker, Mapping)
+    }
+    validated: list[dict[str, Any]] = []
+    for receipt_path in receipt_paths:
+        receipt = load_subject_mask_sampled_contour_worker_receipt(receipt_path)
+        payload = receipt.get("payload")
+        run_path = (
+            payload.get("source_run_path") if isinstance(payload, Mapping) else None
+        )
+        run = run_by_path.get(str(run_path))
+        worker_receipt = dense_receipt_by_path.get(str(run_path))
+        if run is None or not isinstance(worker_receipt, Mapping):
+            raise ValueError(
+                "Sampled-contour receipt does not identify one refined worker."
+            )
+        validated.append(
+            validate_subject_mask_sampled_contour_worker_receipt(
+                receipt,
+                run=run,
+                worker_receipt=worker_receipt,
+            )
+        )
+    ordered = sorted(
+        validated,
+        key=lambda receipt: receipt["payload"]["global_row_interval"]["start_row"],
+    )
+    ordered_runs = [
+        run_by_path[receipt["payload"]["source_run_path"]] for receipt in ordered
+    ]
+    per_run_arrays = [
+        sampled_contour_worker_arrays(run, components=components)
+        for run in ordered_runs
+    ]
+    expected_paths = set(per_run_arrays[0])
+    if any(set(arrays) != expected_paths for arrays in per_run_arrays[1:]):
+        raise ValueError("Sampled-contour worker array inventories differ.")
+    arrays = {
+        path: _ConcatenatedRows([worker[path] for worker in per_run_arrays])
+        for path in sorted(expected_paths)
+    }
+    assembly = build_subject_mask_sampled_contour_worker_assembly(
+        ordered,
+        source_producer_evidence=source_producer_evidence,
+        n_rois=dimensions.n_rois,
+        components=components,
+        producer_commit=str(producer_commit),
+    )
+    return arrays, assembly
+
+
 def _consistent_refined_source_attrs(
     runs: Sequence[Any],
     *,
@@ -512,11 +590,27 @@ def publish_recording_subject_mask_bundle(
     raw_final_layout_unit_packages: Sequence[Path] | None = None,
     refined_final_layout_unit_packages: Sequence[Path] | None = None,
     require_complete_final_layout_units: bool = False,
+    sampled_contour_worker_receipts: Sequence[Path] | None = None,
+    require_worker_sampled_contours: bool = False,
+    sampled_contour_producer_commit: str | None = None,
     coordinate_contract_policy: str = "require_crop_v2",
     expected_work_units: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
     if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
         raise ValueError("core_physical_unit_workers must be a positive integer.")
+    contour_receipt_paths = tuple(sampled_contour_worker_receipts or ())
+    if require_worker_sampled_contours and not contour_receipt_paths:
+        raise ValueError(
+            "Current subject-mask publication requires worker sampled contours."
+        )
+    if contour_receipt_paths and cache_run is None:
+        raise ValueError(
+            "Worker sampled-contour receipts require a recording cache run id."
+        )
+    if contour_receipt_paths and not str(sampled_contour_producer_commit or "").strip():
+        raise ValueError(
+            "Worker sampled-contour receipts require their exact producer commit."
+        )
     target = analysis_zarr.expanduser().resolve()
     draft_path = draft_zarr.expanduser().resolve()
     output = local_output_root.expanduser().resolve()
@@ -787,6 +881,24 @@ def publish_recording_subject_mask_bundle(
         final_layout_unit_packages=tuple(refined_final_layout_unit_packages or ()),
         require_complete_final_layout_units=require_complete_final_layout_units,
     )
+    precomputed_contour_arrays = None
+    sampled_contour_assembly = None
+    if contour_receipt_paths:
+        producer_evidence = refined_receipt["payload"].get("producer_evidence")
+        if not isinstance(producer_evidence, Mapping):
+            raise ValueError(
+                "Refined source receipt lacks worker evidence for sampled contours."
+            )
+        precomputed_contour_arrays, sampled_contour_assembly = (
+            _sampled_contour_worker_inputs(
+                refined_drafts,
+                contour_receipt_paths,
+                source_producer_evidence=producer_evidence,
+                dimensions=refined_dimensions,
+                components=refined_components,
+                producer_commit=str(sampled_contour_producer_commit),
+            )
+        )
     cache_publication = None
     cache_store = output / "cache.zarr"
     if cache_run is not None:
@@ -797,6 +909,8 @@ def publish_recording_subject_mask_bundle(
             cache_run_id=cache_run,
             source_compute_block_bytes=cache_source_compute_block_bytes,
             compute_workers=cache_compute_workers,
+            precomputed_arrays=precomputed_contour_arrays,
+            worker_assembly=sampled_contour_assembly,
             created_by="publish_recording_subject_mask_bundle",
         )
     refined_root = open_zarr_root(refined_store, mode="r")
@@ -891,6 +1005,20 @@ def publish_recording_subject_mask_bundle(
             ),
             "raw_phase_seconds": dict(raw_publication.phase_seconds),
             "refined_phase_seconds": dict(refined_publication.phase_seconds),
+            "sampled_contour_source_mode": (
+                "receipt_bound_worker_arrays"
+                if sampled_contour_assembly is not None
+                else (
+                    "dense_authority_recompute"
+                    if cache_publication is not None
+                    else "not_published"
+                )
+            ),
+            "sampled_contour_phase_seconds": (
+                dict(cache_publication.phase_seconds)
+                if cache_publication is not None
+                else {}
+            ),
             "raw_final_layout_unit_adoption": dict(
                 open_zarr_root(raw_store, mode="r")[
                     f"subject_mask_runs/{raw_run}"
@@ -925,8 +1053,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache-run",
         help=(
-            "Optional immutable sampled-contour cache run; supplying it emits "
-            "the four-member bundle-v3 candidate."
+            "Immutable sampled-contour cache run for the current four-member "
+            "bundle-v3 profile. Omit only for legacy three-member compatibility."
         ),
     )
     parser.add_argument("--bundle-id", required=True)
@@ -985,6 +1113,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "cross-worker boundary units are still deterministically rebuilt."
         ),
     )
+    parser.add_argument(
+        "--sampled-contour-worker-receipt",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "Sealed refinement-worker sampled-contour receipt; repeat once per "
+            "nonempty worker."
+        ),
+    )
+    parser.add_argument(
+        "--require-worker-sampled-contours",
+        action="store_true",
+        help=(
+            "Fail rather than recompute sampled contours from the recording-level "
+            "dense authority."
+        ),
+    )
+    parser.add_argument(
+        "--sampled-contour-producer-commit",
+        help="Exact Palette commit recorded by every sampled-contour worker receipt.",
+    )
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -1037,6 +1187,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         require_complete_final_layout_units=bool(
             args.require_complete_final_layout_units
         ),
+        sampled_contour_worker_receipts=args.sampled_contour_worker_receipt,
+        require_worker_sampled_contours=bool(args.require_worker_sampled_contours),
+        sampled_contour_producer_commit=args.sampled_contour_producer_commit,
         activate=bool(args.activate),
         expected_work_units=expected_work_units,
     )

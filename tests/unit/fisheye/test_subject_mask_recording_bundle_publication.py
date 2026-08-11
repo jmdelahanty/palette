@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -41,6 +42,9 @@ from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     build_subject_mask_worker_semantic_receipt,
 )
+from fisheye.shared.refined_subject_component_contours import (
+    write_sampled_component_contour_arrays,
+)
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
 from fisheye.shared.import_video_metadata import (
     publish_external_video_acquisition_authority,
@@ -69,8 +73,12 @@ from fisheye.shared.zarr.subject_shape_bundle_source import (
     load_subject_shape_bundle_source,
 )
 from fisheye.shared.zarr.subject_mask_schema import (
+    SubjectMaskComponentRegistry,
     derive_subject_mask_frame_row_offsets,
     derive_subject_mask_metrics,
+)
+from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
+    write_subject_mask_sampled_contour_worker_receipt,
 )
 from fisheye.shared.zarr.subject_mask_validation_receipt import (
     subject_mask_array_unit_document,
@@ -282,6 +290,63 @@ def _draft(
             paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
         )
     return path
+
+
+def _install_worker_sampled_contours(
+    draft_path: Path,
+    *,
+    refined_runs: tuple[str, ...],
+) -> tuple[Path, ...]:
+    root = zarr.open_group(str(draft_path), mode="a", use_consolidated=False)
+    receipt_root = draft_path.parent / "sampled_contour_receipts"
+    receipt_root.mkdir()
+    receipt_paths: list[Path] = []
+    for refined_name in refined_runs:
+        run = root[f"refined_subject_masks_runs/{refined_name}"]
+        components = SubjectMaskComponentRegistry(tuple(run.attrs["mask_labels"]))
+        rows = int(run["masks_roi"].shape[0])
+        for component_index, component in enumerate(components.labels):
+            sample_count = {
+                "subject_body": 128,
+                "eye_left": 64,
+                "eye_right": 64,
+                "swim_bladder": 32,
+            }[component]
+            points = np.empty((rows, sample_count, 2), dtype=np.float32)
+            points[..., 0] = np.arange(sample_count, dtype=np.float32)
+            points[..., 1] = np.float32(component_index)
+            write_sampled_component_contour_arrays(
+                run.require_group("components").require_group(component),
+                points_xy=points,
+                valid=np.ones((rows,), dtype=bool),
+                source_point_count=np.full((rows,), sample_count, dtype=np.int32),
+                component=component,
+                source_mask_run=refined_name,
+                row_chunk=2,
+            )
+        run.attrs.update(
+            {
+                "sampled_component_contours_status": "computed",
+                "derived_mask_caches_stale": False,
+                "contours_stale": False,
+            }
+        )
+        binding = run.attrs["subject_mask_worker_semantic_receipt_binding"]
+        worker_receipt = json.loads(
+            (draft_path / binding["relative_path"]).read_text(encoding="utf-8")
+        )
+        rows_global = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64)
+        destination = receipt_root / f"{refined_name}.json"
+        write_subject_mask_sampled_contour_worker_receipt(
+            run,
+            destination=destination,
+            global_start_row=int(rows_global[0]),
+            worker_receipt=worker_receipt,
+            producer_commit="a" * 40,
+            unit_rows=2,
+        )
+        receipt_paths.append(destination)
+    return tuple(receipt_paths)
 
 
 def _install_crop_v2(draft_path: Path) -> None:
@@ -1048,6 +1113,73 @@ def test_recording_bundle_composes_multiple_refined_clip_shards_without_reorderi
     )
     assert refined.attrs["stage_selector_eligible"] is False
     assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
+
+
+def test_recording_bundle_assembles_standard_sampled_contour_member(
+    tmp_path: Path,
+) -> None:
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_a": slice(0, 2), "raw_clip_b": slice(2, 4)},
+        refined_slices={
+            "refined_clip_a": slice(0, 2),
+            "refined_clip_b": slice(2, 4),
+        },
+    )
+    receipts = _install_worker_sampled_contours(
+        draft,
+        refined_runs=("refined_clip_a", "refined_clip_b"),
+    )
+    analysis = tmp_path / "analysis_sampled_contours.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "recording_001"
+
+    result = publish_recording_subject_mask_bundle(
+        analysis_zarr=analysis,
+        draft_zarr=draft,
+        crop_run="crop_001",
+        raw_draft_parent="subject_mask_shard_runs",
+        raw_draft_run="raw_clip_b",
+        raw_draft_runs=("raw_clip_b", "raw_clip_a"),
+        refined_draft_run="refined_clip_b",
+        refined_draft_runs=("refined_clip_b", "refined_clip_a"),
+        raw_run="raw_sampled_001",
+        refined_run="refined_sampled_001",
+        quality_run="quality_sampled_001",
+        cache_run="sampled_contours_001",
+        bundle_id="bundle_sampled_001",
+        local_output_root=tmp_path / "local_sampled_outputs",
+        quality_scratch_root=tmp_path / "quality_sampled_scratch",
+        coordinate_contract_policy="legacy_allow_missing",
+        sampled_contour_worker_receipts=tuple(reversed(receipts)),
+        require_worker_sampled_contours=True,
+        sampled_contour_producer_commit="a" * 40,
+    )
+
+    assert result["publication_execution"]["sampled_contour_source_mode"] == (
+        "receipt_bound_worker_arrays"
+    )
+    assert result["cache_manifest_digest"] is not None
+    published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    cache = published["subject_mask_cache_runs/sampled_contours_001"]
+    manifest = cache.attrs["run_manifest"]
+    assert manifest["schema_version"] == 2
+    assert manifest["payload"]["write_receipt"]["worker_assembly"]["worker_count"] == 2
+    assert cache["components/subject_body/sampled_contours/points_xy"].shape == (
+        4,
+        128,
+        2,
+    )
+    bundle = published["subject_mask_bundle_runs/bundle_sampled_001"].attrs[
+        "run_manifest"
+    ]
+    assert set(bundle["payload"]["members"]) == {
+        "raw",
+        "refined",
+        "quality",
+        "presentation_cache",
+    }
 
 
 def test_recording_bundle_binds_distinct_raw_and_refined_component_registries(
