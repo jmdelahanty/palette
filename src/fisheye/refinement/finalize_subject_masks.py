@@ -295,6 +295,9 @@ _CROP_REBASE_COPY_ARRAYS = (
     "source_refined_row_ids",
     "source_detect_row_index",
     "detection_indices",
+    "instance_key",
+    "source_acquisition_frame_index",
+    "source_crop_xywh",
 )
 _SUBJECT_MASK_SHARD_COMPAT_ATTRS = (
     "mask_labels",
@@ -1255,6 +1258,8 @@ def _load_subject_mask_source(
             "source_refined_row_ids",
             "source_detect_row_index",
             "instance_key",
+            "source_acquisition_frame_index",
+            "source_crop_xywh",
         )
         for name in array_names:
             source_arrays = [shard.source.group.get(name) for shard in shards]
@@ -5569,6 +5574,44 @@ def _refined_source_row_identity_document(
     }
 
 
+def _validate_refined_production_row_identity_source(
+    source: SourceSubjectMaskRun,
+) -> None:
+    """Reject incomplete canonical lineage before expensive mask refinement."""
+
+    row_count = int(source.masks_roi.shape[0])
+    expected = {
+        "source_crop_row_ids": ((row_count,), np.dtype(np.int64)),
+        "instance_key": ((row_count,), np.dtype(np.uint64)),
+        "source_acquisition_frame_index": ((row_count,), np.dtype(np.int64)),
+        "source_crop_xywh": ((row_count, 4), np.dtype(np.float32)),
+    }
+    errors: list[str] = []
+    for name, (expected_shape, expected_dtype) in expected.items():
+        value = source.group.get(name)
+        if value is None:
+            errors.append(f"missing {name}")
+            continue
+        actual_shape = tuple(int(item) for item in value.shape)
+        actual_dtype = np.dtype(value.dtype)
+        if actual_shape != expected_shape:
+            errors.append(f"{name} shape {actual_shape!r} != {expected_shape!r}")
+        if actual_dtype != expected_dtype:
+            errors.append(f"{name} dtype {actual_dtype!s} != {expected_dtype!s}")
+
+    available = np.asarray(source.available_channels)
+    if available.ndim != 1 or available.size <= 0:
+        errors.append("available_channels must be a nonempty one-dimensional array")
+    if available.dtype != np.dtype(bool):
+        errors.append(f"available_channels dtype {available.dtype!s} != bool")
+
+    if errors:
+        raise ValueError(
+            "Production refined-mask row-identity preflight failed: "
+            + "; ".join(errors)
+        )
+
+
 def _build_refined_subject_mask_scientific_identity(
     *,
     source: SourceSubjectMaskRun,
@@ -6226,6 +6269,8 @@ def finalize_subject_mask_run(
         subject_shard_runs=subject_shard_runs,
         target_crop_run=target_crop_run,
     )
+    if require_production_proof:
+        _validate_refined_production_row_identity_source(source)
     future_canonical = bool(source.canonical_coordinates and shard_collection is None)
     if future_canonical and retain_source_seeds:
         raise ValueError(

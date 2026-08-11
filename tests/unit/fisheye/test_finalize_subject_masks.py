@@ -1059,6 +1059,40 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
     return root
 
 
+def _stamp_v2_shard_row_identity(root: zarr.Group) -> None:
+    crop_specs = {
+        "crop_clip_a": {
+            "instance_key": np.asarray([1001], dtype=np.uint64),
+            "source_acquisition_frame_index": np.asarray([10], dtype=np.int64),
+            "source_crop_xywh": np.asarray([[4, 5, 10, 10]], dtype=np.float32),
+        },
+        "crop_clip_b": {
+            "instance_key": np.asarray([1002], dtype=np.uint64),
+            "source_acquisition_frame_index": np.asarray([11], dtype=np.int64),
+            "source_crop_xywh": np.asarray([[14, 15, 10, 10]], dtype=np.float32),
+        },
+    }
+    for crop_name, arrays in crop_specs.items():
+        crop = root[f"crop_runs/{crop_name}"]
+        shard_name = f"subject_masks_{crop_name.removeprefix('crop_')}"
+        shard = root[f"subject_mask_shard_runs/{shard_name}"]
+        for name, values in arrays.items():
+            crop.create_array(name, data=values, overwrite=True)
+            shard.create_array(name, data=values, overwrite=True)
+
+    collection = root["crop_runs/crop_collection"]
+    for name in (
+        "instance_key",
+        "source_acquisition_frame_index",
+        "source_crop_xywh",
+    ):
+        values = np.concatenate(
+            [crop_specs["crop_clip_a"][name], crop_specs["crop_clip_b"][name]],
+            axis=0,
+        )
+        collection.create_array(name, data=values, overwrite=True)
+
+
 def _stamp_complete_partition_contract(
     root: zarr.Group,
     run: zarr.Group,
@@ -1311,6 +1345,66 @@ def test_collection_same_crop_target_does_not_require_clipped_rebase_identity() 
     assert collection.source_crop_rebased_from_shards is False
     np.testing.assert_array_equal(collection.source_crop_row_ids, np.asarray([0]))
     np.testing.assert_array_equal(source.source_crop_row_ids[:], np.asarray([0]))
+
+
+def test_collection_preserves_exact_v2_production_row_identity() -> None:
+    root = _build_sharded_subject_mask_root()
+    _stamp_v2_shard_row_identity(root)
+
+    source, collection = mod._load_subject_mask_source(
+        root,
+        subject_run=None,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+    )
+
+    assert collection is not None
+    mod._validate_refined_production_row_identity_source(source)
+    np.testing.assert_array_equal(
+        source.group["source_crop_row_ids"][:], np.asarray([0, 1], dtype=np.int64)
+    )
+    np.testing.assert_array_equal(
+        source.group["instance_key"][:], np.asarray([1001, 1002], dtype=np.uint64)
+    )
+    np.testing.assert_array_equal(
+        source.group["source_acquisition_frame_index"][:],
+        np.asarray([10, 11], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        source.group["source_crop_xywh"][:],
+        np.asarray([[4, 5, 10, 10], [14, 15, 10, 10]], dtype=np.float32),
+    )
+
+
+def test_production_row_identity_preflight_rejects_missing_collection_placement(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "missing_placement.zarr"
+    root = _build_sharded_subject_mask_root(zarr_path)
+    _stamp_v2_shard_row_identity(root)
+    for path in (
+        "crop_runs/crop_clip_a/source_crop_xywh",
+        "crop_runs/crop_clip_b/source_crop_xywh",
+        "crop_runs/crop_collection/source_crop_xywh",
+        "subject_mask_shard_runs/subject_masks_clip_a/source_crop_xywh",
+        "subject_mask_shard_runs/subject_masks_clip_b/source_crop_xywh",
+    ):
+        del root[path]
+
+    with pytest.raises(
+        ValueError,
+        match="Production refined-mask row-identity preflight failed: missing source_crop_xywh",
+    ):
+        mod.finalize_subject_mask_run(
+            root,
+            zarr_path=zarr_path,
+            subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+            target_crop_run="crop_collection",
+            refined_run="must_not_compute",
+            components=["subject_body", "swim_bladder"],
+            require_production_proof=True,
+        )
+    assert "refined_subject_masks_runs" not in root
 
 
 def test_collection_worker_plan_reuses_parent_rebase_without_identity_map(
@@ -3037,7 +3131,23 @@ def test_production_proof_finalizer_binds_draft_audit_and_stays_inactive(
 ) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     zarr_path = tmp_path / "analysis.zarr"
-    _build_probability_root(zarr_path)
+    root = _build_probability_root(zarr_path)
+    raw = root["subject_mask_runs/subject_probs_001"]
+    raw.create_array(
+        "instance_key",
+        data=np.asarray([1001, 1002], dtype=np.uint64),
+        overwrite=True,
+    )
+    raw.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([10, 11], dtype=np.int64),
+        overwrite=True,
+    )
+    raw.create_array(
+        "source_crop_xywh",
+        data=np.asarray([[2, 3, 10, 10], [4, 5, 10, 10]], dtype=np.float32),
+        overwrite=True,
+    )
     science = mod.build_subject_mask_scientific_identity(
         stage_kind="refined_subject_mask",
         model={"method": "pytest"},
