@@ -27,6 +27,10 @@ from fisheye.shared.roi_pixel_contract import (
 )
 from fisheye.shared.row_lineage import copy_selected_crop_row_lineage_arrays
 from fisheye.shared.row_source_signature import build_row_source_signatures
+from fisheye.segmentation.infer_unet_subject_masks import (
+    _validate_package_subject_mask_selection,
+    _write_package_subject_mask_crop_placement,
+)
 from tests.unit.fisheye.test_crop_consumer import _strict_crop
 
 
@@ -58,6 +62,22 @@ def _crop_root() -> tuple[Any, Any]:
     )
     crop.create_array("detection_indices", data=np.arange(5, dtype=np.int64))
     crop.create_array("roi_coordinates_full", data=coordinates, chunks=(2, 2))
+    crop.create_array(
+        "source_acquisition_frame_index",
+        data=frames,
+        chunks=(2,),
+    )
+    crop.create_array(
+        "source_crop_xywh",
+        data=np.column_stack(
+            (
+                coordinates.astype(np.float32),
+                np.full((5,), 4, dtype=np.float32),
+                np.full((5,), 3, dtype=np.float32),
+            )
+        ),
+        chunks=(2, 4),
+    )
     crop.create_array(
         "source_row_signature", data=signatures.signatures, chunks=(2, 32)
     )
@@ -469,6 +489,18 @@ def test_selected_lineage_is_identical_for_keypoint_and_mask_fanout(
             assert "instance_key" in result.copied
             assert "source_crop_row_ids" in result.copied
 
+        selected_mask_values = _write_package_subject_mask_crop_placement(
+            masks,
+            crop,
+            source.source_crop_row_ids,
+        )
+        _validate_package_subject_mask_selection(
+            masks,
+            crop,
+            source.source_crop_row_ids,
+            expected=selected_mask_values,
+        )
+
         for name in (
             "instance_key",
             "frame_indices",
@@ -481,6 +513,57 @@ def test_selected_lineage_is_identical_for_keypoint_and_mask_fanout(
         np.testing.assert_array_equal(keypoint["frame_indices"][:], [1, 3])
         np.testing.assert_array_equal(keypoint["frame_counts"][:], [0, 1, 0, 1, 0, 0])
         np.testing.assert_array_equal(keypoint["source_crop_row_ids"][:], [1, 3])
+        assert masks["source_crop_xywh"].dtype == np.dtype(np.float32)
+        np.testing.assert_array_equal(
+            masks["source_crop_xywh"][:],
+            np.asarray(crop["source_crop_xywh"][[1, 3]]),
+        )
+    finally:
+        source.close()
+
+
+def test_package_subject_mask_selection_rejects_missing_or_wrong_placement(
+    tmp_path: Path,
+) -> None:
+    root, crop = _crop_root()
+    _manifest, manifest_path = _build(root, tmp_path)
+    source = CropImageSource.open_work_package(
+        root,
+        manifest_path=manifest_path,
+        zarr_path=tmp_path / "recording.analysis.zarr",
+    )
+    try:
+        missing = root.require_group("subject_mask_shard_runs").create_group(
+            "missing_placement"
+        )
+        copy_selected_crop_row_lineage_arrays(
+            missing,
+            crop,
+            source.source_crop_row_ids,
+        )
+        with pytest.raises(RuntimeError, match="source_crop_xywh"):
+            _validate_package_subject_mask_selection(
+                missing,
+                crop,
+                source.source_crop_row_ids,
+            )
+
+        wrong = root["subject_mask_shard_runs"].create_group("wrong_placement")
+        copy_selected_crop_row_lineage_arrays(
+            wrong,
+            crop,
+            source.source_crop_row_ids,
+        )
+        wrong.create_array(
+            "source_crop_xywh",
+            data=np.asarray(crop["source_crop_xywh"][[1, 3]], dtype=np.float64),
+        )
+        with pytest.raises(RuntimeError, match="dtype"):
+            _validate_package_subject_mask_selection(
+                wrong,
+                crop,
+                source.source_crop_row_ids,
+            )
     finally:
         source.close()
 

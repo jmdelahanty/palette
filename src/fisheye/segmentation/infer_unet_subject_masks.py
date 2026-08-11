@@ -1113,6 +1113,146 @@ def _write_canonical_subject_mask_selection(
     return selected
 
 
+_PACKAGE_SUBJECT_MASK_SELECTION_DTYPES: dict[str, np.dtype] = {
+    "source_crop_row_ids": np.dtype("<i8"),
+    "instance_key": np.dtype("<u8"),
+    "source_acquisition_frame_index": np.dtype("<i8"),
+    "source_crop_xywh": np.dtype("<f4"),
+}
+
+
+def _selected_package_subject_mask_crop_values(
+    crop_group: zarr.Group,
+    source_crop_row_ids: Sequence[int] | np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Resolve the exact crop-v2 identity and placement used by one package."""
+
+    raw_rows = np.asarray(source_crop_row_ids)
+    if raw_rows.ndim != 1 or raw_rows.dtype.kind not in {"i", "u"}:
+        raise ValueError(
+            "Package-backed subject-mask crop rows must be one integer vector."
+        )
+    rows = np.asarray(raw_rows, dtype="<i8")
+    if rows.size == 0:
+        raise ValueError("Package-backed subject-mask selection cannot be empty.")
+    if "frame_indices" not in crop_group:
+        raise ValueError("Package-backed subject masks require crop frame_indices.")
+    crop_row_count = int(crop_group["frame_indices"].shape[0])
+    if int(rows.min()) < 0 or int(rows.max()) >= crop_row_count:
+        raise ValueError(
+            "Package-backed subject-mask selection contains an out-of-bounds crop row."
+        )
+    if int(np.unique(rows).shape[0]) != int(rows.shape[0]):
+        raise ValueError(
+            "Package-backed subject-mask selection requires unique crop rows."
+        )
+
+    selected: dict[str, np.ndarray] = {"source_crop_row_ids": rows}
+    source_shapes = {
+        "instance_key": (crop_row_count,),
+        "source_acquisition_frame_index": (crop_row_count,),
+        "source_crop_xywh": (crop_row_count, 4),
+    }
+    for name, expected_shape in source_shapes.items():
+        if name not in crop_group:
+            raise ValueError(
+                f"Package-backed subject masks require crop-v2 array {name!r}."
+            )
+        source_array = crop_group[name]
+        expected_dtype = _PACKAGE_SUBJECT_MASK_SELECTION_DTYPES[name]
+        if tuple(map(int, source_array.shape)) != expected_shape:
+            raise ValueError(
+                f"Crop-v2 array {name!r} has shape {source_array.shape}, expected "
+                f"{expected_shape}."
+            )
+        if np.dtype(source_array.dtype) != expected_dtype:
+            raise ValueError(
+                f"Crop-v2 array {name!r} has dtype {source_array.dtype}, expected "
+                f"{expected_dtype}."
+            )
+        values = np.asarray(source_array[rows])
+        if values.dtype != expected_dtype:
+            raise RuntimeError(
+                f"Selected crop-v2 array {name!r} changed dtype during indexed read."
+            )
+        selected[name] = np.ascontiguousarray(values)
+    return selected
+
+
+def _write_package_subject_mask_crop_placement(
+    run_group: zarr.Group,
+    crop_group: zarr.Group,
+    source_crop_row_ids: Sequence[int] | np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Persist subject-mask-specific crop placement for a pixel work package."""
+
+    selected = _selected_package_subject_mask_crop_values(
+        crop_group,
+        source_crop_row_ids,
+    )
+    placement = selected["source_crop_xywh"]
+    row_count = int(placement.shape[0])
+    source_chunks = getattr(crop_group["source_crop_xywh"], "chunks", None)
+    source_row_chunk = (
+        int(source_chunks[0])
+        if source_chunks is not None and len(source_chunks) > 0
+        else 4096
+    )
+    # This is a terminal worker array, not the recording-level publication.
+    # Finalization re-plans and rematerializes its complete immutable shard grid.
+    chunks = (max(1, min(row_count, source_row_chunk)), 4)
+    run_group.create_array(
+        "source_crop_xywh",
+        data=placement,
+        chunks=chunks,
+        overwrite=True,
+    )
+    _validate_package_subject_mask_selection(
+        run_group,
+        crop_group,
+        source_crop_row_ids,
+        expected=selected,
+    )
+    return selected
+
+
+def _validate_package_subject_mask_selection(
+    run_group: zarr.Group,
+    crop_group: zarr.Group,
+    source_crop_row_ids: Sequence[int] | np.ndarray,
+    *,
+    expected: Mapping[str, np.ndarray] | None = None,
+) -> None:
+    """Fail closed unless a package worker retains its exact crop-v2 selection."""
+
+    resolved = (
+        dict(expected)
+        if expected is not None
+        else _selected_package_subject_mask_crop_values(
+            crop_group,
+            source_crop_row_ids,
+        )
+    )
+    for name, expected_dtype in _PACKAGE_SUBJECT_MASK_SELECTION_DTYPES.items():
+        if name not in run_group:
+            raise RuntimeError(
+                f"Package-backed subject-mask output is missing required array {name!r}."
+            )
+        observed_array = run_group[name]
+        observed = np.asarray(observed_array[:])
+        selected = np.asarray(resolved[name])
+        if np.dtype(observed_array.dtype) != expected_dtype:
+            raise RuntimeError(
+                f"Package-backed subject-mask array {name!r} has dtype "
+                f"{observed_array.dtype}, expected {expected_dtype}."
+            )
+        if observed.shape != selected.shape or not np.array_equal(observed, selected):
+            raise RuntimeError(
+                f"Package-backed subject-mask array {name!r} differs from its "
+                "exact selected crop-v2 rows."
+            )
+
+
 def _output_parent_from_args(args: argparse.Namespace) -> str:
     output_parent = str(
         getattr(args, "output_parent", SUBJECT_MASK_CANONICAL_OUTPUT_PARENT)
@@ -3088,6 +3228,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     shard_attrs = _shard_attrs_from_args(args, output_parent=output_parent)
     timing_profiler = InferenceTimingProfiler(enabled=bool(args.profile_timings))
     canonical_coordinate_context = None
+    package_selection: dict[str, np.ndarray] | None = None
 
     try:
         if canonical_crop_source is not None:
@@ -3135,6 +3276,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     crop_group,
                     selected_crop_rows,
                 )
+                if getattr(crop_source, "pixel_materialization_id", None) is not None:
+                    package_selection = _write_package_subject_mask_crop_placement(
+                        run_group,
+                        crop_group,
+                        selected_crop_rows,
+                    )
             else:
                 copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
                 write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
@@ -3202,6 +3349,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             input_pixels_sha256=input_pixels_sha256,
             validation_accumulators=validation_accumulators,
         )
+        if package_selection is not None:
+            assert selected_crop_rows is not None
+            _validate_package_subject_mask_selection(
+                run_group,
+                crop_group,
+                selected_crop_rows,
+                expected=package_selection,
+            )
     finally:
         if boundary is not None:
             boundary.close_crop_source()
