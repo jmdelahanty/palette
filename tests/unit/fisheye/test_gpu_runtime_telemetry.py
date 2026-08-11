@@ -69,7 +69,7 @@ def _sampler(path: Path) -> tuple[GpuRuntimeTelemetrySampler, list[str]]:
     return sampler, observed_command
 
 
-def test_sampler_persists_exact_trace_summary_and_lsf_gpu_selection(
+def test_sampler_persists_exact_trace_summary_and_job_local_gpu_selection(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "gpu_runtime.json"
@@ -90,11 +90,39 @@ def test_sampler_persists_exact_trace_summary_and_lsf_gpu_selection(
         "max": 95.0,
     }
     assert report["execution"]["lsb_jobid"] == "123"
-    assert report["sampler"]["device_selector"] == "3"
-    assert report["sampler"]["device_selector_source"] == ("CUDA_VISIBLE_DEVICES_ORIG")
-    assert command[-2:] == ["-i", "3"]
+    assert report["sampler"]["device_selector"] == "0"
+    assert report["sampler"]["device_selector_source"] == "CUDA_VISIBLE_DEVICES"
+    assert report["execution"]["cuda_visible_devices"] == "0"
+    assert report["execution"]["cuda_visible_devices_orig"] == "3"
+    assert command[-2:] == ["-i", "0"]
     assert not (tmp_path / ".gpu_runtime.json.raw.csv").exists()
     assert not (tmp_path / ".gpu_runtime.json.stderr").exists()
+
+
+def test_sampler_falls_back_to_original_gpu_selector_without_job_local_value(
+    tmp_path: Path,
+) -> None:
+    observed_command: list[str] = []
+
+    def popen(command: list[str], **kwargs: Any) -> _FakeProcess:
+        observed_command[:] = command
+        return _FakeProcess(stdout=kwargs["stdout"], stderr=kwargs["stderr"])
+
+    sampler = GpuRuntimeTelemetrySampler(
+        output_path=tmp_path / "gpu_runtime.json",
+        environment={"CUDA_VISIBLE_DEVICES_ORIG": "3"},
+        executable_resolver=lambda _name: "/usr/bin/nvidia-smi",
+        popen_factory=popen,
+    )
+
+    report = sampler.start().stop(workload_outcome="success")
+
+    require_gpu_runtime_telemetry(report)
+    assert report["sampler"]["device_selector"] == "3"
+    assert report["sampler"]["device_selector_source"] == (
+        "CUDA_VISIBLE_DEVICES_ORIG"
+    )
+    assert observed_command[-2:] == ["-i", "3"]
 
 
 def test_missing_nvidia_smi_is_valid_missing_performance_evidence(

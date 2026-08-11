@@ -290,11 +290,14 @@ _CROP_REBASE_IDENTITY_ARRAYS = (
 _CROP_REBASE_COPY_ARRAYS = (
     "frame_indices",
     "source_frame_indices",
+    "source_acquisition_frame_index",
     "source_clip_indices",
     "source_clip_local_frame_indices",
     "source_refined_row_ids",
     "source_detect_row_index",
     "detection_indices",
+    "instance_key",
+    "source_crop_xywh",
 )
 _SUBJECT_MASK_SHARD_COMPAT_ATTRS = (
     "mask_labels",
@@ -1255,6 +1258,8 @@ def _load_subject_mask_source(
             "source_refined_row_ids",
             "source_detect_row_index",
             "instance_key",
+            "source_acquisition_frame_index",
+            "source_crop_xywh",
         )
         for name in array_names:
             source_arrays = [shard.source.group.get(name) for shard in shards]

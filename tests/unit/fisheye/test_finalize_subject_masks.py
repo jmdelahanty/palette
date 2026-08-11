@@ -933,21 +933,31 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
         "crop_clip_a": {
             "frame_indices": np.asarray([10], dtype=np.int32),
             "source_frame_indices": np.asarray([10], dtype=np.int32),
+            "source_acquisition_frame_index": np.asarray([10], dtype=np.int64),
             "source_clip_indices": np.asarray([0], dtype=np.int32),
             "source_clip_local_frame_indices": np.asarray([0], dtype=np.int32),
             "source_refined_row_ids": np.asarray([100], dtype=np.int64),
             "source_detect_row_index": np.asarray([1000], dtype=np.int64),
             "detection_indices": np.asarray([0], dtype=np.int32),
+            "instance_key": np.asarray([10000], dtype=np.uint64),
+            "source_crop_xywh": np.asarray(
+                [[4.0, 5.0, 10.0, 10.0]], dtype=np.float32
+            ),
             "roi_coordinates_full": np.asarray([[4, 5]], dtype=np.int32),
         },
         "crop_clip_b": {
             "frame_indices": np.asarray([11], dtype=np.int32),
             "source_frame_indices": np.asarray([11], dtype=np.int32),
+            "source_acquisition_frame_index": np.asarray([11], dtype=np.int64),
             "source_clip_indices": np.asarray([1], dtype=np.int32),
             "source_clip_local_frame_indices": np.asarray([0], dtype=np.int32),
             "source_refined_row_ids": np.asarray([101], dtype=np.int64),
             "source_detect_row_index": np.asarray([1001], dtype=np.int64),
             "detection_indices": np.asarray([1], dtype=np.int32),
+            "instance_key": np.asarray([10001], dtype=np.uint64),
+            "source_crop_xywh": np.asarray(
+                [[14.0, 15.0, 10.0, 10.0]], dtype=np.float32
+            ),
             "roi_coordinates_full": np.asarray([[14, 15]], dtype=np.int32),
         },
     }
@@ -1014,6 +1024,23 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
         run.create_array(
             "detection_indices",
             data=np.asarray(crop["detection_indices"][:], dtype=np.int32),
+            overwrite=True,
+        )
+        run.create_array(
+            "instance_key",
+            data=np.asarray(crop["instance_key"][:], dtype=np.uint64),
+            overwrite=True,
+        )
+        run.create_array(
+            "source_acquisition_frame_index",
+            data=np.asarray(
+                crop["source_acquisition_frame_index"][:], dtype=np.int64
+            ),
+            overwrite=True,
+        )
+        run.create_array(
+            "source_crop_xywh",
+            data=np.asarray(crop["source_crop_xywh"][:], dtype=np.float32),
             overwrite=True,
         )
         run.create_array(
@@ -1127,6 +1154,10 @@ def _stamp_complete_partition_contract(
             "source_acquisition_frame_index",
             data=np.asarray([frame_index], dtype=np.int64),
             overwrite=True,
+        )
+    else:
+        run["source_acquisition_frame_index"][:] = np.asarray(
+            [frame_index], dtype=np.int64
         )
     crop = root[f"crop_runs/{run.attrs['source_crop_run']}"]
     crop.create_array(
@@ -1273,6 +1304,42 @@ def test_finalize_subject_mask_run_from_shard_collection_rebases_to_target_crop(
     assert provenance["source_stage"] == "subject_mask_shard_runs"
     assert provenance["source_probability_path"] == (
         "subject_mask_shard_runs/subject_mask_shard_collection/mask_probs_roi"
+    )
+
+
+def test_refined_shard_collection_preserves_exact_v2_row_identity_inventory() -> None:
+    root = _build_sharded_subject_mask_root()
+
+    source, collection = mod._load_subject_mask_source(
+        root,
+        subject_run=None,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+    )
+
+    assert collection is not None
+    row_identity = mod._refined_source_row_identity_document(source)
+    assert set(row_identity["arrays"]) == {
+        "source_crop_row_ids",
+        "instance_key",
+        "source_acquisition_frame_index",
+        "source_crop_xywh",
+        "available_channels",
+    }
+    assert row_identity["arrays"]["source_crop_row_ids"]["dtype"] == "int64"
+    assert row_identity["arrays"]["instance_key"]["dtype"] == "uint64"
+    assert (
+        row_identity["arrays"]["source_acquisition_frame_index"]["dtype"]
+        == "int64"
+    )
+    assert row_identity["arrays"]["source_crop_xywh"]["dtype"] == "float32"
+    np.testing.assert_array_equal(
+        source.group["source_acquisition_frame_index"][:],
+        np.asarray([10, 11], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        source.group["instance_key"][:],
+        np.asarray([10000, 10001], dtype=np.uint64),
     )
 
 
