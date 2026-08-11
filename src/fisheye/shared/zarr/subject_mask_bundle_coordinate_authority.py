@@ -1,4 +1,4 @@
-"""Strict reader for recording-level subject-mask coordinate-v4 cores."""
+"""Strict reader for recording-level subject-mask coordinate-v4/v5 cores."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from fisheye.shared.zarr.subject_mask_bundle_publication import (
     validate_subject_mask_bundle_candidate,
 )
 from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
 )
@@ -372,12 +373,14 @@ def load_recording_subject_mask_coordinate_authority(
         not isinstance(raw_manifest, Mapping)
         or not isinstance(refined_manifest, Mapping)
         or raw_manifest.get("schema_version")
-        != SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
-        or refined_manifest.get("schema_version")
-        != SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        not in {
+            SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+            SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+        }
+        or refined_manifest.get("schema_version") != raw_manifest.get("schema_version")
     ):
         raise SubjectMaskBundleCoordinateAuthorityError(
-            "Bundle members are not coordinate-core-v4 publications."
+            "Bundle members are not matching coordinate-core-v4/v5 publications."
         )
     crop_path = str(coordinate["crop"]["run_path"])
     crop_run = root[crop_path]

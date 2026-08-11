@@ -2,8 +2,9 @@
 
 Date: 2026-08-11
 
-Status: implementation checklist; Phase A complete, Phase B implemented for
-the v4-compatible canary path
+Status: implementation checkpoint complete for Phases A-B and the Phase-C
+publication boundary; row-local quality reuse is deferred and the
+recording-scale Phase-D canary remains pending
 
 ## Goal
 
@@ -24,8 +25,9 @@ selector activation.
   chunks or shards.
 - [x] No worker writes attributes, manifests, completion markers, consolidated
   metadata, or selectors.
-- [x] The canonical logical SHA-256 order and source-validation receipt checks
-  remain unchanged.
+- [x] Legacy whole-value SHA-256 manifests remain readable and valid. The new
+  payload identity is explicitly versioned, storage-independent, ordered by
+  fixed global row units, and bound to exact worker validation receipts.
 - [x] A worker exception marks the staged run failed; it cannot publish or
   activate a partial authority.
 - [x] Existing validated clip artifacts remain reusable after finalizer failure.
@@ -90,14 +92,20 @@ cluster trials with RSS and I/O evidence.
 - [x] Keep the assembled candidate selector-ineligible until all units,
   manifests, direct metadata, and consolidated metadata validate.
 
-The current manifest-v4 compatibility boundary still requires one canonical,
-serial decoded read/hash pass. SHA-256 over the entire C-order byte stream
-cannot be reconstructed from independent worker SHA-256 digests. Phase B
-therefore eliminates finalizer-side compression for complete worker-owned
-units and rebuilds only cross-worker boundary units, but it does not claim to
-eliminate that v4 logical-validation read. Removing the read requires a new
-manifest version with an ordered composable unit identity and coordinated
-Palette/Crimson adoption.
+The legacy manifest-v2/v4 compatibility boundary still requires one canonical
+decoded whole-value hash. The new manifest-v3/v5 path replaces only the large
+dense payload's whole-value SHA with a storage-independent ordered identity:
+global 256-row logical units, each containing its decoded byte count and
+SHA-256. Narrow lineage and metric arrays retain conventional whole-value
+SHA-256 records.
+
+Workers validate their decoded payload against their existing semantic receipt
+during final-layout packaging and emit complete logical units or authenticated
+segments for a unit that crosses a worker boundary. The finalizer binds each
+package to the exact worker receipt, copies already encoded complete physical
+units, and decodes only logical or physical units crossing worker boundaries.
+It cannot silently fall back to a full decoded payload scan in composable mode.
+Legacy streaming mode remains available for old packages and rollback.
 
 Worker packages contain only the large dense authority payloads:
 `mask_probs_roi` and `masks_roi`. Narrow lineage/metric arrays remain cheap
@@ -123,7 +131,7 @@ in-memory source and local filesystem, so real compressed-source decoding,
 PRFS package transfer, clip boundaries, RSS, and quality publication still
 require the recording-scale Phase D gate.
 
-Implementation validation at this checkpoint:
+Implementation validation at the Phase-B checkpoint:
 
 - 38 focused core, canary, and atomic recording-bundle tests passed;
 - exact decoded equality, complete-unit adoption, cross-worker boundary
@@ -159,13 +167,28 @@ readable and migratable as optional cold inspection/export data.
   member while preserving explicit legacy three-member publication.
 - [x] Forbid full ragged contours in the new worker default while retaining
   historical readers and migration.
+- [x] Validate the refined composable identity during the already-required
+  bounded quality computation, rather than add a separate hash-only scan.
+- [x] Emit the conventional whole refined-mask SHA from that quality pass so
+  the existing quality manifest remains honest and compatible.
 - [ ] Compute row-local quality evidence with the same final physical-unit
-  ownership where scientifically valid.
+  ownership where scientifically valid, eliminating the quality computation's
+  own full dense traversal.
 - [ ] Define explicit boundary/global reducers for non-row-local metrics.
-- [ ] Bind quality unit receipts to the exact refined dense-mask digest.
+- [x] Bind quality input to the exact refined manifest, component registry,
+  complete dense logical-unit identity, and whole-value identities of every
+  narrow source array.
 - [ ] Assemble quality arrays without a second full dense-mask scan.
 - [ ] Regenerate stale bitpacked/RLE/contour caches only at explicit validation,
   promotion, or maintenance boundaries.
+
+The unchecked quality-local items are an explicit follow-on optimization. They
+are not required to remove the redundant core-finalizer scan: quality still
+has to read refined masks to compute scientific QC, and the current checkpoint
+validates the composable identity during that same bounded traversal. A future
+worker-local quality design may reuse more computation, but it must first
+define scientifically correct reducers for metrics that cross row or worker
+boundaries.
 
 ## Phase D — benchmark and promotion
 
@@ -178,6 +201,30 @@ readable and migratable as optional cold inspection/export data.
 - [ ] Run one selector-ineligible full-duration canary.
 - [ ] Promote a bounded default only after required CI and canary gates pass;
   retain the serial setting as rollback.
+
+The full-duration canary already running from commit `85bdb492` exercises the
+legacy v4 whole-hash path and is intentionally unaffected by this change. A
+fresh canary from the composable implementation is required to measure the
+eliminated finalizer scan. It must report separate core publication and quality
+compute phases: the former should no longer decode every complete dense unit,
+while the latter still reads refined masks because it computes scientific QC.
+
+Implementation validation for the composable checkpoint:
+
+- 64 focused core, quality, cache, bundle, recording-bundle, and canary tests
+  passed in one combined outside-sandbox run;
+- a fail-on-read source proves complete adopted physical units are published
+  without finalizer decoding;
+- package schema v2 binds the exact worker array-unit receipt and is mandatory
+  in the composable canary;
+- quality rejects a changed dense value against the composed identity while
+  retaining its bounded block computation;
+- the end-to-end recording fixture publishes coordinate-aware core manifest v5,
+  carries the quality-derived whole-mask digest into the sampled-contour cache,
+  binds the four-member bundle, and opens it through the strict inactive
+  coordinate-authority reader;
+- legacy v2/v4 publication tests remain green;
+- Ruff, Black, Python compilation, and `git diff --check` pass.
 
 ## Failure semantics
 

@@ -17,9 +17,17 @@ from fisheye.shared.zarr.subject_mask_quality_producer import (
     prepare_in_memory_observation_local_subject_mask_quality,
 )
 from fisheye.shared.zarr.subject_mask_quality_publication import (
+    SubjectMaskQualityComposableSourceExpectation,
     publish_selector_ineligible_subject_mask_quality_snapshot,
     require_local_subject_mask_quality_scratch_root,
     validate_subject_mask_quality_shadow_publication,
+)
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+)
+from fisheye.shared.zarr.subject_mask_validation_receipt import (
+    SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM,
 )
 from fisheye.shared.zarr.subject_mask_quality_schema import (
     SUBJECT_MASK_QUALITY_SCHEMA_V1,
@@ -69,9 +77,7 @@ def _fixture() -> tuple[
         "masks_roi": masks,
         "instance_key": np.asarray([101, 102, 201, 301], dtype=np.uint64),
         "source_crop_row_ids": np.arange(4, dtype=np.int64),
-        "source_acquisition_frame_index": np.asarray(
-            [0, 0, 2, 3], dtype=np.int64
-        ),
+        "source_acquisition_frame_index": np.asarray([0, 0, 2, 3], dtype=np.int64),
         "frame_row_offsets": np.asarray([0, 2, 2, 3, 4], dtype=np.int64),
         "available_channels": np.ones((4,), dtype=bool),
     }
@@ -86,9 +92,7 @@ def _fixture() -> tuple[
         run_name="refined_subject_masks_001",
         manifest_digest=canonical_json_sha256(source_manifest),
         dense_array_values_sha256=sha256_array(masks),
-        component_registry_digest=canonical_json_sha256(
-            _components().as_manifest()
-        ),
+        component_registry_digest=canonical_json_sha256(_components().as_manifest()),
         source_array_values_sha256={
             path: sha256_array(arrays[path])
             for path in (
@@ -164,6 +168,78 @@ def test_bounded_selector_ineligible_publication_round_trip(tmp_path: object) ->
             np.testing.assert_array_equal(observed, wanted)
 
 
+def test_composable_source_is_verified_during_required_quality_compute(
+    tmp_path: Path,
+) -> None:
+    arrays, source_manifest, _source = _fixture()
+    masks = arrays["masks_roi"]
+    mask_units = [
+        {
+            "start_row": 0,
+            "stop_row": int(masks.shape[0]),
+            "decoded_bytes": int(masks.nbytes),
+            "sha256": sha256_array(masks),
+        }
+    ]
+    identities: dict[str, dict[str, object]] = {}
+    for path, values in arrays.items():
+        identities[path] = {
+            "shape": list(values.shape),
+            "dtype": str(values.dtype),
+            "digest_algorithm": SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM,
+            "sha256": sha256_array(values),
+        }
+    identities["masks_roi"] = {
+        "shape": list(masks.shape),
+        "dtype": str(masks.dtype),
+        "digest_algorithm": SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+        "identity_unit_rows": SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+        "unit_count": 1,
+        "units_digest": canonical_json_sha256(mask_units),
+        "units": mask_units,
+    }
+    expectation = SubjectMaskQualityComposableSourceExpectation(
+        run_name="refined_subject_masks_001",
+        manifest_digest=canonical_json_sha256(source_manifest),
+        component_registry_digest=canonical_json_sha256(_components().as_manifest()),
+        source_array_logical_identities=identities,
+    )
+    root = tmp_path / "quality"
+    publication = publish_selector_ineligible_subject_mask_quality_snapshot(
+        arrays,
+        n_frames=4,
+        components=_components(),
+        source=expectation,
+        source_manifest=source_manifest,
+        destination=root / "composable.zarr",
+        run_id="quality_composable_001",
+        shadow_root=root,
+        source_compute_block_bytes=512,
+        created_by="pytest",
+    )
+
+    assert publication.source.dense_array_values_sha256 == sha256_array(masks)
+    assert publication.source.source_array_values_sha256 == {
+        path: sha256_array(values) for path, values in arrays.items()
+    }
+
+    tampered = {path: values.copy() for path, values in arrays.items()}
+    tampered["masks_roi"][0, 0, 0, 0] ^= np.uint8(1)
+    with pytest.raises(ValueError, match="composable core identity"):
+        publish_selector_ineligible_subject_mask_quality_snapshot(
+            tampered,
+            n_frames=4,
+            components=_components(),
+            source=expectation,
+            source_manifest=source_manifest,
+            destination=root / "tampered.zarr",
+            run_id="quality_composable_tampered",
+            shadow_root=root,
+            source_compute_block_bytes=512,
+            created_by="pytest",
+        )
+
+
 def test_manifest_rejects_recomputed_nested_tampering(tmp_path: object) -> None:
     arrays, source_manifest, source = _fixture()
     root = tmp_path / "quality"  # type: ignore[operator]
@@ -184,9 +260,9 @@ def test_manifest_rejects_recomputed_nested_tampering(tmp_path: object) -> None:
     tampered["payload"]["storage_plan"]["arrays"][0][
         "access_unit_semantics"
     ] = "tampered"
-    tampered["payload"]["write_receipt"]["output_array_write_units"][
-        "instance_key"
-    ]["row_count"] = 999
+    tampered["payload"]["write_receipt"]["output_array_write_units"]["instance_key"][
+        "row_count"
+    ] = 999
     logical_content = tampered["payload"]["logical_content"]
     logical_content["document"]["arrays"]["instance_key"]["shape"] = [999]
     logical_content["digest"] = canonical_json_sha256(logical_content["document"])
@@ -196,9 +272,7 @@ def test_manifest_rejects_recomputed_nested_tampering(tmp_path: object) -> None:
 
     assert any("policy differs" in error for error in errors)
     assert "subject-mask quality storage plan differs from planner output" in errors
-    assert (
-        "subject-mask quality output write units differ from storage plan" in errors
-    )
+    assert "subject-mask quality output write units differ from storage plan" in errors
     assert "subject-mask quality shape mismatch at instance_key" in errors
 
 

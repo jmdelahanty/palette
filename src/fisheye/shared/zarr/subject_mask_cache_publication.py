@@ -67,6 +67,9 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     validate_persisted_subject_mask_core_publication,
     validate_subject_mask_core_run_manifest,
 )
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+)
 from fisheye.shared.zarr.subject_mask_schema import (
     REFINED_SUBJECT_MASK_CORE_SCHEMA_ID,
     SubjectMaskComponentRegistry,
@@ -342,6 +345,7 @@ def _source_refined_context(
     source_root: Path,
     *,
     refined_run_id: str,
+    verified_dense_array_values_sha256: str | None = None,
 ) -> tuple[
     Any,
     Mapping[str, Any],
@@ -378,8 +382,41 @@ def _source_refined_context(
     arrays = payload["logical_content"]["document"]["arrays"]
     source_hashes = {
         path: _require_sha256(arrays[path]["sha256"], name=f"source {path}")
-        for path in ("masks_roi", *_IDENTITY_PATHS)
+        for path in _IDENTITY_PATHS
     }
+    dense_declaration = arrays.get("masks_roi")
+    if not isinstance(dense_declaration, Mapping):
+        raise ValueError("Refined source lacks its dense logical declaration.")
+    dense_values_sha256 = dense_declaration.get("sha256")
+    if dense_values_sha256 is not None:
+        dense_values_sha256 = _require_sha256(
+            dense_values_sha256, name="source masks_roi"
+        )
+        if (
+            verified_dense_array_values_sha256 is not None
+            and _require_sha256(
+                verified_dense_array_values_sha256,
+                name="verified_dense_array_values_sha256",
+            )
+            != dense_values_sha256
+        ):
+            raise ValueError("Verified dense SHA differs from the refined source.")
+    elif (
+        dense_declaration.get("digest_algorithm")
+        == SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+    ):
+        if verified_dense_array_values_sha256 is None:
+            raise ValueError(
+                "Composable refined source requires a whole-value SHA verified "
+                "during quality computation."
+            )
+        dense_values_sha256 = _require_sha256(
+            verified_dense_array_values_sha256,
+            name="verified_dense_array_values_sha256",
+        )
+    else:
+        raise ValueError("Refined dense logical identity is unsupported.")
+    source_hashes["masks_roi"] = dense_values_sha256
     source = {
         "stage": "refined_subject_masks",
         "run_name": refined_run_id,
@@ -847,6 +884,22 @@ def validate_subject_mask_cache_run_manifest(
             else:
                 source_payload = source_manifest["payload"]
                 source_arrays = source_payload["logical_content"]["document"]["arrays"]
+                dense_declaration = source_arrays.get("masks_roi")
+                if not isinstance(dense_declaration, Mapping):
+                    errors.append("source masks_roi logical declaration is absent")
+                    dense_values_sha256 = source.get("dense_array_values_sha256")
+                elif "sha256" in dense_declaration:
+                    dense_values_sha256 = dense_declaration["sha256"]
+                elif (
+                    dense_declaration.get("digest_algorithm")
+                    == SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+                ):
+                    # Quality computes this conventional whole-value digest while
+                    # independently verifying the manifest-bound unit identity.
+                    dense_values_sha256 = source.get("dense_array_values_sha256")
+                else:
+                    errors.append("source masks_roi logical identity is unsupported")
+                    dense_values_sha256 = source.get("dense_array_values_sha256")
                 expected_source = {
                     "stage": "refined_subject_masks",
                     "run_name": source_payload["run_id"],
@@ -857,7 +910,7 @@ def validate_subject_mask_cache_run_manifest(
                     "manifest_schema_version": source_manifest["schema_version"],
                     "manifest_payload_digest": source_manifest["payload_digest"],
                     "manifest_document_digest": canonical_json_sha256(source_manifest),
-                    "dense_array_values_sha256": source_arrays["masks_roi"]["sha256"],
+                    "dense_array_values_sha256": dense_values_sha256,
                     "component_registry_digest": canonical_json_sha256(
                         source_payload["logical_schema"]["components"]
                     ),
@@ -1172,6 +1225,7 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
     compute_workers: int = 1,
     precomputed_arrays: Mapping[str, Any] | None = None,
     worker_assembly: Mapping[str, Any] | None = None,
+    verified_dense_array_values_sha256: str | None = None,
     created_by: str = SUBJECT_MASK_CACHE_GENERATOR_ID,
 ) -> SubjectMaskCachePublication:
     """Assemble or explicitly regenerate one recording-level contour cache."""
@@ -1202,7 +1256,11 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
 
     phase = time.perf_counter()
     source_run, source_manifest, dimensions, components, source = (
-        _source_refined_context(source_root, refined_run_id=resolved_source_run)
+        _source_refined_context(
+            source_root,
+            refined_run_id=resolved_source_run,
+            verified_dense_array_values_sha256=(verified_dense_array_values_sha256),
+        )
     )
     contour_profile = contour_profile or default_subject_mask_sampled_contour_profile(
         components

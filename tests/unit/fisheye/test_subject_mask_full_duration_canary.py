@@ -10,6 +10,9 @@ import zarr
 
 from fisheye.cluster.subject_masks import full_duration_canary as canary
 from fisheye.cluster.lsf import LsfExecutionMode
+from fisheye.shared.zarr.subject_mask_validation_receipt import (
+    subject_mask_array_unit_document,
+)
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -157,6 +160,8 @@ def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
         "final_layout_units_are_selector_ineligible_transport": True,
         "worker_sampled_contours_required": True,
         "full_ragged_contours_allowed": False,
+        "receipt_bound_composable_dense_identity_required": True,
+        "finalizer_full_dense_decode_hash_allowed": False,
     }
     assert plan["final_layout"]["raw"]["array_path"] == "mask_probs_roi"
     assert plan["final_layout"]["refined"]["array_path"] == "masks_roi"
@@ -324,6 +329,8 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     assert plan["execution"]["publication"] == {
         "core_physical_unit_workers": 4,
         "ownership_policy": ("bounded_threaded_disjoint_whole_physical_row_bands_v1"),
+        "core_validation_mode": "production_composable_units_v1",
+        "logical_identity_unit_rows": 256,
     }
     assert publication.resources.ncores == 16
     assert "--activate" not in publication.command
@@ -380,18 +387,27 @@ def test_worker_bundle_seals_and_reopens_final_layout_package(
     )
     run.attrs[canary.RUN_COMPLETION_STATUS_ATTR] = canary.RUN_STATUS_COMPLETE
     run.attrs["stage_selector_eligible"] = False
+    payload_values = np.ones((2, 3, 8, 8), dtype=np.uint8)
+    payload_record = subject_mask_array_unit_document(
+        {"mask_probs_roi": payload_values},
+        ("mask_probs_roi",),
+        unit_rows=2,
+    )["mask_probs_roi"]
     proof = {
         "scientific_identity": {"digest": "1" * 64},
         "attempt": {"payload_digest": "2" * 64},
         "receipt": {
             "payload_digest": "3" * 64,
-            "payload": {"run_path": f"subject_mask_shard_runs/{window['raw_run']}"},
+            "payload": {
+                "run_path": f"subject_mask_shard_runs/{window['raw_run']}",
+                "arrays": {"mask_probs_roi": payload_record},
+            },
         },
     }
     monkeypatch.setattr(canary, "_worker_evidence", lambda *_args, **_kwargs: proof)
     package = tmp_path / "unit_package"
     canary.build_subject_mask_final_layout_unit_package(
-        source_array=np.ones((2, 3, 8, 8), dtype=np.uint8),
+        source_array=payload_values,
         source_crop_row_ids=np.arange(2, dtype=np.int64),
         destination=package,
         kind="raw_probability_uint8",
@@ -400,6 +416,7 @@ def test_worker_bundle_seals_and_reopens_final_layout_package(
         source_run_path=f"subject_mask_shard_runs/{window['raw_run']}",
         worker_receipt_payload_digest="3" * 64,
         producer_commit="a" * 40,
+        worker_array_validation_record=payload_record,
     )
     result = {
         "schema_id": canary.WORKER_RESULT_SCHEMA_ID,

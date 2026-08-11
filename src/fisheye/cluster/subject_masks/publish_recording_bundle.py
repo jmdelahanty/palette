@@ -55,7 +55,11 @@ from fisheye.shared.zarr.subject_mask_quality_manifest import (
     SubjectMaskQualitySourceReference,
 )
 from fisheye.shared.zarr.subject_mask_quality_publication import (
+    SubjectMaskQualityComposableSourceExpectation,
     publish_selector_ineligible_subject_mask_quality_snapshot,
+)
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
 )
 from fisheye.shared.zarr.subject_mask_validation_receipt import (
     validate_subject_mask_source_run_manifest,
@@ -587,6 +591,9 @@ def publish_recording_subject_mask_bundle(
     cache_source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     cache_compute_workers: int = 1,
     core_physical_unit_workers: int = 1,
+    core_validation_mode: SubjectMaskCoreValidationMode | str = (
+        SubjectMaskCoreValidationMode.PRODUCTION_STREAMING
+    ),
     raw_final_layout_unit_packages: Sequence[Path] | None = None,
     refined_final_layout_unit_packages: Sequence[Path] | None = None,
     require_complete_final_layout_units: bool = False,
@@ -598,6 +605,7 @@ def publish_recording_subject_mask_bundle(
 ) -> dict[str, object]:
     if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
         raise ValueError("core_physical_unit_workers must be a positive integer.")
+    resolved_core_validation_mode = SubjectMaskCoreValidationMode(core_validation_mode)
     contour_receipt_paths = tuple(sampled_contour_worker_receipts or ())
     if require_worker_sampled_contours and not contour_receipt_paths:
         raise ValueError(
@@ -799,7 +807,7 @@ def publish_recording_subject_mask_bundle(
             else {"mask_labels": list(raw_labels)}
         ),
         threshold=threshold,
-        validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+        validation_mode=resolved_core_validation_mode,
         source_validation_receipt=raw_receipt,
         coordinate_dependencies=raw_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
@@ -873,7 +881,7 @@ def publish_recording_subject_mask_bundle(
         kind="refined_dense_core",
         source_run_path=refined_source_path,
         source_attributes=refined_source_attrs,
-        validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+        validation_mode=resolved_core_validation_mode,
         source_validation_receipt=refined_receipt,
         coordinate_dependencies=refined_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
@@ -899,44 +907,48 @@ def publish_recording_subject_mask_bundle(
                 producer_commit=str(sampled_contour_producer_commit),
             )
         )
-    cache_publication = None
     cache_store = output / "cache.zarr"
-    if cache_run is not None:
-        cache_publication = publish_selector_ineligible_subject_mask_sampled_contours(
-            refined_snapshot_root=refined_store,
-            refined_run_id=refined_run,
-            destination=cache_store,
-            cache_run_id=cache_run,
-            source_compute_block_bytes=cache_source_compute_block_bytes,
-            compute_workers=cache_compute_workers,
-            precomputed_arrays=precomputed_contour_arrays,
-            worker_assembly=sampled_contour_assembly,
-            created_by="publish_recording_subject_mask_bundle",
-        )
     refined_root = open_zarr_root(refined_store, mode="r")
     refined_published_run = refined_root[f"refined_subject_masks_runs/{refined_run}"]
     refined_docs = refined_publication.manifest["payload"]["logical_content"][
         "document"
     ]["arrays"]
-    quality_source = SubjectMaskQualitySourceReference(
-        run_name=refined_run,
-        manifest_digest=canonical_json_sha256(refined_publication.manifest),
-        dense_array_values_sha256=str(refined_docs["masks_roi"]["sha256"]),
-        component_registry_digest=canonical_json_sha256(
-            refined_components.as_manifest()
-        ),
-        source_array_values_sha256={
-            path: str(refined_docs[path]["sha256"])
-            for path in (
-                "masks_roi",
-                "instance_key",
-                "source_crop_row_ids",
-                "source_acquisition_frame_index",
-                "frame_row_offsets",
-                "available_channels",
-            )
-        },
+    quality_source_paths = (
+        "masks_roi",
+        "instance_key",
+        "source_crop_row_ids",
+        "source_acquisition_frame_index",
+        "frame_row_offsets",
+        "available_channels",
     )
+    quality_identity = {path: dict(refined_docs[path]) for path in quality_source_paths}
+    if (
+        refined_docs["masks_roi"].get("digest_algorithm")
+        == SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+    ):
+        quality_source: (
+            SubjectMaskQualitySourceReference
+            | SubjectMaskQualityComposableSourceExpectation
+        ) = SubjectMaskQualityComposableSourceExpectation(
+            run_name=refined_run,
+            manifest_digest=canonical_json_sha256(refined_publication.manifest),
+            component_registry_digest=canonical_json_sha256(
+                refined_components.as_manifest()
+            ),
+            source_array_logical_identities=quality_identity,
+        )
+    else:
+        quality_source = SubjectMaskQualitySourceReference(
+            run_name=refined_run,
+            manifest_digest=canonical_json_sha256(refined_publication.manifest),
+            dense_array_values_sha256=str(refined_docs["masks_roi"]["sha256"]),
+            component_registry_digest=canonical_json_sha256(
+                refined_components.as_manifest()
+            ),
+            source_array_values_sha256={
+                path: str(refined_docs[path]["sha256"]) for path in quality_source_paths
+            },
+        )
     quality_store = output / "quality.zarr"
     quality_publication = publish_selector_ineligible_subject_mask_quality_snapshot(
         {
@@ -960,6 +972,22 @@ def publish_recording_subject_mask_bundle(
         scratch_root=quality_scratch_root,
         created_by="publish_recording_subject_mask_bundle",
     )
+    cache_publication = None
+    if cache_run is not None:
+        cache_publication = publish_selector_ineligible_subject_mask_sampled_contours(
+            refined_snapshot_root=refined_store,
+            refined_run_id=refined_run,
+            destination=cache_store,
+            cache_run_id=cache_run,
+            source_compute_block_bytes=cache_source_compute_block_bytes,
+            compute_workers=cache_compute_workers,
+            precomputed_arrays=precomputed_contour_arrays,
+            worker_assembly=sampled_contour_assembly,
+            verified_dense_array_values_sha256=(
+                quality_publication.source.dense_array_values_sha256
+            ),
+            created_by="publish_recording_subject_mask_bundle",
+        )
     recording_identity = str(
         open_zarr_root(target, mode="r").attrs.get("recording_id") or ""
     )
@@ -998,6 +1026,7 @@ def publish_recording_subject_mask_bundle(
         ),
         "publication_execution": {
             "core_physical_unit_workers_requested": int(core_physical_unit_workers),
+            "core_validation_mode": resolved_core_validation_mode.value,
             "parallel_write_policy": (
                 "single_writer_v1_future_workers_require_disjoint_whole_shards"
                 if int(core_physical_unit_workers) == 1
@@ -1092,6 +1121,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--core-validation-mode",
+        choices=tuple(mode.value for mode in SubjectMaskCoreValidationMode),
+        default=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING.value,
+        help=(
+            "Core logical-validation contract. Composable mode requires current "
+            "receipt-bound final-layout packages (default: production streaming)."
+        ),
+    )
+    parser.add_argument(
         "--raw-final-layout-unit-package",
         action="append",
         default=[],
@@ -1182,6 +1220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cache_source_compute_block_bytes=args.cache_source_compute_block_bytes,
         cache_compute_workers=args.cache_compute_workers,
         core_physical_unit_workers=args.core_physical_unit_workers,
+        core_validation_mode=args.core_validation_mode,
         raw_final_layout_unit_packages=args.raw_final_layout_unit_package,
         refined_final_layout_unit_packages=args.refined_final_layout_unit_package,
         require_complete_final_layout_units=bool(

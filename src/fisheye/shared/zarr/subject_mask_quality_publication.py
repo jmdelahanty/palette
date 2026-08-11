@@ -41,9 +41,16 @@ from fisheye.shared.zarr.subject_mask_quality_storage import (
     SubjectMaskQualityStoragePlanSet,
     plan_subject_mask_quality_storage,
 )
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+)
 from fisheye.shared.zarr.subject_mask_schema import (
     SubjectMaskComponentRegistry,
     derive_subject_mask_frame_row_offsets,
+)
+from fisheye.shared.zarr.subject_mask_validation_receipt import (
+    SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM,
 )
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
@@ -103,6 +110,128 @@ class SubjectMaskQualityShadowPublication:
     write_receipt: Mapping[str, Any]
     phase_seconds: Mapping[str, float]
     elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class SubjectMaskQualityComposableSourceExpectation:
+    """Refined-v5 source identity validated during required quality compute."""
+
+    run_name: str
+    manifest_digest: str
+    component_registry_digest: str
+    source_array_logical_identities: Mapping[str, Mapping[str, Any]]
+
+    def __post_init__(self) -> None:
+        run_name = str(self.run_name).strip()
+        if not run_name or "/" in run_name:
+            raise ValueError("run_name must be one nonempty archive group name.")
+        object.__setattr__(self, "run_name", run_name)
+        for name in ("manifest_digest", "component_registry_digest"):
+            value = str(getattr(self, name)).strip()
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise ValueError(f"{name} must be lowercase hexadecimal SHA-256.")
+            object.__setattr__(self, name, value)
+        identities = {
+            str(path): dict(record)
+            for path, record in self.source_array_logical_identities.items()
+        }
+        if set(identities) != _SOURCE_PATHS:
+            raise ValueError(
+                "Composable quality source must bind every exact refined source array."
+            )
+        object.__setattr__(self, "source_array_logical_identities", identities)
+
+
+class _ComposableMaskIdentityVerifier:
+    def __init__(self, record: Mapping[str, Any], *, shape: tuple[int, ...]) -> None:
+        expected_fields = {
+            "shape",
+            "dtype",
+            "digest_algorithm",
+            "identity_unit_rows",
+            "unit_count",
+            "units_digest",
+            "units",
+        }
+        units = record.get("units")
+        if (
+            set(record) != expected_fields
+            or record.get("shape") != list(shape)
+            or record.get("dtype") != "uint8"
+            or record.get("digest_algorithm")
+            != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+            or record.get("identity_unit_rows")
+            != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+            or not isinstance(units, list)
+            or not units
+            or record.get("unit_count") != len(units)
+            or record.get("units_digest") != canonical_json_sha256(units)
+        ):
+            raise ValueError("Composable quality mask identity is invalid.")
+        cursor = 0
+        trailing_values = int(np.prod(shape[1:], dtype=np.int64))
+        for index, unit in enumerate(units):
+            if not isinstance(unit, Mapping) or set(unit) != {
+                "start_row",
+                "stop_row",
+                "decoded_bytes",
+                "sha256",
+            }:
+                raise ValueError("Composable quality mask unit is invalid.")
+            start = int(unit.get("start_row", -1))
+            stop = int(unit.get("stop_row", -1))
+            expected_stop = min(
+                start + SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+                int(shape[0]),
+            )
+            sha256 = str(unit.get("sha256", ""))
+            if (
+                start != cursor
+                or stop != expected_stop
+                or int(unit.get("decoded_bytes", -1))
+                != (stop - start) * trailing_values * np.dtype(np.uint8).itemsize
+                or len(sha256) != 64
+                or any(character not in "0123456789abcdef" for character in sha256)
+                or index != start // SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+            ):
+                raise ValueError("Composable quality mask unit coverage is invalid.")
+            cursor = stop
+        if cursor != int(shape[0]):
+            raise ValueError("Composable quality mask identity is incomplete.")
+        self._units = units
+        self._cursor = 0
+        self._unit_index = 0
+        self._digest = hashlib.sha256()
+
+    def append(self, start_row: int, values: np.ndarray[Any, Any]) -> None:
+        if int(start_row) != self._cursor:
+            raise ValueError("Composable quality mask reads are not contiguous.")
+        offset = 0
+        while offset < int(values.shape[0]):
+            if self._unit_index >= len(self._units):
+                raise ValueError("Composable quality mask input exceeds its identity.")
+            unit = self._units[self._unit_index]
+            stop = int(unit["stop_row"])
+            take = min(stop - self._cursor, int(values.shape[0]) - offset)
+            part = np.ascontiguousarray(values[offset : offset + take])
+            self._digest.update(part.view(np.uint8))
+            self._cursor += int(take)
+            offset += int(take)
+            if self._cursor == stop:
+                if self._digest.hexdigest() != unit.get("sha256"):
+                    raise ValueError(
+                        "Quality source masks differ from the composable core identity."
+                    )
+                self._unit_index += 1
+                self._digest = hashlib.sha256()
+
+    def finish(self) -> None:
+        if self._unit_index != len(self._units) or self._cursor != int(
+            self._units[-1]["stop_row"]
+        ):
+            raise ValueError("Composable quality mask identity coverage is incomplete.")
 
 
 def require_safe_subject_mask_quality_shadow_destination(
@@ -276,7 +405,10 @@ def _validate_source_surface(
     *,
     n_frames: int,
     components: SubjectMaskComponentRegistry,
-    source: SubjectMaskQualitySourceReference,
+    source: (
+        SubjectMaskQualitySourceReference
+        | SubjectMaskQualityComposableSourceExpectation
+    ),
 ) -> tuple[SubjectMaskQualityDimensions, np.ndarray]:
     if not _SOURCE_PATHS <= set(source_arrays):
         missing = sorted(_SOURCE_PATHS - set(source_arrays))
@@ -417,7 +549,10 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
     *,
     n_frames: int,
     components: SubjectMaskComponentRegistry,
-    source: SubjectMaskQualitySourceReference,
+    source: (
+        SubjectMaskQualitySourceReference
+        | SubjectMaskQualityComposableSourceExpectation
+    ),
     source_manifest: Mapping[str, Any],
     destination: Path,
     run_id: str,
@@ -448,6 +583,11 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         n_frames=int(n_frames),
         components=components,
         source=source,
+    )
+    composable_expectation = (
+        source
+        if isinstance(source, SubjectMaskQualityComposableSourceExpectation)
+        else None
     )
     profile = quality_profile_for_policy(policy)
     dimensions = SubjectMaskQualityDimensions(
@@ -486,6 +626,16 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         scratch_path = Path(temporary)
         scratch_arrays = _create_scratch_arrays(scratch_path, plans)
         source_digest = hashlib.sha256()
+        composable_mask_verifier = (
+            _ComposableMaskIdentityVerifier(
+                composable_expectation.source_array_logical_identities["masks_roi"],
+                shape=tuple(
+                    int(value) for value in source_mask_arrays["masks_roi"].shape
+                ),
+            )
+            if composable_expectation is not None
+            else None
+        )
         identity_digests = {
             path: hashlib.sha256()
             for path in (
@@ -501,6 +651,8 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                 _read_rows(source_mask_arrays["masks_roi"], start, stop)
             )
             source_digest.update(masks.view(np.uint8))
+            if composable_mask_verifier is not None:
+                composable_mask_verifier.append(start, masks)
             keys = _read_rows(source_mask_arrays["instance_key"], start, stop)
             source_crop_row_ids = _read_rows(
                 source_mask_arrays["source_crop_row_ids"], start, stop
@@ -541,7 +693,11 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                 np.ascontiguousarray(available).view(np.uint8)
             ).hexdigest(),
         }
-        if observed_source_digests != dict(source.source_array_values_sha256):
+        if composable_mask_verifier is not None:
+            composable_mask_verifier.finish()
+        if composable_expectation is None and observed_source_digests != dict(
+            source.source_array_values_sha256
+        ):
             mismatches = sorted(
                 path
                 for path, observed in observed_source_digests.items()
@@ -551,6 +707,47 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                 "Exact refined source-array digest mismatch for: "
                 + ", ".join(mismatches)
             )
+        if composable_expectation is not None:
+            mismatches: list[str] = []
+            for path, observed in observed_source_digests.items():
+                if path == "masks_roi":
+                    continue
+                expected = composable_expectation.source_array_logical_identities[path]
+                observed_shape, observed_dtype = _shape_dtype(
+                    source_mask_arrays[path], name=path
+                )
+                if (
+                    set(expected)
+                    != {
+                        "shape",
+                        "dtype",
+                        "digest_algorithm",
+                        "sha256",
+                    }
+                    or expected.get("shape") != list(observed_shape)
+                    or expected.get("dtype") != str(observed_dtype)
+                    or expected.get("digest_algorithm")
+                    != SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM
+                    or expected.get("sha256") != observed
+                ):
+                    mismatches.append(path)
+            if mismatches:
+                raise ValueError(
+                    "Exact refined composable source-array mismatch for: "
+                    + ", ".join(sorted(mismatches))
+                )
+            resolved_source = SubjectMaskQualitySourceReference(
+                run_name=composable_expectation.run_name,
+                manifest_digest=composable_expectation.manifest_digest,
+                dense_array_values_sha256=observed_source_digests["masks_roi"],
+                component_registry_digest=(
+                    composable_expectation.component_registry_digest
+                ),
+                source_array_values_sha256=observed_source_digests,
+            )
+        else:
+            assert isinstance(source, SubjectMaskQualitySourceReference)
+            resolved_source = source
         frames = scratch_arrays["source_acquisition_frame_index"]
         scratch_arrays["frame_row_offsets"][...] = (
             derive_subject_mask_frame_row_offsets(frames, n_frames=dimensions.n_frames)
@@ -615,10 +812,10 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                     dimensions=dimensions,
                     components=components,
                     profile=profile,
-                    source=source,
+                    source=resolved_source,
                 ),
                 "storage_plan": plans.as_manifest(),
-                "source_refined_subject_mask_snapshot": source.as_manifest(),
+                "source_refined_subject_mask_snapshot": resolved_source.as_manifest(),
                 "policy": policy.as_manifest(),
                 "write_receipt": receipt,
             }
@@ -673,7 +870,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             components=components,
             profile=profile,
             policy=policy,
-            source=source,
+            source=resolved_source,
             source_manifest=source_manifest,
             storage_plan=plans,
             arrays=scratch_arrays,
@@ -758,7 +955,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             components=components,
             profile=profile,
             policy=policy,
-            source=source,
+            source=resolved_source,
             source_manifest=dict(source_manifest),
             plans=plans,
             manifest=manifest,
@@ -796,6 +993,7 @@ __all__ = [
     "SUBJECT_MASK_QUALITY_SHADOW_SCHEMA_VERSION",
     "SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID",
     "SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION",
+    "SubjectMaskQualityComposableSourceExpectation",
     "SubjectMaskQualityShadowPublication",
     "publish_selector_ineligible_subject_mask_quality_snapshot",
     "require_local_subject_mask_quality_scratch_root",

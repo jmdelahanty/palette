@@ -74,9 +74,14 @@ from fisheye.shared.zarr.subject_mask_cache_storage import (
     plan_subject_mask_sampled_contour_storage,
 )
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+    SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION,
     build_subject_mask_final_layout_unit_package,
     subject_mask_final_layout_payload_plan,
     validate_subject_mask_final_layout_unit_package,
+)
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    SubjectMaskCoreValidationMode,
 )
 from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
     load_subject_mask_sampled_contour_worker_receipt,
@@ -92,11 +97,11 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
-PLAN_SCHEMA_VERSION = 3
+PLAN_SCHEMA_VERSION = 4
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
-RESULT_SCHEMA_VERSION = 4
+RESULT_SCHEMA_VERSION = 5
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
-WORKER_RESULT_SCHEMA_VERSION = 2
+WORKER_RESULT_SCHEMA_VERSION = 3
 FAMILY = "subject_mask_full_duration_canary"
 BENCHMARK_CLASSIFICATION = "selector_ineligible_full_duration_canary"
 DEFAULT_GPU_CONCURRENCY = 4
@@ -803,6 +808,12 @@ def prepare_canary(
             },
             "publication": {
                 "core_physical_unit_workers": int(core_physical_unit_workers),
+                "core_validation_mode": (
+                    SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
+                ),
+                "logical_identity_unit_rows": (
+                    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+                ),
                 "ownership_policy": (
                     "single_writer_v1_future_workers_require_disjoint_whole_shards"
                     if int(core_physical_unit_workers) == 1
@@ -818,6 +829,8 @@ def prepare_canary(
             "worker_writes_are_node_local_until_atomic_bundle_publish": True,
             "window_rows_are_exact_nonoverlapping_complete": True,
             "final_layout_units_are_selector_ineligible_transport": True,
+            "receipt_bound_composable_dense_identity_required": True,
+            "finalizer_full_dense_decode_hash_allowed": False,
             "worker_sampled_contours_required": True,
             "full_ragged_contours_allowed": False,
         },
@@ -863,6 +876,20 @@ def load_plan(path: Path) -> dict[str, Any]:
         or payload.get("safety", {}).get("full_ragged_contours_allowed") is not False
     ):
         raise ValueError("Canary plan does not enforce the sampled-contour profile.")
+    publication = payload.get("execution", {}).get("publication", {})
+    if (
+        payload.get("safety", {}).get(
+            "receipt_bound_composable_dense_identity_required"
+        )
+        is not True
+        or payload.get("safety", {}).get("finalizer_full_dense_decode_hash_allowed")
+        is not False
+        or publication.get("core_validation_mode")
+        != SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
+        or publication.get("logical_identity_unit_rows")
+        != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+    ):
+        raise ValueError("Canary plan does not enforce composable dense identity.")
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
@@ -989,6 +1016,7 @@ def _existing_worker_result(
     binding = result.get("final_layout_unit_package")
     if not isinstance(binding, Mapping) or set(binding) != {
         "relative_path",
+        "schema_version",
         "payload_digest",
         "kind",
         "array_path",
@@ -996,6 +1024,8 @@ def _existing_worker_result(
         "complete_unit_count",
         "encoded_object_count",
         "encoded_bytes",
+        "worker_receipt_payload_digest",
+        "source_array_validation_digest",
     }:
         raise RuntimeError(f"Worker bundle lacks exact final-layout evidence: {bundle}")
     if binding.get("relative_path") != "final_layout_unit":
@@ -1008,6 +1038,10 @@ def _existing_worker_result(
     expected = plan["final_layout"][expected_role]
     if (
         binding.get("payload_digest") != package_receipt["payload_digest"]
+        or binding.get("schema_version")
+        != SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
+        or package_receipt.get("schema_version")
+        != SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
         or binding.get("kind") != package_receipt["payload"]["kind"]
         or binding.get("array_path") != package_receipt["payload"]["array_path"]
         or binding.get("storage_plan_digest")
@@ -1015,6 +1049,12 @@ def _existing_worker_result(
         or package_receipt["payload"]["storage_plan_digest"]
         != expected["storage_plan_digest"]
         or package_receipt["payload"]["producer_commit"] != plan["repo"]["commit"]
+        or binding.get("worker_receipt_payload_digest")
+        != package_receipt["payload"]["worker_receipt_payload_digest"]
+        or binding.get("worker_receipt_payload_digest")
+        != result.get("proof", {}).get("receipt_payload_digest")
+        or binding.get("source_array_validation_digest")
+        != canonical_json_sha256(package_receipt["payload"]["source_array_validation"])
     ):
         raise RuntimeError(f"Worker final-layout package binding differs: {bundle}")
     sampled_binding = result.get("sampled_contour_worker_receipt")
@@ -1123,8 +1163,16 @@ def _publish_worker_bundle(
             package_receipt = validate_subject_mask_final_layout_unit_package(
                 package_destination
             )
+            if package_receipt.get("schema_version") != (
+                SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
+            ):
+                raise RuntimeError(
+                    "Canary worker requires receipt-bound composable final-layout "
+                    "evidence."
+                )
             final_layout_binding = {
                 "relative_path": "final_layout_unit",
+                "schema_version": package_receipt["schema_version"],
                 "payload_digest": package_receipt["payload_digest"],
                 "kind": package_receipt["payload"]["kind"],
                 "array_path": package_receipt["payload"]["array_path"],
@@ -1138,6 +1186,12 @@ def _publish_worker_bundle(
                     "encoded_object_count"
                 ],
                 "encoded_bytes": package_receipt["payload"]["encoded_bytes"],
+                "worker_receipt_payload_digest": package_receipt["payload"][
+                    "worker_receipt_payload_digest"
+                ],
+                "source_array_validation_digest": canonical_json_sha256(
+                    package_receipt["payload"]["source_array_validation"]
+                ),
             }
         sampled_contour_binding = None
         if sampled_contour_receipt is not None:
@@ -1335,6 +1389,9 @@ def run_inference_window(
             source_run_path=str(proof["receipt"]["payload"]["run_path"]),
             worker_receipt_payload_digest=str(proof["receipt"]["payload_digest"]),
             producer_commit=str(plan["repo"]["commit"]),
+            worker_array_validation_record=proof["receipt"]["payload"]["arrays"][
+                "mask_probs_roi"
+            ],
         )
         result = {
             "schema_id": WORKER_RESULT_SCHEMA_ID,
@@ -1466,6 +1523,9 @@ def run_refinement_window(
             source_run_path=str(proof["receipt"]["payload"]["run_path"]),
             worker_receipt_payload_digest=str(proof["receipt"]["payload_digest"]),
             producer_commit=str(plan["repo"]["commit"]),
+            worker_array_validation_record=proof["receipt"]["payload"]["arrays"][
+                "masks_roi"
+            ],
         )
         sampled_contour_receipt_path = work / "sampled_contour_receipt.json"
         sampled_contour_started = time.perf_counter()
@@ -1695,6 +1755,9 @@ def finalize_canary(
             ],
             core_physical_unit_workers=int(
                 plan["execution"]["publication"]["core_physical_unit_workers"]
+            ),
+            core_validation_mode=str(
+                plan["execution"]["publication"]["core_validation_mode"]
             ),
             raw_final_layout_unit_packages=raw_final_layout_packages,
             refined_final_layout_unit_packages=refined_final_layout_packages,

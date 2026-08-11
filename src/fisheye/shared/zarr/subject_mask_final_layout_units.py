@@ -43,11 +43,23 @@ from fisheye.shared.zarr.subject_mask_storage import (
     plan_raw_subject_mask_storage,
     plan_refined_subject_mask_publication_storage,
 )
+from fisheye.shared.zarr.subject_mask_validation_receipt import (
+    SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM,
+)
 
 SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_ID = (
     "palette.subject_mask.final_layout_unit_package"
 )
-SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION = 1
+SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_LEGACY_SCHEMA_VERSION = 1
+SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION = 2
+SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_SCHEMA_ID = (
+    "palette.subject_mask.composable_logical_identity"
+)
+SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_SCHEMA_VERSION = 1
+SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM = (
+    "sha256_c_contiguous_global_row_units_v1"
+)
+SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS = 256
 SUBJECT_MASK_FINAL_LAYOUT_UNIT_RECEIPT = "receipt.json"
 SUBJECT_MASK_FINAL_LAYOUT_UNIT_ARRAY = "payload.zarr/payload"
 _ARRAY_ATTRIBUTES = {
@@ -76,6 +88,24 @@ class EncodedPhysicalUnit:
 
 
 @dataclass(frozen=True)
+class LogicalIdentityUnit:
+    start_row: int
+    stop_row: int
+    decoded_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class LogicalIdentityBoundarySegment:
+    unit_start_row: int
+    unit_stop_row: int
+    start_row: int
+    stop_row: int
+    decoded_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class FinalLayoutUnitAdoption:
     """Validated complete-unit ownership for one final payload array."""
 
@@ -84,6 +114,10 @@ class FinalLayoutUnitAdoption:
     package_count: int
     encoded_object_count: int
     encoded_bytes: int
+    composable_identity: bool = False
+    logical_identity_unit_rows: int | None = None
+    logical_identity_units: tuple[LogicalIdentityUnit, ...] = ()
+    logical_identity_boundary_segments: tuple[LogicalIdentityBoundarySegment, ...] = ()
 
 
 def _require_sha256(value: object, *, name: str) -> str:
@@ -98,6 +132,188 @@ def _strict_json(path: Path) -> Any:
         raise ValueError(f"Non-finite JSON constant {value!r}.")
 
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
+
+
+def _canonical_worker_array_validation(
+    value: Mapping[str, Any],
+    *,
+    shape: tuple[int, ...],
+    dtype: np.dtype[Any],
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Validate one worker's exact local row-unit evidence."""
+
+    expected_fields = {
+        "shape",
+        "dtype",
+        "digest_algorithm",
+        "unit_count",
+        "units_digest",
+        "units",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("Worker payload validation fields are not exact.")
+    units = value.get("units")
+    if (
+        value.get("shape") != list(shape)
+        or value.get("dtype") != str(dtype)
+        or value.get("digest_algorithm") != SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM
+        or not isinstance(units, list)
+        or not units
+    ):
+        raise ValueError("Worker payload validation identity differs.")
+    row_bytes = int(dtype.itemsize) * int(np.prod(shape[1:]))
+    cursor = 0
+    normalized: list[dict[str, object]] = []
+    for item in units:
+        if not isinstance(item, Mapping) or set(item) != {
+            "start_row",
+            "stop_row",
+            "decoded_bytes",
+            "sha256",
+        }:
+            raise ValueError("Worker payload validation unit fields are not exact.")
+        start = item.get("start_row")
+        stop = item.get("stop_row")
+        if (
+            type(start) is not int
+            or type(stop) is not int
+            or start != cursor
+            or not (0 <= start < stop <= shape[0])
+            or item.get("decoded_bytes") != (stop - start) * row_bytes
+        ):
+            raise ValueError("Worker payload validation unit coverage differs.")
+        _require_sha256(item.get("sha256"), name="worker payload unit sha256")
+        normalized.append(dict(item))
+        cursor = int(stop)
+    if (
+        cursor != shape[0]
+        or value.get("unit_count") != len(normalized)
+        or value.get("units_digest") != canonical_json_sha256(normalized)
+    ):
+        raise ValueError("Worker payload validation units are incomplete.")
+    binding = {
+        "shape": list(shape),
+        "dtype": str(dtype),
+        "digest_algorithm": SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM,
+        "unit_count": len(normalized),
+        "units_digest": canonical_json_sha256(normalized),
+    }
+    return binding, tuple(normalized)
+
+
+class _WorkerArrayReceiptVerifier:
+    def __init__(
+        self,
+        units: Sequence[Mapping[str, Any]],
+        *,
+        shape: tuple[int, ...],
+        dtype: np.dtype[Any],
+    ) -> None:
+        self._units = tuple(units)
+        self._shape = shape
+        self._dtype = dtype
+        self._cursor = 0
+        self._unit_index = 0
+        self._digest = hashlib.sha256()
+
+    def append(self, start_row: int, values: np.ndarray[Any, Any]) -> None:
+        if int(start_row) != self._cursor or values.dtype != self._dtype:
+            raise ValueError("Worker payload verification blocks are not contiguous.")
+        offset = 0
+        while offset < int(values.shape[0]):
+            if self._unit_index >= len(self._units):
+                raise ValueError("Worker payload verification exceeds its receipt.")
+            unit = self._units[self._unit_index]
+            unit_stop = int(unit["stop_row"])
+            take = min(unit_stop - self._cursor, int(values.shape[0]) - offset)
+            part = np.ascontiguousarray(values[offset : offset + take])
+            self._digest.update(part.view(np.uint8))
+            self._cursor += int(take)
+            offset += int(take)
+            if self._cursor == unit_stop:
+                if self._digest.hexdigest() != unit["sha256"]:
+                    raise ValueError(
+                        "Final-layout payload differs from its worker receipt."
+                    )
+                self._unit_index += 1
+                self._digest = hashlib.sha256()
+
+    def finish(self) -> None:
+        if self._cursor != self._shape[0] or self._unit_index != len(self._units):
+            raise ValueError("Worker payload receipt verification is incomplete.")
+
+
+class _ComposableLogicalIdentityAccumulator:
+    def __init__(
+        self,
+        *,
+        global_start_row: int,
+        global_stop_row: int,
+        n_rois: int,
+        row_bytes: int,
+        unit_rows: int,
+    ) -> None:
+        self._start = int(global_start_row)
+        self._stop = int(global_stop_row)
+        self._n_rois = int(n_rois)
+        self._row_bytes = int(row_bytes)
+        self._unit_rows = int(unit_rows)
+        self._cursor = self._start
+        self._segment_start = self._start
+        self._digest = hashlib.sha256()
+        self.units: list[dict[str, object]] = []
+        self.boundary_segments: list[dict[str, object]] = []
+
+    def append(self, start_row: int, values: np.ndarray[Any, Any]) -> None:
+        if int(start_row) != self._cursor:
+            raise ValueError("Composable logical identity blocks are not contiguous.")
+        offset = 0
+        while offset < int(values.shape[0]):
+            unit_start = (self._cursor // self._unit_rows) * self._unit_rows
+            unit_stop = min(self._n_rois, unit_start + self._unit_rows)
+            segment_stop = min(unit_stop, self._stop)
+            take = min(segment_stop - self._cursor, int(values.shape[0]) - offset)
+            part = np.ascontiguousarray(values[offset : offset + take])
+            self._digest.update(part.view(np.uint8))
+            self._cursor += int(take)
+            offset += int(take)
+            if self._cursor == segment_stop:
+                record = {
+                    "start_row": int(self._segment_start),
+                    "stop_row": int(segment_stop),
+                    "decoded_bytes": int(
+                        (segment_stop - self._segment_start) * self._row_bytes
+                    ),
+                    "sha256": self._digest.hexdigest(),
+                }
+                if self._segment_start == unit_start and segment_stop == unit_stop:
+                    self.units.append(record)
+                else:
+                    self.boundary_segments.append(
+                        {
+                            "unit_start_row": int(unit_start),
+                            "unit_stop_row": int(unit_stop),
+                            **record,
+                        }
+                    )
+                self._segment_start = int(segment_stop)
+                self._digest = hashlib.sha256()
+
+    def finish(self) -> dict[str, object]:
+        if self._cursor != self._stop or self._segment_start != self._stop:
+            raise ValueError("Composable logical identity coverage is incomplete.")
+        return {
+            "schema_id": SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_SCHEMA_ID,
+            "schema_version": SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_SCHEMA_VERSION,
+            "digest_algorithm": SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+            "identity_unit_rows": self._unit_rows,
+            "unit_count": len(self.units),
+            "units_digest": canonical_json_sha256(self.units),
+            "units": self.units,
+            "boundary_segment_count": len(self.boundary_segments),
+            "boundary_segments_digest": canonical_json_sha256(self.boundary_segments),
+            "boundary_segments": self.boundary_segments,
+        }
 
 
 def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
@@ -214,6 +430,7 @@ def build_subject_mask_final_layout_unit_package(
     source_run_path: str,
     worker_receipt_payload_digest: str,
     producer_commit: str,
+    worker_array_validation_record: Mapping[str, Any] | None = None,
     profile: StorageProfile = PUBLISHED_HTTP_V1,
 ) -> dict[str, Any]:
     """Seal reusable complete final-layout row bands for one worker interval."""
@@ -254,6 +471,16 @@ def build_subject_mask_final_layout_unit_package(
     source_path = str(source_run_path).strip().strip("/")
     if not source_path:
         raise ValueError("source_run_path cannot be empty.")
+    source_validation_binding: dict[str, object] | None = None
+    source_validation_units: tuple[dict[str, object], ...] = ()
+    if worker_array_validation_record is not None:
+        source_validation_binding, source_validation_units = (
+            _canonical_worker_array_validation(
+                worker_array_validation_record,
+                shape=shape,
+                dtype=dtype,
+            )
+        )
 
     if target.exists():
         existing = validate_subject_mask_final_layout_unit_package(target)
@@ -271,6 +498,10 @@ def build_subject_mask_final_layout_unit_package(
         if any(payload.get(key) != value for key, value in expected.items()):
             raise FileExistsError(
                 f"Existing final-layout package has another identity: {target}"
+            )
+        if payload.get("source_array_validation") != source_validation_binding:
+            raise FileExistsError(
+                f"Existing final-layout package has another validation identity: {target}"
             )
         return existing
 
@@ -292,21 +523,56 @@ def build_subject_mask_final_layout_unit_package(
         units: list[dict[str, Any]] = []
         boundary_ranges: list[dict[str, int]] = []
         trailing = (slice(None),) * (len(shape) - 1)
+        verifier = (
+            _WorkerArrayReceiptVerifier(
+                source_validation_units,
+                shape=shape,
+                dtype=dtype,
+            )
+            if source_validation_binding is not None
+            else None
+        )
+        identity = (
+            _ComposableLogicalIdentityAccumulator(
+                global_start_row=start,
+                global_stop_row=stop,
+                n_rois=int(dimensions.n_rois),
+                row_bytes=int(dtype.itemsize) * int(np.prod(shape[1:])),
+                unit_rows=SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+            )
+            if source_validation_binding is not None
+            else None
+        )
         for unit_start, unit_stop in _physical_row_ranges(plan):
             overlap_start = max(start, unit_start)
             overlap_stop = min(stop, unit_stop)
             if overlap_start >= overlap_stop:
                 continue
+            local_start = overlap_start - start
+            local_stop = overlap_stop - start
+            values: np.ndarray[Any, Any] | None = None
+            if verifier is not None:
+                values = np.ascontiguousarray(
+                    np.asarray(
+                        source_array[(slice(local_start, local_stop), *trailing)]
+                    )
+                )
+                verifier.append(local_start, values)
+                assert identity is not None
+                identity.append(overlap_start, values)
             if unit_start < start or unit_stop > stop:
                 boundary_ranges.append(
                     {"start_row": overlap_start, "stop_row": overlap_stop}
                 )
                 continue
-            local_start = unit_start - start
-            local_stop = unit_stop - start
-            values = np.ascontiguousarray(
-                np.asarray(source_array[(slice(local_start, local_stop), *trailing)])
-            )
+            if values is None:
+                values = np.ascontiguousarray(
+                    np.asarray(
+                        source_array[
+                            (slice(unit_start - start, unit_stop - start), *trailing)
+                        ]
+                    )
+                )
             destination_array[(slice(unit_start, unit_stop), *trailing)] = values
             unit_index = unit_start // unit_rows
             objects = _object_records(array_path, row_unit_index=unit_index)
@@ -319,6 +585,11 @@ def build_subject_mask_final_layout_unit_package(
                     "objects": objects,
                 }
             )
+        logical_identity: dict[str, object] | None = None
+        if verifier is not None:
+            verifier.finish()
+            assert identity is not None
+            logical_identity = identity.finish()
         metadata_path = array_path / "zarr.json"
         metadata = _strict_json(metadata_path)
         package_payload: dict[str, Any] = {
@@ -343,9 +614,18 @@ def build_subject_mask_final_layout_unit_package(
             "units": units,
             "boundary_ranges": boundary_ranges,
         }
+        package_schema_version = (
+            SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
+            if source_validation_binding is not None
+            else SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_LEGACY_SCHEMA_VERSION
+        )
+        if source_validation_binding is not None:
+            assert logical_identity is not None
+            package_payload["source_array_validation"] = source_validation_binding
+            package_payload["logical_identity"] = logical_identity
         receipt = {
             "schema_id": SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_ID,
-            "schema_version": SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION,
+            "schema_version": package_schema_version,
             "status": "complete",
             "created_at_utc": utc_now(),
             "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -362,6 +642,129 @@ def build_subject_mask_final_layout_unit_package(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def _validate_composable_logical_identity(
+    value: object,
+    *,
+    start_row: int,
+    stop_row: int,
+    n_rois: int,
+    row_bytes: int,
+) -> dict[str, Any]:
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "digest_algorithm",
+        "identity_unit_rows",
+        "unit_count",
+        "units_digest",
+        "units",
+        "boundary_segment_count",
+        "boundary_segments_digest",
+        "boundary_segments",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise ValueError("Composable logical identity fields are not exact.")
+    unit_rows = value.get("identity_unit_rows")
+    if (
+        value.get("schema_id") != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_SCHEMA_ID
+        or value.get("schema_version")
+        != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_SCHEMA_VERSION
+        or value.get("digest_algorithm")
+        != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+        or unit_rows != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+    ):
+        raise ValueError("Composable logical identity header is unsupported.")
+    units = value.get("units")
+    segments = value.get("boundary_segments")
+    if not isinstance(units, list) or not isinstance(segments, list):
+        raise ValueError("Composable logical identity coverage is absent.")
+    for record in units:
+        if not isinstance(record, Mapping) or set(record) != {
+            "start_row",
+            "stop_row",
+            "decoded_bytes",
+            "sha256",
+        }:
+            raise ValueError("Composable logical unit fields are not exact.")
+        unit_start = record.get("start_row")
+        unit_stop = record.get("stop_row")
+        if (
+            type(unit_start) is not int
+            or type(unit_stop) is not int
+            or unit_start % int(unit_rows) != 0
+            or unit_stop != min(n_rois, unit_start + int(unit_rows))
+            or not (start_row <= unit_start < unit_stop <= stop_row)
+            or record.get("decoded_bytes") != (unit_stop - unit_start) * row_bytes
+        ):
+            raise ValueError("Composable logical unit coverage differs.")
+        _require_sha256(record.get("sha256"), name="composable logical unit sha256")
+    for record in segments:
+        if not isinstance(record, Mapping) or set(record) != {
+            "unit_start_row",
+            "unit_stop_row",
+            "start_row",
+            "stop_row",
+            "decoded_bytes",
+            "sha256",
+        }:
+            raise ValueError("Composable boundary segment fields are not exact.")
+        unit_start = record.get("unit_start_row")
+        unit_stop = record.get("unit_stop_row")
+        segment_start = record.get("start_row")
+        segment_stop = record.get("stop_row")
+        if (
+            type(unit_start) is not int
+            or type(unit_stop) is not int
+            or type(segment_start) is not int
+            or type(segment_stop) is not int
+            or unit_start % int(unit_rows) != 0
+            or unit_stop != min(n_rois, unit_start + int(unit_rows))
+            or not (unit_start <= segment_start < segment_stop <= unit_stop)
+            or not (start_row <= segment_start < segment_stop <= stop_row)
+            or (segment_start == unit_start and segment_stop == unit_stop)
+            or record.get("decoded_bytes") != (segment_stop - segment_start) * row_bytes
+        ):
+            raise ValueError("Composable boundary segment coverage differs.")
+        _require_sha256(record.get("sha256"), name="composable boundary segment sha256")
+    expected_units: list[tuple[int, int]] = []
+    expected_segments: list[tuple[int, int, int, int]] = []
+    first_unit = (start_row // int(unit_rows)) * int(unit_rows)
+    for unit_start in range(first_unit, stop_row, int(unit_rows)):
+        unit_stop = min(n_rois, unit_start + int(unit_rows))
+        overlap_start = max(start_row, unit_start)
+        overlap_stop = min(stop_row, unit_stop)
+        if overlap_start >= overlap_stop:
+            continue
+        if overlap_start == unit_start and overlap_stop == unit_stop:
+            expected_units.append((unit_start, unit_stop))
+        else:
+            expected_segments.append(
+                (unit_start, unit_stop, overlap_start, overlap_stop)
+            )
+    if [
+        (int(item["start_row"]), int(item["stop_row"])) for item in units
+    ] != expected_units:
+        raise ValueError("Composable logical complete-unit inventory differs.")
+    if [
+        (
+            int(item["unit_start_row"]),
+            int(item["unit_stop_row"]),
+            int(item["start_row"]),
+            int(item["stop_row"]),
+        )
+        for item in segments
+    ] != expected_segments:
+        raise ValueError("Composable logical boundary inventory differs.")
+    if (
+        value.get("unit_count") != len(units)
+        or value.get("units_digest") != canonical_json_sha256(units)
+        or value.get("boundary_segment_count") != len(segments)
+        or value.get("boundary_segments_digest") != canonical_json_sha256(segments)
+    ):
+        raise ValueError("Composable logical identity digest differs.")
+    return value
 
 
 def validate_subject_mask_final_layout_unit_package(
@@ -386,10 +789,14 @@ def validate_subject_mask_final_layout_unit_package(
         "payload",
     }:
         raise ValueError("Final-layout package receipt envelope is not exact.")
+    schema_version = receipt.get("schema_version")
     if (
         receipt.get("schema_id") != SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_ID
-        or receipt.get("schema_version")
-        != SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
+        or schema_version
+        not in {
+            SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_LEGACY_SCHEMA_VERSION,
+            SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION,
+        }
         or receipt.get("status") != "complete"
         or receipt.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
     ):
@@ -415,6 +822,8 @@ def validate_subject_mask_final_layout_unit_package(
         "units",
         "boundary_ranges",
     }
+    if schema_version == SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION:
+        expected_payload_fields.update({"source_array_validation", "logical_identity"})
     if not isinstance(payload, dict) or set(payload) != expected_payload_fields:
         raise ValueError("Final-layout package payload fields are not exact.")
     if receipt.get("payload_digest") != canonical_json_sha256(payload):
@@ -484,6 +893,46 @@ def validate_subject_mask_final_layout_unit_package(
     stop = interval.get("stop_row")
     if type(start) is not int or type(stop) is not int or not 0 <= start < stop:
         raise ValueError("Final-layout package row interval is invalid.")
+    if schema_version == SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION:
+        source_validation = payload.get("source_array_validation")
+        if not isinstance(source_validation, Mapping) or set(source_validation) != {
+            "shape",
+            "dtype",
+            "digest_algorithm",
+            "unit_count",
+            "units_digest",
+        }:
+            raise ValueError("Final-layout source-array validation binding is invalid.")
+        local_shape = [
+            int(stop - start),
+            int(dimensions["n_channels"]),
+            int(dimensions["roi_height"]),
+            int(dimensions["roi_width"]),
+        ]
+        if (
+            source_validation.get("shape") != local_shape
+            or source_validation.get("dtype") != "uint8"
+            or source_validation.get("digest_algorithm")
+            != SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM
+            or type(source_validation.get("unit_count")) is not int
+            or int(source_validation["unit_count"]) <= 0
+        ):
+            raise ValueError("Final-layout source-array validation identity differs.")
+        _require_sha256(
+            source_validation.get("units_digest"),
+            name="source-array validation units_digest",
+        )
+        _validate_composable_logical_identity(
+            payload.get("logical_identity"),
+            start_row=int(start),
+            stop_row=int(stop),
+            n_rois=int(dimensions["n_rois"]),
+            row_bytes=(
+                int(dimensions["n_channels"])
+                * int(dimensions["roi_height"])
+                * int(dimensions["roi_width"])
+            ),
+        )
     unit_rows = payload.get("physical_unit_rows")
     if type(unit_rows) is not int or unit_rows <= 0:
         raise ValueError("Final-layout package physical_unit_rows is invalid.")
@@ -616,7 +1065,7 @@ def prepare_subject_mask_final_layout_unit_adoption(
     workers = producer.get("workers") if isinstance(producer, Mapping) else None
     if not isinstance(workers, list) or not workers:
         raise ValueError("Final-layout adoption requires recording worker evidence.")
-    expected_by_digest: dict[str, tuple[int, int, str]] = {}
+    expected_by_digest: dict[str, tuple[int, int, str, Mapping[str, Any] | None]] = {}
     for worker in workers:
         if not isinstance(worker, Mapping):
             raise ValueError("Recording worker evidence is malformed.")
@@ -627,10 +1076,27 @@ def prepare_subject_mask_final_layout_unit_adoption(
         interval = worker.get("global_row_interval")
         if not isinstance(interval, Mapping):
             raise ValueError("Recording worker interval is malformed.")
+        worker_receipt = worker.get("worker_receipt")
+        worker_payload = (
+            worker_receipt.get("payload")
+            if isinstance(worker_receipt, Mapping)
+            else None
+        )
+        worker_arrays = (
+            worker_payload.get("arrays")
+            if isinstance(worker_payload, Mapping)
+            else None
+        )
         expected_by_digest[digest] = (
             int(interval["start_row"]),
             int(interval["stop_row"]),
             str(worker.get("run_path") or "").strip().strip("/"),
+            (
+                worker_arrays.get(payload_path)
+                if isinstance(worker_arrays, Mapping)
+                and isinstance(worker_arrays.get(payload_path), Mapping)
+                else None
+            ),
         )
 
     plan_digest = canonical_json_sha256(plan.as_dict())
@@ -646,6 +1112,9 @@ def prepare_subject_mask_final_layout_unit_adoption(
     }
     observed_workers: set[str] = set()
     units: dict[int, EncodedPhysicalUnit] = {}
+    identity_units: dict[int, LogicalIdentityUnit] = {}
+    identity_segments: list[LogicalIdentityBoundarySegment] = []
+    package_schema_versions: set[int] = set()
     encoded_object_count = 0
     encoded_bytes = 0
     for package_path in package_paths:
@@ -653,6 +1122,7 @@ def prepare_subject_mask_final_layout_unit_adoption(
             package_path,
             verify_object_digests=False,
         )
+        package_schema_versions.add(int(receipt["schema_version"]))
         payload = receipt["payload"]
         if (
             payload.get("kind") != kind
@@ -682,7 +1152,9 @@ def prepare_subject_mask_final_layout_unit_adoption(
             raise ValueError(
                 "Final-layout package worker binding is absent or duplicated."
             )
-        expected_start, expected_stop, expected_run = expected_by_digest[worker_digest]
+        expected_start, expected_stop, expected_run, expected_array_record = (
+            expected_by_digest[worker_digest]
+        )
         if (
             payload.get("global_row_interval")
             != {
@@ -692,6 +1164,52 @@ def prepare_subject_mask_final_layout_unit_adoption(
             or payload.get("source_run_path") != expected_run
         ):
             raise ValueError("Final-layout package worker identity differs.")
+        if (
+            receipt["schema_version"]
+            == SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
+        ):
+            if expected_array_record is None:
+                raise ValueError(
+                    "Composable final-layout package lacks worker array evidence."
+                )
+            expected_binding, _expected_units = _canonical_worker_array_validation(
+                expected_array_record,
+                shape=(
+                    expected_stop - expected_start,
+                    int(dimensions.n_channels),
+                    int(dimensions.roi_height),
+                    int(dimensions.roi_width),
+                ),
+                dtype=np.dtype(np.uint8),
+            )
+            if payload.get("source_array_validation") != expected_binding:
+                raise ValueError(
+                    "Final-layout package binds another worker array receipt."
+                )
+            identity = payload["logical_identity"]
+            for item in identity["units"]:
+                start_row = int(item["start_row"])
+                if start_row in identity_units:
+                    raise ValueError(
+                        "Composable logical identity unit has multiple owners."
+                    )
+                identity_units[start_row] = LogicalIdentityUnit(
+                    start_row=start_row,
+                    stop_row=int(item["stop_row"]),
+                    decoded_bytes=int(item["decoded_bytes"]),
+                    sha256=str(item["sha256"]),
+                )
+            identity_segments.extend(
+                LogicalIdentityBoundarySegment(
+                    unit_start_row=int(item["unit_start_row"]),
+                    unit_stop_row=int(item["unit_stop_row"]),
+                    start_row=int(item["start_row"]),
+                    stop_row=int(item["stop_row"]),
+                    decoded_bytes=int(item["decoded_bytes"]),
+                    sha256=str(item["sha256"]),
+                )
+                for item in identity["boundary_segments"]
+            )
         observed_workers.add(worker_digest)
         array_path = package_array_path
         for item in payload["units"]:
@@ -724,7 +1242,12 @@ def prepare_subject_mask_final_layout_unit_adoption(
     for start, stop in _physical_row_ranges(plan):
         owners = [
             digest
-            for digest, (worker_start, worker_stop, _run) in expected_by_digest.items()
+            for digest, (
+                worker_start,
+                worker_stop,
+                _run,
+                _array_record,
+            ) in expected_by_digest.items()
             if worker_start <= start and stop <= worker_stop
         ]
         if len(owners) == 1:
@@ -742,12 +1265,74 @@ def prepare_subject_mask_final_layout_unit_adoption(
         )
     if not set(units).issubset(expected_starts):
         raise ValueError("Final-layout package includes a cross-worker boundary unit.")
+    if len(package_schema_versions) != 1:
+        raise ValueError("Final-layout package schema versions cannot be mixed.")
+    composable_identity = package_schema_versions == {
+        SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
+    }
+    ordered_identity_units: tuple[LogicalIdentityUnit, ...] = ()
+    ordered_identity_segments: tuple[LogicalIdentityBoundarySegment, ...] = ()
+    if composable_identity:
+        segments_by_unit: dict[int, list[LogicalIdentityBoundarySegment]] = {}
+        for segment in identity_segments:
+            segments_by_unit.setdefault(segment.unit_start_row, []).append(segment)
+        for unit_start in range(
+            0,
+            int(dimensions.n_rois),
+            SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+        ):
+            unit_stop = min(
+                int(dimensions.n_rois),
+                unit_start + SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+            )
+            complete = identity_units.get(unit_start)
+            segments = sorted(
+                segments_by_unit.get(unit_start, []), key=lambda item: item.start_row
+            )
+            if complete is not None:
+                if complete.stop_row != unit_stop or segments:
+                    raise ValueError(
+                        "Composable logical identity ownership is ambiguous."
+                    )
+                continue
+            cursor = unit_start
+            for segment in segments:
+                if (
+                    segment.unit_stop_row != unit_stop
+                    or segment.start_row != cursor
+                    or segment.stop_row <= segment.start_row
+                ):
+                    raise ValueError(
+                        "Composable logical boundary segments are not contiguous."
+                    )
+                cursor = segment.stop_row
+            if cursor != unit_stop:
+                raise ValueError(
+                    "Composable logical identity does not cover every row."
+                )
+        ordered_identity_units = tuple(
+            identity_units[start] for start in sorted(identity_units)
+        )
+        ordered_identity_segments = tuple(
+            sorted(
+                identity_segments,
+                key=lambda item: (item.unit_start_row, item.start_row),
+            )
+        )
     return FinalLayoutUnitAdoption(
         units=units,
         boundary_starts=tuple(boundary_starts),
         package_count=len(package_paths),
         encoded_object_count=encoded_object_count,
         encoded_bytes=encoded_bytes,
+        composable_identity=composable_identity,
+        logical_identity_unit_rows=(
+            SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+            if composable_identity
+            else None
+        ),
+        logical_identity_units=ordered_identity_units,
+        logical_identity_boundary_segments=ordered_identity_segments,
     )
 
 
@@ -792,7 +1377,12 @@ def copy_encoded_physical_unit(
 __all__ = [
     "EncodedPhysicalUnit",
     "FinalLayoutUnitAdoption",
+    "LogicalIdentityBoundarySegment",
+    "LogicalIdentityUnit",
+    "SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM",
+    "SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS",
     "SUBJECT_MASK_FINAL_LAYOUT_UNIT_ARRAY",
+    "SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_LEGACY_SCHEMA_VERSION",
     "SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_ID",
     "SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION",
     "build_subject_mask_final_layout_unit_package",

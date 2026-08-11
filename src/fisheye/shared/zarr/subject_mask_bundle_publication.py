@@ -35,6 +35,7 @@ from fisheye.shared.zarr.manifest_digest import (
     metadata_without_empty_group_consolidation,
 )
 from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
     validate_persisted_subject_mask_core_publication,
@@ -123,6 +124,10 @@ _FAMILY_SELECTOR_ATTRS = (
     "latest_pending",
     "authoritative_run",
 )
+_COORDINATE_CORE_MANIFEST_VERSIONS = {
+    SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+}
 
 
 def _member_specs_for_version(version: int) -> Mapping[str, tuple[str, str]]:
@@ -368,17 +373,27 @@ def _bundle_cross_binding(
     )
     if not isinstance(quality_source, Mapping):
         raise ValueError("Quality manifest lacks its refined-source binding.")
+    quality_source_hashes = quality_source.get("source_array_values_sha256")
+    quality_source_paths = (
+        "masks_roi",
+        "instance_key",
+        "source_crop_row_ids",
+        "source_acquisition_frame_index",
+        "frame_row_offsets",
+        "available_channels",
+    )
+    if not isinstance(quality_source_hashes, Mapping) or set(
+        quality_source_hashes
+    ) != set(quality_source_paths):
+        raise ValueError("Quality manifest source-array identities are not exact.")
     expected_source_hashes = {
-        path: str(refined_arrays[path]["sha256"])
-        for path in (
-            "masks_roi",
-            "instance_key",
-            "source_crop_row_ids",
-            "source_acquisition_frame_index",
-            "frame_row_offsets",
-            "available_channels",
-        )
+        path: str(quality_source_hashes[path]) for path in quality_source_paths
     }
+    for path in quality_source_paths[1:]:
+        if expected_source_hashes[path] != refined_arrays[path].get("sha256"):
+            raise ValueError(
+                f"Quality/refined narrow source identity differs at {path!r}."
+            )
     expected_quality_source = {
         "run_name": refined_run_id,
         "run_path": f"refined_subject_masks_runs/{refined_run_id}",
@@ -401,7 +416,11 @@ def _bundle_cross_binding(
         "raw_refined_identity_array_values_sha256": identity,
         "quality_source_array_values_sha256": expected_source_hashes,
         "quality_source_manifest_digest": canonical_json_sha256(refined_manifest),
-        "identity_policy": "exact_logical_array_hash_equality_v1",
+        "identity_policy": (
+            "exact_logical_array_hash_equality_v1"
+            if "sha256" in refined_arrays["masks_roi"]
+            else "manifest_bound_composable_dense_identity_plus_quality_sha_v1"
+        ),
     }
     if version >= 2:
         cross_binding.update(
@@ -412,19 +431,21 @@ def _bundle_cross_binding(
                 "component_registry_policy": "raw_and_refined_bound_independently_v1",
             }
         )
-    raw_coordinate = (
-        raw_manifest.get("schema_version")
-        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    raw_coordinate = raw_manifest.get("schema_version") in (
+        _COORDINATE_CORE_MANIFEST_VERSIONS
     )
-    refined_coordinate = (
-        refined_manifest.get("schema_version")
-        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    refined_coordinate = refined_manifest.get("schema_version") in (
+        _COORDINATE_CORE_MANIFEST_VERSIONS
     )
     if raw_coordinate is not refined_coordinate:
         raise ValueError(
-            "Raw and refined bundle members must both carry coordinate-v4 or "
+            "Raw and refined bundle members must both carry coordinate-v4/v5 or "
             "both remain legacy."
         )
+    if raw_coordinate and raw_manifest.get("schema_version") != (
+        refined_manifest.get("schema_version")
+    ):
+        raise ValueError("Raw and refined coordinate core versions differ.")
     if raw_coordinate:
         raw_payload = raw_manifest["payload"]
         refined_payload = refined_manifest["payload"]
@@ -451,7 +472,12 @@ def _bundle_cross_binding(
                 refined_dependencies["recording_assembly"]
             ),
             "refined_raw_core_binding": dict(raw_core_binding),
-            "binding_policy": "crop_v2_raw_core_v4_refined_core_v4_exact_v1",
+            "binding_policy": (
+                "crop_v2_raw_core_v5_refined_core_v5_exact_v1"
+                if raw_manifest.get("schema_version")
+                == SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+                else "crop_v2_raw_core_v4_refined_core_v4_exact_v1"
+            ),
         }
     if version >= 3:
         if not isinstance(cache_manifest, Mapping):
@@ -469,7 +495,7 @@ def _bundle_cross_binding(
             "run_path": f"refined_subject_masks_runs/{refined_run_id}",
             "manifest_payload_digest": refined_manifest["payload_digest"],
             "manifest_document_digest": canonical_json_sha256(refined_manifest),
-            "dense_array_values_sha256": refined_arrays["masks_roi"]["sha256"],
+            "dense_array_values_sha256": expected_source_hashes["masks_roi"],
             "component_registry_digest": canonical_json_sha256(refined_components),
             "row_identity_array_values_sha256": {
                 path: refined_arrays[path]["sha256"] for path in _IDENTITY_PATHS
@@ -492,7 +518,7 @@ def _bundle_cross_binding(
         cross_binding["presentation_cache"] = {
             "source_refined_run_id": refined_run_id,
             "source_refined_manifest_digest": canonical_json_sha256(refined_manifest),
-            "source_dense_array_values_sha256": refined_arrays["masks_roi"]["sha256"],
+            "source_dense_array_values_sha256": expected_source_hashes["masks_roi"],
             "source_component_registry_digest": canonical_json_sha256(
                 refined_components
             ),
@@ -500,7 +526,11 @@ def _bundle_cross_binding(
                 path: refined_arrays[path]["sha256"] for path in _IDENTITY_PATHS
             },
             "cache_extension_receipts_digest": cache_extension.get("receipts_digest"),
-            "binding_policy": "exact_dense_authority_and_row_identity_v1",
+            "binding_policy": (
+                "manifest_composable_dense_quality_sha_and_row_identity_v1"
+                if "sha256" not in refined_arrays["masks_roi"]
+                else "exact_dense_authority_and_row_identity_v1"
+            ),
         }
     return cross_binding
 
@@ -960,8 +990,7 @@ def _validate_persisted_members(
     if (
         not raw_errors
         and not refined_errors
-        and refined_manifest.get("schema_version")
-        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        and refined_manifest.get("schema_version") in _COORDINATE_CORE_MANIFEST_VERSIONS
     ):
         try:
             root = open_zarr_root(archive, mode="r")

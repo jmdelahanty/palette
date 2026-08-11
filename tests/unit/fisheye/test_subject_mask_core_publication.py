@@ -28,6 +28,7 @@ from fisheye.shared.zarr.crop_manifest import build_coordinate_crop_run_manifest
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_COMPOSABLE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
     SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR,
@@ -37,6 +38,8 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     validate_subject_mask_core_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+    SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION,
     build_subject_mask_final_layout_unit_package,
     prepare_subject_mask_final_layout_unit_adoption,
     validate_subject_mask_final_layout_unit_package,
@@ -716,6 +719,124 @@ def test_streaming_publication_adopts_sealed_final_layout_payload_unit(
     assert adoption["boundary_unit_count"] == 0
 
 
+def test_composable_publication_adopts_payload_without_finalizer_decode(
+    tmp_path: Path,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    crop = refined_with_crop.pop("_crop")
+    source_manifest, source_receipt, source_path = _recording_documents(
+        kind="raw_probability_uint8",
+        arrays=raw,
+    )
+    worker = source_receipt["payload"]["producer_evidence"]["workers"][0]
+    worker_payload = worker["worker_receipt"]["payload"]["arrays"]["mask_probs_roi"]
+    package = tmp_path / "raw_composable_final_layout_unit"
+    built = build_subject_mask_final_layout_unit_package(
+        source_array=raw["mask_probs_roi"],
+        source_crop_row_ids=raw["source_crop_row_ids"],
+        destination=package,
+        kind="raw_probability_uint8",
+        dimensions=_dimensions(),
+        global_start_row=0,
+        source_run_path=str(worker["run_path"]),
+        worker_receipt_payload_digest=str(worker["worker_receipt_payload_digest"]),
+        producer_commit="a" * 40,
+        worker_array_validation_record=worker_payload,
+    )
+    assert built["schema_version"] == (
+        SUBJECT_MASK_FINAL_LAYOUT_UNIT_PACKAGE_SCHEMA_VERSION
+    )
+
+    publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        raw,
+        source_crop_arrays=crop,  # type: ignore[arg-type]
+        source_manifest=source_manifest,
+        n_frames=4,
+        components=_components(),
+        destination=tmp_path / "composable.zarr",
+        run_id="composable_raw",
+        kind="raw_probability_uint8",
+        source_run_path=source_path,
+        validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE,
+        source_validation_receipt=source_receipt,
+        final_layout_unit_packages=(package,),
+        require_complete_final_layout_units=True,
+    )
+    assert publication.manifest["schema_version"] == (
+        SUBJECT_MASK_CORE_COMPOSABLE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    payload_document = publication.manifest["payload"]["logical_content"]["document"][
+        "arrays"
+    ]["mask_probs_roi"]
+    assert payload_document["digest_algorithm"] == (
+        SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+    )
+    assert "sha256" not in payload_document
+    assert validate_subject_mask_core_run_manifest(publication.manifest) == ()
+
+    plans = plan_raw_subject_mask_storage(
+        _dimensions(),
+        encoding=SubjectMaskProbabilityEncoding.LINEAR_UINT8_0_255,
+        profile=PUBLISHED_HTTP_V1,
+    )
+    plan = next(
+        entry.plan for entry in plans.entries if entry.rule.path == "mask_probs_roi"
+    )
+    adoption = prepare_subject_mask_final_layout_unit_adoption(
+        (package,),
+        kind="raw_probability_uint8",
+        dimensions=_dimensions(),
+        plan=plan,
+        source_validation_receipt=source_receipt,
+        require_complete_eligible_units=True,
+    )
+
+    class ForbiddenDecodedRead:
+        shape = raw["mask_probs_roi"].shape
+        dtype = raw["mask_probs_roi"].dtype
+
+        def __getitem__(self, _selection: object) -> np.ndarray:
+            raise AssertionError("complete adopted units must not be decoded")
+
+    destination_path = tmp_path / "composable_no_decode.zarr"
+    destination_root = zarr.open_group(str(destination_path), mode="w", zarr_format=3)
+    binding = next(
+        item
+        for item in RAW_SUBJECT_MASK_UINT8_SCHEMA_V1.bindings
+        if item.path == "mask_probs_roi"
+    )
+    contract = RAW_SUBJECT_MASK_UINT8_SCHEMA_V1.contracts.resolve(
+        binding.contract_id,
+        binding.contract_version,
+    )
+    destination = create_array_from_plan(
+        destination_root,
+        name="payload",
+        contract=contract,
+        plan=plan,
+        fill_value=0,
+        attributes={
+            "benchmark_only": True,
+            "selector_eligible": False,
+            "artifact_class": "subject_mask_scientific_core",
+        },
+    )
+    receipt = core_publication._write_physical_units(
+        destination,
+        ForbiddenDecodedRead(),
+        plan,
+        final_layout_adoption=adoption,
+        destination_array_path=destination_path / "payload",
+        use_composable_identity=True,
+    )
+    np.testing.assert_array_equal(destination[:], raw["mask_probs_roi"])
+    assert receipt["encoded_physical_unit_copy_count"] == 1
+    assert receipt["boundary_reencode_count"] == 0
+    assert receipt["digest_algorithm"] == (
+        SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+    )
+
+
 def test_final_layout_package_corruption_fails_before_publication(
     tmp_path: Path,
 ) -> None:
@@ -768,6 +889,14 @@ def test_final_layout_packages_leave_only_cross_worker_boundary_for_reencode(
     )
     values = np.arange(10 * 4 * 8 * 8, dtype=np.uint8).reshape(10, 4, 8, 8)
     digests = ("1" * 64, "2" * 64)
+    worker_array_records = tuple(
+        subject_mask_array_unit_document(
+            {"mask_probs_roi": values[start:stop]},
+            ("mask_probs_roi",),
+            unit_rows=3,
+        )["mask_probs_roi"]
+        for start, stop in ((0, 5), (5, 10))
+    )
     packages: list[Path] = []
     for index, (start, stop) in enumerate(((0, 5), (5, 10))):
         package = tmp_path / f"worker_{index}"
@@ -781,6 +910,7 @@ def test_final_layout_packages_leave_only_cross_worker_boundary_for_reencode(
             source_run_path=f"subject_mask_shard_runs/worker_{index}",
             worker_receipt_payload_digest=digests[index],
             producer_commit="a" * 40,
+            worker_array_validation_record=worker_array_records[index],
             profile=profile,
         )
         packages.append(package)
@@ -803,6 +933,13 @@ def test_final_layout_packages_leave_only_cross_worker_boundary_for_reencode(
                             "stop_row": stop,
                         },
                         "run_path": f"subject_mask_shard_runs/worker_{index}",
+                        "worker_receipt": {
+                            "payload": {
+                                "arrays": {
+                                    "mask_probs_roi": worker_array_records[index]
+                                }
+                            }
+                        },
                     }
                     for index, (start, stop) in enumerate(((0, 5), (5, 10)))
                 ]
@@ -822,6 +959,9 @@ def test_final_layout_packages_leave_only_cross_worker_boundary_for_reencode(
 
     assert set(adoption.units) == {0, 8}
     assert adoption.boundary_starts == (4,)
+    assert adoption.composable_identity is True
+    assert adoption.logical_identity_units == ()
+    assert len(adoption.logical_identity_boundary_segments) == 2
 
     destination_path = tmp_path / "boundary_destination.zarr"
     destination_root = zarr.open_group(str(destination_path), mode="w", zarr_format=3)
@@ -853,10 +993,16 @@ def test_final_layout_packages_leave_only_cross_worker_boundary_for_reencode(
         final_layout_adoption=adoption,
         destination_array_path=destination_path / "payload",
         physical_unit_workers=2,
+        use_composable_identity=True,
     )
     np.testing.assert_array_equal(destination[:], values)
     assert write_receipt["encoded_physical_unit_copy_count"] == 2
     assert write_receipt["boundary_reencode_count"] == 1
+    assert write_receipt["unit_count"] == 1
+    assert (
+        write_receipt["units"][0]["sha256"]
+        == hashlib.sha256(values.view(np.uint8)).hexdigest()
+    )
 
     resumed = build_subject_mask_final_layout_unit_package(
         source_array=values[:5],
@@ -868,6 +1014,7 @@ def test_final_layout_packages_leave_only_cross_worker_boundary_for_reencode(
         source_run_path="subject_mask_shard_runs/worker_0",
         worker_receipt_payload_digest=digests[0],
         producer_commit="a" * 40,
+        worker_array_validation_record=worker_array_records[0],
         profile=profile,
     )
     assert (
@@ -970,10 +1117,10 @@ def test_coordinate_core_v4_binds_crop_raw_refined_and_worker_evidence(
         == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
     )
     assert validate_subject_mask_core_run_manifest(raw_publication.manifest) == ()
-    stale_v3 = deepcopy(raw_publication.manifest)
-    stale_v3["schema_version"] = 3
+    unsupported_v6 = deepcopy(raw_publication.manifest)
+    unsupported_v6["schema_version"] = 6
     assert "subject-mask core manifest envelope identity mismatch" in (
-        validate_subject_mask_core_run_manifest(stale_v3)
+        validate_subject_mask_core_run_manifest(unsupported_v6)
     )
 
     refined_source, refined_receipt, refined_source_path = _recording_documents(

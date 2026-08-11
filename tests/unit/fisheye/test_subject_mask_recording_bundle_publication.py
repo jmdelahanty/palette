@@ -63,6 +63,13 @@ from fisheye.shared.zarr.subject_mask_bundle_publication import (
     SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
     activate_subject_mask_bundle,
 )
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    SubjectMaskCoreValidationMode,
+)
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    build_subject_mask_final_layout_unit_package,
+)
 from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
     SubjectMaskBundleCoordinateAuthorityError,
     load_recording_subject_mask_coordinate_authority,
@@ -74,6 +81,7 @@ from fisheye.shared.zarr.subject_shape_bundle_source import (
 )
 from fisheye.shared.zarr.subject_mask_schema import (
     SubjectMaskComponentRegistry,
+    SubjectMaskDimensions,
     derive_subject_mask_frame_row_offsets,
     derive_subject_mask_metrics,
 )
@@ -347,6 +355,65 @@ def _install_worker_sampled_contours(
         )
         receipt_paths.append(destination)
     return tuple(receipt_paths)
+
+
+def _install_composable_final_layout_packages(
+    draft_path: Path,
+    *,
+    raw_runs: tuple[str, ...],
+    refined_runs: tuple[str, ...],
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    root = zarr.open_group(str(draft_path), mode="r", use_consolidated=False)
+    package_root = draft_path.parent / "final_layout_packages"
+    packages_by_kind: list[tuple[Path, ...]] = []
+    for kind, family, names, payload_path in (
+        (
+            "raw_probability_uint8",
+            "subject_mask_shard_runs",
+            raw_runs,
+            "mask_probs_roi",
+        ),
+        (
+            "refined_dense_core",
+            "refined_subject_masks_runs",
+            refined_runs,
+            "masks_roi",
+        ),
+    ):
+        channels = int(root[f"{family}/{names[0]}/{payload_path}"].shape[1])
+        dimensions = SubjectMaskDimensions(
+            n_frames=4,
+            n_rois=4,
+            n_channels=channels,
+            roi_height=8,
+            roi_width=8,
+        )
+        paths: list[Path] = []
+        for name in names:
+            run = root[f"{family}/{name}"]
+            binding = run.attrs["subject_mask_worker_semantic_receipt_binding"]
+            receipt = json.loads(
+                (draft_path / binding["relative_path"]).read_text(encoding="utf-8")
+            )
+            crop_rows = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64)
+            destination = package_root / kind / name
+            build_subject_mask_final_layout_unit_package(
+                source_array=run[payload_path],
+                source_crop_row_ids=run["source_crop_row_ids"],
+                destination=destination,
+                kind=kind,
+                dimensions=dimensions,
+                global_start_row=int(crop_rows[0]),
+                source_run_path=f"{family}/{name}",
+                worker_receipt_payload_digest=receipt["payload_digest"],
+                producer_commit="a" * 40,
+                worker_array_validation_record=receipt["payload"]["arrays"][
+                    payload_path
+                ],
+            )
+            paths.append(destination)
+        packages_by_kind.append(tuple(paths))
+    return packages_by_kind[0], packages_by_kind[1]
 
 
 def _install_crop_v2(draft_path: Path) -> None:
@@ -1180,6 +1247,130 @@ def test_recording_bundle_assembles_standard_sampled_contour_member(
         "quality",
         "presentation_cache",
     }
+
+
+def test_recording_bundle_composes_v5_dense_identity_through_coordinate_bundle(
+    tmp_path: Path,
+) -> None:
+    raw_runs = ("raw_clip_a", "raw_clip_b")
+    refined_runs = ("refined_clip_a", "refined_clip_b")
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_a": slice(0, 2), "raw_clip_b": slice(2, 4)},
+        refined_slices={
+            "refined_clip_a": slice(0, 2),
+            "refined_clip_b": slice(2, 4),
+        },
+    )
+    _install_crop_v2(draft)
+    _upgrade_workers_to_coordinate_science_v2(draft)
+    contour_receipts = _install_worker_sampled_contours(
+        draft, refined_runs=refined_runs
+    )
+    raw_packages, refined_packages = _install_composable_final_layout_packages(
+        draft,
+        raw_runs=raw_runs,
+        refined_runs=refined_runs,
+    )
+    analysis = tmp_path / "analysis_composable.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "crop_manifest_test"
+    _install_source_camera_authorities(root, archive_path=analysis)
+    _install_crop_v2(analysis)
+
+    result = publish_recording_subject_mask_bundle(
+        analysis_zarr=analysis,
+        draft_zarr=draft,
+        crop_run="crop_001",
+        raw_draft_parent="subject_mask_shard_runs",
+        raw_draft_run=raw_runs[0],
+        raw_draft_runs=raw_runs,
+        refined_draft_run=refined_runs[0],
+        refined_draft_runs=refined_runs,
+        raw_run="raw_composable_001",
+        refined_run="refined_composable_001",
+        quality_run="quality_composable_001",
+        cache_run="cache_composable_001",
+        bundle_id="bundle_composable_001",
+        local_output_root=tmp_path / "local_composable_outputs",
+        quality_scratch_root=tmp_path / "quality_composable_scratch",
+        expected_work_units=(
+            {
+                "work_unit_id": "pytest_collection:clip_0",
+                "work_unit_index": 0,
+                "source_clip_id": "clip_0",
+                "source_clip_index": 0,
+                "frame_start": 0,
+                "frame_stop": 2,
+                "row_start": 0,
+                "row_stop": 2,
+            },
+            {
+                "work_unit_id": "pytest_collection:clip_2",
+                "work_unit_index": 1,
+                "source_clip_id": "clip_2",
+                "source_clip_index": 1,
+                "frame_start": 2,
+                "frame_stop": 4,
+                "row_start": 2,
+                "row_stop": 4,
+            },
+        ),
+        core_validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE,
+        raw_final_layout_unit_packages=raw_packages,
+        refined_final_layout_unit_packages=refined_packages,
+        require_complete_final_layout_units=True,
+        sampled_contour_worker_receipts=contour_receipts,
+        require_worker_sampled_contours=True,
+        sampled_contour_producer_commit="a" * 40,
+    )
+
+    assert result["publication_execution"]["core_validation_mode"] == (
+        SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
+    )
+    published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    raw_manifest = published["subject_mask_runs/raw_composable_001"].attrs[
+        "run_manifest"
+    ]
+    refined_manifest = published[
+        "refined_subject_masks_runs/refined_composable_001"
+    ].attrs["run_manifest"]
+    assert raw_manifest["schema_version"] == (
+        SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert refined_manifest["schema_version"] == (
+        SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    refined_dense = refined_manifest["payload"]["logical_content"]["document"][
+        "arrays"
+    ]["masks_roi"]
+    assert "sha256" not in refined_dense
+    quality_source = published[
+        "subject_mask_quality_runs/quality_composable_001"
+    ].attrs["run_manifest"]["payload"]["source_refined_subject_mask_snapshot"]
+    cache_source = published["subject_mask_cache_runs/cache_composable_001"].attrs[
+        "run_manifest"
+    ]["payload"]["source_refined_subject_mask_snapshot"]
+    assert cache_source["dense_array_values_sha256"] == (
+        quality_source["dense_array_values_sha256"]
+    )
+    bundle = published["subject_mask_bundle_runs/bundle_composable_001"].attrs[
+        "run_manifest"
+    ]
+    assert bundle["payload"]["cross_binding"]["identity_policy"] == (
+        "manifest_bound_composable_dense_identity_plus_quality_sha_v1"
+    )
+    authority = load_recording_subject_mask_coordinate_authority(
+        analysis,
+        bundle_id="bundle_composable_001",
+        allow_inactive=True,
+    )
+    assert authority.active is False
+    assert authority.crop_run_path == "crop_runs/crop_001"
+    assert authority.refined_run.path == (
+        "refined_subject_masks_runs/refined_composable_001"
+    )
 
 
 def test_recording_bundle_binds_distinct_raw_and_refined_component_registries(

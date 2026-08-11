@@ -61,6 +61,8 @@ from fisheye.shared.zarr.subject_mask_schema import (
 )
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
     FinalLayoutUnitAdoption,
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
     copy_encoded_physical_unit,
     prepare_subject_mask_final_layout_unit_adoption,
 )
@@ -88,7 +90,9 @@ from fisheye.shared.zarr_run_completion import (
 
 SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID = "palette.subject_mask_core.run_manifest"
 SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION = 2
+SUBJECT_MASK_CORE_COMPOSABLE_RUN_MANIFEST_SCHEMA_VERSION = 3
 SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 4
+SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 5
 SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR = "source_validation_receipt.json"
 SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_ID = "palette.subject_mask_core.shadow_publication"
@@ -118,6 +122,7 @@ class SubjectMaskCoreValidationMode(str, Enum):
 
     REFERENCE_FULL = "reference_full_v1"
     PRODUCTION_STREAMING = "production_streaming_v1"
+    PRODUCTION_COMPOSABLE = "production_composable_units_v1"
 
 
 @dataclass(frozen=True)
@@ -442,7 +447,10 @@ def build_subject_mask_core_coordinate_dependencies(
             raw_core_manifest.get("schema_id")
             != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID
             or raw_core_manifest.get("schema_version")
-            != SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            not in {
+                SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+                SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+            }
             or not isinstance(raw_payload, Mapping)
             or raw_payload.get("kind") != "raw_probability_uint8"
             or raw_core_manifest.get("payload_digest")
@@ -900,6 +908,99 @@ def _group_for_path(group: Any, path: str) -> tuple[Any, str]:
     return target, parts[-1]
 
 
+def _composable_identity_units(
+    source: Any,
+    adoption: FinalLayoutUnitAdoption,
+) -> list[dict[str, object]]:
+    """Assemble a storage-independent logical root from worker unit evidence.
+
+    Complete global identity units are trusted from receipt-bound worker
+    packages. Only identity units crossing worker boundaries are decoded and
+    checked against every contributing package segment.
+    """
+
+    if (
+        not adoption.composable_identity
+        or adoption.logical_identity_unit_rows
+        != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+    ):
+        raise ValueError("Composable publication requires current unit evidence.")
+    shape, dtype = _shape_dtype(source)
+    if not shape:
+        raise ValueError("Composable publication requires a row axis.")
+    row_bytes = int(dtype.itemsize) * int(np.prod(shape[1:]))
+    complete = {int(unit.start_row): unit for unit in adoption.logical_identity_units}
+    segments_by_unit: dict[int, list[Any]] = {}
+    for segment in adoption.logical_identity_boundary_segments:
+        segments_by_unit.setdefault(int(segment.unit_start_row), []).append(segment)
+    trailing = (slice(None),) * (len(shape) - 1)
+    result: list[dict[str, object]] = []
+    for start in range(
+        0,
+        int(shape[0]),
+        SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+    ):
+        stop = min(
+            int(shape[0]),
+            start + SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+        )
+        unit = complete.get(start)
+        segments = sorted(
+            segments_by_unit.get(start, []), key=lambda item: item.start_row
+        )
+        if unit is not None:
+            if unit.stop_row != stop or segments:
+                raise ValueError("Composable logical identity ownership is ambiguous.")
+            result.append(
+                {
+                    "start_row": start,
+                    "stop_row": stop,
+                    "decoded_bytes": int(unit.decoded_bytes),
+                    "sha256": str(unit.sha256),
+                }
+            )
+            continue
+        values = np.ascontiguousarray(
+            np.asarray(source[(slice(start, stop), *trailing)])
+        )
+        cursor = start
+        for segment in segments:
+            if segment.start_row != cursor or segment.stop_row > stop:
+                raise RuntimeError(
+                    "Composable boundary evidence is not ordered and contiguous."
+                )
+            local_start = segment.start_row - start
+            local_stop = segment.stop_row - start
+            part = np.ascontiguousarray(values[local_start:local_stop])
+            if (
+                int(part.nbytes) != int(segment.decoded_bytes)
+                or hashlib.sha256(part.view(np.uint8)).hexdigest() != segment.sha256
+            ):
+                raise RuntimeError(
+                    "Composable boundary bytes differ from worker evidence."
+                )
+            cursor = segment.stop_row
+        if cursor != stop:
+            raise RuntimeError(
+                "Composable boundary evidence does not cover its identity unit."
+            )
+        if int(values.nbytes) != (stop - start) * row_bytes:
+            raise RuntimeError("Composable identity decoded byte count differs.")
+        result.append(
+            {
+                "start_row": start,
+                "stop_row": stop,
+                "decoded_bytes": int(values.nbytes),
+                "sha256": hashlib.sha256(values.view(np.uint8)).hexdigest(),
+            }
+        )
+    if set(complete) | set(segments_by_unit) != {
+        int(item["start_row"]) for item in result
+    }:
+        raise ValueError("Composable logical identity inventory differs.")
+    return result
+
+
 def _write_physical_units(
     destination: Any,
     source: Any,
@@ -909,6 +1010,7 @@ def _write_physical_units(
     physical_unit_workers: int = 1,
     final_layout_adoption: FinalLayoutUnitAdoption | None = None,
     destination_array_path: Path | None = None,
+    use_composable_identity: bool = False,
 ) -> dict[str, object]:
     """Write whole physical row bands and hash exact source bytes once.
 
@@ -924,6 +1026,12 @@ def _write_physical_units(
         raise ValueError(
             "Final-layout unit adoption requires the destination array path."
         )
+    if use_composable_identity and (
+        final_layout_adoption is None or not final_layout_adoption.composable_identity
+    ):
+        raise ValueError(
+            "Composable publication requires complete current final-layout units."
+        )
 
     unit = plan.shard_shape or plan.chunk_shape
     if unit is None:
@@ -934,11 +1042,16 @@ def _write_physical_units(
     encoded_unit_copies = 0
     boundary_reencodes = 0
     logical_digest = hashlib.sha256()
+    composable_units = (
+        _composable_identity_units(source, final_layout_adoption)
+        if use_composable_identity and final_layout_adoption is not None
+        else None
+    )
     samples: list[dict[str, object]] = []
     expected_units: list[Mapping[str, Any]] | None = None
     expected_unit_index = 0
     expected_unit_digest = hashlib.sha256()
-    if source_validation_record is not None:
+    if source_validation_record is not None and not use_composable_identity:
         algorithm = source_validation_record.get("digest_algorithm")
         if algorithm == SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM:
             raw_units = source_validation_record.get("units")
@@ -962,13 +1075,24 @@ def _write_physical_units(
         for index, start in enumerate(starts):
             stop = min(shape[0], start + max(1, int(unit[0])))
             selection = (slice(start, stop), *trailing)
-            values = np.ascontiguousarray(np.asarray(source[selection]))
-            if values.dtype.hasobject:
-                raise TypeError("Subject-mask core arrays cannot use object dtype.")
-            unit_bytes = values.view(np.uint8)
-            logical_digest.update(unit_bytes)
-            unit_sha256 = hashlib.sha256(unit_bytes).hexdigest()
+            encoded_unit = (
+                final_layout_adoption.units.get(int(start))
+                if final_layout_adoption is not None
+                else None
+            )
+            values: np.ndarray[Any, Any] | None = None
+            if not (use_composable_identity and encoded_unit is not None):
+                values = np.ascontiguousarray(np.asarray(source[selection]))
+                if values.dtype.hasobject:
+                    raise TypeError("Subject-mask core arrays cannot use object dtype.")
+                unit_bytes = values.view(np.uint8)
+                if not use_composable_identity:
+                    logical_digest.update(unit_bytes)
+                unit_sha256 = hashlib.sha256(unit_bytes).hexdigest()
+            else:
+                unit_sha256 = str(encoded_unit.logical_sha256)
             if expected_units is not None:
+                assert values is not None
                 cursor = int(start)
                 while cursor < int(stop):
                     if expected_unit_index >= len(expected_units):
@@ -998,15 +1122,10 @@ def _write_physical_units(
                         expected_unit_index += 1
                         expected_unit_digest = hashlib.sha256()
                     cursor = segment_stop
-            encoded_unit = (
-                final_layout_adoption.units.get(int(start))
-                if final_layout_adoption is not None
-                else None
-            )
             if encoded_unit is not None:
-                if (
-                    encoded_unit.stop_row != int(stop)
-                    or encoded_unit.logical_sha256 != unit_sha256
+                if encoded_unit.stop_row != int(stop) or (
+                    not use_composable_identity
+                    and encoded_unit.logical_sha256 != unit_sha256
                 ):
                     raise RuntimeError(
                         "Encoded final-layout unit differs from the validated "
@@ -1023,6 +1142,7 @@ def _write_physical_units(
                         destination_array_path=destination_array_path,
                     )
                 else:
+                    assert values is not None
                     destination[selection] = values
             elif encoded_unit is not None:
                 pending.append(
@@ -1033,6 +1153,7 @@ def _write_physical_units(
                     )
                 )
             else:
+                assert values is not None
                 pending.append(
                     executor.submit(
                         _write_one_physical_row_band,
@@ -1058,7 +1179,7 @@ def _write_physical_units(
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
     logical_sha256 = logical_digest.hexdigest()
-    if source_validation_record is not None:
+    if source_validation_record is not None and not use_composable_identity:
         if expected_units is not None:
             if expected_unit_index != len(expected_units):
                 raise RuntimeError(
@@ -1070,11 +1191,9 @@ def _write_physical_units(
                 "Bytes streamed into the subject-mask publication differ from "
                 "the validated source receipt."
             )
-    return {
+    result: dict[str, object] = {
         "shape": list(shape),
         "dtype": str(dtype),
-        "digest_algorithm": SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM,
-        "sha256": logical_sha256,
         "physical_write_count": writes,
         "encoded_physical_unit_copy_count": encoded_unit_copies,
         "boundary_reencode_count": boundary_reencodes,
@@ -1091,6 +1210,28 @@ def _write_physical_units(
         "effective_physical_unit_workers": effective_workers,
         "bounded_reopen_samples": samples,
     }
+    if composable_units is None:
+        result.update(
+            {
+                "digest_algorithm": SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM,
+                "sha256": logical_sha256,
+            }
+        )
+    else:
+        result.update(
+            {
+                "digest_algorithm": (
+                    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+                ),
+                "identity_unit_rows": (
+                    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+                ),
+                "unit_count": len(composable_units),
+                "units_digest": canonical_json_sha256(composable_units),
+                "units": composable_units,
+            }
+        )
+    return result
 
 
 def _write_one_physical_row_band(
@@ -1104,15 +1245,32 @@ def _write_one_physical_row_band(
 def _streamed_array_document(
     write_receipts: Mapping[str, Mapping[str, object]], paths: tuple[str, ...]
 ) -> dict[str, object]:
-    return {
-        path: {
+    result: dict[str, object] = {}
+    for path in paths:
+        receipt = write_receipts[path]
+        record: dict[str, object] = {
             "shape": list(write_receipts[path]["shape"]),
             "dtype": str(write_receipts[path]["dtype"]),
             "digest_algorithm": str(write_receipts[path]["digest_algorithm"]),
-            "sha256": str(write_receipts[path]["sha256"]),
         }
-        for path in paths
-    }
+        if receipt["digest_algorithm"] == SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM:
+            record["sha256"] = str(receipt["sha256"])
+        elif (
+            receipt["digest_algorithm"]
+            == SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+        ):
+            record.update(
+                {
+                    "identity_unit_rows": int(receipt["identity_unit_rows"]),
+                    "unit_count": int(receipt["unit_count"]),
+                    "units_digest": str(receipt["units_digest"]),
+                    "units": list(receipt["units"]),
+                }
+            )
+        else:  # pragma: no cover - writer owns the finite algorithm set
+            raise RuntimeError("Subject-mask write receipt digest is unsupported.")
+        result[path] = record
+    return result
 
 
 def _validate_reopened_metadata_and_samples(
@@ -1281,12 +1439,18 @@ def validate_subject_mask_core_run_manifest(
     if set(manifest) != expected_envelope:
         errors.append("subject-mask core manifest envelope has unexpected fields")
     manifest_schema_version = manifest.get("schema_version")
+    composable_manifest = manifest_schema_version in {
+        SUBJECT_MASK_CORE_COMPOSABLE_RUN_MANIFEST_SCHEMA_VERSION,
+        SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    }
     if (
         manifest.get("schema_id") != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID
         or manifest_schema_version
         not in {
             SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION,
+            SUBJECT_MASK_CORE_COMPOSABLE_RUN_MANIFEST_SCHEMA_VERSION,
             SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+            SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
         }
         or manifest.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
     ):
@@ -1312,10 +1476,10 @@ def validate_subject_mask_core_run_manifest(
         "write_receipt",
         "logical_content",
     }
-    if (
-        manifest_schema_version
-        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
-    ):
+    if manifest_schema_version in {
+        SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+        SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         expected_payload.update({"coordinate_contract", "coordinate_dependencies"})
     if set(payload) != expected_payload:
         errors.append("subject-mask core manifest payload has unexpected fields")
@@ -1412,10 +1576,10 @@ def validate_subject_mask_core_run_manifest(
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
 
-    if (
-        manifest_schema_version
-        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
-    ):
+    if manifest_schema_version in {
+        SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+        SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         if schema is None:
             errors.append("subject-mask coordinate catalog lacks a resolved schema")
         else:
@@ -1505,9 +1669,33 @@ def validate_subject_mask_core_run_manifest(
         "parallel_write_policy",
         "derived_metric_canonicalization",
     }
+    if composable_manifest:
+        expected_receipt_fields.add("composable_identity")
     if not isinstance(receipt, Mapping) or set(receipt) != expected_receipt_fields:
         errors.append("subject-mask core write_receipt is not exact")
     elif plans is not None:
+        if composable_manifest:
+            payload_path = (
+                "mask_probs_roi" if kind == "raw_probability_uint8" else "masks_roi"
+            )
+            expected_composable = {
+                "policy": "ordered_fixed_global_row_units_v1",
+                "payload_path": payload_path,
+                "digest_algorithm": (
+                    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+                ),
+                "identity_unit_rows": (
+                    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+                ),
+                "complete_units_source": "receipt_bound_worker_packages_v1",
+                "boundary_units_source": "decoded_and_segment_verified_v1",
+            }
+            if (
+                receipt.get("validation_mode")
+                != (SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value)
+                or receipt.get("composable_identity") != expected_composable
+            ):
+                errors.append("subject-mask composable write receipt differs")
         if receipt.get("parallel_write_policy") not in {
             "single_writer_v1_future_workers_require_disjoint_whole_shards",
             "bounded_threaded_disjoint_whole_physical_row_bands_v1",
@@ -1559,7 +1747,7 @@ def validate_subject_mask_core_run_manifest(
                 errors.append("subject-mask core logical_content has unexpected fields")
             if (
                 document.get("schema_id") != "palette.subject_mask_core.logical_content"
-                or document.get("schema_version") != 1
+                or document.get("schema_version") != (2 if composable_manifest else 1)
                 or document.get("kind") != kind
             ):
                 errors.append("subject-mask core logical_content identity mismatch")
@@ -1583,13 +1771,32 @@ def validate_subject_mask_core_run_manifest(
                         "subject-mask core logical array declarations mismatch"
                     )
                 else:
+                    payload_path = (
+                        "mask_probs_roi"
+                        if kind == "raw_probability_uint8"
+                        else "masks_roi"
+                    )
                     for path, item in array_documents.items():
-                        if not isinstance(item, Mapping) or set(item) != {
+                        expected_fields = {
                             "shape",
                             "dtype",
                             "digest_algorithm",
                             "sha256",
-                        }:
+                        }
+                        if composable_manifest and path == payload_path:
+                            expected_fields = {
+                                "shape",
+                                "dtype",
+                                "digest_algorithm",
+                                "identity_unit_rows",
+                                "unit_count",
+                                "units_digest",
+                                "units",
+                            }
+                        if (
+                            not isinstance(item, Mapping)
+                            or set(item) != expected_fields
+                        ):
                             errors.append(
                                 f"subject-mask core logical declaration invalid at {path}"
                             )
@@ -1599,17 +1806,85 @@ def validate_subject_mask_core_run_manifest(
                             errors.append(f"subject-mask core shape mismatch at {path}")
                         if item.get("dtype") != plan.logical_dtype:
                             errors.append(f"subject-mask core dtype mismatch at {path}")
-                        if (
-                            item.get("digest_algorithm")
-                            != SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM
-                        ):
-                            errors.append(
-                                f"subject-mask core digest algorithm mismatch at {path}"
-                            )
-                        try:
-                            _require_sha256(item.get("sha256"), name=f"{path} sha256")
-                        except ValueError as exc:
-                            errors.append(str(exc))
+                        if composable_manifest and path == payload_path:
+                            units = item.get("units")
+                            if (
+                                item.get("digest_algorithm")
+                                != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+                                or item.get("identity_unit_rows")
+                                != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+                                or not isinstance(units, list)
+                                or not units
+                            ):
+                                errors.append(
+                                    f"subject-mask composable identity invalid at {path}"
+                                )
+                                continue
+                            cursor = 0
+                            row_bytes = int(
+                                np.dtype(plan.logical_dtype).itemsize
+                            ) * int(np.prod(plan.logical_shape[1:]))
+                            for unit in units:
+                                if not isinstance(unit, Mapping) or set(unit) != {
+                                    "start_row",
+                                    "stop_row",
+                                    "decoded_bytes",
+                                    "sha256",
+                                }:
+                                    errors.append(
+                                        f"subject-mask composable unit invalid at {path}"
+                                    )
+                                    break
+                                start = unit.get("start_row")
+                                stop = unit.get("stop_row")
+                                if (
+                                    type(start) is not int
+                                    or type(stop) is not int
+                                    or start != cursor
+                                    or stop
+                                    != min(
+                                        int(plan.logical_shape[0]),
+                                        start
+                                        + SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+                                    )
+                                    or unit.get("decoded_bytes")
+                                    != (stop - start) * row_bytes
+                                ):
+                                    errors.append(
+                                        f"subject-mask composable coverage invalid at {path}"
+                                    )
+                                    break
+                                try:
+                                    _require_sha256(
+                                        unit.get("sha256"),
+                                        name=f"{path} unit sha256",
+                                    )
+                                except ValueError as exc:
+                                    errors.append(str(exc))
+                                cursor = int(stop)
+                            if (
+                                cursor != int(plan.logical_shape[0])
+                                or item.get("unit_count") != len(units)
+                                or item.get("units_digest")
+                                != canonical_json_sha256(units)
+                            ):
+                                errors.append(
+                                    f"subject-mask composable identity digest mismatch at {path}"
+                                )
+                        else:
+                            if (
+                                item.get("digest_algorithm")
+                                != SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM
+                            ):
+                                errors.append(
+                                    f"subject-mask core digest algorithm mismatch at {path}"
+                                )
+                            try:
+                                _require_sha256(
+                                    item.get("sha256"), name=f"{path} sha256"
+                                )
+                            except ValueError as exc:
+                                errors.append(str(exc))
     return tuple(errors)
 
 
@@ -1733,7 +2008,11 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             dimensions=dimensions,
             components=components,
         )
-    manifest_schema_version = SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION
+    manifest_schema_version = (
+        SUBJECT_MASK_CORE_COMPOSABLE_RUN_MANIFEST_SCHEMA_VERSION
+        if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE
+        else SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION
+    )
     coordinate_contract: dict[str, object] | None = None
     normalized_coordinate_dependencies: dict[str, object] | None = None
     if coordinate_dependencies is not None:
@@ -1765,7 +2044,9 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
                 "Coordinate dependencies bind another source-validation receipt."
             )
         manifest_schema_version = (
-            SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE
+            else SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
         )
 
     started = time.perf_counter()
@@ -1774,7 +2055,11 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     final_layout_adoption: FinalLayoutUnitAdoption | None = None
     if package_paths:
         if (
-            validation_mode is not SubjectMaskCoreValidationMode.PRODUCTION_STREAMING
+            validation_mode
+            not in {
+                SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+                SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE,
+            }
             or source_validation_receipt is None
         ):
             raise ValueError(
@@ -1794,6 +2079,20 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             source_validation_receipt=source_validation_receipt,
             require_complete_eligible_units=require_complete_final_layout_units,
             profile=profile,
+        )
+        if (
+            validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE
+            and not final_layout_adoption.composable_identity
+        ):
+            raise ValueError(
+                "Composable publication requires current receipt-bound packages."
+            )
+    if (
+        validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE
+        and final_layout_adoption is None
+    ):
+        raise ValueError(
+            "Composable publication requires complete final-layout unit packages."
         )
     phases["final_layout_unit_preflight"] = time.perf_counter() - phase
     root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
@@ -1862,6 +2161,26 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
                     if final_layout_adoption is not None
                     else 0
                 ),
+                "composable_identity": (
+                    bool(final_layout_adoption.composable_identity)
+                    if final_layout_adoption is not None
+                    else False
+                ),
+                "logical_identity_unit_rows": (
+                    final_layout_adoption.logical_identity_unit_rows
+                    if final_layout_adoption is not None
+                    else None
+                ),
+                "logical_identity_complete_unit_count": (
+                    len(final_layout_adoption.logical_identity_units)
+                    if final_layout_adoption is not None
+                    else 0
+                ),
+                "logical_identity_boundary_segment_count": (
+                    len(final_layout_adoption.logical_identity_boundary_segments)
+                    if final_layout_adoption is not None
+                    else 0
+                ),
             },
         }
     )
@@ -1869,7 +2188,10 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     write_counts: dict[str, int] = {}
     write_receipts: dict[str, dict[str, object]] = {}
     source_array_validation: Mapping[str, Any] = {}
-    if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_STREAMING:
+    if validation_mode in {
+        SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+        SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE,
+    }:
         assert source_validation_receipt is not None
         source_array_validation = source_validation_receipt["payload"]["arrays"]
     phase = time.perf_counter()
@@ -1908,6 +2230,11 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
                     if path == payload_path and final_layout_adoption is not None
                     else None
                 ),
+                use_composable_identity=(
+                    validation_mode
+                    is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE
+                    and path == payload_path
+                ),
             )
         except Exception as exc:
             run.attrs["status"] = "failed"
@@ -1940,7 +2267,10 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         }
     )
     streamed_array_document: dict[str, object] | None = None
-    if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_STREAMING:
+    if validation_mode in {
+        SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+        SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE,
+    }:
         assert source_validation_receipt is not None
         streamed_array_document = _streamed_array_document(write_receipts, paths)
     run.attrs["physical_write_counts"] = write_counts
@@ -1961,7 +2291,11 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         array_document = streamed_array_document
     content = {
         "schema_id": "palette.subject_mask_core.logical_content",
-        "schema_version": 1,
+        "schema_version": (
+            2
+            if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE
+            else 1
+        ),
         "kind": kind,
         "dimensions": dimensions.as_manifest(),
         "components": components.as_manifest(),
@@ -2017,7 +2351,12 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "logical_hash_timing": (
                 "separate_postwrite_full_read_v1"
                 if validation_mode is SubjectMaskCoreValidationMode.REFERENCE_FULL
-                else "computed_during_required_publication_read_v1"
+                else (
+                    "receipt_bound_composable_units_boundary_reads_only_v1"
+                    if validation_mode
+                    is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE
+                    else "computed_during_required_publication_read_v1"
+                )
             ),
             "reopen_validation": (
                 "full_schema_and_full_logical_hash_v1"
@@ -2036,10 +2375,19 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "document": content,
         },
     }
-    if (
-        manifest_schema_version
-        == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
-    ):
+    if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE:
+        manifest_payload["write_receipt"]["composable_identity"] = {
+            "policy": "ordered_fixed_global_row_units_v1",
+            "payload_path": payload_path,
+            "digest_algorithm": (SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM),
+            "identity_unit_rows": (SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS),
+            "complete_units_source": "receipt_bound_worker_packages_v1",
+            "boundary_units_source": "decoded_and_segment_verified_v1",
+        }
+    if manifest_schema_version in {
+        SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+        SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         assert coordinate_contract is not None
         assert normalized_coordinate_dependencies is not None
         manifest_payload["coordinate_contract"] = coordinate_contract
@@ -2177,6 +2525,8 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
 
 __all__ = [
     "SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM",
+    "SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION",
+    "SUBJECT_MASK_CORE_COMPOSABLE_RUN_MANIFEST_SCHEMA_VERSION",
     "SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_ID",
     "SUBJECT_MASK_CORE_COORDINATE_DEPENDENCY_SCHEMA_VERSION",
     "SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION",
