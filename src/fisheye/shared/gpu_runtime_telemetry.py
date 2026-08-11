@@ -127,7 +127,13 @@ def _integer(value: object) -> int | None:
 def _device_selector(
     environment: Mapping[str, str],
 ) -> tuple[str | None, str]:
-    for name in ("CUDA_VISIBLE_DEVICES_ORIG", "CUDA_VISIBLE_DEVICES"):
+    # LSF records the physical host allocation in CUDA_VISIBLE_DEVICES_ORIG,
+    # but presents the job-local CUDA/nvidia-smi namespace through
+    # CUDA_VISIBLE_DEVICES.  On hosts that remap a physical device (for
+    # example, physical GPU 5 to job-local GPU 0), passing the *_ORIG value to
+    # nvidia-smi exits without samples even though inference is healthy.  Use
+    # the same namespace as the CUDA workload and retain *_ORIG as provenance.
+    for name in ("CUDA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES_ORIG"):
         value = str(environment.get(name, "")).strip()
         if value and value not in {"-1", "NoDevFiles"}:
             return value, name
@@ -360,6 +366,12 @@ class GpuRuntimeTelemetrySampler:
                 "lsb_jobindex": self.environment.get("LSB_JOBINDEX"),
                 "lsb_jobname": self.environment.get("LSB_JOBNAME"),
                 "lsb_queue": self.environment.get("LSB_QUEUE"),
+                "cuda_visible_devices": self.environment.get(
+                    "CUDA_VISIBLE_DEVICES"
+                ),
+                "cuda_visible_devices_orig": self.environment.get(
+                    "CUDA_VISIBLE_DEVICES_ORIG"
+                ),
             }
         )
         self._started_at_utc: str | None = None

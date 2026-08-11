@@ -290,6 +290,7 @@ _CROP_REBASE_IDENTITY_ARRAYS = (
 _CROP_REBASE_COPY_ARRAYS = (
     "frame_indices",
     "source_frame_indices",
+    "source_acquisition_frame_index",
     "source_clip_indices",
     "source_clip_local_frame_indices",
     "source_refined_row_ids",
