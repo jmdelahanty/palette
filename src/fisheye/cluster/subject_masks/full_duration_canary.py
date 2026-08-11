@@ -63,7 +63,13 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
     validate_refined_keypoint_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_schema import (
+    SubjectMaskDimensions,
     derive_subject_mask_frame_row_offsets,
+)
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    build_subject_mask_final_layout_unit_package,
+    subject_mask_final_layout_payload_plan,
+    validate_subject_mask_final_layout_unit_package,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -74,9 +80,9 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
-RESULT_SCHEMA_VERSION = 2
+RESULT_SCHEMA_VERSION = 3
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
 WORKER_RESULT_SCHEMA_VERSION = 1
 FAMILY = "subject_mask_full_duration_canary"
@@ -84,6 +90,13 @@ BENCHMARK_CLASSIFICATION = "selector_ineligible_full_duration_canary"
 DEFAULT_GPU_CONCURRENCY = 4
 DEFAULT_CPU_CONCURRENCY = 4
 _ATTEMPT_NAMESPACE = UUID("79676a9f-24f1-4be9-ac50-c374b0fdccae")
+_RAW_MASK_LABELS = ("subject_body", "eyes_union", "swim_bladder")
+_REFINED_MASK_LABELS = (
+    "subject_body",
+    "eye_left",
+    "eye_right",
+    "swim_bladder",
+)
 
 
 def _utc_now() -> str:
@@ -592,6 +605,15 @@ def prepare_canary(
         raise ValueError("Crop frame_row_offsets must have shape [F+1].")
     n_frames = int(offsets.shape[0] - 1)
     n_rows = int(frames.shape[0])
+    crop_xywh = np.asarray(crop["source_crop_xywh"][:])
+    if crop_xywh.shape != (n_rows, 4):
+        raise ValueError("Crop source_crop_xywh must have shape [R,4].")
+    roi_sizes = np.unique(crop_xywh[:, 2:4].astype(np.int64), axis=0)
+    if roi_sizes.shape[0] != 1 or np.any(roi_sizes[0] <= 0):
+        raise ValueError(
+            "Subject-mask final-layout planning requires one positive ROI extent."
+        )
+    roi_width, roi_height = (int(value) for value in roi_sizes[0])
     expected_offsets = derive_subject_mask_frame_row_offsets(frames, n_frames=n_frames)
     if not np.array_equal(offsets, expected_offsets):
         raise ValueError(
@@ -633,6 +655,20 @@ def prepare_canary(
         recording_id=recording_id,
         camera_identity=camera_identity,
         workflow_id=label,
+    )
+    raw_final_dimensions = SubjectMaskDimensions(
+        n_frames=n_frames,
+        n_rois=n_rows,
+        n_channels=len(_RAW_MASK_LABELS),
+        roi_height=roi_height,
+        roi_width=roi_width,
+    )
+    refined_final_dimensions = SubjectMaskDimensions(
+        n_frames=n_frames,
+        n_rois=n_rows,
+        n_channels=len(_REFINED_MASK_LABELS),
+        roi_height=roi_height,
+        roi_width=roi_width,
     )
     output.mkdir(parents=True)
     for child in ("logs", "status", "workers", "bundles", "publish"):
@@ -705,6 +741,22 @@ def prepare_canary(
             **_file_identity(model),
             "sha256": str(model_sha256),
         },
+        "final_layout": {
+            "schema_id": "palette.subject_mask.final_layout_work_plan",
+            "schema_version": 1,
+            "ownership_policy": (
+                "complete_final_outer_row_units_per_worker_with_"
+                "deterministic_boundary_rebuild_v1"
+            ),
+            "raw": subject_mask_final_layout_payload_plan(
+                kind="raw_probability_uint8",
+                dimensions=raw_final_dimensions,
+            ),
+            "refined": subject_mask_final_layout_payload_plan(
+                kind="refined_dense_core",
+                dimensions=refined_final_dimensions,
+            ),
+        },
         "windows": windows,
         "outputs": {
             "raw_run": f"subject_masks_{label}",
@@ -743,6 +795,7 @@ def prepare_canary(
             "all_outputs_below_run_root": True,
             "worker_writes_are_node_local_until_atomic_bundle_publish": True,
             "window_rows_are_exact_nonoverlapping_complete": True,
+            "final_layout_units_are_selector_ineligible_transport": True,
         },
     }
     payload["plan_digest"] = canonical_json_sha256(payload)
@@ -784,6 +837,19 @@ def load_plan(path: Path) -> dict[str, Any]:
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
+    for stage, kind, role in (
+        ("inference", "raw_probability_uint8", "raw"),
+        ("refinement", "refined_dense_core", "refined"),
+    ):
+        dimensions = _final_layout_dimensions(payload, stage=stage)
+        expected = subject_mask_final_layout_payload_plan(
+            kind=kind,
+            dimensions=dimensions,
+        )
+        final_layout = payload.get("final_layout")
+        observed = final_layout.get(role) if isinstance(final_layout, Mapping) else None
+        if observed != expected:
+            raise ValueError(f"Canary {role} final-layout plan differs from policy.")
     return payload
 
 
@@ -798,6 +864,32 @@ def _window(plan: Mapping[str, Any], index: int) -> dict[str, Any]:
     if int(result["row_count"]) <= 0:
         raise ValueError("Zero-row windows do not receive inference/refinement tasks.")
     return result
+
+
+def _final_layout_dimensions(
+    plan: Mapping[str, Any], *, stage: str
+) -> SubjectMaskDimensions:
+    final_layout = plan.get("final_layout")
+    if not isinstance(final_layout, Mapping):
+        raise ValueError("Canary plan lacks the final-layout work plan.")
+    role = "raw" if stage == "inference" else "refined"
+    role_plan = final_layout.get(role)
+    dimensions = role_plan.get("dimensions") if isinstance(role_plan, Mapping) else None
+    if not isinstance(dimensions, Mapping) or set(dimensions) != {
+        "n_frames",
+        "n_rois",
+        "n_channels",
+        "roi_height",
+        "roi_width",
+    }:
+        raise ValueError("Canary final-layout dimensions are not exact.")
+    return SubjectMaskDimensions(
+        n_frames=int(dimensions["n_frames"]),
+        n_rois=int(dimensions["n_rois"]),
+        n_channels=int(dimensions["n_channels"]),
+        roi_height=int(dimensions["roi_height"]),
+        roi_width=int(dimensions["roi_width"]),
+    )
 
 
 def _stage_reference_archive(plan: Mapping[str, Any], destination: Path) -> Path:
@@ -849,6 +941,37 @@ def _existing_worker_result(
         or result.get("window_id") != window["window_id"]
     ):
         raise RuntimeError(f"Existing worker bundle identity differs: {bundle}")
+    binding = result.get("final_layout_unit_package")
+    if not isinstance(binding, Mapping) or set(binding) != {
+        "relative_path",
+        "payload_digest",
+        "kind",
+        "array_path",
+        "storage_plan_digest",
+        "complete_unit_count",
+        "encoded_object_count",
+        "encoded_bytes",
+    }:
+        raise RuntimeError(f"Worker bundle lacks exact final-layout evidence: {bundle}")
+    if binding.get("relative_path") != "final_layout_unit":
+        raise RuntimeError(f"Worker final-layout package path is unsafe: {bundle}")
+    package_receipt = validate_subject_mask_final_layout_unit_package(
+        bundle / "final_layout_unit",
+        verify_object_digests=False,
+    )
+    expected_role = "raw" if stage == "inference" else "refined"
+    expected = plan["final_layout"][expected_role]
+    if (
+        binding.get("payload_digest") != package_receipt["payload_digest"]
+        or binding.get("kind") != package_receipt["payload"]["kind"]
+        or binding.get("array_path") != package_receipt["payload"]["array_path"]
+        or binding.get("storage_plan_digest")
+        != package_receipt["payload"]["storage_plan_digest"]
+        or package_receipt["payload"]["storage_plan_digest"]
+        != expected["storage_plan_digest"]
+        or package_receipt["payload"]["producer_commit"] != plan["repo"]["commit"]
+    ):
+        raise RuntimeError(f"Worker final-layout package binding differs: {bundle}")
     return result
 
 
@@ -859,6 +982,7 @@ def _publish_worker_bundle(
     run_name: str,
     bundle: Path,
     result: dict[str, Any],
+    final_layout_unit_package: Path | None = None,
 ) -> dict[str, Any]:
     destination = bundle.expanduser().resolve()
     if destination.exists():
@@ -887,6 +1011,33 @@ def _publish_worker_bundle(
         if copied.attrs.get("stage_selector_eligible") is not False:
             raise RuntimeError("Copied worker run is unexpectedly selector eligible.")
         proof = _worker_evidence(archive, copied)
+        final_layout_binding = None
+        if final_layout_unit_package is not None:
+            package_destination = temporary / "final_layout_unit"
+            shutil.copytree(
+                final_layout_unit_package.expanduser().resolve(),
+                package_destination,
+                copy_function=shutil.copy2,
+            )
+            package_receipt = validate_subject_mask_final_layout_unit_package(
+                package_destination
+            )
+            final_layout_binding = {
+                "relative_path": "final_layout_unit",
+                "payload_digest": package_receipt["payload_digest"],
+                "kind": package_receipt["payload"]["kind"],
+                "array_path": package_receipt["payload"]["array_path"],
+                "storage_plan_digest": package_receipt["payload"][
+                    "storage_plan_digest"
+                ],
+                "complete_unit_count": package_receipt["payload"][
+                    "complete_unit_count"
+                ],
+                "encoded_object_count": package_receipt["payload"][
+                    "encoded_object_count"
+                ],
+                "encoded_bytes": package_receipt["payload"]["encoded_bytes"],
+            }
         result.update(
             {
                 "bundle_path": str(destination),
@@ -900,6 +1051,7 @@ def _publish_worker_bundle(
                     "attempt_payload_digest": proof["attempt"]["payload_digest"],
                     "receipt_payload_digest": proof["receipt"]["payload_digest"],
                 },
+                "final_layout_unit_package": final_layout_binding,
             }
         )
         _write_json_atomic(temporary / "result.json", result)
@@ -1043,6 +1195,19 @@ def run_inference_window(
             f"subject_mask_shard_runs/{window['raw_run']}"
         ]
         proof = _worker_evidence(local_archive, run)
+        final_layout_package_path = work / "raw_final_layout_unit"
+        final_layout_started = time.perf_counter()
+        final_layout_package = build_subject_mask_final_layout_unit_package(
+            source_array=run["mask_probs_roi"],
+            source_crop_row_ids=run["source_crop_row_ids"],
+            destination=final_layout_package_path,
+            kind="raw_probability_uint8",
+            dimensions=_final_layout_dimensions(plan, stage="inference"),
+            global_start_row=int(window["row_start"]),
+            source_run_path=str(proof["receipt"]["payload"]["run_path"]),
+            worker_receipt_payload_digest=str(proof["receipt"]["payload_digest"]),
+            producer_commit=str(plan["repo"]["commit"]),
+        )
         result = {
             "schema_id": WORKER_RESULT_SCHEMA_ID,
             "schema_version": WORKER_RESULT_SCHEMA_VERSION,
@@ -1067,6 +1232,12 @@ def run_inference_window(
             },
             "compute_duration_seconds": float(time.perf_counter() - started),
             "resource_usage": _resource_usage(),
+            "local_final_layout_unit_payload_digest": final_layout_package[
+                "payload_digest"
+            ],
+            "final_layout_unit_duration_seconds": float(
+                time.perf_counter() - final_layout_started
+            ),
         }
         return _publish_worker_bundle(
             local_archive=local_archive,
@@ -1074,6 +1245,7 @@ def run_inference_window(
             run_name=str(window["raw_run"]),
             bundle=bundle,
             result=result,
+            final_layout_unit_package=final_layout_package_path,
         )
     finally:
         if not keep_scratch:
@@ -1154,6 +1326,19 @@ def run_refinement_window(
             f"refined_subject_masks_runs/{window['refined_run']}"
         ]
         proof = _worker_evidence(local_archive, run)
+        final_layout_package_path = work / "refined_final_layout_unit"
+        final_layout_started = time.perf_counter()
+        final_layout_package = build_subject_mask_final_layout_unit_package(
+            source_array=run["masks_roi"],
+            source_crop_row_ids=run["source_crop_row_ids"],
+            destination=final_layout_package_path,
+            kind="refined_dense_core",
+            dimensions=_final_layout_dimensions(plan, stage="refinement"),
+            global_start_row=int(window["row_start"]),
+            source_run_path=str(proof["receipt"]["payload"]["run_path"]),
+            worker_receipt_payload_digest=str(proof["receipt"]["payload_digest"]),
+            producer_commit=str(plan["repo"]["commit"]),
+        )
         result = {
             "schema_id": WORKER_RESULT_SCHEMA_ID,
             "schema_version": WORKER_RESULT_SCHEMA_VERSION,
@@ -1175,6 +1360,12 @@ def run_refinement_window(
             },
             "compute_duration_seconds": float(time.perf_counter() - started),
             "resource_usage": _resource_usage(),
+            "local_final_layout_unit_payload_digest": final_layout_package[
+                "payload_digest"
+            ],
+            "final_layout_unit_duration_seconds": float(
+                time.perf_counter() - final_layout_started
+            ),
         }
         return _publish_worker_bundle(
             local_archive=local_archive,
@@ -1182,6 +1373,7 @@ def run_refinement_window(
             run_name=str(window["refined_run"]),
             bundle=bundle,
             result=result,
+            final_layout_unit_package=final_layout_package_path,
         )
     finally:
         if not keep_scratch:
@@ -1297,6 +1489,27 @@ def finalize_canary(
     try:
         assembly = work / "assembly.zarr"
         raw_runs, refined_runs = _assemble_draft(plan, assembly)
+        nonempty_window_ids = [
+            str(window["window_id"])
+            for window in plan["windows"]
+            if int(window["row_count"]) > 0
+        ]
+        raw_final_layout_packages = [
+            Path(plan["run_root"])
+            / "bundles"
+            / "inference"
+            / window_id
+            / "final_layout_unit"
+            for window_id in nonempty_window_ids
+        ]
+        refined_final_layout_packages = [
+            Path(plan["run_root"])
+            / "bundles"
+            / "refinement"
+            / window_id
+            / "final_layout_unit"
+            for window_id in nonempty_window_ids
+        ]
         output = plan["outputs"]
         publication = publish_recording_subject_mask_bundle(
             analysis_zarr=Path(plan["references"]["analysis_zarr"]),
@@ -1330,6 +1543,9 @@ def finalize_canary(
             core_physical_unit_workers=int(
                 plan["execution"]["publication"]["core_physical_unit_workers"]
             ),
+            raw_final_layout_unit_packages=raw_final_layout_packages,
+            refined_final_layout_unit_packages=refined_final_layout_packages,
+            require_complete_final_layout_units=True,
         )
         target = open_zarr_root(Path(plan["references"]["analysis_zarr"]), mode="r")
         if "subject_mask_authority" in target.attrs:

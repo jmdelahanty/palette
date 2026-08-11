@@ -59,6 +59,11 @@ from fisheye.shared.zarr.subject_mask_schema import (
     SubjectMaskDimensions,
     SubjectMaskProbabilityEncoding,
 )
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    FinalLayoutUnitAdoption,
+    copy_encoded_physical_unit,
+    prepare_subject_mask_final_layout_unit_adoption,
+)
 from fisheye.shared.zarr.subject_mask_storage import (
     SubjectMaskStoragePlanSet,
     plan_raw_subject_mask_storage,
@@ -902,6 +907,8 @@ def _write_physical_units(
     *,
     source_validation_record: Mapping[str, Any] | None = None,
     physical_unit_workers: int = 1,
+    final_layout_adoption: FinalLayoutUnitAdoption | None = None,
+    destination_array_path: Path | None = None,
 ) -> dict[str, object]:
     """Write whole physical row bands and hash exact source bytes once.
 
@@ -913,6 +920,10 @@ def _write_physical_units(
 
     if type(physical_unit_workers) is not int or physical_unit_workers <= 0:
         raise ValueError("physical_unit_workers must be a positive integer.")
+    if final_layout_adoption is not None and destination_array_path is None:
+        raise ValueError(
+            "Final-layout unit adoption requires the destination array path."
+        )
 
     unit = plan.shard_shape or plan.chunk_shape
     if unit is None:
@@ -920,6 +931,8 @@ def _write_physical_units(
     shape, dtype = _shape_dtype(source)
     trailing = (slice(None),) * (len(shape) - 1)
     writes = 0
+    encoded_unit_copies = 0
+    boundary_reencodes = 0
     logical_digest = hashlib.sha256()
     samples: list[dict[str, object]] = []
     expected_units: list[Mapping[str, Any]] | None = None
@@ -954,6 +967,7 @@ def _write_physical_units(
                 raise TypeError("Subject-mask core arrays cannot use object dtype.")
             unit_bytes = values.view(np.uint8)
             logical_digest.update(unit_bytes)
+            unit_sha256 = hashlib.sha256(unit_bytes).hexdigest()
             if expected_units is not None:
                 cursor = int(start)
                 while cursor < int(stop):
@@ -984,8 +998,40 @@ def _write_physical_units(
                         expected_unit_index += 1
                         expected_unit_digest = hashlib.sha256()
                     cursor = segment_stop
+            encoded_unit = (
+                final_layout_adoption.units.get(int(start))
+                if final_layout_adoption is not None
+                else None
+            )
+            if encoded_unit is not None:
+                if (
+                    encoded_unit.stop_row != int(stop)
+                    or encoded_unit.logical_sha256 != unit_sha256
+                ):
+                    raise RuntimeError(
+                        "Encoded final-layout unit differs from the validated "
+                        f"source bytes at rows {start}:{stop}."
+                    )
+                assert destination_array_path is not None
+                encoded_unit_copies += 1
+            else:
+                boundary_reencodes += 1
             if executor is None:
-                destination[selection] = values
+                if encoded_unit is not None:
+                    copy_encoded_physical_unit(
+                        encoded_unit,
+                        destination_array_path=destination_array_path,
+                    )
+                else:
+                    destination[selection] = values
+            elif encoded_unit is not None:
+                pending.append(
+                    executor.submit(
+                        copy_encoded_physical_unit,
+                        encoded_unit,
+                        destination_array_path=destination_array_path,
+                    )
+                )
             else:
                 pending.append(
                     executor.submit(
@@ -1002,7 +1048,7 @@ def _write_physical_units(
                     {
                         "start_row": int(start),
                         "stop_row": int(stop),
-                        "sha256": hashlib.sha256(unit_bytes).hexdigest(),
+                        "sha256": unit_sha256,
                     }
                 )
             writes += 1
@@ -1030,6 +1076,18 @@ def _write_physical_units(
         "digest_algorithm": SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM,
         "sha256": logical_sha256,
         "physical_write_count": writes,
+        "encoded_physical_unit_copy_count": encoded_unit_copies,
+        "boundary_reencode_count": boundary_reencodes,
+        "encoded_object_copy_count": (
+            sum(len(unit.objects) for unit in final_layout_adoption.units.values())
+            if final_layout_adoption is not None
+            else 0
+        ),
+        "encoded_bytes_copied": (
+            int(final_layout_adoption.encoded_bytes)
+            if final_layout_adoption is not None
+            else 0
+        ),
         "effective_physical_unit_workers": effective_workers,
         "bounded_reopen_samples": samples,
     }
@@ -1577,12 +1635,19 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     source_validation_receipt: Mapping[str, Any] | None = None,
     coordinate_dependencies: Mapping[str, Any] | None = None,
     physical_unit_workers: int = 1,
+    final_layout_unit_packages: tuple[Path, ...] | None = None,
+    require_complete_final_layout_units: bool = False,
 ) -> SubjectMaskCorePublication:
     """Validate and rematerialize one complete raw or refined core."""
 
     validation_mode = SubjectMaskCoreValidationMode(validation_mode)
     if type(physical_unit_workers) is not int or physical_unit_workers <= 0:
         raise ValueError("physical_unit_workers must be a positive integer.")
+    package_paths = tuple(final_layout_unit_packages or ())
+    if require_complete_final_layout_units and not package_paths:
+        raise ValueError(
+            "Complete final-layout unit adoption requires worker packages."
+        )
     output_path = destination.expanduser().resolve()
     if output_path.exists():
         raise FileExistsError(f"Subject-mask core destination exists: {output_path}")
@@ -1705,6 +1770,32 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
 
     started = time.perf_counter()
     phases: dict[str, float] = {}
+    phase = time.perf_counter()
+    final_layout_adoption: FinalLayoutUnitAdoption | None = None
+    if package_paths:
+        if (
+            validation_mode is not SubjectMaskCoreValidationMode.PRODUCTION_STREAMING
+            or source_validation_receipt is None
+        ):
+            raise ValueError(
+                "Final-layout unit packages require production-streaming source "
+                "validation evidence."
+            )
+        payload_entries = [
+            entry for entry in plans.entries if entry.rule.path == payload_path
+        ]
+        if len(payload_entries) != 1:
+            raise RuntimeError("Subject-mask payload storage plan is ambiguous.")
+        final_layout_adoption = prepare_subject_mask_final_layout_unit_adoption(
+            package_paths,
+            kind=kind,
+            dimensions=dimensions,
+            plan=payload_entries[0].plan,
+            source_validation_receipt=source_validation_receipt,
+            require_complete_eligible_units=require_complete_final_layout_units,
+            profile=profile,
+        )
+    phases["final_layout_unit_preflight"] = time.perf_counter() - phase
     root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
     root.attrs.update(
         {
@@ -1741,6 +1832,37 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "validation_mode": validation_mode.value,
             "derived_metric_canonicalization": canonicalization,
             "physical_unit_workers_requested": int(physical_unit_workers),
+            "final_layout_unit_adoption": {
+                "enabled": final_layout_adoption is not None,
+                "required_complete_eligible_units": bool(
+                    require_complete_final_layout_units
+                ),
+                "package_count": (
+                    int(final_layout_adoption.package_count)
+                    if final_layout_adoption is not None
+                    else 0
+                ),
+                "complete_unit_count": (
+                    len(final_layout_adoption.units)
+                    if final_layout_adoption is not None
+                    else 0
+                ),
+                "boundary_unit_count": (
+                    len(final_layout_adoption.boundary_starts)
+                    if final_layout_adoption is not None
+                    else 0
+                ),
+                "encoded_object_count": (
+                    int(final_layout_adoption.encoded_object_count)
+                    if final_layout_adoption is not None
+                    else 0
+                ),
+                "encoded_bytes": (
+                    int(final_layout_adoption.encoded_bytes)
+                    if final_layout_adoption is not None
+                    else 0
+                ),
+            },
         }
     )
     destination_arrays: dict[str, Any] = {}
@@ -1778,6 +1900,14 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
                 entry.plan,
                 source_validation_record=source_array_validation.get(path),
                 physical_unit_workers=physical_unit_workers,
+                final_layout_adoption=(
+                    final_layout_adoption if path == payload_path else None
+                ),
+                destination_array_path=(
+                    output_path / family / str(run_id) / Path(path)
+                    if path == payload_path and final_layout_adoption is not None
+                    else None
+                ),
             )
         except Exception as exc:
             run.attrs["status"] = "failed"

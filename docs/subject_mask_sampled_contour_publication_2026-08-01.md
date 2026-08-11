@@ -56,12 +56,22 @@ Every cache manifest binds:
 - the exact storage plan and direct/consolidated metadata declarations;
 - one freshness receipt per component proving full dense-derived generation.
 
-The recording-level publisher computes contours in bounded dense-row blocks on
-local scratch, stages the 2.53 GiB logical result through disk-backed memmaps,
-and writes complete immutable output shards from a single owner. Dense-row
-contour extraction may use bounded worker processes, but workers return only
-disjoint row blocks to node-local memmaps; they never write Zarr. It never
-materializes the full contour surface in heap memory.
+The recording-level publisher currently computes contours in bounded dense-row
+blocks on local scratch, stages the 2.53 GiB logical result through disk-backed
+memmaps, and writes complete immutable output shards from a single owner.
+Dense-row contour extraction may use bounded worker processes, but workers
+return only disjoint row blocks to node-local memmaps; they never write Zarr.
+It never materializes the full contour surface in heap memory.
+
+The intended successor avoids repeating that extraction when refinement
+workers already produced exact fixed-count contours. Each worker will bind its
+row-local contour arrays to the exact dense-mask unit digest, component
+registry, sampling algorithm/version, sample count, winding, and canonical
+start rule. The recording finalizer will assemble those rows in canonical crop
+order and bind the cache run to the final dense authority. It will regenerate
+only missing/stale rows, or all rows after a dense edit or sampling-contract
+change. There is no cross-clip scientific reducer for an observation-local
+contour.
 
 ## Physical Candidate
 
@@ -144,6 +154,10 @@ explicit bundle-v3 cache to an unrelated contour source.
   cancellation, RSS, and Metal visual-equivalence gates.
 - [ ] Promote or revise the physical profile from that evidence.
 - [ ] Make bundle v3 the production publisher default only after promotion.
+- [ ] Carry worker-produced sampled contours through strict terminal receipts
+  and assemble them without a second dense-mask extraction pass.
+- [ ] Make full ragged contour publication opt-in in the new default profile
+  while retaining historical read/migration compatibility.
 - [ ] Add compact bitpacked/RLE recording-level members in a later independent
   cache profile; do not couple them to contour promotion.
 

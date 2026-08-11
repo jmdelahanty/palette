@@ -509,6 +509,9 @@ def publish_recording_subject_mask_bundle(
     cache_source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     cache_compute_workers: int = 1,
     core_physical_unit_workers: int = 1,
+    raw_final_layout_unit_packages: Sequence[Path] | None = None,
+    refined_final_layout_unit_packages: Sequence[Path] | None = None,
+    require_complete_final_layout_units: bool = False,
     coordinate_contract_policy: str = "require_crop_v2",
     expected_work_units: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
@@ -707,6 +710,8 @@ def publish_recording_subject_mask_bundle(
         coordinate_dependencies=raw_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
         physical_unit_workers=core_physical_unit_workers,
+        final_layout_unit_packages=tuple(raw_final_layout_unit_packages or ()),
+        require_complete_final_layout_units=require_complete_final_layout_units,
     )
     refined_documents = (
         _prebuilt_source_documents(
@@ -779,6 +784,8 @@ def publish_recording_subject_mask_bundle(
         coordinate_dependencies=refined_coordinate_dependencies,
         created_by="publish_recording_subject_mask_bundle",
         physical_unit_workers=core_physical_unit_workers,
+        final_layout_unit_packages=tuple(refined_final_layout_unit_packages or ()),
+        require_complete_final_layout_units=require_complete_final_layout_units,
     )
     cache_publication = None
     cache_store = output / "cache.zarr"
@@ -884,6 +891,16 @@ def publish_recording_subject_mask_bundle(
             ),
             "raw_phase_seconds": dict(raw_publication.phase_seconds),
             "refined_phase_seconds": dict(refined_publication.phase_seconds),
+            "raw_final_layout_unit_adoption": dict(
+                open_zarr_root(raw_store, mode="r")[
+                    f"subject_mask_runs/{raw_run}"
+                ].attrs["final_layout_unit_adoption"]
+            ),
+            "refined_final_layout_unit_adoption": dict(
+                open_zarr_root(refined_store, mode="r")[
+                    f"refined_subject_masks_runs/{refined_run}"
+                ].attrs["final_layout_unit_adoption"]
+            ),
         },
         "bundle": bundle,
         "authority": authority,
@@ -946,6 +963,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "owns complete, non-overlapping chunks or shards (default: 1)."
         ),
     )
+    parser.add_argument(
+        "--raw-final-layout-unit-package",
+        action="append",
+        default=[],
+        type=Path,
+        help="Sealed raw payload final-layout package; repeat once per worker.",
+    )
+    parser.add_argument(
+        "--refined-final-layout-unit-package",
+        action="append",
+        default=[],
+        type=Path,
+        help="Sealed refined payload final-layout package; repeat once per worker.",
+    )
+    parser.add_argument(
+        "--require-complete-final-layout-units",
+        action="store_true",
+        help=(
+            "Fail unless every worker-owned complete final-layout unit is sealed; "
+            "cross-worker boundary units are still deterministically rebuilt."
+        ),
+    )
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -993,6 +1032,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         cache_source_compute_block_bytes=args.cache_source_compute_block_bytes,
         cache_compute_workers=args.cache_compute_workers,
         core_physical_unit_workers=args.core_physical_unit_workers,
+        raw_final_layout_unit_packages=args.raw_final_layout_unit_package,
+        refined_final_layout_unit_packages=args.refined_final_layout_unit_package,
+        require_complete_final_layout_units=bool(
+            args.require_complete_final_layout_units
+        ),
         activate=bool(args.activate),
         expected_work_units=expected_work_units,
     )

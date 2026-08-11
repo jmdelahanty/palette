@@ -2,7 +2,8 @@
 
 Date: 2026-08-11
 
-Status: implementation checklist; Phase A is the current checkpoint
+Status: implementation checklist; Phase A complete, Phase B implemented for
+the v4-compatible canary path
 
 ## Goal
 
@@ -74,22 +75,76 @@ cluster trials with RSS and I/O evidence.
 
 ## Phase B — reusable final-layout unit packages
 
-- [ ] Derive final array chunk/shard plans before clip jobs are launched.
-- [ ] Partition work by final physical ownership, not merely by clip row range.
-- [ ] Assign units crossing clip boundaries to a deterministic boundary owner
+- [x] Derive final array chunk/shard plans before clip jobs are launched.
+- [x] Partition final payload packaging by complete final physical ownership,
+  not merely by clip row range.
+- [x] Assign units crossing clip boundaries to a deterministic boundary owner
   or assembly task.
-- [ ] Emit immutable unit packages with array path, exact selection, codec and
+- [x] Emit immutable unit packages with array path, exact selection, codec and
   storage-plan identity, logical digest, encoded-object digest, source clip
   identities, producer commit, and terminal status.
-- [ ] Retry only missing or failed units.
-- [ ] Make the finalizer verify complete, non-overlapping `[0, R)` coverage and
+- [x] Reuse a complete immutable worker package on retry; missing or invalid
+  packages fail closed and only the affected worker package must be rebuilt.
+- [x] Make the finalizer verify complete, non-overlapping `[0, R)` coverage and
   adopt or copy already encoded final-layout objects without decode/re-encode.
-- [ ] Keep the assembled candidate selector-ineligible until all units,
+- [x] Keep the assembled candidate selector-ineligible until all units,
   manifests, direct metadata, and consolidated metadata validate.
 
-This phase is what eliminates recording-scale raw/refined rematerialization.
-Phase A improves today's required rematerialization but does not claim to
-remove it.
+The current manifest-v4 compatibility boundary still requires one canonical,
+serial decoded read/hash pass. SHA-256 over the entire C-order byte stream
+cannot be reconstructed from independent worker SHA-256 digests. Phase B
+therefore eliminates finalizer-side compression for complete worker-owned
+units and rebuilds only cross-worker boundary units, but it does not claim to
+eliminate that v4 logical-validation read. Removing the read requires a new
+manifest version with an ordered composable unit identity and coordinated
+Palette/Crimson adoption.
+
+Worker packages contain only the large dense authority payloads:
+`mask_probs_roi` and `masks_roi`. Narrow lineage/metric arrays remain cheap
+canonical writes. Package objects are selector-ineligible transport evidence;
+workers never write run manifests, completion state, consolidation, or
+selectors.
+
+Local implementation smoke (not recording-scale promotion evidence): a 32 MiB
+binary `uint8[128,4,256,256]` refined payload with `[16,1,256,256]` inner chunks
+and `[64,1,256,256]` outer shards produced:
+
+| Operation | Seconds |
+|---|---:|
+| Upstream package construction | 0.152 |
+| Phase A finalizer re-encode | 0.129 |
+| Phase B finalizer adoption | 0.035 |
+
+The already-packaged finalizer was 3.71x faster and adopted both complete row
+units with zero boundary rebuilds. Package construction is shown separately
+because production performs it inside independent clip jobs; adding the two
+local times serially is not the recording workflow. The smoke used an
+in-memory source and local filesystem, so real compressed-source decoding,
+PRFS package transfer, clip boundaries, RSS, and quality publication still
+require the recording-scale Phase D gate.
+
+Implementation validation at this checkpoint:
+
+- 38 focused core, canary, and atomic recording-bundle tests passed;
+- exact decoded equality, complete-unit adoption, cross-worker boundary
+  rebuild, missing-worker rejection, encoded-object corruption rejection, and
+  immutable package reuse are covered;
+- Ruff, Black, Python compilation, and `git diff --check` passed for the changed
+  Python surfaces.
+
+### Contour publication boundary
+
+Per-clip refinement already defaults to full ragged contours disabled and
+fixed-count sampled contours enabled. The current recording publisher drops
+those clip-local sampled products unless a separate `cache_run` is requested.
+The next cache-lifecycle change should assemble the already computed row-local
+sampled contours, bind them to the exact final dense-mask digest and sampling
+contract, and make that cache a standard bundle member. It should not
+re-extract contours at publication when complete worker evidence is valid.
+Regeneration is required only after a dense edit, an algorithm/version change,
+or stale/failed evidence. Full ragged contours remain optional cold
+inspection/export data and legacy-readable, not part of the new default
+profile.
 
 ## Phase C — quality and cache reuse
 

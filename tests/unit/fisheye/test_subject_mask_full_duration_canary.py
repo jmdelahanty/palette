@@ -154,7 +154,12 @@ def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
         "all_outputs_below_run_root": True,
         "worker_writes_are_node_local_until_atomic_bundle_publish": True,
         "window_rows_are_exact_nonoverlapping_complete": True,
+        "final_layout_units_are_selector_ineligible_transport": True,
     }
+    assert plan["final_layout"]["raw"]["array_path"] == "mask_probs_roi"
+    assert plan["final_layout"]["refined"]["array_path"] == "masks_roi"
+    assert plan["final_layout"]["raw"]["dimensions"]["n_rois"] == 4
+    assert plan["final_layout"]["refined"]["dimensions"]["n_channels"] == 4
     target = Path(plan["references"]["analysis_zarr"])
     assert (target / "crop_runs" / "crop_v2" / "zarr.json").is_file()
     assert (target / "refined_keypoints_runs" / "refined_v2" / "zarr.json").is_file()
@@ -355,3 +360,65 @@ def test_failed_worker_bundle_copy_removes_hidden_partial(
 
     assert not destination.exists()
     assert list(destination.parent.iterdir()) == []
+
+
+def test_worker_bundle_seals_and_reopens_final_layout_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _prepare(tmp_path, monkeypatch)
+    window = plan["windows"][0]
+    local_archive = tmp_path / "worker.zarr"
+    root = zarr.open_group(str(local_archive), mode="w", zarr_format=3)
+    run = root.create_group("subject_mask_shard_runs").create_group(
+        str(window["raw_run"])
+    )
+    run.attrs[canary.RUN_COMPLETION_STATUS_ATTR] = canary.RUN_STATUS_COMPLETE
+    run.attrs["stage_selector_eligible"] = False
+    proof = {
+        "scientific_identity": {"digest": "1" * 64},
+        "attempt": {"payload_digest": "2" * 64},
+        "receipt": {
+            "payload_digest": "3" * 64,
+            "payload": {"run_path": f"subject_mask_shard_runs/{window['raw_run']}"},
+        },
+    }
+    monkeypatch.setattr(canary, "_worker_evidence", lambda *_args, **_kwargs: proof)
+    package = tmp_path / "unit_package"
+    canary.build_subject_mask_final_layout_unit_package(
+        source_array=np.ones((2, 3, 8, 8), dtype=np.uint8),
+        source_crop_row_ids=np.arange(2, dtype=np.int64),
+        destination=package,
+        kind="raw_probability_uint8",
+        dimensions=canary._final_layout_dimensions(plan, stage="inference"),
+        global_start_row=0,
+        source_run_path=f"subject_mask_shard_runs/{window['raw_run']}",
+        worker_receipt_payload_digest="3" * 64,
+        producer_commit="a" * 40,
+    )
+    result = {
+        "schema_id": canary.WORKER_RESULT_SCHEMA_ID,
+        "schema_version": canary.WORKER_RESULT_SCHEMA_VERSION,
+        "status": "complete",
+        "stage": "inference",
+        "plan_digest": plan["plan_digest"],
+        "window_id": window["window_id"],
+    }
+    bundle = Path(plan["run_root"]) / "bundles" / "inference" / str(window["window_id"])
+
+    sealed = canary._publish_worker_bundle(
+        local_archive=local_archive,
+        parent="subject_mask_shard_runs",
+        run_name=str(window["raw_run"]),
+        bundle=bundle,
+        result=result,
+        final_layout_unit_package=package,
+    )
+    reopened = canary._existing_worker_result(
+        bundle=bundle,
+        plan=plan,
+        window=window,
+        stage="inference",
+    )
+
+    assert reopened == sealed
+    assert reopened["final_layout_unit_package"]["kind"] == ("raw_probability_uint8")

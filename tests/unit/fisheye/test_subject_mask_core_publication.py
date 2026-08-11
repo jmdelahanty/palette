@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import hashlib
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -23,6 +25,7 @@ from fisheye.shared.subject_mask_worker_receipt import (
     build_subject_mask_worker_semantic_receipt,
 )
 from fisheye.shared.zarr.crop_manifest import build_coordinate_crop_run_manifest
+from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
@@ -33,19 +36,19 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     publish_selector_ineligible_subject_mask_core_snapshot,
     validate_subject_mask_core_run_manifest,
 )
-from tests.unit.fisheye.test_crop_manifest import (
-    _arrays as _crop_manifest_arrays,
-    _dimensions as _crop_dimensions,
-    _metadata as _crop_metadata,
-    _pixel as _crop_pixel,
-    _policy as _crop_policy,
-    _source as _crop_source,
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    build_subject_mask_final_layout_unit_package,
+    prepare_subject_mask_final_layout_unit_adoption,
+    validate_subject_mask_final_layout_unit_package,
 )
+from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
+from fisheye.shared.zarr.subject_mask_storage import plan_raw_subject_mask_storage
 from fisheye.shared.zarr.subject_mask_schema import (
     RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
     REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
     SubjectMaskComponentRegistry,
     SubjectMaskDimensions,
+    SubjectMaskProbabilityEncoding,
     derive_subject_mask_frame_row_offsets,
     derive_subject_mask_metrics,
 )
@@ -58,6 +61,14 @@ from fisheye.shared.zarr.subject_mask_validation_receipt import (
     subject_mask_array_unit_document,
     subject_mask_semantic_units_from_array_document,
     validate_subject_mask_source_validation_receipt,
+)
+from tests.unit.fisheye.test_crop_manifest import (
+    _arrays as _crop_manifest_arrays,
+    _dimensions as _crop_dimensions,
+    _metadata as _crop_metadata,
+    _pixel as _crop_pixel,
+    _policy as _crop_policy,
+    _source as _crop_source,
 )
 
 
@@ -652,6 +663,230 @@ def test_subject_mask_core_publication_round_trip(
         "authoritative_run",
     ):
         assert parent.attrs.get(selector) is None
+
+
+def test_streaming_publication_adopts_sealed_final_layout_payload_unit(
+    tmp_path: Path,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    crop = refined_with_crop.pop("_crop")
+    source_manifest, source_receipt, source_path = _recording_documents(
+        kind="raw_probability_uint8",
+        arrays=raw,
+    )
+    worker = source_receipt["payload"]["producer_evidence"]["workers"][0]
+    package = tmp_path / "raw_final_layout_unit"
+    built = build_subject_mask_final_layout_unit_package(
+        source_array=raw["mask_probs_roi"],
+        source_crop_row_ids=raw["source_crop_row_ids"],
+        destination=package,
+        kind="raw_probability_uint8",
+        dimensions=_dimensions(),
+        global_start_row=0,
+        source_run_path=str(worker["run_path"]),
+        worker_receipt_payload_digest=str(worker["worker_receipt_payload_digest"]),
+        producer_commit="a" * 40,
+    )
+    assert built["payload"]["complete_unit_count"] == 1
+
+    publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        raw,
+        source_crop_arrays=crop,  # type: ignore[arg-type]
+        source_manifest=source_manifest,
+        n_frames=4,
+        components=_components(),
+        destination=tmp_path / "adopted.zarr",
+        run_id="adopted_raw",
+        kind="raw_probability_uint8",
+        source_run_path=source_path,
+        validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
+        source_validation_receipt=source_receipt,
+        final_layout_unit_packages=(package,),
+        require_complete_final_layout_units=True,
+        physical_unit_workers=2,
+    )
+
+    run = zarr.open_group(
+        str(publication.output_path), mode="r", use_consolidated=True
+    )["subject_mask_runs/adopted_raw"]
+    np.testing.assert_array_equal(run["mask_probs_roi"][:], raw["mask_probs_roi"])
+    adoption = run.attrs["final_layout_unit_adoption"]
+    assert adoption["enabled"] is True
+    assert adoption["complete_unit_count"] == 1
+    assert adoption["boundary_unit_count"] == 0
+
+
+def test_final_layout_package_corruption_fails_before_publication(
+    tmp_path: Path,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    refined_with_crop.pop("_crop")
+    _manifest, source_receipt, _source_path = _recording_documents(
+        kind="raw_probability_uint8",
+        arrays=raw,
+    )
+    worker = source_receipt["payload"]["producer_evidence"]["workers"][0]
+    package = tmp_path / "corrupt_final_layout_unit"
+    receipt = build_subject_mask_final_layout_unit_package(
+        source_array=raw["mask_probs_roi"],
+        source_crop_row_ids=raw["source_crop_row_ids"],
+        destination=package,
+        kind="raw_probability_uint8",
+        dimensions=_dimensions(),
+        global_start_row=0,
+        source_run_path=str(worker["run_path"]),
+        worker_receipt_payload_digest=str(worker["worker_receipt_payload_digest"]),
+        producer_commit="a" * 40,
+    )
+    object_path = receipt["payload"]["units"][0]["objects"][0]["path"]
+    (package / "payload.zarr" / "payload" / object_path).write_bytes(b"corrupt")
+
+    with pytest.raises(ValueError, match="absent or changed|digest differs"):
+        validate_subject_mask_final_layout_unit_package(package)
+
+
+def test_final_layout_packages_leave_only_cross_worker_boundary_for_reencode(
+    tmp_path: Path,
+) -> None:
+    profile = replace(
+        PUBLISHED_HTTP_V1,
+        profile_id="pytest_tiny_final_units_v1",
+        target_chunk_bytes=64,
+        min_chunk_bytes=64,
+        max_chunk_bytes=64,
+        target_shard_bytes=256,
+        per_row_target_shard_bytes=256,
+        max_shard_bytes=512,
+        target_chunk_bytes_by_access=(),
+    )
+    dimensions = SubjectMaskDimensions(
+        n_frames=10,
+        n_rois=10,
+        n_channels=4,
+        roi_height=8,
+        roi_width=8,
+    )
+    values = np.arange(10 * 4 * 8 * 8, dtype=np.uint8).reshape(10, 4, 8, 8)
+    digests = ("1" * 64, "2" * 64)
+    packages: list[Path] = []
+    for index, (start, stop) in enumerate(((0, 5), (5, 10))):
+        package = tmp_path / f"worker_{index}"
+        build_subject_mask_final_layout_unit_package(
+            source_array=values[start:stop],
+            source_crop_row_ids=np.arange(start, stop, dtype=np.int64),
+            destination=package,
+            kind="raw_probability_uint8",
+            dimensions=dimensions,
+            global_start_row=start,
+            source_run_path=f"subject_mask_shard_runs/worker_{index}",
+            worker_receipt_payload_digest=digests[index],
+            producer_commit="a" * 40,
+            profile=profile,
+        )
+        packages.append(package)
+    plans = plan_raw_subject_mask_storage(
+        dimensions,
+        encoding=SubjectMaskProbabilityEncoding.LINEAR_UINT8_0_255,
+        profile=profile,
+    )
+    plan = next(
+        entry.plan for entry in plans.entries if entry.rule.path == "mask_probs_roi"
+    )
+    source_receipt = {
+        "payload": {
+            "producer_evidence": {
+                "workers": [
+                    {
+                        "worker_receipt_payload_digest": digests[index],
+                        "global_row_interval": {
+                            "start_row": start,
+                            "stop_row": stop,
+                        },
+                        "run_path": f"subject_mask_shard_runs/worker_{index}",
+                    }
+                    for index, (start, stop) in enumerate(((0, 5), (5, 10)))
+                ]
+            }
+        }
+    }
+
+    adoption = prepare_subject_mask_final_layout_unit_adoption(
+        packages,
+        kind="raw_probability_uint8",
+        dimensions=dimensions,
+        plan=plan,
+        source_validation_receipt=source_receipt,
+        require_complete_eligible_units=True,
+        profile=profile,
+    )
+
+    assert set(adoption.units) == {0, 8}
+    assert adoption.boundary_starts == (4,)
+
+    destination_path = tmp_path / "boundary_destination.zarr"
+    destination_root = zarr.open_group(str(destination_path), mode="w", zarr_format=3)
+    binding = next(
+        item
+        for item in RAW_SUBJECT_MASK_UINT8_SCHEMA_V1.bindings
+        if item.path == "mask_probs_roi"
+    )
+    contract = RAW_SUBJECT_MASK_UINT8_SCHEMA_V1.contracts.resolve(
+        binding.contract_id,
+        binding.contract_version,
+    )
+    destination = create_array_from_plan(
+        destination_root,
+        name="payload",
+        contract=contract,
+        plan=plan,
+        fill_value=0,
+        attributes={
+            "benchmark_only": True,
+            "selector_eligible": False,
+            "artifact_class": "subject_mask_scientific_core",
+        },
+    )
+    write_receipt = core_publication._write_physical_units(
+        destination,
+        values,
+        plan,
+        final_layout_adoption=adoption,
+        destination_array_path=destination_path / "payload",
+        physical_unit_workers=2,
+    )
+    np.testing.assert_array_equal(destination[:], values)
+    assert write_receipt["encoded_physical_unit_copy_count"] == 2
+    assert write_receipt["boundary_reencode_count"] == 1
+
+    resumed = build_subject_mask_final_layout_unit_package(
+        source_array=values[:5],
+        source_crop_row_ids=np.arange(0, 5, dtype=np.int64),
+        destination=packages[0],
+        kind="raw_probability_uint8",
+        dimensions=dimensions,
+        global_start_row=0,
+        source_run_path="subject_mask_shard_runs/worker_0",
+        worker_receipt_payload_digest=digests[0],
+        producer_commit="a" * 40,
+        profile=profile,
+    )
+    assert (
+        resumed["payload_digest"]
+        == validate_subject_mask_final_layout_unit_package(packages[0])[
+            "payload_digest"
+        ]
+    )
+
+    with pytest.raises(ValueError, match="every recording worker"):
+        prepare_subject_mask_final_layout_unit_adoption(
+            packages[:1],
+            kind="raw_probability_uint8",
+            dimensions=dimensions,
+            plan=plan,
+            source_validation_receipt=source_receipt,
+            require_complete_eligible_units=True,
+            profile=profile,
+        )
 
 
 def test_coordinate_core_v4_binds_crop_raw_refined_and_worker_evidence(
