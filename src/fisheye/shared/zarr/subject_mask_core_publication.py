@@ -271,10 +271,13 @@ def _validate_worker_crop_coordinate_bindings(
                 "schema_version": crop_manifest.get("schema_version"),
                 "payload_digest": crop_manifest.get("payload_digest"),
             }
-            if (
-                crop.get("run_group_path") != normalized_path
-                or manifest_ref != expected_ref
-            ):
+            # Older sealed inference workers recorded the exact run name here
+            # rather than the canonical ``crop_runs/<run>`` group path.  Keep
+            # those receipts readable only when the run id and manifest digest
+            # still bind exactly to the current crop authority.
+            recorded_path = str(crop.get("run_group_path") or "").strip().strip("/")
+            accepted_paths = {normalized_path, crop_run_id}
+            if recorded_path not in accepted_paths or manifest_ref != expected_ref:
                 raise ValueError(
                     "Raw worker does not bind the exact crop-v2 manifest and path."
                 )

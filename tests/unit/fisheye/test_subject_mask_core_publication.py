@@ -335,6 +335,7 @@ def _recording_documents(
     arrays: dict[str, np.ndarray],
     source_producer_evidence: dict[str, object] | None = None,
     source_producer_run_path: str | None = None,
+    legacy_bare_crop_path: bool = False,
 ) -> tuple[dict[str, object], dict[str, object], str]:
     raw = kind == "raw_probability_uint8"
     stage = "raw_subject_mask" if raw else "refined_subject_mask"
@@ -380,7 +381,11 @@ def _recording_documents(
             },
             crop={
                 "run_id": "crop_coordinate_shadow",
-                "run_group_path": "crop_runs/crop_coordinate_shadow",
+                "run_group_path": (
+                    "crop_coordinate_shadow"
+                    if legacy_bare_crop_path
+                    else "crop_runs/crop_coordinate_shadow"
+                ),
                 "run_manifest": {
                     "schema_id": crop_manifest["schema_id"],
                     "schema_version": crop_manifest["schema_version"],
@@ -1122,7 +1127,6 @@ def test_coordinate_core_v4_binds_crop_raw_refined_and_worker_evidence(
     assert "subject-mask core manifest envelope identity mismatch" in (
         validate_subject_mask_core_run_manifest(unsupported_v6)
     )
-
     refined_source, refined_receipt, refined_source_path = _recording_documents(
         kind="refined_dense_core",
         arrays=refined_with_crop,
@@ -1199,6 +1203,28 @@ def test_coordinate_core_v4_binds_crop_raw_refined_and_worker_evidence(
     tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
     assert "coordinate catalog differs from the frozen stage catalog" in (
         validate_subject_mask_core_run_manifest(tampered)
+    )
+
+
+def test_coordinate_core_accepts_legacy_bare_crop_path_when_manifest_is_exact() -> None:
+    raw, _ = _fixture()
+    crop_manifest = _coordinate_crop_manifest()
+    _, raw_receipt, raw_source_path = _recording_documents(
+        kind="raw_probability_uint8",
+        arrays=raw,
+        legacy_bare_crop_path=True,
+    )
+    dependencies = build_subject_mask_core_coordinate_dependencies(
+        kind="raw_probability_uint8",
+        crop_run_path="crop_runs/crop_coordinate_shadow",
+        crop_manifest=crop_manifest,
+        source_crop_arrays=_crop_manifest_arrays(),
+        source_run_path=raw_source_path,
+        source_validation_receipt=raw_receipt,
+        n_rois=4,
+    )
+    assert dependencies["document"]["crop"]["run_path"] == (
+        "crop_runs/crop_coordinate_shadow"
     )
 
 
