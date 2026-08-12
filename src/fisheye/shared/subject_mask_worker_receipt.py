@@ -351,6 +351,25 @@ def _recording_common_scientific_authority(
         normalized_inference = dict(inference)
         if "eye_assignment_contract" in normalized_inference:
             normalized_inference["eye_assignment_contract"] = assignment
+        component_sources = normalized_inference.get(
+            "component_sources_and_policies"
+        )
+        if isinstance(component_sources, Mapping):
+            worker_local_component_fields = {
+                "assignment_summary",
+                "source_created_at_utc",
+                "source_roi_cache_canonical_path",
+                "source_roi_cache_key",
+                "source_roi_cache_path",
+            }
+            normalized_inference["component_sources_and_policies"] = {
+                str(component): (
+                    _without_fields(policy, worker_local_component_fields)
+                    if isinstance(policy, Mapping)
+                    else policy
+                )
+                for component, policy in component_sources.items()
+            }
     else:
         raise ValueError(f"Unsupported recording assembly stage {stage!r}.")
     document = {

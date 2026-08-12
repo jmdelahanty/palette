@@ -18,6 +18,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    _recording_common_scientific_authority,
     _validate_refined_worker_source_join,
     _normalize_expected_work_units,
     build_recording_assignment_keypoint_collection,
@@ -103,6 +104,53 @@ def test_refined_worker_accepts_only_exact_receipt_bound_legacy_collection_path(
     )
     with pytest.raises(ValueError, match="exact corresponding raw worker"):
         _validate_refined_worker_source_join(tampered, raw_worker)
+
+
+def test_recording_common_authority_excludes_refined_worker_local_evidence() -> None:
+    def science(*, cache_key: str, assigned_rows: int) -> dict[str, object]:
+        return build_subject_mask_scientific_identity(
+            stage_kind="refined_subject_mask",
+            model={"policy": "refinement_v1"},
+            crop={"roi_shape_hw": [512, 512], "storage_mode": "geometry_only"},
+            pixels={"source": "raw_masks"},
+            row_identity={"rows": assigned_rows},
+            inference_contract={
+                "components": ["subject_body", "eye_left"],
+                "component_sources_and_policies": {
+                    "subject_body": {
+                        "source_method": "unet_subject_mask_segmenter",
+                        "source_roi_cache_key": cache_key,
+                        "source_roi_cache_path": f"/scratch/{cache_key}",
+                        "source_roi_cache_canonical_path": f"/scratch/{cache_key}",
+                        "source_created_at_utc": "2026-08-12T00:00:00+00:00",
+                    },
+                    "eye_left": {
+                        "source_method": "split_eyes_union_v1",
+                        "source_roi_cache_key": cache_key,
+                        "assignment_summary": {"assigned_rows": assigned_rows},
+                    },
+                },
+            },
+            schema_version=1,
+        )
+
+    first = _recording_common_scientific_authority(
+        science(cache_key="clip_a", assigned_rows=10),
+        stage_kind="refined_subject_mask",
+    )
+    second = _recording_common_scientific_authority(
+        science(cache_key="clip_b", assigned_rows=12),
+        stage_kind="refined_subject_mask",
+    )
+
+    assert first == second
+    component_sources = first["inference_contract"][
+        "component_sources_and_policies"
+    ]
+    assert component_sources == {
+        "eye_left": {"source_method": "split_eyes_union_v1"},
+        "subject_body": {"source_method": "unet_subject_mask_segmenter"},
+    }
 
 
 def test_expected_work_units_retain_empty_frame_windows() -> None:
