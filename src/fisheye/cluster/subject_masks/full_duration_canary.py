@@ -604,7 +604,7 @@ def prepare_canary(
     reuse_inference_plan: Path | None = None,
     require_clean_repo: bool = True,
     core_physical_unit_workers: int = 4,
-    quality_compute_workers: int = 8,
+    quality_compute_workers: int = 4,
     gpu_telemetry_interval_seconds: int = DEFAULT_GPU_TELEMETRY_INTERVAL_SECONDS,
     synchronized_stage_profiling: bool = False,
 ) -> dict[str, Any]:
@@ -2607,10 +2607,10 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument(
         "--quality-compute-workers",
         type=int,
-        default=8,
+        default=4,
         help=(
             "Bounded row-local subject-mask QC compute threads; source reads, "
-            "hashing, and output writes remain ordered (default: 8)."
+            "hashing, and output writes remain ordered (default: 4)."
         ),
     )
     prepare.add_argument(

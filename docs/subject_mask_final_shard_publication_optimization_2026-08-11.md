@@ -3,8 +3,9 @@
 Date: 2026-08-11
 
 Status: implementation checkpoint complete for Phases A-B and the Phase-C
-publication boundary; row-local quality reuse is deferred and the
-recording-scale Phase-D canary remains pending
+publication boundary; bounded row-local quality compute is implemented,
+worker-produced quality reuse is deferred, and the recording-scale Phase-D
+canary is running
 
 ## Goal
 
@@ -171,6 +172,9 @@ readable and migratable as optional cold inspection/export data.
   bounded quality computation, rather than add a separate hash-only scan.
 - [x] Emit the conventional whole refined-mask SHA from that quality pass so
   the existing quality manifest remains honest and compatible.
+- [x] Parallelize only the row-local quality kernel with bounded workers while
+  preserving ordered source reads, digest updates, scratch writes, Zarr writes,
+  and publication ownership.
 - [ ] Compute row-local quality evidence with the same final physical-unit
   ownership where scientifically valid, eliminating the quality computation's
   own full dense traversal.
@@ -190,6 +194,23 @@ worker-local quality design may reuse more computation, but it must first
 define scientifically correct reducers for metrics that cross row or worker
 boundaries.
 
+The bounded compute path uses write-receipt v2 and records requested/effective
+workers plus its execution policy. Canary plan v8 selects four workers by
+default; plan v7 and older publications remain readable and execute the prior
+single-worker path. A 512-row real refined-mask benchmark on the workstation
+produced identical payload digests for every candidate:
+
+| QC workers | Seconds | Rows/s |
+|---:|---:|---:|
+| 1 | 9.714 | 52.7 |
+| 2 | 5.445 | 94.0 |
+| 4 | 3.536 | 144.8 |
+| 8 | 3.366 | 152.1 |
+
+Four workers are the provisional knee: 2.75x the single-worker throughput,
+while eight workers improve only another 5%. This is implementation evidence,
+not the recording-scale promotion gate.
+
 ## Phase D — benchmark and promotion
 
 - [ ] Compare 1, 2, and 4 publication workers on the same immutable inputs.
@@ -202,12 +223,22 @@ boundaries.
 - [ ] Promote a bounded default only after required CI and canary gates pass;
   retain the serial setting as rollback.
 
-The full-duration canary already running from commit `85bdb492` exercises the
-legacy v4 whole-hash path and is intentionally unaffected by this change. A
-fresh canary from the composable implementation is required to measure the
-eliminated finalizer scan. It must report separate core publication and quality
-compute phases: the former should no longer decode every complete dense unit,
-while the latter still reads refined masks because it computes scientific QC.
+The fresh composable canary completed all 22 inference and 22 refinement
+workers from worker commit `e523c816`. Publication then failed closed on two
+previously unexercised recording joins: refined workers persisted a virtual
+`<collection>` source path despite binding one exact raw-worker sidecar, and
+recording-common authority incorrectly included worker-local cache paths,
+timestamps, and eye-assignment summaries. Commits `b3c3066c` and `5b2be8df`
+respectively fixed those contracts without changing or recomputing the sealed
+workers. Publication-only job `153370229` is reusing those immutable bundles
+and records its publication commit separately from the worker commit.
+
+That v7 canary intentionally retains the single-worker QC baseline. Its live
+row evidence projected a roughly 5-6 hour exhaustive quality phase, which
+motivated but does not retroactively alter the v8 bounded-compute path. The
+final canary must report separate core publication and quality compute phases:
+the former no longer decodes every complete dense unit, while the latter still
+reads refined masks because it computes scientific QC.
 
 Implementation validation for the composable checkpoint:
 

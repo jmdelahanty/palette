@@ -447,7 +447,7 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     )
     assert plan["execution"]["publication"] == {
         "core_physical_unit_workers": 4,
-        "quality_compute_workers": 8,
+        "quality_compute_workers": 4,
         "ownership_policy": ("bounded_threaded_disjoint_whole_physical_row_bands_v1"),
         "core_validation_mode": "production_composable_units_v1",
         "logical_identity_unit_rows": 256,
