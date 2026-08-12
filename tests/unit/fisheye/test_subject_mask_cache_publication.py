@@ -29,6 +29,7 @@ from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
     build_subject_mask_sampled_contour_worker_assembly,
     build_subject_mask_sampled_contour_worker_receipt,
     sampled_contour_worker_arrays,
+    validate_subject_mask_sampled_contour_worker_assembly,
     validate_subject_mask_sampled_contour_worker_receipt,
 )
 from fisheye.shared.zarr.subject_mask_validation_receipt import (
@@ -305,6 +306,44 @@ def test_worker_sampled_contours_assemble_without_dense_regeneration(
     )[f"{SUBJECT_MASK_CACHE_FAMILY}/{publication.run_id}"]
     for path, values in precomputed.items():
         assert np.array_equal(result[path][:], values, equal_nan=True)
+
+
+def test_worker_assembly_accepts_exact_legacy_v1_without_source_digest(
+    tmp_path: Path,
+) -> None:
+    masks = np.ones((2, 4, 8, 8), dtype=np.uint8)
+    _run, worker_receipt, receipt = _sampled_worker(
+        tmp_path,
+        name="refined_worker_legacy",
+        masks=masks,
+        global_start_row=0,
+    )
+    evidence = {
+        "workers": [
+            {
+                "global_row_interval": {"start_row": 0, "stop_row": 2},
+                "run_path": receipt["payload"]["source_run_path"],
+                "worker_receipt_payload_digest": worker_receipt["payload_digest"],
+            }
+        ]
+    }
+    assembly = build_subject_mask_sampled_contour_worker_assembly(
+        [receipt],
+        source_producer_evidence=evidence,
+        n_rois=2,
+        components=_components(),
+        producer_commit="a" * 40,
+    )
+    assembly.pop("source_producer_evidence_digest")
+
+    assert (
+        validate_subject_mask_sampled_contour_worker_assembly(
+            assembly,
+            n_rois=2,
+            components=_components(),
+        )
+        == assembly
+    )
 
 
 def test_worker_sampled_contour_receipt_rejects_stale_or_changed_values(

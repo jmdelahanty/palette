@@ -59,6 +59,38 @@ def _components() -> SubjectMaskComponentRegistry:
     return SubjectMaskComponentRegistry(SUBJECT_V1_LR_COMPONENTS)
 
 
+def test_quality_manifest_accepts_exact_legacy_v1_write_receipt(
+    tmp_path: Path,
+) -> None:
+    arrays, source_manifest, source = _fixture()
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+    publication = publish_selector_ineligible_subject_mask_quality_snapshot(
+        arrays,
+        n_frames=4,
+        components=_components(),
+        source=source,
+        source_manifest=source_manifest,
+        destination=tmp_path / "quality.zarr",
+        run_id="quality_legacy_receipt",
+        shadow_root=tmp_path,
+        scratch_root=scratch_root,
+        source_compute_block_bytes=512,
+        created_by="pytest",
+    )
+    manifest = copy.deepcopy(publication.manifest)
+    receipt = manifest["payload"]["write_receipt"]
+    receipt["schema_version"] = 1
+    receipt.pop("source_compute_workers_requested")
+    receipt.pop("source_compute_workers_effective")
+    receipt.pop("source_compute_execution")
+    receipt.pop("source_mode")
+    receipt.pop("worker_assembly")
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+
+    assert validate_subject_mask_quality_run_manifest(manifest) == ()
+
+
 def _fixture() -> tuple[
     dict[str, np.ndarray],
     dict[str, object],

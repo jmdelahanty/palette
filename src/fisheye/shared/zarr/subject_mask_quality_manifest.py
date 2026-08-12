@@ -1128,17 +1128,17 @@ def validate_subject_mask_quality_run_manifest(
                 )
             if receipt.get("source_compute_block_count") != expected_count:
                 errors.append("subject-mask quality compute block count mismatch")
-            expected_effective_workers = (
-                0
-                if receipt.get("schema_version") == 4
-                else (
+            expected_effective_workers = None
+            if receipt.get("schema_version") == 4:
+                expected_effective_workers = 0
+            elif receipt.get("schema_version") in {2, 3}:
+                expected_effective_workers = (
                     1
                     if receipt.get("source_mode") == "receipt_bound_quality_partitions"
                     else min(
                         int(receipt["source_compute_workers_requested"]), expected_count
                     )
                 )
-            )
             if (
                 receipt.get("schema_version") in {2, 3, 4}
                 and receipt.get("source_compute_workers_effective")

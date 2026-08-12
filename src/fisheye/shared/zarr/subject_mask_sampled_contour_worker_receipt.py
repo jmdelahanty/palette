@@ -669,7 +669,11 @@ def validate_subject_mask_sampled_contour_worker_assembly(
         "full_contours_policy",
         "producer_commit",
     }
-    if not isinstance(document, dict) or set(document) != expected_fields:
+    legacy_fields = expected_fields - {"source_producer_evidence_digest"}
+    if not isinstance(document, dict) or frozenset(document) not in {
+        frozenset(expected_fields),
+        frozenset(legacy_fields),
+    }:
         raise ValueError("Sampled-contour worker assembly fields are not exact.")
     intervals = document.get("worker_intervals")
     receipt_digests = document.get("worker_receipt_payload_digests")
@@ -696,7 +700,10 @@ def validate_subject_mask_sampled_contour_worker_assembly(
         != canonical_json_sha256(receipt_digests)
         or document.get("dense_worker_receipts_digest")
         != canonical_json_sha256(dense_digests)
-        or not _is_sha256(document.get("source_producer_evidence_digest"))
+        or (
+            "source_producer_evidence_digest" in document
+            and not _is_sha256(document.get("source_producer_evidence_digest"))
+        )
         or document.get("component_registry_digest")
         != canonical_json_sha256(components.as_manifest())
         or document.get("contour_profile_digest")
