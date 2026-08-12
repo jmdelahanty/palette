@@ -46,6 +46,7 @@ from fisheye.shared.zarr.manifest_digest import (
 )
 from fisheye.shared.zarr.refined_subject_mask_extensions import (
     SubjectMaskDerivedCacheKind,
+    SubjectMaskDerivedComposableCacheReceipt,
     SubjectMaskDerivedCacheReceipt,
     SubjectMaskSampledContourProfile,
     default_subject_mask_sampled_contour_profile,
@@ -96,8 +97,8 @@ SUBJECT_MASK_CACHE_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_ID = (
     "palette.subject_mask.derived_cache_run_manifest"
 )
-SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION = 2
-SUBJECT_MASK_CACHE_RUN_MANIFEST_SUPPORTED_VERSIONS = (1, 2)
+SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION = 3
+SUBJECT_MASK_CACHE_RUN_MANIFEST_SUPPORTED_VERSIONS = (1, 2, 3)
 SUBJECT_MASK_CACHE_PUBLICATION_SCHEMA_ID = (
     "palette.subject_mask.derived_cache_publication"
 )
@@ -346,6 +347,7 @@ def _source_refined_context(
     *,
     refined_run_id: str,
     verified_dense_array_values_sha256: str | None = None,
+    worker_assembly: Mapping[str, Any] | None = None,
 ) -> tuple[
     Any,
     Mapping[str, Any],
@@ -405,19 +407,19 @@ def _source_refined_context(
         dense_declaration.get("digest_algorithm")
         == SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
     ):
-        if verified_dense_array_values_sha256 is None:
-            raise ValueError(
-                "Composable refined source requires a whole-value SHA verified "
-                "during quality computation."
+        dense_values_sha256 = (
+            _require_sha256(
+                verified_dense_array_values_sha256,
+                name="verified_dense_array_values_sha256",
             )
-        dense_values_sha256 = _require_sha256(
-            verified_dense_array_values_sha256,
-            name="verified_dense_array_values_sha256",
+            if verified_dense_array_values_sha256 is not None
+            else None
         )
     else:
         raise ValueError("Refined dense logical identity is unsupported.")
-    source_hashes["masks_roi"] = dense_values_sha256
-    source = {
+    if dense_values_sha256 is not None:
+        source_hashes["masks_roi"] = dense_values_sha256
+    source: dict[str, object] = {
         "stage": "refined_subject_masks",
         "run_name": refined_run_id,
         "run_path": f"refined_subject_masks_runs/{refined_run_id}",
@@ -425,13 +427,47 @@ def _source_refined_context(
         "manifest_schema_version": manifest["schema_version"],
         "manifest_payload_digest": manifest["payload_digest"],
         "manifest_document_digest": canonical_json_sha256(manifest),
-        "dense_array_values_sha256": source_hashes["masks_roi"],
         "component_registry_digest": canonical_json_sha256(components.as_manifest()),
         "row_identity_array_values_sha256": {
             path: source_hashes[path] for path in _IDENTITY_PATHS
         },
         "authority": "dense_masks_roi",
     }
+    if dense_values_sha256 is not None:
+        source["dense_array_values_sha256"] = dense_values_sha256
+    else:
+        if worker_assembly is None:
+            raise ValueError(
+                "Composable refined source requires receipt-bound contour workers."
+            )
+        validated_assembly = validate_subject_mask_sampled_contour_worker_assembly(
+            worker_assembly, n_rois=dimensions.n_rois, components=components
+        )
+        dependencies = payload.get("coordinate_dependencies")
+        dependency_document = (
+            dependencies.get("document") if isinstance(dependencies, Mapping) else None
+        )
+        recording_assembly = (
+            dependency_document.get("recording_assembly")
+            if isinstance(dependency_document, Mapping)
+            else None
+        )
+        if not isinstance(recording_assembly, Mapping) or recording_assembly.get(
+            "producer_evidence_digest"
+        ) != validated_assembly.get("source_producer_evidence_digest"):
+            raise ValueError(
+                "Sampled-contour workers do not bind the refined producer evidence."
+            )
+        source.update(
+            {
+                "dense_identity_kind": "composable_logical_units_v1",
+                "dense_array_logical_identity_digest": canonical_json_sha256(
+                    dense_declaration
+                ),
+                "dense_array_logical_identity": dict(dense_declaration),
+                "worker_assembly_digest": canonical_json_sha256(validated_assembly),
+            }
+        )
     return run, manifest, dimensions, components, source
 
 
@@ -639,28 +675,42 @@ def _cache_extension(
     generated_at_utc: str,
 ) -> dict[str, object]:
     arrays = logical_content["document"]["arrays"]
-    receipts: list[SubjectMaskDerivedCacheReceipt] = []
+    receipts: list[
+        SubjectMaskDerivedCacheReceipt | SubjectMaskDerivedComposableCacheReceipt
+    ] = []
     for component in components.labels:
         prefix = f"components/{component}/sampled_contours"
         component_document = {
             field: arrays[f"{prefix}/{field}"]
             for field in ("points_xy", "valid", "source_point_count")
         }
+        receipt_kwargs = {
+            "cache_kind": SubjectMaskDerivedCacheKind.SAMPLED_CONTOURS,
+            "cache_path": prefix,
+            "source_dense_core_manifest_digest": str(
+                source["manifest_document_digest"]
+            ),
+            "component_registry_digest": str(source["component_registry_digest"]),
+            "logical_content_digest": canonical_json_sha256(component_document),
+            "generator_id": SUBJECT_MASK_CACHE_GENERATOR_ID,
+            "generator_version": SUBJECT_MASK_CACHE_GENERATOR_VERSION,
+            "generated_at_utc": generated_at_utc,
+        }
         receipts.append(
-            SubjectMaskDerivedCacheReceipt(
-                cache_kind=SubjectMaskDerivedCacheKind.SAMPLED_CONTOURS,
-                cache_path=prefix,
-                source_dense_core_manifest_digest=str(
-                    source["manifest_document_digest"]
-                ),
-                source_dense_array_values_sha256=str(
-                    source["dense_array_values_sha256"]
-                ),
-                component_registry_digest=str(source["component_registry_digest"]),
-                logical_content_digest=canonical_json_sha256(component_document),
-                generator_id=SUBJECT_MASK_CACHE_GENERATOR_ID,
-                generator_version=SUBJECT_MASK_CACHE_GENERATOR_VERSION,
-                generated_at_utc=generated_at_utc,
+            (
+                SubjectMaskDerivedComposableCacheReceipt(
+                    **receipt_kwargs,
+                    source_dense_array_logical_identity_digest=str(
+                        source["dense_array_logical_identity_digest"]
+                    ),
+                )
+                if source.get("dense_identity_kind") == "composable_logical_units_v1"
+                else SubjectMaskDerivedCacheReceipt(
+                    **receipt_kwargs,
+                    source_dense_array_values_sha256=str(
+                        source["dense_array_values_sha256"]
+                    ),
+                )
             )
         )
     return published_subject_mask_cache_extension_manifest(tuple(receipts))
@@ -742,7 +792,11 @@ def build_subject_mask_cache_run_manifest(
     }
     manifest = {
         "schema_id": SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_ID,
-        "schema_version": SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": (
+            SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION
+            if source.get("dense_identity_kind") == "composable_logical_units_v1"
+            else 2
+        ),
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
         "payload_digest": canonical_json_sha256(payload),
         "payload": payload,
@@ -841,11 +895,24 @@ def validate_subject_mask_cache_run_manifest(
         "manifest_schema_version",
         "manifest_payload_digest",
         "manifest_document_digest",
-        "dense_array_values_sha256",
         "component_registry_digest",
         "row_identity_array_values_sha256",
         "authority",
     }
+    composable_source = (
+        isinstance(source, Mapping)
+        and source.get("dense_identity_kind") == "composable_logical_units_v1"
+    )
+    expected_source_fields.update(
+        {
+            "dense_identity_kind",
+            "dense_array_logical_identity_digest",
+            "dense_array_logical_identity",
+            "worker_assembly_digest",
+        }
+        if composable_source
+        else {"dense_array_values_sha256"}
+    )
     if not isinstance(source, Mapping) or set(source) != expected_source_fields:
         errors.append("subject-mask cache source binding is not exact")
     else:
@@ -859,7 +926,11 @@ def validate_subject_mask_cache_run_manifest(
         for field in (
             "manifest_payload_digest",
             "manifest_document_digest",
-            "dense_array_values_sha256",
+            (
+                "dense_array_logical_identity_digest"
+                if composable_source
+                else "dense_array_values_sha256"
+            ),
             "component_registry_digest",
         ):
             try:
@@ -894,13 +965,11 @@ def validate_subject_mask_cache_run_manifest(
                     dense_declaration.get("digest_algorithm")
                     == SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
                 ):
-                    # Quality computes this conventional whole-value digest while
-                    # independently verifying the manifest-bound unit identity.
                     dense_values_sha256 = source.get("dense_array_values_sha256")
                 else:
                     errors.append("source masks_roi logical identity is unsupported")
                     dense_values_sha256 = source.get("dense_array_values_sha256")
-                expected_source = {
+                expected_source: dict[str, object] = {
                     "stage": "refined_subject_masks",
                     "run_name": source_payload["run_id"],
                     "run_path": (
@@ -910,7 +979,6 @@ def validate_subject_mask_cache_run_manifest(
                     "manifest_schema_version": source_manifest["schema_version"],
                     "manifest_payload_digest": source_manifest["payload_digest"],
                     "manifest_document_digest": canonical_json_sha256(source_manifest),
-                    "dense_array_values_sha256": dense_values_sha256,
                     "component_registry_digest": canonical_json_sha256(
                         source_payload["logical_schema"]["components"]
                     ),
@@ -919,6 +987,28 @@ def validate_subject_mask_cache_run_manifest(
                     },
                     "authority": "dense_masks_roi",
                 }
+                if composable_source:
+                    expected_source.update(
+                        {
+                            "dense_identity_kind": "composable_logical_units_v1",
+                            "dense_array_logical_identity_digest": (
+                                canonical_json_sha256(dense_declaration)
+                            ),
+                            "dense_array_logical_identity": dict(dense_declaration),
+                            "worker_assembly_digest": source.get(
+                                "worker_assembly_digest"
+                            ),
+                        }
+                    )
+                    try:
+                        _require_sha256(
+                            source.get("worker_assembly_digest"),
+                            name="source worker_assembly_digest",
+                        )
+                    except ValueError as exc:
+                        errors.append(str(exc))
+                else:
+                    expected_source["dense_array_values_sha256"] = dense_values_sha256
                 if dict(source) != expected_source:
                     errors.append("subject-mask cache source binding differs")
 
@@ -1041,19 +1131,29 @@ def validate_subject_mask_cache_run_manifest(
                 ):
                     continue
                 source_binding = receipt_payload.get("source")
-                expected_receipt_source = {
+                expected_receipt_source: dict[str, object] = {
                     "schema_id": REFINED_SUBJECT_MASK_CORE_SCHEMA_ID,
                     "schema_version": 1,
                     "dense_core_manifest_digest": source.get(
                         "manifest_document_digest"
                     ),
-                    "dense_array_values_sha256": source.get(
-                        "dense_array_values_sha256"
-                    ),
                     "component_registry_digest": source.get(
                         "component_registry_digest"
                     ),
                 }
+                if composable_source:
+                    expected_receipt_source.update(
+                        {
+                            "dense_identity_kind": "composable_logical_units_v1",
+                            "dense_array_logical_identity_digest": source.get(
+                                "dense_array_logical_identity_digest"
+                            ),
+                        }
+                    )
+                else:
+                    expected_receipt_source["dense_array_values_sha256"] = source.get(
+                        "dense_array_values_sha256"
+                    )
                 if source_binding != expected_receipt_source:
                     errors.append(
                         f"subject-mask cache receipt source differs at {cache_path}"
@@ -1150,13 +1250,50 @@ def validate_subject_mask_cache_run_manifest(
             errors.append("subject-mask cache worker assembly execution differs")
         else:
             try:
-                validate_subject_mask_sampled_contour_worker_assembly(
-                    assembly,
-                    n_rois=dimensions.n_rois,
-                    components=components,
+                validated_worker_assembly = (
+                    validate_subject_mask_sampled_contour_worker_assembly(
+                        assembly,
+                        n_rois=dimensions.n_rois,
+                        components=components,
+                    )
                 )
             except (TypeError, ValueError) as exc:
                 errors.append(str(exc))
+            else:
+                if composable_source and source.get(
+                    "worker_assembly_digest"
+                ) != canonical_json_sha256(validated_worker_assembly):
+                    errors.append(
+                        "subject-mask cache source/worker assembly digest differs"
+                    )
+                if composable_source and source_manifest is not None:
+                    source_payload_for_binding = source_manifest.get("payload")
+                    dependencies = (
+                        source_payload_for_binding.get("coordinate_dependencies")
+                        if isinstance(source_payload_for_binding, Mapping)
+                        else None
+                    )
+                    dependency_document = (
+                        dependencies.get("document")
+                        if isinstance(dependencies, Mapping)
+                        else None
+                    )
+                    recording_assembly = (
+                        dependency_document.get("recording_assembly")
+                        if isinstance(dependency_document, Mapping)
+                        else None
+                    )
+                    if not isinstance(
+                        recording_assembly, Mapping
+                    ) or recording_assembly.get(
+                        "producer_evidence_digest"
+                    ) != validated_worker_assembly.get(
+                        "source_producer_evidence_digest"
+                    ):
+                        errors.append(
+                            "subject-mask cache workers differ from refined "
+                            "producer evidence"
+                        )
     else:
         errors.append("subject-mask cache source mode is unsupported")
     return tuple(errors)
@@ -1260,6 +1397,7 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
             source_root,
             refined_run_id=resolved_source_run,
             verified_dense_array_values_sha256=(verified_dense_array_values_sha256),
+            worker_assembly=worker_assembly,
         )
     )
     contour_profile = contour_profile or default_subject_mask_sampled_contour_profile(

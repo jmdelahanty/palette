@@ -74,6 +74,20 @@ def _worker_receipt(run_path: str, masks: np.ndarray) -> dict[str, object]:
     }
 
 
+def _producer_evidence(
+    run_path: str, worker_receipt: dict[str, object], *, rows: int
+) -> dict[str, object]:
+    return {
+        "workers": [
+            {
+                "run_path": run_path,
+                "global_row_interval": {"start_row": 0, "stop_row": rows},
+                "worker_receipt_payload_digest": worker_receipt["payload_digest"],
+            }
+        ]
+    }
+
+
 def _source_fixture() -> (
     tuple[dict[str, np.ndarray], dict[str, object], SubjectMaskQualitySourceReference]
 ):
@@ -167,6 +181,43 @@ def test_quality_partition_matches_serial_values_and_rejects_tampering(
         )
 
 
+def test_quality_partition_rejects_masks_that_differ_from_worker_receipt(
+    tmp_path: Path,
+) -> None:
+    arrays, _manifest, _source = _source_fixture()
+    run_path = "refined_subject_masks_runs/refined_worker_000"
+    worker_receipt = _worker_receipt(run_path, arrays["masks_roi"])
+    tampered_masks = arrays["masks_roi"].copy()
+    tampered_masks[0, 0, 1, 1] ^= np.uint8(1)
+    run = _Run(
+        {
+            "masks_roi": tampered_masks,
+            "instance_key": arrays["instance_key"],
+            "available_channels": arrays["available_channels"],
+        },
+        path=run_path,
+    )
+
+    with pytest.raises(
+        ValueError, match="QC source masks differ from their worker receipt"
+    ):
+        compute_subject_mask_quality_partition(
+            run,
+            source_acquisition_frame_index=arrays["source_acquisition_frame_index"],
+            global_start_row=0,
+            global_frame_start=0,
+            global_frame_stop=4,
+            work_unit_id="fixture:window_000",
+            work_unit_index=0,
+            source_worker_receipt=worker_receipt,
+            producer_commit="a" * 40,
+            destination=tmp_path / "tampered_partition",
+            compute_workers=1,
+            source_compute_block_bytes=512,
+            receipt_unit_rows=1024,
+        )
+
+
 def test_recording_publication_adopts_receipt_bound_quality_partition(
     tmp_path: Path,
 ) -> None:
@@ -197,7 +248,10 @@ def test_recording_publication_adopts_receipt_bound_quality_partition(
         source_compute_block_bytes=512,
     )
     assembly = build_subject_mask_quality_partition_assembly(
-        (receipt,), n_rois=4, producer_commit="b" * 40
+        (receipt,),
+        n_rois=4,
+        producer_commit="b" * 40,
+        source_producer_evidence=_producer_evidence(run_path, worker_receipt, rows=4),
     )
     precomputed = load_subject_mask_quality_partition_arrays(partition)
     shadow_root = tmp_path / "quality"
@@ -272,6 +326,10 @@ def test_quality_partition_assembly_rejects_gaps() -> None:
         "local_row_count": 2,
         "source_run_path": "refined_subject_masks_runs/worker_1",
         "source_dense_worker": {},
+        "source_dense_verification": {
+            "mode": "required_qc_read_compared_to_worker_unit_receipt_v1",
+            "status": "passed",
+        },
         "component_registry": {},
         "quality_profile": {},
         "quality_policy": {},
@@ -289,5 +347,16 @@ def test_quality_partition_assembly_rejects_gaps() -> None:
     }
     with pytest.raises(ValueError, match="gap, overlap, or reordering"):
         build_subject_mask_quality_partition_assembly(
-            (receipt,), n_rois=4, producer_commit="c" * 40
+            (receipt,),
+            n_rois=4,
+            producer_commit="c" * 40,
+            source_producer_evidence={
+                "workers": [
+                    {
+                        "run_path": "refined_subject_masks_runs/worker_1",
+                        "global_row_interval": {"start_row": 2, "stop_row": 4},
+                        "worker_receipt_payload_digest": "1" * 64,
+                    }
+                ]
+            },
         )

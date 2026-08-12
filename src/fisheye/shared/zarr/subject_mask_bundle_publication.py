@@ -76,8 +76,8 @@ from fisheye.shared.zarr_run_completion import (
 SUBJECT_MASK_BUNDLE_FAMILY = "subject_mask_bundle_runs"
 SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID = "palette.subject_mask.bundle_manifest"
-SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION = 3
-SUBJECT_MASK_BUNDLE_MANIFEST_SUPPORTED_VERSIONS = (1, 2, 3)
+SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION = 4
+SUBJECT_MASK_BUNDLE_MANIFEST_SUPPORTED_VERSIONS = (1, 2, 3, 4)
 SUBJECT_MASK_BUNDLE_PUBLICATION_SCHEMA_ID = "palette.subject_mask.bundle_publication"
 SUBJECT_MASK_BUNDLE_PUBLICATION_SCHEMA_VERSION = 1
 SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR = "subject_mask_authority"
@@ -133,7 +133,7 @@ _COORDINATE_CORE_MANIFEST_VERSIONS = {
 def _member_specs_for_version(version: int) -> Mapping[str, tuple[str, str]]:
     if version in (1, 2):
         return _MEMBER_SPECS
-    if version == 3:
+    if version in (3, 4):
         return _V3_MEMBER_SPECS
     raise ValueError(f"Unsupported subject-mask bundle schema version: {version}.")
 
@@ -374,6 +374,7 @@ def _bundle_cross_binding(
     if not isinstance(quality_source, Mapping):
         raise ValueError("Quality manifest lacks its refined-source binding.")
     quality_source_hashes = quality_source.get("source_array_values_sha256")
+    quality_source_identities = quality_source.get("source_array_logical_identities")
     quality_source_paths = (
         "masks_roi",
         "instance_key",
@@ -382,26 +383,60 @@ def _bundle_cross_binding(
         "frame_row_offsets",
         "available_channels",
     )
-    if not isinstance(quality_source_hashes, Mapping) or set(
-        quality_source_hashes
-    ) != set(quality_source_paths):
-        raise ValueError("Quality manifest source-array identities are not exact.")
-    expected_source_hashes = {
-        path: str(quality_source_hashes[path]) for path in quality_source_paths
-    }
+    composable_quality = quality_source.get("source_identity_kind") == (
+        "composable_logical_arrays_v1"
+    )
+    if composable_quality:
+        if not isinstance(quality_source_identities, Mapping) or set(
+            quality_source_identities
+        ) != set(quality_source_paths):
+            raise ValueError("Composable quality source identities are not exact.")
+        expected_source_hashes = {
+            path: str(quality_source_identities[path]["sha256"])
+            for path in quality_source_paths[1:]
+        }
+        if dict(quality_source_identities["masks_roi"]) != dict(
+            refined_arrays["masks_roi"]
+        ):
+            raise ValueError("Quality/refined composable dense identity differs.")
+    else:
+        if not isinstance(quality_source_hashes, Mapping) or set(
+            quality_source_hashes
+        ) != set(quality_source_paths):
+            raise ValueError("Quality manifest source-array identities are not exact.")
+        expected_source_hashes = {
+            path: str(quality_source_hashes[path]) for path in quality_source_paths
+        }
     for path in quality_source_paths[1:]:
         if expected_source_hashes[path] != refined_arrays[path].get("sha256"):
             raise ValueError(
                 f"Quality/refined narrow source identity differs at {path!r}."
             )
-    expected_quality_source = {
+    expected_quality_source: dict[str, object] = {
         "run_name": refined_run_id,
         "run_path": f"refined_subject_masks_runs/{refined_run_id}",
         "manifest_digest": canonical_json_sha256(refined_manifest),
-        "dense_array_values_sha256": expected_source_hashes["masks_roi"],
         "component_registry_digest": canonical_json_sha256(refined_components),
-        "source_array_values_sha256": expected_source_hashes,
     }
+    if composable_quality:
+        expected_quality_source.update(
+            {
+                "source_identity_kind": "composable_logical_arrays_v1",
+                "dense_array_logical_identity_digest": canonical_json_sha256(
+                    refined_arrays["masks_roi"]
+                ),
+                "source_array_logical_identities": {
+                    path: dict(refined_arrays[path]) for path in quality_source_paths
+                },
+            }
+        )
+    else:
+        expected_quality_source.update(
+            {
+                "dense_array_values_sha256": expected_source_hashes["masks_roi"],
+                "source_array_values_sha256": expected_source_hashes,
+            }
+        )
     for name, expected in expected_quality_source.items():
         if quality_source.get(name) != expected:
             raise ValueError(f"Quality/refined source binding differs for {name!r}.")
@@ -414,12 +449,31 @@ def _bundle_cross_binding(
         "components": refined_components,
         "component_registry_digest": canonical_json_sha256(refined_components),
         "raw_refined_identity_array_values_sha256": identity,
-        "quality_source_array_values_sha256": expected_source_hashes,
+        "quality_source_identity": (
+            {
+                "kind": "composable_logical_arrays_v1",
+                "dense_array_logical_identity_digest": canonical_json_sha256(
+                    refined_arrays["masks_roi"]
+                ),
+                "source_array_logical_identities_digest": canonical_json_sha256(
+                    {path: dict(refined_arrays[path]) for path in quality_source_paths}
+                ),
+            }
+            if composable_quality
+            else {
+                "kind": "whole_array_sha256_v1",
+                "source_array_values_sha256": expected_source_hashes,
+            }
+        ),
         "quality_source_manifest_digest": canonical_json_sha256(refined_manifest),
         "identity_policy": (
             "exact_logical_array_hash_equality_v1"
             if "sha256" in refined_arrays["masks_roi"]
-            else "manifest_bound_composable_dense_identity_plus_quality_sha_v1"
+            else (
+                "manifest_bound_composable_dense_identity_v2"
+                if composable_quality
+                else "manifest_bound_composable_dense_identity_plus_quality_sha_v1"
+            )
         ),
     }
     if version >= 2:
@@ -490,17 +544,30 @@ def _bundle_cross_binding(
         )
         if not isinstance(cache_source, Mapping):
             raise ValueError("Presentation cache lacks its refined-source binding.")
-        expected_cache_source = {
+        expected_cache_source: dict[str, object] = {
             "run_name": refined_run_id,
             "run_path": f"refined_subject_masks_runs/{refined_run_id}",
             "manifest_payload_digest": refined_manifest["payload_digest"],
             "manifest_document_digest": canonical_json_sha256(refined_manifest),
-            "dense_array_values_sha256": expected_source_hashes["masks_roi"],
             "component_registry_digest": canonical_json_sha256(refined_components),
             "row_identity_array_values_sha256": {
                 path: refined_arrays[path]["sha256"] for path in _IDENTITY_PATHS
             },
         }
+        if composable_quality:
+            expected_cache_source.update(
+                {
+                    "dense_identity_kind": "composable_logical_units_v1",
+                    "dense_array_logical_identity_digest": canonical_json_sha256(
+                        refined_arrays["masks_roi"]
+                    ),
+                    "dense_array_logical_identity": dict(refined_arrays["masks_roi"]),
+                }
+            )
+        else:
+            expected_cache_source["dense_array_values_sha256"] = expected_source_hashes[
+                "masks_roi"
+            ]
         for name, expected in expected_cache_source.items():
             if cache_source.get(name) != expected:
                 raise ValueError(
@@ -515,10 +582,9 @@ def _bundle_cross_binding(
         cache_extension = cache_payload.get("cache_extension")
         if not isinstance(cache_extension, Mapping):
             raise ValueError("Presentation cache lacks its closed-world extension.")
-        cross_binding["presentation_cache"] = {
+        presentation_binding: dict[str, object] = {
             "source_refined_run_id": refined_run_id,
             "source_refined_manifest_digest": canonical_json_sha256(refined_manifest),
-            "source_dense_array_values_sha256": expected_source_hashes["masks_roi"],
             "source_component_registry_digest": canonical_json_sha256(
                 refined_components
             ),
@@ -527,11 +593,20 @@ def _bundle_cross_binding(
             },
             "cache_extension_receipts_digest": cache_extension.get("receipts_digest"),
             "binding_policy": (
-                "manifest_composable_dense_quality_sha_and_row_identity_v1"
-                if "sha256" not in refined_arrays["masks_roi"]
+                "manifest_composable_dense_identity_and_row_identity_v2"
+                if composable_quality
                 else "exact_dense_authority_and_row_identity_v1"
             ),
         }
+        if composable_quality:
+            presentation_binding["source_dense_array_logical_identity_digest"] = (
+                canonical_json_sha256(refined_arrays["masks_roi"])
+            )
+        else:
+            presentation_binding["source_dense_array_values_sha256"] = (
+                expected_source_hashes["masks_roi"]
+            )
+        cross_binding["presentation_cache"] = presentation_binding
     return cross_binding
 
 
@@ -578,6 +653,7 @@ def build_subject_mask_bundle_manifest(
     cross_binding: Mapping[str, Any],
     import_receipt_digests: Mapping[str, str],
     metadata_digest: str,
+    schema_version: int | None = None,
 ) -> dict[str, object]:
     resolved_id = _require_run_id(bundle_id, name="bundle_id")
     identity = str(recording_identity).strip()
@@ -585,12 +661,12 @@ def build_subject_mask_bundle_manifest(
         raise ValueError("recording_identity cannot be empty.")
     member_roles = set(members)
     if member_roles == set(_MEMBER_SPECS):
-        schema_version = 2
+        resolved_version = 2 if schema_version is None else int(schema_version)
     elif member_roles == set(_V3_MEMBER_SPECS):
-        schema_version = 3
+        resolved_version = 3 if schema_version is None else int(schema_version)
     else:
         raise ValueError("Subject-mask bundle member roles are not exact.")
-    member_specs = _member_specs_for_version(schema_version)
+    member_specs = _member_specs_for_version(resolved_version)
     if set(import_receipt_digests) != set(member_specs):
         raise ValueError("Subject-mask bundle import receipt roles are not exact.")
     payload = {
@@ -616,7 +692,7 @@ def build_subject_mask_bundle_manifest(
     }
     envelope = {
         "schema_id": SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID,
-        "schema_version": schema_version,
+        "schema_version": resolved_version,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
         "payload_digest": canonical_json_sha256(payload),
         "payload": payload,
@@ -1049,8 +1125,9 @@ def publish_subject_mask_bundle_candidate(
     """Import and seal one complete selector-ineligible subject-mask bundle.
 
     Omitting both cache arguments preserves the read-compatible three-member
-    bundle-v2 contract.  Providing both creates a viewer-complete bundle-v3
-    candidate with one independently regenerable sampled-contour cache.
+    bundle-v2 contract. Providing both creates a viewer-complete bundle-v3
+    compatibility candidate or bundle-v4 composable candidate with one
+    independently regenerable sampled-contour cache.
     """
 
     started = time.perf_counter()
@@ -1139,6 +1216,12 @@ def publish_subject_mask_bundle_candidate(
         if not isinstance(local_manifest, Mapping):
             raise RuntimeError(f"Local {role} member lacks its run_manifest.")
         local_manifests[role] = local_manifest
+    if (
+        cache_run_id is not None
+        and local_manifests["quality"].get("schema_version") == 3
+        and local_manifests["presentation_cache"].get("schema_version") == 3
+    ):
+        bundle_schema_version = 4
     # Prove all cross-member identities before copying the first immutable
     # member into the destination archive.  A source-binding error therefore
     # cannot leave an otherwise-valid but unrelated imported cache orphan.
@@ -1246,6 +1329,7 @@ def publish_subject_mask_bundle_candidate(
             cross_binding=cross_binding,
             import_receipt_digests=import_digests,
             metadata_digest=metadata_digest,
+            schema_version=bundle_schema_version,
         )
         manifest_errors = validate_subject_mask_bundle_manifest(manifest)
         if manifest_errors:

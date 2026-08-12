@@ -2,10 +2,11 @@
 
 Date: 2026-08-11
 
-Status: implementation checkpoint complete for Phases A-B and the partitioned
-Phase-C quality boundary; the current canary plan computes immutable
-worker-produced quality partitions concurrently and assembles them during
-single-owner publication. Recording-scale Phase-D evidence is still required.
+Status: implementation complete through the receipt-composed Phase-C quality
+and sampled-contour boundary. Immutable worker QC reads now verify the exact
+dense units already resident for computation; the recording finalizer composes
+those receipts without another full dense-mask scan. Recording-scale Phase-D
+evidence is still required before production promotion.
 
 ## Goal
 
@@ -148,9 +149,10 @@ sampled contours enabled. Phase C now seals each worker's sampled arrays
 against that worker's dense-mask semantic receipt and carries the receipt with
 the immutable worker bundle. The recording publisher validates exact,
 contiguous row coverage and assembles those arrays into the access-aware cache
-without a second dense-mask extraction pass. The full-duration canary requires
-this four-member bundle-v3 path; the older three-member and dense-regeneration
-paths remain explicit compatibility/repair surfaces.
+without a second dense-mask extraction pass. The receipt-composed full-duration
+canary requires the four-member bundle-v4 path; bundle v3, the older
+three-member form, and dense regeneration remain explicit compatibility/repair
+surfaces.
 
 Regeneration is required only after a dense edit, an algorithm/version change,
 or stale/failed evidence. The default worker receipt rejects stale contours
@@ -164,14 +166,16 @@ readable and migratable as optional cold inspection/export data.
   unit hashes.
 - [x] Assemble complete sampled-contour worker coverage without a second dense
   extraction pass.
-- [x] Make the sampled-contour cache a required full-duration canary bundle-v3
-  member while preserving explicit legacy three-member publication.
+- [x] Make the sampled-contour cache a required full-duration canary bundle-v4
+  member while preserving explicit legacy bundle and three-member publication.
 - [x] Forbid full ragged contours in the new worker default while retaining
   historical readers and migration.
-- [x] Validate the refined composable identity during the already-required
-  bounded quality computation, rather than add a separate hash-only scan.
-- [x] Emit the conventional whole refined-mask SHA from that quality pass so
-  the existing quality manifest remains honest and compatible.
+- [x] Validate every dense block consumed by worker QC against the producer's
+  ordered unit hashes during the already-required computation, rather than add
+  a separate hash-only scan.
+- [x] Preserve conventional whole-value SHA publication for the legacy
+  monolithic path while giving the partitioned path an explicitly versioned
+  composable source reference.
 - [x] Parallelize only the row-local quality kernel with bounded workers while
   preserving ordered source reads, digest updates, scratch writes, Zarr writes,
   and publication ownership.
@@ -186,7 +190,7 @@ readable and migratable as optional cold inspection/export data.
 - [x] Assemble the worker-produced quality arrays without recomputing connected
   components, topology, containment, or overlap metrics over the complete
   recording.
-- [ ] Replace the compatibility whole-value source hash with a composable
+- [x] Replace the compatibility whole-value source hash with a composable
   receipt-bound source reference so the final publisher need not perform its
   remaining ordered dense identity-verification scan.
 - [ ] Regenerate stale bitpacked/RLE/contour caches only at explicit validation,
@@ -195,27 +199,41 @@ readable and migratable as optional cold inspection/export data.
 Each quality job owns one terminal refined worker and writes one node-local
 partition containing only the 11 row-aligned quality arrays (the final
 `frame_row_offsets` index is derived during assembly). Its immutable receipt
-binds the exact refined-worker receipt, dense-mask unit digest, component and
-quality contracts, producer commit, frame interval, row interval, array
-shapes/dtypes, and fixed-size logical-unit hashes. The recording publisher
-requires gap-free ordered `[0, R)` coverage and never lets workers write the
-final Zarr concurrently.
+binds the exact refined-worker receipt, every ordered dense-mask validation
+unit, component and quality contracts, producer commit, frame interval, row
+interval, array shapes/dtypes, and fixed-size output logical-unit hashes. The
+partition refuses to publish if any dense byte read for QC differs from its
+producer receipt. The recording publisher requires gap-free ordered `[0, R)`
+coverage and never lets workers write the final Zarr concurrently.
 
-The current source-reference schema still requires a conventional whole-value
-SHA-256 of the refined dense mask. Consequently, adopting precomputed quality
-partitions eliminates the expensive scientific QC recomputation but the final
-publisher still performs one ordered dense identity-verification pass. That
-scan is deliberately retained rather than weakening the existing manifest. A
-future versioned composable source-reference contract may remove it after a
-canary measures its residual cost.
+Partition receipt/assembly v2 binds the complete refined producer-evidence
+digest. Quality manifest v3 and logical-content v2 carry the exact refined
+array declarations rather than inventing a whole-recording dense SHA. Quality
+write-receipt v4 records zero finalizer compute and
+`receipt_bound_partitions_with_verified_worker_units_v2`. The finalizer still
+reads and verifies the narrow lineage arrays, adopts the quality payload, and
+writes/consolidates its publication, but it does not read `masks_roi`.
 
-The monolithic bounded compute path uses write-receipt v2; partition adoption
-uses write-receipt v3 and records the complete worker assembly. Canary plan v9
-requires partitioned QC, selects four compute threads per partition and ten
-concurrent partition jobs by default, and makes recording publication depend
-on terminal quality coverage. Plan v8 remains loadable and retains the
-monolithic compatibility path. A 512-row real refined-mask benchmark on the
-workstation produced identical payload digests for every candidate:
+Sampled-contour assembly v2 binds the same refined producer evidence. Cache
+manifest v3 and cache-receipt v2 bind the refined composable dense identity and
+the exact worker assembly; bundle manifest v4 requires the quality and cache
+members to name that same refined authority. Legacy quality manifests,
+whole-value source hashes, cache receipts, and bundle versions remain accepted
+on their explicit compatibility paths.
+
+Old quality partition receipts do not claim that QC reads were compared with
+producer units, so they cannot be upgraded by metadata rewriting. A canary
+created before partition receipt v2 must rerun only the quality partitions.
+Its sealed inference/refinement final-layout packages remain reusable when
+their existing worker receipts validate. Sampled-contour worker payloads also
+remain reusable; their recording-level assembly receipt is rebuilt cheaply.
+
+Canary plan v9 requires partitioned QC, selects four compute threads per
+partition and ten concurrent partition jobs by default, and makes recording
+publication depend on terminal quality coverage. Plan v8 remains loadable and
+retains the monolithic compatibility path. A 512-row real refined-mask
+benchmark on the workstation produced identical payload digests for every
+candidate:
 
 | QC workers | Seconds | Rows/s |
 |---:|---:|---:|
@@ -233,8 +251,17 @@ about six minutes of QC. Twenty-two clips at concurrency ten require three
 waves, so approximately 18-25 minutes is a reasonable hypothesis for the
 scientific QC phase, versus roughly six hours for one single-threaded
 recording traversal. This is a projection, not a completed cluster benchmark;
-the remaining dense identity scan, scheduling, PRFS transfer, and final Zarr
-write are additional publication time.
+scheduling, PRFS transfer, final Zarr writes, and consolidation are additional
+publication time. The prior finalizer dense-scan cost is retired for the
+receipt-composed path.
+
+The first full-duration partitioned-quality publication measured 2,709.95 s
+total, of which 2,229.18 s was the finalizer's redundant ordered dense-source
+verification and only 0.189 s was quality-partition adoption. Removing that
+scan leaves roughly 481 s of measured non-scan work, so approximately eight
+minutes is the current full-duration finalizer hypothesis. This subtraction is
+not promotion evidence: the next selector-ineligible canary must measure the
+new implementation directly, including I/O, RSS, and consolidation.
 
 ## Phase D — benchmark and promotion
 
@@ -258,13 +285,13 @@ respectively fixed those contracts without changing or recomputing the sealed
 workers. Publication-only job `153370229` is reusing those immutable bundles
 and records its publication commit separately from the worker commit.
 
-That v7 canary intentionally retains the single-worker QC baseline. Its live
+That v7 canary intentionally retained the single-worker QC baseline. Its live
 row evidence projected a roughly 5-6 hour exhaustive quality phase, which
-motivated but does not retroactively alter the v9 partitioned path. A new plan
-is required to exercise partitioned quality; the existing running job is not
-mutated. The final canary must report worker-QC, partition adoption, remaining
-dense identity verification, core publication, cache publication, and total
-wall time separately.
+motivated but does not retroactively alter the v9 partitioned path. A fresh
+plan is required to exercise receipt v2/v4 composition; existing artifacts are
+never rewritten to claim the stronger evidence. The final canary must report
+worker QC, partition adoption, receipt-bound source verification, core
+publication, cache publication, consolidation, and total wall time separately.
 
 Implementation validation for the composable checkpoint:
 
@@ -295,6 +322,19 @@ Additional partitioned-quality implementation validation:
 - current plans insert a dedicated LSF quality array between refinement and
   publication, while old plans remain readable compatibility inputs;
 - static compilation, Ruff, Black, and `git diff --check` pass.
+
+Receipt-composition validation:
+
+- 57 focused quality-schema, partition, cache, extension, bundle, and
+  recording-publication tests pass outside the sandbox;
+- changing one dense mask byte while retaining the producer receipt fails in
+  the QC worker before a partition receipt can be emitted;
+- the recording-level coordinate-aware fixture publishes refined composable
+  authority, quality manifest v3/write-receipt v4, cache manifest v3/receipt
+  v2, and four-member bundle v4 without a finalizer dense read;
+- recomputed cache-manifest tampering that separates the cache worker assembly
+  from its refined producer evidence fails closed;
+- historical whole-hash publication and bundle tests remain green.
 
 ## Failure semantics
 

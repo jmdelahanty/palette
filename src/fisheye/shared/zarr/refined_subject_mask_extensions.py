@@ -77,6 +77,7 @@ SUBJECT_MASK_CACHE_RECEIPT_SCHEMA_ID = (
     "palette.refined_subject_mask.derived_cache_receipt"
 )
 SUBJECT_MASK_CACHE_RECEIPT_SCHEMA_VERSION = 1
+SUBJECT_MASK_CACHE_RECEIPT_SUPPORTED_VERSIONS = (1, 2)
 SUBJECT_MASK_CACHE_RECEIPT_DIGEST_ALGORITHM = "sha256_canonical_json_v1"
 SUBJECT_MASK_CACHE_VALIDATION_MODE = "full_dense_equivalence"
 SUBJECT_MASK_CONTOUR_CACHE_PROFILE_SCHEMA_ID = (
@@ -547,6 +548,84 @@ class SubjectMaskDerivedCacheReceipt:
         }
 
 
+@dataclass(frozen=True)
+class SubjectMaskDerivedComposableCacheReceipt:
+    """Cache receipt bound to a versioned composable dense logical identity."""
+
+    cache_kind: SubjectMaskDerivedCacheKind
+    cache_path: str
+    source_dense_core_manifest_digest: str
+    source_dense_array_logical_identity_digest: str
+    component_registry_digest: str
+    logical_content_digest: str
+    generator_id: str
+    generator_version: int
+    generated_at_utc: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "cache_kind", SubjectMaskDerivedCacheKind(self.cache_kind)
+        )
+        cache_path = str(self.cache_path).strip().strip("/")
+        if not cache_path or ".." in cache_path.split("/"):
+            raise ValueError("cache_path must be a nonempty relative archive path.")
+        if not _cache_path_matches_kind(self.cache_kind, cache_path):
+            raise ValueError("cache_path does not match cache kind.")
+        object.__setattr__(self, "cache_path", cache_path)
+        for name in (
+            "source_dense_core_manifest_digest",
+            "source_dense_array_logical_identity_digest",
+            "component_registry_digest",
+            "logical_content_digest",
+        ):
+            object.__setattr__(
+                self, name, _require_sha256(getattr(self, name), name=name)
+            )
+        generator_id = str(self.generator_id).strip()
+        if not generator_id:
+            raise ValueError("generator_id cannot be empty.")
+        object.__setattr__(self, "generator_id", generator_id)
+        if type(self.generator_version) is not int or self.generator_version <= 0:
+            raise ValueError("generator_version must be a positive exact integer.")
+        object.__setattr__(
+            self,
+            "generated_at_utc",
+            _require_utc_timestamp(self.generated_at_utc, name="generated_at_utc"),
+        )
+
+    def as_manifest(self) -> dict[str, object]:
+        payload = {
+            "cache_kind": self.cache_kind.value,
+            "cache_path": self.cache_path,
+            "source": {
+                "schema_id": REFINED_SUBJECT_MASK_CORE_SCHEMA_ID,
+                "schema_version": REFINED_SUBJECT_MASK_CORE_SCHEMA_VERSION,
+                "dense_core_manifest_digest": (self.source_dense_core_manifest_digest),
+                "dense_identity_kind": "composable_logical_units_v1",
+                "dense_array_logical_identity_digest": (
+                    self.source_dense_array_logical_identity_digest
+                ),
+                "component_registry_digest": self.component_registry_digest,
+            },
+            "logical_content_digest": self.logical_content_digest,
+            "generator": {"id": self.generator_id, "version": self.generator_version},
+            "generated_at_utc": self.generated_at_utc,
+            "validation": {
+                "mode": "receipt_bound_complete_dense_equivalence_v2",
+                "status": "passed",
+            },
+            "stale": False,
+            "authoritative_pixels": False,
+        }
+        return {
+            "schema_id": SUBJECT_MASK_CACHE_RECEIPT_SCHEMA_ID,
+            "schema_version": 2,
+            "digest_algorithm": SUBJECT_MASK_CACHE_RECEIPT_DIGEST_ALGORITHM,
+            "payload": payload,
+            "payload_digest": canonical_json_sha256(payload),
+        }
+
+
 def validate_subject_mask_cache_receipt(
     document: Mapping[str, Any],
 ) -> tuple[str, ...]:
@@ -564,7 +643,8 @@ def validate_subject_mask_cache_receipt(
         errors.append("cache receipt envelope has an unexpected field set")
     if (
         document.get("schema_id") != SUBJECT_MASK_CACHE_RECEIPT_SCHEMA_ID
-        or document.get("schema_version") != SUBJECT_MASK_CACHE_RECEIPT_SCHEMA_VERSION
+        or document.get("schema_version")
+        not in SUBJECT_MASK_CACHE_RECEIPT_SUPPORTED_VERSIONS
         or document.get("digest_algorithm")
         != SUBJECT_MASK_CACHE_RECEIPT_DIGEST_ALGORITHM
     ):
@@ -603,13 +683,22 @@ def validate_subject_mask_cache_receipt(
     ):
         errors.append("cache receipt path does not match cache_kind")
     source = payload.get("source")
-    if not isinstance(source, Mapping) or set(source) != {
+    composable = document.get("schema_version") == 2
+    expected_source_fields = {
         "schema_id",
         "schema_version",
         "dense_core_manifest_digest",
-        "dense_array_values_sha256",
         "component_registry_digest",
-    }:
+    }
+    expected_source_fields.update(
+        {
+            "dense_identity_kind",
+            "dense_array_logical_identity_digest",
+        }
+        if composable
+        else {"dense_array_values_sha256"}
+    )
+    if not isinstance(source, Mapping) or set(source) != expected_source_fields:
         errors.append("cache receipt source has an unexpected field set")
     else:
         if (
@@ -619,7 +708,11 @@ def validate_subject_mask_cache_receipt(
             errors.append("cache receipt source schema mismatch")
         for field in (
             "dense_core_manifest_digest",
-            "dense_array_values_sha256",
+            (
+                "dense_array_logical_identity_digest"
+                if composable
+                else "dense_array_values_sha256"
+            ),
             "component_registry_digest",
         ):
             try:
@@ -647,7 +740,11 @@ def validate_subject_mask_cache_receipt(
     except ValueError as exc:
         errors.append(str(exc))
     if payload.get("validation") != {
-        "mode": SUBJECT_MASK_CACHE_VALIDATION_MODE,
+        "mode": (
+            "receipt_bound_complete_dense_equivalence_v2"
+            if composable
+            else SUBJECT_MASK_CACHE_VALIDATION_MODE
+        ),
         "status": "passed",
     }:
         errors.append("cache receipt does not prove full dense equivalence")
@@ -938,7 +1035,10 @@ def validate_subject_mask_cache_arrays(
 
 
 def published_subject_mask_cache_extension_manifest(
-    receipts: tuple[SubjectMaskDerivedCacheReceipt, ...],
+    receipts: tuple[
+        SubjectMaskDerivedCacheReceipt | SubjectMaskDerivedComposableCacheReceipt,
+        ...,
+    ],
 ) -> dict[str, object]:
     """Build one closed-world cache extension from validated receipt objects."""
 
@@ -950,7 +1050,17 @@ def published_subject_mask_cache_extension_manifest(
     source_identities = {
         (
             receipt.source_dense_core_manifest_digest,
-            receipt.source_dense_array_values_sha256,
+            (
+                (
+                    "composable_logical_units_v1",
+                    receipt.source_dense_array_logical_identity_digest,
+                )
+                if isinstance(receipt, SubjectMaskDerivedComposableCacheReceipt)
+                else (
+                    "whole_array_sha256_v1",
+                    receipt.source_dense_array_values_sha256,
+                )
+            ),
             receipt.component_registry_digest,
         )
         for receipt in receipts
@@ -1049,6 +1159,7 @@ __all__ = [
     "RefinedSubjectMaskDraftAuditSchema",
     "SubjectMaskDerivedCacheKind",
     "SubjectMaskDerivedCacheReceipt",
+    "SubjectMaskDerivedComposableCacheReceipt",
     "published_subject_mask_cache_extension_manifest",
     "validate_published_subject_mask_cache_extension",
     "validate_subject_mask_cache_arrays",

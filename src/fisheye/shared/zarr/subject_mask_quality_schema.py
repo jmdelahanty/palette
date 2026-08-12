@@ -33,6 +33,10 @@ from fisheye.shared.zarr.array_contracts import (
     ArrayContractCatalog,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+)
 from fisheye.shared.zarr.subject_mask_schema import (
     REFINED_SUBJECT_MASK_CORE_SCHEMA_ID,
     REFINED_SUBJECT_MASK_CORE_SCHEMA_VERSION,
@@ -40,6 +44,9 @@ from fisheye.shared.zarr.subject_mask_schema import (
     SubjectMaskSchemaError,
     SubjectMaskSchemaIssue,
     derive_subject_mask_frame_row_offsets,
+)
+from fisheye.shared.zarr.subject_mask_validation_receipt import (
+    SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM,
 )
 
 SUBJECT_MASK_QUALITY_SCHEMA_ID = "palette.stage.subject_mask_quality"
@@ -279,6 +286,165 @@ class SubjectMaskQualitySourceReference:
             "source_array_values_sha256": dict(self.source_array_values_sha256),
             "coverage": "every_source_row_exactly_once_in_source_order",
         }
+
+
+@dataclass(frozen=True)
+class SubjectMaskQualityComposableSourceReference:
+    """One immutable refined authority bound by composable logical identities."""
+
+    run_name: str
+    manifest_digest: str
+    component_registry_digest: str
+    source_array_logical_identities: Mapping[str, Mapping[str, Any]]
+
+    def __post_init__(self) -> None:
+        run_name = str(self.run_name).strip()
+        if not run_name or "/" in run_name:
+            raise ValueError("run_name must be one nonempty archive group name.")
+        object.__setattr__(self, "run_name", run_name)
+        for name in ("manifest_digest", "component_registry_digest"):
+            value = str(getattr(self, name)).strip()
+            if not _SHA256.fullmatch(value):
+                raise ValueError(f"{name} must be lowercase hexadecimal SHA-256.")
+            object.__setattr__(self, name, value)
+        identities = {
+            str(path): dict(record)
+            for path, record in self.source_array_logical_identities.items()
+        }
+        if set(identities) != set(SUBJECT_MASK_QUALITY_SOURCE_ARRAY_PATHS):
+            raise ValueError(
+                "source_array_logical_identities must bind every exact refined "
+                "identity and dense-authority array."
+            )
+        dense = identities["masks_roi"]
+        dense_shape = dense.get("shape")
+        dense_units = dense.get("units")
+        if (
+            set(dense)
+            != {
+                "shape",
+                "dtype",
+                "digest_algorithm",
+                "identity_unit_rows",
+                "unit_count",
+                "units_digest",
+                "units",
+            }
+            or not isinstance(dense_shape, list)
+            or len(dense_shape) != 4
+            or any(type(value) is not int or value <= 0 for value in dense_shape)
+            or dense.get("dtype") != "uint8"
+            or dense.get("digest_algorithm")
+            != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM
+            or dense.get("identity_unit_rows")
+            != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+            or not isinstance(dense_units, list)
+            or not dense_units
+            or dense.get("unit_count") != len(dense_units)
+            or dense.get("units_digest") != canonical_json_sha256(dense_units)
+        ):
+            raise ValueError("masks_roi composable logical identity is invalid.")
+        cursor = 0
+        row_bytes = int(np.prod(dense_shape[1:], dtype=np.int64))
+        for unit in dense_units:
+            if not isinstance(unit, Mapping) or set(unit) != {
+                "start_row",
+                "stop_row",
+                "decoded_bytes",
+                "sha256",
+            }:
+                raise ValueError("masks_roi composable unit fields are invalid.")
+            start = unit.get("start_row")
+            stop = unit.get("stop_row")
+            if (
+                type(start) is not int
+                or type(stop) is not int
+                or start != cursor
+                or stop
+                != min(
+                    start + SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+                    dense_shape[0],
+                )
+                or unit.get("decoded_bytes") != (stop - start) * row_bytes
+                or not _SHA256.fullmatch(str(unit.get("sha256", "")))
+            ):
+                raise ValueError("masks_roi composable unit coverage is invalid.")
+            cursor = stop
+        if cursor != dense_shape[0]:
+            raise ValueError("masks_roi composable unit coverage is incomplete.")
+        expected_narrow = {
+            "instance_key": ([dense_shape[0]], "uint64"),
+            "source_crop_row_ids": ([dense_shape[0]], "int64"),
+            "source_acquisition_frame_index": ([dense_shape[0]], "int64"),
+            "available_channels": ([dense_shape[1]], "bool"),
+        }
+        for path, record in identities.items():
+            if path == "masks_roi":
+                continue
+            if (
+                set(record) != {"shape", "dtype", "digest_algorithm", "sha256"}
+                or record.get("digest_algorithm") != SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM
+                or not _SHA256.fullmatch(str(record.get("sha256", "")))
+            ):
+                raise ValueError(f"Logical identity for {path!r} is invalid.")
+            if (
+                path in expected_narrow
+                and (record.get("shape"), record.get("dtype")) != expected_narrow[path]
+            ):
+                raise ValueError(
+                    f"Logical identity for {path!r} has wrong shape/dtype."
+                )
+        offsets = identities["frame_row_offsets"]
+        offsets_shape = offsets.get("shape")
+        if (
+            not isinstance(offsets_shape, list)
+            or len(offsets_shape) != 1
+            or type(offsets_shape[0]) is not int
+            or offsets_shape[0] <= 1
+            or offsets.get("dtype") != "int64"
+        ):
+            raise ValueError("frame_row_offsets logical identity is invalid.")
+        object.__setattr__(
+            self,
+            "source_array_logical_identities",
+            MappingProxyType(
+                {
+                    path: MappingProxyType(dict(record))
+                    for path, record in sorted(identities.items())
+                }
+            ),
+        )
+
+    @property
+    def dense_array_logical_identity_digest(self) -> str:
+        return canonical_json_sha256(
+            dict(self.source_array_logical_identities["masks_roi"])
+        )
+
+    def as_manifest(self) -> dict[str, object]:
+        return {
+            "stage": "refined_subject_mask",
+            "run_name": self.run_name,
+            "run_path": f"refined_subject_masks_runs/{self.run_name}",
+            "schema_id": REFINED_SUBJECT_MASK_CORE_SCHEMA_ID,
+            "schema_version": REFINED_SUBJECT_MASK_CORE_SCHEMA_VERSION,
+            "manifest_digest": self.manifest_digest,
+            "component_registry_digest": self.component_registry_digest,
+            "source_identity_kind": "composable_logical_arrays_v1",
+            "dense_array_logical_identity_digest": (
+                self.dense_array_logical_identity_digest
+            ),
+            "source_array_logical_identities": {
+                path: dict(record)
+                for path, record in self.source_array_logical_identities.items()
+            },
+            "coverage": "every_source_row_exactly_once_in_source_order",
+        }
+
+
+SubjectMaskQualityAnySourceReference = (
+    SubjectMaskQualitySourceReference | SubjectMaskQualityComposableSourceReference
+)
 
 
 @dataclass(frozen=True)
@@ -663,7 +829,7 @@ class SubjectMaskQualitySchema:
         dimensions: SubjectMaskQualityDimensions,
         components: SubjectMaskComponentRegistry,
         profile: SubjectMaskQualityProfile,
-        source: SubjectMaskQualitySourceReference,
+        source: SubjectMaskQualityAnySourceReference,
     ) -> dict[str, object]:
         if len(components.labels) != dimensions.n_channels:
             raise ValueError("Component count does not match dimensions.")
@@ -720,4 +886,6 @@ __all__ = [
     "SubjectMaskQualityProfile",
     "SubjectMaskQualitySchema",
     "SubjectMaskQualitySourceReference",
+    "SubjectMaskQualityComposableSourceReference",
+    "SubjectMaskQualityAnySourceReference",
 ]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+import hashlib
 import json
 import math
 import os
@@ -46,11 +47,11 @@ from fisheye.shared.zarr.subject_mask_validation_receipt import (
 SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_ID = (
     "palette.subject_mask_quality.partition_receipt"
 )
-SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION = 1
+SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION = 2
 SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_ID = (
     "palette.subject_mask_quality.partition_assembly"
 )
-SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION = 1
+SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION = 2
 DEFAULT_PARTITION_UNIT_ROWS = 1024
 DEFAULT_PARTITION_COMPUTE_BLOCK_BYTES = 64 * 1024 * 1024
 
@@ -103,6 +104,10 @@ def _dense_worker_binding(
         or dense.get("dtype") != "uint8"
         or dense.get("digest_algorithm") != SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM
         or not _is_sha256(dense.get("units_digest"))
+        or not isinstance(dense.get("units"), list)
+        or not dense["units"]
+        or dense.get("unit_count") != len(dense["units"])
+        or dense.get("units_digest") != canonical_json_sha256(dense["units"])
     ):
         raise ValueError("Quality partition lacks a valid refined worker binding.")
     return {
@@ -111,7 +116,78 @@ def _dense_worker_binding(
         "dense_array_shape": list(dense["shape"]),
         "dense_array_dtype": "uint8",
         "dense_array_units_digest": dense["units_digest"],
+        "dense_array_unit_count": dense["unit_count"],
+        "dense_array_units": [dict(unit) for unit in dense["units"]],
     }
+
+
+class _DenseWorkerValueVerifier:
+    """Verify required QC reads against the producer's ordered unit hashes."""
+
+    def __init__(self, binding: Mapping[str, Any]) -> None:
+        self._units = tuple(binding["dense_array_units"])
+        self._shape = tuple(int(value) for value in binding["dense_array_shape"])
+        self._cursor = 0
+        self._unit_index = 0
+        self._unit_digest = hashlib.sha256()
+        row_bytes = int(np.prod(self._shape[1:], dtype=np.int64))
+        cursor = 0
+        for unit in self._units:
+            if not isinstance(unit, Mapping) or set(unit) != {
+                "start_row",
+                "stop_row",
+                "decoded_bytes",
+                "sha256",
+            }:
+                raise ValueError("Dense worker receipt unit fields are not exact.")
+            start = unit.get("start_row")
+            stop = unit.get("stop_row")
+            if (
+                type(start) is not int
+                or type(stop) is not int
+                or start != cursor
+                or not (start < stop <= self._shape[0])
+                or unit.get("decoded_bytes") != (stop - start) * row_bytes
+                or not _is_sha256(unit.get("sha256"))
+            ):
+                raise ValueError("Dense worker receipt unit coverage differs.")
+            cursor = stop
+        if cursor != self._shape[0]:
+            raise ValueError("Dense worker receipt units do not cover every row.")
+
+    def append(self, start_row: int, values: np.ndarray[Any, Any]) -> None:
+        if int(start_row) != self._cursor:
+            raise ValueError("Dense QC reads are not ordered and contiguous.")
+        block = np.asarray(values)
+        if (
+            block.dtype != np.dtype(np.uint8)
+            or tuple(block.shape[1:]) != self._shape[1:]
+        ):
+            raise ValueError("Dense QC read shape or dtype differs from its receipt.")
+        offset = 0
+        while offset < int(block.shape[0]):
+            if self._unit_index >= len(self._units):
+                raise ValueError("Dense QC reads exceed their receipt coverage.")
+            unit = self._units[self._unit_index]
+            take = min(
+                int(unit["stop_row"]) - self._cursor,
+                int(block.shape[0]) - offset,
+            )
+            part = np.ascontiguousarray(block[offset : offset + take])
+            self._unit_digest.update(part.view(np.uint8))
+            self._cursor += take
+            offset += take
+            if self._cursor == int(unit["stop_row"]):
+                if self._unit_digest.hexdigest() != unit["sha256"]:
+                    raise ValueError(
+                        "QC source masks differ from their worker receipt."
+                    )
+                self._unit_index += 1
+                self._unit_digest = hashlib.sha256()
+
+    def finish(self) -> None:
+        if self._cursor != self._shape[0] or self._unit_index != len(self._units):
+            raise ValueError("Dense QC verification coverage is incomplete.")
 
 
 def _effective_block_rows(run: Any, budget_bytes: int) -> int:
@@ -203,6 +279,7 @@ def compute_subject_mask_quality_partition(
     dense_binding = _dense_worker_binding(
         source_worker_receipt, run_path=run_path, row_count=rows
     )
+    dense_verifier = _DenseWorkerValueVerifier(dense_binding)
     policy = SubjectV1LrObservationQualityPolicy()
     profile = quality_profile_for_policy(policy)
     block_rows = _effective_block_rows(run, int(source_compute_block_bytes))
@@ -249,6 +326,7 @@ def compute_subject_mask_quality_partition(
             for block_start in range(0, rows, block_rows):
                 block_stop = min(rows, block_start + block_rows)
                 block = np.ascontiguousarray(masks[block_start:block_stop])
+                dense_verifier.append(block_start, block)
                 if executor is None:
                     store(
                         block_start,
@@ -283,6 +361,7 @@ def compute_subject_mask_quality_partition(
         finally:
             if executor is not None:
                 executor.shutdown(wait=True, cancel_futures=True)
+        dense_verifier.finish()
 
         _write_arrays(temporary / "arrays", arrays)
         array_document = subject_mask_array_unit_document(
@@ -305,6 +384,10 @@ def compute_subject_mask_quality_partition(
             "local_row_count": rows,
             "source_run_path": run_path,
             "source_dense_worker": dense_binding,
+            "source_dense_verification": {
+                "mode": "required_qc_read_compared_to_worker_unit_receipt_v1",
+                "status": "passed",
+            },
             "component_registry": components.as_manifest(),
             "quality_profile": profile.as_manifest(),
             "quality_policy": policy.as_manifest(),
@@ -378,6 +461,7 @@ def validate_subject_mask_quality_partition(
         "local_row_count",
         "source_run_path",
         "source_dense_worker",
+        "source_dense_verification",
         "component_registry",
         "quality_profile",
         "quality_policy",
@@ -469,14 +553,27 @@ def validate_subject_mask_quality_partition(
             "dense_array_shape",
             "dense_array_dtype",
             "dense_array_units_digest",
+            "dense_array_unit_count",
+            "dense_array_units",
         }
         or not _is_sha256(source_binding.get("worker_receipt_payload_digest"))
         or source_binding.get("dense_array_path") != "masks_roi"
         or source_binding.get("dense_array_shape", [None])[0] != rows
         or source_binding.get("dense_array_dtype") != "uint8"
         or not _is_sha256(source_binding.get("dense_array_units_digest"))
+        or not isinstance(source_binding.get("dense_array_units"), list)
+        or source_binding.get("dense_array_unit_count")
+        != len(source_binding.get("dense_array_units", []))
+        or source_binding.get("dense_array_units_digest")
+        != canonical_json_sha256(source_binding.get("dense_array_units", []))
     ):
         raise ValueError("Quality partition dense-worker binding differs.")
+    _DenseWorkerValueVerifier(source_binding)
+    if payload.get("source_dense_verification") != {
+        "mode": "required_qc_read_compared_to_worker_unit_receipt_v1",
+        "status": "passed",
+    }:
+        raise ValueError("Quality partition lacks verified dense-source evidence.")
     source_run_path = _safe_run_path(payload.get("source_run_path"))
     if source_worker_receipt is not None and payload.get(
         "source_dense_worker"
@@ -552,6 +649,7 @@ def build_subject_mask_quality_partition_assembly(
     *,
     n_rois: int,
     producer_commit: str,
+    source_producer_evidence: Mapping[str, Any],
 ) -> dict[str, object]:
     if not receipts:
         raise ValueError("Quality partition assembly requires workers.")
@@ -566,6 +664,22 @@ def build_subject_mask_quality_partition_assembly(
     )
     cursor = 0
     first = ordered[0]["payload"]
+    evidence = _strict_copy(
+        source_producer_evidence, name="quality source producer evidence"
+    )
+    evidence_workers = (
+        evidence.get("workers") if isinstance(evidence, Mapping) else None
+    )
+    if not isinstance(evidence_workers, list) or not evidence_workers:
+        raise ValueError("Quality assembly source producer evidence lacks workers.")
+    expected_workers = {
+        str(worker.get("worker_receipt_payload_digest")): worker
+        for worker in evidence_workers
+        if isinstance(worker, Mapping)
+    }
+    if len(expected_workers) != len(evidence_workers):
+        raise ValueError("Quality assembly source worker identities are not unique.")
+    observed_worker_digests: set[str] = set()
     worker_records: list[dict[str, object]] = []
     for receipt in ordered:
         if (
@@ -599,6 +713,16 @@ def build_subject_mask_quality_partition_assembly(
             or payload["producer_commit"] != str(producer_commit)
         ):
             raise ValueError("Quality partition contracts or producer commits differ.")
+        worker_digest = payload["source_dense_worker"]["worker_receipt_payload_digest"]
+        evidence_worker = expected_workers.get(str(worker_digest))
+        if (
+            not isinstance(evidence_worker, Mapping)
+            or evidence_worker.get("run_path") != payload["source_run_path"]
+            or evidence_worker.get("global_row_interval") != interval
+            or worker_digest in observed_worker_digests
+        ):
+            raise ValueError("Quality partition binds another refined worker assembly.")
+        observed_worker_digests.add(str(worker_digest))
         cursor = int(interval["stop_row"])
         worker_records.append(
             {
@@ -606,11 +730,14 @@ def build_subject_mask_quality_partition_assembly(
                 "work_unit": payload["work_unit"],
                 "source_run_path": payload["source_run_path"],
                 "source_dense_worker": payload["source_dense_worker"],
+                "source_dense_verification": payload["source_dense_verification"],
                 "array_document_digest": payload["array_document_digest"],
             }
         )
     if cursor != int(n_rois):
         raise ValueError("Quality partitions do not cover every recording row.")
+    if observed_worker_digests != set(expected_workers):
+        raise ValueError("Quality partitions do not cover every refined worker.")
     payload = {
         "kind": "ordered_complete_quality_partition_assembly",
         "n_rois": int(n_rois),
@@ -619,6 +746,7 @@ def build_subject_mask_quality_partition_assembly(
         "quality_profile": first["quality_profile"],
         "quality_policy": first["quality_policy"],
         "producer_commit": str(producer_commit),
+        "source_producer_evidence_digest": canonical_json_sha256(evidence),
         "workers": worker_records,
         "workers_digest": canonical_json_sha256(worker_records),
     }
@@ -644,6 +772,7 @@ def validate_subject_mask_quality_partition_assembly(
         "quality_profile",
         "quality_policy",
         "producer_commit",
+        "source_producer_evidence_digest",
         "workers",
         "workers_digest",
     }
@@ -670,6 +799,7 @@ def validate_subject_mask_quality_partition_assembly(
         or payload.get("worker_count") != len(payload.get("workers", []))
         or payload.get("workers_digest")
         != canonical_json_sha256(payload.get("workers"))
+        or not _is_sha256(payload.get("source_producer_evidence_digest"))
     ):
         raise ValueError("Quality partition assembly differs.")
     workers = payload["workers"]
@@ -695,6 +825,7 @@ def validate_subject_mask_quality_partition_assembly(
             "work_unit",
             "source_run_path",
             "source_dense_worker",
+            "source_dense_verification",
             "array_document_digest",
         }:
             raise ValueError("Quality partition assembly worker fields differ.")
@@ -720,6 +851,11 @@ def validate_subject_mask_quality_partition_assembly(
             or row_interval["start_row"] != cursor
             or row_interval["stop_row"] <= cursor
             or unit_identity in seen_units
+            or worker.get("source_dense_verification")
+            != {
+                "mode": "required_qc_read_compared_to_worker_unit_receipt_v1",
+                "status": "passed",
+            }
         ):
             raise ValueError("Quality partition assembly coverage differs.")
         seen_units.add(unit_identity)

@@ -47,7 +47,7 @@ SUBJECT_MASK_SAMPLED_CONTOUR_WORKER_RECEIPT_SCHEMA_VERSION = 1
 SUBJECT_MASK_SAMPLED_CONTOUR_WORKER_ASSEMBLY_SCHEMA_ID = (
     "palette.subject_mask.sampled_contour_worker_assembly"
 )
-SUBJECT_MASK_SAMPLED_CONTOUR_WORKER_ASSEMBLY_SCHEMA_VERSION = 1
+SUBJECT_MASK_SAMPLED_CONTOUR_WORKER_ASSEMBLY_SCHEMA_VERSION = 2
 DEFAULT_RECEIPT_UNIT_ROWS = 1024
 _FIELDS = ("points_xy", "valid", "source_point_count")
 
@@ -636,6 +636,9 @@ def build_subject_mask_sampled_contour_worker_assembly(
         "worker_receipts_digest": canonical_json_sha256(payload_digests),
         "dense_worker_receipt_payload_digests": dense_receipt_digests,
         "dense_worker_receipts_digest": canonical_json_sha256(dense_receipt_digests),
+        "source_producer_evidence_digest": canonical_json_sha256(
+            source_producer_evidence
+        ),
         "full_contours_policy": "forbidden_default_profile",
         "producer_commit": str(producer_commit),
     }
@@ -662,6 +665,7 @@ def validate_subject_mask_sampled_contour_worker_assembly(
         "worker_receipts_digest",
         "dense_worker_receipt_payload_digests",
         "dense_worker_receipts_digest",
+        "source_producer_evidence_digest",
         "full_contours_policy",
         "producer_commit",
     }
@@ -692,6 +696,7 @@ def validate_subject_mask_sampled_contour_worker_assembly(
         != canonical_json_sha256(receipt_digests)
         or document.get("dense_worker_receipts_digest")
         != canonical_json_sha256(dense_digests)
+        or not _is_sha256(document.get("source_producer_evidence_digest"))
         or document.get("component_registry_digest")
         != canonical_json_sha256(components.as_manifest())
         or document.get("contour_profile_digest")

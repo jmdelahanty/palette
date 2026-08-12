@@ -39,6 +39,8 @@ from fisheye.shared.zarr.subject_mask_quality_partition import (
 )
 from fisheye.shared.zarr.subject_mask_quality_schema import (
     SUBJECT_MASK_QUALITY_SCHEMA_V1,
+    SubjectMaskQualityAnySourceReference,
+    SubjectMaskQualityComposableSourceReference,
     SubjectMaskQualityDimensions,
     SubjectMaskQualityProfile,
     SubjectMaskQualitySourceReference,
@@ -79,7 +81,7 @@ SUBJECT_MASK_QUALITY_SHADOW_SCHEMA_VERSION = 1
 SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID = (
     "palette.subject_mask_quality.write_receipt"
 )
-SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 3
+SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 4
 DEFAULT_SUBJECT_MASK_QUALITY_SHADOW_ROOT = Path(
     "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
     "subject_mask_quality"
@@ -109,7 +111,7 @@ class SubjectMaskQualityShadowPublication:
     components: SubjectMaskComponentRegistry
     profile: SubjectMaskQualityProfile
     policy: SubjectV1LrObservationQualityPolicy
-    source: SubjectMaskQualitySourceReference
+    source: SubjectMaskQualityAnySourceReference
     source_manifest: Mapping[str, Any]
     plans: SubjectMaskQualityStoragePlanSet
     manifest: Mapping[str, Any]
@@ -148,6 +150,67 @@ class SubjectMaskQualityComposableSourceExpectation:
                 "Composable quality source must bind every exact refined source array."
             )
         object.__setattr__(self, "source_array_logical_identities", identities)
+
+    def as_source_reference(self) -> SubjectMaskQualityComposableSourceReference:
+        return SubjectMaskQualityComposableSourceReference(
+            run_name=self.run_name,
+            manifest_digest=self.manifest_digest,
+            component_registry_digest=self.component_registry_digest,
+            source_array_logical_identities=self.source_array_logical_identities,
+        )
+
+
+def _validate_receipt_bound_composable_quality_source(
+    *,
+    expectation: SubjectMaskQualityComposableSourceExpectation,
+    source_manifest: Mapping[str, Any],
+    worker_assembly: Mapping[str, Any],
+) -> SubjectMaskQualityComposableSourceReference:
+    """Join QC worker evidence to the exact published refined logical identity."""
+
+    validate_subject_mask_quality_partition_assembly(
+        worker_assembly,
+        n_rois=int(
+            expectation.source_array_logical_identities["masks_roi"]["shape"][0]
+        ),
+    )
+    payload = source_manifest.get("payload")
+    logical = payload.get("logical_content") if isinstance(payload, Mapping) else None
+    document = logical.get("document") if isinstance(logical, Mapping) else None
+    arrays = document.get("arrays") if isinstance(document, Mapping) else None
+    dependencies = (
+        payload.get("coordinate_dependencies") if isinstance(payload, Mapping) else None
+    )
+    dependency_document = (
+        dependencies.get("document") if isinstance(dependencies, Mapping) else None
+    )
+    recording_assembly = (
+        dependency_document.get("recording_assembly")
+        if isinstance(dependency_document, Mapping)
+        else None
+    )
+    assembly_payload = worker_assembly.get("payload")
+    if (
+        canonical_json_sha256(source_manifest) != expectation.manifest_digest
+        or not isinstance(arrays, Mapping)
+        or {
+            path: dict(arrays[path])
+            for path in expectation.source_array_logical_identities
+            if path in arrays
+        }
+        != {
+            path: dict(record)
+            for path, record in expectation.source_array_logical_identities.items()
+        }
+        or not isinstance(recording_assembly, Mapping)
+        or not isinstance(assembly_payload, Mapping)
+        or recording_assembly.get("producer_evidence_digest")
+        != assembly_payload.get("source_producer_evidence_digest")
+    ):
+        raise ValueError(
+            "Quality partitions do not bind the published refined composable identity."
+        )
+    return expectation.as_source_reference()
 
 
 class _ComposableMaskIdentityVerifier:
@@ -479,22 +542,37 @@ def _write_receipt(
     compute_workers_effective: int,
     source_mode: str,
     worker_assembly: Mapping[str, Any] | None,
+    receipt_bound_composable: bool,
 ) -> dict[str, object]:
+    if receipt_bound_composable:
+        block_rows = 0
+        block_bytes_budget = 0
+        block_count = 0
+        compute_workers_requested = 0
+        compute_workers_effective = 0
     return {
         "schema_id": SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID,
-        "schema_version": SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION,
+        "schema_version": (
+            SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION
+            if receipt_bound_composable
+            else 3
+        ),
         "source_compute_block_rows": int(block_rows),
         "source_compute_block_bytes_budget": int(block_bytes_budget),
         "source_compute_block_count": int(block_count),
         "source_compute_workers_requested": int(compute_workers_requested),
         "source_compute_workers_effective": int(compute_workers_effective),
         "source_compute_execution": (
-            "receipt_bound_partitions_with_ordered_source_verification_v1"
-            if source_mode == "receipt_bound_quality_partitions"
+            "receipt_bound_partitions_with_verified_worker_units_v2"
+            if receipt_bound_composable
             else (
-                "ordered_inline_single_worker_v1"
-                if int(compute_workers_effective) == 1
-                else "bounded_thread_pool_ordered_single_writer_v1"
+                "receipt_bound_partitions_with_ordered_source_verification_v1"
+                if source_mode == "receipt_bound_quality_partitions"
+                else (
+                    "ordered_inline_single_worker_v1"
+                    if int(compute_workers_effective) == 1
+                    else "bounded_thread_pool_ordered_single_writer_v1"
+                )
             )
         ),
         "source_mode": source_mode,
@@ -644,6 +722,20 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         }
         if set(precomputed_arrays or {}) != expected_precomputed:
             raise ValueError("Precomputed quality partition arrays are incomplete.")
+    receipt_bound_composable = bool(
+        adopting_partitions and composable_expectation is not None
+    )
+    receipt_bound_source = (
+        _validate_receipt_bound_composable_quality_source(
+            expectation=composable_expectation,
+            source_manifest=source_manifest,
+            worker_assembly=worker_assembly,
+        )
+        if receipt_bound_composable
+        and composable_expectation is not None
+        and worker_assembly is not None
+        else None
+    )
     block_rows = _effective_compute_block_rows(
         n_channels=dimensions.n_channels,
         roi_height=dimensions.roi_height,
@@ -667,6 +759,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             else "inline_dense_quality_compute"
         ),
         worker_assembly=worker_assembly,
+        receipt_bound_composable=receipt_bound_composable,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -688,7 +781,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                     int(value) for value in source_mask_arrays["masks_roi"].shape
                 ),
             )
-            if composable_expectation is not None
+            if composable_expectation is not None and not receipt_bound_composable
             else None
         )
         identity_digests = {
@@ -799,7 +892,9 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                     pending_future.result(),
                 )
 
-        if effective_compute_workers == 1:
+        if receipt_bound_composable:
+            assert precomputed_arrays is not None
+        elif effective_compute_workers == 1:
             process_blocks(None)
         else:
             with ThreadPoolExecutor(
@@ -807,8 +902,16 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                 thread_name_prefix="subject-mask-quality",
             ) as compute_executor:
                 process_blocks(compute_executor)
+        if receipt_bound_composable:
+            for path in identity_digests:
+                values = np.ascontiguousarray(source_mask_arrays[path][...])
+                identity_digests[path].update(values.view(np.uint8))
         observed_source_digests = {
-            "masks_roi": source_digest.hexdigest(),
+            **(
+                {}
+                if receipt_bound_composable
+                else {"masks_roi": source_digest.hexdigest()}
+            ),
             **{path: digest.hexdigest() for path, digest in identity_digests.items()},
             "frame_row_offsets": hashlib.sha256(
                 np.ascontiguousarray(source_mask_arrays["frame_row_offsets"][...]).view(
@@ -862,21 +965,31 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                     "Exact refined composable source-array mismatch for: "
                     + ", ".join(sorted(mismatches))
                 )
-            resolved_source = SubjectMaskQualitySourceReference(
-                run_name=composable_expectation.run_name,
-                manifest_digest=composable_expectation.manifest_digest,
-                dense_array_values_sha256=observed_source_digests["masks_roi"],
-                component_registry_digest=(
-                    composable_expectation.component_registry_digest
-                ),
-                source_array_values_sha256=observed_source_digests,
+            resolved_source: SubjectMaskQualityAnySourceReference = (
+                receipt_bound_source
+                if receipt_bound_source is not None
+                else SubjectMaskQualitySourceReference(
+                    run_name=composable_expectation.run_name,
+                    manifest_digest=composable_expectation.manifest_digest,
+                    dense_array_values_sha256=observed_source_digests["masks_roi"],
+                    component_registry_digest=(
+                        composable_expectation.component_registry_digest
+                    ),
+                    source_array_values_sha256=observed_source_digests,
+                )
             )
         else:
             assert isinstance(source, SubjectMaskQualitySourceReference)
             resolved_source = source
         source_verification_seconds = time.perf_counter() - phase_started
         if adopting_partitions:
-            phase_seconds["ordered_source_verification"] = source_verification_seconds
+            phase_seconds[
+                (
+                    "receipt_bound_source_verification"
+                    if receipt_bound_composable
+                    else "ordered_source_verification"
+                )
+            ] = source_verification_seconds
         if adopting_partitions:
             assert precomputed_arrays is not None
             phase_started = time.perf_counter()

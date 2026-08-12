@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -67,8 +68,14 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SubjectMaskCoreValidationMode,
 )
+from fisheye.shared.zarr.subject_mask_cache_publication import (
+    validate_subject_mask_cache_run_manifest,
+)
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
     build_subject_mask_final_layout_unit_package,
+)
+from fisheye.shared.zarr.subject_mask_quality_partition import (
+    compute_subject_mask_quality_partition,
 )
 from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
     SubjectMaskBundleCoordinateAuthorityError,
@@ -355,6 +362,58 @@ def _install_worker_sampled_contours(
         )
         receipt_paths.append(destination)
     return tuple(receipt_paths)
+
+
+def _install_worker_quality_partitions(
+    draft_path: Path,
+    *,
+    refined_runs: tuple[str, ...],
+) -> tuple[Path, ...]:
+    root = zarr.open_group(str(draft_path), mode="r", use_consolidated=False)
+    partition_root = draft_path.parent / "quality_partitions"
+    partition_root.mkdir()
+    paths: list[Path] = []
+    crop = root["crop_runs/crop_001"]
+    for index, refined_name in enumerate(refined_runs):
+        run = root[f"refined_subject_masks_runs/{refined_name}"]
+        binding = run.attrs["subject_mask_worker_semantic_receipt_binding"]
+        receipt = json.loads(
+            (draft_path / binding["relative_path"]).read_text(encoding="utf-8")
+        )
+        crop_rows = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64)
+        frames = np.asarray(
+            crop["source_acquisition_frame_index"][crop_rows],
+            dtype=np.int64,
+        )
+
+        class _QualityRun(dict[str, object]):
+            pass
+
+        quality_run = _QualityRun(
+            masks_roi=run["masks_roi"],
+            available_channels=run["available_channels"],
+            instance_key=crop["instance_key"][crop_rows],
+        )
+        quality_run.path = run.path  # type: ignore[attr-defined]
+        quality_run.attrs = run.attrs  # type: ignore[attr-defined]
+        destination = partition_root / refined_name
+        compute_subject_mask_quality_partition(
+            quality_run,
+            source_acquisition_frame_index=frames,
+            global_start_row=int(crop_rows[0]),
+            global_frame_start=int(frames.min()),
+            global_frame_stop=int(frames.max()) + 1,
+            work_unit_id=f"pytest_collection:clip_{int(frames.min())}",
+            work_unit_index=index,
+            source_worker_receipt=receipt,
+            producer_commit="b" * 40,
+            destination=destination,
+            compute_workers=1,
+            source_compute_block_bytes=512,
+            receipt_unit_rows=2,
+        )
+        paths.append(destination)
+    return tuple(paths)
 
 
 def _install_composable_final_layout_packages(
@@ -1268,6 +1327,9 @@ def test_recording_bundle_composes_v5_dense_identity_through_coordinate_bundle(
     contour_receipts = _install_worker_sampled_contours(
         draft, refined_runs=refined_runs
     )
+    quality_partitions = _install_worker_quality_partitions(
+        draft, refined_runs=refined_runs
+    )
     raw_packages, refined_packages = _install_composable_final_layout_packages(
         draft,
         raw_runs=raw_runs,
@@ -1324,6 +1386,9 @@ def test_recording_bundle_composes_v5_dense_identity_through_coordinate_bundle(
         sampled_contour_worker_receipts=contour_receipts,
         require_worker_sampled_contours=True,
         sampled_contour_producer_commit="a" * 40,
+        quality_partition_roots=quality_partitions,
+        require_worker_quality=True,
+        quality_partition_producer_commit="b" * 40,
     )
 
     assert result["publication_execution"]["core_validation_mode"] == (
@@ -1346,20 +1411,50 @@ def test_recording_bundle_composes_v5_dense_identity_through_coordinate_bundle(
         "arrays"
     ]["masks_roi"]
     assert "sha256" not in refined_dense
-    quality_source = published[
+    quality_manifest = published[
         "subject_mask_quality_runs/quality_composable_001"
-    ].attrs["run_manifest"]["payload"]["source_refined_subject_mask_snapshot"]
-    cache_source = published["subject_mask_cache_runs/cache_composable_001"].attrs[
+    ].attrs["run_manifest"]
+    quality_source = quality_manifest["payload"]["source_refined_subject_mask_snapshot"]
+    cache_manifest = published["subject_mask_cache_runs/cache_composable_001"].attrs[
         "run_manifest"
-    ]["payload"]["source_refined_subject_mask_snapshot"]
-    assert cache_source["dense_array_values_sha256"] == (
-        quality_source["dense_array_values_sha256"]
+    ]
+    cache_source = cache_manifest["payload"]["source_refined_subject_mask_snapshot"]
+    assert cache_source["dense_array_logical_identity_digest"] == (
+        quality_source["dense_array_logical_identity_digest"]
+    )
+    assert quality_manifest["schema_version"] == 3
+    assert quality_manifest["payload"]["write_receipt"]["schema_version"] == 4
+    assert (
+        quality_manifest["payload"]["write_receipt"]["source_compute_execution"]
+        == "receipt_bound_partitions_with_verified_worker_units_v2"
+    )
+    assert (
+        quality_manifest["payload"]["write_receipt"]["source_compute_block_count"] == 0
+    )
+    tampered_cache = copy.deepcopy(cache_manifest)
+    tampered_cache["payload"]["source_refined_subject_mask_snapshot"][
+        "worker_assembly_digest"
+    ] = ("0" * 64)
+    tampered_cache["payload_digest"] = canonical_json_sha256(tampered_cache["payload"])
+    assert "subject-mask cache source/worker assembly digest differs" in (
+        validate_subject_mask_cache_run_manifest(
+            tampered_cache, source_manifest=refined_manifest
+        )
     )
     bundle = published["subject_mask_bundle_runs/bundle_composable_001"].attrs[
         "run_manifest"
     ]
     assert bundle["payload"]["cross_binding"]["identity_policy"] == (
-        "manifest_bound_composable_dense_identity_plus_quality_sha_v1"
+        "manifest_bound_composable_dense_identity_v2"
+    )
+    assert bundle["schema_version"] == 4
+    assert (
+        "ordered_source_verification"
+        not in result["publication_execution"]["quality_phase_seconds"]
+    )
+    assert (
+        "receipt_bound_source_verification"
+        in result["publication_execution"]["quality_phase_seconds"]
     )
     authority = load_recording_subject_mask_coordinate_authority(
         analysis,

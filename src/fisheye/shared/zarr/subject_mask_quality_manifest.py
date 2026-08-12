@@ -27,6 +27,8 @@ from fisheye.shared.zarr.subject_mask_quality_producer import (
 )
 from fisheye.shared.zarr.subject_mask_quality_schema import (
     SUBJECT_MASK_QUALITY_SCHEMA_V1,
+    SubjectMaskQualityAnySourceReference,
+    SubjectMaskQualityComposableSourceReference,
     SubjectMaskQualityDimensions,
     SubjectMaskQualityMetricDefinition,
     SubjectMaskQualityProfile,
@@ -48,7 +50,8 @@ from fisheye.shared.zarr_run_completion import (
 SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_ID = (
     "palette.subject_mask_quality.run_manifest"
 )
-SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION = 2
+SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION = 3
+SUBJECT_MASK_QUALITY_RUN_MANIFEST_SUPPORTED_VERSIONS = (2, 3)
 SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_QUALITY_RUN_MANIFEST_PERSISTED_PATH = (
     "subject_mask_quality_runs/<run>/zarr.json.attributes.run_manifest"
@@ -56,7 +59,8 @@ SUBJECT_MASK_QUALITY_RUN_MANIFEST_PERSISTED_PATH = (
 SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_ID = (
     "palette.subject_mask_quality.logical_content"
 )
-SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_VERSION = 1
+SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_VERSION = 2
+SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SUPPORTED_VERSIONS = (1, 2)
 SUBJECT_MASK_QUALITY_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
 SUBJECT_MASK_QUALITY_METADATA_DIGEST_SCOPE = (
     "exact_group_and_array_declarations_redacting_manifest_lifecycle_"
@@ -205,7 +209,36 @@ def quality_profile_from_manifest(
 
 def quality_source_from_manifest(
     value: Mapping[str, Any],
-) -> SubjectMaskQualitySourceReference:
+) -> SubjectMaskQualityAnySourceReference:
+    if value.get("source_identity_kind") == "composable_logical_arrays_v1":
+        expected = {
+            "stage",
+            "run_name",
+            "run_path",
+            "schema_id",
+            "schema_version",
+            "manifest_digest",
+            "component_registry_digest",
+            "source_identity_kind",
+            "dense_array_logical_identity_digest",
+            "source_array_logical_identities",
+            "coverage",
+        }
+        if set(value) != expected:
+            raise ValueError(
+                "Composable subject-mask quality source has an unexpected field set."
+            )
+        source = SubjectMaskQualityComposableSourceReference(
+            run_name=value.get("run_name"),
+            manifest_digest=value.get("manifest_digest"),
+            component_registry_digest=value.get("component_registry_digest"),
+            source_array_logical_identities=value.get(
+                "source_array_logical_identities"
+            ),
+        )
+        if dict(value) != source.as_manifest():
+            raise ValueError("Composable subject-mask quality source is not canonical.")
+        return source
     expected = {
         "stage",
         "run_name",
@@ -336,7 +369,7 @@ def subject_mask_quality_logical_content_document(
     dimensions: SubjectMaskQualityDimensions,
     components: SubjectMaskComponentRegistry,
     profile: SubjectMaskQualityProfile,
-    source: SubjectMaskQualitySourceReference,
+    source: SubjectMaskQualityAnySourceReference,
     source_arrays: Mapping[str, Any] | None = None,
     validate_logical_arrays: bool,
     digest_block_rows: int = 65_536,
@@ -360,9 +393,13 @@ def subject_mask_quality_logical_content_document(
                 arrays[path], row_block_rows=digest_block_rows
             ),
         }
-    return {
+    document: dict[str, object] = {
         "schema_id": SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_ID,
-        "schema_version": SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_VERSION,
+        "schema_version": (
+            SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_VERSION
+            if isinstance(source, SubjectMaskQualityComposableSourceReference)
+            else 1
+        ),
         "logical_schema": {
             "id": SUBJECT_MASK_QUALITY_SCHEMA_V1.schema_id,
             "version": SUBJECT_MASK_QUALITY_SCHEMA_V1.schema_version,
@@ -370,12 +407,31 @@ def subject_mask_quality_logical_content_document(
         "dimensions": dimensions.as_manifest(),
         "component_registry_digest": source.component_registry_digest,
         "source_manifest_digest": source.manifest_digest,
-        "source_dense_array_values_sha256": source.dense_array_values_sha256,
-        "source_array_values_sha256": dict(source.source_array_values_sha256),
         "profile_digest": profile.profile_digest,
         "policy_digest": profile.policy_digest,
         "arrays": declarations,
     }
+    if isinstance(source, SubjectMaskQualityComposableSourceReference):
+        document.update(
+            {
+                "source_identity_kind": "composable_logical_arrays_v1",
+                "source_dense_array_logical_identity_digest": (
+                    source.dense_array_logical_identity_digest
+                ),
+                "source_array_logical_identities": {
+                    path: dict(record)
+                    for path, record in source.source_array_logical_identities.items()
+                },
+            }
+        )
+    else:
+        document.update(
+            {
+                "source_dense_array_values_sha256": (source.dense_array_values_sha256),
+                "source_array_values_sha256": dict(source.source_array_values_sha256),
+            }
+        )
+    return document
 
 
 def subject_mask_quality_metadata_declarations_digest(
@@ -451,7 +507,7 @@ def build_subject_mask_quality_run_manifest(
     components: SubjectMaskComponentRegistry,
     profile: SubjectMaskQualityProfile,
     policy: SubjectV1LrObservationQualityPolicy,
-    source: SubjectMaskQualitySourceReference,
+    source: SubjectMaskQualityAnySourceReference,
     source_manifest: Mapping[str, Any],
     storage_plan: SubjectMaskQualityStoragePlanSet,
     arrays: Mapping[str, Any],
@@ -517,7 +573,11 @@ def build_subject_mask_quality_run_manifest(
     }
     envelope = {
         "schema_id": SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_ID,
-        "schema_version": SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": (
+            SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+            if isinstance(source, SubjectMaskQualityComposableSourceReference)
+            else 2
+        ),
         "persisted_attribute": SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE,
         "persisted_path": SUBJECT_MASK_QUALITY_RUN_MANIFEST_PERSISTED_PATH,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -536,7 +596,7 @@ def _parse_manifest_components(
     SubjectMaskQualityDimensions | None,
     SubjectMaskComponentRegistry | None,
     SubjectMaskQualityProfile | None,
-    SubjectMaskQualitySourceReference | None,
+    SubjectMaskQualityAnySourceReference | None,
     SubjectV1LrObservationQualityPolicy | None,
 ]:
     errors: list[str] = []
@@ -554,7 +614,7 @@ def _parse_manifest_components(
     if (
         manifest.get("schema_id") != SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_ID
         or manifest.get("schema_version")
-        != SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+        not in SUBJECT_MASK_QUALITY_RUN_MANIFEST_SUPPORTED_VERSIONS
         or manifest.get("persisted_attribute")
         != SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE
         or manifest.get("persisted_path")
@@ -696,6 +756,14 @@ def _parse_manifest_components(
             components.as_manifest()
         ):
             errors.append("subject-mask quality component registry digest mismatch")
+    if source is not None:
+        expected_manifest_version = (
+            SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+            if isinstance(source, SubjectMaskQualityComposableSourceReference)
+            else 2
+        )
+        if manifest.get("schema_version") != expected_manifest_version:
+            errors.append("subject-mask quality manifest/source version mismatch")
     return errors, payload, dimensions, components, profile, source, policy
 
 
@@ -704,7 +772,7 @@ def _validate_logical_content(
     *,
     dimensions: SubjectMaskQualityDimensions | None,
     profile: SubjectMaskQualityProfile | None,
-    source: SubjectMaskQualitySourceReference | None,
+    source: SubjectMaskQualityAnySourceReference | None,
     errors: list[str],
 ) -> None:
     logical_content = payload.get("logical_content")
@@ -735,18 +803,35 @@ def _validate_logical_content(
         "dimensions",
         "component_registry_digest",
         "source_manifest_digest",
-        "source_dense_array_values_sha256",
-        "source_array_values_sha256",
         "profile_digest",
         "policy_digest",
         "arrays",
     }
+    if isinstance(source, SubjectMaskQualityComposableSourceReference):
+        expected_fields.update(
+            {
+                "source_identity_kind",
+                "source_dense_array_logical_identity_digest",
+                "source_array_logical_identities",
+            }
+        )
+    else:
+        expected_fields.update(
+            {
+                "source_dense_array_values_sha256",
+                "source_array_values_sha256",
+            }
+        )
     if set(document) != expected_fields:
         errors.append("subject-mask quality logical_content has unexpected fields")
+    expected_content_version = (
+        SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_VERSION
+        if isinstance(source, SubjectMaskQualityComposableSourceReference)
+        else 1
+    )
     if (
         document.get("schema_id") != SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_ID
-        or document.get("schema_version")
-        != SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_VERSION
+        or document.get("schema_version") != expected_content_version
         or document.get("logical_schema")
         != {
             "id": SUBJECT_MASK_QUALITY_SCHEMA_V1.schema_id,
@@ -760,12 +845,36 @@ def _validate_logical_content(
     ):
         errors.append("subject-mask quality logical_content dimensions mismatch")
     if source is not None:
-        expected_source = {
+        expected_source: dict[str, object] = {
             "component_registry_digest": source.component_registry_digest,
             "source_manifest_digest": source.manifest_digest,
-            "source_dense_array_values_sha256": source.dense_array_values_sha256,
-            "source_array_values_sha256": dict(source.source_array_values_sha256),
         }
+        if isinstance(source, SubjectMaskQualityComposableSourceReference):
+            expected_source.update(
+                {
+                    "source_identity_kind": "composable_logical_arrays_v1",
+                    "source_dense_array_logical_identity_digest": (
+                        source.dense_array_logical_identity_digest
+                    ),
+                    "source_array_logical_identities": {
+                        path: dict(record)
+                        for path, record in (
+                            source.source_array_logical_identities.items()
+                        )
+                    },
+                }
+            )
+        else:
+            expected_source.update(
+                {
+                    "source_dense_array_values_sha256": (
+                        source.dense_array_values_sha256
+                    ),
+                    "source_array_values_sha256": dict(
+                        source.source_array_values_sha256
+                    ),
+                }
+            )
         for name, expected_value in expected_source.items():
             if document.get(name) != expected_value:
                 errors.append(f"subject-mask quality logical_content {name} mismatch")
@@ -881,7 +990,7 @@ def validate_subject_mask_quality_run_manifest(
     )
     expected_receipt_fields = (
         partition_receipt_fields
-        if receipt_version == 3
+        if receipt_version in {3, 4}
         else (current_receipt_fields if receipt_version == 2 else legacy_receipt_fields)
     )
     if not isinstance(receipt, Mapping) or set(receipt) != expected_receipt_fields:
@@ -889,7 +998,7 @@ def validate_subject_mask_quality_run_manifest(
     else:
         if (
             receipt.get("schema_id") != "palette.subject_mask_quality.write_receipt"
-            or receipt.get("schema_version") not in {1, 2, 3}
+            or receipt.get("schema_version") not in {1, 2, 3, 4}
             or receipt.get("output_write_unit")
             != "complete_outer_shard_or_unsharded_chunk"
             or receipt.get("scratch_surface")
@@ -913,16 +1022,20 @@ def validate_subject_mask_quality_run_manifest(
                     "ordered_inline_single_worker_v1",
                     "bounded_thread_pool_ordered_single_writer_v1",
                     "receipt_bound_partitions_with_ordered_source_verification_v1",
+                    "receipt_bound_partitions_with_verified_worker_units_v2",
                 }
                 or (
                     execution
-                    != "receipt_bound_partitions_with_ordered_source_verification_v1"
+                    not in {
+                        "receipt_bound_partitions_with_ordered_source_verification_v1",
+                        "receipt_bound_partitions_with_verified_worker_units_v2",
+                    }
                     and (effective == 1)
                     != (execution == "ordered_inline_single_worker_v1")
                 )
             ):
                 errors.append("subject-mask quality compute-worker receipt is invalid")
-        if receipt.get("schema_version") == 3:
+        if receipt.get("schema_version") in {3, 4}:
             source_mode = receipt.get("source_mode")
             assembly = receipt.get("worker_assembly")
             if source_mode not in {
@@ -934,10 +1047,15 @@ def validate_subject_mask_quality_run_manifest(
                 isinstance(assembly, Mapping)
             ):
                 errors.append("subject-mask quality worker assembly presence differs")
+            expected_partition_execution = (
+                "receipt_bound_partitions_with_verified_worker_units_v2"
+                if receipt.get("schema_version") == 4
+                else "receipt_bound_partitions_with_ordered_source_verification_v1"
+            )
             if (
                 source_mode == "receipt_bound_quality_partitions"
                 and receipt.get("source_compute_execution")
-                != "receipt_bound_partitions_with_ordered_source_verification_v1"
+                != expected_partition_execution
             ):
                 errors.append("subject-mask quality partition execution differs")
             if (
@@ -953,29 +1071,57 @@ def validate_subject_mask_quality_run_manifest(
                     errors.append(
                         "subject-mask quality worker assembly is invalid: " f"{exc}"
                     )
-        for name in (
+        compute_fields = (
             "source_compute_block_rows",
             "source_compute_block_bytes_budget",
             "source_compute_block_count",
-        ):
-            if type(receipt.get(name)) is not int or int(receipt[name]) <= 0:
-                errors.append(f"subject-mask quality write_receipt {name} is invalid")
+        )
+        if receipt.get("schema_version") == 4:
+            if not isinstance(source, SubjectMaskQualityComposableSourceReference):
+                errors.append(
+                    "subject-mask quality v4 receipt requires composable source"
+                )
+            if (
+                receipt.get("source_mode") != "receipt_bound_quality_partitions"
+                or not isinstance(receipt.get("worker_assembly"), Mapping)
+                or receipt.get("source_compute_execution")
+                != "receipt_bound_partitions_with_verified_worker_units_v2"
+            ):
+                errors.append("subject-mask quality v4 receipt mode is invalid")
+            zero_compute_fields = (
+                *compute_fields,
+                "source_compute_workers_requested",
+                "source_compute_workers_effective",
+            )
+            if any(
+                type(receipt.get(name)) is not int or receipt.get(name) != 0
+                for name in zero_compute_fields
+            ):
+                errors.append("subject-mask quality v4 finalizer compute must be zero")
+        else:
+            for name in compute_fields:
+                if type(receipt.get(name)) is not int or int(receipt[name]) <= 0:
+                    errors.append(
+                        f"subject-mask quality write_receipt {name} is invalid"
+                    )
         if dimensions is not None and all(
-            type(receipt.get(name)) is int
-            for name in (
-                "source_compute_block_rows",
-                "source_compute_block_bytes_budget",
-                "source_compute_block_count",
-            )
+            type(receipt.get(name)) is int for name in compute_fields
         ):
-            row_bytes = (
-                dimensions.n_channels * dimensions.roi_height * dimensions.roi_width
-            )
-            expected_rows = max(
-                1,
-                int(receipt["source_compute_block_bytes_budget"]) // max(1, row_bytes),
-            )
-            expected_count = (dimensions.n_rois + expected_rows - 1) // expected_rows
+            if receipt.get("schema_version") == 4:
+                expected_rows = 0
+                expected_count = 0
+            else:
+                row_bytes = (
+                    dimensions.n_channels * dimensions.roi_height * dimensions.roi_width
+                )
+                expected_rows = max(
+                    1,
+                    int(receipt["source_compute_block_bytes_budget"])
+                    // max(1, row_bytes),
+                )
+                expected_count = (
+                    dimensions.n_rois + expected_rows - 1
+                ) // expected_rows
             if receipt.get("source_compute_block_rows") != expected_rows:
                 errors.append(
                     "subject-mask quality effective compute block rows mismatch"
@@ -983,14 +1129,18 @@ def validate_subject_mask_quality_run_manifest(
             if receipt.get("source_compute_block_count") != expected_count:
                 errors.append("subject-mask quality compute block count mismatch")
             expected_effective_workers = (
-                1
-                if receipt.get("source_mode") == "receipt_bound_quality_partitions"
-                else min(
-                    int(receipt["source_compute_workers_requested"]), expected_count
+                0
+                if receipt.get("schema_version") == 4
+                else (
+                    1
+                    if receipt.get("source_mode") == "receipt_bound_quality_partitions"
+                    else min(
+                        int(receipt["source_compute_workers_requested"]), expected_count
+                    )
                 )
             )
             if (
-                receipt.get("schema_version") in {2, 3}
+                receipt.get("schema_version") in {2, 3, 4}
                 and receipt.get("source_compute_workers_effective")
                 != expected_effective_workers
             ):

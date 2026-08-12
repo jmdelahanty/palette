@@ -559,6 +559,7 @@ def _quality_partition_inputs(
         receipts,
         n_rois=int(n_rois),
         producer_commit=str(producer_commit),
+        source_producer_evidence=source_producer_evidence,
     )
     return arrays, assembly
 
@@ -1087,6 +1088,10 @@ def publish_recording_subject_mask_bundle(
             worker_assembly=sampled_contour_assembly,
             verified_dense_array_values_sha256=(
                 quality_publication.source.dense_array_values_sha256
+                if isinstance(
+                    quality_publication.source, SubjectMaskQualitySourceReference
+                )
+                else None
             ),
             created_by="publish_recording_subject_mask_bundle",
         )
