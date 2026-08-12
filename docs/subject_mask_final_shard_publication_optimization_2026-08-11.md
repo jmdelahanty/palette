@@ -417,9 +417,33 @@ Implementation verification at this checkpoint:
   the former job and publisher remain reachable only by explicit selection;
 - Ruff, Python compilation, and `git diff --check` pass.
 
-The next gate is one production-shaped, selector-ineligible clipped candidate
-created by the ordinary planner, followed by lightweight Crimson schema/open
-validation. No selector or registry authority is activated by this code change.
+### Production planner dry gate (2026-08-12)
+
+The ordinary registry-backed planner passed a real 22-clip Sleepyfish dry gate
+at Palette commit `d79bbece006c3fd0f2d4ed396350c5903c1f6e5f`. The exact
+cluster deployment was:
+
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/subject-mask-final-shard-publication-20260811-d79bbece`
+
+The planner resolved and content-verified the registered detection, five-point
+pose, and subject-mask models, the canonical acquisition authority, and all 22
+contiguous recording-frame intervals. It emitted plan-v2 with 20 scheduler
+jobs and 148 independently identified execution tasks. The subject-mask
+refinement fragment contains exactly the package array and atomic publication
+job, reports the publisher as its terminal job, and contains no merged-import
+job. The immutable local evidence hashes are:
+
+- `plan.json`: `b305266ca1c5b71c6178c780872824d41b8b1b407140ff9c4bc12dd5ac1ec467`;
+- `lsf_plan.json`: `2998937b4f0e4e5dc5004cf025215b5958ff7e381d171ac2ad137166f43c0477`.
+
+This was `--dry-run`: no LSF submission receipt was created, no archive or
+registry state changed, and no selector was activated. The remaining rollout
+gate is an executed selector-ineligible candidate from this ordinary planner,
+followed by lightweight Crimson schema/open validation. Because such a run
+repeats detection, crop-cache, keypoint, and mask inference across all 22 clips,
+it should be the next scientifically useful clipped processing run rather than
+a redundant recomputation solely to retest publication code already exercised
+by the full-duration receipt-composition canary.
 
 ## Failure semantics
 
