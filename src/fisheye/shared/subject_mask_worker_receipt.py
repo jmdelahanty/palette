@@ -218,8 +218,18 @@ def _validate_refined_worker_source_join(
         ),
         "storage": "strict_json_sidecar_v1",
     }
+    raw_run_path = raw_worker.get("run_path")
+    binding_run_path = binding.get("run_path")
+    exact_run_path = binding_run_path == raw_run_path
+    legacy_single_worker_collection_path = (
+        binding_run_path == "subject_mask_shard_runs/<collection>"
+        and isinstance(raw_run_path, str)
+        and isinstance(receipt_binding, Mapping)
+        and receipt_binding.get("relative_path")
+        == f"{raw_run_path}/worker_semantic_receipt.json"
+    )
     if (
-        binding.get("run_path") != raw_worker.get("run_path")
+        not (exact_run_path or legacy_single_worker_collection_path)
         or binding.get("scientific_identity_digest") != raw_science.get("digest")
         or not isinstance(receipt_binding, Mapping)
         or not isinstance(raw_receipt, Mapping)

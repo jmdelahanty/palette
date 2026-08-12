@@ -1410,6 +1410,10 @@ def test_collection_same_crop_target_does_not_require_clipped_rebase_identity() 
     assert collection is not None
     assert collection.source_crop_run == "crop_clip_a"
     assert collection.source_crop_rebased_from_shards is False
+    assert source.group.path == "subject_mask_shard_runs/subject_masks_clip_a"
+    assert source.masks_roi._source_path == (
+        "subject_mask_shard_runs/subject_masks_clip_a/mask_probs_roi"
+    )
     np.testing.assert_array_equal(collection.source_crop_row_ids, np.asarray([0]))
     np.testing.assert_array_equal(source.source_crop_row_ids[:], np.asarray([0]))
 

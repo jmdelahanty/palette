@@ -18,6 +18,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    _validate_refined_worker_source_join,
     _normalize_expected_work_units,
     build_recording_assignment_keypoint_collection,
     build_recording_subject_mask_source_receipt,
@@ -46,6 +47,62 @@ def _science(*, pixels_sha256: str = "a" * 64) -> dict[str, object]:
         inference_contract={"label_schema_id": "subject_v1_union"},
         schema_version=1,
     )
+
+
+def test_refined_worker_accepts_only_exact_receipt_bound_legacy_collection_path() -> None:
+    raw_science = _science()
+    raw_run_path = "subject_mask_shard_runs/raw_clip_001"
+    raw_receipt = {
+        "schema_id": "palette.subject_mask.worker_semantic_receipt",
+        "schema_version": 1,
+        "payload": {"run_path": raw_run_path},
+        "payload_digest": "d" * 64,
+    }
+    receipt_binding = {
+        "schema_id": raw_receipt["schema_id"],
+        "schema_version": raw_receipt["schema_version"],
+        "payload_digest": raw_receipt["payload_digest"],
+        "document_sha256": canonical_json_sha256(raw_receipt),
+        "relative_path": f"{raw_run_path}/worker_semantic_receipt.json",
+        "storage": "strict_json_sidecar_v1",
+    }
+    refined_science = build_subject_mask_scientific_identity(
+        stage_kind="refined_subject_mask",
+        model={
+            "source_input_binding": {
+                "run_path": "subject_mask_shard_runs/<collection>",
+                "scientific_identity_digest": raw_science["digest"],
+                "worker_semantic_receipt_binding": receipt_binding,
+            }
+        },
+        crop={"run_id": "crop_v2"},
+        pixels={"source": "raw_masks"},
+        row_identity={"rows": 1},
+        inference_contract={"components": ["body"]},
+        schema_version=1,
+    )
+    raw_worker = {
+        "global_row_interval": {"start_row": 0, "stop_row": 1},
+        "run_path": raw_run_path,
+        "scientific_identity": raw_science,
+        "worker_receipt": raw_receipt,
+    }
+    refined_worker = {
+        "global_row_interval": {"start_row": 0, "stop_row": 1},
+        "scientific_identity": refined_science,
+    }
+
+    _validate_refined_worker_source_join(refined_worker, raw_worker)
+
+    tampered = deepcopy(refined_worker)
+    tampered_binding = tampered["scientific_identity"]["payload"]["model"][
+        "source_input_binding"
+    ]
+    tampered_binding["worker_semantic_receipt_binding"]["relative_path"] = (
+        "subject_mask_shard_runs/other/worker_semantic_receipt.json"
+    )
+    with pytest.raises(ValueError, match="exact corresponding raw worker"):
+        _validate_refined_worker_source_join(tampered, raw_worker)
 
 
 def test_expected_work_units_retain_empty_frame_windows() -> None:

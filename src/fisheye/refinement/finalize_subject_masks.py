@@ -1327,10 +1327,15 @@ def _load_subject_mask_source(
                 if value is not None:
                     source_crop_snapshot[target_key] = value
 
+        source_collection_path = (
+            f"{SUBJECT_MASK_SHARD_PARENT}/{shards[0].name}"
+            if len(shards) == 1
+            else f"{SUBJECT_MASK_SHARD_PARENT}/<collection>"
+        )
         virtual_group = _SubjectMaskCollectionGroup(
             attrs,
             arrays,
-            path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>",
+            path=source_collection_path,
         )
         if (
             first_source.mask_surface_path == "mask_probs_roi"
@@ -1340,7 +1345,7 @@ def _load_subject_mask_source(
                 arrays["mask_probs_roi"],
                 thresholds=first_source.probability_thresholds,
                 encoding=first_source.probability_encoding,
-                source_path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>/mask_probs_roi",
+                source_path=f"{source_collection_path}/mask_probs_roi",
             )
         elif "masks_roi" in arrays:
             masks_roi = arrays["masks_roi"]
@@ -1349,7 +1354,7 @@ def _load_subject_mask_source(
                 arrays["mask_probs_roi"],
                 thresholds=first_source.probability_thresholds,
                 encoding=first_source.probability_encoding,
-                source_path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>/mask_probs_roi",
+                source_path=f"{source_collection_path}/mask_probs_roi",
             )
         else:
             raise ValueError(
