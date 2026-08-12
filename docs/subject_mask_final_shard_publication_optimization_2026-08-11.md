@@ -228,10 +228,12 @@ Its sealed inference/refinement final-layout packages remain reusable when
 their existing worker receipts validate. Sampled-contour worker payloads also
 remain reusable; their recording-level assembly receipt is rebuilt cheaply.
 
-Canary plan v9 requires partitioned QC, selects four compute threads per
+Canary plan v10 requires partitioned QC, selects four compute threads per
 partition and ten concurrent partition jobs by default, and makes recording
 publication depend on terminal quality coverage. Plan v8 remains loadable and
-retains the monolithic compatibility path. A 512-row real refined-mask
+retains the monolithic compatibility path; historical plan v9 records the
+retired finalizer whole-scan policy and cannot serve as receipt-composition
+evidence. A 512-row real refined-mask
 benchmark on the workstation produced identical payload digests for every
 candidate:
 

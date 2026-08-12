@@ -282,7 +282,16 @@ def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
         "full_ragged_contours_allowed": False,
         "receipt_bound_composable_dense_identity_required": True,
         "core_finalizer_full_dense_decode_hash_allowed": False,
-        "quality_finalizer_ordered_dense_identity_scan_required": True,
+        "quality_receipt_composition_required": True,
+        "quality_finalizer_ordered_dense_identity_scan_allowed": False,
+    }
+    assert plan["execution"]["quality_partitions"] == {
+        "compute_workers_per_partition": 4,
+        "execution": "independent_refined_worker_bound_partitions_v1",
+        "publication": "immutable_partition_then_single_owner_merge_v1",
+        "partition_receipt_schema_version": 2,
+        "partition_assembly_schema_version": 2,
+        "finalizer_dense_read_policy": "forbidden_receipt_composition_v1",
     }
     assert plan["final_layout"]["raw"]["array_path"] == "mask_probs_roi"
     assert plan["final_layout"]["refined"]["array_path"] == "masks_roi"
@@ -453,6 +462,10 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     assert plan["execution"]["publication"] == {
         "core_physical_unit_workers": 4,
         "quality_compute_workers": 4,
+        "quality_manifest_schema_version": 3,
+        "quality_write_receipt_schema_version": 4,
+        "cache_manifest_schema_version": 3,
+        "bundle_manifest_schema_version": 4,
         "ownership_policy": ("bounded_threaded_disjoint_whole_physical_row_bands_v1"),
         "core_validation_mode": "production_composable_units_v1",
         "logical_identity_unit_rows": 256,

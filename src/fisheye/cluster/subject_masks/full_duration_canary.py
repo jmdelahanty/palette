@@ -90,12 +90,25 @@ from fisheye.shared.zarr.subject_mask_final_layout_units import (
 from fisheye.shared.zarr.subject_mask_core_publication import (
     SubjectMaskCoreValidationMode,
 )
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.subject_mask_cache_publication import (
+    SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.subject_mask_quality_manifest import (
+    SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.subject_mask_quality_publication import (
+    SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION,
+)
 from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
     load_subject_mask_sampled_contour_worker_receipt,
     validate_subject_mask_sampled_contour_worker_receipt,
     write_subject_mask_sampled_contour_worker_receipt,
 )
 from fisheye.shared.zarr.subject_mask_quality_partition import (
+    SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION,
     SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_ID,
     SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION,
     compute_subject_mask_quality_partition,
@@ -112,11 +125,12 @@ from fisheye.shared.zarr_run_completion import (
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
 PLAN_SCHEMA_LEGACY_VERSION = 4
 PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION = 8
-PLAN_SCHEMA_VERSION = 9
+PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION = 9
+PLAN_SCHEMA_VERSION = 10
 INFERENCE_REUSE_SCHEMA_ID = "palette.subject_mask.inference_reuse"
 INFERENCE_REUSE_SCHEMA_VERSION = 1
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
-RESULT_SCHEMA_VERSION = 5
+RESULT_SCHEMA_VERSION = 6
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
 WORKER_RESULT_SCHEMA_LEGACY_VERSION = 3
 WORKER_RESULT_SCHEMA_VERSION = 4
@@ -857,6 +871,18 @@ def prepare_canary(
             "publication": {
                 "core_physical_unit_workers": int(core_physical_unit_workers),
                 "quality_compute_workers": int(quality_compute_workers),
+                "quality_manifest_schema_version": (
+                    SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+                ),
+                "quality_write_receipt_schema_version": (
+                    SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION
+                ),
+                "cache_manifest_schema_version": (
+                    SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION
+                ),
+                "bundle_manifest_schema_version": (
+                    SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION
+                ),
                 "core_validation_mode": (
                     SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
                 ),
@@ -873,6 +899,13 @@ def prepare_canary(
                 "compute_workers_per_partition": int(quality_compute_workers),
                 "execution": "independent_refined_worker_bound_partitions_v1",
                 "publication": "immutable_partition_then_single_owner_merge_v1",
+                "partition_receipt_schema_version": (
+                    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION
+                ),
+                "partition_assembly_schema_version": (
+                    SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION
+                ),
+                "finalizer_dense_read_policy": ("forbidden_receipt_composition_v1"),
             },
         },
         "safety": {
@@ -885,7 +918,8 @@ def prepare_canary(
             "final_layout_units_are_selector_ineligible_transport": True,
             "receipt_bound_composable_dense_identity_required": True,
             "core_finalizer_full_dense_decode_hash_allowed": False,
-            "quality_finalizer_ordered_dense_identity_scan_required": True,
+            "quality_receipt_composition_required": True,
+            "quality_finalizer_ordered_dense_identity_scan_allowed": False,
             "worker_sampled_contours_required": True,
             "worker_quality_partitions_required": True,
             "full_ragged_contours_allowed": False,
@@ -918,6 +952,7 @@ def load_plan(path: Path) -> dict[str, Any]:
             6,
             7,
             PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+            PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION,
             PLAN_SCHEMA_VERSION,
         }
         or payload.get("status") != "planned"
@@ -949,6 +984,7 @@ def load_plan(path: Path) -> dict[str, Any]:
         6,
         7,
         PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+        PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION,
         PLAN_SCHEMA_VERSION,
     }:
         _validate_inference_reuse_contract(reuse)
@@ -962,7 +998,8 @@ def load_plan(path: Path) -> dict[str, Any]:
     publication = payload.get("execution", {}).get("publication", {})
     core_dense_decode_allowed = payload.get("safety", {}).get(
         "core_finalizer_full_dense_decode_hash_allowed"
-        if payload["schema_version"] == PLAN_SCHEMA_VERSION
+        if payload["schema_version"]
+        in {PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION, PLAN_SCHEMA_VERSION}
         else "finalizer_full_dense_decode_hash_allowed"
     )
     if (
@@ -981,6 +1018,7 @@ def load_plan(path: Path) -> dict[str, Any]:
         6,
         7,
         PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+        PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION,
         PLAN_SCHEMA_VERSION,
     }:
         inference = payload.get("execution", {}).get("inference", {})
@@ -1007,6 +1045,7 @@ def load_plan(path: Path) -> dict[str, Any]:
     if payload["schema_version"] in {
         7,
         PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+        PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION,
         PLAN_SCHEMA_VERSION,
     }:
         inference = payload.get("execution", {}).get("inference", {})
@@ -1017,6 +1056,26 @@ def load_plan(path: Path) -> dict[str, Any]:
             raise ValueError(
                 "Canary probability destination validation policy differs."
             )
+    if payload["schema_version"] == PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION:
+        quality_workers = publication.get("quality_compute_workers")
+        quality_partitions = payload.get("execution", {}).get("quality_partitions")
+        if (
+            type(quality_workers) is not int
+            or quality_workers <= 0
+            or quality_partitions
+            != {
+                "compute_workers_per_partition": quality_workers,
+                "execution": "independent_refined_worker_bound_partitions_v1",
+                "publication": "immutable_partition_then_single_owner_merge_v1",
+            }
+            or payload.get("safety", {}).get("worker_quality_partitions_required")
+            is not True
+            or payload.get("safety", {}).get(
+                "quality_finalizer_ordered_dense_identity_scan_required"
+            )
+            is not True
+        ):
+            raise ValueError("Legacy partitioned-quality policy differs.")
     if payload["schema_version"] == PLAN_SCHEMA_VERSION:
         quality_workers = publication.get("quality_compute_workers")
         if type(quality_workers) is not int or quality_workers <= 0:
@@ -1028,6 +1087,13 @@ def load_plan(path: Path) -> dict[str, Any]:
                 "compute_workers_per_partition": quality_workers,
                 "execution": "independent_refined_worker_bound_partitions_v1",
                 "publication": "immutable_partition_then_single_owner_merge_v1",
+                "partition_receipt_schema_version": (
+                    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION
+                ),
+                "partition_assembly_schema_version": (
+                    SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION
+                ),
+                "finalizer_dense_read_policy": ("forbidden_receipt_composition_v1"),
             }
             or payload.get("safety", {}).get("worker_quality_partitions_required")
             is not True
@@ -1035,12 +1101,22 @@ def load_plan(path: Path) -> dict[str, Any]:
                 "core_finalizer_full_dense_decode_hash_allowed"
             )
             is not False
-            or payload.get("safety", {}).get(
-                "quality_finalizer_ordered_dense_identity_scan_required"
-            )
+            or payload.get("safety", {}).get("quality_receipt_composition_required")
             is not True
+            or payload.get("safety", {}).get(
+                "quality_finalizer_ordered_dense_identity_scan_allowed"
+            )
+            is not False
+            or publication.get("quality_manifest_schema_version")
+            != SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+            or publication.get("quality_write_receipt_schema_version")
+            != SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION
+            or publication.get("cache_manifest_schema_version")
+            != SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION
+            or publication.get("bundle_manifest_schema_version")
+            != SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION
         ):
-            raise ValueError("Canary partitioned-quality policy differs.")
+            raise ValueError("Canary receipt-composed quality policy differs.")
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
@@ -1222,6 +1298,7 @@ def _existing_worker_result(
     if stage == "inference" and plan.get("schema_version") in {
         7,
         PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+        PLAN_SCHEMA_WHOLE_SCAN_QUALITY_VERSION,
         PLAN_SCHEMA_VERSION,
     }:
         _validate_probability_destination_validation_handoff(
@@ -2579,6 +2656,44 @@ def finalize_canary(
                 raise RuntimeError(
                     f"Published canary member is selector eligible: {parent}/{run_name}"
                 )
+        quality_manifest = target[
+            f"subject_mask_quality_runs/{output['quality_run']}"
+        ].attrs.get("run_manifest")
+        cache_manifest = target[
+            f"subject_mask_cache_runs/{output['cache_run']}"
+        ].attrs.get("run_manifest")
+        bundle_manifest = target[
+            f"subject_mask_bundle_runs/{output['bundle_id']}"
+        ].attrs.get("run_manifest")
+        quality_receipt = (
+            quality_manifest.get("payload", {}).get("write_receipt")
+            if isinstance(quality_manifest, Mapping)
+            else None
+        )
+        quality_phases = publication["publication_execution"]["quality_phase_seconds"]
+        if (
+            not isinstance(quality_manifest, Mapping)
+            or quality_manifest.get("schema_version")
+            != SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+            or not isinstance(quality_receipt, Mapping)
+            or quality_receipt.get("schema_version")
+            != SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION
+            or quality_receipt.get("source_compute_execution")
+            != "receipt_bound_partitions_with_verified_worker_units_v2"
+            or quality_receipt.get("source_compute_block_count") != 0
+            or quality_receipt.get("source_compute_workers_effective") != 0
+            or not isinstance(cache_manifest, Mapping)
+            or cache_manifest.get("schema_version")
+            != SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION
+            or not isinstance(bundle_manifest, Mapping)
+            or bundle_manifest.get("schema_version")
+            != SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION
+            or "ordered_source_verification" in quality_phases
+            or "receipt_bound_source_verification" not in quality_phases
+        ):
+            raise RuntimeError(
+                "Receipt-composed quality/cache/bundle publication gate failed."
+            )
         worker_results = {
             "inference": [
                 _resolve_inference_bundle(plan=plan, window=window)[1]
@@ -2632,6 +2747,21 @@ def finalize_canary(
             "analysis_tree": _tree_stats(Path(plan["references"]["analysis_zarr"])),
             "duration_seconds": float(time.perf_counter() - started),
             "resource_usage": _resource_usage(),
+            "receipt_composition": {
+                "quality_partition_receipt_schema_version": (
+                    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION
+                ),
+                "quality_partition_assembly_schema_version": (
+                    SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION
+                ),
+                "quality_manifest_schema_version": quality_manifest["schema_version"],
+                "quality_write_receipt_schema_version": quality_receipt[
+                    "schema_version"
+                ],
+                "cache_manifest_schema_version": cache_manifest["schema_version"],
+                "bundle_manifest_schema_version": bundle_manifest["schema_version"],
+                "quality_phase_seconds": quality_phases,
+            },
             "safety": {
                 "subject_mask_authority_present": False,
                 "registry_mutated": False,
@@ -2646,6 +2776,8 @@ def finalize_canary(
                     publication["publication_execution"]["quality_source_mode"]
                     == "receipt_bound_worker_partitions"
                 ),
+                "quality_receipt_composition_validated": True,
+                "quality_finalizer_dense_scan_performed": False,
                 "full_ragged_contours_published": False,
             },
         }
