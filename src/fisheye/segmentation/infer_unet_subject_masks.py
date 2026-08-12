@@ -490,6 +490,16 @@ def _append_raw_worker_validation_batch(
         accumulator.append(int(batch.start), values[path])
 
 
+def _freeze_subject_mask_output_batch(batch: _SubjectMaskOutputBatch) -> None:
+    """Make a queued CPU batch immutable until the output worker releases it."""
+
+    arrays = [batch.probs_out, *batch.metrics.values()]
+    if batch.binary is not None:
+        arrays.append(batch.binary)
+    for values in arrays:
+        values.setflags(write=False)
+
+
 def _seal_raw_worker_semantic_receipt(
     *,
     run_group: zarr.Group,
@@ -1898,6 +1908,9 @@ def _write_subject_mask_output_batch(
     progress: Progress,
     task: int,
     profiler: InferenceTimingProfiler,
+    validation_accumulators: (
+        Mapping[str, SubjectMaskArrayUnitAccumulator] | None
+    ) = None,
 ) -> None:
     start = int(batch.start)
     stop = int(batch.stop)
@@ -1922,6 +1935,10 @@ def _write_subject_mask_output_batch(
         centroid_valid[start:stop, :] = batch.metrics["centroid_valid"]
         bbox_xyxy[start:stop, :, :] = batch.metrics["bbox_xyxy"]
         bbox_valid[start:stop, :] = batch.metrics["bbox_valid"]
+
+    if validation_accumulators is not None:
+        with profiler.time("semantic_receipt_hash", items=batch_count):
+            _append_raw_worker_validation_batch(validation_accumulators, batch)
 
     with profiler.time("progress_update", items=batch_count):
         progress.advance(task, batch_count)
@@ -2500,6 +2517,7 @@ def _write_subject_mask_outputs(
                         progress=progress,
                         task=task,
                         profiler=profiler,
+                        validation_accumulators=validation_accumulators,
                     )
                 except (
                     BaseException
@@ -2597,11 +2615,6 @@ def _write_subject_mask_outputs(
                     binary=binary,
                     metrics=output_metrics,
                 )
-                if validation_accumulators is not None:
-                    _append_raw_worker_validation_batch(
-                        validation_accumulators,
-                        output_batch,
-                    )
                 if output_queue is None:
                     _write_subject_mask_output_batch(
                         output_batch,
@@ -2617,9 +2630,11 @@ def _write_subject_mask_outputs(
                         progress=progress,
                         task=task,
                         profiler=profiler,
+                        validation_accumulators=validation_accumulators,
                     )
                 else:
                     _raise_async_writer_error(output_errors)
+                    _freeze_subject_mask_output_batch(output_batch)
                     with profiler.time("output_queue_put", items=batch_count):
                         output_queue.put(output_batch)
         finally:
@@ -3595,6 +3610,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "inference_batch_size": int(args.batch_size),
             "async_output": bool(args.async_output),
             "output_queue_size": int(args.output_queue_size),
+            "semantic_receipt_hash_execution": (
+                "ordered_async_output_worker_v1"
+                if args.async_output
+                else "ordered_inline_output_v1"
+            ),
             "mask_probs_destination_validation": str(
                 args.mask_probs_destination_validation
             ),
@@ -3722,6 +3742,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "output_shard_write writes complete immutable probability storage shards from the background buffer while inference continues; output_shard_validate appears only when the writer itself performs the full decoded destination reread.",
                 "receipt_bound_final_layout_unit_v1 defers that redundant writer reread only for a complete non-authoritative partition; mandatory final-layout packaging rereads the persisted probabilities, verifies their semantic receipt, and seals encoded objects before publication.",
                 "metric_compute covers copying precomputed per-batch metrics into full-run metric arrays.",
+                "semantic_receipt_hash hashes each immutable CPU output batch in row order after its output-worker write; with --async-output this overlaps the next GPU inference batch.",
                 "output_queue_put and output_queue_drain appear when --async-output overlaps inference with background output writes.",
             ],
         )
@@ -3808,6 +3829,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "write_masks_roi": bool(args.write_masks_roi),
             "async_output": bool(args.async_output),
             "output_queue_size": int(args.output_queue_size),
+            "semantic_receipt_hash_execution": run_group.attrs[
+                "semantic_receipt_hash_execution"
+            ],
             "progress": bool(args.progress),
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_manifest": (

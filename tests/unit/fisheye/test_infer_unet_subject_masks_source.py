@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import sys
+from threading import current_thread
 from types import SimpleNamespace
 
 import numpy as np
@@ -617,7 +618,9 @@ def test_write_subject_mask_outputs_pads_model_input_and_writes_native_shape() -
     assert run_group["masks_roi"].shape == (1, 3, 2, 2)
 
 
-def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
+def test_write_subject_mask_outputs_async_matches_serial_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _FakeCropSource:
         total_rois = 3
         roi_shape = (2, 2)
@@ -635,6 +638,36 @@ def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
 
     serial_group = _FakeGroup()
     async_group = _FakeGroup()
+    serial_accumulators = mod._raw_worker_validation_accumulators(
+        total_rois=3,
+        n_channels=3,
+        height=2,
+        width=2,
+        probability_dtype=np.dtype(np.uint8),
+        write_masks_roi=False,
+        unit_rows=1,
+    )
+    async_accumulators = mod._raw_worker_validation_accumulators(
+        total_rois=3,
+        n_channels=3,
+        height=2,
+        width=2,
+        probability_dtype=np.dtype(np.uint8),
+        write_masks_roi=False,
+        unit_rows=1,
+    )
+    hash_threads: list[tuple[str, bool]] = []
+    append_validation = mod._append_raw_worker_validation_batch
+
+    def _record_validation_thread(accumulators, batch) -> None:
+        hash_threads.append((current_thread().name, batch.probs_out.flags.writeable))
+        append_validation(accumulators, batch)
+
+    monkeypatch.setattr(
+        mod,
+        "_append_raw_worker_validation_batch",
+        _record_validation_thread,
+    )
     kwargs = {
         "model": _FakeModel(),
         "roi_source": _FakeCropSource(),
@@ -655,12 +688,14 @@ def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
         serial_group,
         async_output=False,
         output_queue_size=2,
+        validation_accumulators=serial_accumulators,
         **kwargs,
     )
     mod._write_subject_mask_outputs(
         async_group,
         async_output=True,
         output_queue_size=1,
+        validation_accumulators=async_accumulators,
         **kwargs,
     )
 
@@ -682,6 +717,19 @@ def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
             np.asarray(serial_group["metrics"][name][:]),
         )
     assert "masks_roi" not in async_group
+    assert any(name == "subject-mask-output-writer" for name, _writeable in hash_threads)
+    assert all(
+        not writeable
+        for name, writeable in hash_threads
+        if name == "subject-mask-output-writer"
+    )
+    assert {
+        path: accumulator.as_document()
+        for path, accumulator in async_accumulators.items()
+    } == {
+        path: accumulator.as_document()
+        for path, accumulator in serial_accumulators.items()
+    }
 
 
 def test_postpack_probability_shards_exactly_replaces_working_array() -> None:
