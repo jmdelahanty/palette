@@ -189,7 +189,7 @@ def _seal_inference_bundles(
             lambda *_args, _proof=proof, **_kwargs: _proof,
         )
         package = tmp_path / f"unit_package_{window_id}"
-        canary.build_subject_mask_final_layout_unit_package(
+        package_receipt = canary.build_subject_mask_final_layout_unit_package(
             source_array=payload_values,
             source_crop_row_ids=np.arange(
                 int(window["row_start"]),
@@ -212,6 +212,29 @@ def _seal_inference_bundles(
             "stage": "inference",
             "plan_digest": plan["plan_digest"],
             "window_id": window_id,
+            "probability_destination_validation_handoff": {
+                "schema_id": (
+                    canary.PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID
+                ),
+                "schema_version": (
+                    canary.PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_VERSION
+                ),
+                "status": "complete",
+                "writer_mode": (
+                    canary.infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+                ),
+                "writer_status": "deferred_to_mandatory_final_layout_unit",
+                "worker_receipt_payload_digest": "3" * 64,
+                "final_layout_payload_digest": package_receipt["payload_digest"],
+                "final_layout_source_array_validation_digest": (
+                    canary.canonical_json_sha256(
+                        package_receipt["payload"]["source_array_validation"]
+                    )
+                ),
+                "publication_requirement": (
+                    "immutable_worker_bundle_requires_verified_final_layout_unit_v1"
+                ),
+            },
         }
         bundle = Path(str(plan["run_root"])) / "bundles" / "inference" / window_id
         canary._publish_worker_bundle(
@@ -232,6 +255,9 @@ def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
     assert plan["recording"]["n_frames"] == 4
     assert plan["recording"]["n_rows"] == 4
     assert plan["schema_version"] == canary.PLAN_SCHEMA_VERSION
+    assert plan["execution"]["inference"]["destination_validation_mode"] == (
+        canary.infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+    )
     assert plan["execution"]["inference"]["synchronized_stage_profiling"] is False
     assert plan["execution"]["inference"]["gpu_runtime_telemetry"] == {
         "enabled": True,
@@ -575,7 +601,7 @@ def test_worker_bundle_seals_and_reopens_final_layout_package(
     }
     monkeypatch.setattr(canary, "_worker_evidence", lambda *_args, **_kwargs: proof)
     package = tmp_path / "unit_package"
-    canary.build_subject_mask_final_layout_unit_package(
+    package_receipt = canary.build_subject_mask_final_layout_unit_package(
         source_array=payload_values,
         source_crop_row_ids=np.arange(2, dtype=np.int64),
         destination=package,
@@ -594,6 +620,29 @@ def test_worker_bundle_seals_and_reopens_final_layout_package(
         "stage": "inference",
         "plan_digest": plan["plan_digest"],
         "window_id": window["window_id"],
+        "probability_destination_validation_handoff": {
+            "schema_id": (
+                canary.PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID
+            ),
+            "schema_version": (
+                canary.PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_VERSION
+            ),
+            "status": "complete",
+            "writer_mode": (
+                canary.infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+            ),
+            "writer_status": "deferred_to_mandatory_final_layout_unit",
+            "worker_receipt_payload_digest": "3" * 64,
+            "final_layout_payload_digest": package_receipt["payload_digest"],
+            "final_layout_source_array_validation_digest": (
+                canary.canonical_json_sha256(
+                    package_receipt["payload"]["source_array_validation"]
+                )
+            ),
+            "publication_requirement": (
+                "immutable_worker_bundle_requires_verified_final_layout_unit_v1"
+            ),
+        },
     }
     bundle = Path(plan["run_root"]) / "bundles" / "inference" / str(window["window_id"])
 
@@ -614,3 +663,15 @@ def test_worker_bundle_seals_and_reopens_final_layout_package(
 
     assert reopened == sealed
     assert reopened["final_layout_unit_package"]["kind"] == ("raw_probability_uint8")
+
+    tampered_handoff = dict(result["probability_destination_validation_handoff"])
+    tampered_handoff["final_layout_payload_digest"] = "f" * 64
+    with pytest.raises(
+        RuntimeError,
+        match="Probability destination validation handoff is absent or differs",
+    ):
+        canary._validate_probability_destination_validation_handoff(
+            tampered_handoff,
+            worker_receipt_payload_digest="3" * 64,
+            final_layout_receipt=package_receipt,
+        )

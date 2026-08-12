@@ -20,6 +20,7 @@ from uuid import uuid5
 
 import zarr
 
+from fisheye.segmentation import infer_unet_subject_masks
 from fisheye.cluster.clipped_lsf import (
     build_execution_task,
     build_job,
@@ -224,6 +225,9 @@ def prepare_matrix(
         inference = task_plan["execution"]["inference"]
         inference.update(
             {
+                "destination_validation_mode": (
+                    infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+                ),
                 "synchronized_stage_profiling": bool(
                     candidate["synchronized_stage_profiling"]
                 ),

@@ -842,6 +842,42 @@ def test_composable_publication_adopts_payload_without_finalizer_decode(
     )
 
 
+def test_final_layout_package_rejects_persisted_values_that_differ_from_receipt(
+    tmp_path: Path,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    refined_with_crop.pop("_crop")
+    _manifest, source_receipt, _source_path = _recording_documents(
+        kind="raw_probability_uint8",
+        arrays=raw,
+    )
+    worker = source_receipt["payload"]["producer_evidence"]["workers"][0]
+    worker_payload = worker["worker_receipt"]["payload"]["arrays"][
+        "mask_probs_roi"
+    ]
+    changed = np.array(raw["mask_probs_roi"], copy=True)
+    changed[0, 0, 0, 0] ^= np.uint8(1)
+
+    with pytest.raises(
+        ValueError,
+        match="Final-layout payload differs from its worker receipt",
+    ):
+        build_subject_mask_final_layout_unit_package(
+            source_array=changed,
+            source_crop_row_ids=raw["source_crop_row_ids"],
+            destination=tmp_path / "changed_final_layout_unit",
+            kind="raw_probability_uint8",
+            dimensions=_dimensions(),
+            global_start_row=0,
+            source_run_path=str(worker["run_path"]),
+            worker_receipt_payload_digest=str(
+                worker["worker_receipt_payload_digest"]
+            ),
+            producer_commit="a" * 40,
+            worker_array_validation_record=worker_payload,
+        )
+
+
 def test_final_layout_package_corruption_fails_before_publication(
     tmp_path: Path,
 ) -> None:

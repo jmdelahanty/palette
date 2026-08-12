@@ -25,6 +25,10 @@ def test_parser_defaults_to_probability_shards_and_accepts_regular_override() ->
     )
 
     assert default_args.mask_probs_shard_rois == mod.DEFAULT_MASK_PROBS_SHARD_ROIS
+    assert (
+        default_args.mask_probs_destination_validation
+        == mod.MASK_PROBS_DESTINATION_VALIDATION_FULL
+    )
     assert default_args.require_training_materialization_binding is False
     assert regular_args.mask_probs_shard_rois is None
 
@@ -38,6 +42,20 @@ def test_training_materialization_requires_terminal_shard_output() -> None:
                 "--crop-run",
                 "crop_v2_training",
                 "--require-training-materialization-binding",
+            ]
+        )
+
+
+def test_deferred_probability_validation_requires_complete_partition_shard() -> None:
+    with pytest.raises(ValueError, match="complete_collection_partition"):
+        mod.main(
+            [
+                "missing.zarr",
+                "missing.pt",
+                "--output-parent",
+                "subject_mask_shard_runs",
+                "--mask-probs-destination-validation",
+                mod.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT,
             ]
         )
 
@@ -802,7 +820,59 @@ def test_double_buffered_probability_writer_handles_crossing_batches_and_partial
         summary["source_sha256_by_channel"] == summary["destination_sha256_by_channel"]
     )
     assert summary["source_sha256"] == summary["destination_sha256"]
+    assert (
+        summary["destination_validation_mode"]
+        == mod.MASK_PROBS_DESTINATION_VALIDATION_FULL
+    )
+    assert summary["destination_validation_status"] == "complete"
     assert summary["exact_match"] is True
+
+
+def test_double_buffered_probability_writer_defers_redundant_destination_reread(
+    monkeypatch,
+) -> None:
+    run_group = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+    values = np.arange(8 * 2 * 3 * 3, dtype=np.uint8).reshape(8, 2, 3, 3)
+    destination = run_group.create_array(
+        mod.MASK_PROBS_CANONICAL_ARRAY,
+        shape=values.shape,
+        dtype=values.dtype,
+        chunks=(2, 1, 3, 3),
+        shards=(4, 1, 3, 3),
+        overwrite=True,
+    )
+    writer = mod._DoubleBufferedProbabilityShardWriter(
+        destination,
+        shard_rows=4,
+        profiler=mod.InferenceTimingProfiler(enabled=True),
+        destination_validation_mode=(
+            mod.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+        ),
+    )
+    writer[0:3] = values[0:3]
+    writer[3:8] = values[3:8]
+    monkeypatch.setattr(
+        mod,
+        "_probability_array_digests_by_channel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deferred final-layout validation must not reread the destination"
+        ),
+    )
+
+    summary = writer.finish(
+        validation_row_step=2,
+    )
+
+    np.testing.assert_array_equal(np.asarray(destination[:]), values)
+    assert summary["destination_validation_status"] == (
+        "deferred_to_mandatory_final_layout_unit"
+    )
+    assert summary["destination_sha256_by_channel"] is None
+    assert summary["destination_sha256"] is None
+    assert summary["source_sha256_by_channel"] is None
+    assert summary["source_sha256"] is None
+    assert summary["validation_seconds"] == 0.0
+    assert summary["exact_match"] is None
 
 
 def test_double_buffered_probability_writer_rejects_nonsequential_batches() -> None:
@@ -966,12 +1036,16 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
         timing_profiler,
         input_pixels_sha256,
         validation_accumulators,
+        mask_probs_destination_validation,
     ) -> float:
         del model, batch_size, device, console
         seen["mask_labels"] = tuple(mask_labels)
         seen["mask_probs_chunk_rois"] = mask_probs_chunk_rois
         seen["mask_probs_shard_rois"] = mask_probs_shard_rois
         seen["mask_probs_dtype"] = mask_probs_dtype
+        seen["mask_probs_destination_validation"] = (
+            mask_probs_destination_validation
+        )
         seen["write_masks_roi"] = write_masks_roi
         seen["async_output"] = async_output
         seen["output_queue_size"] = output_queue_size
@@ -1482,6 +1556,7 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         timing_profiler,
         input_pixels_sha256,
         validation_accumulators,
+        mask_probs_destination_validation,
     ) -> float:
         del (
             model,
@@ -1495,6 +1570,7 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
             show_progress,
             console,
             timing_profiler,
+            mask_probs_destination_validation,
         )
         seen["mask_labels"] = tuple(mask_labels)
         input_pixels_sha256.update(
@@ -1677,6 +1753,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         timing_profiler,
         input_pixels_sha256,
         validation_accumulators,
+        mask_probs_destination_validation,
     ) -> float:
         del (
             model,
@@ -1688,6 +1765,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
             model_input_transform,
             console,
             timing_profiler,
+            mask_probs_destination_validation,
         )
         seen["async_output"] = async_output
         seen["show_progress"] = show_progress

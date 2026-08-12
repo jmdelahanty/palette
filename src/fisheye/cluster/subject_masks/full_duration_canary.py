@@ -105,7 +105,7 @@ from fisheye.shared.zarr_run_completion import (
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
 PLAN_SCHEMA_LEGACY_VERSION = 4
-PLAN_SCHEMA_VERSION = 6
+PLAN_SCHEMA_VERSION = 7
 INFERENCE_REUSE_SCHEMA_ID = "palette.subject_mask.inference_reuse"
 INFERENCE_REUSE_SCHEMA_VERSION = 1
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
@@ -113,6 +113,10 @@ RESULT_SCHEMA_VERSION = 5
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
 WORKER_RESULT_SCHEMA_LEGACY_VERSION = 3
 WORKER_RESULT_SCHEMA_VERSION = 4
+PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID = (
+    "palette.subject_mask.probability_destination_validation_handoff"
+)
+PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_VERSION = 1
 FAMILY = "subject_mask_full_duration_canary"
 BENCHMARK_CLASSIFICATION = "selector_ineligible_full_duration_canary"
 DEFAULT_GPU_CONCURRENCY = 4
@@ -821,6 +825,9 @@ def prepare_canary(
                 "probability_dtype": "uint8",
                 "inner_chunk_rows": 32,
                 "outer_shard_rows": 2048,
+                "destination_validation_mode": (
+                    infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+                ),
                 "synchronized_stage_profiling": synchronized_stage_profiling,
                 "gpu_runtime_telemetry": {
                     "enabled": True,
@@ -886,7 +893,7 @@ def load_plan(path: Path) -> dict[str, Any]:
     if (
         payload.get("schema_id") != PLAN_SCHEMA_ID
         or payload.get("schema_version")
-        not in {PLAN_SCHEMA_LEGACY_VERSION, 5, PLAN_SCHEMA_VERSION}
+        not in {PLAN_SCHEMA_LEGACY_VERSION, 5, 6, PLAN_SCHEMA_VERSION}
         or payload.get("status") != "planned"
         or payload.get("classification") != BENCHMARK_CLASSIFICATION
     ):
@@ -911,7 +918,7 @@ def load_plan(path: Path) -> dict[str, Any]:
     if payload.get("safety", {}).get("bundle_activation_allowed") is not False:
         raise ValueError("Canary plan does not fail closed on activation.")
     reuse = payload.get("inference_reuse")
-    if payload.get("schema_version") in {5, PLAN_SCHEMA_VERSION}:
+    if payload.get("schema_version") in {5, 6, PLAN_SCHEMA_VERSION}:
         _validate_inference_reuse_contract(reuse)
     elif reuse is not None:
         raise ValueError("Legacy canary plans cannot declare inference reuse.")
@@ -934,7 +941,7 @@ def load_plan(path: Path) -> dict[str, Any]:
         != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
     ):
         raise ValueError("Canary plan does not enforce composable dense identity.")
-    if payload["schema_version"] == PLAN_SCHEMA_VERSION:
+    if payload["schema_version"] in {6, PLAN_SCHEMA_VERSION}:
         inference = payload.get("execution", {}).get("inference", {})
         telemetry = inference.get("gpu_runtime_telemetry")
         if (
@@ -956,6 +963,15 @@ def load_plan(path: Path) -> dict[str, Any]:
             or telemetry["identity_policy"] != GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY
         ):
             raise ValueError("Canary GPU runtime telemetry plan differs.")
+    if payload["schema_version"] == PLAN_SCHEMA_VERSION:
+        inference = payload.get("execution", {}).get("inference", {})
+        if (
+            inference.get("destination_validation_mode")
+            != infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+        ):
+            raise ValueError(
+                "Canary probability destination validation policy differs."
+            )
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
@@ -1134,6 +1150,14 @@ def _existing_worker_result(
         != canonical_json_sha256(package_receipt["payload"]["source_array_validation"])
     ):
         raise RuntimeError(f"Worker final-layout package binding differs: {bundle}")
+    if stage == "inference" and plan.get("schema_version") == PLAN_SCHEMA_VERSION:
+        _validate_probability_destination_validation_handoff(
+            result.get("probability_destination_validation_handoff"),
+            worker_receipt_payload_digest=str(
+                package_receipt["payload"]["worker_receipt_payload_digest"]
+            ),
+            final_layout_receipt=package_receipt,
+        )
     sampled_binding = result.get("sampled_contour_worker_receipt")
     if stage == "inference":
         if sampled_binding is not None:
@@ -1190,6 +1214,56 @@ def _existing_worker_result(
                 f"Worker sampled-contour receipt binding differs: {bundle}"
             )
     return result
+
+
+def _validate_probability_destination_validation_handoff(
+    value: object,
+    *,
+    worker_receipt_payload_digest: str,
+    final_layout_receipt: Mapping[str, Any],
+) -> None:
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "status",
+        "writer_mode",
+        "writer_status",
+        "worker_receipt_payload_digest",
+        "final_layout_payload_digest",
+        "final_layout_source_array_validation_digest",
+        "publication_requirement",
+    }
+    payload = final_layout_receipt.get("payload")
+    source_validation = (
+        payload.get("source_array_validation")
+        if isinstance(payload, Mapping)
+        else None
+    )
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != expected_fields
+        or value.get("schema_id")
+        != PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID
+        or value.get("schema_version")
+        != PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_VERSION
+        or value.get("status") != "complete"
+        or value.get("writer_mode")
+        != infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+        or value.get("writer_status")
+        != "deferred_to_mandatory_final_layout_unit"
+        or value.get("worker_receipt_payload_digest")
+        != worker_receipt_payload_digest
+        or value.get("final_layout_payload_digest")
+        != final_layout_receipt.get("payload_digest")
+        or not isinstance(source_validation, Mapping)
+        or value.get("final_layout_source_array_validation_digest")
+        != canonical_json_sha256(source_validation)
+        or value.get("publication_requirement")
+        != "immutable_worker_bundle_requires_verified_final_layout_unit_v1"
+    ):
+        raise RuntimeError(
+            "Probability destination validation handoff is absent or differs."
+        )
 
 
 def _is_sha256_text(value: object) -> bool:
@@ -1481,6 +1555,16 @@ def _publish_worker_bundle(
                     package_receipt["payload"]["source_array_validation"]
                 ),
             }
+            if result.get("stage") == "inference" and (
+                result.get("probability_destination_validation_handoff") is not None
+            ):
+                _validate_probability_destination_validation_handoff(
+                    result["probability_destination_validation_handoff"],
+                    worker_receipt_payload_digest=str(
+                        proof["receipt"]["payload_digest"]
+                    ),
+                    final_layout_receipt=package_receipt,
+                )
         sampled_contour_binding = None
         if sampled_contour_receipt is not None:
             receipt_destination = temporary / "sampled_contour_receipt.json"
@@ -1749,6 +1833,13 @@ def run_inference_window(
             str(execution["inner_chunk_rows"]),
             "--mask-probs-shard-rois",
             str(execution["outer_shard_rows"]),
+            "--mask-probs-destination-validation",
+            str(
+                execution.get(
+                    "destination_validation_mode",
+                    infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FULL,
+                )
+            ),
             "--no-write-masks-roi",
             "--async-output",
             "--output-queue-size",
@@ -1767,6 +1858,19 @@ def run_inference_window(
         run = open_zarr_root(local_archive, mode="r")[
             f"subject_mask_shard_runs/{window['raw_run']}"
         ]
+        shard_write = run.attrs.get("mask_probs_shard_write")
+        if (
+            execution.get("destination_validation_mode")
+            == infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+            and (
+                not isinstance(shard_write, Mapping)
+                or shard_write.get("destination_validation_status")
+                != "deferred_to_mandatory_final_layout_unit"
+            )
+        ):
+            raise RuntimeError(
+                "Inference did not preserve the planned final-layout validation handoff."
+            )
         proof = _worker_evidence(local_archive, run)
         performance_phase_durations["local_proof"] = float(
             time.perf_counter() - phase_started
@@ -1826,6 +1930,34 @@ def run_inference_window(
                 "final_layout_unit"
             ],
         }
+        if (
+            execution.get("destination_validation_mode")
+            == infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+        ):
+            assert isinstance(shard_write, Mapping)
+            result["probability_destination_validation_handoff"] = {
+                "schema_id": (
+                    PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID
+                ),
+                "schema_version": (
+                    PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_VERSION
+                ),
+                "status": "complete",
+                "writer_mode": shard_write.get("destination_validation_mode"),
+                "writer_status": shard_write.get("destination_validation_status"),
+                "worker_receipt_payload_digest": proof["receipt"]["payload_digest"],
+                "final_layout_payload_digest": final_layout_package[
+                    "payload_digest"
+                ],
+                "final_layout_source_array_validation_digest": (
+                    canonical_json_sha256(
+                        final_layout_package["payload"]["source_array_validation"]
+                    )
+                ),
+                "publication_requirement": (
+                    "immutable_worker_bundle_requires_verified_final_layout_unit_v1"
+                ),
+            }
         telemetry_error = telemetry_start_error
         if telemetry_sampler is not None:
             try:

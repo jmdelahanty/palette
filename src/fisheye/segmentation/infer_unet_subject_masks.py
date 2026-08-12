@@ -147,6 +147,14 @@ MASK_PROBS_SHARDING_SCHEMA = "palette.subject_mask_probability_postpack.v1"
 MASK_PROBS_DIRECT_SHARDING_SCHEMA = (
     "palette.subject_mask_probability_double_buffered_shards.v1"
 )
+MASK_PROBS_DESTINATION_VALIDATION_FULL = "full_decoded_reread_v1"
+MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT = (
+    "receipt_bound_final_layout_unit_v1"
+)
+MASK_PROBS_DESTINATION_VALIDATION_MODES = (
+    MASK_PROBS_DESTINATION_VALIDATION_FULL,
+    MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT,
+)
 SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR = "subject_mask_scientific_identity"
 SUBJECT_MASK_ATTEMPT_ATTR = "subject_mask_attempt"
 SUBJECT_MASK_ATTEMPT_LINEAGE_EVIDENCE_ATTR = "subject_mask_attempt_lineage_evidence"
@@ -1965,6 +1973,7 @@ class _DoubleBufferedProbabilityShardWriter:
         shard_rows: int,
         profiler: InferenceTimingProfiler,
         buffer_count: int = 2,
+        destination_validation_mode: str = MASK_PROBS_DESTINATION_VALIDATION_FULL,
     ) -> None:
         shape = tuple(int(value) for value in destination.shape)
         if len(shape) != 4:
@@ -1983,6 +1992,14 @@ class _DoubleBufferedProbabilityShardWriter:
         self.buffer_rows = min(self.shard_rows, max(1, self.total_rows))
         self.profiler = profiler
         self.buffer_count = resolved_buffer_count
+        self.destination_validation_mode = str(destination_validation_mode)
+        if self.destination_validation_mode not in (
+            MASK_PROBS_DESTINATION_VALIDATION_MODES
+        ):
+            raise ValueError(
+                "Unsupported probability destination validation mode "
+                f"{self.destination_validation_mode!r}."
+            )
         self.buffers = [
             np.empty(
                 (self.channel_count, self.buffer_rows, self.height, self.width),
@@ -2000,7 +2017,12 @@ class _DoubleBufferedProbabilityShardWriter:
         self._active_start = 0
         self._active_rows = 0
         self._next_row = 0
-        self._source_digests = [hashlib.sha256() for _ in range(self.channel_count)]
+        self._source_digests = (
+            [hashlib.sha256() for _ in range(self.channel_count)]
+            if self.destination_validation_mode
+            == MASK_PROBS_DESTINATION_VALIDATION_FULL
+            else None
+        )
         self._write_seconds = 0.0
         self._full_shards_written = 0
         self._partial_shards_written = 0
@@ -2092,9 +2114,10 @@ class _DoubleBufferedProbabilityShardWriter:
                 with self.profiler.time("output_shard_write", items=row_count):
                     for channel in range(self.channel_count):
                         channel_values = self.buffers[index][channel, :row_count, :, :]
-                        self._source_digests[channel].update(
-                            channel_values.view(np.uint8)
-                        )
+                        if self._source_digests is not None:
+                            self._source_digests[channel].update(
+                                channel_values.view(np.uint8)
+                            )
                         self.destination[
                             start:stop,
                             channel : channel + 1,
@@ -2116,7 +2139,11 @@ class _DoubleBufferedProbabilityShardWriter:
                     self._free_buffers.put(int(item[0]))
                 self._flush_queue.task_done()
 
-    def finish(self, *, validation_row_step: int) -> dict[str, object]:
+    def finish(
+        self,
+        *,
+        validation_row_step: int,
+    ) -> dict[str, object]:
         self._raise_error()
         self._submit_active()
         self._flush_queue.put(self._sentinel)
@@ -2128,21 +2155,38 @@ class _DoubleBufferedProbabilityShardWriter:
                 f"Probability shard writer received {self._next_row} of {self.total_rows} rows."
             )
 
-        source_digests = [digest.hexdigest() for digest in self._source_digests]
-        validation_started = time.perf_counter()
-        with self.profiler.time("output_shard_validate", items=self.total_rows):
-            destination_digests = _probability_array_digests_by_channel(
-                self.destination,
-                row_step=int(validation_row_step),
-            )
-        validation_seconds = float(time.perf_counter() - validation_started)
-        if source_digests != destination_digests:
-            raise RuntimeError(
-                "Direct-sharded probability digest mismatch: "
-                f"source={source_digests} destination={destination_digests}."
-            )
-        source_digest = _aggregate_channel_digests(source_digests)
-        destination_digest = _aggregate_channel_digests(destination_digests)
+        validation_mode = self.destination_validation_mode
+        source_digests = (
+            [digest.hexdigest() for digest in self._source_digests]
+            if self._source_digests is not None
+            else None
+        )
+        destination_digests: list[str] | None = None
+        validation_seconds = 0.0
+        if validation_mode == MASK_PROBS_DESTINATION_VALIDATION_FULL:
+            assert source_digests is not None
+            validation_started = time.perf_counter()
+            with self.profiler.time("output_shard_validate", items=self.total_rows):
+                destination_digests = _probability_array_digests_by_channel(
+                    self.destination,
+                    row_step=int(validation_row_step),
+                )
+            validation_seconds = float(time.perf_counter() - validation_started)
+            if source_digests != destination_digests:
+                raise RuntimeError(
+                    "Direct-sharded probability digest mismatch: "
+                    f"source={source_digests} destination={destination_digests}."
+                )
+        source_digest = (
+            _aggregate_channel_digests(source_digests)
+            if source_digests is not None
+            else None
+        )
+        destination_digest = (
+            _aggregate_channel_digests(destination_digests)
+            if destination_digests is not None
+            else None
+        )
         buffer_bytes_each = int(self.buffers[0].nbytes)
         return {
             "schema_id": MASK_PROBS_DIRECT_SHARDING_SCHEMA,
@@ -2164,13 +2208,27 @@ class _DoubleBufferedProbabilityShardWriter:
             "full_row_shards_written": self._full_shards_written,
             "partial_row_shards_written": self._partial_shards_written,
             "write_seconds": self._write_seconds,
+            "destination_validation_mode": validation_mode,
+            "destination_validation_status": (
+                "complete"
+                if validation_mode == MASK_PROBS_DESTINATION_VALIDATION_FULL
+                else "deferred_to_mandatory_final_layout_unit"
+            ),
             "validation_seconds": validation_seconds,
-            "digest_scheme": "sha256_per_channel_then_sha256_v1",
+            "digest_scheme": (
+                "sha256_per_channel_then_sha256_v1"
+                if validation_mode == MASK_PROBS_DESTINATION_VALIDATION_FULL
+                else "semantic_receipt_units_then_mandatory_final_layout_v1"
+            ),
             "source_sha256_by_channel": source_digests,
             "destination_sha256_by_channel": destination_digests,
             "source_sha256": source_digest,
             "destination_sha256": destination_digest,
-            "exact_match": True,
+            "exact_match": (
+                True
+                if validation_mode == MASK_PROBS_DESTINATION_VALIDATION_FULL
+                else None
+            ),
         }
 
 
@@ -2289,6 +2347,9 @@ def _write_subject_mask_outputs(
     validation_accumulators: (
         Mapping[str, SubjectMaskArrayUnitAccumulator] | None
     ) = None,
+    mask_probs_destination_validation: str = (
+        MASK_PROBS_DESTINATION_VALIDATION_FULL
+    ),
 ) -> float:
     total_rois = int(roi_source.total_rois)
     height, width = map(int, roi_source.roi_shape)
@@ -2311,6 +2372,13 @@ def _write_subject_mask_outputs(
                 "--mask-probs-shard-rois must exceed and be an integer multiple of "
                 f"the effective inner chunk rows ({int(storage_chunks[0])}); got {shard_rows}."
             )
+    elif (
+        mask_probs_destination_validation
+        != MASK_PROBS_DESTINATION_VALIDATION_FULL
+    ):
+        raise ValueError(
+            "Deferred probability destination validation requires indexed sharding."
+        )
     metric_row_chunk = subject_mask_metric_row_chunk(total_rois)
 
     roi_array = roi_source.roi_array
@@ -2368,6 +2436,7 @@ def _write_subject_mask_outputs(
             shard_rows=int(mask_probs_shard_rois),
             profiler=profiler,
             buffer_count=2,
+            destination_validation_mode=mask_probs_destination_validation,
         )
         probs_arr = probability_shard_writer
     run_group.create_array(
@@ -2832,7 +2901,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Outer storage-shard row count for mask_probs_roi (default: 2048). Two host-memory buffers "
             "accumulate inference batches and write each complete indexed shard once; the final "
-            "destination is exact-validated before run completion."
+            "destination follows --mask-probs-destination-validation."
         ),
     )
     probability_storage.add_argument(
@@ -2847,6 +2916,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=("float16", "uint8"),
         default="uint8",
         help="Storage dtype for mask_probs_roi (default: uint8 for analysis runs).",
+    )
+    parser.add_argument(
+        "--mask-probs-destination-validation",
+        choices=MASK_PROBS_DESTINATION_VALIDATION_MODES,
+        default=MASK_PROBS_DESTINATION_VALIDATION_FULL,
+        help=(
+            "Validation of the completed probability destination. The default "
+            "rereads and hashes the decoded array. receipt_bound_final_layout_unit_v1 "
+            "is restricted to complete, non-authoritative collection partitions whose "
+            "caller must build and verify a final-layout unit before publication."
+        ),
     )
     parser.add_argument(
         "--write-masks-roi",
@@ -2991,6 +3071,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.require_training_materialization_binding and not args.crop_run:
         raise ValueError(
             "Strict training materialization input requires an explicit --crop-run."
+        )
+    if (
+        args.mask_probs_destination_validation
+        == MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
+    ) and (
+        canonical_output
+        or not _is_shard_output_parent(output_parent)
+        or args.roi_work_package_manifest is None
+        or args.roi_work_package_role != ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION
+        or args.mask_probs_shard_rois is None
+    ):
+        raise ValueError(
+            "receipt_bound_final_layout_unit_v1 is allowed only for an indexed-sharded "
+            "subject_mask_shard_runs output backed by an exact "
+            "complete_collection_partition work package."
         )
     zarr_path = Path(args.zarr_path).expanduser().resolve()
     training_materialization = (
@@ -3348,6 +3443,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             timing_profiler=timing_profiler,
             input_pixels_sha256=input_pixels_sha256,
             validation_accumulators=validation_accumulators,
+            mask_probs_destination_validation=str(
+                args.mask_probs_destination_validation
+            ),
         )
         if package_selection is not None:
             assert selected_crop_rows is not None
@@ -3497,6 +3595,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "inference_batch_size": int(args.batch_size),
             "async_output": bool(args.async_output),
             "output_queue_size": int(args.output_queue_size),
+            "mask_probs_destination_validation": str(
+                args.mask_probs_destination_validation
+            ),
             "duration_seconds": float(duration),
             "inference_duration_seconds": float(duration),
             "profile_timings_enabled": bool(args.profile_timings),
@@ -3618,7 +3719,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "d2h_copy includes sigmoid + clamp + dtype conversion, on-device spatial metrics, probability transfer, and optional binary transfer when masks_roi is materialized.",
                 "output_write_probs measures ordinary probability Zarr writes when indexed sharding is disabled; output_write_binary is present only when masks_roi is materialized.",
                 "output_shard_buffer_submit includes batch submission and any wait for one of two shard buffers; output_shard_buffer_fill measures copies into channel-major host buffers.",
-                "output_shard_write writes complete immutable probability storage shards from the background buffer while inference continues; output_shard_validate rereads only the completed destination and exact-checks per-channel decoded values.",
+                "output_shard_write writes complete immutable probability storage shards from the background buffer while inference continues; output_shard_validate appears only when the writer itself performs the full decoded destination reread.",
+                "receipt_bound_final_layout_unit_v1 defers that redundant writer reread only for a complete non-authoritative partition; mandatory final-layout packaging rereads the persisted probabilities, verifies their semantic receipt, and seals encoded objects before publication.",
                 "metric_compute covers copying precomputed per-batch metrics into full-run metric arrays.",
                 "output_queue_put and output_queue_drain appear when --async-output overlaps inference with background output writes.",
             ],
@@ -3700,6 +3802,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "mask_probs_storage_policy": run_group.attrs["mask_probs_storage_policy"],
             "mask_probs_default_shard_rois": int(DEFAULT_MASK_PROBS_SHARD_ROIS),
             "mask_probs_dtype": str(args.mask_probs_dtype),
+            "mask_probs_destination_validation": str(
+                args.mask_probs_destination_validation
+            ),
             "write_masks_roi": bool(args.write_masks_roi),
             "async_output": bool(args.async_output),
             "output_queue_size": int(args.output_queue_size),
