@@ -483,6 +483,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
         f"raw_subject_masks:{target_safe}",
         f"refined_keypoints:{target_safe}",
     ]
+    assert fragments[7]["metadata"]["terminal_job_key"] == publish_job.job_key
     assert fragments[8]["requires"] == [
         f"refined_keypoints:{target_safe}",
         f"refined_subject_masks:{target_safe}",
@@ -502,6 +503,19 @@ def test_build_plan_retains_explicit_subject_mask_streaming_rollback(
         subject_mask_publication_profile=(
             workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
         ),
+    )
+    target_safe = workflow.safe_component(
+        str(plan.target_plans[0]["target_id"]), default="target", max_length=56
+    )
+    fragments = {
+        fragment["fragment_id"]: fragment
+        for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    }
+    assert (
+        fragments[f"subject_mask_refinement:{target_safe}"]["metadata"][
+            "terminal_job_key"
+        ]
+        == f"mask_publish:{target_safe}"
     )
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
     target = plan.target_plans[0]

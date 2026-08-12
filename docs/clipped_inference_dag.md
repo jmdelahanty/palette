@@ -163,7 +163,7 @@ artifact detect array[22] -> native recording canonical publication
                                \                /
                           mask-package array[22]
                                   |
-                         refined-mask import
+                 receipt-composed bundle publication
                                   |
                        exact content validation
 ```
@@ -329,7 +329,7 @@ repair/cleanup -> keypoint array[22] -> keypoint finalize -> keypoint refine
                                                                 |
                                       completed raw masks -> mask-package array[22]
                                                                 |
-                                                  refined-mask import
+                                      receipt-composed bundle publication
                                                                 |
                                               validation -> registry -> NRS cleanup
 ```
@@ -337,14 +337,19 @@ repair/cleanup -> keypoint array[22] -> keypoint finalize -> keypoint refine
 The merged proxy may legitimately be absent during preflight because the
 keypoint finalizer creates it immediately before merging the completed shards.
 
-Collection-level refined-mask import runs on the `local` CPU queue with a
-three-hour requested wall time. The import publishes a very large dense mask
-surface and can exceed the `short` queue's hard one-hour limit even when memory
-use is low. If import is interrupted after all clip packages complete,
-`fisheye.cluster.clipped_inference_import_recovery` preflights those packages
-and complete refined keypoints, then submits only import, validation, registry
-reconciliation, and NRS cleanup. Recovery imports use `--overwrite` to replace
-the incomplete, non-promoted collection output; a complete output is refused.
+New plans default to `receipt_composed_v1`. Each mask-package worker seals raw
+and refined final-layout units, its quality partition, fixed-count sampled
+contours, and exact work-unit intervals. The recording-level `local`-queue job
+then assembles those receipts directly into an atomic, selector-ineligible
+four-member bundle; it does not create a merged refined draft first.
+
+`streaming_rollback_v1` remains an explicit compatibility profile. Only that
+profile runs the former collection-level refined-mask import and may use
+`fisheye.cluster.clipped_inference_import_recovery`. Import recovery fails
+closed for receipt-composed plans; their recovery path reruns the immutable
+package/publication tail through
+`fisheye.cluster.clipped_inference_keypoint_recovery`. Complete published runs
+are never overwritten by either path.
 
 ## Next-recording encoded-chunk publication checklist
 

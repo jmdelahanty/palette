@@ -1830,7 +1830,7 @@ def build_plan(
                         "module": "subject_mask_refinement",
                         "target_id": target.target_id,
                         "recording_layout": "clipped_collection",
-                        "terminal_job_key": mask_import_key,
+                        "terminal_job_key": mask_publish_key,
                     },
                 ),
                 LsfWorkflowFragment(
