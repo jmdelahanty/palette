@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 import json
@@ -27,6 +29,7 @@ from fisheye.shared.zarr.subject_mask_quality_manifest import (
 )
 from fisheye.shared.zarr.subject_mask_quality_producer import (
     SUBJECT_V1_LR_COMPONENTS,
+    SubjectMaskQualityPayload,
     SubjectV1LrObservationQualityPolicy,
     compute_subject_mask_quality_block,
     quality_profile_for_policy,
@@ -73,7 +76,7 @@ SUBJECT_MASK_QUALITY_SHADOW_SCHEMA_VERSION = 1
 SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID = (
     "palette.subject_mask_quality.write_receipt"
 )
-SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 1
+SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 2
 DEFAULT_SUBJECT_MASK_QUALITY_SHADOW_ROOT = Path(
     "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
     "subject_mask_quality"
@@ -469,6 +472,8 @@ def _write_receipt(
     block_rows: int,
     block_bytes_budget: int,
     block_count: int,
+    compute_workers_requested: int,
+    compute_workers_effective: int,
 ) -> dict[str, object]:
     return {
         "schema_id": SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID,
@@ -476,6 +481,13 @@ def _write_receipt(
         "source_compute_block_rows": int(block_rows),
         "source_compute_block_bytes_budget": int(block_bytes_budget),
         "source_compute_block_count": int(block_count),
+        "source_compute_workers_requested": int(compute_workers_requested),
+        "source_compute_workers_effective": int(compute_workers_effective),
+        "source_compute_execution": (
+            "ordered_inline_single_worker_v1"
+            if int(compute_workers_effective) == 1
+            else "bounded_thread_pool_ordered_single_writer_v1"
+        ),
         "output_write_unit": "complete_outer_shard_or_unsharded_chunk",
         "output_array_write_units": subject_mask_quality_output_write_units(plans),
         "scratch_surface": "node_local_npy_memmap_deleted_after_publication",
@@ -563,6 +575,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         SubjectV1LrObservationQualityPolicy()
     ),
     source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
+    compute_workers: int = 1,
     created_by: str = "subject_mask_quality_shadow",
 ) -> SubjectMaskQualityShadowPublication:
     """Compute, write, consolidate, and gate one immutable QC snapshot."""
@@ -572,6 +585,8 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
     )
     if not str(created_by).strip():
         raise ValueError("created_by cannot be empty.")
+    if type(compute_workers) is not int or compute_workers <= 0:
+        raise ValueError("compute_workers must be a positive integer.")
     resolved_run_id = str(run_id).strip()
     if not resolved_run_id or "/" in resolved_run_id:
         raise ValueError("run_id must be one nonempty archive group name.")
@@ -607,11 +622,14 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         budget_bytes=int(source_compute_block_bytes),
     )
     block_count = max(1, math.ceil(dimensions.n_rois / block_rows))
+    effective_compute_workers = min(int(compute_workers), int(block_count))
     receipt = _write_receipt(
         plans=plans,
         block_rows=block_rows,
         block_bytes_budget=int(source_compute_block_bytes),
         block_count=block_count,
+        compute_workers_requested=int(compute_workers),
+        compute_workers_effective=effective_compute_workers,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -645,35 +663,23 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             )
         }
         phase_started = time.perf_counter()
-        for start in range(0, dimensions.n_rois, block_rows):
-            stop = min(start + block_rows, dimensions.n_rois)
-            masks = np.ascontiguousarray(
-                _read_rows(source_mask_arrays["masks_roi"], start, stop)
-            )
-            source_digest.update(masks.view(np.uint8))
-            if composable_mask_verifier is not None:
-                composable_mask_verifier.append(start, masks)
-            keys = _read_rows(source_mask_arrays["instance_key"], start, stop)
-            source_crop_row_ids = _read_rows(
-                source_mask_arrays["source_crop_row_ids"], start, stop
-            )
-            frames = _read_rows(
-                source_mask_arrays["source_acquisition_frame_index"], start, stop
-            )
-            for path, values in (
-                ("instance_key", keys),
-                ("source_crop_row_ids", source_crop_row_ids),
-                ("source_acquisition_frame_index", frames),
-            ):
-                identity_digests[path].update(
-                    np.ascontiguousarray(values).view(np.uint8)
-                )
-            payload = compute_subject_mask_quality_block(
-                masks,
-                available_channels=available,
-                components=components,
-                policy=policy,
-            )
+        pending: deque[
+            tuple[
+                int,
+                int,
+                np.ndarray,
+                np.ndarray,
+                Future[SubjectMaskQualityPayload],
+            ]
+        ] = deque()
+
+        def write_payload(
+            start: int,
+            stop: int,
+            keys: np.ndarray,
+            frames: np.ndarray,
+            payload: SubjectMaskQualityPayload,
+        ) -> None:
             scratch_arrays["instance_key"][start:stop] = keys
             scratch_arrays["source_mask_row_ids"][start:stop] = np.arange(
                 start, stop, dtype=np.int64
@@ -681,6 +687,87 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             scratch_arrays["source_acquisition_frame_index"][start:stop] = frames
             for path, values in payload.as_arrays().items():
                 scratch_arrays[path][start:stop] = values
+
+        def process_blocks(executor: ThreadPoolExecutor | None) -> None:
+            for start in range(0, dimensions.n_rois, block_rows):
+                stop = min(start + block_rows, dimensions.n_rois)
+                masks = np.ascontiguousarray(
+                    _read_rows(source_mask_arrays["masks_roi"], start, stop)
+                )
+                source_digest.update(masks.view(np.uint8))
+                if composable_mask_verifier is not None:
+                    composable_mask_verifier.append(start, masks)
+                keys = _read_rows(source_mask_arrays["instance_key"], start, stop)
+                source_crop_row_ids = _read_rows(
+                    source_mask_arrays["source_crop_row_ids"], start, stop
+                )
+                frames = _read_rows(
+                    source_mask_arrays["source_acquisition_frame_index"], start, stop
+                )
+                for path, values in (
+                    ("instance_key", keys),
+                    ("source_crop_row_ids", source_crop_row_ids),
+                    ("source_acquisition_frame_index", frames),
+                ):
+                    identity_digests[path].update(
+                        np.ascontiguousarray(values).view(np.uint8)
+                    )
+                if executor is None:
+                    payload = compute_subject_mask_quality_block(
+                        masks,
+                        available_channels=available,
+                        components=components,
+                        policy=policy,
+                    )
+                    write_payload(start, stop, keys, frames, payload)
+                    continue
+                future = executor.submit(
+                    compute_subject_mask_quality_block,
+                    masks,
+                    available_channels=available,
+                    components=components,
+                    policy=policy,
+                )
+                pending.append((start, stop, keys, frames, future))
+                if len(pending) >= effective_compute_workers:
+                    (
+                        pending_start,
+                        pending_stop,
+                        pending_keys,
+                        pending_frames,
+                        pending_future,
+                    ) = pending.popleft()
+                    write_payload(
+                        pending_start,
+                        pending_stop,
+                        pending_keys,
+                        pending_frames,
+                        pending_future.result(),
+                    )
+            while pending:
+                (
+                    pending_start,
+                    pending_stop,
+                    pending_keys,
+                    pending_frames,
+                    pending_future,
+                ) = pending.popleft()
+                write_payload(
+                    pending_start,
+                    pending_stop,
+                    pending_keys,
+                    pending_frames,
+                    pending_future.result(),
+                )
+
+        if effective_compute_workers == 1:
+            process_blocks(None)
+        else:
+            with ThreadPoolExecutor(
+                max_workers=effective_compute_workers,
+                thread_name_prefix="subject-mask-quality",
+            ) as compute_executor:
+                process_blocks(compute_executor)
         observed_source_digests = {
             "masks_roi": source_digest.hexdigest(),
             **{path: digest.hexdigest() for path, digest in identity_digests.items()},

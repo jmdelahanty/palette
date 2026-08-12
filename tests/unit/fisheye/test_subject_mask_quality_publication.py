@@ -131,6 +131,7 @@ def test_bounded_selector_ineligible_publication_round_trip(tmp_path: object) ->
         shadow_root=shadow_root,
         scratch_root=scratch_root,
         source_compute_block_bytes=512,
+        compute_workers=2,
         created_by="pytest",
     )
 
@@ -139,6 +140,11 @@ def test_bounded_selector_ineligible_publication_round_trip(tmp_path: object) ->
     assert tracked_masks.selections == [slice(0, 2), slice(2, 4)]
     assert publication.write_receipt["source_compute_block_rows"] == 2
     assert publication.write_receipt["source_compute_block_count"] == 2
+    assert publication.write_receipt["source_compute_workers_requested"] == 2
+    assert publication.write_receipt["source_compute_workers_effective"] == 2
+    assert publication.write_receipt["source_compute_execution"] == (
+        "bounded_thread_pool_ordered_single_writer_v1"
+    )
     assert list(scratch_root.iterdir()) == []
 
     family = zarr.open_group(

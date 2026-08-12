@@ -853,7 +853,7 @@ def validate_subject_mask_quality_run_manifest(
                         "subject-mask quality output write units differ from storage plan"
                     )
     receipt = payload.get("write_receipt")
-    expected_receipt_fields = {
+    legacy_receipt_fields = {
         "schema_id",
         "schema_version",
         "source_compute_block_rows",
@@ -864,12 +864,21 @@ def validate_subject_mask_quality_run_manifest(
         "scratch_surface",
         "parallel_write_policy",
     }
+    current_receipt_fields = legacy_receipt_fields | {
+        "source_compute_workers_requested",
+        "source_compute_workers_effective",
+        "source_compute_execution",
+    }
+    receipt_version = receipt.get("schema_version") if isinstance(receipt, Mapping) else None
+    expected_receipt_fields = (
+        current_receipt_fields if receipt_version == 2 else legacy_receipt_fields
+    )
     if not isinstance(receipt, Mapping) or set(receipt) != expected_receipt_fields:
         errors.append("subject-mask quality write_receipt is not exact")
     else:
         if (
             receipt.get("schema_id") != "palette.subject_mask_quality.write_receipt"
-            or receipt.get("schema_version") != 1
+            or receipt.get("schema_version") not in {1, 2}
             or receipt.get("output_write_unit")
             != "complete_outer_shard_or_unsharded_chunk"
             or receipt.get("scratch_surface")
@@ -878,6 +887,27 @@ def validate_subject_mask_quality_run_manifest(
             != "single_writer_v1_future_workers_require_disjoint_whole_shards"
         ):
             errors.append("subject-mask quality write_receipt identity mismatch")
+        if receipt.get("schema_version") == 2:
+            requested = receipt.get("source_compute_workers_requested")
+            effective = receipt.get("source_compute_workers_effective")
+            execution = receipt.get("source_compute_execution")
+            if (
+                type(requested) is not int
+                or requested <= 0
+                or type(effective) is not int
+                or effective <= 0
+                or effective > requested
+                or execution
+                not in {
+                    "ordered_inline_single_worker_v1",
+                    "bounded_thread_pool_ordered_single_writer_v1",
+                }
+                or (effective == 1)
+                != (execution == "ordered_inline_single_worker_v1")
+            ):
+                errors.append(
+                    "subject-mask quality compute-worker receipt is invalid"
+                )
         for name in (
             "source_compute_block_rows",
             "source_compute_block_bytes_budget",
@@ -907,6 +937,14 @@ def validate_subject_mask_quality_run_manifest(
                 )
             if receipt.get("source_compute_block_count") != expected_count:
                 errors.append("subject-mask quality compute block count mismatch")
+            if receipt.get("schema_version") == 2 and receipt.get(
+                "source_compute_workers_effective"
+            ) != min(
+                int(receipt["source_compute_workers_requested"]), expected_count
+            ):
+                errors.append(
+                    "subject-mask quality effective compute workers mismatch"
+                )
         units = receipt.get("output_array_write_units")
         if not isinstance(units, Mapping) or set(units) != set(
             SUBJECT_MASK_QUALITY_SCHEMA_V1.binding_paths

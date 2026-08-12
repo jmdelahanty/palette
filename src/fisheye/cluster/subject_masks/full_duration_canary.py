@@ -105,7 +105,7 @@ from fisheye.shared.zarr_run_completion import (
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
 PLAN_SCHEMA_LEGACY_VERSION = 4
-PLAN_SCHEMA_VERSION = 7
+PLAN_SCHEMA_VERSION = 8
 INFERENCE_REUSE_SCHEMA_ID = "palette.subject_mask.inference_reuse"
 INFERENCE_REUSE_SCHEMA_VERSION = 1
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
@@ -604,6 +604,7 @@ def prepare_canary(
     reuse_inference_plan: Path | None = None,
     require_clean_repo: bool = True,
     core_physical_unit_workers: int = 4,
+    quality_compute_workers: int = 8,
     gpu_telemetry_interval_seconds: int = DEFAULT_GPU_TELEMETRY_INTERVAL_SECONDS,
     synchronized_stage_profiling: bool = False,
 ) -> dict[str, Any]:
@@ -618,6 +619,8 @@ def prepare_canary(
         raise ValueError("Synchronized stage profiling must be one exact boolean.")
     if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
         raise ValueError("core_physical_unit_workers must be a positive integer.")
+    if type(quality_compute_workers) is not int or quality_compute_workers <= 0:
+        raise ValueError("quality_compute_workers must be a positive integer.")
     output = _require_benchmark_root(run_root)
     if output.exists():
         raise FileExistsError(f"Immutable canary run root already exists: {output}")
@@ -845,6 +848,7 @@ def prepare_canary(
             },
             "publication": {
                 "core_physical_unit_workers": int(core_physical_unit_workers),
+                "quality_compute_workers": int(quality_compute_workers),
                 "core_validation_mode": (
                     SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
                 ),
@@ -893,7 +897,7 @@ def load_plan(path: Path) -> dict[str, Any]:
     if (
         payload.get("schema_id") != PLAN_SCHEMA_ID
         or payload.get("schema_version")
-        not in {PLAN_SCHEMA_LEGACY_VERSION, 5, 6, PLAN_SCHEMA_VERSION}
+        not in {PLAN_SCHEMA_LEGACY_VERSION, 5, 6, 7, PLAN_SCHEMA_VERSION}
         or payload.get("status") != "planned"
         or payload.get("classification") != BENCHMARK_CLASSIFICATION
     ):
@@ -918,7 +922,7 @@ def load_plan(path: Path) -> dict[str, Any]:
     if payload.get("safety", {}).get("bundle_activation_allowed") is not False:
         raise ValueError("Canary plan does not fail closed on activation.")
     reuse = payload.get("inference_reuse")
-    if payload.get("schema_version") in {5, 6, PLAN_SCHEMA_VERSION}:
+    if payload.get("schema_version") in {5, 6, 7, PLAN_SCHEMA_VERSION}:
         _validate_inference_reuse_contract(reuse)
     elif reuse is not None:
         raise ValueError("Legacy canary plans cannot declare inference reuse.")
@@ -941,7 +945,7 @@ def load_plan(path: Path) -> dict[str, Any]:
         != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
     ):
         raise ValueError("Canary plan does not enforce composable dense identity.")
-    if payload["schema_version"] in {6, PLAN_SCHEMA_VERSION}:
+    if payload["schema_version"] in {6, 7, PLAN_SCHEMA_VERSION}:
         inference = payload.get("execution", {}).get("inference", {})
         telemetry = inference.get("gpu_runtime_telemetry")
         if (
@@ -963,7 +967,7 @@ def load_plan(path: Path) -> dict[str, Any]:
             or telemetry["identity_policy"] != GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY
         ):
             raise ValueError("Canary GPU runtime telemetry plan differs.")
-    if payload["schema_version"] == PLAN_SCHEMA_VERSION:
+    if payload["schema_version"] in {7, PLAN_SCHEMA_VERSION}:
         inference = payload.get("execution", {}).get("inference", {})
         if (
             inference.get("destination_validation_mode")
@@ -972,6 +976,10 @@ def load_plan(path: Path) -> dict[str, Any]:
             raise ValueError(
                 "Canary probability destination validation policy differs."
             )
+    if payload["schema_version"] == PLAN_SCHEMA_VERSION:
+        quality_workers = publication.get("quality_compute_workers")
+        if type(quality_workers) is not int or quality_workers <= 0:
+            raise ValueError("Canary quality compute-worker policy differs.")
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
@@ -1150,7 +1158,10 @@ def _existing_worker_result(
         != canonical_json_sha256(package_receipt["payload"]["source_array_validation"])
     ):
         raise RuntimeError(f"Worker final-layout package binding differs: {bundle}")
-    if stage == "inference" and plan.get("schema_version") == PLAN_SCHEMA_VERSION:
+    if stage == "inference" and plan.get("schema_version") in {
+        7,
+        PLAN_SCHEMA_VERSION,
+    }:
         _validate_probability_destination_validation_handoff(
             result.get("probability_destination_validation_handoff"),
             worker_receipt_payload_digest=str(
@@ -2298,6 +2309,11 @@ def finalize_canary(
             bundle_id=str(output["bundle_id"]),
             local_output_root=work / "snapshots",
             quality_scratch_root=work / "quality_scratch",
+            quality_compute_workers=int(
+                plan["execution"]["publication"].get(
+                    "quality_compute_workers", 1
+                )
+            ),
             activate=False,
             expected_work_units=[
                 {
@@ -2589,6 +2605,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     prepare.add_argument(
+        "--quality-compute-workers",
+        type=int,
+        default=8,
+        help=(
+            "Bounded row-local subject-mask QC compute threads; source reads, "
+            "hashing, and output writes remain ordered (default: 8)."
+        ),
+    )
+    prepare.add_argument(
         "--gpu-telemetry-interval-seconds",
         type=int,
         default=DEFAULT_GPU_TELEMETRY_INTERVAL_SECONDS,
@@ -2655,6 +2680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             reuse_inference_plan=args.reuse_inference_plan,
             require_clean_repo=not bool(args.allow_dirty),
             core_physical_unit_workers=args.core_physical_unit_workers,
+            quality_compute_workers=args.quality_compute_workers,
             gpu_telemetry_interval_seconds=args.gpu_telemetry_interval_seconds,
             synchronized_stage_profiling=bool(args.synchronized_stage_profiling),
         )

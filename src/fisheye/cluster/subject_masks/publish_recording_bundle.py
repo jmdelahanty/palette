@@ -585,6 +585,7 @@ def publish_recording_subject_mask_bundle(
     bundle_id: str,
     local_output_root: Path,
     quality_scratch_root: Path,
+    quality_compute_workers: int = 1,
     cache_run: str | None = None,
     activate: bool = False,
     refined_draft_runs: Sequence[str] | None = None,
@@ -605,6 +606,8 @@ def publish_recording_subject_mask_bundle(
 ) -> dict[str, object]:
     if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
         raise ValueError("core_physical_unit_workers must be a positive integer.")
+    if type(quality_compute_workers) is not int or quality_compute_workers <= 0:
+        raise ValueError("quality_compute_workers must be a positive integer.")
     resolved_core_validation_mode = SubjectMaskCoreValidationMode(core_validation_mode)
     contour_receipt_paths = tuple(sampled_contour_worker_receipts or ())
     if require_worker_sampled_contours and not contour_receipt_paths:
@@ -970,6 +973,7 @@ def publish_recording_subject_mask_bundle(
         run_id=quality_run,
         shadow_root=output,
         scratch_root=quality_scratch_root,
+        compute_workers=quality_compute_workers,
         created_by="publish_recording_subject_mask_bundle",
     )
     cache_publication = None
@@ -1026,6 +1030,12 @@ def publish_recording_subject_mask_bundle(
         ),
         "publication_execution": {
             "core_physical_unit_workers_requested": int(core_physical_unit_workers),
+            "quality_compute_workers_requested": int(quality_compute_workers),
+            "quality_compute_workers_effective": int(
+                quality_publication.write_receipt[
+                    "source_compute_workers_effective"
+                ]
+            ),
             "core_validation_mode": resolved_core_validation_mode.value,
             "parallel_write_policy": (
                 "single_writer_v1_future_workers_require_disjoint_whole_shards"
@@ -1034,6 +1044,7 @@ def publish_recording_subject_mask_bundle(
             ),
             "raw_phase_seconds": dict(raw_publication.phase_seconds),
             "refined_phase_seconds": dict(refined_publication.phase_seconds),
+            "quality_phase_seconds": dict(quality_publication.phase_seconds),
             "sampled_contour_source_mode": (
                 "receipt_bound_worker_arrays"
                 if sampled_contour_assembly is not None
@@ -1089,6 +1100,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bundle-id", required=True)
     parser.add_argument("--local-output-root", required=True, type=Path)
     parser.add_argument("--quality-scratch-root", required=True, type=Path)
+    parser.add_argument(
+        "--quality-compute-workers",
+        type=int,
+        default=1,
+        help=(
+            "Bounded row-local QC compute threads. Source reads, hashes, and "
+            "scratch/output writes remain ordered and single-owner (default: 1)."
+        ),
+    )
     parser.add_argument(
         "--expected-work-units-manifest",
         type=Path,
@@ -1217,6 +1237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         bundle_id=args.bundle_id,
         local_output_root=args.local_output_root,
         quality_scratch_root=args.quality_scratch_root,
+        quality_compute_workers=args.quality_compute_workers,
         cache_source_compute_block_bytes=args.cache_source_compute_block_bytes,
         cache_compute_workers=args.cache_compute_workers,
         core_physical_unit_workers=args.core_physical_unit_workers,
