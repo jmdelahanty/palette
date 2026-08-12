@@ -2,10 +2,10 @@
 
 Date: 2026-08-11
 
-Status: implementation checkpoint complete for Phases A-B and the Phase-C
-publication boundary; bounded row-local quality compute is implemented,
-worker-produced quality reuse is deferred, and the recording-scale Phase-D
-canary is running
+Status: implementation checkpoint complete for Phases A-B and the partitioned
+Phase-C quality boundary; the current canary plan computes immutable
+worker-produced quality partitions concurrently and assembles them during
+single-owner publication. Recording-scale Phase-D evidence is still required.
 
 ## Goal
 
@@ -175,30 +175,47 @@ readable and migratable as optional cold inspection/export data.
 - [x] Parallelize only the row-local quality kernel with bounded workers while
   preserving ordered source reads, digest updates, scratch writes, Zarr writes,
   and publication ownership.
-- [ ] Compute row-local quality evidence with the same final physical-unit
-  ownership where scientifically valid, eliminating the quality computation's
-  own full dense traversal.
-- [ ] Define explicit boundary/global reducers for non-row-local metrics.
+- [x] Compute row-local quality evidence from each terminal refined worker,
+  with exact dense-worker receipt and global row/frame-interval binding.
+- [x] Freeze the current quality profile as observation-local; it has no
+  cross-worker reducer. Any future temporal/global metrics require a separate
+  profile and explicit reduction stage.
 - [x] Bind quality input to the exact refined manifest, component registry,
   complete dense logical-unit identity, and whole-value identities of every
   narrow source array.
-- [ ] Assemble quality arrays without a second full dense-mask scan.
+- [x] Assemble the worker-produced quality arrays without recomputing connected
+  components, topology, containment, or overlap metrics over the complete
+  recording.
+- [ ] Replace the compatibility whole-value source hash with a composable
+  receipt-bound source reference so the final publisher need not perform its
+  remaining ordered dense identity-verification scan.
 - [ ] Regenerate stale bitpacked/RLE/contour caches only at explicit validation,
   promotion, or maintenance boundaries.
 
-The unchecked quality-local items are an explicit follow-on optimization. They
-are not required to remove the redundant core-finalizer scan: quality still
-has to read refined masks to compute scientific QC, and the current checkpoint
-validates the composable identity during that same bounded traversal. A future
-worker-local quality design may reuse more computation, but it must first
-define scientifically correct reducers for metrics that cross row or worker
-boundaries.
+Each quality job owns one terminal refined worker and writes one node-local
+partition containing only the 11 row-aligned quality arrays (the final
+`frame_row_offsets` index is derived during assembly). Its immutable receipt
+binds the exact refined-worker receipt, dense-mask unit digest, component and
+quality contracts, producer commit, frame interval, row interval, array
+shapes/dtypes, and fixed-size logical-unit hashes. The recording publisher
+requires gap-free ordered `[0, R)` coverage and never lets workers write the
+final Zarr concurrently.
 
-The bounded compute path uses write-receipt v2 and records requested/effective
-workers plus its execution policy. Canary plan v8 selects four workers by
-default; plan v7 and older publications remain readable and execute the prior
-single-worker path. A 512-row real refined-mask benchmark on the workstation
-produced identical payload digests for every candidate:
+The current source-reference schema still requires a conventional whole-value
+SHA-256 of the refined dense mask. Consequently, adopting precomputed quality
+partitions eliminates the expensive scientific QC recomputation but the final
+publisher still performs one ordered dense identity-verification pass. That
+scan is deliberately retained rather than weakening the existing manifest. A
+future versioned composable source-reference contract may remove it after a
+canary measures its residual cost.
+
+The monolithic bounded compute path uses write-receipt v2; partition adoption
+uses write-receipt v3 and records the complete worker assembly. Canary plan v9
+requires partitioned QC, selects four compute threads per partition and ten
+concurrent partition jobs by default, and makes recording publication depend
+on terminal quality coverage. Plan v8 remains loadable and retains the
+monolithic compatibility path. A 512-row real refined-mask benchmark on the
+workstation produced identical payload digests for every candidate:
 
 | QC workers | Seconds | Rows/s |
 |---:|---:|---:|
@@ -210,6 +227,14 @@ produced identical payload digests for every candidate:
 Four workers are the provisional knee: 2.75x the single-worker throughput,
 while eight workers improve only another 5%. This is implementation evidence,
 not the recording-scale promotion gate.
+
+At the measured four-thread rate, one roughly 53,000-row Sleepyfish clip is
+about six minutes of QC. Twenty-two clips at concurrency ten require three
+waves, so approximately 18-25 minutes is a reasonable hypothesis for the
+scientific QC phase, versus roughly six hours for one single-threaded
+recording traversal. This is a projection, not a completed cluster benchmark;
+the remaining dense identity scan, scheduling, PRFS transfer, and final Zarr
+write are additional publication time.
 
 ## Phase D — benchmark and promotion
 
@@ -235,10 +260,11 @@ and records its publication commit separately from the worker commit.
 
 That v7 canary intentionally retains the single-worker QC baseline. Its live
 row evidence projected a roughly 5-6 hour exhaustive quality phase, which
-motivated but does not retroactively alter the v8 bounded-compute path. The
-final canary must report separate core publication and quality compute phases:
-the former no longer decodes every complete dense unit, while the latter still
-reads refined masks because it computes scientific QC.
+motivated but does not retroactively alter the v9 partitioned path. A new plan
+is required to exercise partitioned quality; the existing running job is not
+mutated. The final canary must report worker-QC, partition adoption, remaining
+dense identity verification, core publication, cache publication, and total
+wall time separately.
 
 Implementation validation for the composable checkpoint:
 
@@ -256,6 +282,19 @@ Implementation validation for the composable checkpoint:
   coordinate-authority reader;
 - legacy v2/v4 publication tests remain green;
 - Ruff, Black, Python compilation, and `git diff --check` pass.
+
+Additional partitioned-quality implementation validation:
+
+- 29 partition, quality-publication, canary, and recording-bundle tests passed;
+- all 10 recording-bundle publication tests passed, including the long
+  coordinate-bound fixture and six independent multi-worker/cache fixtures;
+- serial and partitioned QC arrays are exactly equal, including canonical NaN
+  handling;
+- tampered partition arrays, source receipts, gaps, overlaps, reordered rows,
+  duplicate instance keys, and incomplete assemblies fail closed;
+- current plans insert a dedicated LSF quality array between refinement and
+  publication, while old plans remain readable compatibility inputs;
+- static compilation, Ruff, Black, and `git diff --check` pass.
 
 ## Failure semantics
 

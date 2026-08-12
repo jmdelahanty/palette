@@ -95,6 +95,12 @@ from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
     validate_subject_mask_sampled_contour_worker_receipt,
     write_subject_mask_sampled_contour_worker_receipt,
 )
+from fisheye.shared.zarr.subject_mask_quality_partition import (
+    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_ID,
+    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION,
+    compute_subject_mask_quality_partition,
+    validate_subject_mask_quality_partition,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
@@ -105,7 +111,8 @@ from fisheye.shared.zarr_run_completion import (
 
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
 PLAN_SCHEMA_LEGACY_VERSION = 4
-PLAN_SCHEMA_VERSION = 8
+PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION = 8
+PLAN_SCHEMA_VERSION = 9
 INFERENCE_REUSE_SCHEMA_ID = "palette.subject_mask.inference_reuse"
 INFERENCE_REUSE_SCHEMA_VERSION = 1
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
@@ -121,6 +128,7 @@ FAMILY = "subject_mask_full_duration_canary"
 BENCHMARK_CLASSIFICATION = "selector_ineligible_full_duration_canary"
 DEFAULT_GPU_CONCURRENCY = 4
 DEFAULT_CPU_CONCURRENCY = 4
+DEFAULT_QUALITY_CONCURRENCY = 10
 DEFAULT_GPU_TELEMETRY_INTERVAL_SECONDS = 1
 _ATTEMPT_NAMESPACE = UUID("79676a9f-24f1-4be9-ac50-c374b0fdccae")
 _RAW_MASK_LABELS = ("subject_body", "eyes_union", "swim_bladder")
@@ -861,6 +869,11 @@ def prepare_canary(
                     else "bounded_threaded_disjoint_whole_physical_row_bands_v1"
                 ),
             },
+            "quality_partitions": {
+                "compute_workers_per_partition": int(quality_compute_workers),
+                "execution": "independent_refined_worker_bound_partitions_v1",
+                "publication": "immutable_partition_then_single_owner_merge_v1",
+            },
         },
         "safety": {
             "production_registry_used": False,
@@ -871,8 +884,10 @@ def prepare_canary(
             "window_rows_are_exact_nonoverlapping_complete": True,
             "final_layout_units_are_selector_ineligible_transport": True,
             "receipt_bound_composable_dense_identity_required": True,
-            "finalizer_full_dense_decode_hash_allowed": False,
+            "core_finalizer_full_dense_decode_hash_allowed": False,
+            "quality_finalizer_ordered_dense_identity_scan_required": True,
             "worker_sampled_contours_required": True,
+            "worker_quality_partitions_required": True,
             "full_ragged_contours_allowed": False,
         },
     }
@@ -897,7 +912,14 @@ def load_plan(path: Path) -> dict[str, Any]:
     if (
         payload.get("schema_id") != PLAN_SCHEMA_ID
         or payload.get("schema_version")
-        not in {PLAN_SCHEMA_LEGACY_VERSION, 5, 6, 7, PLAN_SCHEMA_VERSION}
+        not in {
+            PLAN_SCHEMA_LEGACY_VERSION,
+            5,
+            6,
+            7,
+            PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+            PLAN_SCHEMA_VERSION,
+        }
         or payload.get("status") != "planned"
         or payload.get("classification") != BENCHMARK_CLASSIFICATION
     ):
@@ -922,7 +944,13 @@ def load_plan(path: Path) -> dict[str, Any]:
     if payload.get("safety", {}).get("bundle_activation_allowed") is not False:
         raise ValueError("Canary plan does not fail closed on activation.")
     reuse = payload.get("inference_reuse")
-    if payload.get("schema_version") in {5, 6, 7, PLAN_SCHEMA_VERSION}:
+    if payload.get("schema_version") in {
+        5,
+        6,
+        7,
+        PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+        PLAN_SCHEMA_VERSION,
+    }:
         _validate_inference_reuse_contract(reuse)
     elif reuse is not None:
         raise ValueError("Legacy canary plans cannot declare inference reuse.")
@@ -932,20 +960,29 @@ def load_plan(path: Path) -> dict[str, Any]:
     ):
         raise ValueError("Canary plan does not enforce the sampled-contour profile.")
     publication = payload.get("execution", {}).get("publication", {})
+    core_dense_decode_allowed = payload.get("safety", {}).get(
+        "core_finalizer_full_dense_decode_hash_allowed"
+        if payload["schema_version"] == PLAN_SCHEMA_VERSION
+        else "finalizer_full_dense_decode_hash_allowed"
+    )
     if (
         payload.get("safety", {}).get(
             "receipt_bound_composable_dense_identity_required"
         )
         is not True
-        or payload.get("safety", {}).get("finalizer_full_dense_decode_hash_allowed")
-        is not False
+        or core_dense_decode_allowed is not False
         or publication.get("core_validation_mode")
         != SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
         or publication.get("logical_identity_unit_rows")
         != SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
     ):
         raise ValueError("Canary plan does not enforce composable dense identity.")
-    if payload["schema_version"] in {6, 7, PLAN_SCHEMA_VERSION}:
+    if payload["schema_version"] in {
+        6,
+        7,
+        PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+        PLAN_SCHEMA_VERSION,
+    }:
         inference = payload.get("execution", {}).get("inference", {})
         telemetry = inference.get("gpu_runtime_telemetry")
         if (
@@ -967,7 +1004,11 @@ def load_plan(path: Path) -> dict[str, Any]:
             or telemetry["identity_policy"] != GPU_RUNTIME_TELEMETRY_IDENTITY_POLICY
         ):
             raise ValueError("Canary GPU runtime telemetry plan differs.")
-    if payload["schema_version"] in {7, PLAN_SCHEMA_VERSION}:
+    if payload["schema_version"] in {
+        7,
+        PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
+        PLAN_SCHEMA_VERSION,
+    }:
         inference = payload.get("execution", {}).get("inference", {})
         if (
             inference.get("destination_validation_mode")
@@ -980,6 +1021,26 @@ def load_plan(path: Path) -> dict[str, Any]:
         quality_workers = publication.get("quality_compute_workers")
         if type(quality_workers) is not int or quality_workers <= 0:
             raise ValueError("Canary quality compute-worker policy differs.")
+        quality_partitions = payload.get("execution", {}).get("quality_partitions")
+        if (
+            quality_partitions
+            != {
+                "compute_workers_per_partition": quality_workers,
+                "execution": "independent_refined_worker_bound_partitions_v1",
+                "publication": "immutable_partition_then_single_owner_merge_v1",
+            }
+            or payload.get("safety", {}).get("worker_quality_partitions_required")
+            is not True
+            or payload.get("safety", {}).get(
+                "core_finalizer_full_dense_decode_hash_allowed"
+            )
+            is not False
+            or payload.get("safety", {}).get(
+                "quality_finalizer_ordered_dense_identity_scan_required"
+            )
+            is not True
+        ):
+            raise ValueError("Canary partitioned-quality policy differs.")
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         raise ValueError("Canary plan has no windows.")
@@ -1160,6 +1221,7 @@ def _existing_worker_result(
         raise RuntimeError(f"Worker final-layout package binding differs: {bundle}")
     if stage == "inference" and plan.get("schema_version") in {
         7,
+        PLAN_SCHEMA_PRE_PARTITIONED_QUALITY_VERSION,
         PLAN_SCHEMA_VERSION,
     }:
         _validate_probability_destination_validation_handoff(
@@ -1246,9 +1308,7 @@ def _validate_probability_destination_validation_handoff(
     }
     payload = final_layout_receipt.get("payload")
     source_validation = (
-        payload.get("source_array_validation")
-        if isinstance(payload, Mapping)
-        else None
+        payload.get("source_array_validation") if isinstance(payload, Mapping) else None
     )
     if (
         not isinstance(value, Mapping)
@@ -1260,10 +1320,8 @@ def _validate_probability_destination_validation_handoff(
         or value.get("status") != "complete"
         or value.get("writer_mode")
         != infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
-        or value.get("writer_status")
-        != "deferred_to_mandatory_final_layout_unit"
-        or value.get("worker_receipt_payload_digest")
-        != worker_receipt_payload_digest
+        or value.get("writer_status") != "deferred_to_mandatory_final_layout_unit"
+        or value.get("worker_receipt_payload_digest") != worker_receipt_payload_digest
         or value.get("final_layout_payload_digest")
         != final_layout_receipt.get("payload_digest")
         or not isinstance(source_validation, Mapping)
@@ -1870,14 +1928,12 @@ def run_inference_window(
             f"subject_mask_shard_runs/{window['raw_run']}"
         ]
         shard_write = run.attrs.get("mask_probs_shard_write")
-        if (
-            execution.get("destination_validation_mode")
-            == infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT
-            and (
-                not isinstance(shard_write, Mapping)
-                or shard_write.get("destination_validation_status")
-                != "deferred_to_mandatory_final_layout_unit"
-            )
+        if execution.get(
+            "destination_validation_mode"
+        ) == infer_unet_subject_masks.MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT and (
+            not isinstance(shard_write, Mapping)
+            or shard_write.get("destination_validation_status")
+            != "deferred_to_mandatory_final_layout_unit"
         ):
             raise RuntimeError(
                 "Inference did not preserve the planned final-layout validation handoff."
@@ -1947,9 +2003,7 @@ def run_inference_window(
         ):
             assert isinstance(shard_write, Mapping)
             result["probability_destination_validation_handoff"] = {
-                "schema_id": (
-                    PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID
-                ),
+                "schema_id": (PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID),
                 "schema_version": (
                     PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_VERSION
                 ),
@@ -1957,9 +2011,7 @@ def run_inference_window(
                 "writer_mode": shard_write.get("destination_validation_mode"),
                 "writer_status": shard_write.get("destination_validation_status"),
                 "worker_receipt_payload_digest": proof["receipt"]["payload_digest"],
-                "final_layout_payload_digest": final_layout_package[
-                    "payload_digest"
-                ],
+                "final_layout_payload_digest": final_layout_package["payload_digest"],
                 "final_layout_source_array_validation_digest": (
                     canonical_json_sha256(
                         final_layout_package["payload"]["source_array_validation"]
@@ -2157,6 +2209,163 @@ def run_refinement_window(
             shutil.rmtree(work, ignore_errors=True)
 
 
+def _existing_quality_result(
+    *,
+    bundle: Path,
+    plan: Mapping[str, Any],
+    window: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not bundle.exists():
+        return None
+    result_path = bundle / "result.json"
+    if not result_path.is_file():
+        raise RuntimeError(f"Incomplete immutable quality bundle exists: {bundle}")
+    result = _strict_json(result_path)
+    refinement_bundle = (
+        Path(plan["run_root"]) / "bundles" / "refinement" / str(window["window_id"])
+    )
+    refinement_result = _existing_worker_result(
+        bundle=refinement_bundle,
+        plan=plan,
+        window=window,
+        stage="refinement",
+    )
+    if refinement_result is None:
+        raise RuntimeError("Quality bundle exists without its refined source.")
+    refined_run = open_zarr_root(refinement_bundle / "archive.zarr", mode="r")[
+        f"refined_subject_masks_runs/{window['refined_run']}"
+    ]
+    proof = _worker_evidence(refinement_bundle / "archive.zarr", refined_run)
+    receipt = validate_subject_mask_quality_partition(
+        bundle,
+        source_worker_receipt=proof["receipt"],
+        verify_values=False,
+    )
+    if (
+        not isinstance(result, dict)
+        or result.get("schema_id")
+        != "palette.subject_mask.full_duration_canary_quality_worker"
+        or result.get("schema_version") != 1
+        or result.get("status") != "complete"
+        or result.get("stage") != "quality"
+        or result.get("plan_digest") != plan["plan_digest"]
+        or result.get("window_id") != window["window_id"]
+        or result.get("partition_receipt_payload_digest") != receipt["payload_digest"]
+        or result.get("source_refinement_result_digest")
+        != canonical_json_sha256(refinement_result)
+    ):
+        raise RuntimeError(f"Existing quality worker identity differs: {bundle}")
+    return result
+
+
+def run_quality_window(
+    *,
+    plan_path: Path,
+    window_index: int,
+    scratch_root: Path,
+    keep_scratch: bool = False,
+) -> dict[str, Any]:
+    """Compute one immutable observation-local QC partition."""
+
+    plan = load_plan(plan_path)
+    if plan["schema_version"] != PLAN_SCHEMA_VERSION:
+        raise RuntimeError("Partitioned quality requires the current canary plan.")
+    window = _window(plan, window_index)
+    run_root = Path(plan["run_root"])
+    bundle = run_root / "bundles" / "quality" / str(window["window_id"])
+    existing = _existing_quality_result(bundle=bundle, plan=plan, window=window)
+    if existing is not None:
+        return existing
+    refinement_bundle = run_root / "bundles" / "refinement" / str(window["window_id"])
+    refinement_result = _existing_worker_result(
+        bundle=refinement_bundle,
+        plan=plan,
+        window=window,
+        stage="refinement",
+    )
+    if refinement_result is None:
+        raise RuntimeError("Quality worker requires terminal refinement evidence.")
+    refined_run = open_zarr_root(refinement_bundle / "archive.zarr", mode="r")[
+        f"refined_subject_masks_runs/{window['refined_run']}"
+    ]
+    proof = _worker_evidence(refinement_bundle / "archive.zarr", refined_run)
+    crop = open_zarr_root(Path(plan["references"]["analysis_zarr"]), mode="r")[
+        f"crop_runs/{plan['references']['crop']['run']}"
+    ]
+    row_start = int(window["row_start"])
+    row_stop = int(window["row_stop"])
+    frames = np.asarray(
+        crop["source_acquisition_frame_index"][row_start:row_stop], dtype=np.int64
+    )
+    work = scratch_root.expanduser().resolve() / "quality" / str(window["window_id"])
+    work.mkdir(parents=True, exist_ok=False)
+    try:
+        local_partition = work / "partition"
+        compute_subject_mask_quality_partition(
+            refined_run,
+            source_acquisition_frame_index=frames,
+            global_start_row=row_start,
+            global_frame_start=int(window["start_frame"]),
+            global_frame_stop=int(window["end_frame"]),
+            work_unit_id=f"{plan['workflow_id']}:{window['window_id']}",
+            work_unit_index=int(window["window_index"]),
+            source_worker_receipt=proof["receipt"],
+            producer_commit=str(plan["repo"]["commit"]),
+            destination=local_partition,
+            compute_workers=int(
+                plan["execution"]["quality_partitions"]["compute_workers_per_partition"]
+            ),
+        )
+        destination = bundle.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+        try:
+            shutil.copytree(local_partition, temporary, copy_function=shutil.copy2)
+            copied = validate_subject_mask_quality_partition(
+                temporary,
+                source_worker_receipt=proof["receipt"],
+                verify_values=True,
+            )
+            result = {
+                "schema_id": "palette.subject_mask.full_duration_canary_quality_worker",
+                "schema_version": 1,
+                "status": "complete",
+                "stage": "quality",
+                "plan_digest": plan["plan_digest"],
+                "palette_commit": plan["repo"]["commit"],
+                "window_id": window["window_id"],
+                "window_index": int(window["window_index"]),
+                "global_frame_interval": {
+                    "start_frame": int(window["start_frame"]),
+                    "stop_frame": int(window["end_frame"]),
+                },
+                "global_row_interval": {
+                    "start_row": row_start,
+                    "stop_row": row_stop,
+                },
+                "partition_receipt_schema_id": (
+                    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_ID
+                ),
+                "partition_receipt_schema_version": (
+                    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION
+                ),
+                "partition_receipt_payload_digest": copied["payload_digest"],
+                "source_refinement_result_digest": canonical_json_sha256(
+                    refinement_result
+                ),
+                "resource_usage": _resource_usage(),
+            }
+            _write_json_atomic(temporary / "result.json", result)
+            os.replace(temporary, destination)
+            return result
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+    finally:
+        if not keep_scratch:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def _symlink_run(*, source: Path, archive: Path, parent: str, run_name: str) -> None:
     root = open_zarr_root(archive, mode="r+")
     if parent not in root:
@@ -2262,9 +2471,7 @@ def finalize_canary(
         nonempty_windows = [
             window for window in plan["windows"] if int(window["row_count"]) > 0
         ]
-        nonempty_window_ids = [
-            str(window["window_id"]) for window in nonempty_windows
-        ]
+        nonempty_window_ids = [str(window["window_id"]) for window in nonempty_windows]
         inference_bundles = {
             str(window["window_id"]): _resolve_inference_bundle(
                 plan=plan,
@@ -2292,6 +2499,14 @@ def finalize_canary(
             / "sampled_contour_receipt.json"
             for window_id in nonempty_window_ids
         ]
+        quality_partition_roots = (
+            [
+                Path(plan["run_root"]) / "bundles" / "quality" / window_id
+                for window_id in nonempty_window_ids
+            ]
+            if plan["schema_version"] == PLAN_SCHEMA_VERSION
+            else []
+        )
         output = plan["outputs"]
         publication = publish_recording_subject_mask_bundle(
             analysis_zarr=Path(plan["references"]["analysis_zarr"]),
@@ -2310,10 +2525,11 @@ def finalize_canary(
             local_output_root=work / "snapshots",
             quality_scratch_root=work / "quality_scratch",
             quality_compute_workers=int(
-                plan["execution"]["publication"].get(
-                    "quality_compute_workers", 1
-                )
+                plan["execution"]["publication"].get("quality_compute_workers", 1)
             ),
+            quality_partition_roots=quality_partition_roots,
+            require_worker_quality=(plan["schema_version"] == PLAN_SCHEMA_VERSION),
+            quality_partition_producer_commit=str(plan["repo"]["commit"]),
             activate=False,
             expected_work_units=[
                 {
@@ -2378,6 +2594,23 @@ def finalize_canary(
                 )
                 for window in nonempty_windows
             ],
+            "quality": (
+                [
+                    _existing_quality_result(
+                        bundle=(
+                            Path(plan["run_root"])
+                            / "bundles"
+                            / "quality"
+                            / str(window["window_id"])
+                        ),
+                        plan=plan,
+                        window=window,
+                    )
+                    for window in nonempty_windows
+                ]
+                if plan["schema_version"] == PLAN_SCHEMA_VERSION
+                else []
+            ),
         }
         result = {
             "schema_id": RESULT_SCHEMA_ID,
@@ -2409,6 +2642,10 @@ def finalize_canary(
                     publication["publication_execution"]["sampled_contour_source_mode"]
                     == "receipt_bound_worker_arrays"
                 ),
+                "worker_quality_partitions_assembled": (
+                    publication["publication_execution"]["quality_source_mode"]
+                    == "receipt_bound_worker_partitions"
+                ),
                 "full_ragged_contours_published": False,
             },
         }
@@ -2425,6 +2662,7 @@ def build_lsf_workflow(
     plan_path: Path,
     gpu_concurrency: int = DEFAULT_GPU_CONCURRENCY,
     cpu_concurrency: int = DEFAULT_CPU_CONCURRENCY,
+    quality_concurrency: int = DEFAULT_QUALITY_CONCURRENCY,
 ) -> LsfWorkflow:
     plan = load_plan(plan_path)
     repo = Path(plan["repo"]["path"])
@@ -2437,6 +2675,7 @@ def build_lsf_workflow(
     )
     inference_tasks = []
     refinement_tasks = []
+    quality_tasks = []
     for window in nonempty:
         index = int(window["window_index"])
         window_id = str(window["window_id"])
@@ -2488,6 +2727,31 @@ def build_lsf_workflow(
                 array_indexed=True,
             )
         )
+        if plan["schema_version"] == PLAN_SCHEMA_VERSION:
+            quality_tasks.append(
+                build_execution_task(
+                    run_root=run_root,
+                    task_key=f"quality:{window_id}",
+                    stage="subject_mask_quality",
+                    command=(
+                        "scripts/py",
+                        "-m",
+                        "fisheye.cluster.subject_masks.full_duration_canary",
+                        "quality-worker",
+                        "--plan",
+                        str(plan_path),
+                        "--window-index",
+                        str(index),
+                        "--scratch-root",
+                        scratch_template,
+                    ),
+                    expected_outputs=(
+                        run_root / "bundles" / "quality" / window_id / "result.json",
+                    ),
+                    cleanup_paths=(scratch_template,),
+                    array_indexed=True,
+                )
+            )
     inference = (
         None
         if inference_reused
@@ -2519,6 +2783,35 @@ def build_lsf_workflow(
         resources=LsfResources(queue="short", ncores=16, mem_gb=64, walltime="1:00"),
         upstream=() if inference_reused else ("subject_mask_inference_array",),
     )
+    quality = (
+        build_task_group_job(
+            workflow_id=str(plan["workflow_id"]),
+            family=FAMILY,
+            repo=repo,
+            run_root=run_root,
+            job_key="subject_mask_quality_array",
+            stage="subject_mask_quality",
+            tasks=quality_tasks,
+            mode=LsfExecutionMode.ARRAY,
+            max_concurrent=int(quality_concurrency),
+            resources=LsfResources(
+                queue="short",
+                ncores=max(
+                    4,
+                    int(
+                        plan["execution"]["quality_partitions"][
+                            "compute_workers_per_partition"
+                        ]
+                    ),
+                ),
+                mem_gb=64,
+                walltime="1:00",
+            ),
+            upstream=("subject_mask_refinement_array",),
+        )
+        if quality_tasks
+        else None
+    )
     final_scratch = (
         f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
         "subject_mask_full_duration"
@@ -2541,14 +2834,16 @@ def build_lsf_workflow(
             final_scratch,
         ),
         resources=LsfResources(queue="local", ncores=16, mem_gb=128, walltime="8:00"),
-        upstream=("subject_mask_refinement_array",),
+        upstream=(
+            ("subject_mask_quality_array",)
+            if quality is not None
+            else ("subject_mask_refinement_array",)
+        ),
         expected_outputs=(Path(plan["outputs"]["result_path"]),),
         cleanup_paths=(final_scratch,),
     )
-    jobs = (
-        (refinement, publication)
-        if inference is None
-        else (inference, refinement, publication)
+    jobs = tuple(
+        job for job in (inference, refinement, quality, publication) if job is not None
     )
     return LsfWorkflow(
         workflow_id=str(plan["workflow_id"]),
@@ -2562,6 +2857,7 @@ def build_lsf_workflow(
             "nonempty_window_count": len(nonempty),
             "gpu_concurrency": int(gpu_concurrency),
             "cpu_concurrency": int(cpu_concurrency),
+            "quality_concurrency": int(quality_concurrency),
             "inference_reused": bool(inference_reused),
             "production_state_changes": False,
         },
@@ -2636,7 +2932,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Allow explicitly non-reproducible development preflight only.",
     )
 
-    for name in ("inference-worker", "refinement-worker"):
+    for name in ("inference-worker", "refinement-worker", "quality-worker"):
         worker = subparsers.add_parser(name)
         worker.add_argument("--plan", required=True, type=Path)
         worker.add_argument("--window-index", required=True, type=int)
@@ -2652,6 +2948,9 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--plan", required=True, type=Path)
     submit.add_argument("--gpu-concurrency", type=int, default=DEFAULT_GPU_CONCURRENCY)
     submit.add_argument("--cpu-concurrency", type=int, default=DEFAULT_CPU_CONCURRENCY)
+    submit.add_argument(
+        "--quality-concurrency", type=int, default=DEFAULT_QUALITY_CONCURRENCY
+    )
     submit.add_argument("--submit-host", default="login1-citrus-poller")
     mode = submit.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
@@ -2698,6 +2997,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             scratch_root=args.scratch_root,
             keep_scratch=bool(args.keep_scratch),
         )
+    elif args.command == "quality-worker":
+        result = run_quality_window(
+            plan_path=args.plan,
+            window_index=args.window_index,
+            scratch_root=args.scratch_root,
+            keep_scratch=bool(args.keep_scratch),
+        )
     elif args.command == "finalize":
         result = finalize_canary(
             plan_path=args.plan,
@@ -2709,6 +3015,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan_path=args.plan,
             gpu_concurrency=args.gpu_concurrency,
             cpu_concurrency=args.cpu_concurrency,
+            quality_concurrency=args.quality_concurrency,
         )
         plan = load_plan(args.plan)
         run_root = Path(plan["run_root"])
@@ -2745,4 +3052,5 @@ __all__ = [
     "prepare_canary",
     "run_inference_window",
     "run_refinement_window",
+    "run_quality_window",
 ]

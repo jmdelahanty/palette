@@ -278,9 +278,11 @@ def test_prepare_freezes_exact_clip_row_coverage_and_reference_copies(
         "window_rows_are_exact_nonoverlapping_complete": True,
         "final_layout_units_are_selector_ineligible_transport": True,
         "worker_sampled_contours_required": True,
+        "worker_quality_partitions_required": True,
         "full_ragged_contours_allowed": False,
         "receipt_bound_composable_dense_identity_required": True,
-        "finalizer_full_dense_decode_hash_allowed": False,
+        "core_finalizer_full_dense_decode_hash_allowed": False,
+        "quality_finalizer_ordered_dense_identity_scan_required": True,
     }
     assert plan["final_layout"]["raw"]["array_path"] == "mask_probs_roi"
     assert plan["final_layout"]["refined"]["array_path"] == "masks_roi"
@@ -430,9 +432,10 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     assert [job.job_key for job in workflow.topological_jobs()] == [
         "subject_mask_inference_array",
         "subject_mask_refinement_array",
+        "subject_mask_quality_array",
         "subject_mask_recording_publication",
     ]
-    inference, refinement, publication = workflow.jobs
+    inference, refinement, quality, publication = workflow.jobs
     assert inference.execution_group is not None
     assert inference.execution_group.mode is LsfExecutionMode.ARRAY
     assert len(inference.execution_group.tasks) == 2
@@ -441,10 +444,12 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     assert refinement.dependency.upstream_job_keys == ("subject_mask_inference_array",)
     assert refinement.resources.queue == "short"
     assert refinement.resources.walltime == "1:00"
+    assert quality.dependency is not None
+    assert quality.dependency.upstream_job_keys == ("subject_mask_refinement_array",)
+    assert quality.execution_group is not None
+    assert len(quality.execution_group.tasks) == 2
     assert publication.dependency is not None
-    assert publication.dependency.upstream_job_keys == (
-        "subject_mask_refinement_array",
-    )
+    assert publication.dependency.upstream_job_keys == ("subject_mask_quality_array",)
     assert plan["execution"]["publication"] == {
         "core_physical_unit_workers": 4,
         "quality_compute_workers": 4,
@@ -520,15 +525,16 @@ def test_receipt_bound_retry_plan_reuses_inference_and_submits_no_gpu_jobs(
     )
     assert [job.job_key for job in workflow.topological_jobs()] == [
         "subject_mask_refinement_array",
+        "subject_mask_quality_array",
         "subject_mask_recording_publication",
     ]
-    refinement, publication = workflow.jobs
+    refinement, quality, publication = workflow.jobs
     assert refinement.resources.gpus == 0
     assert refinement.dependency is None
+    assert quality.dependency is not None
+    assert quality.dependency.upstream_job_keys == ("subject_mask_refinement_array",)
     assert publication.dependency is not None
-    assert publication.dependency.upstream_job_keys == (
-        "subject_mask_refinement_array",
-    )
+    assert publication.dependency.upstream_job_keys == ("subject_mask_quality_array",)
     assert workflow.metadata["inference_reused"] is True
 
 
@@ -622,9 +628,7 @@ def test_worker_bundle_seals_and_reopens_final_layout_package(
         "plan_digest": plan["plan_digest"],
         "window_id": window["window_id"],
         "probability_destination_validation_handoff": {
-            "schema_id": (
-                canary.PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID
-            ),
+            "schema_id": (canary.PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_ID),
             "schema_version": (
                 canary.PROBABILITY_DESTINATION_VALIDATION_HANDOFF_SCHEMA_VERSION
             ),

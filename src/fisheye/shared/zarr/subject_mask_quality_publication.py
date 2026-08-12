@@ -34,6 +34,9 @@ from fisheye.shared.zarr.subject_mask_quality_producer import (
     compute_subject_mask_quality_block,
     quality_profile_for_policy,
 )
+from fisheye.shared.zarr.subject_mask_quality_partition import (
+    validate_subject_mask_quality_partition_assembly,
+)
 from fisheye.shared.zarr.subject_mask_quality_schema import (
     SUBJECT_MASK_QUALITY_SCHEMA_V1,
     SubjectMaskQualityDimensions,
@@ -76,7 +79,7 @@ SUBJECT_MASK_QUALITY_SHADOW_SCHEMA_VERSION = 1
 SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID = (
     "palette.subject_mask_quality.write_receipt"
 )
-SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 2
+SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 3
 DEFAULT_SUBJECT_MASK_QUALITY_SHADOW_ROOT = Path(
     "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
     "subject_mask_quality"
@@ -474,6 +477,8 @@ def _write_receipt(
     block_count: int,
     compute_workers_requested: int,
     compute_workers_effective: int,
+    source_mode: str,
+    worker_assembly: Mapping[str, Any] | None,
 ) -> dict[str, object]:
     return {
         "schema_id": SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID,
@@ -484,9 +489,17 @@ def _write_receipt(
         "source_compute_workers_requested": int(compute_workers_requested),
         "source_compute_workers_effective": int(compute_workers_effective),
         "source_compute_execution": (
-            "ordered_inline_single_worker_v1"
-            if int(compute_workers_effective) == 1
-            else "bounded_thread_pool_ordered_single_writer_v1"
+            "receipt_bound_partitions_with_ordered_source_verification_v1"
+            if source_mode == "receipt_bound_quality_partitions"
+            else (
+                "ordered_inline_single_worker_v1"
+                if int(compute_workers_effective) == 1
+                else "bounded_thread_pool_ordered_single_writer_v1"
+            )
+        ),
+        "source_mode": source_mode,
+        "worker_assembly": (
+            dict(worker_assembly) if worker_assembly is not None else None
         ),
         "output_write_unit": "complete_outer_shard_or_unsharded_chunk",
         "output_array_write_units": subject_mask_quality_output_write_units(plans),
@@ -576,6 +589,8 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
     ),
     source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
     compute_workers: int = 1,
+    precomputed_arrays: Mapping[str, Any] | None = None,
+    worker_assembly: Mapping[str, Any] | None = None,
     created_by: str = "subject_mask_quality_shadow",
 ) -> SubjectMaskQualityShadowPublication:
     """Compute, write, consolidate, and gate one immutable QC snapshot."""
@@ -587,6 +602,11 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         raise ValueError("created_by cannot be empty.")
     if type(compute_workers) is not int or compute_workers <= 0:
         raise ValueError("compute_workers must be a positive integer.")
+    adopting_partitions = precomputed_arrays is not None or worker_assembly is not None
+    if (precomputed_arrays is None) != (worker_assembly is None):
+        raise ValueError(
+            "precomputed_arrays and worker_assembly must be supplied together."
+        )
     resolved_run_id = str(run_id).strip()
     if not resolved_run_id or "/" in resolved_run_id:
         raise ValueError("run_id must be one nonempty archive group name.")
@@ -615,6 +635,15 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         n_observation_metrics=len(profile.observation_metrics),
     )
     plans = plan_subject_mask_quality_storage(dimensions, profile=storage_profile)
+    if worker_assembly is not None:
+        validate_subject_mask_quality_partition_assembly(
+            worker_assembly, n_rois=dimensions.n_rois
+        )
+        expected_precomputed = set(SUBJECT_MASK_QUALITY_SCHEMA_V1.binding_paths) - {
+            "frame_row_offsets"
+        }
+        if set(precomputed_arrays or {}) != expected_precomputed:
+            raise ValueError("Precomputed quality partition arrays are incomplete.")
     block_rows = _effective_compute_block_rows(
         n_channels=dimensions.n_channels,
         roi_height=dimensions.roi_height,
@@ -622,7 +651,9 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         budget_bytes=int(source_compute_block_bytes),
     )
     block_count = max(1, math.ceil(dimensions.n_rois / block_rows))
-    effective_compute_workers = min(int(compute_workers), int(block_count))
+    effective_compute_workers = (
+        1 if adopting_partitions else min(int(compute_workers), int(block_count))
+    )
     receipt = _write_receipt(
         plans=plans,
         block_rows=block_rows,
@@ -630,6 +661,12 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         block_count=block_count,
         compute_workers_requested=int(compute_workers),
         compute_workers_effective=effective_compute_workers,
+        source_mode=(
+            "receipt_bound_quality_partitions"
+            if adopting_partitions
+            else "inline_dense_quality_compute"
+        ),
+        worker_assembly=worker_assembly,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -712,6 +749,8 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                     identity_digests[path].update(
                         np.ascontiguousarray(values).view(np.uint8)
                     )
+                if adopting_partitions:
+                    continue
                 if executor is None:
                     payload = compute_subject_mask_quality_block(
                         masks,
@@ -835,12 +874,39 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         else:
             assert isinstance(source, SubjectMaskQualitySourceReference)
             resolved_source = source
+        source_verification_seconds = time.perf_counter() - phase_started
+        if adopting_partitions:
+            phase_seconds["ordered_source_verification"] = source_verification_seconds
+        if adopting_partitions:
+            assert precomputed_arrays is not None
+            phase_started = time.perf_counter()
+            for path in sorted(precomputed_arrays):
+                source_value = precomputed_arrays[path]
+                destination_value = scratch_arrays[path]
+                source_shape, source_dtype = _shape_dtype(source_value, name=path)
+                destination_shape, destination_dtype = _shape_dtype(
+                    destination_value, name=path
+                )
+                if (
+                    source_shape != destination_shape
+                    or source_dtype != destination_dtype
+                ):
+                    raise ValueError(
+                        f"Precomputed quality partition array differs at {path}."
+                    )
+                destination_value[...] = np.asarray(source_value[...])
+            phase_seconds["receipt_bound_partition_adoption"] = (
+                time.perf_counter() - phase_started
+            )
         frames = scratch_arrays["source_acquisition_frame_index"]
         scratch_arrays["frame_row_offsets"][...] = (
             derive_subject_mask_frame_row_offsets(frames, n_frames=dimensions.n_frames)
         )
         phase_seconds["bounded_compute_to_scratch"] = (
-            time.perf_counter() - phase_started
+            source_verification_seconds
+            + phase_seconds.get("receipt_bound_partition_adoption", 0.0)
+            if adopting_partitions
+            else time.perf_counter() - phase_started
         )
 
         source_evidence = {

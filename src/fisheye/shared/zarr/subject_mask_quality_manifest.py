@@ -32,6 +32,9 @@ from fisheye.shared.zarr.subject_mask_quality_schema import (
     SubjectMaskQualityProfile,
     SubjectMaskQualitySourceReference,
 )
+from fisheye.shared.zarr.subject_mask_quality_partition import (
+    validate_subject_mask_quality_partition_assembly,
+)
 from fisheye.shared.zarr.subject_mask_quality_storage import (
     SubjectMaskQualityStoragePlanSet,
     plan_subject_mask_quality_storage,
@@ -869,16 +872,24 @@ def validate_subject_mask_quality_run_manifest(
         "source_compute_workers_effective",
         "source_compute_execution",
     }
-    receipt_version = receipt.get("schema_version") if isinstance(receipt, Mapping) else None
+    partition_receipt_fields = current_receipt_fields | {
+        "source_mode",
+        "worker_assembly",
+    }
+    receipt_version = (
+        receipt.get("schema_version") if isinstance(receipt, Mapping) else None
+    )
     expected_receipt_fields = (
-        current_receipt_fields if receipt_version == 2 else legacy_receipt_fields
+        partition_receipt_fields
+        if receipt_version == 3
+        else (current_receipt_fields if receipt_version == 2 else legacy_receipt_fields)
     )
     if not isinstance(receipt, Mapping) or set(receipt) != expected_receipt_fields:
         errors.append("subject-mask quality write_receipt is not exact")
     else:
         if (
             receipt.get("schema_id") != "palette.subject_mask_quality.write_receipt"
-            or receipt.get("schema_version") not in {1, 2}
+            or receipt.get("schema_version") not in {1, 2, 3}
             or receipt.get("output_write_unit")
             != "complete_outer_shard_or_unsharded_chunk"
             or receipt.get("scratch_surface")
@@ -887,7 +898,7 @@ def validate_subject_mask_quality_run_manifest(
             != "single_writer_v1_future_workers_require_disjoint_whole_shards"
         ):
             errors.append("subject-mask quality write_receipt identity mismatch")
-        if receipt.get("schema_version") == 2:
+        if receipt.get("schema_version") in {2, 3}:
             requested = receipt.get("source_compute_workers_requested")
             effective = receipt.get("source_compute_workers_effective")
             execution = receipt.get("source_compute_execution")
@@ -901,13 +912,47 @@ def validate_subject_mask_quality_run_manifest(
                 not in {
                     "ordered_inline_single_worker_v1",
                     "bounded_thread_pool_ordered_single_writer_v1",
+                    "receipt_bound_partitions_with_ordered_source_verification_v1",
                 }
-                or (effective == 1)
-                != (execution == "ordered_inline_single_worker_v1")
-            ):
-                errors.append(
-                    "subject-mask quality compute-worker receipt is invalid"
+                or (
+                    execution
+                    != "receipt_bound_partitions_with_ordered_source_verification_v1"
+                    and (effective == 1)
+                    != (execution == "ordered_inline_single_worker_v1")
                 )
+            ):
+                errors.append("subject-mask quality compute-worker receipt is invalid")
+        if receipt.get("schema_version") == 3:
+            source_mode = receipt.get("source_mode")
+            assembly = receipt.get("worker_assembly")
+            if source_mode not in {
+                "inline_dense_quality_compute",
+                "receipt_bound_quality_partitions",
+            }:
+                errors.append("subject-mask quality source mode is invalid")
+            if (source_mode == "receipt_bound_quality_partitions") != (
+                isinstance(assembly, Mapping)
+            ):
+                errors.append("subject-mask quality worker assembly presence differs")
+            if (
+                source_mode == "receipt_bound_quality_partitions"
+                and receipt.get("source_compute_execution")
+                != "receipt_bound_partitions_with_ordered_source_verification_v1"
+            ):
+                errors.append("subject-mask quality partition execution differs")
+            if (
+                source_mode == "receipt_bound_quality_partitions"
+                and isinstance(assembly, Mapping)
+                and dimensions is not None
+            ):
+                try:
+                    validate_subject_mask_quality_partition_assembly(
+                        assembly, n_rois=dimensions.n_rois
+                    )
+                except (TypeError, ValueError) as exc:
+                    errors.append(
+                        "subject-mask quality worker assembly is invalid: " f"{exc}"
+                    )
         for name in (
             "source_compute_block_rows",
             "source_compute_block_bytes_budget",
@@ -937,14 +982,19 @@ def validate_subject_mask_quality_run_manifest(
                 )
             if receipt.get("source_compute_block_count") != expected_count:
                 errors.append("subject-mask quality compute block count mismatch")
-            if receipt.get("schema_version") == 2 and receipt.get(
-                "source_compute_workers_effective"
-            ) != min(
-                int(receipt["source_compute_workers_requested"]), expected_count
-            ):
-                errors.append(
-                    "subject-mask quality effective compute workers mismatch"
+            expected_effective_workers = (
+                1
+                if receipt.get("source_mode") == "receipt_bound_quality_partitions"
+                else min(
+                    int(receipt["source_compute_workers_requested"]), expected_count
                 )
+            )
+            if (
+                receipt.get("schema_version") in {2, 3}
+                and receipt.get("source_compute_workers_effective")
+                != expected_effective_workers
+            ):
+                errors.append("subject-mask quality effective compute workers mismatch")
         units = receipt.get("output_array_write_units")
         if not isinstance(units, Mapping) or set(units) != set(
             SUBJECT_MASK_QUALITY_SCHEMA_V1.binding_paths

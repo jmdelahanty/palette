@@ -58,6 +58,11 @@ from fisheye.shared.zarr.subject_mask_quality_publication import (
     SubjectMaskQualityComposableSourceExpectation,
     publish_selector_ineligible_subject_mask_quality_snapshot,
 )
+from fisheye.shared.zarr.subject_mask_quality_partition import (
+    build_subject_mask_quality_partition_assembly,
+    load_subject_mask_quality_partition_arrays,
+    validate_subject_mask_quality_partition,
+)
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
     SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_ALGORITHM,
 )
@@ -492,6 +497,72 @@ def _sampled_contour_worker_inputs(
     return arrays, assembly
 
 
+def _quality_partition_inputs(
+    runs: Sequence[Any],
+    partition_roots: Sequence[Path],
+    *,
+    source_producer_evidence: Mapping[str, Any],
+    n_rois: int,
+    producer_commit: str,
+) -> tuple[dict[str, Any], dict[str, object]]:
+    """Validate and concatenate receipt-bound observation-local QC partitions."""
+
+    if len(runs) != len(partition_roots) or not runs:
+        raise ValueError(
+            "Quality partitions must cover every refined worker exactly once."
+        )
+    run_by_path = {str(run.path).strip("/"): run for run in runs}
+    evidence_workers = source_producer_evidence.get("workers")
+    if not isinstance(evidence_workers, list):
+        raise ValueError("Refined producer evidence lacks its worker inventory.")
+    dense_receipt_by_path = {
+        str(worker.get("run_path")): worker.get("worker_receipt")
+        for worker in evidence_workers
+        if isinstance(worker, Mapping)
+    }
+    validated: list[tuple[dict[str, Any], Path]] = []
+    for partition_root in partition_roots:
+        receipt_path = partition_root.expanduser().resolve() / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        payload = receipt.get("payload") if isinstance(receipt, Mapping) else None
+        run_path = (
+            payload.get("source_run_path") if isinstance(payload, Mapping) else None
+        )
+        if run_path not in run_by_path or not isinstance(
+            dense_receipt_by_path.get(str(run_path)), Mapping
+        ):
+            raise ValueError("Quality partition does not identify one refined worker.")
+        validated_receipt = validate_subject_mask_quality_partition(
+            partition_root,
+            source_worker_receipt=dense_receipt_by_path[str(run_path)],
+            verify_values=True,
+        )
+        validated.append((validated_receipt, partition_root.expanduser().resolve()))
+    ordered = sorted(
+        validated,
+        key=lambda item: item[0]["payload"]["work_unit"]["global_row_interval"][
+            "start_row"
+        ],
+    )
+    receipts = [item[0] for item in ordered]
+    per_partition = [
+        load_subject_mask_quality_partition_arrays(item[1]) for item in ordered
+    ]
+    expected_paths = set(per_partition[0])
+    if any(set(arrays) != expected_paths for arrays in per_partition[1:]):
+        raise ValueError("Quality partition array inventories differ.")
+    arrays = {
+        path: _ConcatenatedRows([partition[path] for partition in per_partition])
+        for path in sorted(expected_paths)
+    }
+    assembly = build_subject_mask_quality_partition_assembly(
+        receipts,
+        n_rois=int(n_rois),
+        producer_commit=str(producer_commit),
+    )
+    return arrays, assembly
+
+
 def _consistent_refined_source_attrs(
     runs: Sequence[Any],
     *,
@@ -586,6 +657,9 @@ def publish_recording_subject_mask_bundle(
     local_output_root: Path,
     quality_scratch_root: Path,
     quality_compute_workers: int = 1,
+    quality_partition_roots: Sequence[Path] | None = None,
+    require_worker_quality: bool = False,
+    quality_partition_producer_commit: str | None = None,
     cache_run: str | None = None,
     activate: bool = False,
     refined_draft_runs: Sequence[str] | None = None,
@@ -610,6 +684,11 @@ def publish_recording_subject_mask_bundle(
         raise ValueError("quality_compute_workers must be a positive integer.")
     resolved_core_validation_mode = SubjectMaskCoreValidationMode(core_validation_mode)
     contour_receipt_paths = tuple(sampled_contour_worker_receipts or ())
+    quality_roots = tuple(quality_partition_roots or ())
+    if require_worker_quality and not quality_roots:
+        raise ValueError("Current subject-mask publication requires worker quality.")
+    if quality_roots and not str(quality_partition_producer_commit or "").strip():
+        raise ValueError("Worker quality requires its exact producer commit.")
     if require_worker_sampled_contours and not contour_receipt_paths:
         raise ValueError(
             "Current subject-mask publication requires worker sampled contours."
@@ -953,6 +1032,23 @@ def publish_recording_subject_mask_bundle(
             },
         )
     quality_store = output / "quality.zarr"
+    precomputed_quality_arrays = None
+    quality_partition_assembly = None
+    if quality_roots:
+        producer_evidence = refined_receipt["payload"].get("producer_evidence")
+        if not isinstance(producer_evidence, Mapping):
+            raise ValueError(
+                "Refined source receipt lacks worker evidence for quality partitions."
+            )
+        precomputed_quality_arrays, quality_partition_assembly = (
+            _quality_partition_inputs(
+                refined_drafts,
+                quality_roots,
+                source_producer_evidence=producer_evidence,
+                n_rois=refined_dimensions.n_rois,
+                producer_commit=str(quality_partition_producer_commit),
+            )
+        )
     quality_publication = publish_selector_ineligible_subject_mask_quality_snapshot(
         {
             path: refined_published_run[path]
@@ -974,6 +1070,8 @@ def publish_recording_subject_mask_bundle(
         shadow_root=output,
         scratch_root=quality_scratch_root,
         compute_workers=quality_compute_workers,
+        precomputed_arrays=precomputed_quality_arrays,
+        worker_assembly=quality_partition_assembly,
         created_by="publish_recording_subject_mask_bundle",
     )
     cache_publication = None
@@ -1032,9 +1130,7 @@ def publish_recording_subject_mask_bundle(
             "core_physical_unit_workers_requested": int(core_physical_unit_workers),
             "quality_compute_workers_requested": int(quality_compute_workers),
             "quality_compute_workers_effective": int(
-                quality_publication.write_receipt[
-                    "source_compute_workers_effective"
-                ]
+                quality_publication.write_receipt["source_compute_workers_effective"]
             ),
             "core_validation_mode": resolved_core_validation_mode.value,
             "parallel_write_policy": (
@@ -1045,6 +1141,11 @@ def publish_recording_subject_mask_bundle(
             "raw_phase_seconds": dict(raw_publication.phase_seconds),
             "refined_phase_seconds": dict(refined_publication.phase_seconds),
             "quality_phase_seconds": dict(quality_publication.phase_seconds),
+            "quality_source_mode": (
+                "receipt_bound_worker_partitions"
+                if quality_partition_assembly is not None
+                else "recording_finalizer_dense_compute"
+            ),
             "sampled_contour_source_mode": (
                 "receipt_bound_worker_arrays"
                 if sampled_contour_assembly is not None
@@ -1108,6 +1209,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "Bounded row-local QC compute threads. Source reads, hashes, and "
             "scratch/output writes remain ordered and single-owner (default: 1)."
         ),
+    )
+    parser.add_argument(
+        "--quality-partition-root",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "Sealed observation-local quality partition; repeat once per "
+            "refined worker. Publication validates and concatenates these arrays."
+        ),
+    )
+    parser.add_argument(
+        "--require-worker-quality",
+        action="store_true",
+        help=(
+            "Fail rather than recompute subject-mask quality from the complete "
+            "recording-level dense authority."
+        ),
+    )
+    parser.add_argument(
+        "--quality-partition-producer-commit",
+        help="Exact Palette commit recorded by every quality partition receipt.",
     )
     parser.add_argument(
         "--expected-work-units-manifest",
@@ -1238,6 +1361,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         local_output_root=args.local_output_root,
         quality_scratch_root=args.quality_scratch_root,
         quality_compute_workers=args.quality_compute_workers,
+        quality_partition_roots=args.quality_partition_root,
+        require_worker_quality=bool(args.require_worker_quality),
+        quality_partition_producer_commit=args.quality_partition_producer_commit,
         cache_source_compute_block_bytes=args.cache_source_compute_block_bytes,
         cache_compute_workers=args.cache_compute_workers,
         core_physical_unit_workers=args.core_physical_unit_workers,
