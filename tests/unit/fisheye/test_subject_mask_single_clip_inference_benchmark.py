@@ -55,9 +55,29 @@ def _source_plan(tmp_path: Path) -> Path:
     root.mkdir(parents=True)
     analysis = root / "analysis.zarr"
     analysis.mkdir()
+    raw_dimensions = canary.SubjectMaskDimensions(
+        n_frames=100,
+        n_rois=100,
+        n_channels=3,
+        roi_height=512,
+        roi_width=512,
+    )
+    refined_dimensions = canary.SubjectMaskDimensions(
+        n_frames=100,
+        n_rois=100,
+        n_channels=4,
+        roi_height=512,
+        roi_width=512,
+    )
+    refined_components = canary.SubjectMaskComponentRegistry(
+        ("subject_body", "eye_left", "eye_right", "swim_bladder")
+    )
+    sampled_contour_profile = canary.default_subject_mask_sampled_contour_profile(
+        refined_components
+    )
     payload: dict[str, Any] = {
         "schema_id": canary.PLAN_SCHEMA_ID,
-        "schema_version": canary.PLAN_SCHEMA_LEGACY_VERSION,
+        "schema_version": 5,
         "status": "planned",
         "classification": canary.BENCHMARK_CLASSIFICATION,
         "created_at_utc": "2026-08-10T20:00:00+00:00",
@@ -109,6 +129,27 @@ def _source_plan(tmp_path: Path) -> Path:
             "inode": 2,
             "sha256": "5" * 64,
         },
+        "final_layout": {
+            "schema_id": "palette.subject_mask.final_layout_work_plan",
+            "schema_version": 1,
+            "ownership_policy": (
+                "complete_final_outer_row_units_per_worker_with_"
+                "deterministic_boundary_rebuild_v1"
+            ),
+            "raw": canary.subject_mask_final_layout_payload_plan(
+                kind="raw_probability_uint8",
+                dimensions=raw_dimensions,
+            ),
+            "refined": canary.subject_mask_final_layout_payload_plan(
+                kind="refined_dense_core",
+                dimensions=refined_dimensions,
+            ),
+            "sampled_contours": canary.plan_subject_mask_sampled_contour_storage(
+                refined_dimensions,
+                components=refined_components,
+                contour_profile=sampled_contour_profile,
+            ).as_manifest(),
+        },
         "windows": [
             {
                 "window_index": 0,
@@ -136,6 +177,7 @@ def _source_plan(tmp_path: Path) -> Path:
             "raw_run": "raw",
             "refined_run": "refined",
             "quality_run": "quality",
+            "cache_run": "cache",
             "bundle_id": "bundle",
             "result_path": str(root / "result.json"),
         },
@@ -153,6 +195,18 @@ def _source_plan(tmp_path: Path) -> Path:
                 "workers": 16,
                 "metric_level": "cheap",
             },
+            "publication": {
+                "core_physical_unit_workers": 4,
+                "core_validation_mode": (
+                    canary.SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
+                ),
+                "logical_identity_unit_rows": (
+                    canary.SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+                ),
+                "ownership_policy": (
+                    "bounded_threaded_disjoint_whole_physical_row_bands_v1"
+                ),
+            },
         },
         "safety": {
             "production_registry_used": False,
@@ -161,7 +215,13 @@ def _source_plan(tmp_path: Path) -> Path:
             "all_outputs_below_run_root": True,
             "worker_writes_are_node_local_until_atomic_bundle_publish": True,
             "window_rows_are_exact_nonoverlapping_complete": True,
+            "final_layout_units_are_selector_ineligible_transport": True,
+            "receipt_bound_composable_dense_identity_required": True,
+            "finalizer_full_dense_decode_hash_allowed": False,
+            "worker_sampled_contours_required": True,
+            "full_ragged_contours_allowed": False,
         },
+        "inference_reuse": None,
     }
     payload["plan_digest"] = canonical_json_sha256(payload)
     plan_path = root / "plan.json"
@@ -271,7 +331,7 @@ def _complete_trials(matrix: dict[str, Any]) -> None:
             "stage": "inference",
             "plan_digest": task["task_plan_digest"],
             "window_id": task["window_id"],
-            "compute_duration_seconds": duration + 50.0,
+            "compute_duration_seconds": duration + 60.0,
             "copy_duration_seconds": 2.0,
             "performance_phase_durations_seconds": {
                 "reference_archive_stage": 5.0,
@@ -280,7 +340,8 @@ def _complete_trials(matrix: dict[str, Any]) -> None:
                 "crop_pixel_materialization": 20.0,
                 "inference_cli": duration,
                 "local_proof": 14.0,
-                "worker_pre_bundle_total": duration + 50.0,
+                "final_layout_unit": 10.0,
+                "worker_pre_bundle_total": duration + 60.0,
             },
         }
         _write_json(Path(task["result_path"]), result)

@@ -82,6 +82,7 @@ PERFORMANCE_PHASES = (
     "crop_pixel_materialization",
     "inference_cli",
     "local_proof",
+    "final_layout_unit",
     "worker_pre_bundle_total",
 )
 
@@ -214,6 +215,7 @@ def prepare_matrix(
                     "raw_run": raw_run,
                     "refined_run": _safe_component(f"unused_refined_{task_id}"),
                     "quality_run": _safe_component(f"unused_quality_{task_id}"),
+                    "cache_run": _safe_component(f"unused_cache_{task_id}"),
                     "bundle_id": _safe_component(f"unused_bundle_{task_id}"),
                     "result_path": str(task_root / "unused_result.json"),
                 },
