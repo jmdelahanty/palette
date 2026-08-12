@@ -1,6 +1,20 @@
 # Citrus Data Structure Documentation
 ## Complete Reference for Data Ingestion and Analysis
 
+> **Historical reference — archived 2026-08-12.**
+>
+> This document describes the legacy Citrus H5 layout. It is retained for
+> historical and compatibility analysis only; it is not the acceptance
+> contract for new recordings. In particular, a non-empty
+> `/tracking_data/bounding_boxes`, schema-v4-style `chaser_states`, and legacy
+> coordinate attributes are not canonical stimulus-coordinate inputs for
+> Palette's strict importer.
+>
+> For new acquisition output, use
+> [`docs/citrus_stimulus_coordinate_output_contract.md`](../../../docs/citrus_stimulus_coordinate_output_contract.md)
+> and see the timestamped decision record
+> [`docs/archive/citrus_legacy_stimulus_h5_layout_decision_2026-08-12.md`](../../../docs/archive/citrus_legacy_stimulus_h5_layout_decision_2026-08-12.md).
+
 ---
 
 ## 1. Overview

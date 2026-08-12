@@ -401,6 +401,7 @@ class BoundStimulusCoordinateEvidence:
     )
     import_lineage: BoundCoordinateRecord
     output_manifest: BoundCoordinateRecord
+    target_source_acquisition_mapping: BoundCoordinateRecord | None
     stimulus_state_key: np.ndarray = dataclass_field(repr=False, compare=False)
     camera_frame_ids: np.ndarray = dataclass_field(repr=False, compare=False)
     source_acquisition_frame_index: np.ndarray = dataclass_field(
@@ -4309,6 +4310,7 @@ def _load_bound_stimulus_coordinate_evidence_impl(
         source_temporal_authority=frame_transform.source_temporal_authority,
         import_lineage=import_lineage,
         output_manifest=output_manifest_record,
+        target_source_acquisition_mapping=target_source_mapping,
         stimulus_state_key=key_values,
         camera_frame_ids=camera_values,
         source_acquisition_frame_index=source_acquisition_values,

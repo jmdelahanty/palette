@@ -3254,6 +3254,20 @@ def test_import_preserves_separate_target_source_acquisition_provenance(
     assert evidence.source_acquisition_frame_index.tolist() == [0, 1]
     assert evidence.target_source_acquisition_frame_index.tolist() == [0, 0]
     assert evidence.target_source_acquisition_frame_valid.tolist() == [True, True]
+    assert evidence.target_source_acquisition_mapping is not None
+
+    positions, metadata, handoff = (
+        chaser_metrics_loader.load_canonical_online_coordinate_surface(
+            root,
+            run,
+            chaser,
+            stimulus_evidence=evidence,
+        )
+    )
+    np.testing.assert_array_equal(positions, chaser["target_position_xy"][:])
+    assert "target_source_acquisition_mapping" in metadata["record_bindings"]
+    assert handoff.target_source_acquisition_mapping is not None
+    handoff.assert_verified()
 
 
 def test_import_classifies_legacy_static_renderer_snapshot_without_coordinate_claim(

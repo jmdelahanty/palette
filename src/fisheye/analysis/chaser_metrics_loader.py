@@ -91,6 +91,7 @@ class CanonicalOnlineCoordinateHandoff:
     import_lineage: BoundCoordinateRecord
     output_manifest: BoundCoordinateRecord
     camera_mapping: BoundCoordinateRecord
+    target_source_acquisition_mapping: BoundCoordinateRecord | None
     archive_identity: ArchiveIdentity
     stimulus_state_key: np.ndarray = dataclass_field(repr=False, compare=False)
     camera_frame_ids: np.ndarray = dataclass_field(repr=False, compare=False)
@@ -148,26 +149,15 @@ class CanonicalOnlineCoordinateHandoff:
                     current.frame_transform.arena_relative_frame
                 ),
                 transform_chain=current.frame_transform.transform_chain,
-                lineage_records=(
-                    current.surface_manifest,
-                    current.camera_mapping,
-                    current.frame_transform.manifest,
-                    current.import_lineage,
-                    current.output_manifest,
-                ),
+                lineage_records=_stimulus_coordinate_lineage_records(current),
             )
             current_node_archive = archive_identity(fresh_coordinate_node)
         except Exception as exc:
             raise ChaserMetricsCoordinateContractError(
                 f"Canonical coordinate handoff is no longer fresh: {exc}"
             ) from exc
-        record_pairs = (
-            (self.surface_manifest, current.surface_manifest),
-            (self.camera_mapping, current.camera_mapping),
-            (self.frame_transform.manifest, current.frame_transform.manifest),
-            (self.import_lineage, current.import_lineage),
-            (self.output_manifest, current.output_manifest),
-        )
+        prior_records = _stimulus_coordinate_lineage_records(self)
+        current_records = _stimulus_coordinate_lineage_records(current)
         mismatches: list[str] = []
         if current.archive_identity != self.archive_identity:
             mismatches.append("evidence_archive")
@@ -189,10 +179,10 @@ class CanonicalOnlineCoordinateHandoff:
             != self.coordinate_descriptor.descriptor.digest()
         ):
             mismatches.append("coordinate_descriptor")
-        if any(
+        if len(prior_records) != len(current_records) or any(
             left.record_ref != right.record_ref
             or left.record_sha256 != right.record_sha256
-            for left, right in record_pairs
+            for left, right in zip(prior_records, current_records, strict=True)
         ):
             mismatches.append("lineage_records")
         if not np.array_equal(current.stimulus_state_key, self.stimulus_state_key):
@@ -719,20 +709,8 @@ def _load_canonical_target_surface(
             f"Canonical stimulus coordinate evidence is invalid: {exc}"
         ) from exc
     if stimulus_evidence is not None:
-        provided_records = (
-            stimulus_evidence.surface_manifest,
-            stimulus_evidence.camera_mapping,
-            stimulus_evidence.frame_transform.manifest,
-            stimulus_evidence.import_lineage,
-            stimulus_evidence.output_manifest,
-        )
-        current_records = (
-            evidence.surface_manifest,
-            evidence.camera_mapping,
-            evidence.frame_transform.manifest,
-            evidence.import_lineage,
-            evidence.output_manifest,
-        )
+        provided_records = _stimulus_coordinate_lineage_records(stimulus_evidence)
+        current_records = _stimulus_coordinate_lineage_records(evidence)
         if (
             stimulus_evidence.archive_identity != evidence.archive_identity
             or any(
@@ -808,13 +786,7 @@ def _load_canonical_target_surface(
                 evidence.frame_transform.arena_relative_frame
             ),
             transform_chain=evidence.frame_transform.transform_chain,
-            lineage_records=(
-                evidence.surface_manifest,
-                evidence.camera_mapping,
-                evidence.frame_transform.manifest,
-                evidence.import_lineage,
-                evidence.output_manifest,
-            ),
+            lineage_records=_stimulus_coordinate_lineage_records(evidence),
         )
     except Exception as exc:
         raise ChaserMetricsCoordinateContractError(
@@ -838,6 +810,12 @@ def _load_canonical_target_surface(
         "import_lineage": _serializable_record_binding(evidence.import_lineage),
         "output_manifest": _serializable_record_binding(evidence.output_manifest),
     }
+    if evidence.target_source_acquisition_mapping is not None:
+        record_bindings["target_source_acquisition_mapping"] = (
+            _serializable_record_binding(
+                evidence.target_source_acquisition_mapping
+            )
+        )
     metadata: Dict[str, object] = {
         "schema_id": CANONICAL_ONLINE_COORDINATE_HANDOFF_SCHEMA_ID,
         "schema_version": CANONICAL_ONLINE_COORDINATE_HANDOFF_SCHEMA_VERSION,
@@ -927,6 +905,9 @@ def _load_canonical_target_surface(
         import_lineage=evidence.import_lineage,
         output_manifest=evidence.output_manifest,
         camera_mapping=evidence.camera_mapping,
+        target_source_acquisition_mapping=(
+            evidence.target_source_acquisition_mapping
+        ),
         archive_identity=evidence.archive_identity,
         stimulus_state_key=handoff_arrays[0],
         camera_frame_ids=handoff_arrays[1],
@@ -976,6 +957,21 @@ def _serializable_record_binding(record: BoundCoordinateRecord) -> Dict[str, str
         "attr_name": record.attr_name,
         "digest_attr_name": record.digest_attr_name,
     }
+
+
+def _stimulus_coordinate_lineage_records(
+    evidence: BoundStimulusCoordinateEvidence | CanonicalOnlineCoordinateHandoff,
+) -> tuple[BoundCoordinateRecord, ...]:
+    records = (
+        evidence.surface_manifest,
+        evidence.camera_mapping,
+        evidence.frame_transform.manifest,
+        evidence.import_lineage,
+        evidence.output_manifest,
+    )
+    if evidence.target_source_acquisition_mapping is None:
+        return records
+    return (*records, evidence.target_source_acquisition_mapping)
 
 
 def _validate_target_descriptor(
