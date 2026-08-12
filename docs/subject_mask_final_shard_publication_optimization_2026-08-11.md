@@ -273,7 +273,7 @@ new implementation directly, including I/O, RSS, and consolidation.
 - [ ] Verify identical logical digests and Crimson-visible declarations.
 - [ ] Inject one unit failure and prove retry does not recompute successful
   units or change authority.
-- [ ] Run one selector-ineligible full-duration canary.
+- [x] Run one selector-ineligible full-duration canary.
 - [ ] Promote a bounded default only after required CI and canary gates pass;
   retain the serial setting as rollback.
 
@@ -337,6 +337,40 @@ Receipt-composition validation:
 - recomputed cache-manifest tampering that separates the cache worker assembly
   from its refined producer evidence fails closed;
 - historical whole-hash publication and bundle tests remain green.
+
+### Full-duration receipt-composition canary (2026-08-12)
+
+The selector-ineligible Sleepyfish canary completed at Palette commit
+`80e55b642a90b657435def1b3901baa8907afd55`. It reused the 22 sealed direct
+inference bundles from the earlier canary, then completed 22 refinement workers,
+22 quality workers, and one recording publisher. The immutable result is:
+
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/subject_mask_storage/full_duration/sleepyfish_receipt_composed_20260812_80e55b64_v1/result.json`
+
+The result SHA-256 is
+`8ccd4b1ce19e1ad632d48b8ef16dbbc2eb963170561a3fb4232dc944a6810a96`;
+its plan digest is
+`82f8f616bfd09f89958c494ff8d4281eabfad2200789e201e1a2da93cf67e0bb`.
+
+The finalizer completed in 958.83 s, compared with 2,709.95 s for the preceding
+partitioned-quality publication, a 2.83x improvement. End-to-end scheduler time
+from submission through the final receipt was about 1 h 53 min. The quality
+finalizer recorded `quality_finalizer_dense_scan_performed=false`, validated
+receipt composition, adopted all 22 quality partitions, assembled all sampled
+contour workers, and left every bundle member selector-ineligible. It wrote no
+production path and mutated no registry.
+
+Raw, refined, and sampled-contour logical digests exactly match the preceding
+full-duration publication. Every declared quality-array shape, dtype, and
+value digest also matches. The quality logical-content digest intentionally
+differs because its envelope advanced from v1 to v2 and now binds the stronger
+composable refined-source manifest rather than a monolithic dense-source hash.
+
+This promotes receipt composition from an experimental implementation to a
+production-DAG candidate. It does not itself activate a selector or prove that
+the ordinary whole-recording and clipped DAG planners supply the required
+worker packages and receipts; that wiring remains a separate fail-closed
+adoption checkpoint.
 
 ## Failure semantics
 
