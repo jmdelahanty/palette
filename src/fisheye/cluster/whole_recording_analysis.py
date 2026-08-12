@@ -52,6 +52,7 @@ class SubjectMaskRunNames:
     refined_subject_mask_run: str
     refined_subject_mask_draft_run: str
     subject_mask_quality_run: str
+    subject_mask_cache_run: str
     subject_mask_bundle_id: str
 
     def to_json(self) -> dict[str, str]:
@@ -60,6 +61,7 @@ class SubjectMaskRunNames:
             "refined_subject_mask_run": self.refined_subject_mask_run,
             "refined_subject_mask_draft_run": self.refined_subject_mask_draft_run,
             "subject_mask_quality_run": self.subject_mask_quality_run,
+            "subject_mask_cache_run": self.subject_mask_cache_run,
             "subject_mask_bundle_id": self.subject_mask_bundle_id,
         }
 
@@ -152,6 +154,7 @@ def build_subject_mask_run_names(run_label: str) -> SubjectMaskRunNames:
         refined_subject_mask_run=refined,
         refined_subject_mask_draft_run=f"{refined}__worker_draft",
         subject_mask_quality_run=f"subject_mask_quality_{label}",
+        subject_mask_cache_run=f"subject_mask_cache_{label}",
         subject_mask_bundle_id=f"subject_mask_bundle_{label}",
     )
 
@@ -172,6 +175,7 @@ def _refuse_mask_output_collisions(
         analysis_zarr
         / "subject_mask_quality_runs"
         / run_names.subject_mask_quality_run,
+        analysis_zarr / "subject_mask_cache_runs" / run_names.subject_mask_cache_run,
         analysis_zarr / "subject_mask_bundle_runs" / run_names.subject_mask_bundle_id,
     )
     collisions = [path for path in outputs if path.exists()]
@@ -429,6 +433,8 @@ def _build_subject_mask_publication_job(
         run_names.refined_subject_mask_run,
         "--quality-run",
         run_names.subject_mask_quality_run,
+        "--cache-run",
+        run_names.subject_mask_cache_run,
         "--bundle-id",
         run_names.subject_mask_bundle_id,
         "--local-output-root",

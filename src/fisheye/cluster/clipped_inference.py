@@ -69,6 +69,7 @@ from fisheye.cluster.native_detection import (
 )
 from fisheye.cluster.native_detection_authority import (
     load_native_archive_authority,
+    recording_frame_work_unit_intervals,
     validate_recording_frame_index,
 )
 from fisheye.registry.db import Registry
@@ -96,6 +97,12 @@ DEFAULT_REGISTRY = Path(
 DEFAULT_CACHE_ROOT = Path("/nrs/johnson/palette_staging/flat_roi_cache")
 DEFAULT_PACKAGE_ROOT = Path(
     "/nrs/johnson/palette_staging/refined_subject_mask_clip_packages"
+)
+SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED = "receipt_composed_v1"
+SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK = "streaming_rollback_v1"
+SUBJECT_MASK_PUBLICATION_PROFILES = (
+    SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED,
+    SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK,
 )
 
 
@@ -149,6 +156,7 @@ class ClippedInferencePlan:
     cleanup_nrs_after_success: bool
     resume_existing_detections: bool
     encoded_mask_packages: bool
+    subject_mask_publication_profile: str
     detect_array_concurrency: int
     gpu_array_concurrency: int
     cache_array_concurrency: int
@@ -173,6 +181,7 @@ class ClippedInferencePlan:
             "cleanup_nrs_after_success": self.cleanup_nrs_after_success,
             "resume_existing_detections": self.resume_existing_detections,
             "encoded_mask_packages": self.encoded_mask_packages,
+            "subject_mask_publication_profile": self.subject_mask_publication_profile,
             "scheduler_concurrency": {
                 "detect_array": self.detect_array_concurrency,
                 "gpu_array_per_stage": self.gpu_array_concurrency,
@@ -412,6 +421,9 @@ def _refuse_output_collisions(
             / "subject_mask_quality_runs"
             / str(target_plan["subject_mask_quality_run"]),
             zarr
+            / "subject_mask_cache_runs"
+            / str(target_plan["subject_mask_cache_run"]),
+            zarr
             / "subject_mask_bundle_runs"
             / str(target_plan["subject_mask_bundle_id"]),
             Path(str(target_plan["cache_dir"])),
@@ -456,9 +468,7 @@ def _artifact_backed_detection_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         legacy_family = str(paths.get("detect_family_path") or "")
         legacy_group = str(paths.get("detect_target_group_path") or "")
         artifact_family = str(paths.get("detection_artifact_family_path") or "")
-        artifact_group = str(
-            paths.get("detection_artifact_target_group_path") or ""
-        )
+        artifact_group = str(paths.get("detection_artifact_target_group_path") or "")
         if not all((legacy_family, legacy_group, artifact_family, artifact_group)):
             raise ValueError("Detection plan lacks artifact/compatibility paths.")
         paths["detect_family_path"] = artifact_family
@@ -470,9 +480,7 @@ def _artifact_backed_detection_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
                     legacy_family,
                     artifact_family,
                 )
-    resolved["raw_detection_storage_profile"] = (
-        "artifact_first_native_canonical_v1"
-    )
+    resolved["raw_detection_storage_profile"] = "artifact_first_native_canonical_v1"
     resolved["compatibility_refinement_source"] = "detection_artifact_runs"
     return resolved
 
@@ -633,6 +641,7 @@ def build_plan(
     cleanup_nrs_after_success: bool = True,
     resume_existing_detections: bool = False,
     encoded_mask_packages: bool = False,
+    subject_mask_publication_profile: str = (SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED),
     detect_array_concurrency: int = 8,
     gpu_array_concurrency: int = 4,
     cache_array_concurrency: int = 2,
@@ -641,6 +650,11 @@ def build_plan(
 ) -> ClippedInferencePlan:
     if not targets:
         raise ValueError("At least one target is required.")
+    if subject_mask_publication_profile not in SUBJECT_MASK_PUBLICATION_PROFILES:
+        raise ValueError(
+            "Unsupported subject-mask publication profile: "
+            f"{subject_mask_publication_profile!r}."
+        )
     concurrency_values = {
         "cache_bundle_size": cache_bundle_size,
         "max_active_targets": max_active_targets,
@@ -741,6 +755,10 @@ def build_plan(
             target.recording_dir / "recording_frame_index.parquet",
             n_frames=authority.n_frames,
         )
+        frame_intervals = recording_frame_work_unit_intervals(
+            target.recording_dir / "recording_frame_index.parquet",
+            n_frames=authority.n_frames,
+        )
         collection_id = f"refined_detect_collection_{target_label}"
         detect_quality_source_run = f"detect_quality_source_{target_label}"
         detect_quality_run = f"detect_quality_{target_label}"
@@ -786,10 +804,24 @@ def build_plan(
         refined_subject_mask_run = f"refined_subject_masks_{target_label}"
         refined_subject_mask_draft_run = f"{refined_subject_mask_run}__worker_draft"
         subject_mask_quality_run = f"subject_mask_quality_{target_label}"
+        subject_mask_cache_run = f"subject_mask_cache_{target_label}"
         subject_mask_bundle_id = f"subject_mask_bundle_{target_label}"
         clips: list[dict[str, Any]] = []
-        for unit in work_units:
+        ordered_work_units = sorted(
+            work_units,
+            key=lambda item: frame_intervals[
+                (int(item["clip_index"]), str(item["clip_id"]))
+            ][0],
+        )
+        for work_unit_index, unit in enumerate(ordered_work_units):
             clip = str(unit["clip_id"])
+            clip_index = int(unit["clip_index"])
+            try:
+                frame_start, frame_stop = frame_intervals[(clip_index, clip)]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Recording frame index has no interval for clip {clip!r}."
+                ) from exc
             manifest = (
                 cache_dir / f"roi_cache_{target_label}__{clip}.flat_roi_cache.json"
             )
@@ -800,6 +832,9 @@ def build_plan(
                 {
                     "clip_id": clip,
                     "clip_index": int(unit["clip_index"]),
+                    "work_unit_index": int(work_unit_index),
+                    "frame_start": int(frame_start),
+                    "frame_stop": int(frame_stop),
                     "camera_serial": str(unit["camera_serial"]),
                     "work_unit_id": str(unit["work_unit_id"]),
                     "video_path": str(unit["source"]["video_path"]),
@@ -861,6 +896,7 @@ def build_plan(
             "refined_subject_mask_run": refined_subject_mask_run,
             "refined_subject_mask_draft_run": refined_subject_mask_draft_run,
             "subject_mask_quality_run": subject_mask_quality_run,
+            "subject_mask_cache_run": subject_mask_cache_run,
             "subject_mask_bundle_id": subject_mask_bundle_id,
             "clips": clips,
         }
@@ -1522,6 +1558,30 @@ def build_plan(
                         "8",
                     ]
                 )
+            if (
+                subject_mask_publication_profile
+                == SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED
+            ):
+                package_command.extend(
+                    [
+                        "--publication-evidence-producer-commit",
+                        repo_commit,
+                        "--work-unit-id",
+                        str(clip["work_unit_id"]),
+                        "--work-unit-index",
+                        str(clip["work_unit_index"]),
+                        "--source-clip-id",
+                        clip_id,
+                        "--source-clip-index",
+                        str(clip["clip_index"]),
+                        "--global-frame-start",
+                        str(clip["frame_start"]),
+                        "--global-frame-stop",
+                        str(clip["frame_stop"]),
+                        "--quality-compute-workers",
+                        "4",
+                    ]
+                )
             package_tasks.append(
                 _execution_task(
                     run_root=run_root,
@@ -1570,24 +1630,30 @@ def build_plan(
         ]
         for clip in clips:
             mask_import.extend(["--package", str(clip["package_path"])])
-        jobs.append(
-            _job(
-                workflow_id=workflow_id,
-                repo=repo,
-                run_root=run_root,
-                job_key=mask_import_key,
-                stage="subject_mask_collection_import",
-                command=mask_import,
-                resources=import_cpu,
-                upstream=(package_array_key,),
-                expected_outputs=(
-                    target.analysis_zarr
-                    / "refined_subject_masks_runs"
-                    / refined_subject_mask_draft_run
-                    / "zarr.json",
-                ),
+        if (
+            subject_mask_publication_profile
+            == SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+        ):
+            jobs.append(
+                _job(
+                    workflow_id=workflow_id,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=mask_import_key,
+                    stage="subject_mask_collection_import",
+                    command=mask_import,
+                    resources=import_cpu,
+                    upstream=(package_array_key,),
+                    expected_outputs=(
+                        target.analysis_zarr
+                        / "refined_subject_masks_runs"
+                        / refined_subject_mask_draft_run
+                        / "zarr.json",
+                    ),
+                )
             )
-        )
+        else:
+            mask_import_key = package_array_key
 
         mask_publish_key = f"mask_publish:{target_safe}"
         mask_publish_output = (
@@ -1598,26 +1664,30 @@ def build_plan(
             f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
             "palette_subject_mask_quality"
         )
+        receipt_composed = (
+            subject_mask_publication_profile
+            == SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED
+        )
         mask_publish = [
             "scripts/py",
             "-m",
-            "fisheye.cluster.subject_masks.publish_recording_bundle",
+            (
+                "fisheye.cluster.subject_masks.publish_receipt_composed_bundle"
+                if receipt_composed
+                else "fisheye.cluster.subject_masks.publish_recording_bundle"
+            ),
             "--analysis-zarr",
-            str(target.analysis_zarr),
-            "--draft-zarr",
             str(target.analysis_zarr),
             "--crop-run",
             merged_proxy,
-            "--raw-draft-parent",
-            "subject_mask_shard_runs",
-            "--refined-draft-run",
-            refined_subject_mask_draft_run,
             "--raw-run",
             subject_mask_run,
             "--refined-run",
             refined_subject_mask_run,
             "--quality-run",
             subject_mask_quality_run,
+            "--cache-run",
+            subject_mask_cache_run,
             "--bundle-id",
             subject_mask_bundle_id,
             "--local-output-root",
@@ -1626,6 +1696,21 @@ def build_plan(
             mask_quality_scratch,
             "--json",
         ]
+        if receipt_composed:
+            mask_publish.extend(["--producer-commit", repo_commit])
+            for clip in clips:
+                mask_publish.extend(["--refined-package", str(clip["package_path"])])
+        else:
+            mask_publish.extend(
+                [
+                    "--draft-zarr",
+                    str(target.analysis_zarr),
+                    "--raw-draft-parent",
+                    "subject_mask_shard_runs",
+                    "--refined-draft-run",
+                    refined_subject_mask_draft_run,
+                ]
+            )
         for clip in clips:
             mask_publish.extend(
                 ["--raw-draft-run", str(clip["subject_mask_shard_run"])]
@@ -1684,7 +1769,9 @@ def build_plan(
         refined_masks_artifact = f"refined_subject_masks:{target_safe}"
         validated_artifact = f"validated_analysis:{target_safe}"
         job_by_key = {job.job_key: job for job in jobs}
-        mask_finalize_keys = [package_array_key, mask_import_key, mask_publish_key]
+        mask_finalize_keys = list(
+            dict.fromkeys((package_array_key, mask_import_key, mask_publish_key))
+        )
         if mask_grid_key is not None:
             mask_finalize_keys.insert(0, mask_grid_key)
         fragments.extend(
@@ -1837,9 +1924,7 @@ def build_plan(
         )
     )
 
-    planned_job_keys = [
-        job.job_key for fragment in fragments for job in fragment.jobs
-    ]
+    planned_job_keys = [job.job_key for fragment in fragments for job in fragment.jobs]
     duplicate_job_keys = sorted(
         key for key, count in Counter(planned_job_keys).items() if count > 1
     )
@@ -1894,6 +1979,7 @@ def build_plan(
         cleanup_nrs_after_success=cleanup_nrs_after_success,
         resume_existing_detections=resume_existing_detections,
         encoded_mask_packages=encoded_mask_packages,
+        subject_mask_publication_profile=subject_mask_publication_profile,
         detect_array_concurrency=int(detect_array_concurrency),
         gpu_array_concurrency=int(gpu_array_concurrency),
         cache_array_concurrency=int(cache_array_concurrency),
@@ -2076,6 +2162,15 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit v2 globally aligned encoded mask packages and use direct chunk publication.",
     )
+    parser.add_argument(
+        "--subject-mask-publication-profile",
+        choices=SUBJECT_MASK_PUBLICATION_PROFILES,
+        default=SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED,
+        help=(
+            "Receipt-composed is the current default; streaming_rollback_v1 "
+            "retains the former serial validation/publication path."
+        ),
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -2108,6 +2203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cleanup_nrs_after_success=not args.no_cleanup_nrs_after_success,
         resume_existing_detections=args.resume_existing_detections,
         encoded_mask_packages=args.encoded_mask_packages,
+        subject_mask_publication_profile=args.subject_mask_publication_profile,
         detect_array_concurrency=args.detect_array_concurrency,
         gpu_array_concurrency=args.gpu_array_concurrency,
         cache_array_concurrency=args.cache_array_concurrency,

@@ -372,6 +372,55 @@ the ordinary whole-recording and clipped DAG planners supply the required
 worker packages and receipts; that wiring remains a separate fail-closed
 adoption checkpoint.
 
+### Production planner adoption (2026-08-12)
+
+The clipped-recording production planner now defaults new immutable plans to
+`receipt_composed_v1`. Each refinement-package task seals, while its exact
+worker output is still local:
+
+- the raw and refined final-layout units bound to their semantic receipts;
+- the fixed-count sampled-contour receipt;
+- the observation-local quality partition; and
+- exact work-unit, clip, global-frame, and global-row intervals.
+
+The resulting immutable package is the only handoff. The recording publisher
+extracts the refined workers and evidence to node-local scratch, exposes the
+raw workers and crop authority read-only, and invokes the shared bundle
+publisher with `production_composable_units_v1`, complete-unit enforcement,
+mandatory worker quality, mandatory worker sampled contours, and activation
+disabled. It no longer runs the former merged-refined-draft rematerialization
+job on this profile. Missing evidence, changed receipts, unsafe tar members,
+duplicate workers, interval gaps, or mismatched producer commits fail before a
+candidate can become visible.
+
+`streaming_rollback_v1` remains an explicit planner option. It retains the
+former per-clip package import and streaming publication path; it is not the
+default for new clipped plans. Keypoint recovery republishes receipt-composed
+packages through the same strict publisher. The older import-recovery tool
+rejects receipt-composed plans because there is deliberately no merged import
+to recover.
+
+The ordinary whole-video planner is not yet receipt-composed. It now publishes
+the standard four-member bundle, including the sampled-contour cache, but keeps
+the streaming core/QC/cache computation path. This boundary is explicit: the
+validated promotion applies to the clip-parallel production topology first,
+not to a nominal profile flag that a whole-video producer cannot yet satisfy.
+
+Implementation verification at this checkpoint:
+
+- 53 adjacent clipped/recovery/whole-recording/package planner tests passed;
+- 45 recording-bundle/core-layout/quality/cache publication tests passed;
+- 35 focused clip-package, wrapper, and production-plan tests passed;
+- one real-Zarr integration test built all four evidence surfaces from exact
+  raw/refined worker receipts and verified their sealed files;
+- the promoted planner has no merged-import job, while the rollback test proves
+  the former job and publisher remain reachable only by explicit selection;
+- Ruff, Python compilation, and `git diff --check` pass.
+
+The next gate is one production-shaped, selector-ineligible clipped candidate
+created by the ordinary planner, followed by lightweight Crimson schema/open
+validation. No selector or registry authority is activated by this code change.
+
 ## Failure semantics
 
 If a parallel write fails, the destination remains a failed node-local

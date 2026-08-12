@@ -140,8 +140,43 @@ def validate_recording_frame_index(path: Path, *, n_frames: int) -> None:
         )
 
 
+def recording_frame_work_unit_intervals(
+    path: Path, *, n_frames: int
+) -> dict[tuple[int, str], tuple[int, int]]:
+    """Return exact half-open acquisition-frame intervals for clipped work units."""
+
+    validate_recording_frame_index(path, n_frames=n_frames)
+    table = pq.read_table(
+        path.expanduser().resolve(),
+        columns=["clip_index", "clip_id", "parent_frame_index"],
+    )
+    rows = table.to_pydict()
+    grouped: dict[tuple[int, str], list[int]] = {}
+    for clip_index, clip_id, frame in zip(
+        rows["clip_index"],
+        rows["clip_id"],
+        rows["parent_frame_index"],
+        strict=True,
+    ):
+        grouped.setdefault((int(clip_index), str(clip_id)), []).append(int(frame))
+    intervals: dict[tuple[int, str], tuple[int, int]] = {}
+    observed: list[int] = []
+    for key, frames in grouped.items():
+        ordered = sorted(frames)
+        start = ordered[0]
+        stop = ordered[-1] + 1
+        if ordered != list(range(start, stop)):
+            raise ValueError(f"Recording work unit {key!r} is not frame-contiguous.")
+        intervals[key] = (start, stop)
+        observed.extend(ordered)
+    if sorted(observed) != list(range(int(n_frames))):
+        raise ValueError("Recording work-unit intervals do not cover every frame once.")
+    return intervals
+
+
 __all__ = [
     "NativeArchiveAuthority",
     "load_native_archive_authority",
     "validate_recording_frame_index",
+    "recording_frame_work_unit_intervals",
 ]

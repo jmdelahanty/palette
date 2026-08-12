@@ -31,7 +31,6 @@ from fisheye.cluster.lsf import (
 )
 from fisheye.utils.prepare_clipped_keypoint_recovery import prepare_keypoint_recovery
 
-
 RECOVERY_SCHEMA = "palette.clipped_inference_keypoint_recovery.v1"
 
 
@@ -67,7 +66,9 @@ def _inner_command(job: Mapping[str, Any]) -> tuple[str, ...]:
     return inner
 
 
-def _prior_jobs_by_task_key(prior_jobs: Sequence[object]) -> dict[str, Mapping[str, Any]]:
+def _prior_jobs_by_task_key(
+    prior_jobs: Sequence[object],
+) -> dict[str, Mapping[str, Any]]:
     """Index standalone scheduler jobs and grouped tasks through one view."""
 
     indexed: dict[str, Mapping[str, Any]] = {}
@@ -107,13 +108,17 @@ def _resources(job: Mapping[str, Any]) -> LsfResources:
         ncores=int(payload["ncores"]),
         mem_gb=int(payload["mem_gb"]),
         gpus=int(payload.get("gpus") or 0),
-        walltime=str(payload["walltime"]) if payload.get("walltime") is not None else None,
+        walltime=(
+            str(payload["walltime"]) if payload.get("walltime") is not None else None
+        ),
         span_hosts=(
             int(payload["span_hosts"])
             if payload.get("span_hosts") is not None
             else None
         ),
-        extra_lsf_args=tuple(str(value) for value in payload.get("extra_lsf_args") or ()),
+        extra_lsf_args=tuple(
+            str(value) for value in payload.get("extra_lsf_args") or ()
+        ),
     )
 
 
@@ -144,7 +149,9 @@ def build_plan(
         raise ValueError(f"Unsupported clipped inference plan: {source_plan_path}")
     targets = source.get("targets")
     workflow_payload = source.get("lsf_workflow")
-    prior_jobs = workflow_payload.get("jobs") if isinstance(workflow_payload, Mapping) else None
+    prior_jobs = (
+        workflow_payload.get("jobs") if isinstance(workflow_payload, Mapping) else None
+    )
     if not isinstance(targets, list) or not targets or not isinstance(prior_jobs, list):
         raise ValueError("Source plan requires targets and an LSF workflow.")
     label = safe_component(recovery_label, default="keypoint_recovery", max_length=72)
@@ -185,7 +192,9 @@ def build_plan(
     for target in targets:
         if not isinstance(target, Mapping):
             raise ValueError("Source plan target must be an object.")
-        target_safe = safe_component(str(target["target_id"]), default="target", max_length=56)
+        target_safe = safe_component(
+            str(target["target_id"]), default="target", max_length=56
+        )
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
         keypoint_tasks: list[LsfExecutionTask] = []
         keypoint_priors: list[Mapping[str, Any]] = []
@@ -247,7 +256,10 @@ def build_plan(
                 resources=_resources(finalize_prior),
                 upstream=(keypoint_array_key,),
                 expected_outputs=(
-                    zarr_path / "keypoints_runs" / str(target["keypoint_run"]) / "zarr.json",
+                    zarr_path
+                    / "keypoints_runs"
+                    / str(target["keypoint_run"])
+                    / "zarr.json",
                 ),
             )
         )
@@ -313,29 +325,55 @@ def build_plan(
             )
         )
 
-        import_key = f"mask_import:{target_safe}"
-        import_prior = prior_by_key[import_key]
+        receipt_composed = (
+            source.get("subject_mask_publication_profile") == "receipt_composed_v1"
+        )
+        terminal_mask_key = (
+            f"mask_publish:{target_safe}"
+            if receipt_composed
+            else f"mask_import:{target_safe}"
+        )
+        terminal_prior = prior_by_key[terminal_mask_key]
         jobs.append(
             _job(
                 workflow_id=label,
                 repo=repo,
                 run_root=run_root,
-                job_key=import_key,
-                stage="subject_mask_collection_import",
+                job_key=terminal_mask_key,
+                stage=(
+                    "subject_mask_collection_publication"
+                    if receipt_composed
+                    else "subject_mask_collection_import"
+                ),
                 command=_replace_run_root(
-                    _inner_command(import_prior),
+                    _inner_command(terminal_prior),
                     prior_run_root=prior_run_root,
                     recovery_run_root=run_root,
                 ),
-                resources=LsfResources(
-                    queue="local", ncores=8, mem_gb=32, walltime="3:00"
+                resources=(
+                    _resources(terminal_prior)
+                    if receipt_composed
+                    else LsfResources(
+                        queue="local", ncores=8, mem_gb=32, walltime="3:00"
+                    )
                 ),
                 upstream=(package_array_key,),
                 expected_outputs=(
-                    zarr_path
-                    / "refined_subject_masks_runs"
-                    / str(target["refined_subject_mask_run"])
-                    / "zarr.json",
+                    (
+                        (
+                            zarr_path
+                            / "subject_mask_bundle_runs"
+                            / str(target["subject_mask_bundle_id"])
+                            / "zarr.json"
+                        )
+                        if receipt_composed
+                        else (
+                            zarr_path
+                            / "refined_subject_masks_runs"
+                            / str(target["refined_subject_mask_run"])
+                            / "zarr.json"
+                        )
+                    ),
                 ),
             )
         )
@@ -361,7 +399,7 @@ def build_plan(
                     str(validation_report),
                 ),
                 resources=_resources(validation_prior),
-                upstream=(import_key,),
+                upstream=(terminal_mask_key,),
                 expected_outputs=(validation_report,),
             )
         )
@@ -435,7 +473,9 @@ def build_plan(
             "preflight": preflight,
         },
     }
-    return KeypointRecoveryPlan(payload=payload, workflow=workflow, repo=repo, run_root=run_root)
+    return KeypointRecoveryPlan(
+        payload=payload, workflow=workflow, repo=repo, run_root=run_root
+    )
 
 
 def materialize_plan(plan: KeypointRecoveryPlan) -> dict[str, Any]:
@@ -444,10 +484,24 @@ def materialize_plan(plan: KeypointRecoveryPlan) -> dict[str, Any]:
     lsf_path = plan.run_root / "lsf_plan.json"
     if plan_path.exists():
         existing = _read_json(plan_path)
-        if existing != payload or not lsf_path.is_file() or _read_json(lsf_path) != plan.workflow.to_json():
-            raise FileExistsError(f"Recovery run root contains different immutable evidence: {plan.run_root}")
+        if (
+            existing != payload
+            or not lsf_path.is_file()
+            or _read_json(lsf_path) != plan.workflow.to_json()
+        ):
+            raise FileExistsError(
+                f"Recovery run root contains different immutable evidence: {plan.run_root}"
+            )
         return existing
-    for name in ("logs", "status", "progress", "recovery", "validation", "registry", "cleanup"):
+    for name in (
+        "logs",
+        "status",
+        "progress",
+        "recovery",
+        "validation",
+        "registry",
+        "cleanup",
+    ):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
     write_json_snapshot(plan_path, payload)
     write_json_snapshot(lsf_path, plan.workflow.to_json())
@@ -484,7 +538,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=args.run_root,
         recovery_label=args.recovery_label,
     )
-    result = apply_plan(plan, submit_host=args.submit_host) if args.apply else materialize_plan(plan)
+    result = (
+        apply_plan(plan, submit_host=args.submit_host)
+        if args.apply
+        else materialize_plan(plan)
+    )
     summary = {
         "status": "submitted" if args.apply else "dry_run",
         "job_count": len(plan.workflow.jobs),
@@ -495,7 +553,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True, default=str))
     else:
-        print(f"{summary['status']}: {summary['job_count']} jobs; plan={summary['plan_path']}")
+        print(
+            f"{summary['status']}: {summary['job_count']} jobs; plan={summary['plan_path']}"
+        )
     return 0
 
 

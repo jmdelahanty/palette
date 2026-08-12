@@ -40,13 +40,19 @@ def test_finalize_subject_mask_clip_package_writes_tar_and_cleans_staging(
     root.require_group("refined_keypoints_runs").create_group("refined_keypoints")
 
     def fake_finalize_subject_mask_run(root, **kwargs):  # noqa: ANN001, ANN003
-        refined = root.require_group("refined_subject_masks_runs").create_group(kwargs["refined_run"])
+        refined = root.require_group("refined_subject_masks_runs").create_group(
+            kwargs["refined_run"]
+        )
         refined.attrs["method"] = "test_finalizer"
         refined.attrs["mask_labels"] = ["subject_body"]
-        refined.create_array("masks_roi", data=np.zeros((1, 1, 2, 2), dtype=np.uint8), overwrite=True)
+        refined.create_array(
+            "masks_roi", data=np.zeros((1, 1, 2, 2), dtype=np.uint8), overwrite=True
+        )
         return {"status": "ok", "refined_run": kwargs["refined_run"]}
 
-    monkeypatch.setattr(mod, "finalize_subject_mask_run", fake_finalize_subject_mask_run)
+    monkeypatch.setattr(
+        mod, "finalize_subject_mask_run", fake_finalize_subject_mask_run
+    )
 
     staging_root = tmp_path / "scratch"
     package_path = tmp_path / "nrs" / "refined_clip.tar.gz"
@@ -100,7 +106,9 @@ def test_finalize_subject_mask_clip_package_can_emit_encoded_v2(
     )
 
     def fake_finalize_subject_mask_run(root, **kwargs):  # noqa: ANN001, ANN003
-        refined = root.require_group("refined_subject_masks_runs").create_group(kwargs["refined_run"])
+        refined = root.require_group("refined_subject_masks_runs").create_group(
+            kwargs["refined_run"]
+        )
         refined.attrs["method"] = "test_finalizer"
         refined.attrs["mask_labels"] = ["subject_body"]
         refined.create_array(
@@ -117,7 +125,9 @@ def test_finalize_subject_mask_clip_package_can_emit_encoded_v2(
         )
         return {"status": "ok", "refined_run": kwargs["refined_run"]}
 
-    monkeypatch.setattr(mod, "finalize_subject_mask_run", fake_finalize_subject_mask_run)
+    monkeypatch.setattr(
+        mod, "finalize_subject_mask_run", fake_finalize_subject_mask_run
+    )
     package_path = tmp_path / "refined_clip_v2.tar.gz"
     result = mod.finalize_subject_mask_clip_package(
         source_zarr=source_zarr,
@@ -141,3 +151,126 @@ def test_finalize_subject_mask_clip_package_can_emit_encoded_v2(
     assert package["encoded_global_masks_roi"]["complete_row_chunk_count"] == 1
     assert f"{ENCODED_MASK_PAYLOAD_NAME}/zarr.json" in names
     assert any(name.startswith(f"{ENCODED_MASK_PAYLOAD_NAME}/c/0/") for name in names)
+
+
+def test_finalize_clip_package_embeds_receipt_composed_publication_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_zarr = tmp_path / "source_evidence.zarr"
+    root = zarr.open_group(str(source_zarr), mode="w", zarr_format=3)
+    root.require_group("crop_runs").create_group("crop_collection")
+    root.require_group("subject_mask_shard_runs").create_group("subject_clip")
+
+    def fake_finalize(root, **kwargs):  # noqa: ANN001, ANN003
+        refined = root.require_group("refined_subject_masks_runs").create_group(
+            kwargs["refined_run"]
+        )
+        refined.attrs["mask_labels"] = ["subject_body"]
+        refined.attrs["stage_selector_eligible"] = False
+        refined.create_array(
+            "masks_roi",
+            data=np.zeros((1, 1, 2, 2), dtype=np.uint8),
+            overwrite=True,
+        )
+        return {"status": "ok"}
+
+    def fake_evidence(**kwargs):  # noqa: ANN003
+        destination = kwargs["destination"]
+        (destination / "raw_final_layout_unit").mkdir(parents=True)
+        (destination / "refined_final_layout_unit").mkdir()
+        (destination / "quality_partition").mkdir()
+        (destination / "sampled_contour_receipt.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        return {
+            "schema_id": "palette.subject_mask.clip_publication_evidence",
+            "schema_version": 1,
+            "producer_commit": "c" * 40,
+            "work_unit_id": "unit_0",
+            "work_unit_index": 0,
+            "source_clip_id": "clip_0",
+            "source_clip_index": 0,
+            "global_frame_interval": {"start_frame": 0, "stop_frame": 10},
+            "global_row_interval": {"start_row": 0, "stop_row": 1},
+        }
+
+    monkeypatch.setattr(mod, "finalize_subject_mask_run", fake_finalize)
+    monkeypatch.setattr(mod, "_refined_worker_proof", lambda *_args: {"ok": True})
+    monkeypatch.setattr(mod, "_build_publication_evidence", fake_evidence)
+    package_path = tmp_path / "refined_evidence.tar.gz"
+
+    result = mod.finalize_subject_mask_clip_package(
+        source_zarr=source_zarr,
+        subject_shard_run="subject_clip",
+        target_crop_run="crop_collection",
+        refined_run="refined_clip",
+        package_path=package_path,
+        staging_root=tmp_path / "scratch_evidence",
+        require_production_proof=True,
+        publication_evidence_producer_commit="c" * 40,
+        work_unit_id="unit_0",
+        work_unit_index=0,
+        source_clip_id="clip_0",
+        source_clip_index=0,
+        global_frame_start=0,
+        global_frame_stop=10,
+    )
+
+    assert result["publication_evidence"]["work_unit_id"] == "unit_0"
+    with tarfile.open(package_path, "r:gz") as tar:
+        names = set(tar.getnames())
+        manifest_file = tar.extractfile("package.json")
+        assert manifest_file is not None
+        manifest = json.loads(manifest_file.read().decode("utf-8"))
+    assert "publication_evidence/raw_final_layout_unit" in names
+    assert "publication_evidence/refined_final_layout_unit" in names
+    assert "publication_evidence/quality_partition" in names
+    assert "publication_evidence/sampled_contour_receipt.json" in names
+    assert manifest["publication_evidence"]["producer_commit"] == "c" * 40
+
+
+def test_publication_evidence_binds_real_worker_receipts_and_values(
+    tmp_path: Path,
+) -> None:
+    from tests.unit.fisheye.test_subject_mask_recording_bundle_publication import (
+        _draft,
+        _install_worker_sampled_contours,
+    )
+
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_0": slice(0, 2), "raw_clip_1": slice(2, 4)},
+        refined_slices={
+            "refined_clip_0": slice(0, 2),
+            "refined_clip_1": slice(2, 4),
+        },
+    )
+    _install_worker_sampled_contours(
+        draft, refined_runs=("refined_clip_0", "refined_clip_1")
+    )
+    root = zarr.open_group(str(draft), mode="r", use_consolidated=False)
+
+    evidence = mod._build_publication_evidence(  # noqa: SLF001
+        root=root,
+        staged_zarr=draft,
+        raw_run=root["subject_mask_shard_runs/raw_clip_0"],
+        refined_run=root["refined_subject_masks_runs/refined_clip_0"],
+        crop_run=root["crop_runs/crop_001"],
+        destination=tmp_path / "evidence",
+        producer_commit="c" * 40,
+        work_unit_id="unit_0",
+        work_unit_index=0,
+        source_clip_id="clip_0",
+        source_clip_index=0,
+        global_frame_start=0,
+        global_frame_stop=1,
+        quality_compute_workers=1,
+    )
+
+    assert evidence["global_row_interval"] == {"start_row": 0, "stop_row": 2}
+    assert (tmp_path / "evidence/raw_final_layout_unit/receipt.json").is_file()
+    assert (tmp_path / "evidence/refined_final_layout_unit/receipt.json").is_file()
+    assert (tmp_path / "evidence/sampled_contour_receipt.json").is_file()
+    assert (tmp_path / "evidence/quality_partition/receipt.json").is_file()

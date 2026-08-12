@@ -227,6 +227,9 @@ def _build_fixture_plan(
     encoded_mask_packages: bool = False,
     target_count: int = 1,
     max_active_targets: int = 3,
+    subject_mask_publication_profile: str = (
+        workflow.SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED
+    ),
 ) -> workflow.ClippedInferencePlan:
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -291,6 +294,14 @@ def _build_fixture_plan(
     )
     monkeypatch.setattr(
         workflow,
+        "recording_frame_work_unit_intervals",
+        lambda *_args, **_kwargs: {
+            (index, f"clip_{index:06d}"): (index * 100, (index + 1) * 100)
+            for index in range(22)
+        },
+    )
+    monkeypatch.setattr(
+        workflow,
         "resolve_pose_model_binding",
         lambda **_kwargs: SimpleNamespace(
             set_id="pose_set",
@@ -334,6 +345,7 @@ def _build_fixture_plan(
         resume_existing_detections=resume_existing_detections,
         encoded_mask_packages=encoded_mask_packages,
         max_active_targets=max_active_targets,
+        subject_mask_publication_profile=subject_mask_publication_profile,
     )
 
 
@@ -354,7 +366,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     clip_id = "clip_000000"
 
-    assert len(plan.lsf_workflow.jobs) == 22
+    assert len(plan.lsf_workflow.jobs) == 21
     keypoint_array = jobs[f"keypoints_array:{target_safe}"]
     subject_mask_array = jobs[f"subject_masks_array:{target_safe}"]
     package_array = jobs[f"mask_package_array:{target_safe}"]
@@ -382,18 +394,25 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert f"mask_package:{target_safe}:{clip_id}" in _execution_tasks(package_array)
     cache_job = jobs[f"cache_array:{target_safe}"]
     cache_tasks = _execution_tasks(cache_job)
-    import_job = jobs[f"mask_import:{target_safe}"]
     publish_job = jobs[f"mask_publish:{target_safe}"]
     validation_job = jobs[f"validate:{target_safe}"]
     assert "--run-direct" in cache_tasks[f"cache:{target_safe}:00"].command
     assert "bsub" not in cache_job.command
-    assert import_job.resources.queue == "local"
-    assert import_job.resources.walltime == "3:00"
-    assert "--require-production-proof" in import_job.command
-    assert publish_job.dependency.upstream_job_keys == (import_job.job_key,)
+    assert f"mask_import:{target_safe}" not in jobs
+    assert publish_job.dependency.upstream_job_keys == (package_array.job_key,)
     assert publish_job.command.count("--raw-draft-run") == len(target["clips"])
-    assert "--raw-draft-parent" in publish_job.command
-    assert "subject_mask_shard_runs" in publish_job.command
+    assert "fisheye.cluster.subject_masks.publish_receipt_composed_bundle" in (
+        publish_job.command
+    )
+    assert publish_job.command.count("--refined-package") == len(target["clips"])
+    assert "--producer-commit" in publish_job.command
+    assert "--cache-run" in publish_job.command
+    package_task = _execution_tasks(package_array)[
+        f"mask_package:{target_safe}:{clip_id}"
+    ]
+    assert "--publication-evidence-producer-commit" in package_task.command
+    assert "--global-frame-start" in package_task.command
+    assert "--global-frame-stop" in package_task.command
     assert validation_job.dependency.upstream_job_keys == (publish_job.job_key,)
     assert all(
         job.command[:2]
@@ -456,12 +475,8 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert fragments[1]["requires"] == [native_output["artifact_key"]]
     assert fragments[1]["provides"] == [detection_output["artifact_key"]]
     assert fragments[2]["requires"] == [detection_output["artifact_key"]]
-    assert fragments[3]["requires"] == [
-        strict_output["evidence"]["artifact_key"]
-    ]
-    assert fragments[4]["requires"] == [
-        strict_output["storage"]["crop_artifact_key"]
-    ]
+    assert fragments[3]["requires"] == [strict_output["evidence"]["artifact_key"]]
+    assert fragments[4]["requires"] == [strict_output["storage"]["crop_artifact_key"]]
     assert fragments[5]["requires"] == [f"crop_roi_cache:{target_safe}"]
     assert fragments[6]["requires"] == [f"crop_roi_cache:{target_safe}"]
     assert fragments[7]["requires"] == [
@@ -476,6 +491,38 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
         "registry_reconciled",
         "nrs_cache_cleaned",
     ]
+
+
+def test_build_plan_retains_explicit_subject_mask_streaming_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        subject_mask_publication_profile=(
+            workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+        ),
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    import_job = jobs[f"mask_import:{target_safe}"]
+    publish_job = jobs[f"mask_publish:{target_safe}"]
+
+    assert plan.subject_mask_publication_profile == (
+        workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+    )
+    assert "fisheye.utils.import_refined_subject_mask_clip_packages" in (
+        import_job.command
+    )
+    assert publish_job.dependency.upstream_job_keys == (import_job.job_key,)
+    assert "fisheye.cluster.subject_masks.publish_recording_bundle" in (
+        publish_job.command
+    )
+    assert "--refined-draft-run" in publish_job.command
+    assert "--refined-package" not in publish_job.command
 
 
 def test_detection_module_composes_as_a_first_class_detection_only_workflow(
@@ -849,10 +896,10 @@ def test_encoded_mask_packages_add_global_grid_and_join(
     )
     grid_key = f"mask_grid:{target_safe}"
     package_key = f"mask_package_array:{target_safe}"
-    import_key = f"mask_import:{target_safe}"
+    publish_key = f"mask_publish:{target_safe}"
 
     assert plan.encoded_mask_packages is True
-    assert len(plan.lsf_workflow.jobs) == 23
+    assert len(plan.lsf_workflow.jobs) == 22
     assert jobs[grid_key].dependency.upstream_job_keys == (
         f"keypoint_finalize:{target_safe}",
     )
@@ -866,7 +913,9 @@ def test_encoded_mask_packages_add_global_grid_and_join(
     ]
     assert "--global-mask-grid-manifest" in package_task.command
     assert "--require-production-proof" in package_task.command
-    assert "--encoded-copy-workers" in jobs[import_key].command
+    assert f"mask_import:{target_safe}" not in jobs
+    assert "--refined-package" in jobs[publish_key].command
+    assert jobs[publish_key].dependency.upstream_job_keys == (package_key,)
 
 
 def test_encoded_chunk_canary_serializes_prfs_ab_imports(tmp_path: Path) -> None:
@@ -912,9 +961,7 @@ def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
     )
     clip_id = "clip_000000"
     detect_array = jobs[f"detect_artifact_array:{target_safe}"]
-    detect = _execution_tasks(detect_array)[
-        f"detect_artifact:{target_safe}:{clip_id}"
-    ]
+    detect = _execution_tasks(detect_array)[f"detect_artifact:{target_safe}:{clip_id}"]
     refine_bundle = jobs[f"detect_refine_bundle:{target_safe}"]
 
     assert plan.resume_existing_detections is True
@@ -948,13 +995,11 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
     )
 
     assert len(plan.targets) == 2
-    assert len(plan.lsf_workflow.jobs) == 42
+    assert len(plan.lsf_workflow.jobs) == 40
     assert jobs[f"detect_artifact_array:{first_safe}"].dependency is None
     assert jobs[
         f"detect_artifact_array:{second_safe}"
-    ].dependency.upstream_job_keys == (
-        f"validate:{first_safe}",
-    )
+    ].dependency.upstream_job_keys == (f"validate:{first_safe}",)
     assert jobs["registry_finalize"].dependency.upstream_job_keys == (
         f"validate:{first_safe}",
         f"validate:{second_safe}",
@@ -983,7 +1028,14 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = _build_fixture_plan(tmp_path, monkeypatch, resume_existing_detections=True)
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        resume_existing_detections=True,
+        subject_mask_publication_profile=(
+            workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+        ),
+    )
     source_plan = tmp_path / "source_plan.json"
     _write_json(source_plan, source.to_json())
     monkeypatch.setattr(
@@ -1029,11 +1081,54 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     assert plan.payload["targets"] == source.to_json()["targets"]
 
 
-def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
+def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_plan = tmp_path / "source_receipt_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+    )
+
+    plan = recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "receipt_recovery",
+        recovery_label="sleepyfish_receipt_keypoint_recovery",
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+    target = source.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    package_key = f"mask_package_array:{target_safe}"
+    publish_key = f"mask_publish:{target_safe}"
+
+    assert f"mask_import:{target_safe}" not in jobs
+    assert publish_key in jobs
+    assert jobs[publish_key].dependency.upstream_job_keys == (package_key,)
+    assert "fisheye.cluster.subject_masks.publish_receipt_composed_bundle" in (
+        jobs[publish_key].command
+    )
+    assert jobs[f"validate:{target_safe}"].dependency.upstream_job_keys == (
+        publish_key,
+    )
+
+
+def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        subject_mask_publication_profile=(
+            workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+        ),
+    )
     workflow.materialize_plan_bundle(source)
     source_plan = source.run_root / "plan.json"
     source_payload = json.loads(source_plan.read_text(encoding="utf-8"))
@@ -1196,7 +1291,13 @@ def test_import_recovery_reuses_packages_on_long_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        subject_mask_publication_profile=(
+            workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+        ),
+    )
     source_plan = tmp_path / "source_import_plan.json"
     _write_json(source_plan, source.to_json())
     monkeypatch.setattr(
@@ -1233,7 +1334,13 @@ def test_import_recovery_can_resume_after_complete_import_validation_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        subject_mask_publication_profile=(
+            workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+        ),
+    )
     source_plan = tmp_path / "source_complete_import_plan.json"
     _write_json(source_plan, source.to_json())
     monkeypatch.setattr(
@@ -1270,7 +1377,13 @@ def test_import_recovery_can_convert_v1_packages_to_encoded_v2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        subject_mask_publication_profile=(
+            workflow.SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK
+        ),
+    )
     source_plan = tmp_path / "source_import_plan.json"
     _write_json(source_plan, source.to_json())
     monkeypatch.setattr(

@@ -29,7 +29,6 @@ from fisheye.cluster.lsf import (
     write_json_snapshot,
 )
 
-
 RECOVERY_SCHEMA = "palette.clipped_inference_import_recovery.v1"
 
 
@@ -68,12 +67,17 @@ def _preflight(
     reports: list[dict[str, Any]] = []
     for target in source["targets"]:
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
-        refined_keypoints = zarr_path / "refined_keypoints_runs" / str(
-            target["refined_keypoint_run"]
+        refined_keypoints = (
+            zarr_path / "refined_keypoints_runs" / str(target["refined_keypoint_run"])
         )
         keypoint_attrs = _group_attrs(refined_keypoints)
-        if not keypoint_attrs or keypoint_attrs.get("palette_run_completion_status") != "complete":
-            raise RuntimeError(f"Refined keypoints are not complete: {refined_keypoints}")
+        if (
+            not keypoint_attrs
+            or keypoint_attrs.get("palette_run_completion_status") != "complete"
+        ):
+            raise RuntimeError(
+                f"Refined keypoints are not complete: {refined_keypoints}"
+            )
 
         packages: list[dict[str, Any]] = []
         for clip in target["clips"]:
@@ -88,8 +92,10 @@ def _preflight(
                 }
             )
 
-        output = zarr_path / "refined_subject_masks_runs" / str(
-            target["refined_subject_mask_run"]
+        output = (
+            zarr_path
+            / "refined_subject_masks_runs"
+            / str(target["refined_subject_mask_run"])
         )
         output_attrs = _group_attrs(output)
         output_status = (
@@ -98,7 +104,9 @@ def _preflight(
             else "absent"
         )
         if output_status == "complete" and not require_complete_import:
-            raise RuntimeError(f"Refined subject-mask output is already complete: {output}")
+            raise RuntimeError(
+                f"Refined subject-mask output is already complete: {output}"
+            )
         if require_complete_import and output_status != "complete":
             raise RuntimeError(
                 f"Validation-only recovery requires a complete refined subject-mask output: "
@@ -137,7 +145,9 @@ def _replace_package_paths(
     index = 0
     while index < len(values):
         if values[index] == "--package" and index + 1 < len(values):
-            values[index + 1] = str(replacements.get(values[index + 1], values[index + 1]))
+            values[index + 1] = str(
+                replacements.get(values[index + 1], values[index + 1])
+            )
             index += 2
             continue
         index += 1
@@ -166,9 +176,16 @@ def build_plan(
         or source.get("schema") not in SUPPORTED_PLAN_SCHEMAS
     ):
         raise ValueError(f"Unsupported clipped inference plan: {source_plan_path}")
+    if source.get("subject_mask_publication_profile") == "receipt_composed_v1":
+        raise ValueError(
+            "Import recovery is not applicable to receipt-composed subject-mask "
+            "plans; rerun the package/publication tail or use keypoint recovery."
+        )
     targets = source.get("targets")
     workflow_payload = source.get("lsf_workflow")
-    prior_jobs = workflow_payload.get("jobs") if isinstance(workflow_payload, Mapping) else None
+    prior_jobs = (
+        workflow_payload.get("jobs") if isinstance(workflow_payload, Mapping) else None
+    )
     if not isinstance(targets, list) or not targets or not isinstance(prior_jobs, list):
         raise ValueError("Source plan requires targets and an LSF workflow.")
 
@@ -191,11 +208,12 @@ def build_plan(
     validation_keys: list[str] = []
     recovery_targets = json.loads(json.dumps(targets))
     recovery_target_by_id = {
-        str(target["target_id"]): target
-        for target in recovery_targets
+        str(target["target_id"]): target for target in recovery_targets
     }
     for target in targets:
-        target_safe = safe_component(str(target["target_id"]), default="target", max_length=56)
+        target_safe = safe_component(
+            str(target["target_id"]), default="target", max_length=56
+        )
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
         import_upstream: tuple[str, ...] = ()
         package_replacements: dict[str, str] = {}
@@ -212,18 +230,34 @@ def build_plan(
                     job_key=grid_key,
                     stage="subject_mask_global_chunk_grid_recovery",
                     command=(
-                        "scripts/py", "-m", "fisheye.utils.prepare_refined_subject_mask_chunk_grid",
-                        "--zarr", str(zarr_path),
-                        "--crop-run", str(target["merged_proxy_crop_run"]),
-                        "--output-manifest", str(grid_manifest),
-                        "--mask-label", "subject_body",
-                        "--mask-label", "eye_left",
-                        "--mask-label", "eye_right",
-                        "--mask-label", "swim_bladder",
-                        "--mask-height", "512", "--mask-width", "512",
-                        "--dense-mask-row-chunk", "128", "--json",
+                        "scripts/py",
+                        "-m",
+                        "fisheye.utils.prepare_refined_subject_mask_chunk_grid",
+                        "--zarr",
+                        str(zarr_path),
+                        "--crop-run",
+                        str(target["merged_proxy_crop_run"]),
+                        "--output-manifest",
+                        str(grid_manifest),
+                        "--mask-label",
+                        "subject_body",
+                        "--mask-label",
+                        "eye_left",
+                        "--mask-label",
+                        "eye_right",
+                        "--mask-label",
+                        "swim_bladder",
+                        "--mask-height",
+                        "512",
+                        "--mask-width",
+                        "512",
+                        "--dense-mask-row-chunk",
+                        "128",
+                        "--json",
                     ),
-                    resources=LsfResources(queue="short", ncores=2, mem_gb=16, walltime="1:00"),
+                    resources=LsfResources(
+                        queue="short", ncores=2, mem_gb=16, walltime="1:00"
+                    ),
                     expected_outputs=(grid_manifest,),
                 )
             )
@@ -231,13 +265,17 @@ def build_plan(
             payload_target = recovery_target_by_id[str(target["target_id"])]
             payload_target["global_mask_grid_manifest"] = str(grid_manifest)
             payload_target["encoded_mask_packages"] = True
-            for clip, payload_clip in zip(target["clips"], payload_target["clips"], strict=True):
+            for clip, payload_clip in zip(
+                target["clips"], payload_target["clips"], strict=True
+            ):
                 source_package = Path(str(clip["package_path"])).expanduser().resolve()
                 output_package = encoded_dir / source_package.name
                 package_replacements[str(source_package)] = str(output_package)
                 payload_clip["source_package_path"] = str(source_package)
                 payload_clip["package_path"] = str(output_package)
-                clip_safe = safe_component(str(clip["clip_id"]), default="clip", max_length=40)
+                clip_safe = safe_component(
+                    str(clip["clip_id"]), default="clip", max_length=40
+                )
                 conversion_key = f"mask_package_v2:{target_safe}:{clip_safe}"
                 conversion_keys.append(conversion_key)
                 jobs.append(
@@ -248,13 +286,22 @@ def build_plan(
                         job_key=conversion_key,
                         stage="subject_mask_package_v2_conversion",
                         command=(
-                            "scripts/py", "-m", "fisheye.utils.convert_refined_subject_mask_clip_package_v2",
-                            "--source-package", str(source_package),
-                            "--output-package", str(output_package),
-                            "--grid-manifest", str(grid_manifest),
-                            "--copy-workers", "8", "--json",
+                            "scripts/py",
+                            "-m",
+                            "fisheye.utils.convert_refined_subject_mask_clip_package_v2",
+                            "--source-package",
+                            str(source_package),
+                            "--output-package",
+                            str(output_package),
+                            "--grid-manifest",
+                            str(grid_manifest),
+                            "--copy-workers",
+                            "8",
+                            "--json",
                         ),
-                        resources=LsfResources(queue="short", ncores=8, mem_gb=32, walltime="1:00"),
+                        resources=LsfResources(
+                            queue="short", ncores=8, mem_gb=32, walltime="1:00"
+                        ),
                         upstream=(grid_key,),
                         expected_outputs=(output_package,),
                     )
@@ -272,7 +319,9 @@ def build_plan(
                 )
             )
             if convert_packages_v2:
-                import_command = _replace_package_paths(import_command, package_replacements)
+                import_command = _replace_package_paths(
+                    import_command, package_replacements
+                )
             jobs.append(
                 _job(
                     workflow_id=label,
@@ -394,7 +443,9 @@ def build_plan(
             "validation_only_complete_import": bool(validate_existing_complete_import),
         },
     }
-    return ImportRecoveryPlan(payload=payload, workflow=workflow, repo=repo, run_root=run_root)
+    return ImportRecoveryPlan(
+        payload=payload, workflow=workflow, repo=repo, run_root=run_root
+    )
 
 
 def materialize_plan(plan: ImportRecoveryPlan) -> dict[str, Any]:
@@ -403,8 +454,14 @@ def materialize_plan(plan: ImportRecoveryPlan) -> dict[str, Any]:
     lsf_path = plan.run_root / "lsf_plan.json"
     if plan_path.exists():
         existing = _read_json(plan_path)
-        if existing != payload or not lsf_path.is_file() or _read_json(lsf_path) != plan.workflow.to_json():
-            raise FileExistsError(f"Import recovery contains different evidence: {plan.run_root}")
+        if (
+            existing != payload
+            or not lsf_path.is_file()
+            or _read_json(lsf_path) != plan.workflow.to_json()
+        ):
+            raise FileExistsError(
+                f"Import recovery contains different evidence: {plan.run_root}"
+            )
         return existing
     for name in ("logs", "status", "validation", "registry", "cleanup"):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
@@ -447,7 +504,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         convert_packages_v2=bool(args.convert_packages_v2),
         validate_existing_complete_import=bool(args.validate_existing_complete_import),
     )
-    result = apply_plan(plan, submit_host=args.submit_host) if args.apply else materialize_plan(plan)
+    result = (
+        apply_plan(plan, submit_host=args.submit_host)
+        if args.apply
+        else materialize_plan(plan)
+    )
     summary = {
         "status": "submitted" if args.apply else "dry_run",
         "job_count": len(plan.workflow.jobs),
