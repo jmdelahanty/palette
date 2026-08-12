@@ -161,3 +161,36 @@ def test_repair_removes_legacy_imageio_before_publication(tmp_path: Path) -> Non
     assert load_acquisition_authority_publication_status(root).status == (
         ACQUISITION_AUTHORITY_PUBLISHED
     )
+
+
+def test_repair_removes_redundant_legacy_imageio_after_publication(
+    tmp_path: Path,
+) -> None:
+    zarr_path, _video_path = _metadata_only_archive(tmp_path)
+    root = zarr.open_group(zarr_path, mode="a", use_consolidated=False)
+    publish_external_video_acquisition_authority(root)
+    root.attrs["imageio_metadata"] = {
+        "plugin": "ffmpeg",
+        "nframes": float("inf"),
+    }
+
+    dry_run = repair_external_video_acquisition_authority(zarr_path)
+
+    assert dry_run["status"] == "ok"
+    assert dry_run["action"] == "would_remove_legacy_metadata"
+    assert dry_run["legacy_imageio_metadata_action"] == "would_remove"
+
+    applied = repair_external_video_acquisition_authority(zarr_path, apply=True)
+
+    assert applied["status"] == "ok"
+    assert applied["action"] == "removed_legacy_metadata"
+    assert applied["legacy_imageio_metadata_action"] == "removed"
+    assert applied["consolidated_metadata_updated"] is True
+    direct = zarr.open_group(zarr_path, mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(zarr_path, mode="r", use_consolidated=True)
+    for observed in (direct, consolidated):
+        assert "imageio_metadata" not in observed.attrs
+        assert "imageio_metadata" not in observed.attrs["source_video_metadata"]
+        assert load_acquisition_authority_publication_status(observed).status == (
+            ACQUISITION_AUTHORITY_PUBLISHED
+        )

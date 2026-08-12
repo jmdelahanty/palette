@@ -41,12 +41,40 @@ from fisheye.shared.zarr_discovery import (
     load_path_list,
 )
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
-
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+)
 
 SCHEMA_ID = "palette.external_video_acquisition_authority_repair.v1"
 
 
-def _expected_live_fingerprint(video_path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+def _remove_legacy_imageio_metadata(
+    root: zarr.Group,
+    *,
+    canonical_source_video_metadata: Mapping[str, Any],
+) -> None:
+    """Remove redundant legacy probe metadata after authority validation."""
+
+    root_attrs = copy.deepcopy(dict(root.attrs))
+    root_attrs.pop("imageio_metadata", None)
+    root_attrs["source_video_metadata"] = copy.deepcopy(
+        dict(canonical_source_video_metadata)
+    )
+    root.attrs.put(root_attrs)
+    reparsed = parse_source_video_metadata(root.attrs.get("source_video_metadata"))
+    if (
+        reparsed != dict(canonical_source_video_metadata)
+        or "imageio_metadata" in root.attrs
+        or "imageio_metadata" in root.attrs["source_video_metadata"]
+    ):
+        raise PixelFrameAuthorityError(
+            "Legacy ImageIO metadata removal did not round-trip exactly."
+        )
+
+
+def _expected_live_fingerprint(
+    video_path: Path, metadata: dict[str, Any]
+) -> dict[str, Any]:
     live = source_stat_fingerprint_attrs(
         video_path,
         attr_prefix="source_video",
@@ -151,7 +179,9 @@ def repair_external_video_acquisition_authority(
         recording_id = root.attrs.get("recording_id")
         camera_id = root.attrs.get("camera_id")
         if type(recording_id) is not str or not recording_id.strip():
-            raise PixelFrameAuthorityError("Archive root is missing exact recording_id.")
+            raise PixelFrameAuthorityError(
+                "Archive root is missing exact recording_id."
+            )
         if type(camera_id) is not str or not camera_id.strip():
             raise PixelFrameAuthorityError("Archive root is missing exact camera_id.")
         if metadata.get("camera_id") != camera_id:
@@ -210,17 +240,41 @@ def repair_external_video_acquisition_authority(
                     "Existing acquisition publication status conflicts with this repair."
                 )
             if status.status == ACQUISITION_AUTHORITY_PUBLISHED:
-                if legacy_imageio_present:
-                    raise PixelFrameAuthorityError(
-                        "Published authority cannot be rewritten while legacy ImageIO "
-                        "metadata remains in its source identity."
-                    )
                 evidence = _validate_published_authority(
                     root,
                     camera_id=camera_id,
                     authority_path=authority_path,
                 )
                 report.update(evidence)
+                if legacy_imageio_present:
+                    if not apply:
+                        report.update(
+                            {
+                                "status": "ok",
+                                "action": "would_remove_legacy_metadata",
+                                "legacy_imageio_metadata_action": "would_remove",
+                            }
+                        )
+                        return report
+                    _remove_legacy_imageio_metadata(
+                        root,
+                        canonical_source_video_metadata=metadata,
+                    )
+                    consolidate_metadata_capture_expected_warnings(archive_path)
+                    _validate_published_authority(
+                        root,
+                        camera_id=camera_id,
+                        authority_path=authority_path,
+                    )
+                    report.update(
+                        {
+                            "status": "ok",
+                            "action": "removed_legacy_metadata",
+                            "legacy_imageio_metadata_action": "removed",
+                            "consolidated_metadata_updated": True,
+                        }
+                    )
+                    return report
                 report.update({"status": "ok", "action": "already_complete"})
                 return report
             action = "resume" if apply else "would_resume"
@@ -230,21 +284,18 @@ def repair_external_video_acquisition_authority(
             return report
 
         if legacy_imageio_present:
-            if root_status_value is not None or raw_status_value is not None or authority_exists:
+            if (
+                root_status_value is not None
+                or raw_status_value is not None
+                or authority_exists
+            ):
                 raise PixelFrameAuthorityError(
                     "Legacy ImageIO metadata can only be removed before authority publication."
                 )
-            root_attrs = copy.deepcopy(dict(root.attrs))
-            root_attrs.pop("imageio_metadata", None)
-            root_attrs["source_video_metadata"] = metadata
-            root.attrs.put(root_attrs)
-            reparsed = parse_source_video_metadata(
-                root.attrs.get("source_video_metadata")
+            _remove_legacy_imageio_metadata(
+                root,
+                canonical_source_video_metadata=metadata,
             )
-            if reparsed != metadata or "imageio_metadata" in root.attrs:
-                raise PixelFrameAuthorityError(
-                    "Legacy ImageIO metadata removal did not round-trip exactly."
-                )
             report["legacy_imageio_metadata_action"] = "removed"
 
         publish_external_video_acquisition_authority(root)
@@ -276,8 +327,10 @@ def _discover_paths(args: argparse.Namespace) -> list[Path]:
         )
     elif args.source == "registry":
         registry_path = (
-            args.registry or RegistryPaths.from_env(Path.cwd()).path
-        ).expanduser().resolve()
+            (args.registry or RegistryPaths.from_env(Path.cwd()).path)
+            .expanduser()
+            .resolve()
+        )
         paths.extend(
             discover_registry_zarrs(
                 registry_path=registry_path,
@@ -296,10 +349,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--path-list", action="append", default=[], type=Path)
     parser.add_argument("--scope", action="append", default=[], type=Path)
     parser.add_argument("--recursive", action="store_true")
-    parser.add_argument("--source", choices=("none", "filesystem", "registry"), default="none")
+    parser.add_argument(
+        "--source", choices=("none", "filesystem", "registry"), default="none"
+    )
     parser.add_argument("--registry", type=Path)
     parser.add_argument("--path-contains", type=str)
-    parser.add_argument("--apply", action="store_true", help="Publish repairs; default is dry-run.")
+    parser.add_argument(
+        "--apply", action="store_true", help="Publish repairs; default is dry-run."
+    )
     parser.add_argument("--output-json", type=Path)
     return parser
 
@@ -324,7 +381,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "would_publish_zarr_count": sum(
             report["action"] == "would_publish" for report in reports
         ),
-        "published_zarr_count": sum(report["action"] == "publish" for report in reports),
+        "published_zarr_count": sum(
+            report["action"] == "publish" for report in reports
+        ),
         "already_complete_zarr_count": sum(
             report["action"] == "already_complete" for report in reports
         ),
