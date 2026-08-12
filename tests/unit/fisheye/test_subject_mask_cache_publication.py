@@ -335,6 +335,7 @@ def test_worker_assembly_accepts_exact_legacy_v1_without_source_digest(
         producer_commit="a" * 40,
     )
     assembly.pop("source_producer_evidence_digest")
+    assembly["schema_version"] = 1
 
     assert (
         validate_subject_mask_sampled_contour_worker_assembly(

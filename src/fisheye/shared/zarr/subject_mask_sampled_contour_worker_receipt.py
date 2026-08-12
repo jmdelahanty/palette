@@ -670,10 +670,16 @@ def validate_subject_mask_sampled_contour_worker_assembly(
         "producer_commit",
     }
     legacy_fields = expected_fields - {"source_producer_evidence_digest"}
-    if not isinstance(document, dict) or frozenset(document) not in {
-        frozenset(expected_fields),
-        frozenset(legacy_fields),
-    }:
+    declared_version = document.get("schema_version")
+    declared_fields = frozenset(document)
+    if not isinstance(document, dict) or not (
+        (
+            declared_version
+            == SUBJECT_MASK_SAMPLED_CONTOUR_WORKER_ASSEMBLY_SCHEMA_VERSION
+            and declared_fields == frozenset(expected_fields)
+        )
+        or (declared_version == 1 and declared_fields == frozenset(legacy_fields))
+    ):
         raise ValueError("Sampled-contour worker assembly fields are not exact.")
     intervals = document.get("worker_intervals")
     receipt_digests = document.get("worker_receipt_payload_digests")
@@ -682,8 +688,7 @@ def validate_subject_mask_sampled_contour_worker_assembly(
     if (
         document.get("schema_id")
         != SUBJECT_MASK_SAMPLED_CONTOUR_WORKER_ASSEMBLY_SCHEMA_ID
-        or document.get("schema_version")
-        != SUBJECT_MASK_SAMPLED_CONTOUR_WORKER_ASSEMBLY_SCHEMA_VERSION
+        or document.get("schema_version") not in {1, 2}
         or type(count) is not int
         or count <= 0
         or document.get("global_row_count") != int(n_rois)
