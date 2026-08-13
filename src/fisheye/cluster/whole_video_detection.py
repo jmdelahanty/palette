@@ -507,6 +507,12 @@ def build_plan(
                     repo=resolved_repo,
                     run_root=resolved_run_root,
                     source_detect_run=detect_run,
+                    canonicalize_legacy_source=True,
+                    canonical_source_run=safe_component(
+                        f"{detect_run}_canonical_v3",
+                        default="detect_whole_video_canonical_v3",
+                        max_length=120,
+                    ),
                     quality_run=quality_run,
                     refined_run=refined_run,
                     registered_gate_requirement=gate_requirement,

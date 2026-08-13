@@ -45,6 +45,9 @@ from fisheye.shared.selector_activation import (
     SelectorActivationError,
     activate_selector_eligible_run,
 )
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    canonical_detection_dimensions_from_manifest,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -139,6 +142,60 @@ def _effective_shard_rows(shard_rows: int, inner_rows: int) -> int:
     return max(inner, int(math.ceil(requested / inner) * inner))
 
 
+def _source_dimensions(
+    attrs: Mapping[str, Any],
+    table: Any,
+    *,
+    row_count: int,
+) -> tuple[int, int, int, str | None]:
+    """Resolve one legacy or canonical-manifest detection extent."""
+
+    width_value = attrs.get("source_video_width") or attrs.get("width")
+    height_value = attrs.get("source_video_height") or attrs.get("height")
+    frame_count_value = (
+        attrs.get("recording_frame_count")
+        or attrs.get("num_frames")
+        or attrs.get("total_frames")
+    )
+    manifest_value = attrs.get("run_manifest")
+    manifest_digest: str | None = None
+    if isinstance(manifest_value, Mapping):
+        dimensions = canonical_detection_dimensions_from_manifest(manifest_value)
+        if dimensions.n_instances != row_count:
+            raise ValueError(
+                "Canonical detection manifest instance count differs from its "
+                "persisted table."
+            )
+        for label, declared, canonical in (
+            ("width", width_value, dimensions.source_width),
+            ("height", height_value, dimensions.source_height),
+            ("frame count", frame_count_value, dimensions.n_frames),
+        ):
+            if declared is not None and _positive_int(
+                declared, label=f"detection source {label}"
+            ) != int(canonical):
+                raise ValueError(
+                    f"Detection source {label} disagrees with its canonical manifest."
+                )
+        width_value = dimensions.source_width
+        height_value = dimensions.source_height
+        frame_count_value = dimensions.n_frames
+        manifest_digest = str(manifest_value["payload_digest"])
+    elif manifest_value is not None:
+        raise ValueError("Canonical detection run_manifest must be a JSON object.")
+
+    if frame_count_value is None and "frame_counts" in table:
+        frame_count_value = int(table["frame_counts"].shape[0])
+    if frame_count_value is None and "frame_row_offsets" in table:
+        frame_count_value = int(table["frame_row_offsets"].shape[0]) - 1
+    return (
+        _positive_int(width_value, label="detection source width"),
+        _positive_int(height_value, label="detection source height"),
+        _positive_int(frame_count_value, label="detection source frame count"),
+        manifest_digest,
+    )
+
+
 def _selection_snapshot(root: Any, selection_run: str) -> dict[str, Any]:
     name = _safe_name(selection_run, label="selection_run")
     path = f"analysis/{SELECTION_RUNS_PARENT}/{name}"
@@ -209,24 +266,11 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         or np.dtype(table["instance_key"].dtype) != np.dtype(np.uint64)
     ):
         raise ValueError(f"Detection source {path!r} has an invalid row contract.")
-    width = _positive_int(
-        attrs.get("source_video_width") or attrs.get("width"),
-        label="detection source width",
+    width, height, frame_count, manifest_digest = _source_dimensions(
+        attrs,
+        table,
+        row_count=rows,
     )
-    height = _positive_int(
-        attrs.get("source_video_height") or attrs.get("height"),
-        label="detection source height",
-    )
-    frame_count_value = (
-        attrs.get("recording_frame_count")
-        or attrs.get("num_frames")
-        or attrs.get("total_frames")
-    )
-    if frame_count_value is None and "frame_counts" in table:
-        frame_count_value = int(table["frame_counts"].shape[0])
-    if frame_count_value is None and "frame_row_offsets" in table:
-        frame_count_value = int(table["frame_row_offsets"].shape[0]) - 1
-    frame_count = _positive_int(frame_count_value, label="detection source frame count")
 
     # Canonical whole-video detection arrays carry their coordinate descriptor.
     # The clipped collection source is itself the bounded adapter: its schema,
@@ -241,7 +285,7 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
             or tuple(descriptor.get("component_units") or ()) != ("normalized",) * 4
         ):
             raise ValueError("bbox_norm_coords coordinate descriptor is incompatible.")
-    elif not is_collection_adapter:
+    elif not is_collection_adapter and manifest_digest is None:
         raise ValueError(
             "Canonical detection source bbox_norm_coords lacks its coordinate descriptor."
         )
@@ -260,6 +304,8 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         "source_slices": attrs.get("source_slices"),
         "source_pixel_authority": source_pixel_authority,
     }
+    if manifest_digest is not None:
+        signature_payload["canonical_run_manifest_payload_digest"] = manifest_digest
     return {
         "group": table,
         "run_group": group,

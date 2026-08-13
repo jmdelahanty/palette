@@ -62,14 +62,25 @@ def test_whole_video_and_clipped_use_same_canonical_postprocess_contract(
     )
 
     whole_module = build_recording_detection_postprocess_fragment(
-        _inputs(tmp_path, whole)
+        _inputs(
+            tmp_path,
+            whole,
+            canonicalize_legacy_source=True,
+            canonical_source_run="detect_native_canonical_v3",
+        )
     )
     clipped_module = build_recording_detection_postprocess_fragment(
         _inputs(tmp_path, clipped)
     )
 
+    assert whole_module.outputs.input_detect_group_path == "detect_runs/detect_native"
+    assert whole_module.outputs.source_detect_group_path == (
+        "detect_runs/detect_native_canonical_v3"
+    )
+    assert clipped_module.outputs.input_detect_group_path == "detect_runs/detect_native"
+    assert clipped_module.outputs.source_detect_group_path == "detect_runs/detect_native"
+
     for module in (whole_module, clipped_module):
-        assert module.outputs.source_detect_group_path == "detect_runs/detect_native"
         assert module.outputs.working_refined_group_path == (
             "refined_detect_runs/refined_native_working"
         )
@@ -78,8 +89,8 @@ def test_whole_video_and_clipped_use_same_canonical_postprocess_contract(
             "canonical_recording_detect_run"
         )
         assert module.fragment.metadata["legacy_dish_mask_policy_coupled"] is False
-        quality, refine = module.fragment.jobs
-        assert "detect_runs/detect_native" in quality.command
+        quality, refine = module.fragment.jobs[-2:]
+        assert module.outputs.source_detect_group_path in quality.command
         rendered = " ".join(refine.command)
         assert "--registered-gate-requirement" in rendered
         assert "required" in rendered
@@ -95,6 +106,21 @@ def test_whole_video_and_clipped_use_same_canonical_postprocess_contract(
         )
     assert whole_module.fragment.metadata["recording_layout"] == "whole_video"
     assert clipped_module.fragment.metadata["recording_layout"] == "clipped_collection"
+    canonicalize = whole_module.fragment.jobs[0]
+    rendered_canonicalize = " ".join(canonicalize.command)
+    assert "fisheye.utils.publish_canonical_detection_successor" in (
+        rendered_canonicalize
+    )
+    assert "--source-detect-group detect_runs/detect_native" in rendered_canonicalize
+    assert "--successor-run detect_native_canonical_v3" in rendered_canonicalize
+    assert whole_module.fragment.jobs[1].dependency.upstream_job_keys == (
+        canonicalize.job_key,
+    )
+    assert clipped_module.fragment.jobs[0].dependency.upstream_job_keys == (
+        "registered_detection_gate:target",
+    )
+    assert whole_module.fragment.metadata["canonicalize_legacy_source"] is True
+    assert clipped_module.fragment.metadata["canonicalize_legacy_source"] is False
 
 
 def test_required_mode_rejects_missing_exact_gate(tmp_path: Path) -> None:
@@ -133,3 +159,23 @@ def test_if_available_persists_explicit_unavailable_capability(tmp_path: Path) -
     assert module.fragment.metadata["registered_gate_run"] is None
     refine = module.fragment.jobs[1]
     assert "--registered-gate-run" not in " ".join(refine.command)
+
+
+def test_legacy_canonicalization_requires_distinct_successor(tmp_path: Path) -> None:
+    whole = whole_video_recording_target(
+        target_id="whole",
+        recording_id="recording",
+        recording_dir=tmp_path / "recording",
+        analysis_zarr=tmp_path / "recording" / "analysis.zarr",
+        video_path=tmp_path / "recording" / "video.mp4",
+        camera_serial="2010093",
+    )
+    with pytest.raises(ValueError, match="successor run id"):
+        _inputs(tmp_path, whole, canonicalize_legacy_source=True)
+    with pytest.raises(ValueError, match="differ from its source"):
+        _inputs(
+            tmp_path,
+            whole,
+            canonicalize_legacy_source=True,
+            canonical_source_run="detect_native",
+        )

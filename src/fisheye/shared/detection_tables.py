@@ -39,11 +39,20 @@ def resolve_detection_source_pixel_authority(
 
     Legacy canonical adapters carry ``source_evidence.source_pixel_authority``.
     Native canonical-v2 detection runs bind the same continuous point frame as
-    ``bbox_center_derivation.destination_frame``.  When both are present they
+    ``bbox_center_derivation.destination_frame``.  Canonical successors of
+    legacy-layout runs project the same verified pointer as the top-level
+    ``source_pixel_authority`` attribute.  When several forms are present they
     must agree exactly after SHA-256 prefix normalization.
     """
 
     pointers: list[dict[str, str]] = []
+    if "source_pixel_authority" in run_attrs:
+        pointers.append(
+            _pixel_authority_pointer(
+                run_attrs.get("source_pixel_authority"),
+                label="detection source_pixel_authority",
+            )
+        )
     source_evidence = run_attrs.get("source_evidence")
     if isinstance(source_evidence, Mapping) and (
         "source_pixel_authority" in source_evidence

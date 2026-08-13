@@ -24,6 +24,7 @@ from fisheye.shared.recording_geometry import (
     RegisteredDishMaskKey,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
 
 
 def _candidate_record() -> dict[str, object]:
@@ -271,3 +272,73 @@ def test_gate_validation_detects_later_source_payload_mutation(tmp_path: Path) -
 
     assert report["valid"] is False
     assert "source detection payload changed" in report["errors"]
+
+
+def test_gate_reads_extent_from_canonical_detection_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive, candidate_run = _archive_with_candidate(tmp_path)
+    selected = _publish_selection(archive, candidate_run, tmp_path)
+    source_path = _write_detection_source(archive)
+    root = open_zarr_root(archive, mode="a")
+    source = root[source_path]
+    for name in ("source_video_width", "source_video_height", "num_frames"):
+        del source.attrs[name]
+    del source["bbox_norm_coords"].attrs["coordinate_descriptor"]
+    source.attrs["run_manifest"] = {
+        "payload_digest": "f" * 64,
+        "fixture": "canonical-v3",
+    }
+    monkeypatch.setattr(
+        gate,
+        "canonical_detection_dimensions_from_manifest",
+        lambda manifest: CanonicalDetectionDimensions(
+            n_frames=10,
+            n_instances=3,
+            source_width=640,
+            source_height=480,
+        ),
+    )
+
+    plan = gate.build_registered_detection_gate_plan(
+        archive,
+        source_group_path=source_path,
+        selection_run=selected.selection_id,
+        inner_rows=2,
+        shard_rows=4,
+    )
+
+    assert (plan.width_px, plan.height_px, plan.frame_count) == (640, 480, 10)
+    assert plan.source_signature
+
+
+def test_gate_rejects_canonical_manifest_row_count_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive, candidate_run = _archive_with_candidate(tmp_path)
+    selected = _publish_selection(archive, candidate_run, tmp_path)
+    source_path = _write_detection_source(archive)
+    root = open_zarr_root(archive, mode="a")
+    root[source_path].attrs["run_manifest"] = {
+        "payload_digest": "f" * 64,
+        "fixture": "canonical-v3",
+    }
+    monkeypatch.setattr(
+        gate,
+        "canonical_detection_dimensions_from_manifest",
+        lambda manifest: CanonicalDetectionDimensions(
+            n_frames=10,
+            n_instances=4,
+            source_width=640,
+            source_height=480,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="manifest instance count"):
+        gate.build_registered_detection_gate_plan(
+            archive,
+            source_group_path=source_path,
+            selection_run=selected.selection_id,
+        )

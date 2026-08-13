@@ -224,7 +224,7 @@ def test_collection_quality_reads_nested_canonical_instance_table(
             dtype=np.float32,
         ),
         chunks=(2, 4),
-        shards=(4, 4),
+        shards=(6, 4),
     )
     keys = np.asarray([301, 302, 303], dtype=np.uint64)
     instances.create_array(
@@ -249,6 +249,11 @@ def test_collection_quality_reads_nested_canonical_instance_table(
     )
 
     assert result["status"] == "complete"
+    assert result["params"]["source_row_shard_grids"] == [4, 6]
+    assert result["params"]["source_task_rows"] == 4
+    assert result["params"]["source_task_partition_policy"] == (
+        "requested_rows_mixed_read_only_source_grids"
+    )
     quality = zarr.open_group(path, mode="r", use_consolidated=False)[
         "detect_quality_runs/quality_canonical"
     ]

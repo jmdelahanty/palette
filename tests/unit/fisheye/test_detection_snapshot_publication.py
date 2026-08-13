@@ -42,6 +42,13 @@ from fisheye.shared.zarr.refined_detection_schema import (
 
 
 RECORDING_IDENTITY = "snapshot_publication_recording"
+SOURCE_PIXEL_AUTHORITY = {
+    "record_ref": (
+        "/analysis/coordinate_frames/source_camera/2010093/"
+        "continuous@pixel_frame_authority"
+    ),
+    "record_sha256": "e" * 64,
+}
 
 
 def _build_sources(archive: Path) -> None:
@@ -52,7 +59,13 @@ def _build_sources(archive: Path) -> None:
         {"latest": "detect_source", "latest_complete": "detect_source"}
     )
     raw = raw_family.create_group("detect_source")
-    raw.attrs.update({"source_video_width": 640, "source_video_height": 480})
+    raw.attrs.update(
+        {
+            "source_video_width": 640,
+            "source_video_height": 480,
+            "source_pixel_authority": SOURCE_PIXEL_AUTHORITY,
+        }
+    )
     frames = np.asarray([1, 3], dtype=np.int32)
     bbox = np.asarray(
         [[0.25, 0.5, 0.1, 0.2], [0.75, 0.5, 0.1, 0.2]],
@@ -268,6 +281,7 @@ def test_raw_successor_is_canonical_v3_atomic_and_selector_ineligible(
     assert successor.attrs["stage_selector_eligible"] is False
     assert successor.attrs["immutable_snapshot"] is True
     assert successor.attrs["production_selector_activation"] == "deferred"
+    assert successor.attrs["source_pixel_authority"] == SOURCE_PIXEL_AUTHORITY
     assert "shadow_only" not in successor.attrs
     np.testing.assert_array_equal(
         successor["instances/instance_key"][:],

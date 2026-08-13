@@ -298,18 +298,37 @@ def test_whole_video_registered_geometry_composes_canonical_postprocess(
         registered_gate_run="gate_exact_v1",
     )
 
-    assert len(plan.lsf_workflow.jobs) == 4
+    assert len(plan.lsf_workflow.jobs) == 5
     assert plan.quality_run == "detect_quality_geometry_required"
     assert plan.refined_run == "refined_detect_geometry_required"
     assert plan.crop_run == "crop_geometry_required"
     assert plan.registered_gate_requirement == "required"
     assert len(plan.postprocess_outputs) == 1
-    quality, refine, crop = plan.lsf_workflow.jobs[1:]
-    assert quality.dependency.upstream_job_keys == (plan.lsf_workflow.jobs[0].job_key,)
-    assert "detect_runs/detect_geometry_required" in quality.command
+    canonicalize, quality, refine, crop = plan.lsf_workflow.jobs[1:]
+    assert canonicalize.dependency.upstream_job_keys == (
+        plan.lsf_workflow.jobs[0].job_key,
+    )
+    rendered_canonicalize = " ".join(canonicalize.command)
+    assert "fisheye.utils.publish_canonical_detection_successor" in (
+        rendered_canonicalize
+    )
+    assert (
+        "--source-detect-group detect_runs/detect_geometry_required"
+        in rendered_canonicalize
+    )
+    assert "--successor-run detect_geometry_required_canonical_v3" in (
+        rendered_canonicalize
+    )
+    assert quality.dependency.upstream_job_keys == (canonicalize.job_key,)
+    assert "detect_runs/detect_geometry_required_canonical_v3" in quality.command
     rendered_refine = " ".join(refine.command)
     assert "--registered-gate-requirement required" in rendered_refine
     assert "--registered-gate-run gate_exact_v1" in rendered_refine
+    assert "--detect-run detect_geometry_required_canonical_v3" in rendered_refine
+    assert (
+        "--canonical-detect-run detect_geometry_required_canonical_v3"
+        in rendered_refine
+    )
     assert crop.dependency.upstream_job_keys == (refine.job_key,)
     rendered_crop = " ".join(crop.command)
     assert "--source-refined-run refined_detect_geometry_required" in rendered_crop

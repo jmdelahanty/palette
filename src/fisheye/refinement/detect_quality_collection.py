@@ -332,15 +332,14 @@ def _effective_shard_rows(requested: int, inner: int) -> int:
     return int(math.ceil(requested / inner) * inner)
 
 
-def _source_shard_rows(source: Any, requested: int) -> int:
+def _source_shard_rows(source: Any, requested: int) -> tuple[int, tuple[int, ...]]:
     values: set[int] = set()
     for name in ("frame_indices", "bbox_norm_coords", "instance_key"):
         shards = getattr(source[name], "shards", None)
         if shards is not None:
             values.add(int(shards[0]))
-    if len(values) > 1:
-        raise ValueError(f"Source identity arrays use mixed row shard grids: {sorted(values)}.")
-    return next(iter(values)) if values else int(requested)
+    grids = tuple(sorted(values))
+    return (next(iter(values)) if len(values) == 1 else int(requested), grids)
 
 
 def _hash_arrays(*arrays: np.ndarray) -> str:
@@ -807,7 +806,9 @@ def run_collection_detect_quality(
     cluster_radius = effective_jump * float(relocation_cluster_radius_fraction)
     effective_row_shard = _effective_shard_rows(int(shard_rows), int(row_chunk_rows))
     effective_frame_shard = _effective_shard_rows(int(shard_rows), int(frame_chunk_rows))
-    task_rows = _source_shard_rows(source, effective_row_shard)
+    task_rows, source_row_shard_grids = _source_shard_rows(
+        source, effective_row_shard
+    )
     ranges = [
         (start, min(start + task_rows, row_count))
         for start in range(0, row_count, task_rows)
@@ -842,6 +843,14 @@ def run_collection_detect_quality(
         "row_chunk_rows": int(row_chunk_rows),
         "frame_chunk_rows": int(frame_chunk_rows),
         "source_task_rows": int(task_rows),
+        "source_row_shard_grids": list(source_row_shard_grids),
+        "source_task_partition_policy": (
+            "uniform_source_shard_grid"
+            if len(source_row_shard_grids) == 1
+            else "requested_rows_mixed_read_only_source_grids"
+            if source_row_shard_grids
+            else "requested_rows_unsharded_source"
+        ),
     }
     params_hash = hashlib.sha256(
         json.dumps(params, sort_keys=True, separators=(",", ":")).encode("utf-8")

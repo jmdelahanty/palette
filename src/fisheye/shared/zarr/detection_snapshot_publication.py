@@ -25,6 +25,9 @@ from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
+from fisheye.shared.detection_tables import (
+    resolve_detection_source_pixel_authority,
+)
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.canonical_detection_benchmark_input import (
@@ -256,6 +259,14 @@ def _mark_local_candidate(run: Any, *, source_group_path: str) -> None:
             node_attrs.pop("shadow_only", None)
             node_attrs["selector_eligible"] = False
             node.attrs.put(node_attrs)
+
+
+def _project_source_pixel_authority(source: Any, successor: Any) -> None:
+    """Copy one verified point-frame pointer onto a canonical successor."""
+
+    pointer = resolve_detection_source_pixel_authority(dict(source.attrs))
+    if pointer is not None:
+        successor.attrs["source_pixel_authority"] = pointer
 
 
 def _prepare_parent(root: Any, family_name: str) -> tuple[Any, ...]:
@@ -535,9 +546,16 @@ def publish_canonical_detection_successor(
                 "Canonical successor did not preserve source instance keys."
             )
         local_run = canonical.output_path / "detect_runs" / successor_id
+        local_group = zarr.open_group(
+            str(local_run), mode="a", use_consolidated=False
+        )
         _mark_local_candidate(
-            zarr.open_group(str(local_run), mode="a", use_consolidated=False),
+            local_group,
             source_group_path=source_relative,
+        )
+        _project_source_pixel_authority(
+            zarr.open_group(str(source_path), mode="r", use_consolidated=False),
+            local_group,
         )
         local_validation = _validate_canonical_run_path(
             local_run,
@@ -1206,9 +1224,20 @@ def publish_detection_snapshot_pair(
 
         local_canonical_run = canonical.output_path / "detect_runs" / canonical_id
         local_refined_run = refined.output_path / "refined_detect_runs" / refined_id
+        local_canonical_group = zarr.open_group(
+            str(local_canonical_run), mode="a", use_consolidated=False
+        )
         _mark_local_candidate(
-            zarr.open_group(str(local_canonical_run), mode="a", use_consolidated=False),
+            local_canonical_group,
             source_group_path=source_detect_relative,
+        )
+        _project_source_pixel_authority(
+            zarr.open_group(
+                str(archive / source_detect_relative),
+                mode="r",
+                use_consolidated=False,
+            ),
+            local_canonical_group,
         )
         _mark_local_candidate(
             zarr.open_group(str(local_refined_run), mode="a", use_consolidated=False),
