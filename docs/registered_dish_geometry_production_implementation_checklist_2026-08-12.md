@@ -1,10 +1,18 @@
 # Registered dish geometry production implementation checklist
 
 - Decision/checklist date: 2026-08-12
-- Status: design decisions complete; implementation held on clean-baseline and
-  validation prerequisites below
+- Status: implementation started from the clean, CI-green baseline recorded
+  below
 - Baseline branch: `sun`
-- Baseline commit inspected: `7ffb8143f54cc54f811e306a1e5be4396ffc1dc3`
+- Implementation baseline commit:
+  `5e0150fcdd0f1bcd50dd63e6ca9384fb3c7409ae`
+- Implementation branch:
+  `agent/palette/registered-dish-geometry-production-20260813`
+- Implementation worktree:
+  `/tmp/palette-registered-dish-geometry-20260813`
+- Baseline required CI:
+  `https://github.com/jmdelahantyj/palette/actions/runs/31660860452`
+  (`15/15` required jobs successful)
 - Scope owner: Palette
 - Producer repositories: read-only references; do not modify Orange or Citrus
 
@@ -28,13 +36,13 @@ Do not begin implementation from the current checkout until all of the
 following are true:
 
 - [x] Every open question in this document has a recorded disposition.
-- [ ] The current `goodbatbadbat` recovery and reader-contract work has been
+- [x] The current `goodbatbadbat` recovery and reader-contract work has been
       reviewed and intentionally committed.
-- [ ] Required CI for that commit has completed successfully.
-- [ ] The source checkout is clean.
-- [ ] A new branch and isolated worktree have been created from the intended
+- [x] Required CI for that commit has completed successfully.
+- [x] The source checkout is clean.
+- [x] A new branch and isolated worktree have been created from the intended
       clean baseline.
-- [ ] The implementation worktree has its own exact path and commit recorded
+- [x] The implementation worktree has its own exact path and commit recorded
       here or in the implementation handoff.
 
 ## Non-negotiable scientific and data invariants
