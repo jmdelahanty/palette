@@ -2323,7 +2323,7 @@
         {
           "dtype": "int8",
           "occurrence_ids": [
-            "schema-writer-dc03c7980453ebab"
+            "schema-writer-85a83b21f9fbbfb2"
           ],
           "shape": "(row_count,)"
         },
@@ -4462,7 +4462,7 @@
         {
           "dtype": "uint64",
           "occurrence_ids": [
-            "schema-writer-591edc1a851dc44d"
+            "schema-writer-8eb8743447661a36"
           ],
           "shape": "(row_count,)"
         },
@@ -6210,7 +6210,7 @@
         {
           "dtype": "int8",
           "occurrence_ids": [
-            "schema-writer-3cf08691f957dfea"
+            "schema-writer-6c792ab37c31ebb0"
           ],
           "shape": "(resolved_frame_count,)"
         },
@@ -36695,8 +36695,8 @@
       "dtype_expression": "np.int8",
       "dynamic_name": false,
       "file": "src/fisheye/refinement/detect_quality_collection.py",
-      "line": 958,
-      "occurrence_id": "schema-writer-3cf08691f957dfea",
+      "line": 967,
+      "occurrence_id": "schema-writer-6c792ab37c31ebb0",
       "path_pattern": "<require_runs_parent(write_root, 'detect_quality_runs')>/<output_run>/quality_flags",
       "required": null,
       "shape_expression": "(resolved_frame_count,)",
@@ -36708,7 +36708,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d12287e301079875"
+      "writer_site_id": "writer-3afb48db0cc794fa"
     },
     {
       "access_pattern": "unclassified",
@@ -36729,8 +36729,8 @@
       "dtype_expression": "np.int8",
       "dynamic_name": false,
       "file": "src/fisheye/refinement/detect_quality_collection.py",
-      "line": 965,
-      "occurrence_id": "schema-writer-dc03c7980453ebab",
+      "line": 974,
+      "occurrence_id": "schema-writer-85a83b21f9fbbfb2",
       "path_pattern": "<require_runs_parent(write_root, 'detect_quality_runs')>/<output_run>/detection_quality_labels",
       "required": null,
       "shape_expression": "(row_count,)",
@@ -36742,7 +36742,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7f6749422dbc66a1"
+      "writer_site_id": "writer-3154aad1ce170d03"
     },
     {
       "access_pattern": "unclassified",
@@ -36763,8 +36763,8 @@
       "dtype_expression": "np.uint64",
       "dynamic_name": false,
       "file": "src/fisheye/refinement/detect_quality_collection.py",
-      "line": 972,
-      "occurrence_id": "schema-writer-591edc1a851dc44d",
+      "line": 981,
+      "occurrence_id": "schema-writer-8eb8743447661a36",
       "path_pattern": "<require_runs_parent(write_root, 'detect_quality_runs')>/<output_run>/instance_key",
       "required": null,
       "shape_expression": "(row_count,)",
@@ -36776,7 +36776,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-09fa54e6ffc2f3b2"
+      "writer_site_id": "writer-2ac49a42098e546a"
     },
     {
       "access_pattern": "unclassified",
