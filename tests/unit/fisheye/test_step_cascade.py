@@ -78,6 +78,8 @@ def test_get_transitive_dependents_detect() -> None:
         "refined_keypoints",
         "subject_masks",
         "refined_subject_masks",
+        "registered_detection_gate",
+        "registered_detection_gate_consumption",
         "subject_shape",
         "tail_kinematics",
         "tail_posture_view",

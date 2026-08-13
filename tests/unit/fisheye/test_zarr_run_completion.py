@@ -1087,6 +1087,7 @@ def test_raw_runs_parent_creation_uses_completion_helper() -> None:
         # finalized_runs is an experiment_index collection table, not a stage run parent.
         "src/fisheye/utils/create_clipped_analysis_zarr.py",
         "src/fisheye/utils/finalize_clipped_detect_refine_workflow.py",
+        "src/fisheye/utils/finalize_registered_clipped_refined_collection.py",
     }
     matches: list[str] = []
     for path in (repo_root / "src" / "fisheye").rglob("*.py"):
