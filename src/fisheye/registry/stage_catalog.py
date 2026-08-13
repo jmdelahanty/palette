@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 CORE_PIPELINE = "core_pipeline"
 RECORDING_METADATA = "recording_metadata"
 DERIVED_ANALYSIS = "derived_analysis"
@@ -89,6 +88,10 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         id="arena_geometry_offline_fit",
         depends_on=("raw",),
         invalidates=("arena_geometry_comparison",),
+        artifact_families=(
+            "analysis/arena_geometry_fit_runs",
+            "analysis/arena_geometry_runs",
+        ),
         category=RECORDING_METADATA,
         description="Independent early/middle/late recording-image rim-fit evidence.",
     ),

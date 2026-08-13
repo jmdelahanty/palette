@@ -19,6 +19,9 @@ from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
     plan_recovered_acquisition_geometry_candidate,
     plan_reviewed_palette_geometry_candidate,
 )
+from fisheye.analysis_workflows.materializers.arena_geometry_fit_review import (
+    FIT_REVIEW_RUNS_PARENT,
+)
 from fisheye.cluster.clipped_lsf import (
     build_execution_task,
     build_job,
@@ -58,6 +61,43 @@ def _require_file(path: Path, *, label: str) -> Path:
     return resolved
 
 
+def _validate_probe_summary(path: Path) -> None:
+    """Reject malformed recorder summaries while planning, before GPU submit."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Source summary is not a JSON object: {path}") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Source summary is not a JSON object: {path}")
+    merged = payload.get("merged_output")
+    video = payload.get("video_metadata")
+    geometry = video.get("geometry") if isinstance(video, Mapping) else None
+    frame_count = payload.get("frames_received")
+    if not frame_count and isinstance(merged, Mapping):
+        frame_count = merged.get("packets_written")
+    values = {
+        "frame_count": frame_count,
+        "fps": payload.get("fps"),
+        "source_width": (
+            geometry.get("source_width") if isinstance(geometry, Mapping) else None
+        ),
+        "source_height": (
+            geometry.get("source_height") if isinstance(geometry, Mapping) else None
+        ),
+    }
+    for name, value in values.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or float(value) <= 0
+        ):
+            raise ValueError(f"Source summary has invalid {name}: {path}")
+    serial = video.get("camera_serial") if isinstance(video, Mapping) else None
+    if not isinstance(serial, (str, int)) or not str(serial).strip():
+        raise ValueError(f"Source summary has no camera serial: {path}")
+
+
 @dataclass(frozen=True)
 class ArenaGeometryProbeSource:
     """Exact whole-recording source used for the recording-level fit.
@@ -81,6 +121,7 @@ class ArenaGeometryProbeSource:
             "summary_path",
             _require_file(self.summary_path, label="source summary"),
         )
+        _validate_probe_summary(self.summary_path)
         object.__setattr__(
             self,
             "keyframe_path",
@@ -172,6 +213,7 @@ class ArenaGeometryReviewFragmentInputs:
     geometry_camera_serial: str | None = None
     geometry_arena_id: str | None = None
     citrus_h5_path: Path | None = None
+    registry_path: Path | None = None
     acquisition_resources: LsfResources = LsfResources(
         queue="short", ncores=2, mem_gb=8, walltime="1:00", span_hosts=1
     )
@@ -272,6 +314,12 @@ class ArenaGeometryReviewFragmentInputs:
         object.__setattr__(self, "geometry_camera_serial", camera_serial or None)
         object.__setattr__(self, "geometry_arena_id", arena_id or None)
         object.__setattr__(self, "citrus_h5_path", citrus_h5)
+        if self.registry_path is not None:
+            object.__setattr__(
+                self,
+                "registry_path",
+                _require_file(self.registry_path, label="Palette registry"),
+            )
         object.__setattr__(self, "repo", repo)
         object.__setattr__(self, "run_root", run_root)
 
@@ -286,6 +334,7 @@ class ArenaGeometryReviewFragmentOutputs:
     fit_report_path: Path
     review_montage_path: Path
     review_receipt_path: Path
+    fit_review_import_receipt_path: Path
     terminal_job_keys: tuple[str, ...]
     acquisition_artifact_key: str
     review_artifact_key: str
@@ -300,13 +349,18 @@ class ArenaGeometryReviewFragmentOutputs:
             "fit_report_path": str(self.fit_report_path),
             "review_montage_path": str(self.review_montage_path),
             "review_receipt_path": str(self.review_receipt_path),
+            "fit_review_import_receipt_path": str(self.fit_review_import_receipt_path),
+            "review_evidence_storage": "analysis_zarr_embedded",
+            "scratch_review_package_disposable": True,
             "terminal_job_keys": list(self.terminal_job_keys),
             "acquisition_artifact_key": self.acquisition_artifact_key,
             "review_artifact_key": self.review_artifact_key,
             "human_review_status": "required",
             "operational_selection": "not_performed",
             "detection_gate_applied": False,
-            "registry_update": False,
+            "registry_update": (
+                "arena_geometry_registry_refresh" in self.terminal_job_keys
+            ),
         }
 
 
@@ -332,7 +386,9 @@ class _ArenaGeometryReviewTargetPlan:
     acquisition_result_path: Path
     acquisition_scratch: str
     acquisition_command: tuple[str, ...]
+    probe_scratch: str
     review_dir: Path
+    fit_review_result_path: Path
     probe_command: tuple[str, ...]
 
     def outputs(
@@ -341,6 +397,7 @@ class _ArenaGeometryReviewTargetPlan:
         target_id: str,
         acquisition_job_key: str,
         probe_job_key: str,
+        registry_job_key: str | None = None,
     ) -> ArenaGeometryReviewFragmentOutputs:
         acquisition_artifact = (
             f"arena_geometry_acquisition_candidate:{self.target_safe}"
@@ -355,7 +412,12 @@ class _ArenaGeometryReviewTargetPlan:
             fit_report_path=self.review_dir / "fit_report.json",
             review_montage_path=self.review_dir / "dish_rim_review_montage.png",
             review_receipt_path=self.review_dir / "review_package.json",
-            terminal_job_keys=(acquisition_job_key, probe_job_key),
+            fit_review_import_receipt_path=self.fit_review_result_path,
+            terminal_job_keys=(
+                (registry_job_key,)
+                if registry_job_key is not None
+                else (acquisition_job_key, probe_job_key)
+            ),
             acquisition_artifact_key=acquisition_artifact,
             review_artifact_key=review_artifact,
         )
@@ -430,7 +492,11 @@ def _plan_review_target(
     acquisition_command = chain_commands(
         (("mkdir", "-p", acquisition_scratch), tuple(publish_command))
     )
-    review_dir = inputs.run_root / "arena_geometry" / target_safe / "review_package"
+    probe_scratch = f"/scratch/{RUNTIME_USER_TOKEN}/{work_unit}/arena_geometry_probe"
+    review_dir = Path(probe_scratch) / "review_package"
+    fit_review_result = (
+        inputs.run_root / "arena_geometry" / target_safe / "fit_review_import.json"
+    )
     probe_command = [
         "scripts/py",
         "-m",
@@ -457,6 +523,20 @@ def _plan_review_target(
                 str(inputs.source.acquisition_observation_path),
             )
         )
+    publish_fit_review_command = (
+        "scripts/py",
+        "-m",
+        "fisheye.utils.publish_arena_geometry_fit_review",
+        "--zarr",
+        str(inputs.analysis_zarr),
+        "--review-package-dir",
+        str(review_dir),
+        "--scratch-root",
+        str(Path(probe_scratch) / "publication"),
+        "--result-json",
+        str(fit_review_result),
+        "--apply",
+    )
     return _ArenaGeometryReviewTargetPlan(
         target_safe=target_safe,
         acquisition_candidate_id=candidate.candidate_id,
@@ -464,8 +544,52 @@ def _plan_review_target(
         acquisition_result_path=acquisition_result,
         acquisition_scratch=acquisition_scratch,
         acquisition_command=acquisition_command,
+        probe_scratch=probe_scratch,
         review_dir=review_dir,
-        probe_command=tuple(probe_command),
+        fit_review_result_path=fit_review_result,
+        probe_command=chain_commands(
+            (
+                ("mkdir", "-p", probe_scratch),
+                tuple(probe_command),
+                publish_fit_review_command,
+            )
+        ),
+    )
+
+
+def _build_registry_refresh_job(
+    *,
+    inputs: ArenaGeometryReviewFragmentInputs,
+    analysis_zarrs: tuple[Path, ...],
+    upstream: tuple[str, ...],
+):
+    if inputs.registry_path is None:
+        raise ValueError("Registry refresh requires an exact registry path.")
+    result = inputs.run_root / "arena_geometry" / "registry_refresh.json"
+    command = (
+        "scripts/py",
+        "-m",
+        "fisheye.utils.registry_rescan",
+        "--registry",
+        str(inputs.registry_path),
+        "--result-json",
+        str(result),
+        "--fail-on-error",
+        *(str(path) for path in dict.fromkeys(analysis_zarrs)),
+    )
+    return build_job(
+        workflow_id=inputs.workflow_id,
+        family=FAMILY,
+        repo=inputs.repo,
+        run_root=inputs.run_root,
+        job_key="arena_geometry_registry_refresh",
+        stage="arena_geometry_registry_refresh",
+        command=command,
+        resources=LsfResources(
+            queue="short", ncores=1, mem_gb=8, walltime="1:00", span_hosts=1
+        ),
+        upstream=upstream,
+        expected_outputs=(result,),
     )
 
 
@@ -504,21 +628,31 @@ def build_arena_geometry_review_fragment(
         command=planned.probe_command,
         resources=inputs.probe_resources,
         upstream=inputs.upstream_job_keys,
-        expected_outputs=(
-            planned.review_dir / "fit_report.json",
-            planned.review_dir / "dish_rim_review_montage.png",
-            planned.review_dir / "review_package.json",
-        ),
+        expected_outputs=(planned.fit_review_result_path,),
+        cleanup_paths=(planned.probe_scratch,),
     )
 
+    registry_key = (
+        "arena_geometry_registry_refresh" if inputs.registry_path is not None else None
+    )
     outputs = planned.outputs(
         target_id=inputs.target_id,
         acquisition_job_key=acquisition_key,
         probe_job_key=probe_key,
+        registry_job_key=registry_key,
     )
+    jobs = [acquisition_job, probe_job]
+    if registry_key is not None:
+        jobs.append(
+            _build_registry_refresh_job(
+                inputs=inputs,
+                analysis_zarrs=(inputs.analysis_zarr,),
+                upstream=(acquisition_key, probe_key),
+            )
+        )
     fragment = LsfWorkflowFragment(
         fragment_id=f"arena_geometry_review:{planned.target_safe}",
-        jobs=(acquisition_job, probe_job),
+        jobs=tuple(jobs),
         requires=inputs.required_artifacts,
         provides=(outputs.acquisition_artifact_key, outputs.review_artifact_key),
         metadata={
@@ -528,7 +662,7 @@ def build_arena_geometry_review_fragment(
             "downstream_layouts": ["clipped", "whole_recording"],
             "human_review_barrier": True,
             "selection_activation": "deferred",
-            "registry_update": False,
+            "registry_update": inputs.registry_path is not None,
             "geometry_source": inputs.geometry_source,
             "source": inputs.source.to_json(),
             "outputs": outputs.to_json(),
@@ -555,6 +689,7 @@ def build_arena_geometry_review_array_fragment(
         "upstream_job_keys",
         "acquisition_resources",
         "probe_resources",
+        "registry_path",
     )
     for item in inputs[1:]:
         for field in shared_fields:
@@ -595,11 +730,8 @@ def build_arena_geometry_review_array_fragment(
                 task_key=probe_task_key,
                 stage="arena_geometry_blind_keyframe_probe",
                 command=planned.probe_command,
-                expected_outputs=(
-                    planned.review_dir / "fit_report.json",
-                    planned.review_dir / "dish_rim_review_montage.png",
-                    planned.review_dir / "review_package.json",
-                ),
+                expected_outputs=(planned.fit_review_result_path,),
+                cleanup_paths=(planned.probe_scratch,),
                 array_indexed=True,
             )
         )
@@ -608,6 +740,11 @@ def build_arena_geometry_review_array_fragment(
             target_id=item.target_id,
             acquisition_job_key="arena_geometry_acquisition_array",
             probe_job_key="arena_geometry_probe_array",
+            registry_job_key=(
+                "arena_geometry_registry_refresh"
+                if first.registry_path is not None
+                else None
+            ),
         )
         outputs.append(output)
         required_artifacts.extend(item.required_artifacts)
@@ -641,9 +778,21 @@ def build_arena_geometry_review_array_fragment(
         resources=first.probe_resources,
         upstream=first.upstream_job_keys,
     )
+    jobs = [acquisition_job, probe_job]
+    if first.registry_path is not None:
+        jobs.append(
+            _build_registry_refresh_job(
+                inputs=first,
+                analysis_zarrs=tuple(item.analysis_zarr for item in inputs),
+                upstream=(
+                    "arena_geometry_acquisition_array",
+                    "arena_geometry_probe_array",
+                ),
+            )
+        )
     fragment = LsfWorkflowFragment(
         fragment_id="arena_geometry_review_array",
-        jobs=(acquisition_job, probe_job),
+        jobs=tuple(jobs),
         requires=tuple(dict.fromkeys(required_artifacts)),
         provides=tuple(provided_artifacts),
         metadata={
@@ -655,7 +804,7 @@ def build_arena_geometry_review_array_fragment(
             "arrays_independent": True,
             "human_review_barrier": True,
             "selection_activation": "deferred",
-            "registry_update": False,
+            "registry_update": first.registry_path is not None,
             "outputs": [item.to_json() for item in outputs],
         },
     )
@@ -692,15 +841,16 @@ class ReviewedArenaGeometryCandidateFragmentInputs:
     workflow_id: str
     target_id: str
     analysis_zarr: Path
-    fit_report_path: Path
-    review_montage_path: Path
-    review_receipt_path: Path
+    fit_report_path: Path | None
+    review_montage_path: Path | None
+    review_receipt_path: Path | None
     reviewer: str
     reviewed_at_utc: str
     repo: Path
     run_root: Path
     upstream_job_keys: tuple[str, ...] = ()
     required_artifacts: tuple[str, ...] = ()
+    fit_review_run: str | None = None
     resources: LsfResources = LsfResources(
         queue="short", ncores=2, mem_gb=8, walltime="1:00", span_hosts=1
     )
@@ -723,21 +873,68 @@ def build_reviewed_arena_geometry_candidate_fragment(
 
     target_safe = safe_component(inputs.target_id, default="target", max_length=56)
     zarr_path = inputs.analysis_zarr.expanduser().resolve()
-    report = _require_file(inputs.fit_report_path, label="fit report")
-    montage = _require_file(inputs.review_montage_path, label="review montage")
-    receipt = _require_file(inputs.review_receipt_path, label="review package receipt")
-    _validate_review_package(
-        review_receipt_path=receipt,
-        fit_report_path=report,
-        montage_path=montage,
-    )
-    plan = plan_reviewed_palette_geometry_candidate(
-        source_zarr=zarr_path,
-        fit_report_path=report,
-        montage_path=montage,
-        reviewer=inputs.reviewer,
-        reviewed_at_utc=inputs.reviewed_at_utc,
-    )
+    if inputs.fit_review_run is not None:
+        if any(
+            value is not None
+            for value in (
+                inputs.fit_report_path,
+                inputs.review_montage_path,
+                inputs.review_receipt_path,
+            )
+        ):
+            raise ValueError(
+                "Choose the embedded fit-review run or external review files, not both."
+            )
+        fit_review_run = str(inputs.fit_review_run).strip()
+        if not fit_review_run or Path(fit_review_run).name != fit_review_run:
+            raise ValueError("fit_review_run must be one safe immutable run ID.")
+        plan = plan_reviewed_palette_geometry_candidate(
+            source_zarr=zarr_path,
+            fit_review_run=fit_review_run,
+            reviewer=inputs.reviewer,
+            reviewed_at_utc=inputs.reviewed_at_utc,
+        )
+        review_source_ref = f"analysis/{FIT_REVIEW_RUNS_PARENT}/{fit_review_run}"
+        source_args = ("--fit-review-run", fit_review_run)
+    else:
+        if any(
+            value is None
+            for value in (
+                inputs.fit_report_path,
+                inputs.review_montage_path,
+                inputs.review_receipt_path,
+            )
+        ):
+            raise ValueError(
+                "External review publication requires report, montage, and receipt."
+            )
+        assert inputs.fit_report_path is not None
+        assert inputs.review_montage_path is not None
+        assert inputs.review_receipt_path is not None
+        report = _require_file(inputs.fit_report_path, label="fit report")
+        montage = _require_file(inputs.review_montage_path, label="review montage")
+        receipt = _require_file(
+            inputs.review_receipt_path, label="review package receipt"
+        )
+        _validate_review_package(
+            review_receipt_path=receipt,
+            fit_report_path=report,
+            montage_path=montage,
+        )
+        plan = plan_reviewed_palette_geometry_candidate(
+            source_zarr=zarr_path,
+            fit_report_path=report,
+            montage_path=montage,
+            reviewer=inputs.reviewer,
+            reviewed_at_utc=inputs.reviewed_at_utc,
+        )
+        review_source_ref = str(receipt)
+        source_args = (
+            "--fit-report",
+            str(report),
+            "--review-montage",
+            str(montage),
+        )
     result = inputs.run_root / "arena_geometry" / target_safe / "palette_candidate.json"
     scratch = (
         f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
@@ -753,10 +950,7 @@ def build_reviewed_arena_geometry_candidate_fragment(
                 "fisheye.utils.publish_reviewed_palette_geometry_candidate",
                 "--zarr",
                 str(zarr_path),
-                "--fit-report",
-                str(report),
-                "--review-montage",
-                str(montage),
+                *source_args,
                 "--reviewer",
                 str(inputs.reviewer),
                 "--reviewed-at-utc",
@@ -792,7 +986,7 @@ def build_reviewed_arena_geometry_candidate_fragment(
             "module": "reviewed_arena_geometry_candidate",
             "target_id": inputs.target_id,
             "candidate_id": plan.candidate_id,
-            "review_receipt_path": str(receipt),
+            "review_source_ref": review_source_ref,
             "selection_activation": "deferred",
             "detection_gate_applied": False,
             "registry_update": False,
@@ -839,7 +1033,10 @@ def compose_arena_geometry_workflow(
             "target_count": target_count,
             "human_review_barrier": True,
             "selection_activation": "deferred",
-            "registry_update": False,
+            "registry_update": any(
+                module.fragment.metadata.get("registry_update") is True
+                for module in modules
+            ),
         },
     )
 

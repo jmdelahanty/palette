@@ -44,8 +44,11 @@ checksummed recording contract, not the rounded compatibility mask.
    or exact recording-bound Citrus H5.
 2. Run the blind early/middle/late probe. When the acquisition observation is
    supplied, the reveal measures fixed-circle image support only after the fit
-   report is frozen.
-3. Review the montage and publish the Palette candidate without selecting it.
+   report is frozen. Import the complete package into
+   `analysis/arena_geometry_fit_runs/<run>` before deleting worker or campaign
+   scratch.
+3. Review the embedded montage and panels, then publish the Palette candidate
+   from the exact fit-review run without selecting it.
 4. Publish the immutable comparison, optionally bound to the exact raw
    detection rowset.
 5. For a reviewable, non-failing comparison, publish an explicit
@@ -69,6 +72,31 @@ scripts/py -m fisheye.utils.publish_acquisition_geometry_candidates \
 Add `--apply` only after the dry-run identity and target are correct. For the
 H5 representation, use `--geometry-source citrus-h5 --citrus-h5 /exact/file.h5`.
 Use `recovery-receipt` only for an approved historical recovery.
+
+An embedded review package is published with:
+
+```bash
+scripts/py -m fisheye.utils.publish_arena_geometry_fit_review \
+  --zarr ANALYSIS_ZARR \
+  --review-package-dir NODE_SCRATCH/review_package \
+  --scratch-root NODE_SCRATCH/publication \
+  --result-json CAMPAIGN_ROOT/fit_review_import.json \
+  --apply
+```
+
+After human review, bind the exact run rather than the disposable package:
+
+```bash
+scripts/py -m fisheye.utils.publish_reviewed_palette_geometry_candidate \
+  --zarr ANALYSIS_ZARR \
+  --fit-review-run ARENA_GEOMETRY_FIT_REVIEW_RUN \
+  --reviewer REVIEWER \
+  --reviewed-at-utc RFC3339_TIME
+```
+
+Both commands remain pointerless with respect to operational geometry. The
+campaign's final serialized registry refresh projects the embedded fit as
+complete evidence with review pending; it does not make a selection.
 
 The comparison and reviewed selection dry runs are:
 

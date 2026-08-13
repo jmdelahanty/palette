@@ -336,6 +336,15 @@ or downstream authority contracts.
       geometry for reveal or comparison.
 - [x] Preserve diagnostic concentric rim candidates even when they are not the
       selected consensus candidate.
+- [x] Import the complete frozen pre-review package into immutable,
+      selector-ineligible
+      `analysis/arena_geometry_fit_runs/<content-derived-run>` storage before
+      node or campaign scratch is disposable.
+- [x] Preserve the fit report, review receipt, optional acquisition reveal,
+      three source panels, and montage in that run; store PNGs under the
+      standard `palette.visualization.png_bytes.v1` contract.
+- [x] Allow reviewed Palette candidates to bind the exact embedded fit-review
+      run and its record digest instead of depending on external staging files.
 
 ### Slice 4: immutable comparison artifact
 
@@ -462,6 +471,13 @@ or downstream authority contracts.
       downstream of the finalized gated authority; do not add a duplicate
       aggregate downstream stage.
 - [x] Do not reinterpret the legacy tuning-stage `dish_mask=ok` as this chain.
+- [x] Project a complete embedded fit-review run as
+      `arena_geometry_offline_fit=ok` with an explicit review-pending state;
+      project comparison and selection as `review` until the human decision
+      and immutable downstream artifacts exist.
+- [x] In the campaign DAG, serialize one fail-closed registry refresh after all
+      acquisition-import and fit-review array tasks complete. Parallel workers
+      never write the registry directly.
 - [ ] Define migrations and compatibility projections only after the modern
       artifact contracts are stable.
 

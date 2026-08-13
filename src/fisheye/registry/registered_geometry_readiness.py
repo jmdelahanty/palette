@@ -140,12 +140,38 @@ def project_registered_geometry_stages(
         )
         == "acquisition_registered_dish",
     )
-    offline = _complete_groups(
+    reviewed_offline = _complete_groups(
         candidate_parent,
         predicate=lambda group: _decode(  # type: ignore[attr-defined]
             group.attrs.get("candidate_kind")
         )
         == "palette_recording_image_fit",
+    )
+    fit_review_parent = (
+        analysis_group.get("arena_geometry_fit_runs")  # type: ignore[attr-defined]
+        if analysis_group is not None
+        else None
+    )
+    fit_reviews = _complete_groups(
+        fit_review_parent,
+        predicate=lambda group: (  # type: ignore[attr-defined]
+            _decode(group.attrs.get("schema_id"))
+            == "palette.arena_geometry_fit_review_run"
+            and group.attrs.get("stage_selector_eligible") is False
+        ),
+    )
+    # Once a reviewed Palette candidate exists it supersedes its immutable
+    # pre-review package for readiness.  The package remains durable evidence.
+    offline = reviewed_offline or fit_reviews
+    pending_fit_review_runs = (
+        [
+            name
+            for name, group in fit_reviews
+            if _decode(group.attrs.get("review_status"))  # type: ignore[attr-defined]
+            == "awaiting_explicit_human_review"
+        ]
+        if not reviewed_offline
+        else []
     )
     comparison_parent = (
         analysis_group.get("arena_geometry_comparison_runs")  # type: ignore[attr-defined]
@@ -204,6 +230,9 @@ def project_registered_geometry_stages(
         present=bool(comparisons),
         prerequisite_statuses=(import_status, offline_status),
     )
+    if not comparisons and pending_fit_review_runs:
+        comparison_status = "review"
+        comparison_reason = "offline_fit_review_required"
     review_runs = [
         name
         for name, group in comparisons
@@ -215,9 +244,13 @@ def project_registered_geometry_stages(
     selection_status, selection_reason = _status_from_presence(
         present=bool(selections), prerequisite_statuses=(comparison_status,)
     )
-    if not selections and review_runs:
+    if not selections and (review_runs or pending_fit_review_runs):
         selection_status = "review"
-        selection_reason = "comparison_review_required"
+        selection_reason = (
+            "comparison_review_required"
+            if review_runs
+            else "offline_fit_review_required"
+        )
 
     selection_names = {name for name, _group in selections}
     current_gates: list[tuple[str, object]] = []
@@ -264,7 +297,9 @@ def project_registered_geometry_stages(
             invalid_consumers[name] = "missing_gate_evidence"
             continue
         requirement = _decode(evidence.get("requirement"))
-        applied = evidence.get("applied") is True and evidence.get("status") == "applied"
+        applied = (
+            evidence.get("applied") is True and evidence.get("status") == "applied"
+        )
         consumed_gate = _decode(evidence.get("gate_run"))
         if applied and consumed_gate in current_gate_names:
             valid_consumers.append((name, group))
@@ -325,7 +360,22 @@ def project_registered_geometry_stages(
             offline,
             reason=offline_reason,
             upstream={"raw": raw_status},
-            extra={"candidate_kind": "palette_recording_image_fit"},
+            review_status=(
+                {
+                    "state": "evidence_complete_review_pending",
+                    "runs": pending_fit_review_runs,
+                }
+                if pending_fit_review_runs
+                else None
+            ),
+            extra={
+                "candidate_kind": "palette_recording_image_fit",
+                "fit_review_run_ids": [name for name, _group in fit_reviews],
+                "reviewed_candidate_run_ids": [
+                    name for name, _group in reviewed_offline
+                ],
+                "pending_fit_review_run_ids": pending_fit_review_runs,
+            },
         ),
         projection(
             "arena_geometry_comparison",
@@ -339,9 +389,20 @@ def project_registered_geometry_stages(
             review_status=(
                 {"state": "review_required", "runs": review_runs}
                 if review_runs
-                else None
+                else (
+                    {
+                        "state": "review_required",
+                        "reason": "offline_fit_review_required",
+                        "fit_review_runs": pending_fit_review_runs,
+                    }
+                    if pending_fit_review_runs
+                    else None
+                )
             ),
-            extra={"review_required_runs": review_runs},
+            extra={
+                "review_required_runs": review_runs,
+                "pending_fit_review_run_ids": pending_fit_review_runs,
+            },
         ),
         projection(
             "arena_geometry_selection",

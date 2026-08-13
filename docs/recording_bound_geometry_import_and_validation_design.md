@@ -488,8 +488,27 @@ complete.
 The review receipt binds the exact fit-report, montage, and panel bytes and
 declares `awaiting_explicit_human_review`. It explicitly blocks Palette
 candidate publication, candidate comparison, operational selection, and
-detection gating. A later reviewed-candidate DAG fragment verifies those
-digests again before it may publish a pointerless candidate.
+detection gating. Before worker scratch can be removed, Palette imports the
+entire package into one content-derived, immutable, selector-ineligible run:
+
+```text
+analysis/arena_geometry_fit_runs/<fit-review-run>/
+  fit_report_json
+  review_package_json
+  acquisition_reveal_json                 # when acquisition was revealed
+  visualizations/dish_rim_review_montage_png
+  visualizations/source_panel_00_..._png
+  visualizations/source_panel_01_..._png
+  visualizations/source_panel_02_..._png
+```
+
+JSON documents are retained as checksummed UTF-8 byte arrays. PNGs use
+`palette.visualization.png_bytes.v1` and are discoverable through the run's
+visualization manifest. Publication validates direct and consolidated views,
+does not set a selector, and records that no candidate, selection, or gate was
+created. A later reviewed-candidate DAG fragment consumes the exact embedded
+run ID and record digest. The external review package is compatibility input,
+not durable review authority, and is disposable after verified import.
 
 The fitter's declared target and the feature actually supported by the image
 must remain separate. A visually reviewed fit may be accepted as a
@@ -540,6 +559,7 @@ canary and repeat-recording variability, not guessed in advance.
 Palette uses a small versioned geometry-run surface:
 
 ```text
+arena_geometry_fit_runs/<fit_review_run>/
 arena_geometry_runs/<candidate_run>/
 arena_geometry_comparison_runs/<comparison_run>/
 arena_geometry_selection/<selection_record>/
@@ -590,6 +610,9 @@ frozen fit-report bytes, review-montage bytes, exact source-video identity,
 early/middle/late source-frame hashes, canonical continuous source-camera
 pixel-frame authority, the semantic correction made during review, and the
 reviewer decision. Publication remains pointerless and explicitly audit-only.
+For new production runs, those report and montage references point into the
+exact immutable `arena_geometry_fit_runs` source. External paths remain an
+explicit compatibility route only.
 
 For the first Batman canary, visual review found that the blind Palette circle
 followed the visible top of the rim well, while the acquisition observation
@@ -760,6 +783,12 @@ The existing `dish_mask=ok` step may remain a high-level readiness projection,
 but it cannot represent these distinctions alone. New normalized fields or
 stage details should preserve artifact ID, registration ID, comparison status,
 selection status, and selected geometry-run identity.
+
+The pre-review campaign performs registry mutation only in one serialized
+terminal job after both parallel array stages finish. Registry extraction sees
+an embedded fit-review run as completed offline evidence with review pending;
+it reports comparison and selection as `review`, not complete. The Zarr run is
+the scientific authority, and the registry row is a refreshable projection.
 
 ## Staging disposition and cleanup
 
