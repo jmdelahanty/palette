@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
+    plan_producer_native_acquisition_geometry_candidate,
     plan_recovered_acquisition_geometry_candidate,
     plan_reviewed_palette_geometry_candidate,
 )
@@ -158,7 +159,7 @@ class ArenaGeometryReviewFragmentInputs:
     target_id: str
     recording_dir: Path
     analysis_zarr: Path
-    recovery_receipt_path: Path
+    recovery_receipt_path: Path | None
     source: ArenaGeometryProbeSource
     repo: Path
     run_root: Path
@@ -167,6 +168,10 @@ class ArenaGeometryReviewFragmentInputs:
     max_keyframes_per_window: int = 21
     span_seconds: float = 5.0
     coarse_max_dimension_px: int = 2048
+    geometry_source: str = "recovery-receipt"
+    geometry_camera_serial: str | None = None
+    geometry_arena_id: str | None = None
+    citrus_h5_path: Path | None = None
     acquisition_resources: LsfResources = LsfResources(
         queue="short", ncores=2, mem_gb=8, walltime="1:00", span_hosts=1
     )
@@ -188,17 +193,62 @@ class ArenaGeometryReviewFragmentInputs:
         analysis = self.analysis_zarr.expanduser().resolve()
         repo = self.repo.expanduser().resolve()
         run_root = self.run_root.expanduser().resolve()
-        receipt = _require_file(
-            self.recovery_receipt_path, label="recording geometry recovery receipt"
+        geometry_source = str(self.geometry_source).strip()
+        if geometry_source not in {
+            "producer-folder",
+            "citrus-h5",
+            "recovery-receipt",
+        }:
+            raise ValueError(f"Unsupported geometry source: {geometry_source!r}.")
+        receipt = None
+        if geometry_source == "recovery-receipt":
+            if self.recovery_receipt_path is None:
+                raise ValueError(
+                    "Historical recovery geometry requires a recovery receipt."
+                )
+            receipt = _require_file(
+                self.recovery_receipt_path,
+                label="recording geometry recovery receipt",
+            )
+        elif self.recovery_receipt_path is not None:
+            raise ValueError(
+                "Producer-native geometry must not be configured with a recovery receipt."
+            )
+        camera_serial = (
+            str(self.geometry_camera_serial).strip()
+            if self.geometry_camera_serial is not None
+            else ""
         )
+        arena_id = (
+            str(self.geometry_arena_id).strip()
+            if self.geometry_arena_id is not None
+            else ""
+        )
+        if geometry_source != "recovery-receipt" and not (camera_serial and arena_id):
+            raise ValueError(
+                "Producer-native geometry requires an exact camera serial and arena ID."
+            )
+        citrus_h5 = None
+        if geometry_source == "citrus-h5":
+            if self.citrus_h5_path is None:
+                raise ValueError("citrus-h5 geometry requires an exact Citrus H5 path.")
+            citrus_h5 = _require_file(
+                self.citrus_h5_path,
+                label="recording-bound Citrus H5",
+            )
+        elif self.citrus_h5_path is not None:
+            raise ValueError(
+                "A Citrus H5 path is only valid for the citrus-h5 geometry source."
+            )
         if not recording.is_dir() or not analysis.is_dir():
             raise FileNotFoundError("Recording directory and analysis Zarr must exist.")
         if not (analysis / "zarr.json").is_file():
             raise FileNotFoundError(f"Analysis target is not Zarr v3: {analysis}")
-        recording_bound_paths = {
-            "analysis Zarr": analysis,
-            "recovery receipt": receipt,
-        }
+        recording_bound_paths = {"analysis Zarr": analysis}
+        if receipt is not None:
+            recording_bound_paths["recovery receipt"] = receipt
+        if citrus_h5 is not None:
+            recording_bound_paths["Citrus H5"] = citrus_h5
         for label, path in recording_bound_paths.items():
             try:
                 path.relative_to(recording)
@@ -218,6 +268,10 @@ class ArenaGeometryReviewFragmentInputs:
         object.__setattr__(self, "recording_dir", recording)
         object.__setattr__(self, "analysis_zarr", analysis)
         object.__setattr__(self, "recovery_receipt_path", receipt)
+        object.__setattr__(self, "geometry_source", geometry_source)
+        object.__setattr__(self, "geometry_camera_serial", camera_serial or None)
+        object.__setattr__(self, "geometry_arena_id", arena_id or None)
+        object.__setattr__(self, "citrus_h5_path", citrus_h5)
         object.__setattr__(self, "repo", repo)
         object.__setattr__(self, "run_root", run_root)
 
@@ -313,10 +367,26 @@ def _plan_review_target(
     array_indexed: bool,
 ) -> _ArenaGeometryReviewTargetPlan:
     target_safe = safe_component(inputs.target_id, default="target", max_length=56)
-    candidate = plan_recovered_acquisition_geometry_candidate(
-        source_zarr=inputs.analysis_zarr,
-        receipt_path=inputs.recovery_receipt_path,
-    )
+    if inputs.geometry_source == "recovery-receipt":
+        assert inputs.recovery_receipt_path is not None
+        candidate = plan_recovered_acquisition_geometry_candidate(
+            source_zarr=inputs.analysis_zarr,
+            receipt_path=inputs.recovery_receipt_path,
+        )
+    else:
+        assert inputs.geometry_camera_serial is not None
+        assert inputs.geometry_arena_id is not None
+        candidate = plan_producer_native_acquisition_geometry_candidate(
+            source_zarr=inputs.analysis_zarr,
+            camera_serial=inputs.geometry_camera_serial,
+            arena_id=inputs.geometry_arena_id,
+            recording_folder=(
+                inputs.recording_dir
+                if inputs.geometry_source == "producer-folder"
+                else None
+            ),
+            citrus_h5=inputs.citrus_h5_path,
+        )
     acquisition_result = (
         inputs.run_root / "arena_geometry" / target_safe / "acquisition_candidate.json"
     )
@@ -328,24 +398,37 @@ def _plan_review_target(
     acquisition_scratch = (
         f"/scratch/{RUNTIME_USER_TOKEN}/{work_unit}/arena_geometry_acquisition"
     )
-    acquisition_command = chain_commands(
-        (
-            ("mkdir", "-p", acquisition_scratch),
+    publish_command = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.publish_acquisition_geometry_candidates",
+        "--recording",
+        str(inputs.recording_dir),
+        "--analysis-zarr",
+        str(inputs.analysis_zarr),
+        "--geometry-source",
+        inputs.geometry_source,
+        "--scratch-root",
+        acquisition_scratch,
+        "--result-json",
+        str(acquisition_result),
+        "--apply",
+    ]
+    if inputs.geometry_source != "recovery-receipt":
+        assert inputs.geometry_camera_serial is not None
+        assert inputs.geometry_arena_id is not None
+        publish_command.extend(
             (
-                "scripts/py",
-                "-m",
-                "fisheye.utils.publish_acquisition_geometry_candidates",
-                "--recording",
-                str(inputs.recording_dir),
-                "--analysis-zarr",
-                str(inputs.analysis_zarr),
-                "--scratch-root",
-                acquisition_scratch,
-                "--result-json",
-                str(acquisition_result),
-                "--apply",
-            ),
+                "--camera-serial",
+                inputs.geometry_camera_serial,
+                "--arena-id",
+                inputs.geometry_arena_id,
+            )
         )
+    if inputs.citrus_h5_path is not None:
+        publish_command.extend(("--citrus-h5", str(inputs.citrus_h5_path)))
+    acquisition_command = chain_commands(
+        (("mkdir", "-p", acquisition_scratch), tuple(publish_command))
     )
     review_dir = inputs.run_root / "arena_geometry" / target_safe / "review_package"
     probe_command = [
@@ -446,6 +529,7 @@ def build_arena_geometry_review_fragment(
             "human_review_barrier": True,
             "selection_activation": "deferred",
             "registry_update": False,
+            "geometry_source": inputs.geometry_source,
             "source": inputs.source.to_json(),
             "outputs": outputs.to_json(),
         },

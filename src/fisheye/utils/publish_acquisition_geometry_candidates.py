@@ -1,4 +1,4 @@
-"""Plan or atomically publish recovered acquisition-geometry candidates."""
+"""Plan or publish producer-native or recovered acquisition-geometry candidates."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
+    plan_producer_native_acquisition_geometry_candidate,
     plan_recovered_acquisition_geometry_candidate,
     publish_arena_geometry_candidate,
     validate_arena_geometry_candidate_run,
@@ -65,6 +66,31 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--geometry-source",
+        choices=("producer-folder", "citrus-h5", "recovery-receipt"),
+        default="recovery-receipt",
+        help=(
+            "Authoritative geometry adapter. recovery-receipt is the explicit "
+            "historical compatibility route."
+        ),
+    )
+    parser.add_argument(
+        "--camera-serial",
+        action="append",
+        help="Exact camera serial paired by position with each producer-native recording.",
+    )
+    parser.add_argument(
+        "--arena-id",
+        action="append",
+        help="Exact arena ID paired by position with each producer-native recording.",
+    )
+    parser.add_argument(
+        "--citrus-h5",
+        type=Path,
+        action="append",
+        help="Exact recording-bound Citrus H5 paired with each --recording.",
+    )
+    parser.add_argument(
         "--scratch-root",
         type=Path,
         default=Path(os.environ.get("TMPDIR", "/tmp"))
@@ -96,6 +122,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RecordingGeometryError(
             "--analysis-zarr must be omitted or repeated once per --recording."
         )
+    camera_serials = tuple(args.camera_serial or ())
+    arena_ids = tuple(args.arena_id or ())
+    citrus_h5s = tuple(args.citrus_h5 or ())
+    producer_native = args.geometry_source in {"producer-folder", "citrus-h5"}
+    if producer_native and (
+        len(camera_serials) != len(args.recording)
+        or len(arena_ids) != len(args.recording)
+    ):
+        raise RecordingGeometryError(
+            "Producer-native geometry requires one --camera-serial and --arena-id "
+            "for every --recording."
+        )
+    if args.geometry_source == "citrus-h5" and len(citrus_h5s) != len(args.recording):
+        raise RecordingGeometryError(
+            "citrus-h5 geometry requires one --citrus-h5 for every --recording."
+        )
+    if args.geometry_source != "citrus-h5" and citrus_h5s:
+        raise RecordingGeometryError(
+            "--citrus-h5 is only valid with --geometry-source citrus-h5."
+        )
     rows: list[dict[str, object]] = []
     for index, raw_recording in enumerate(args.recording):
         recording = raw_recording.expanduser().resolve()
@@ -104,11 +150,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             if explicit_zarrs
             else _analysis_zarr(recording)
         )
-        receipt = recording / "raw" / RECOVERY_RECEIPT_NAME
-        plan = plan_recovered_acquisition_geometry_candidate(
-            source_zarr=source_zarr,
-            receipt_path=receipt,
-        )
+        if args.geometry_source == "recovery-receipt":
+            receipt = recording / "raw" / RECOVERY_RECEIPT_NAME
+            plan = plan_recovered_acquisition_geometry_candidate(
+                source_zarr=source_zarr,
+                receipt_path=receipt,
+            )
+        else:
+            plan = plan_producer_native_acquisition_geometry_candidate(
+                source_zarr=source_zarr,
+                camera_serial=camera_serials[index],
+                arena_id=arena_ids[index],
+                recording_folder=(
+                    recording if args.geometry_source == "producer-folder" else None
+                ),
+                citrus_h5=(
+                    citrus_h5s[index] if args.geometry_source == "citrus-h5" else None
+                ),
+            )
         existing = None
         if plan.target_run_path.exists():
             existing = validate_arena_geometry_candidate_run(
@@ -137,6 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows.append(
             {
                 "recording": recording.name,
+                "geometry_source": args.geometry_source,
                 "camera_serial": arena["camera_serial"],
                 "arena_id": arena["arena_id"],
                 "candidate_id": plan.candidate_id,

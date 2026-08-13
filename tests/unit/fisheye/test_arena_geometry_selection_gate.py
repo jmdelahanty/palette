@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis_workflows.materializers import (
@@ -207,6 +208,15 @@ def test_gate_publishes_keyed_sharded_decisions_without_mutating_raw_detection(
     }
     assert root[f"analysis/{gate.GATE_RUNS_PARENT}"].attrs["latest"] == plan.output_run
     assert run["instance_key"].shards == (4,)
+
+    with pytest.raises(ValueError, match="comparison-bound version-2 selection"):
+        gate.validate_registered_detection_gate_consumption(
+            archive,
+            source_group_path=source_path,
+            gate_run=plan.output_run,
+            expected_instance_keys=np.asarray([10, 20, 30], dtype=np.uint64),
+            require_comparison_bound_selection=True,
+        )
 
 
 def test_gate_fails_closed_on_duplicate_modern_identity(tmp_path: Path) -> None:

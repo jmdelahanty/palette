@@ -20,6 +20,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis_workflows.materializers.arena_geometry_selection import (
+    SELECTION_RECORD_SCHEMA_VERSION,
     SELECTION_RUNS_PARENT,
     validate_arena_geometry_selection_record,
 )
@@ -31,6 +32,7 @@ from fisheye.shared.atomic_run_publisher import (
 from fisheye.shared.detect_quality_contract import (
     CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA,
 )
+from fisheye.shared.detection_tables import resolve_detection_instance_table
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_provenance import (
     build_writer_run_provenance,
@@ -76,6 +78,8 @@ class RegisteredDetectionGatePlan:
     frame_count: int
     width_px: int
     height_px: int
+    source_pixel_frame_record_ref: str | None
+    source_pixel_frame_record_sha256: str | None
     selection_run: str
     selection_record_sha256: str
     selection_record: Mapping[str, Any]
@@ -185,23 +189,21 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
     except KeyError as exc:
         raise ValueError(f"Detection source is missing: {path}") from exc
     attrs = dict(group.attrs)
-    if (
-        attrs.get("palette_run_completion_status") != "complete"
-        or attrs.get("stage_selector_eligible") is False
-    ):
+    if attrs.get("palette_run_completion_status") != "complete":
         raise ValueError(
-            f"Detection source {path!r} is not complete and selector-eligible."
+            f"Detection source {path!r} is not complete immutable evidence."
         )
+    table = resolve_detection_instance_table(group)
     required = ("bbox_norm_coords", "frame_indices", "instance_key")
-    missing = [name for name in required if name not in group]
+    missing = [name for name in required if name not in table]
     if missing:
         raise ValueError(f"Detection source {path!r} lacks arrays: {missing}")
-    rows = int(group["instance_key"].shape[0])
+    rows = int(table["instance_key"].shape[0])
     if (
-        tuple(group["bbox_norm_coords"].shape) != (rows, 4)
-        or tuple(group["frame_indices"].shape) != (rows,)
-        or tuple(group["instance_key"].shape) != (rows,)
-        or np.dtype(group["instance_key"].dtype) != np.dtype(np.uint64)
+        tuple(table["bbox_norm_coords"].shape) != (rows, 4)
+        or tuple(table["frame_indices"].shape) != (rows,)
+        or tuple(table["instance_key"].shape) != (rows,)
+        or np.dtype(table["instance_key"].dtype) != np.dtype(np.uint64)
     ):
         raise ValueError(f"Detection source {path!r} has an invalid row contract.")
     width = _positive_int(
@@ -217,15 +219,17 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         or attrs.get("num_frames")
         or attrs.get("total_frames")
     )
-    if frame_count_value is None and "frame_counts" in group:
-        frame_count_value = int(group["frame_counts"].shape[0])
+    if frame_count_value is None and "frame_counts" in table:
+        frame_count_value = int(table["frame_counts"].shape[0])
+    if frame_count_value is None and "frame_row_offsets" in table:
+        frame_count_value = int(table["frame_row_offsets"].shape[0]) - 1
     frame_count = _positive_int(frame_count_value, label="detection source frame count")
 
     # Canonical whole-video detection arrays carry their coordinate descriptor.
     # The clipped collection source is itself the bounded adapter: its schema,
     # native dimensions, recording-parent frames, and copied bbox column define
     # the same normalized cx/cy/w/h surface.
-    descriptor = group["bbox_norm_coords"].attrs.get("coordinate_descriptor")
+    descriptor = table["bbox_norm_coords"].attrs.get("coordinate_descriptor")
     source_schema = str(attrs.get("schema_id") or "")
     is_collection_adapter = source_schema == CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA
     if isinstance(descriptor, Mapping):
@@ -238,6 +242,21 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         raise ValueError(
             "Canonical detection source bbox_norm_coords lacks its coordinate descriptor."
         )
+    source_pixel_authority = None
+    source_evidence = attrs.get("source_evidence")
+    if isinstance(source_evidence, Mapping):
+        raw_authority = source_evidence.get("source_pixel_authority")
+        if isinstance(raw_authority, Mapping):
+            record_ref = str(raw_authority.get("record_ref") or "").strip()
+            record_sha256 = str(raw_authority.get("record_sha256") or "").strip()
+            if not record_ref or len(record_sha256) != 64:
+                raise ValueError(
+                    "Canonical detection source has invalid source-pixel authority."
+                )
+            source_pixel_authority = {
+                "record_ref": record_ref,
+                "record_sha256": record_sha256,
+            }
     signature_payload = {
         "group_path": path,
         "schema_id": attrs.get("schema_id"),
@@ -250,9 +269,11 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         "instance_key_contract": attrs.get("instance_key_contract"),
         "instance_key_frame_domain": attrs.get("instance_key_frame_domain"),
         "source_slices": attrs.get("source_slices"),
+        "source_pixel_authority": source_pixel_authority,
     }
     return {
-        "group": group,
+        "group": table,
+        "run_group": group,
         "group_path": path,
         "row_count": rows,
         "frame_count": frame_count,
@@ -260,6 +281,16 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         "height_px": height,
         "source_signature": _payload_sha256(signature_payload),
         "source_signature_payload": _canonical_copy(signature_payload),
+        "source_pixel_frame_record_ref": (
+            source_pixel_authority["record_ref"]
+            if source_pixel_authority is not None
+            else None
+        ),
+        "source_pixel_frame_record_sha256": (
+            source_pixel_authority["record_sha256"]
+            if source_pixel_authority is not None
+            else None
+        ),
     }
 
 
@@ -283,6 +314,17 @@ def build_registered_detection_gate_plan(
         raise ValueError(
             "Detection source and selected geometry native extents disagree."
         )
+    if selection["selection_record"]["schema_version"] == SELECTION_RECORD_SCHEMA_VERSION:
+        if (
+            source["source_pixel_frame_record_ref"]
+            != selection["pixel_frame_record_ref"]
+            or source["source_pixel_frame_record_sha256"]
+            != selection["pixel_frame_record_sha256"]
+        ):
+            raise ValueError(
+                "Modern comparison-bound geometry and detection source do not share "
+                "the exact persisted source-camera pixel authority."
+            )
     outer = _effective_shard_rows(shard_rows, inner_rows)
     identity = {
         "algorithm_version": GATE_ALGORITHM_VERSION,
@@ -315,6 +357,10 @@ def build_registered_detection_gate_plan(
         frame_count=source["frame_count"],
         width_px=source["width_px"],
         height_px=source["height_px"],
+        source_pixel_frame_record_ref=source["source_pixel_frame_record_ref"],
+        source_pixel_frame_record_sha256=source[
+            "source_pixel_frame_record_sha256"
+        ],
         selection_run=selection["run_name"],
         selection_record_sha256=selection["selection_record_sha256"],
         selection_record=selection["selection_record"],
@@ -353,6 +399,8 @@ def _encode_reasons(inside: np.ndarray) -> np.ndarray:
 
 def _run_attrs(plan: RegisteredDetectionGatePlan) -> dict[str, Any]:
     selected = plan.selection_record["selected_candidate"]
+    selection_decision = plan.selection_record["decision"]
+    comparison = selection_decision.get("comparison_binding")
     gate = selected["valid_detection_region"]["geometry"]
     return {
         "schema_id": GATE_RUN_SCHEMA_ID,
@@ -365,8 +413,24 @@ def _run_attrs(plan: RegisteredDetectionGatePlan) -> dict[str, Any]:
         "recording_frame_count": plan.frame_count,
         "source_video_width": plan.width_px,
         "source_video_height": plan.height_px,
+        "source_pixel_frame_record_ref": plan.source_pixel_frame_record_ref,
+        "source_pixel_frame_record_sha256": plan.source_pixel_frame_record_sha256,
         "selection_run": plan.selection_run,
         "selection_record_sha256": plan.selection_record_sha256,
+        "selection_record_schema_version": plan.selection_record["schema_version"],
+        "selection_policy": plan.selection_record["selection_policy"],
+        "selection_decision_source": selection_decision["decision_source"],
+        "comparison_run": (
+            comparison.get("run_name") if isinstance(comparison, Mapping) else None
+        ),
+        "comparison_record_sha256": (
+            comparison.get("comparison_record_sha256")
+            if isinstance(comparison, Mapping)
+            else None
+        ),
+        "comparison_policy_id": (
+            comparison.get("policy_id") if isinstance(comparison, Mapping) else None
+        ),
         "selected_candidate_run": selected["run_name"],
         "selected_candidate_record_sha256": selected["candidate_record_sha256"],
         "arena_binding": _canonical_copy(selected["arena_binding"]),
@@ -594,6 +658,109 @@ def _revalidate_sources(plan: RegisteredDetectionGatePlan) -> dict[str, Any]:
     }
 
 
+def validate_registered_detection_gate_consumption(
+    source_zarr: str | Path,
+    *,
+    source_group_path: str,
+    gate_run: str,
+    expected_instance_keys: np.ndarray,
+    require_comparison_bound_selection: bool = False,
+) -> dict[str, Any]:
+    """Validate and load one exact gate for fail-closed refinement consumption."""
+
+    archive = Path(source_zarr).expanduser().resolve()
+    run_name = _safe_name(gate_run, label="gate_run")
+    root = open_zarr_root(archive, mode="r")
+    path = f"analysis/{GATE_RUNS_PARENT}/{run_name}"
+    try:
+        group = root[path]
+    except KeyError as exc:
+        raise ValueError(f"Registered detection gate is missing: {path}") from exc
+    attrs = dict(group.attrs)
+    if attrs.get("source_detection_group_path") != _safe_group_path(source_group_path):
+        raise ValueError("Registered gate binds a different detection source path.")
+    selection_run = _safe_name(attrs.get("selection_run"), label="selection_run")
+    plan = build_registered_detection_gate_plan(
+        archive,
+        source_group_path=source_group_path,
+        selection_run=selection_run,
+        output_run=run_name,
+        inner_rows=int(attrs.get("row_chunk_rows") or 0),
+        shard_rows=int(attrs.get("row_shard_rows") or 0),
+    )
+    comparison = plan.selection_record["decision"].get("comparison_binding")
+    if require_comparison_bound_selection and (
+        plan.selection_record.get("schema_version") != SELECTION_RECORD_SCHEMA_VERSION
+        or not isinstance(comparison, Mapping)
+    ):
+        raise ValueError(
+            "Configured registered geometry requires a comparison-bound version-2 "
+            "selection; legacy selection evidence is not operationally sufficient."
+        )
+    report = validate_registered_detection_gate_run(
+        plan.target_run_path,
+        expected_plan=plan,
+        require_complete=True,
+        require_eligible=True,
+        verify_payload=True,
+    )
+    if not report["valid"]:
+        raise ValueError(f"Registered detection gate is invalid: {report['errors']}")
+    expected = np.asarray(expected_instance_keys, dtype=np.uint64).reshape(-1)
+    observed = np.asarray(group["instance_key"][:], dtype=np.uint64).reshape(-1)
+    rows = np.asarray(group["source_row_index"][:], dtype=np.int64).reshape(-1)
+    frames = np.asarray(group["frame_indices"][:], dtype=np.int64).reshape(-1)
+    inside = np.asarray(group["inside_registered_dish_mask"][:], dtype=bool).reshape(-1)
+    if len(np.unique(expected)) != len(expected):
+        raise ValueError("Source detection instance_key values are not unique.")
+    if not np.array_equal(observed, expected):
+        raise ValueError(
+            "Registered gate and source detections do not have identical ordered "
+            "instance_key coverage."
+        )
+    if not np.array_equal(rows, np.arange(len(expected), dtype=np.int64)):
+        raise ValueError("Registered gate source-row identity is missing or reordered.")
+    if frames.shape != expected.shape or inside.shape != expected.shape:
+        raise ValueError("Registered gate row coverage is incomplete.")
+    return {
+        "inside": inside,
+        "gate_run": run_name,
+        "gate_group_path": path,
+        "gate_decoded_array_sha256": _canonical_copy(
+            attrs["decoded_array_sha256"]
+        ),
+        "source_detection_group_path": plan.source_group_path,
+        "source_detection_signature": plan.source_signature,
+        "selection_run": plan.selection_run,
+        "selection_record_sha256": plan.selection_record_sha256,
+        "selection_record_schema_version": plan.selection_record["schema_version"],
+        "selection_policy": plan.selection_record["selection_policy"],
+        "selection_decision_source": plan.selection_record["decision"][
+            "decision_source"
+        ],
+        "comparison_run": (
+            comparison.get("run_name") if isinstance(comparison, Mapping) else None
+        ),
+        "comparison_record_sha256": (
+            comparison.get("comparison_record_sha256")
+            if isinstance(comparison, Mapping)
+            else None
+        ),
+        "comparison_policy_id": (
+            comparison.get("policy_id") if isinstance(comparison, Mapping) else None
+        ),
+        "selected_candidate_run": attrs.get("selected_candidate_run"),
+        "selected_candidate_record_sha256": attrs.get(
+            "selected_candidate_record_sha256"
+        ),
+        "row_count": len(expected),
+        "accepted_count": int(np.count_nonzero(inside)),
+        "rejected_count": int(len(inside) - np.count_nonzero(inside)),
+        "ordered_instance_key_coverage_exact": True,
+        "source_row_identity_exact": True,
+    }
+
+
 def publish_registered_detection_gate(
     plan: RegisteredDetectionGatePlan,
     *,
@@ -740,5 +907,6 @@ __all__ = [
     "RegisteredDetectionGatePlan",
     "build_registered_detection_gate_plan",
     "publish_registered_detection_gate",
+    "validate_registered_detection_gate_consumption",
     "validate_registered_detection_gate_run",
 ]

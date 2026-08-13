@@ -34,6 +34,7 @@ from ..shared.detect_quality_contract import (
     CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA,
     FULL_FRAME_GEOMETRY_SCHEMA,
 )
+from ..shared.detection_tables import resolve_detection_instance_table
 from ..shared.experiment_setup import resolve_expected_subject_count
 from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.zarr_io import open_zarr_root
@@ -351,7 +352,9 @@ def _hash_arrays(*arrays: np.ndarray) -> str:
 
 def _worker(task: ShardTask) -> ShardTrace:
     root = zarr.open_group(task.zarr_path, mode="r", use_consolidated=False)
-    source = _group_at(root, task.source_group_path)
+    source = resolve_detection_instance_table(
+        _group_at(root, task.source_group_path)
+    )
     frames = np.asarray(source["frame_indices"][task.start : task.stop], dtype=np.int64)
     boxes = np.asarray(source["bbox_norm_coords"][task.start : task.stop])
     keys = np.asarray(source["instance_key"][task.start : task.stop], dtype=np.uint64)
@@ -708,10 +711,17 @@ def _write_shardwise(array: Any, values: np.ndarray) -> None:
         array[start:stop] = values[start:stop]
 
 
-def _digest_array(array: Any, *, block_rows: int = DEFAULT_SHARD_ROWS) -> str:
+def _digest_array(
+    array: Any,
+    *,
+    block_rows: int = DEFAULT_SHARD_ROWS,
+    dtype: np.dtype[Any] | None = None,
+) -> str:
     digest = hashlib.sha256()
     for start in range(0, int(array.shape[0]), block_rows):
         values = np.asarray(array[start : min(start + block_rows, int(array.shape[0]))])
+        if dtype is not None:
+            values = values.astype(dtype, copy=False)
         digest.update(np.ascontiguousarray(values).view(np.uint8))
     return digest.hexdigest()
 
@@ -772,17 +782,18 @@ def run_collection_detect_quality(
         expected_subject_count,
         allow_legacy=True,
     )
-    source = _group_at(root, source_group_path)
+    source_group = _group_at(root, source_group_path)
+    source = resolve_detection_instance_table(source_group)
     row_count = _validate_source(source)
     resolved_frame_count = _resolve_frame_count(
         root,
-        source,
+        source_group,
         source_group_path,
         recording_frame_count,
     )
     resolved_width, resolved_height, geometry_source = _resolve_geometry(
         root,
-        source,
+        source_group,
         explicit_width=width,
         explicit_height=height,
     )
@@ -971,7 +982,9 @@ def run_collection_detect_quality(
 
             source_key_hash = _hash_arrays(aggregate["instance_key"])
             source_frame_hash = _hash_arrays(trace["frame_indices"])
-            live_source = _group_at(write_root, source_group_path)
+            live_source = resolve_detection_instance_table(
+                _group_at(write_root, source_group_path)
+            )
             live_source_key_hash = _digest_array(
                 live_source["instance_key"],
                 block_rows=effective_row_shard,
@@ -979,6 +992,7 @@ def run_collection_detect_quality(
             live_source_frame_hash = _digest_array(
                 live_source["frame_indices"],
                 block_rows=effective_row_shard,
+                dtype=np.dtype(np.int64),
             )
             if source_key_hash != live_source_key_hash:
                 raise RuntimeError("Source instance_key changed after shard workers completed.")

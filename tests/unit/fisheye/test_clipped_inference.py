@@ -184,10 +184,10 @@ def _target(
 
 
 def _detection_plan(
-    target: workflow.CampaignTarget, workflow_id: str
+    target: workflow.CampaignTarget, workflow_id: str, *, work_unit_count: int = 22
 ) -> dict[str, object]:
     work_units = []
-    for index in range(22):
+    for index in range(work_unit_count):
         clip_id = f"clip_{index:06d}"
         camera = target.target_id.removeprefix("sleepyfish_cam")
         detect = f"detect_{workflow_id}_{clip_id}"
@@ -216,7 +216,7 @@ def _detection_plan(
                 "commands": {},
             }
         )
-    return {"work_unit_count": 22, "work_units": work_units}
+    return {"work_unit_count": work_unit_count, "work_units": work_units}
 
 
 def _build_fixture_plan(
@@ -230,7 +230,16 @@ def _build_fixture_plan(
     subject_mask_publication_profile: str = (
         workflow.SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED
     ),
+    work_unit_count: int = 22,
+    frame_index_work_unit_count: int | None = None,
+    registered_gate_requirement: str = "off",
+    registered_gate_run: str | None = None,
 ) -> workflow.ClippedInferencePlan:
+    indexed_work_unit_count = (
+        work_unit_count
+        if frame_index_work_unit_count is None
+        else frame_index_work_unit_count
+    )
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     (repo / "scripts" / "py").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -273,7 +282,7 @@ def _build_fixture_plan(
         lambda target: SimpleNamespace(
             recording_identity=target.recording_id,
             camera_serial=target.target_id.removeprefix("sleepyfish_cam"),
-            n_frames=2200,
+            n_frames=indexed_work_unit_count * 100,
             source_width=4512,
             source_height=4512,
             frame=SimpleNamespace(record_ref="/frame", record_sha256="f" * 64),
@@ -281,7 +290,7 @@ def _build_fixture_plan(
             to_json=lambda: {
                 "recording_identity": target.recording_id,
                 "camera_serial": target.target_id.removeprefix("sleepyfish_cam"),
-                "n_frames": 2200,
+                "n_frames": indexed_work_unit_count * 100,
                 "source_width": 4512,
                 "source_height": 4512,
             },
@@ -297,7 +306,7 @@ def _build_fixture_plan(
         "recording_frame_work_unit_intervals",
         lambda *_args, **_kwargs: {
             (index, f"clip_{index:06d}"): (index * 100, (index + 1) * 100)
-            for index in range(22)
+            for index in range(indexed_work_unit_count)
         },
     )
     monkeypatch.setattr(
@@ -316,6 +325,7 @@ def _build_fixture_plan(
         lambda recording_dir, **kwargs: _detection_plan(
             targets_by_recording[Path(recording_dir).resolve()],
             str(kwargs["workflow_id"]),
+            work_unit_count=work_unit_count,
         ),
     )
     if resume_existing_detections:
@@ -346,6 +356,8 @@ def _build_fixture_plan(
         encoded_mask_packages=encoded_mask_packages,
         max_active_targets=max_active_targets,
         subject_mask_publication_profile=subject_mask_publication_profile,
+        registered_gate_requirement=registered_gate_requirement,
+        registered_gate_run=registered_gate_run,
     )
 
 
@@ -353,6 +365,109 @@ def _execution_tasks(job: object) -> dict[str, object]:
     group = getattr(job, "execution_group", None)
     assert group is not None
     return {task.task_key: task for task in group.tasks}
+
+
+def test_detection_work_units_allow_single_indexed_clip() -> None:
+    work_unit = {"clip_index": 0, "clip_id": "only_clip"}
+
+    ordered = workflow._order_detection_work_units_by_recording_frame(
+        target_id="one_clip",
+        work_units=(work_unit,),
+        frame_intervals={(0, "only_clip"): (0, 100)},
+    )
+
+    assert ordered == [work_unit]
+
+
+def test_detection_work_units_require_exact_once_only_index_coverage() -> None:
+    intervals = {
+        (0, "clip_000000"): (0, 100),
+        (1, "clip_000001"): (100, 200),
+    }
+    with pytest.raises(ValueError, match="exactly cover.*missing"):
+        workflow._order_detection_work_units_by_recording_frame(
+            target_id="missing_clip",
+            work_units=({"clip_index": 0, "clip_id": "clip_000000"},),
+            frame_intervals=intervals,
+        )
+    with pytest.raises(ValueError, match="duplicate"):
+        workflow._order_detection_work_units_by_recording_frame(
+            target_id="duplicate_clip",
+            work_units=(
+                {"clip_index": 0, "clip_id": "clip_000000"},
+                {"clip_index": 0, "clip_id": "clip_000000"},
+            ),
+            frame_intervals={(0, "clip_000000"): (0, 100)},
+        )
+
+
+def test_build_plan_supports_degenerate_one_clip_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=1,
+    )
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+
+    assert [(clip["frame_start"], clip["frame_stop"]) for clip in target["clips"]] == [
+        (0, 100)
+    ]
+    assert len(_execution_tasks(jobs[f"detect_artifact_array:{target_safe}"])) == 1
+    assert len(_execution_tasks(jobs[f"detect_refine_bundle:{target_safe}"])) == 1
+
+
+def test_required_geometry_uses_canonical_refined_collection_without_legacy_bypass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        registered_gate_requirement="required",
+        registered_gate_run="gate_exact_v1",
+    )
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    fragments = plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    fragment_ids = [fragment["fragment_id"] for fragment in fragments]
+
+    assert f"detection_postprocess:{target_safe}" not in fragment_ids
+    assert f"recording_detection_postprocess:{target_safe}" in fragment_ids
+    assert f"registered_refined_collection:{target_safe}" in fragment_ids
+    assert f"strict_clipped_detection_evidence:{target_safe}" not in fragment_ids
+    assert f"clipped_storage_finalization:{target_safe}" not in fragment_ids
+    assert f"detect_refine_bundle:{target_safe}" not in jobs
+    assert f"detect_quality_source:{target_safe}" not in jobs
+    collection = jobs[f"registered_refined_collection:{target_safe}"]
+    rendered = " ".join(collection.command)
+    assert "finalize_registered_clipped_refined_collection" in rendered
+    assert "--registered-gate-requirement required" in rendered
+    assert "--registered-gate-run gate_exact_v1" in rendered
+    cache = jobs[f"cache_array:{target_safe}"]
+    assert cache.dependency.upstream_job_keys == (collection.job_key,)
+    crop_fragment = next(
+        fragment
+        for fragment in fragments
+        if fragment["fragment_id"] == f"crop_roi_cache:{target_safe}"
+    )
+    assert crop_fragment["requires"] == [
+        f"finalized_refined_detection:{target_safe}"
+    ]
+    assert target["strict_detection_storage"] is None
+    assert target["registered_dish_geometry"] == {
+        "gate_requirement": "required",
+        "gate_run": "gate_exact_v1",
+        "selection_policy_id": "manual_review_only_v1",
+    }
 
 
 def test_build_plan_has_parallel_keypoint_mask_branch_and_join(

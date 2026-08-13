@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from fisheye.analysis_workflows.materializers.registered_detection_gate import (
+    validate_registered_detection_gate_consumption,
+)
 from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.crop_schema import (
@@ -41,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME.value,
     )
     parser.add_argument("--camera-id", required=True)
+    parser.add_argument("--source-refined-run")
+    parser.add_argument(
+        "--registered-gate-requirement",
+        choices=("off", "if_available", "required"),
+        default="off",
+    )
+    parser.add_argument("--registered-gate-run")
     parser.add_argument("--scratch-root", type=Path, required=True)
     parser.add_argument(
         "--copy-backend",
@@ -69,6 +79,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             scratch_root=args.scratch_root,
             copy_backend=args.copy_backend,
             keep_scratch=bool(args.keep_scratch),
+            source_refined_run_id=args.source_refined_run,
+            registered_gate_requirement=args.registered_gate_requirement,
+            registered_gate_run=args.registered_gate_run,
+            registered_gate_validator=validate_registered_detection_gate_consumption,
         )
     except Exception as exc:
         result = {

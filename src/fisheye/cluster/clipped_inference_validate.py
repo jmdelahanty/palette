@@ -314,13 +314,36 @@ def validate_target(
     collection_id = str(target["collection_id"])
     quality_source_run = str(target["detect_quality_source_run"])
     quality_run = str(target["detect_quality_run"])
-    quality_source = _require_complete_run(
-        root, "detect_collection_sources", quality_source_run
+    registered = target.get("registered_dish_geometry")
+    registered_mode = (
+        str(registered.get("gate_requirement") or "off")
+        if isinstance(registered, Mapping)
+        else "off"
     )
+    modern_registered = registered_mode != "off"
+    if modern_registered:
+        canonical_detect_run = str(target["native_canonical_run_id"])
+        quality_source = _require_complete_run(
+            root, "detect_runs", canonical_detect_run
+        )
+        quality_source_table = (
+            quality_source["instances"]
+            if "instances" in quality_source
+            else quality_source
+        )
+    else:
+        quality_source = _require_complete_run(
+            root, "detect_collection_sources", quality_source_run
+        )
+        quality_source_table = quality_source
     quality = _require_complete_run(root, "detect_quality_runs", quality_run)
     quality_source_identity, quality_source_keys = _instance_key_values(
-        quality_source,
-        label=f"detect_collection_sources/{quality_source_run}",
+        quality_source_table,
+        label=(
+            f"detect_runs/{canonical_detect_run}/instances"
+            if modern_registered
+            else f"detect_collection_sources/{quality_source_run}"
+        ),
     )
     quality_identity, quality_keys = _instance_key_values(
         quality,
@@ -356,6 +379,31 @@ def validate_target(
             f"Detection collection selected-run count mismatch: "
             f"{len(selected) if isinstance(selected, list) else None} != {len(target['clips'])}."
         )
+    if modern_registered:
+        gate = collection.attrs.get("registered_detection_gate")
+        if not isinstance(gate, Mapping):
+            raise RuntimeError("Registered clipped collection lacks gate consumption.")
+        if gate.get("requirement") != registered_mode:
+            raise RuntimeError("Registered clipped collection has the wrong gate mode.")
+        if registered_mode == "required" and (
+            gate.get("status") != "applied" or gate.get("applied") is not True
+        ):
+            raise RuntimeError("Required clipped collection is not gate-consumed.")
+        canonical_refined_run = str(target["canonical_refined_run_id"])
+        canonical_refined = _require_complete_run(
+            root, "refined_detect_runs", canonical_refined_run
+        )
+        canonical_instances = canonical_refined.get("instances")
+        if canonical_instances is None:
+            raise RuntimeError("Canonical refined run has no instances group.")
+        canonical_frames = np.asarray(
+            canonical_instances["frame_indices"][:], dtype=np.int64
+        ).reshape(-1)
+        canonical_keys = np.asarray(
+            canonical_instances["instance_key"][:], dtype=np.uint64
+        ).reshape(-1)
+        if canonical_frames.shape != canonical_keys.shape:
+            raise RuntimeError("Canonical refined frame/key coverage differs.")
 
     detection_reports: list[dict[str, Any]] = []
     cache_reports: list[dict[str, Any]] = []
@@ -365,11 +413,26 @@ def validate_target(
     cache_rows = 0
     cleaned_cache_count = 0
     for clip in target["clips"]:
-        refined_path = str(clip["refined_detect_group_path"])
-        refined = root
-        for part in Path(refined_path).parts:
-            refined = refined[part]
-        identity, keys = _refined_instance_key_values(refined, label=refined_path)
+        if modern_registered:
+            frame_start = int(clip["frame_start"])
+            frame_stop = int(clip["frame_stop"])
+            mask = (canonical_frames >= frame_start) & (
+                canonical_frames < frame_stop
+            )
+            keys = canonical_keys[mask]
+            identity, keys = _validate_instance_key_values(
+                keys,
+                label=(
+                    f"refined_detect_runs/{canonical_refined_run}"
+                    f"[{frame_start}:{frame_stop}]"
+                ),
+            )
+        else:
+            refined_path = str(clip["refined_detect_group_path"])
+            refined = root
+            for part in Path(refined_path).parts:
+                refined = refined[part]
+            identity, keys = _refined_instance_key_values(refined, label=refined_path)
         detection_rows += int(identity["row_count"])
         detection_key_parts.append(keys)
         detection_reports.append(

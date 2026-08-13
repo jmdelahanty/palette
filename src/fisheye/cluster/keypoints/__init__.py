@@ -21,6 +21,7 @@ from fisheye.cluster.keypoints.common import (
     resolve_keypoint_v2_publication_storage,
     validate_flat_roi_cache_binding,
     validate_keypoint_input_dag,
+    validate_registered_geometry_crop_authority,
 )
 
 __all__ = [
@@ -39,4 +40,5 @@ __all__ = [
     "resolve_keypoint_v2_publication_storage",
     "validate_flat_roi_cache_binding",
     "validate_keypoint_input_dag",
+    "validate_registered_geometry_crop_authority",
 ]

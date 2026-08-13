@@ -17,8 +17,14 @@ from typing import Any, Mapping
 import zarr
 
 from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
+    ACQUISITION_CANDIDATE_KIND,
     CANDIDATE_RUNS_PARENT,
+    PALETTE_CANDIDATE_KIND,
     validate_arena_geometry_candidate_record,
+)
+from fisheye.analysis_workflows.materializers.arena_geometry_comparison import (
+    COMPARISON_RUNS_PARENT,
+    validate_arena_geometry_comparison_record,
 )
 from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
@@ -43,13 +49,15 @@ from fisheye.shared.zarr_run_completion import (
 
 
 SELECTION_RECORD_SCHEMA_ID = "palette.arena_geometry_selection_record"
-SELECTION_RECORD_SCHEMA_VERSION = 1
+SELECTION_RECORD_SCHEMA_VERSION = 2
+LEGACY_SELECTION_RECORD_SCHEMA_VERSION = 1
 SELECTION_RUN_SCHEMA_ID = "palette.arena_geometry_selection_run"
 SELECTION_RUN_SCHEMA_VERSION = 1
 SELECTION_RUNS_PARENT = "arena_geometry_selection"
 SELECTION_PUBLISH_SCHEMA_ID = "palette.arena_geometry_selection_publish"
 SELECTION_ALGORITHM_VERSION = 1
 SELECTION_POLICY = "reviewed_candidate_exact_binding_v1"
+COMPARISON_BOUND_SELECTION_POLICY = "comparison_bound_reviewed_candidate_v2"
 SELECTION_POLICY_ATTR = "arena_geometry_selection_policy"
 SELECTION_GENERATION_ATTR = "arena_geometry_selection_generation"
 SELECTION_LEASE_ATTR = "arena_geometry_selection_lease"
@@ -108,15 +116,80 @@ def _candidate_snapshot(root: Any, candidate_run: str) -> dict[str, Any]:
         raise ValueError(f"Candidate {name!r} record digest is invalid.")
     if attrs.get("candidate_id") != name:
         raise ValueError(f"Candidate {name!r} identity does not match its run name.")
+    candidate_kind = record["candidate_kind"]
+    physical = record.get("physical_inner_rim")
+    observed = record.get("observed_boundary")
+    if candidate_kind == ACQUISITION_CANDIDATE_KIND:
+        if not isinstance(physical, Mapping) or observed is not None:
+            raise ValueError("Acquisition candidate boundary semantics are invalid.")
+        boundary_observation = {
+            "role": "producer_physical_inner_rim",
+            "observed_feature": "dish_inner_rim_water_side_edge",
+            "boundary": _canonical_copy(physical),
+        }
+    elif candidate_kind == PALETTE_CANDIDATE_KIND:
+        if not isinstance(observed, Mapping) or physical is not None:
+            raise ValueError("Palette candidate boundary semantics are invalid.")
+        boundary_observation = {
+            "role": "independent_recording_image_observation",
+            "observed_feature": observed.get("observed_feature"),
+            "boundary": _canonical_copy(observed),
+        }
+    else:  # pragma: no cover - candidate validator already rejects this
+        raise ValueError(f"Unsupported candidate kind: {candidate_kind!r}.")
     return {
         "run_name": name,
         "candidate_id": name,
-        "candidate_kind": record["candidate_kind"],
+        "candidate_kind": candidate_kind,
         "candidate_record_sha256": digest,
         "arena_binding": _canonical_copy(record["arena_binding"]),
         "coordinate_binding": _canonical_copy(record["coordinate_binding"]),
-        "physical_inner_rim": _canonical_copy(record["physical_inner_rim"]),
+        "physical_inner_rim": (
+            _canonical_copy(physical) if isinstance(physical, Mapping) else None
+        ),
+        "observed_boundary": (
+            _canonical_copy(observed) if isinstance(observed, Mapping) else None
+        ),
+        "boundary_observation": boundary_observation,
         "valid_detection_region": _canonical_copy(record["valid_detection_region"]),
+    }
+
+
+def _comparison_snapshot(root: Any, comparison_run: str) -> dict[str, Any]:
+    name = _safe_name(comparison_run, label="comparison_run")
+    path = f"analysis/{COMPARISON_RUNS_PARENT}/{name}"
+    try:
+        group = root[path]
+    except KeyError as exc:
+        raise ValueError(f"Arena-geometry comparison is missing: {path}") from exc
+    attrs = dict(group.attrs)
+    if (
+        attrs.get("palette_run_completion_status") != "complete"
+        or attrs.get("stage_selector_eligible") is not False
+        or attrs.get("candidate_selected") is not False
+    ):
+        raise ValueError(f"Comparison {name!r} is not complete immutable evidence.")
+    record = attrs.get("comparison_record")
+    if not isinstance(record, Mapping):
+        raise ValueError(f"Comparison {name!r} lacks comparison_record.")
+    validate_arena_geometry_comparison_record(record)
+    digest = _payload_sha256(record)
+    if attrs.get("comparison_record_sha256") != digest:
+        raise ValueError(f"Comparison {name!r} record digest is invalid.")
+    return {
+        "run_name": name,
+        "comparison_record_sha256": digest,
+        "policy_id": record["policy"]["policy_id"],
+        "policy_version": record["policy"]["policy_version"],
+        "automatic_selection_promoted": record["policy"][
+            "automatic_selection_promoted"
+        ],
+        "evidence_outcome": record["decision"]["evidence_outcome"],
+        "workflow_action": record["decision"]["workflow_action"],
+        "semantic_compatibility": record["observed_features"][
+            "semantic_compatibility"
+        ],
+        "candidate_bindings": _canonical_copy(record["candidate_bindings"]),
     }
 
 
@@ -127,6 +200,7 @@ def build_arena_geometry_selection_plan(
     selected_by: str,
     decision_reason: str,
     decision_source: str = "manual_review",
+    comparison_run: str | None = None,
     comparison_binding: Mapping[str, Any] | None = None,
 ) -> ArenaGeometrySelectionPlan:
     """Bind one exact candidate to an immutable operational selection."""
@@ -141,19 +215,72 @@ def build_arena_geometry_selection_plan(
         raise ValueError(
             "Selection requires selected_by, decision_reason, and decision_source."
         )
+    if comparison_run is not None and comparison_binding is not None:
+        raise ValueError(
+            "Use comparison_run for validated comparison evidence; do not also pass "
+            "an unvalidated comparison_binding."
+        )
+    comparison = (
+        _comparison_snapshot(root, comparison_run)
+        if comparison_run is not None
+        else None
+    )
+    if comparison is not None:
+        compared_candidates = {
+            binding["candidate_id"]
+            for binding in comparison["candidate_bindings"].values()
+        }
+        if candidate["candidate_id"] not in compared_candidates:
+            raise ValueError("Selected candidate is not bound by the comparison artifact.")
+        if source == "automatic_policy":
+            if (
+                comparison["evidence_outcome"] != "corroborated_pass"
+                or comparison["workflow_action"] != "automatic_select_acquisition"
+                or comparison["automatic_selection_promoted"] is not True
+                or candidate["candidate_kind"] != ACQUISITION_CANDIDATE_KIND
+            ):
+                raise ValueError(
+                    "Automatic selection requires a promoted corroborated acquisition pass."
+                )
+        elif source == "manual_review":
+            if comparison["workflow_action"] == "fail":
+                raise ValueError(
+                    "A failed geometry comparison cannot be overridden by selecting one "
+                    "of its existing candidates. Publish corrected evidence and compare "
+                    "again."
+                )
+        else:
+            raise ValueError(
+                "Comparison-bound selection decision_source must be manual_review or "
+                "automatic_policy."
+            )
+    elif source == "automatic_policy":
+        raise ValueError("Automatic geometry selection requires a comparison artifact.")
+    schema_version = (
+        SELECTION_RECORD_SCHEMA_VERSION
+        if comparison is not None
+        else LEGACY_SELECTION_RECORD_SCHEMA_VERSION
+    )
+    selection_policy = (
+        COMPARISON_BOUND_SELECTION_POLICY if comparison is not None else SELECTION_POLICY
+    )
     record = {
         "schema_id": SELECTION_RECORD_SCHEMA_ID,
-        "schema_version": SELECTION_RECORD_SCHEMA_VERSION,
-        "selection_policy": SELECTION_POLICY,
+        "schema_version": schema_version,
+        "selection_policy": selection_policy,
         "selected_candidate": candidate,
         "decision": {
             "selected_by": reviewer,
             "decision_reason": reason,
             "decision_source": source,
             "comparison_binding": (
-                _canonical_copy(comparison_binding)
-                if comparison_binding is not None
-                else None
+                _canonical_copy(comparison)
+                if comparison is not None
+                else (
+                    _canonical_copy(comparison_binding)
+                    if comparison_binding is not None
+                    else None
+                )
             ),
         },
         "operational_role": "bounding_box_centroid_detection_gating",
@@ -182,6 +309,16 @@ def build_arena_geometry_selection_plan(
         input_run_ids={
             "arena_geometry_candidate": candidate["run_name"],
             "candidate_record_sha256": candidate["candidate_record_sha256"],
+            **(
+                {
+                    "arena_geometry_comparison": comparison["run_name"],
+                    "comparison_record_sha256": comparison[
+                        "comparison_record_sha256"
+                    ],
+                }
+                if comparison is not None
+                else {}
+            ),
         },
         cwd=Path.cwd(),
         include_system_context=False,
@@ -199,10 +336,15 @@ def build_arena_geometry_selection_plan(
 
 
 def validate_arena_geometry_selection_record(record: Mapping[str, Any]) -> None:
+    schema_version = record.get("schema_version")
+    expected_policy = {
+        LEGACY_SELECTION_RECORD_SCHEMA_VERSION: SELECTION_POLICY,
+        SELECTION_RECORD_SCHEMA_VERSION: COMPARISON_BOUND_SELECTION_POLICY,
+    }.get(schema_version)
     if (
         record.get("schema_id") != SELECTION_RECORD_SCHEMA_ID
-        or record.get("schema_version") != SELECTION_RECORD_SCHEMA_VERSION
-        or record.get("selection_policy") != SELECTION_POLICY
+        or expected_policy is None
+        or record.get("selection_policy") != expected_policy
     ):
         raise ValueError("Unsupported arena-geometry selection record.")
     selected = record.get("selected_candidate")
@@ -218,20 +360,49 @@ def validate_arena_geometry_selection_record(record: Mapping[str, Any]) -> None:
             raise ValueError(f"Selection candidate lacks {name}.")
     if selected.get("run_name") != selected.get("candidate_id"):
         raise ValueError("Selection candidate run and identity disagree.")
-    for name in (
-        "arena_binding",
-        "coordinate_binding",
-        "physical_inner_rim",
-        "valid_detection_region",
-    ):
+    for name in ("arena_binding", "coordinate_binding", "valid_detection_region"):
         if not isinstance(selected.get(name), Mapping):
             raise ValueError(f"Selection candidate lacks {name}.")
+    if schema_version == LEGACY_SELECTION_RECORD_SCHEMA_VERSION:
+        if not isinstance(selected.get("physical_inner_rim"), Mapping):
+            raise ValueError("Legacy selection candidate lacks physical_inner_rim.")
+    else:
+        boundary = selected.get("boundary_observation")
+        if not isinstance(boundary, Mapping):
+            raise ValueError("Selection candidate lacks boundary_observation.")
+        kind = selected.get("candidate_kind")
+        if kind == ACQUISITION_CANDIDATE_KIND:
+            if not isinstance(selected.get("physical_inner_rim"), Mapping) or selected.get(
+                "observed_boundary"
+            ) is not None:
+                raise ValueError("Selected acquisition boundary semantics are invalid.")
+        elif kind == PALETTE_CANDIDATE_KIND:
+            if not isinstance(selected.get("observed_boundary"), Mapping) or selected.get(
+                "physical_inner_rim"
+            ) is not None:
+                raise ValueError("Selected Palette boundary semantics are invalid.")
+        else:
+            raise ValueError("Selection candidate kind is unsupported.")
     decision = record.get("decision")
     if not isinstance(decision, Mapping):
         raise ValueError("Selection lacks decision metadata.")
     for name in ("selected_by", "decision_reason", "decision_source"):
         if not str(decision.get(name) or "").strip():
             raise ValueError(f"Selection decision lacks {name}.")
+    comparison = decision.get("comparison_binding")
+    if schema_version == SELECTION_RECORD_SCHEMA_VERSION:
+        if not isinstance(comparison, Mapping):
+            raise ValueError("Version-2 selection requires comparison binding.")
+        for name in (
+            "run_name",
+            "comparison_record_sha256",
+            "policy_id",
+            "evidence_outcome",
+            "workflow_action",
+            "semantic_compatibility",
+        ):
+            if not str(comparison.get(name) or "").strip():
+                raise ValueError(f"Selection comparison binding lacks {name}.")
     if record.get("candidate_mutated") is not False:
         raise ValueError("Selection must not claim candidate mutation.")
     if record.get("legacy_dish_mask_projection_written") is not False:
@@ -310,10 +481,23 @@ def _revalidate_selection_source(plan: ArenaGeometrySelectionPlan) -> dict[str, 
     persisted = plan.selection_record["selected_candidate"]
     if candidate != persisted:
         raise RuntimeError("Selected candidate binding changed during publication.")
+    comparison_binding = plan.selection_record["decision"].get("comparison_binding")
+    comparison_audit: Mapping[str, Any] | None = None
+    if plan.selection_record["schema_version"] == SELECTION_RECORD_SCHEMA_VERSION:
+        if not isinstance(comparison_binding, Mapping):
+            raise RuntimeError("Comparison-bound selection lost its comparison binding.")
+        current = _comparison_snapshot(root, str(comparison_binding["run_name"]))
+        if current != comparison_binding:
+            raise RuntimeError("Comparison binding changed during selection publication.")
+        comparison_audit = {
+            "comparison_run": current["run_name"],
+            "comparison_record_sha256": current["comparison_record_sha256"],
+        }
     return {
         "status": "current",
         "candidate_run": plan.candidate_run,
         "candidate_record_sha256": plan.candidate_record_sha256,
+        "comparison": comparison_audit,
     }
 
 

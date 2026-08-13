@@ -893,6 +893,68 @@ def test_keypoint_input_dag_rejects_crop_below_zebrafish_minimum(
         )
 
 
+def test_registered_geometry_keypoint_guard_requires_exact_finalized_crop_lineage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    gate = {
+        "requirement": "required",
+        "status": "applied",
+        "applied": True,
+        "gate_run": "gate_001",
+        "selection_digest": "a" * 64,
+    }
+    crop = _FakeGroup(
+        source_refined_run_id="refined_final",
+        source_refined_manifest_digest="b" * 64,
+        source_registered_detection_gate_requirement="required",
+        source_registered_detection_gate=gate,
+    )
+    crop_parent = _FakeGroup()
+    crop_parent["crop_001"] = crop
+    root = _FakeGroup()
+    root["crop_runs"] = crop_parent
+    source_run = SimpleNamespace(
+        attrs={
+            "finalized_recording_authority": True,
+            "immutable_snapshot": True,
+            "registered_detection_gate_requirement": "required",
+            "registered_detection_gate": gate,
+        }
+    )
+    monkeypatch.setattr(common_mod, "open_zarr_group_direct", lambda *_a, **_k: root)
+    monkeypatch.setattr(
+        common_mod,
+        "is_run_complete_in_parent",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        common_mod,
+        "bind_refined_detection_crop_source",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            manifest={"payload_digest": "b" * 64},
+            run_group=source_run,
+        ),
+    )
+
+    result = common_mod.validate_registered_geometry_crop_authority(
+        analysis_zarr=tmp_path / "analysis.zarr",
+        crop_run="crop_001",
+        registered_gate_requirement="required",
+        registered_gate_run="gate_001",
+    )
+    assert result["source_refined_run"] == "refined_final"
+    assert result["gate_applied"] is True
+
+    with pytest.raises(ValueError, match="different registered gate"):
+        common_mod.validate_registered_geometry_crop_authority(
+            analysis_zarr=tmp_path / "analysis.zarr",
+            crop_run="crop_001",
+            registered_gate_requirement="required",
+            registered_gate_run="gate_other",
+        )
+
+
 def test_candidate_validator_requires_all_four_v2_runs_in_plan(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     _write_json(

@@ -16,6 +16,11 @@ from fisheye.cluster.clipped_detection import (
     build_whole_video_raw_detection_cohort_fragment,
 )
 from fisheye.cluster.clipped_inference import build_ssh_bsub_runner
+from fisheye.cluster.crop_snapshot import (
+    CropSnapshotFragmentInputs,
+    CropSnapshotFragmentOutputs,
+    build_crop_snapshot_fragment,
+)
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import (
     LsfWorkflow,
@@ -27,6 +32,13 @@ from fisheye.cluster.recording_layout import (
     RecordingTarget,
     whole_video_recording_target,
 )
+from fisheye.cluster.recording_detection_postprocess import (
+    REGISTERED_GATE_REQUIREMENTS,
+    RecordingDetectionPostprocessOutputs,
+    RecordingDetectionPostprocessInputs,
+    build_recording_detection_postprocess_fragment,
+)
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.registry.model_resolution import (
     load_candidates,
@@ -79,6 +91,14 @@ class WholeVideoDetectionCohortPlan:
     targets: tuple[RegistryWholeVideoTarget, ...]
     model: DetectionModelSpec
     detect_run: str
+    quality_run: str | None
+    refined_run: str | None
+    crop_run: str | None
+    registered_gate_requirement: str
+    registered_gate_run: str | None
+    selection_policy_id: str
+    postprocess_outputs: tuple[RecordingDetectionPostprocessOutputs, ...]
+    crop_outputs: tuple[CropSnapshotFragmentOutputs, ...]
     max_concurrent: int
     lsf_workflow: LsfWorkflow
 
@@ -99,6 +119,18 @@ class WholeVideoDetectionCohortPlan:
                 "sha256": self.model.sha256,
             },
             "detect_run": self.detect_run,
+            "quality_run": self.quality_run,
+            "refined_run": self.refined_run,
+            "crop_run": self.crop_run,
+            "registered_dish_geometry": {
+                "gate_requirement": self.registered_gate_requirement,
+                "gate_run": self.registered_gate_run,
+                "selection_policy_id": self.selection_policy_id,
+            },
+            "postprocess_outputs": [
+                output.to_json() for output in self.postprocess_outputs
+            ],
+            "crop_outputs": [output.to_json() for output in self.crop_outputs],
             "scheduler": {
                 "execution_mode": "lsf_array",
                 "max_concurrent": self.max_concurrent,
@@ -325,18 +357,43 @@ def build_plan(
     zarr_use: str = "analysis",
     limit: int | None = None,
     max_concurrent: int = 8,
+    include_postprocess: bool = False,
+    include_crop: bool = False,
+    registered_gate_requirement: str = "off",
+    registered_gate_run: str | None = None,
+    selection_policy_id: str = "manual_review_only_v1",
 ) -> WholeVideoDetectionCohortPlan:
     """Resolve registry targets/model and build one immutable array plan."""
 
     resolved_registry = registry_path.expanduser().resolve()
     resolved_repo = repo.expanduser().resolve()
     resolved_run_root = run_root.expanduser().resolve()
+    if int(max_concurrent) <= 0:
+        raise ValueError("max_concurrent must be positive.")
+    if type(include_postprocess) is not bool:
+        raise TypeError("include_postprocess must be an exact bool.")
+    if type(include_crop) is not bool:
+        raise TypeError("include_crop must be an exact bool.")
+    gate_requirement = str(registered_gate_requirement).strip()
+    if gate_requirement not in REGISTERED_GATE_REQUIREMENTS:
+        raise ValueError(
+            "registered_gate_requirement must be off, if_available, or required."
+        )
+    gate_run = str(registered_gate_run or "").strip() or None
+    if gate_requirement == "required" and gate_run is None:
+        raise ValueError("Required registered geometry needs an exact gate run.")
+    if gate_requirement != "off":
+        include_postprocess = True
+        include_crop = True
+    if include_crop:
+        include_postprocess = True
+    policy_id = str(selection_policy_id).strip()
+    if policy_id not in {"manual_review_only_v1", "corroborated_acquisition_v1"}:
+        raise ValueError("Unsupported registered geometry selection policy id.")
     if not resolved_registry.is_file():
         raise FileNotFoundError(f"Registry does not exist: {resolved_registry}")
     if not (resolved_repo / "scripts" / "py").is_file():
         raise FileNotFoundError(f"Palette checkout lacks scripts/py: {resolved_repo}")
-    if int(max_concurrent) <= 0:
-        raise ValueError("max_concurrent must be positive.")
     safe_label = safe_component(run_label, default="whole_video_detect", max_length=64)
     workflow_id = safe_component(
         f"whole_video_detect_{safe_label}",
@@ -347,6 +404,33 @@ def build_plan(
         f"detect_{safe_label}",
         default="detect_whole_video",
         max_length=120,
+    )
+    quality_run = (
+        safe_component(
+            f"detect_quality_{safe_label}",
+            default="detect_quality_whole_video",
+            max_length=120,
+        )
+        if include_postprocess
+        else None
+    )
+    refined_run = (
+        safe_component(
+            f"refined_detect_{safe_label}",
+            default="refined_detect_whole_video",
+            max_length=120,
+        )
+        if include_postprocess
+        else None
+    )
+    crop_run = (
+        safe_component(
+            f"crop_{safe_label}",
+            default="crop_whole_video",
+            max_length=120,
+        )
+        if include_crop
+        else None
     )
 
     registry = Registry(resolved_registry)
@@ -399,10 +483,76 @@ def build_plan(
         fragment_inputs,
         max_concurrent=int(max_concurrent),
     )
+    postprocess_modules = ()
+    if include_postprocess:
+        assert quality_run is not None and refined_run is not None
+        outputs_by_target = {output.target_id: output for output in cohort.outputs}
+        postprocess_modules = tuple(
+            build_recording_detection_postprocess_fragment(
+                RecordingDetectionPostprocessInputs(
+                    workflow_id=workflow_id,
+                    family=FAMILY,
+                    target=item.target,
+                    repo=resolved_repo,
+                    run_root=resolved_run_root,
+                    source_detect_run=detect_run,
+                    quality_run=quality_run,
+                    refined_run=refined_run,
+                    registered_gate_requirement=gate_requirement,
+                    registered_gate_run=gate_run,
+                    selection_policy_id=policy_id,
+                    upstream_job_keys=(
+                        outputs_by_target[item.target.target_id].terminal_job_key,
+                    ),
+                    required_artifacts=(
+                        outputs_by_target[item.target.target_id].artifact_key,
+                    ),
+                )
+            )
+            for item in targets
+        )
+    crop_modules = ()
+    if include_crop:
+        assert crop_run is not None and refined_run is not None
+        postprocess_by_target = {
+            module.outputs.target_id: module.outputs
+            for module in postprocess_modules
+        }
+        crop_modules = tuple(
+            build_crop_snapshot_fragment(
+                CropSnapshotFragmentInputs(
+                    workflow_id=workflow_id,
+                    family=FAMILY,
+                    target_id=item.target.target_id,
+                    analysis_zarr=item.target.analysis_zarr,
+                    repo=resolved_repo,
+                    run_root=resolved_run_root,
+                    run_id=crop_run,
+                    purpose="zebrafish_keypoints_and_subject_masks",
+                    roi_width=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+                    roi_height=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+                    camera_id=item.target.work_units[0].camera_serial,
+                    source_refined_run=refined_run,
+                    registered_gate_requirement=gate_requirement,
+                    registered_gate_run=gate_run,
+                    upstream_job_keys=(
+                        postprocess_by_target[item.target.target_id].terminal_job_key,
+                    ),
+                    required_artifacts=(
+                        postprocess_by_target[item.target.target_id].artifact_key,
+                    ),
+                )
+            )
+            for item in targets
+        )
     workflow = compose_lsf_workflow(
         workflow_id=workflow_id,
         family=FAMILY,
-        fragments=(cohort.fragment,),
+        fragments=(
+            cohort.fragment,
+            *(module.fragment for module in postprocess_modules),
+            *(module.fragment for module in crop_modules),
+        ),
         metadata={
             "workflow_scope": "registry_discovered_whole_video_raw_detection",
             "target_count": len(targets),
@@ -413,6 +563,15 @@ def build_plan(
                 "sha256": model.sha256,
             },
             "outputs": [output.to_json() for output in cohort.outputs],
+            "postprocess_outputs": [
+                module.outputs.to_json() for module in postprocess_modules
+            ],
+            "crop_outputs": [module.outputs.to_json() for module in crop_modules],
+            "registered_dish_geometry": {
+                "gate_requirement": gate_requirement,
+                "gate_run": gate_run,
+                "selection_policy_id": policy_id,
+            },
         },
     )
     return WholeVideoDetectionCohortPlan(
@@ -424,6 +583,16 @@ def build_plan(
         targets=targets,
         model=model,
         detect_run=detect_run,
+        quality_run=quality_run,
+        refined_run=refined_run,
+        crop_run=crop_run,
+        registered_gate_requirement=gate_requirement,
+        registered_gate_run=gate_run,
+        selection_policy_id=policy_id,
+        postprocess_outputs=tuple(
+            module.outputs for module in postprocess_modules
+        ),
+        crop_outputs=tuple(module.outputs for module in crop_modules),
         max_concurrent=min(int(max_concurrent), len(targets)),
         lsf_workflow=workflow,
     )
@@ -490,6 +659,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--detection-set-id", required=True)
     parser.add_argument("--detection-run-id", required=True)
     parser.add_argument("--max-concurrent", type=int, default=8)
+    parser.add_argument("--include-postprocess", action="store_true")
+    parser.add_argument("--include-crop", action="store_true")
+    parser.add_argument(
+        "--registered-gate-requirement",
+        choices=tuple(sorted(REGISTERED_GATE_REQUIREMENTS)),
+        default="off",
+    )
+    parser.add_argument("--registered-gate-run")
+    parser.add_argument(
+        "--selection-policy-id",
+        choices=("manual_review_only_v1", "corroborated_acquisition_v1"),
+        default="manual_review_only_v1",
+    )
     parser.add_argument(
         "--submit-host",
         default=os.environ.get("PALETTE_LSF_SUBMIT_HOST", "login1-citrus-poller"),
@@ -520,6 +702,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         zarr_use=args.zarr_use,
         limit=args.limit,
         max_concurrent=args.max_concurrent,
+        include_postprocess=args.include_postprocess,
+        include_crop=args.include_crop,
+        registered_gate_requirement=args.registered_gate_requirement,
+        registered_gate_run=args.registered_gate_run,
+        selection_policy_id=args.selection_policy_id,
     )
     result = (
         apply_plan(plan, submit_host=args.submit_host)
@@ -537,6 +724,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "max_concurrent": plan.max_concurrent,
         "detect_run": plan.detect_run,
+        "quality_run": plan.quality_run,
+        "refined_run": plan.refined_run,
+        "crop_run": plan.crop_run,
+        "registered_dish_geometry": {
+            "gate_requirement": plan.registered_gate_requirement,
+            "gate_run": plan.registered_gate_run,
+            "selection_policy_id": plan.selection_policy_id,
+        },
         "model": {
             "set_id": plan.model.set_id,
             "run_id": plan.model.run_id,

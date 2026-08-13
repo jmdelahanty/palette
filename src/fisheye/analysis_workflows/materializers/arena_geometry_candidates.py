@@ -29,9 +29,13 @@ from fisheye.shared.pixel_frame_authority import (
 )
 from fisheye.shared.recording_geometry import (
     BoundRegisteredDishMask,
+    GeometryLoadPolicy,
+    MaskGeometryStatus,
     RecordingGeometryError,
     RegisteredDishMask,
     bind_registered_dish_mask_to_source_camera_frame,
+    load_registered_dish_masks_from_citrus_h5,
+    load_registered_dish_masks_from_recording_folder,
 )
 from fisheye.shared.recording_geometry_recovery import (
     RECOVERY_AUTHORITY,
@@ -532,6 +536,7 @@ def build_reviewed_palette_geometry_candidate_record(
         )
     normalized_windows: dict[str, Any] = {}
     window_values: list[tuple[float, float, float]] = []
+    fit_method = str(report.get("fit_method") or "")
     for name in ("early", "middle", "late"):
         window = _required_mapping(windows[name], label=f"fit_report.windows.{name}")
         fit = _required_mapping(
@@ -541,6 +546,96 @@ def build_reviewed_palette_geometry_candidate_record(
             fit.get("geometry"), label=f"fit_report.windows.{name}.fit.geometry"
         )
         window_values.append(values)
+        raw_candidates = fit.get("frozen_candidates")
+        if raw_candidates is None:
+            raw_candidates = []
+        if not isinstance(raw_candidates, list) or not all(
+            isinstance(item, Mapping) for item in raw_candidates
+        ):
+            raise RecordingGeometryError(
+                f"Palette {name} frozen candidates must be a list of records."
+            )
+        if fit_method.endswith("multicandidate_radial_edge_circle_v2") and not raw_candidates:
+            raise RecordingGeometryError(
+                f"Palette {name} v2 fit did not preserve its frozen candidates."
+            )
+        normalized_candidates: list[dict[str, Any]] = []
+        candidate_ids: set[str] = set()
+        for index, raw_candidate in enumerate(raw_candidates):
+            candidate_id = _required_text(
+                raw_candidate.get("candidate_id"),
+                label=f"fit_report.windows.{name}.candidate[{index}].candidate_id",
+            )
+            if candidate_id in candidate_ids:
+                raise RecordingGeometryError(
+                    f"Palette {name} frozen candidate IDs are not unique."
+                )
+            candidate_ids.add(candidate_id)
+            candidate_geometry, _candidate_values = _circle_mapping(
+                raw_candidate.get("geometry"),
+                label=f"fit_report.windows.{name}.candidate[{index}].geometry",
+            )
+            if raw_candidate.get("coordinate_space") != "camera_native_pixels":
+                raise RecordingGeometryError(
+                    f"Palette {name} frozen candidate is not in native camera pixels."
+                )
+            normalized_candidates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "geometry": candidate_geometry,
+                    "coordinate_space": "camera_native_pixels",
+                    "observed_feature_classification": _required_text(
+                        raw_candidate.get("observed_feature_classification"),
+                        label=(
+                            f"fit_report.windows.{name}.candidate[{index}]."
+                            "observed_feature_classification"
+                        ),
+                    ),
+                    "angular_support_fraction": _required_finite(
+                        raw_candidate.get("angular_support_fraction"),
+                        label=f"fit_report.windows.{name}.candidate[{index}].support",
+                    ),
+                    "radial_residual_px": _required_finite(
+                        raw_candidate.get("radial_residual_px"),
+                        label=f"fit_report.windows.{name}.candidate[{index}].residual",
+                    ),
+                    "median_radial_gradient": _required_finite(
+                        raw_candidate.get("median_radial_gradient"),
+                        label=f"fit_report.windows.{name}.candidate[{index}].gradient",
+                    ),
+                    "evidence_score": _required_finite(
+                        raw_candidate.get("evidence_score"),
+                        label=f"fit_report.windows.{name}.candidate[{index}].score",
+                    ),
+                }
+            )
+        selected_candidate_id = fit.get("selected_candidate_id")
+        if selected_candidate_id is not None:
+            selected_candidate_id = _required_text(
+                selected_candidate_id,
+                label=f"fit_report.windows.{name}.fit.selected_candidate_id",
+            )
+            if selected_candidate_id not in candidate_ids:
+                raise RecordingGeometryError(
+                    f"Palette {name} selected candidate is not in frozen evidence."
+                )
+        raw_decoded_frames = window.get("decoded_frames") or []
+        if not isinstance(raw_decoded_frames, list) or not all(
+            isinstance(item, Mapping) for item in raw_decoded_frames
+        ):
+            raise RecordingGeometryError(
+                f"Palette {name} decoded frame evidence is invalid."
+            )
+        normalized_decoded_frames = [
+            {
+                "frame_index": int(item.get("frame_index")),
+                "decoded_frame_sha256": _required_sha256(
+                    item.get("decoded_frame_sha256"),
+                    label=f"fit_report.windows.{name}.decoded_frame_sha256",
+                ),
+            }
+            for item in raw_decoded_frames
+        ]
         normalized_windows[name] = {
             "center_frame": int(window.get("center_frame")),
             "frame_indices": [int(value) for value in window.get("frame_indices", [])],
@@ -548,6 +643,7 @@ def build_reviewed_palette_geometry_candidate_record(
                 window.get("decoded_luma_sequence_sha256"),
                 label=f"fit_report.windows.{name}.decoded_luma_sequence_sha256",
             ),
+            "decoded_frames": normalized_decoded_frames,
             "composite_pixel_sha256": _required_sha256(
                 window.get("composite_pixel_sha256"),
                 label=f"fit_report.windows.{name}.composite_pixel_sha256",
@@ -561,6 +657,16 @@ def build_reviewed_palette_geometry_candidate_record(
                 fit.get("median_radial_gradient"),
                 label=f"fit_report.windows.{name}.median_radial_gradient",
             ),
+            "radial_residual_px": _required_finite(
+                fit.get("radial_residual_px", 0.0),
+                label=f"fit_report.windows.{name}.radial_residual_px",
+            ),
+            "selected_candidate_id": selected_candidate_id,
+            "selection_reason": _required_text(
+                fit.get("selection_reason", "legacy_unspecified_selection"),
+                label=f"fit_report.windows.{name}.selection_reason",
+            ),
+            "frozen_candidates": normalized_candidates,
         }
         if not normalized_windows[name]["frame_indices"]:
             raise RecordingGeometryError(
@@ -586,6 +692,54 @@ def build_reviewed_palette_geometry_candidate_record(
     ys = [value[1] for value in window_values]
     radii = [value[2] for value in window_values]
     report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    reveal_path = report_path.with_name("acquisition_reveal.json")
+    acquisition_boundary_edge_support: dict[str, Any] = {
+        "status": "not_measured",
+        "reason": "acquisition_reveal_not_present_at_candidate_publication",
+    }
+    acquisition_reveal_binding: dict[str, Any] | None = None
+    if reveal_path.is_file():
+        reveal_bytes = reveal_path.read_bytes()
+        try:
+            reveal = json.loads(reveal_bytes)
+        except json.JSONDecodeError as exc:
+            raise RecordingGeometryError(
+                "Acquisition reveal is not valid JSON."
+            ) from exc
+        reveal_fit = _required_mapping(
+            reveal.get("fit_report"), label="acquisition_reveal.fit_report"
+        )
+        if (
+            reveal.get("schema_id")
+            != "palette.diagnostics.recording_dish_rim_probe.acquisition_reveal"
+            or reveal.get("schema_version") != 1
+            or _required_sha256(
+                reveal_fit.get("sha256"),
+                label="acquisition_reveal.fit_report.sha256",
+            )
+            != report_sha256
+        ):
+            raise RecordingGeometryError(
+                "Acquisition reveal does not bind the exact frozen fit report."
+            )
+        acquisition_boundary_edge_support = _canonical_copy(
+            _required_mapping(
+                reveal.get("acquisition_boundary_edge_support"),
+                label="acquisition_reveal.acquisition_boundary_edge_support",
+            )
+        )
+        if (
+            acquisition_boundary_edge_support.get("status") != "measured"
+            or acquisition_boundary_edge_support.get("fit_frozen_before_measurement")
+            is not True
+        ):
+            raise RecordingGeometryError(
+                "Acquisition reveal lacks post-freeze boundary support evidence."
+            )
+        acquisition_reveal_binding = {
+            "path": str(reveal_path),
+            "sha256": hashlib.sha256(reveal_bytes).hexdigest(),
+        }
     record = {
         "schema_id": CANDIDATE_RECORD_SCHEMA_ID,
         "schema_version": CANDIDATE_RECORD_SCHEMA_VERSION,
@@ -615,7 +769,7 @@ def build_reviewed_palette_geometry_candidate_record(
             "fit_report_sha256": report_sha256,
             "fit_report_schema_id": report.get("schema_id"),
             "fit_report_schema_version": report.get("schema_version"),
-            "fit_method": report.get("fit_method"),
+            "fit_method": fit_method,
             "blind_to_acquisition_geometry": (
                 _required_mapping(
                     report.get("parameters"), label="fit_report.parameters"
@@ -636,11 +790,21 @@ def build_reviewed_palette_geometry_candidate_record(
             "review_montage_path": str(review_montage),
             "review_montage_sha256": _file_sha256(review_montage),
             "windows": normalized_windows,
+            "fit_evidence_contract": _canonical_copy(
+                report.get("fit_evidence_contract") or {
+                    "all_window_candidates_frozen": False,
+                    "candidate_geometry_revealed_to_acquisition_fit": False,
+                    "candidate_feature_classification": "legacy_unspecified",
+                    "selection_scope": "legacy_review_only",
+                }
+            ),
             "temporal_stability_px": {
                 "center_x_range": max(xs) - min(xs),
                 "center_y_range": max(ys) - min(ys),
                 "radius_range": max(radii) - min(radii),
             },
+            "acquisition_boundary_edge_support": acquisition_boundary_edge_support,
+            "acquisition_reveal_binding": acquisition_reveal_binding,
         },
         "review": review_payload,
         "candidate_policy": {
@@ -761,6 +925,117 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
     )
     if set(windows) != {"early", "middle", "late"}:
         raise RecordingGeometryError("Palette fit source windows are incomplete.")
+    evidence_contract = _required_mapping(
+        source.get("fit_evidence_contract"),
+        label="palette_fit_source.fit_evidence_contract",
+    )
+    all_candidates_frozen = evidence_contract.get("all_window_candidates_frozen")
+    if type(all_candidates_frozen) is not bool:
+        raise RecordingGeometryError(
+            "Palette fit evidence must declare whether every candidate was frozen."
+        )
+    if evidence_contract.get("candidate_geometry_revealed_to_acquisition_fit") is not False:
+        raise RecordingGeometryError(
+            "Palette fit evidence was not frozen blind to acquisition geometry."
+        )
+    for name, raw_window in windows.items():
+        window = _required_mapping(raw_window, label=f"palette_fit_source.windows.{name}")
+        _circle_mapping(window.get("geometry"), label=f"{name}.geometry")
+        for metric in (
+            "angular_support_fraction",
+            "median_radial_gradient",
+            "radial_residual_px",
+        ):
+            value = _required_finite(window.get(metric), label=f"{name}.{metric}")
+            if metric == "radial_residual_px" and value < 0:
+                raise RecordingGeometryError(
+                    f"Palette {name} radial residual cannot be negative."
+                )
+        raw_candidates = window.get("frozen_candidates")
+        if not isinstance(raw_candidates, list):
+            raise RecordingGeometryError(
+                f"Palette {name} frozen candidates must be a list."
+            )
+        if all_candidates_frozen and not raw_candidates:
+            raise RecordingGeometryError(
+                f"Palette {name} claims frozen evidence without candidates."
+            )
+        ids: list[str] = []
+        for index, raw_candidate in enumerate(raw_candidates):
+            candidate = _required_mapping(
+                raw_candidate,
+                label=f"palette_fit_source.windows.{name}.candidate[{index}]",
+            )
+            ids.append(
+                _required_text(
+                    candidate.get("candidate_id"),
+                    label=f"{name}.candidate[{index}].candidate_id",
+                )
+            )
+            _circle_mapping(
+                candidate.get("geometry"),
+                label=f"{name}.candidate[{index}].geometry",
+            )
+            if (
+                candidate.get("coordinate_space") != "camera_native_pixels"
+                or candidate.get("observed_feature_classification")
+                != "unclassified_concentric_rim_edge"
+            ):
+                raise RecordingGeometryError(
+                    f"Palette {name} frozen candidate semantics are invalid."
+                )
+            for metric in (
+                "angular_support_fraction",
+                "radial_residual_px",
+                "median_radial_gradient",
+                "evidence_score",
+            ):
+                value = _required_finite(
+                    candidate.get(metric),
+                    label=f"{name}.candidate[{index}].{metric}",
+                )
+                if metric == "radial_residual_px" and value < 0:
+                    raise RecordingGeometryError(
+                        f"Palette {name} candidate residual cannot be negative."
+                    )
+        if len(ids) != len(set(ids)):
+            raise RecordingGeometryError(
+                f"Palette {name} frozen candidate IDs are not unique."
+            )
+        selected_id = window.get("selected_candidate_id")
+        if selected_id is not None and selected_id not in ids:
+            raise RecordingGeometryError(
+                f"Palette {name} selected candidate is not frozen evidence."
+            )
+        _required_text(
+            window.get("selection_reason"),
+            label=f"palette_fit_source.windows.{name}.selection_reason",
+        )
+        decoded_frames = window.get("decoded_frames")
+        if not isinstance(decoded_frames, list):
+            raise RecordingGeometryError(
+                f"Palette {name} decoded frame evidence must be a list."
+            )
+        expected_frames = [int(value) for value in window.get("frame_indices", [])]
+        observed_frames = [
+            int(
+                _required_mapping(item, label=f"{name}.decoded_frame").get(
+                    "frame_index"
+                )
+            )
+            for item in decoded_frames
+        ]
+        if decoded_frames and observed_frames != expected_frames:
+            raise RecordingGeometryError(
+                f"Palette {name} decoded frame hashes do not cover source frames exactly."
+            )
+        for item in decoded_frames:
+            _required_sha256(
+                _required_mapping(item, label=f"{name}.decoded_frame").get(
+                    "decoded_frame_sha256"
+                ),
+                label=f"{name}.decoded_frame_sha256",
+            )
     stability = _required_mapping(
         source.get("temporal_stability_px"),
         label="palette_fit_source.temporal_stability_px",
@@ -773,6 +1048,80 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
             raise RecordingGeometryError(
                 "Palette temporal stability ranges cannot be negative."
             )
+    boundary_support = _required_mapping(
+        source.get("acquisition_boundary_edge_support"),
+        label="palette_fit_source.acquisition_boundary_edge_support",
+    )
+    support_status = boundary_support.get("status")
+    reveal_binding = source.get("acquisition_reveal_binding")
+    if support_status == "measured":
+        if (
+            boundary_support.get("method")
+            != "fixed_circle_radial_gradient_support_v1"
+            or boundary_support.get("fit_frozen_before_measurement") is not True
+            or boundary_support.get("coordinate_space") != "camera_native_pixels"
+        ):
+            raise RecordingGeometryError(
+                "Acquisition boundary support evidence is not frozen native-camera evidence."
+            )
+        _circle_mapping(
+            boundary_support.get("geometry"),
+            label="acquisition_boundary_edge_support.geometry",
+        )
+        _required_sha256(
+            boundary_support.get("source_observation_sha256"),
+            label="acquisition_boundary_edge_support.source_observation_sha256",
+        )
+        support_windows = _required_mapping(
+            boundary_support.get("windows"),
+            label="acquisition_boundary_edge_support.windows",
+        )
+        if set(support_windows) != {"early", "middle", "late"}:
+            raise RecordingGeometryError(
+                "Acquisition boundary support windows are incomplete."
+            )
+        for window_name, raw_support in support_windows.items():
+            window_support = _required_mapping(
+                raw_support,
+                label=f"acquisition_boundary_edge_support.windows.{window_name}",
+            )
+            if (
+                window_support.get("status") != "measured"
+                or window_support.get("geometry_frozen") is not True
+                or window_support.get("method")
+                != "fixed_circle_radial_gradient_support_v1"
+            ):
+                raise RecordingGeometryError(
+                    f"Acquisition boundary support for {window_name} is invalid."
+                )
+            for metric in (
+                "angular_edge_support_fraction",
+                "median_radial_gradient",
+                "median_absolute_radial_offset_px",
+                "signed_median_radial_offset_px",
+            ):
+                _required_finite(
+                    window_support.get(metric),
+                    label=f"acquisition boundary support {window_name}.{metric}",
+                )
+        reveal = _required_mapping(
+            reveal_binding,
+            label="palette_fit_source.acquisition_reveal_binding",
+        )
+        _required_text(reveal.get("path"), label="acquisition_reveal_binding.path")
+        _required_sha256(
+            reveal.get("sha256"), label="acquisition_reveal_binding.sha256"
+        )
+    elif support_status == "not_measured":
+        _required_text(boundary_support.get("reason"), label="boundary_support.reason")
+        if reveal_binding is not None:
+            raise RecordingGeometryError(
+                "Unmeasured acquisition support cannot carry a reveal binding."
+            )
+    else:
+        raise RecordingGeometryError(
+            "Acquisition boundary support status must be measured or not_measured."
+        )
     review = _required_mapping(record.get("review"), label="review")
     if (
         review.get("status") != "reviewer_accepted_for_offline_detection_gate_audit"
@@ -841,6 +1190,15 @@ def _bound_recovered_mask(
             "Recovery receipt and analysis Zarr must be siblings in one recording root."
         )
     mask: RegisteredDishMask = registered_dish_mask_from_verified_recovery(verified)
+    return _bind_mask_to_zarr(source_zarr, mask)
+
+
+def _bind_mask_to_zarr(
+    source_zarr: Path,
+    mask: RegisteredDishMask,
+) -> BoundRegisteredDishMask:
+    """Bind one already verified producer mask to Palette's persisted pixel frame."""
+
     root = open_zarr_root(source_zarr, mode="r")
     _ownership, acquisition = load_persisted_acquisition_camera_authority(
         root,
@@ -860,6 +1218,137 @@ def _bound_recovered_mask(
         acquisition_frame=acquisition,
     )
     return bind_registered_dish_mask_to_source_camera_frame(mask, source_frame)
+
+
+def _producer_native_mask(
+    *,
+    source_path: Path,
+    source_kind: str,
+    camera_serial: str,
+    arena_id: str,
+) -> RegisteredDishMask:
+    if source_kind == "orange_recording_folder":
+        collection = load_registered_dish_masks_from_recording_folder(
+            source_path,
+            policy=GeometryLoadPolicy.REQUIRED,
+        )
+    elif source_kind == "citrus_h5":
+        collection = load_registered_dish_masks_from_citrus_h5(
+            source_path,
+            policy=GeometryLoadPolicy.REQUIRED,
+        )
+    else:
+        raise RecordingGeometryError(
+            f"Unsupported producer-native geometry source kind: {source_kind!r}."
+        )
+    if collection.mask_geometry_status is not MaskGeometryStatus.VALID:
+        details = "; ".join(issue.message for issue in collection.issues)
+        raise RecordingGeometryError(
+            "Producer-native recording geometry is not valid"
+            + (f": {details}" if details else ".")
+        )
+    matches = [
+        mask
+        for key, mask in collection.masks.items()
+        if key.camera_serial == camera_serial and key.arena_id == arena_id
+    ]
+    if len(matches) != 1:
+        raise RecordingGeometryError(
+            "Producer-native recording geometry must resolve exactly one requested "
+            f"camera/arena pair; camera={camera_serial!r}, arena={arena_id!r}, "
+            f"matches={len(matches)}."
+        )
+    mask = matches[0]
+    if mask.source_kind != source_kind:
+        raise RecordingGeometryError(
+            "Producer-native mask source kind differs from the selected adapter."
+        )
+    return mask
+
+
+def _record_from_producer_source_and_zarr(
+    source_zarr: Path,
+    *,
+    source_path: Path,
+    source_kind: str,
+    camera_serial: str,
+    arena_id: str,
+) -> tuple[dict[str, Any], str]:
+    mask = _producer_native_mask(
+        source_path=source_path,
+        source_kind=source_kind,
+        camera_serial=camera_serial,
+        arena_id=arena_id,
+    )
+    bound = _bind_mask_to_zarr(source_zarr, mask)
+    record = build_acquisition_geometry_candidate_record(
+        bound,
+        recovery_binding=None,
+    )
+    return record, _payload_sha256(record)
+
+
+def _recording_folder_input_artifacts(source_path: Path) -> tuple[dict[str, Any], ...]:
+    snapshot = source_path / "recording_snapshot.json"
+    if not snapshot.is_file():
+        raise RecordingGeometryError(
+            f"Producer-native recording snapshot is missing: {snapshot}"
+        )
+    try:
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"non-finite JSON constant {value!r}")
+
+        payload = json.loads(
+            snapshot.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RecordingGeometryError(
+            f"Producer-native recording snapshot is invalid: {exc}"
+        ) from exc
+    pointer = _required_mapping(
+        payload.get("recording_geometry_contract") if isinstance(payload, Mapping) else None,
+        label="recording_snapshot.recording_geometry_contract",
+    )
+    relative = Path(
+        _required_text(pointer.get("relative_path"), label="geometry relative_path")
+    )
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise RecordingGeometryError(
+            "Recording geometry contract pointer must stay below the recording root."
+        )
+    contract = (source_path / relative).resolve()
+    try:
+        contract.relative_to(source_path)
+    except ValueError as exc:
+        raise RecordingGeometryError(
+            "Recording geometry contract pointer escapes the recording root."
+        ) from exc
+    if not contract.is_file():
+        raise RecordingGeometryError(
+            f"Producer-native recording geometry contract is missing: {contract}"
+        )
+    expected = _required_sha256(
+        pointer.get("sha256"),
+        label="recording geometry contract pointer sha256",
+    ).removeprefix("sha256:")
+    observed = _file_sha256(contract)
+    if observed != expected:
+        raise RecordingGeometryError(
+            "Recording geometry contract changed after adapter validation."
+        )
+    return (
+        {
+            "role": "recording_snapshot_geometry_pointer",
+            "path": str(snapshot),
+            "sha256": _file_sha256(snapshot),
+        },
+        {
+            "role": "orange_recording_geometry_contract",
+            "path": str(contract),
+            "sha256": observed,
+        },
+    )
 
 
 def _record_from_receipt_and_zarr(
@@ -934,6 +1423,107 @@ def plan_recovered_acquisition_geometry_candidate(
     )
 
 
+def plan_producer_native_acquisition_geometry_candidate(
+    *,
+    source_zarr: str | Path,
+    camera_serial: str,
+    arena_id: str,
+    recording_folder: str | Path | None = None,
+    citrus_h5: str | Path | None = None,
+) -> ArenaGeometryCandidatePlan:
+    """Plan one ordinary producer-linked candidate without a recovery receipt."""
+
+    if (recording_folder is None) == (citrus_h5 is None):
+        raise RecordingGeometryError(
+            "Choose exactly one producer geometry source: recording_folder or citrus_h5."
+        )
+    zarr_path = Path(source_zarr).expanduser().resolve()
+    recording_root = zarr_path.parent.parent
+    serial = _required_text(camera_serial, label="camera_serial")
+    arena = _required_text(arena_id, label="arena_id")
+    if recording_folder is not None:
+        source = Path(recording_folder).expanduser().resolve()
+        if source != recording_root:
+            raise RecordingGeometryError(
+                "Producer recording folder and analysis Zarr must belong to the same "
+                "recording root."
+            )
+        source_kind = "orange_recording_folder"
+        input_artifacts = _recording_folder_input_artifacts(source)
+    else:
+        assert citrus_h5 is not None
+        source = Path(citrus_h5).expanduser().resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"Producer Citrus H5 is missing: {source}")
+        try:
+            source.relative_to(recording_root)
+        except ValueError as exc:
+            raise RecordingGeometryError(
+                "Producer Citrus H5 and analysis Zarr must belong to the same "
+                "recording root."
+            ) from exc
+        source_kind = "citrus_h5"
+        input_artifacts = (
+            {
+                "role": "citrus_h5_recording_geometry_contract",
+                "path": str(source),
+                "sha256": _file_sha256(source),
+            },
+        )
+    record, digest = _record_from_producer_source_and_zarr(
+        zarr_path,
+        source_path=source,
+        source_kind=source_kind,
+        camera_serial=serial,
+        arena_id=arena,
+    )
+    source_record = _required_mapping(
+        record.get("acquisition_source"), label="acquisition_source"
+    )
+    if source_record.get("recovery_binding") is not None:
+        raise RecordingGeometryError(
+            "Producer-native planning cannot carry a recovery receipt binding."
+        )
+    candidate_id = f"arena-geometry-acquisition-{digest[:24]}"
+    provenance = build_writer_run_provenance(
+        command="publish_producer_native_acquisition_geometry_candidate",
+        params={
+            "algorithm_version": PUBLISH_ALGORITHM_VERSION,
+            "candidate_id": candidate_id,
+            "candidate_record_sha256": digest,
+            "candidate_kind": CANDIDATE_KIND,
+            "source_kind": source_kind,
+            "camera_serial": serial,
+            "arena_id": arena,
+            "operational_selection": "not_performed",
+        },
+        input_run_ids={},
+        input_artifacts=input_artifacts,
+        include_system_context=False,
+    )
+    provenance_validation = validate_run_provenance(provenance)
+    if not provenance_validation.valid:
+        raise RuntimeError(
+            "Producer-native candidate publication provenance is invalid: "
+            f"{provenance_validation.errors}"
+        )
+    return ArenaGeometryCandidatePlan(
+        source_zarr=zarr_path,
+        receipt_path=source,
+        receipt_sha256=_required_sha256(
+            source_record.get("source_contract_sha256"),
+            label="acquisition_source.source_contract_sha256",
+        ),
+        candidate_id=candidate_id,
+        candidate_record_sha256=digest,
+        candidate_record=record,
+        run_name=candidate_id,
+        target_run_path=zarr_path / "analysis" / CANDIDATE_RUNS_PARENT / candidate_id,
+        run_provenance=provenance,
+        candidate_kind=ACQUISITION_CANDIDATE_KIND,
+    )
+
+
 def plan_reviewed_palette_geometry_candidate(
     *,
     source_zarr: str | Path,
@@ -963,6 +1553,27 @@ def plan_reviewed_palette_geometry_candidate(
     )
     digest = _payload_sha256(record)
     candidate_id = f"arena-geometry-palette-{digest[:24]}"
+    input_artifacts: list[dict[str, Any]] = [
+        {
+            "role": "palette_blind_dish_rim_fit_report",
+            "path": str(report_path),
+            "sha256": _file_sha256(report_path),
+        },
+        {
+            "role": "palette_dish_rim_review_montage",
+            "path": str(review_montage),
+            "sha256": _file_sha256(review_montage),
+        },
+    ]
+    reveal_binding = record["palette_fit_source"].get("acquisition_reveal_binding")
+    if isinstance(reveal_binding, Mapping):
+        input_artifacts.append(
+            {
+                "role": "post_freeze_acquisition_boundary_edge_support",
+                "path": reveal_binding["path"],
+                "sha256": reveal_binding["sha256"],
+            }
+        )
     provenance = build_writer_run_provenance(
         command="publish_reviewed_palette_geometry_candidate",
         params={
@@ -975,18 +1586,7 @@ def plan_reviewed_palette_geometry_candidate(
             "operational_selection": "not_performed",
         },
         input_run_ids={},
-        input_artifacts=(
-            {
-                "role": "palette_blind_dish_rim_fit_report",
-                "path": str(report_path),
-                "sha256": _file_sha256(report_path),
-            },
-            {
-                "role": "palette_dish_rim_review_montage",
-                "path": str(review_montage),
-                "sha256": _file_sha256(review_montage),
-            },
-        ),
+        input_artifacts=tuple(input_artifacts),
         include_system_context=False,
     )
     provenance_validation = validate_run_provenance(provenance)
@@ -1115,6 +1715,54 @@ def _revalidate_candidate_sources(
     plan: ArenaGeometryCandidatePlan,
 ) -> dict[str, Any]:
     if plan.candidate_kind == ACQUISITION_CANDIDATE_KIND:
+        acquisition_source = _required_mapping(
+            plan.candidate_record.get("acquisition_source"),
+            label="acquisition_source",
+        )
+        if acquisition_source.get("recovery_binding") is None:
+            arena = _required_mapping(
+                plan.candidate_record.get("arena_binding"),
+                label="arena_binding",
+            )
+            source_kind = _required_text(
+                acquisition_source.get("source_kind"),
+                label="acquisition_source.source_kind",
+            )
+            current_record, current_digest = _record_from_producer_source_and_zarr(
+                plan.source_zarr,
+                source_path=plan.receipt_path,
+                source_kind=source_kind,
+                camera_serial=_required_text(
+                    arena.get("camera_serial"), label="arena_binding.camera_serial"
+                ),
+                arena_id=_required_text(
+                    arena.get("arena_id"), label="arena_binding.arena_id"
+                ),
+            )
+            current_source = _required_mapping(
+                current_record.get("acquisition_source"),
+                label="current acquisition_source",
+            )
+            current_source_sha = _required_sha256(
+                current_source.get("source_contract_sha256"),
+                label="current source_contract_sha256",
+            )
+            if (
+                current_source_sha != plan.receipt_sha256
+                or current_digest != plan.candidate_record_sha256
+                or current_record != plan.candidate_record
+            ):
+                raise RuntimeError(
+                    "Producer-native acquisition geometry source changed during "
+                    "publication."
+                )
+            return {
+                "status": "current",
+                "source_kind": source_kind,
+                "source_contract_sha256": current_source_sha,
+                "candidate_record_sha256": current_digest,
+                "recovery_receipt_required": False,
+            }
         verified, current_record, current_digest = _record_from_receipt_and_zarr(
             plan.source_zarr,
             plan.receipt_path,
@@ -1307,6 +1955,7 @@ __all__ = [
     "PALETTE_CANDIDATE_KIND",
     "build_acquisition_geometry_candidate_record",
     "build_reviewed_palette_geometry_candidate_record",
+    "plan_producer_native_acquisition_geometry_candidate",
     "plan_recovered_acquisition_geometry_candidate",
     "plan_reviewed_palette_geometry_candidate",
     "publish_arena_geometry_candidate",

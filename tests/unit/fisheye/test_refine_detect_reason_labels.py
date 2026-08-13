@@ -4,6 +4,7 @@ import zarr
 
 from fisheye.refinement.refine_detect import (
     _apply_dish_mask_quality_gate,
+    _apply_registered_detection_gate,
     _build_sparse_refined_inputs_from_filtered,
     _filtered_reason_from_quality_label,
     _get_sampled_frame_count,
@@ -221,6 +222,113 @@ def test_get_refinement_parameters_defaults_max_gap_to_0() -> None:
 def test_reject_deprecated_interpolation_overrides() -> None:
     with pytest.raises(ValueError, match="Interpolation overrides are deprecated and unsupported"):
         _reject_deprecated_interpolation_overrides(max_gap=5, interpolation_method=None)
+
+
+def test_registered_gate_modes_are_explicit_and_fail_closed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keys = np.asarray([10, 20, 30], dtype=np.uint64)
+    labels = np.asarray([0, 2, 0], dtype=np.int8)
+
+    off_labels, off = _apply_registered_detection_gate(
+        zarr_path=tmp_path / "recording.zarr",
+        source_detect_path="detect_runs/detect_native",
+        raw_instance_keys=keys,
+        detection_quality_labels=labels,
+        requirement="off",
+        gate_run=None,
+    )
+    np.testing.assert_array_equal(off_labels, labels)
+    assert off["status"] == "off"
+    assert off["applied"] is False
+
+    available_labels, unavailable = _apply_registered_detection_gate(
+        zarr_path=tmp_path / "recording.zarr",
+        source_detect_path="detect_runs/detect_native",
+        raw_instance_keys=keys,
+        detection_quality_labels=labels,
+        requirement="if_available",
+        gate_run=None,
+    )
+    np.testing.assert_array_equal(available_labels, labels)
+    assert unavailable["status"] == "unavailable"
+
+    with pytest.raises(ValueError, match="No exact registered detection gate"):
+        _apply_registered_detection_gate(
+            zarr_path=tmp_path / "recording.zarr",
+            source_detect_path="detect_runs/detect_native",
+            raw_instance_keys=keys,
+            detection_quality_labels=labels,
+            requirement="required",
+            gate_run=None,
+        )
+
+    def valid_gate(*_args, **_kwargs):
+        return {
+            "inside": np.asarray([True, False, True]),
+            "gate_run": "gate_exact",
+            "gate_group_path": "analysis/detection_gate_runs/gate_exact",
+            "selection_record_sha256": "a" * 64,
+            "selected_candidate_record_sha256": "b" * 64,
+            "ordered_instance_key_coverage_exact": True,
+        }
+
+    monkeypatch.setattr(
+        "fisheye.analysis_workflows.materializers.registered_detection_gate."
+        "validate_registered_detection_gate_consumption",
+        valid_gate,
+    )
+    gated_labels, applied = _apply_registered_detection_gate(
+        zarr_path=tmp_path / "recording.zarr",
+        source_detect_path="detect_runs/detect_native",
+        raw_instance_keys=keys,
+        detection_quality_labels=labels,
+        requirement="required",
+        gate_run="gate_exact",
+    )
+    assert gated_labels.tolist() == [0, 6, 0]
+    assert applied["status"] == "applied"
+    assert applied["rejected_count"] == 1
+    assert _filtered_reason_from_quality_label(6) == (
+        "outside_registered_detection_gate"
+    )
+
+
+def test_if_available_records_invalid_gate_but_required_raises(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalid_gate(*_args, **_kwargs):
+        raise ValueError("ordered instance_key coverage differs")
+
+    monkeypatch.setattr(
+        "fisheye.analysis_workflows.materializers.registered_detection_gate."
+        "validate_registered_detection_gate_consumption",
+        invalid_gate,
+    )
+    keys = np.asarray([10, 20], dtype=np.uint64)
+    labels = np.zeros(2, dtype=np.int8)
+    result_labels, result = _apply_registered_detection_gate(
+        zarr_path=tmp_path / "recording.zarr",
+        source_detect_path="detect_runs/detect_native",
+        raw_instance_keys=keys,
+        detection_quality_labels=labels,
+        requirement="if_available",
+        gate_run="gate_stale",
+    )
+    np.testing.assert_array_equal(result_labels, labels)
+    assert result["status"] == "rejected_invalid"
+
+    with pytest.raises(ValueError, match="Required registered detection gate is invalid"):
+        _apply_registered_detection_gate(
+            zarr_path=tmp_path / "recording.zarr",
+            source_detect_path="detect_runs/detect_native",
+            raw_instance_keys=keys,
+            detection_quality_labels=labels,
+            requirement="required",
+            gate_run="gate_stale",
+        )
 
 
 def test_resolve_detection_quality_labels_requires_quality_by_default() -> None:

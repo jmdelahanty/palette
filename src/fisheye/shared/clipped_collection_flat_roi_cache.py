@@ -27,6 +27,9 @@ from fisheye.shared.roi_pixel_contract import orange_mono_pynvvc_luma_pixel_cont
 from fisheye.utils.resolve_clipped_refined_detect_collection import build_collection_frame_map
 
 
+CANONICAL_REFINED_SLICE_MODE = "canonical_recording_refined_slice_v1"
+
+
 CLIPPED_COLLECTION_ROW_INDEX_SCHEMA = "palette_clipped_collection_flat_roi_cache_rows_v2"
 CLIPPED_COLLECTION_CACHE_BUILDER_SCHEMA = "palette_clipped_collection_flat_roi_cache_builder_v2"
 
@@ -334,8 +337,27 @@ def _build_row_index(
             raise ValueError(f"Selected run is missing refined_group_path: {selected}")
         refined_group = root[refined_path]
         instances = refined_group["instances"] if "instances" in refined_group else refined_group
-        frame_indices = np.asarray(instances["frame_indices"][:], dtype=np.int64).reshape(-1)
-        bbox_norm = np.asarray(instances["bbox_norm_coords"][:], dtype=np.float64).reshape(-1, 4)
+        all_frame_indices = np.asarray(
+            instances["frame_indices"][:], dtype=np.int64
+        ).reshape(-1)
+        all_bbox_norm = np.asarray(
+            instances["bbox_norm_coords"][:], dtype=np.float64
+        ).reshape(-1, 4)
+        source_mode = str(selected.get("source_mode") or "")
+        if source_mode == CANONICAL_REFINED_SLICE_MODE:
+            start = int(selected.get("canonical_parent_frame_start"))
+            stop = int(selected.get("canonical_parent_frame_stop"))
+            if start < 0 or stop <= start:
+                raise ValueError(f"Invalid canonical refined slice: {selected}")
+            source_row_indices = np.flatnonzero(
+                (all_frame_indices >= start) & (all_frame_indices < stop)
+            ).astype(np.int64, copy=False)
+        else:
+            source_row_indices = np.arange(
+                all_frame_indices.shape[0], dtype=np.int64
+            )
+        frame_indices = all_frame_indices[source_row_indices]
+        bbox_norm = all_bbox_norm[source_row_indices]
         row_count = int(frame_indices.shape[0])
         if bbox_norm.shape[0] != row_count:
             raise ValueError(f"{refined_path}: bbox_norm_coords and frame_indices length mismatch")
@@ -343,12 +365,15 @@ def _build_row_index(
             row_count = min(row_count, remaining)
             frame_indices = frame_indices[:row_count]
             bbox_norm = bbox_norm[:row_count]
+            source_row_indices = source_row_indices[:row_count]
             remaining -= row_count
         if row_count == 0:
             continue
 
         if "bbox_img_xyxy" in instances:
-            bbox_img_xyxy = np.asarray(instances["bbox_img_xyxy"][:], dtype=np.float64).reshape(-1, 4)[:row_count]
+            bbox_img_xyxy = np.asarray(
+                instances["bbox_img_xyxy"][:], dtype=np.float64
+            ).reshape(-1, 4)[source_row_indices]
         else:
             if width is None or height is None:
                 raise ValueError(
@@ -361,36 +386,47 @@ def _build_row_index(
             (str(selected.get("camera_serial") or ""), str(selected.get("clip_id") or "")),
             {},
         )
-        clip_mapping = _lookup_frame_map_rows(frame_indices, pair_lookup)
-        refined_row_ids = _read_optional_array(instances, "refined_row_ids", np.int64, row_count, default=-1)
+        if source_mode == CANONICAL_REFINED_SLICE_MODE:
+            clip_mapping = _lookup_canonical_frame_map_rows(frame_indices, pair_lookup)
+            cache_frame_indices = clip_mapping["clip_local_frame_index"]
+        else:
+            clip_mapping = _lookup_frame_map_rows(frame_indices, pair_lookup)
+            cache_frame_indices = frame_indices
+        refined_row_ids = _read_optional_array_rows(
+            instances, "refined_row_ids", np.int64, source_row_indices, default=-1
+        )
         source_detect_rows = _read_optional_array(
             instances,
             "source_detect_row_index",
             np.int64,
             row_count,
             default=-1,
+            row_indices=source_row_indices,
         )
-        source_kind_codes = _read_optional_array(instances, "source_kind_codes", np.int8, row_count, default=0)
-        manual_edit_flags = _read_optional_array(instances, "manual_edit_flags", bool, row_count, default=False)
+        source_kind_codes = _read_optional_array_rows(
+            instances, "source_kind_codes", np.int8, source_row_indices, default=0
+        )
+        manual_edit_flags = _read_optional_array_rows(
+            instances, "manual_edit_flags", bool, source_row_indices, default=False
+        )
         confidence_scores = _read_optional_array(
             instances,
             "confidence_scores",
             np.float32,
             row_count,
             default=np.nan,
+            row_indices=source_row_indices,
         )
-        class_ids = _read_optional_array(instances, "class_ids", np.int32, row_count, default=-1)
+        class_ids = _read_optional_array_rows(
+            instances, "class_ids", np.int32, source_row_indices, default=-1
+        )
         if "instance_key" not in instances:
             raise ValueError(
                 f"{refined_path}: modern clipped cache sources require instances/instance_key; "
                 "repair the recording-scoped identity before rebuilding the cache"
             )
-        instance_keys = _read_optional_array(
-            instances,
-            "instance_key",
-            np.uint64,
-            row_count,
-            default=0,
+        instance_keys = _read_optional_array_rows(
+            instances, "instance_key", np.uint64, source_row_indices, default=0
         )
         if np.unique(instance_keys).shape[0] != row_count:
             raise ValueError(f"{refined_path}: instances/instance_key is not unique within the run")
@@ -405,14 +441,14 @@ def _build_row_index(
                 "camera_serial": _repeat_str(selected.get("camera_serial"), row_count),
                 "clip_id": _repeat_str(selected.get("clip_id"), row_count),
                 "clip_index": np.full(row_count, int(selected.get("clip_index") or 0), dtype=np.int32),
-                "clip_local_frame_index": frame_indices.astype(np.int64, copy=False),
+                "clip_local_frame_index": cache_frame_indices.astype(np.int64, copy=False),
                 "recording_frame_id": clip_mapping["recording_frame_id"],
                 "parent_frame_index": clip_mapping["parent_frame_index"],
                 "timestamp": clip_mapping["timestamp"],
                 "timestamp_sys": clip_mapping["timestamp_sys"],
                 "refined_group_path": _repeat_str(refined_path, row_count),
                 "refined_detect_run": _repeat_str(selected.get("refined_detect_run"), row_count),
-                "refined_instance_row_index": np.arange(row_count, dtype=np.int64),
+                "refined_instance_row_index": source_row_indices,
                 "refined_row_id": refined_row_ids.astype(np.int64, copy=False),
                 "source_detect_row_index": source_detect_rows.astype(np.int64, copy=False),
                 "source_kind_code": source_kind_codes.astype(np.int8, copy=False),
@@ -473,13 +509,38 @@ def _read_optional_array(
     row_count: int,
     *,
     default: Any,
+    row_indices: np.ndarray | None = None,
 ) -> np.ndarray:
     if name not in group:
         return np.full(row_count, default, dtype=dtype)
     values = np.asarray(group[name][:], dtype=dtype).reshape(-1)
     if values.shape[0] < row_count:
         raise ValueError(f"{group.path}/{name} has {values.shape[0]} rows, expected at least {row_count}")
-    return values[:row_count]
+    if row_indices is None:
+        return values[:row_count]
+    if row_indices.shape[0] != row_count or (
+        row_indices.size and int(np.max(row_indices)) >= values.shape[0]
+    ):
+        raise ValueError(f"{group.path}/{name} cannot satisfy requested source rows")
+    return values[row_indices]
+
+
+def _read_optional_array_rows(
+    group: zarr.Group,
+    name: str,
+    dtype: Any,
+    row_indices: np.ndarray,
+    *,
+    default: Any,
+) -> np.ndarray:
+    return _read_optional_array(
+        group,
+        name,
+        dtype,
+        int(row_indices.shape[0]),
+        default=default,
+        row_indices=row_indices,
+    )
 
 
 def _repeat_str(value: Any, count: int) -> list[str]:
@@ -554,6 +615,26 @@ def _lookup_frame_map_rows(
         "timestamp": timestamp,
         "timestamp_sys": timestamp_sys,
     }
+
+
+def _lookup_canonical_frame_map_rows(
+    frame_indices: np.ndarray,
+    pair_lookup: Mapping[int, Mapping[str, Any]],
+) -> dict[str, np.ndarray]:
+    by_parent = {
+        int(row["parent_frame_index"]): (int(local), row)
+        for local, row in pair_lookup.items()
+    }
+    local = np.full(frame_indices.shape[0], -1, dtype=np.int64)
+    for index, frame in enumerate(frame_indices.tolist()):
+        match = by_parent.get(int(frame))
+        if match is not None:
+            local[index] = match[0]
+    if np.any(local < 0):
+        raise ValueError("recording_frame_index is missing canonical refined frame rows")
+    mapped = _lookup_frame_map_rows(local, pair_lookup)
+    mapped["clip_local_frame_index"] = local
+    return mapped
 
 
 def _row_table_from_columns(columns: Mapping[str, Any]) -> pa.Table:

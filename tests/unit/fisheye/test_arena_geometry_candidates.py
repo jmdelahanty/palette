@@ -15,9 +15,11 @@ from fisheye.shared.recording_geometry import (
     BoundRegisteredDishMask,
     CircleGeometry,
     CitrusRegistrationStatus,
+    MaskGeometryStatus,
     MaterializedAssetStatus,
     RecordingGeometryError,
     RegisteredDishMask,
+    RegisteredDishMaskCollection,
     RegisteredDishMaskKey,
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
@@ -68,6 +70,26 @@ def _bound_mask() -> BoundRegisteredDishMask:
     )
 
 
+def _producer_mask(*, source_kind: str, source_location: str) -> RegisteredDishMask:
+    return replace(
+        _bound_mask().mask,
+        source_kind=source_kind,
+        source_location=source_location,
+        producer_contract_linkage_status="producer_native",
+        recovery_receipt_sha256=None,
+    )
+
+
+def _producer_collection(mask: RegisteredDishMask) -> RegisteredDishMaskCollection:
+    return RegisteredDishMaskCollection(
+        masks={mask.key: mask},
+        mask_geometry_status=MaskGeometryStatus.VALID,
+        source_kind=mask.source_kind,
+        source_location=mask.source_location,
+        source_contract_sha256=mask.source_contract_sha256,
+    )
+
+
 def _recovery_binding() -> dict[str, object]:
     return {
         "receipt_schema_id": "palette.recording_geometry_recovery_receipt",
@@ -115,7 +137,9 @@ def _palette_fit_inputs(tmp_path: Path) -> tuple[Path, Path]:
         "schema_version": 1,
         "status": "provisional_visual_review_required",
         "fit_frozen_before_acquisition_reveal": True,
-        "fit_method": "temporal_median_multicandidate_radial_edge_circle_v1",
+        "fit_method": (
+            "temporal_median_keyframe_only_multicandidate_radial_edge_circle_v2"
+        ),
         "target_feature": "dish_inner_rim_water_side_edge",
         "parameters": {"acquisition_geometry_available_to_fitter": False},
         "source": {
@@ -135,22 +159,58 @@ def _palette_fit_inputs(tmp_path: Path) -> tuple[Path, Path]:
                 "radius_px": 210.0,
             },
         },
+        "fit_evidence_contract": {
+            "all_window_candidates_frozen": True,
+            "candidate_geometry_revealed_to_acquisition_fit": False,
+            "candidate_feature_classification": "unclassified_concentric_rim_edge",
+            "selection_scope": "window_consensus_for_review_not_operational_selection",
+        },
         "windows": {},
     }
     for index, name in enumerate(("early", "middle", "late")):
+        geometry = {
+            "type": "circle",
+            "center_px": {"x": 320.0 + index * 0.2, "y": 240.0},
+            "radius_px": 210.0 + index * 0.1,
+        }
+        frame_indices = [
+            99 + index * 300,
+            100 + index * 300,
+            101 + index * 300,
+        ]
         fit["windows"][name] = {
             "center_frame": 100 + index * 300,
-            "frame_indices": [99 + index * 300, 100 + index * 300, 101 + index * 300],
+            "frame_indices": frame_indices,
             "decoded_luma_sequence_sha256": str(index + 2) * 64,
+            "decoded_frames": [
+                {
+                    "frame_index": frame_index,
+                    "decoded_frame_sha256": str(index + 7) * 64,
+                }
+                for frame_index in frame_indices
+            ],
             "composite_pixel_sha256": str(index + 5) * 64,
             "fit": {
-                "geometry": {
-                    "type": "circle",
-                    "center_px": {"x": 320.0 + index * 0.2, "y": 240.0},
-                    "radius_px": 210.0 + index * 0.1,
-                },
+                "geometry": geometry,
                 "angular_support_fraction": 0.98,
                 "median_radial_gradient": 700.0,
+                "radial_residual_px": 0.25,
+                "selected_candidate_id": "candidate_000",
+                "selection_reason": "highest_frozen_radial_evidence_score_v1",
+                "frozen_candidates": [
+                    {
+                        "candidate_id": "candidate_000",
+                        "geometry": geometry,
+                        "coordinate_space": "camera_native_pixels",
+                        "observed_feature_classification": (
+                            "unclassified_concentric_rim_edge"
+                        ),
+                        "angular_support_fraction": 0.98,
+                        "radial_residual_px": 0.25,
+                        "median_radial_gradient": 700.0,
+                        "evidence_score": 861.0,
+                    }
+                ],
             },
         }
     report = tmp_path / "fit_report.json"
@@ -210,6 +270,104 @@ def test_candidate_record_keeps_physical_rim_gate_and_selection_distinct() -> No
     }
 
 
+def test_plan_producer_native_folder_candidate_without_recovery_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recording = tmp_path / "recording"
+    source_zarr = recording / "zarr" / "recording_analysis.zarr"
+    source_zarr.parent.mkdir(parents=True)
+    contract = recording / "recording_geometry_contract.json"
+    contract.write_text('{"contract":"exact"}\n', encoding="utf-8")
+    contract_sha = hashlib.sha256(contract.read_bytes()).hexdigest()
+    (recording / "recording_snapshot.json").write_text(
+        json.dumps(
+            {
+                "recording_geometry_contract": {
+                    "relative_path": contract.name,
+                    "sha256": "sha256:" + contract_sha,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    mask = _producer_mask(
+        source_kind="orange_recording_folder",
+        source_location=str(recording.resolve()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_registered_dish_masks_from_recording_folder",
+        lambda *_args, **_kwargs: _producer_collection(mask),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_bind_mask_to_zarr",
+        lambda _source, selected: replace(_bound_mask(), mask=selected),
+    )
+
+    plan = mod.plan_producer_native_acquisition_geometry_candidate(
+        source_zarr=source_zarr,
+        recording_folder=recording,
+        camera_serial="2010093",
+        arena_id="arena_1",
+    )
+
+    source = plan.candidate_record["acquisition_source"]
+    assert source["source_kind"] == "orange_recording_folder"
+    assert source["recovery_binding"] is None
+    assert plan.receipt_path == recording.resolve()
+    assert [row["role"] for row in plan.run_provenance["input_artifacts"]] == [
+        "recording_snapshot_geometry_pointer",
+        "orange_recording_geometry_contract",
+    ]
+
+
+def test_plan_producer_native_h5_requires_exact_camera_and_arena(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recording = tmp_path / "recording"
+    source_zarr = recording / "zarr" / "recording_analysis.zarr"
+    source_zarr.parent.mkdir(parents=True)
+    source_h5 = recording / "raw" / "session.h5"
+    source_h5.parent.mkdir(parents=True)
+    source_h5.write_bytes(b"exact-h5-fixture")
+    mask = _producer_mask(
+        source_kind="citrus_h5",
+        source_location=str(source_h5.resolve()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_registered_dish_masks_from_citrus_h5",
+        lambda *_args, **_kwargs: _producer_collection(mask),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_bind_mask_to_zarr",
+        lambda _source, selected: replace(_bound_mask(), mask=selected),
+    )
+
+    with pytest.raises(RecordingGeometryError, match="exactly one requested"):
+        mod.plan_producer_native_acquisition_geometry_candidate(
+            source_zarr=source_zarr,
+            citrus_h5=source_h5,
+            camera_serial="2010094",
+            arena_id="arena_1",
+        )
+
+    plan = mod.plan_producer_native_acquisition_geometry_candidate(
+        source_zarr=source_zarr,
+        citrus_h5=source_h5,
+        camera_serial="2010093",
+        arena_id="arena_1",
+    )
+    assert plan.candidate_record["acquisition_source"]["source_kind"] == "citrus_h5"
+    assert plan.run_provenance["input_artifacts"][0]["role"] == (
+        "citrus_h5_recording_geometry_contract"
+    )
+
+
 def test_candidate_record_rejects_added_tolerance_or_nonconcentric_gate() -> None:
     record = mod.build_acquisition_geometry_candidate_record(
         _bound_mask(),
@@ -257,6 +415,11 @@ def test_reviewed_palette_candidate_corrects_semantics_and_keeps_gate_pointerles
     assert (
         record["observed_boundary"]["observed_feature"] == "visible_dish_top_rim_edge"
     )
+    early = record["palette_fit_source"]["windows"]["early"]
+    assert early["selected_candidate_id"] == "candidate_000"
+    assert early["radial_residual_px"] == pytest.approx(0.25)
+    assert len(early["frozen_candidates"]) == 1
+    assert [row["frame_index"] for row in early["decoded_frames"]] == [99, 100, 101]
     assert (
         record["palette_fit_source"]["probe_declared_target_feature"]
         == "dish_inner_rim_water_side_edge"
@@ -271,6 +434,83 @@ def test_reviewed_palette_candidate_corrects_semantics_and_keeps_gate_pointerles
     assert record["valid_detection_region"]["additional_palette_tolerance_px"] == 0.0
     assert record["candidate_policy"]["operationally_selected"] is False
     assert record["candidate_policy"]["detection_gate_applied"] is False
+    assert record["palette_fit_source"]["acquisition_boundary_edge_support"] == {
+        "status": "not_measured",
+        "reason": "acquisition_reveal_not_present_at_candidate_publication",
+    }
+
+
+def test_palette_candidate_binds_post_freeze_acquisition_edge_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report, montage = _palette_fit_inputs(tmp_path)
+    geometry = {
+        "type": "circle",
+        "center_px": {"x": 320.0, "y": 240.0},
+        "radius_px": 205.0,
+    }
+    window_support = {
+        "status": "measured",
+        "method": "fixed_circle_radial_gradient_support_v1",
+        "geometry_frozen": True,
+        "radial_band_px": 4.0,
+        "angular_sample_count": 1440,
+        "angular_edge_support_fraction": 0.92,
+        "median_radial_gradient": 650.0,
+        "median_absolute_radial_offset_px": 0.4,
+        "signed_median_radial_offset_px": 0.1,
+    }
+    reveal = {
+        "schema_id": (
+            "palette.diagnostics.recording_dish_rim_probe.acquisition_reveal"
+        ),
+        "schema_version": 1,
+        "fit_report": {
+            "path": report.name,
+            "sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        },
+        "acquisition_boundary_edge_support": {
+            "status": "measured",
+            "method": "fixed_circle_radial_gradient_support_v1",
+            "fit_frozen_before_measurement": True,
+            "coordinate_space": "camera_native_pixels",
+            "geometry": geometry,
+            "source_observation_sha256": "a" * 64,
+            "windows": {
+                name: window_support for name in ("early", "middle", "late")
+            },
+            "median_angular_edge_support_fraction": 0.92,
+            "minimum_angular_edge_support_fraction": 0.92,
+            "median_absolute_radial_offset_px": 0.4,
+            "median_radial_gradient": 650.0,
+        },
+    }
+    (tmp_path / "acquisition_reveal.json").write_text(
+        json.dumps(reveal), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        mod,
+        "_source_camera_candidate_binding",
+        lambda *_args, **_kwargs: _palette_binding(),
+    )
+
+    plan = mod.plan_reviewed_palette_geometry_candidate(
+        source_zarr=tmp_path / "recording.zarr",
+        fit_report_path=report,
+        montage_path=montage,
+        reviewer="delahantyj",
+        reviewed_at_utc="2026-08-13T12:00:00Z",
+    )
+
+    support = plan.candidate_record["palette_fit_source"][
+        "acquisition_boundary_edge_support"
+    ]
+    assert support["status"] == "measured"
+    assert support["geometry"] == geometry
+    assert plan.run_provenance["input_artifacts"][2]["role"] == (
+        "post_freeze_acquisition_boundary_edge_support"
+    )
 
 
 def test_reviewed_palette_candidate_rejects_mutated_gate(

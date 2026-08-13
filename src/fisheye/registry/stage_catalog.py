@@ -71,9 +71,57 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         id="detect",
-        invalidates=("detect_quality",),
+        invalidates=("detect_quality", "registered_detection_gate"),
         artifact_families=("detect_runs",),
         description="Raw detection/model output. Immutable except explicit overwrite.",
+    ),
+    StageSpec(
+        id="recording_geometry_import",
+        depends_on=("raw", "calibration"),
+        invalidates=("arena_geometry_comparison",),
+        artifact_families=("analysis/arena_geometry_runs",),
+        category=RECORDING_METADATA,
+        description=(
+            "Recording-bound producer geometry imported with camera/pixel authority."
+        ),
+    ),
+    StageSpec(
+        id="arena_geometry_offline_fit",
+        depends_on=("raw",),
+        invalidates=("arena_geometry_comparison",),
+        category=RECORDING_METADATA,
+        description="Independent early/middle/late recording-image rim-fit evidence.",
+    ),
+    StageSpec(
+        id="arena_geometry_comparison",
+        depends_on=("recording_geometry_import", "arena_geometry_offline_fit"),
+        invalidates=("arena_geometry_selection",),
+        artifact_families=("analysis/arena_geometry_comparison_runs",),
+        category=RECORDING_METADATA,
+        description="Semantic and operational comparison under a versioned policy.",
+    ),
+    StageSpec(
+        id="arena_geometry_selection",
+        depends_on=("arena_geometry_comparison",),
+        invalidates=("registered_detection_gate",),
+        artifact_families=("analysis/arena_geometry_selection",),
+        category=RECORDING_METADATA,
+        description="Explicit immutable geometry selection bound to comparison evidence.",
+    ),
+    StageSpec(
+        id="registered_detection_gate",
+        depends_on=("arena_geometry_selection", "detect"),
+        invalidates=("registered_detection_gate_consumption",),
+        artifact_families=("analysis/detection_gate_runs",),
+        description="Exact keyed centroid gate over one immutable raw-detection rowset.",
+    ),
+    StageSpec(
+        id="registered_detection_gate_consumption",
+        depends_on=("registered_detection_gate", "detect_quality"),
+        invalidates=("crop",),
+        description=(
+            "Gate-consumption evidence extracted from finalized refined detections."
+        ),
     ),
     StageSpec(
         id="detect_quality",
@@ -343,6 +391,12 @@ RECORDING_STATUS_STAGE_IDS: tuple[str, ...] = (
     "raw",
     "background",
     "detect",
+    "recording_geometry_import",
+    "arena_geometry_offline_fit",
+    "arena_geometry_comparison",
+    "arena_geometry_selection",
+    "registered_detection_gate",
+    "registered_detection_gate_consumption",
     "detect_quality",
     "refined_detect",
     "crop",

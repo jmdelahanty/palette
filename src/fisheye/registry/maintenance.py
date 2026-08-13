@@ -29,6 +29,7 @@ from .extractors.masks import (
     _extract_subject_mask_performance_rows,
 )
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
+from .registered_geometry_readiness import project_registered_geometry_stages
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.shared.zarr_run_completion import (
     is_run_complete,
@@ -5374,6 +5375,8 @@ def _build_recording_step_error_rows(
                 updated_utc=updated_utc,
             )
         )
+    stage_order = {name: index for index, name in enumerate(RECORDING_STEP_NAMES)}
+    rows.sort(key=lambda row: stage_order[str(row["step_name"])])
     return rows
 
 
@@ -6146,6 +6149,16 @@ def _build_recording_step_rows_from_root(
         "zarr_purpose": zarr_purpose,
         "pipeline_type": pipeline_type,
     }
+    geometry_stage_rows = project_registered_geometry_stages(
+        root=root,
+        analysis_group=analysis_group,
+        common_details=common_details,
+        raw_status=raw_status,
+        calibration_status=calibration_status,
+        detect_status=detect_status,
+        detect_quality_status=detect_quality_status,
+    )
+
     detect_identity_kind: Optional[str] = None
     if detect_uses_collection or (detect_run is None and detect_collection is not None):
         detect_identity_kind = "collection"
@@ -6724,6 +6737,28 @@ def _build_recording_step_rows_from_root(
             for tuning_key in RECORDING_TUNING_STEP_NAMES
         ],
     ]
+    for geometry_stage in geometry_stage_rows:
+        rows.append(
+            _make_recording_step_row(
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name=geometry_stage.step_name,
+                status=geometry_stage.status,
+                run_name=geometry_stage.run_name,
+                method=geometry_stage.method,
+                coverage_pct=None,
+                review_status=geometry_stage.review_status,
+                details=geometry_stage.details,
+                source=source,
+                zarr_mtime_ns=zarr_mtime_ns,
+                updated_utc=_extract_updated_utc(
+                    geometry_stage.run_group,
+                    fallback=fallback_updated_utc,
+                ),
+            )
+        )
+    stage_order = {name: index for index, name in enumerate(RECORDING_STEP_NAMES)}
+    rows.sort(key=lambda row: stage_order[str(row["step_name"])])
     return rows
 
 

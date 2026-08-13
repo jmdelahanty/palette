@@ -28,6 +28,7 @@ from fisheye.cluster.keypoints.common import (
     safe_component,
     validate_flat_roi_cache_binding,
     validate_keypoint_input_dag,
+    validate_registered_geometry_crop_authority,
     validate_registered_analysis_zarr,
 )
 from fisheye.cluster.lsf import (
@@ -150,6 +151,8 @@ class WholeRecordingWorkflowPlan:
     model_input_stride: int
     keypoint_storage: dict[str, Any]
     finalization_execution: dict[str, Any]
+    registered_gate_requirement: str
+    registered_gate_run: str | None
     targets: tuple[PlannedWholeRecordingTarget, ...]
     registry_finalizer_job_key: str
     lsf_workflow: LsfWorkflow
@@ -172,6 +175,10 @@ class WholeRecordingWorkflowPlan:
             "model_input_stride": self.model_input_stride,
             "keypoint_storage": self.keypoint_storage,
             "finalization_execution": self.finalization_execution,
+            "registered_dish_geometry": {
+                "gate_requirement": self.registered_gate_requirement,
+                "gate_run": self.registered_gate_run,
+            },
             "target_count": len(self.targets),
             "targets": [target.to_json() for target in self.targets],
             "registry_finalizer_job_key": self.registry_finalizer_job_key,
@@ -348,6 +355,8 @@ def build_plan(
     finalizer_resources: LsfResources,
     cache_bindings: Mapping[str, FlatRoiCacheBinding] | None = None,
     upstream_jobs: Sequence[LsfJob] = (),
+    registered_gate_requirement: str = "off",
+    registered_gate_run: str | None = None,
 ) -> WholeRecordingWorkflowPlan:
     resolved_manifest = manifest_path.expanduser().resolve()
     resolved_repo = repo.expanduser().resolve()
@@ -392,6 +401,14 @@ def build_plan(
         raise ValueError("Model input stride assertion must be a positive integer.")
     if int(refine_chunk_size) <= 0 or int(refine_num_workers) <= 0:
         raise ValueError("Refinement chunk size and worker count must be positive.")
+    gate_requirement = str(registered_gate_requirement).strip()
+    if gate_requirement not in {"off", "if_available", "required"}:
+        raise ValueError(
+            "registered_gate_requirement must be off, if_available, or required."
+        )
+    gate_run = str(registered_gate_run or "").strip() or None
+    if gate_requirement == "required" and gate_run is None:
+        raise ValueError("Required registered geometry needs one exact gate run.")
     keypoint_storage = resolve_keypoint_v2_publication_storage(
         legacy_roi_shard_rows=keypoint_roi_shard_rows,
         legacy_frame_shard_rows=keypoint_frame_shard_rows,
@@ -500,6 +517,12 @@ def build_plan(
             analysis_zarr=target.analysis_zarr,
             cache=cache,
             min_roi_size=int(min_roi_size),
+        )
+        validate_registered_geometry_crop_authority(
+            analysis_zarr=target.analysis_zarr,
+            crop_run=cache.crop_run,
+            registered_gate_requirement=gate_requirement,
+            registered_gate_run=gate_run,
         )
         native_shape = (int(cache.shape[1]), int(cache.shape[2]))
         model_input_runtime = model_contract.plan_for_native_shape(native_shape)
@@ -677,6 +700,10 @@ def build_plan(
             "target_count": len(planned_targets),
             "keypoint_storage": keypoint_storage,
             "finalization_execution": finalization_execution,
+            "registered_dish_geometry": {
+                "gate_requirement": gate_requirement,
+                "gate_run": gate_run,
+            },
         },
     )
     return WholeRecordingWorkflowPlan(
@@ -695,6 +722,8 @@ def build_plan(
         model_input_stride=effective_model_input_stride,
         keypoint_storage=keypoint_storage,
         finalization_execution=finalization_execution,
+        registered_gate_requirement=gate_requirement,
+        registered_gate_run=gate_run,
         targets=tuple(planned_targets),
         registry_finalizer_job_key=finalizer_job_key,
         lsf_workflow=workflow,
@@ -831,6 +860,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
+    parser.add_argument(
+        "--registered-gate-requirement",
+        choices=("off", "if_available", "required"),
+        default="off",
+    )
+    parser.add_argument("--registered-gate-run")
     parser.add_argument(
         "--model-input-contract",
         type=Path,
@@ -987,6 +1022,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             mem_gb=int(args.finalizer_mem_gb),
             walltime=args.finalizer_walltime,
         ),
+        registered_gate_requirement=args.registered_gate_requirement,
+        registered_gate_run=args.registered_gate_run,
     )
     if args.apply:
         result = apply_plan(plan)

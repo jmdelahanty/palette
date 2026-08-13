@@ -198,6 +198,89 @@ def test_whole_video_cohort_is_one_bounded_atomic_detection_array(
     assert (run_root / "lsf_plan.json").is_file()
 
 
+def test_whole_video_registered_geometry_composes_canonical_postprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry = Registry(registry_path)
+    try:
+        _seed_recording(
+            registry,
+            tmp_path / "recordings",
+            recording_id="2026-08-10T19-38-32Z_arena_1_goodbatbadbat",
+            camera_id="2010093",
+        )
+    finally:
+        registry.close()
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "py").write_text("#!/bin/sh\n", encoding="utf-8")
+    model_path = tmp_path / "models" / "detect.pt"
+    model_path.parent.mkdir()
+    model_path.write_bytes(b"model")
+    model = DetectionModelSpec(
+        set_id="detect_set",
+        run_id="detect_model_run",
+        path=model_path,
+        sha256="d" * 64,
+    )
+    monkeypatch.setattr(
+        "fisheye.cluster.whole_video_detection.resolve_detection_model_for_targets",
+        lambda *_args, **_kwargs: model,
+    )
+
+    plan = build_plan(
+        registry_path=registry_path,
+        repo=repo,
+        run_root=tmp_path / "run",
+        run_label="geometry_required",
+        detection_set_id=model.set_id,
+        detection_run_id=model.run_id,
+        path_contains="goodbatbadbat",
+        registered_gate_requirement="required",
+        registered_gate_run="gate_exact_v1",
+    )
+
+    assert len(plan.lsf_workflow.jobs) == 4
+    assert plan.quality_run == "detect_quality_geometry_required"
+    assert plan.refined_run == "refined_detect_geometry_required"
+    assert plan.crop_run == "crop_geometry_required"
+    assert plan.registered_gate_requirement == "required"
+    assert len(plan.postprocess_outputs) == 1
+    quality, refine, crop = plan.lsf_workflow.jobs[1:]
+    assert quality.dependency.upstream_job_keys == (plan.lsf_workflow.jobs[0].job_key,)
+    assert "detect_runs/detect_geometry_required" in quality.command
+    rendered_refine = " ".join(refine.command)
+    assert "--registered-gate-requirement required" in rendered_refine
+    assert "--registered-gate-run gate_exact_v1" in rendered_refine
+    assert crop.dependency.upstream_job_keys == (refine.job_key,)
+    rendered_crop = " ".join(crop.command)
+    assert "--source-refined-run refined_detect_geometry_required" in rendered_crop
+    assert "--registered-gate-requirement required" in rendered_crop
+    assert "--registered-gate-run gate_exact_v1" in rendered_crop
+    assert len(plan.crop_outputs) == 1
+    assert plan.lsf_workflow.metadata["registered_dish_geometry"] == {
+        "gate_requirement": "required",
+        "gate_run": "gate_exact_v1",
+        "selection_policy_id": "manual_review_only_v1",
+    }
+
+
+def test_whole_video_required_geometry_needs_exact_gate(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="exact gate run"):
+        build_plan(
+            registry_path=tmp_path / "missing.sqlite",
+            repo=tmp_path,
+            run_root=tmp_path / "run",
+            run_label="geometry_required",
+            detection_set_id="set",
+            detection_run_id="run",
+            recording_ids=("recording",),
+            registered_gate_requirement="required",
+        )
+
+
 def test_registry_video_query_filters_current_authority(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     try:

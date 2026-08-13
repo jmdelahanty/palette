@@ -68,6 +68,32 @@ def test_target_manifest_preserves_exact_recording_bound_sources(
     assert target.acquisition_observation_path == paths["observation"].resolve()
 
 
+def test_target_manifest_accepts_producer_native_folder_without_recovery_receipt(
+    tmp_path: Path,
+) -> None:
+    paths = _target_files(tmp_path)
+    row = _manifest_row(paths)
+    row.pop("recovery_receipt")
+    row.update(
+        {
+            "geometry_source": "producer-folder",
+            "geometry_camera_serial": "2010093",
+            "geometry_arena_id": "arena_1",
+        }
+    )
+    manifest = tmp_path / "targets.json"
+    manifest.write_text(
+        json.dumps({"schema": TARGET_MANIFEST_SCHEMA, "targets": [row]})
+    )
+
+    (target,) = load_target_manifest(manifest)
+
+    assert target.geometry_source == "producer-folder"
+    assert target.geometry_camera_serial == "2010093"
+    assert target.geometry_arena_id == "arena_1"
+    assert target.recovery_receipt_path is None
+
+
 def test_target_manifest_rejects_source_outside_recording(tmp_path: Path) -> None:
     paths = _target_files(tmp_path)
     outside = tmp_path / "other.mp4"

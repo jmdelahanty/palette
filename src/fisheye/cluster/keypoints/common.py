@@ -40,6 +40,9 @@ from fisheye.shared.zarr.crop_consumer import (
     strict_crop_fixed_roi_shape,
     validate_crop_run_reference,
 )
+from fisheye.shared.zarr.refined_detection_crop_source import (
+    bind_refined_detection_crop_source,
+)
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
@@ -789,6 +792,88 @@ def validate_keypoint_input_dag(
     )
 
 
+def validate_registered_geometry_crop_authority(
+    *,
+    analysis_zarr: Path,
+    crop_run: str,
+    registered_gate_requirement: str,
+    registered_gate_run: str | None = None,
+) -> dict[str, Any]:
+    """Prove a crop/cache lineage derives from the exact finalized gated authority."""
+
+    requirement = str(registered_gate_requirement).strip()
+    if requirement not in {"off", "if_available", "required"}:
+        raise ValueError(
+            "registered_gate_requirement must be off, if_available, or required."
+        )
+    if requirement == "off":
+        return {
+            "requirement": "off",
+            "status": "not_required",
+            "crop_run": str(crop_run),
+        }
+    expected_gate = str(registered_gate_run or "").strip() or None
+    if requirement == "required" and expected_gate is None:
+        raise ValueError("Required registered geometry needs one exact gate run.")
+    archive = analysis_zarr.expanduser().resolve()
+    root = open_zarr_group_direct(archive, mode="r")
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None or crop_run not in crop_parent:
+        raise ValueError(f"Registered geometry crop run is missing: crop_runs/{crop_run}.")
+    crop = crop_parent[crop_run]
+    if not is_run_complete_in_parent(crop_parent, crop):
+        raise ValueError("Registered geometry crop authority is not complete.")
+    source_run = str(crop.attrs.get("source_refined_run_id") or "").strip()
+    source_digest = str(
+        crop.attrs.get("source_refined_manifest_digest") or ""
+    ).strip()
+    if not source_run or not source_digest:
+        raise ValueError("Crop lacks its exact finalized refined source binding.")
+    crop_requirement = str(
+        crop.attrs.get("source_registered_detection_gate_requirement") or ""
+    ).strip()
+    crop_gate = crop.attrs.get("source_registered_detection_gate")
+    if crop_requirement != requirement or not isinstance(crop_gate, Mapping):
+        raise ValueError("Crop gate-consumption lineage differs from the configured policy.")
+    source = bind_refined_detection_crop_source(
+        archive,
+        run_id=source_run,
+        allow_selector_ineligible_benchmark=True,
+    )
+    if source.manifest.get("payload_digest") != source_digest:
+        raise ValueError("Crop binds a stale finalized refined manifest digest.")
+    if (
+        source.run_group.attrs.get("finalized_recording_authority") is not True
+        or source.run_group.attrs.get("immutable_snapshot") is not True
+    ):
+        raise ValueError("Crop source is not a finalized immutable recording authority.")
+    source_requirement = str(
+        source.run_group.attrs.get("registered_detection_gate_requirement") or ""
+    ).strip()
+    source_gate = source.run_group.attrs.get("registered_detection_gate")
+    if source_requirement != requirement or not isinstance(source_gate, Mapping):
+        raise ValueError("Finalized refined source gate policy is invalid.")
+    if json.dumps(dict(crop_gate), sort_keys=True) != json.dumps(
+        dict(source_gate), sort_keys=True
+    ):
+        raise ValueError("Crop and finalized refined gate evidence differ.")
+    applied = source_gate.get("applied") is True and source_gate.get("status") == "applied"
+    observed_gate = str(source_gate.get("gate_run") or "").strip() or None
+    if expected_gate is not None and observed_gate != expected_gate:
+        raise ValueError("Crop lineage binds a different registered gate run.")
+    if requirement == "required" and not applied:
+        raise ValueError("Required keypoint/mask input lacks applied gate consumption.")
+    return {
+        "requirement": requirement,
+        "status": "applied" if applied else str(source_gate.get("status") or "unavailable"),
+        "crop_run": str(crop_run),
+        "source_refined_run": source_run,
+        "source_refined_manifest_digest": source_digest,
+        "gate_run": observed_gate,
+        "gate_applied": applied,
+    }
+
+
 def build_prediction_job(
     *,
     workflow_id: str,
@@ -1075,5 +1160,6 @@ __all__ = [
     "safe_component",
     "validate_flat_roi_cache_binding",
     "validate_keypoint_input_dag",
+    "validate_registered_geometry_crop_authority",
     "validate_registered_analysis_zarr",
 ]

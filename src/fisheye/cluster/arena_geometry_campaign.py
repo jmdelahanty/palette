@@ -74,8 +74,12 @@ class ArenaGeometryTarget:
     video_path: Path
     summary_path: Path
     keyframe_path: Path
-    recovery_receipt_path: Path
+    recovery_receipt_path: Path | None
     acquisition_observation_path: Path | None = None
+    geometry_source: str = "recovery-receipt"
+    geometry_camera_serial: str | None = None
+    geometry_arena_id: str | None = None
+    citrus_h5_path: Path | None = None
 
     def __post_init__(self) -> None:
         recording = self.recording_dir.expanduser().resolve()
@@ -112,15 +116,57 @@ class ArenaGeometryTarget:
             "keyframe_path",
             _contained_file(self.keyframe_path, recording, label="keyframe summary"),
         )
-        object.__setattr__(
-            self,
-            "recovery_receipt_path",
-            _contained_file(
+        geometry_source = str(self.geometry_source).strip()
+        if geometry_source not in {
+            "producer-folder",
+            "citrus-h5",
+            "recovery-receipt",
+        }:
+            raise ValueError(f"Unsupported geometry source: {geometry_source!r}.")
+        receipt = None
+        if geometry_source == "recovery-receipt":
+            if self.recovery_receipt_path is None:
+                raise ValueError("Recovery geometry requires recovery_receipt.")
+            receipt = _contained_file(
                 self.recovery_receipt_path,
                 recording,
                 label="geometry recovery receipt",
-            ),
+            )
+        elif self.recovery_receipt_path is not None:
+            raise ValueError(
+                "Producer-native geometry must not declare recovery_receipt."
+            )
+        camera_serial = (
+            str(self.geometry_camera_serial).strip()
+            if self.geometry_camera_serial is not None
+            else ""
         )
+        arena_id = (
+            str(self.geometry_arena_id).strip()
+            if self.geometry_arena_id is not None
+            else ""
+        )
+        if geometry_source != "recovery-receipt" and not (camera_serial and arena_id):
+            raise ValueError(
+                "Producer-native geometry requires geometry_camera_serial and "
+                "geometry_arena_id."
+            )
+        citrus_h5 = None
+        if geometry_source == "citrus-h5":
+            if self.citrus_h5_path is None:
+                raise ValueError("citrus-h5 geometry requires citrus_h5.")
+            citrus_h5 = _contained_file(
+                self.citrus_h5_path,
+                recording,
+                label="recording-bound Citrus H5",
+            )
+        elif self.citrus_h5_path is not None:
+            raise ValueError("citrus_h5 is only valid for citrus-h5 geometry.")
+        object.__setattr__(self, "recovery_receipt_path", receipt)
+        object.__setattr__(self, "geometry_source", geometry_source)
+        object.__setattr__(self, "geometry_camera_serial", camera_serial or None)
+        object.__setattr__(self, "geometry_arena_id", arena_id or None)
+        object.__setattr__(self, "citrus_h5_path", citrus_h5)
         if observation is not None:
             object.__setattr__(
                 self,
@@ -150,7 +196,17 @@ class ArenaGeometryTarget:
             "video": str(self.video_path),
             "summary": str(self.summary_path),
             "keyframes": str(self.keyframe_path),
-            "recovery_receipt": str(self.recovery_receipt_path),
+            "geometry_source": self.geometry_source,
+            "geometry_camera_serial": self.geometry_camera_serial,
+            "geometry_arena_id": self.geometry_arena_id,
+            "recovery_receipt": (
+                str(self.recovery_receipt_path)
+                if self.recovery_receipt_path is not None
+                else None
+            ),
+            "citrus_h5": (
+                str(self.citrus_h5_path) if self.citrus_h5_path is not None else None
+            ),
             "acquisition_observation": (
                 str(self.acquisition_observation_path)
                 if self.acquisition_observation_path is not None
@@ -172,6 +228,8 @@ def load_target_manifest(path: Path) -> tuple[ArenaGeometryTarget, ...]:
             raise ValueError(f"Target row {index} is not an object.")
         recording_dir = Path(str(row.get("recording_dir") or ""))
         observation = row.get("acquisition_observation")
+        recovery = row.get("recovery_receipt")
+        citrus_h5 = row.get("citrus_h5")
         targets.append(
             ArenaGeometryTarget(
                 target_id=str(row.get("target_id") or recording_dir.name),
@@ -181,10 +239,24 @@ def load_target_manifest(path: Path) -> tuple[ArenaGeometryTarget, ...]:
                 video_path=Path(str(row.get("video") or "")),
                 summary_path=Path(str(row.get("summary") or "")),
                 keyframe_path=Path(str(row.get("keyframes") or "")),
-                recovery_receipt_path=Path(str(row.get("recovery_receipt") or "")),
+                recovery_receipt_path=(Path(str(recovery)) if recovery else None),
                 acquisition_observation_path=(
                     Path(str(observation)) if observation else None
                 ),
+                geometry_source=str(
+                    row.get("geometry_source") or "recovery-receipt"
+                ),
+                geometry_camera_serial=(
+                    str(row.get("geometry_camera_serial"))
+                    if row.get("geometry_camera_serial") is not None
+                    else None
+                ),
+                geometry_arena_id=(
+                    str(row.get("geometry_arena_id"))
+                    if row.get("geometry_arena_id") is not None
+                    else None
+                ),
+                citrus_h5_path=(Path(str(citrus_h5)) if citrus_h5 else None),
             )
         )
     if len({target.target_id for target in targets}) != len(targets):
@@ -286,6 +358,10 @@ def build_plan(
                 recording_dir=target.recording_dir,
                 analysis_zarr=target.analysis_zarr,
                 recovery_receipt_path=target.recovery_receipt_path,
+                geometry_source=target.geometry_source,
+                geometry_camera_serial=target.geometry_camera_serial,
+                geometry_arena_id=target.geometry_arena_id,
+                citrus_h5_path=target.citrus_h5_path,
                 source=ArenaGeometryProbeSource(
                     video_path=target.video_path,
                     summary_path=target.summary_path,

@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 
 from fisheye.cluster.clipped_detection import (
     DetectionFragmentInputs,
+    DetectionFragmentOutputs,
     DetectionModelSpec,
     DetectionWorkUnitSpec,
     RawDetectionFragmentOutputs,
@@ -57,6 +58,11 @@ from fisheye.cluster.lsf.runtime import (
     RUNTIME_USER_TOKEN,
 )
 from fisheye.cluster.recording_layout import clipped_recording_target
+from fisheye.cluster.recording_detection_postprocess import (
+    REGISTERED_GATE_REQUIREMENTS,
+    RecordingDetectionPostprocessInputs,
+    build_recording_detection_postprocess_fragment,
+)
 from fisheye.cluster.clipped_storage_finalization import (
     ClippedStorageFinalizationInputs,
     StrictClipRefinedDetectionInput,
@@ -162,6 +168,9 @@ class ClippedInferencePlan:
     cache_array_concurrency: int
     mask_package_array_concurrency: int
     detect_refine_bundle_concurrency: int
+    registered_gate_requirement: str
+    registered_gate_run: str | None
+    selection_policy_id: str
     lsf_workflow: LsfWorkflow
 
     def to_json(self) -> dict[str, Any]:
@@ -182,6 +191,11 @@ class ClippedInferencePlan:
             "resume_existing_detections": self.resume_existing_detections,
             "encoded_mask_packages": self.encoded_mask_packages,
             "subject_mask_publication_profile": self.subject_mask_publication_profile,
+            "registered_dish_geometry": {
+                "gate_requirement": self.registered_gate_requirement,
+                "gate_run": self.registered_gate_run,
+                "selection_policy_id": self.selection_policy_id,
+            },
             "scheduler_concurrency": {
                 "detect_array": self.detect_array_concurrency,
                 "gpu_array_per_stage": self.gpu_array_concurrency,
@@ -485,6 +499,42 @@ def _artifact_backed_detection_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _order_detection_work_units_by_recording_frame(
+    *,
+    target_id: str,
+    work_units: Sequence[Mapping[str, Any]],
+    frame_intervals: Mapping[tuple[int, str], tuple[int, int]],
+) -> list[Mapping[str, Any]]:
+    """Require exact indexed-unit coverage, then order units on the native timeline."""
+
+    if not work_units:
+        raise ValueError(f"Target {target_id!r} detection plan has no work units.")
+    planned_keys = [
+        (int(unit["clip_index"]), str(unit["clip_id"])) for unit in work_units
+    ]
+    if len(planned_keys) != len(set(planned_keys)):
+        raise ValueError(
+            f"Target {target_id!r} detection plan has duplicate "
+            "(clip_index, clip_id) work units."
+        )
+    planned_key_set = set(planned_keys)
+    frame_interval_key_set = set(frame_intervals)
+    if planned_key_set != frame_interval_key_set:
+        missing = sorted(frame_interval_key_set - planned_key_set)
+        unexpected = sorted(planned_key_set - frame_interval_key_set)
+        raise ValueError(
+            f"Target {target_id!r} detection plan must exactly cover the "
+            "recording frame-index work units; "
+            f"missing={missing!r}, unexpected={unexpected!r}."
+        )
+    return sorted(
+        work_units,
+        key=lambda unit: frame_intervals[
+            (int(unit["clip_index"]), str(unit["clip_id"]))
+        ][0],
+    )
+
+
 def _repo_commit(repo: Path) -> str:
     commit = subprocess.run(
         ["git", "-C", str(repo.expanduser().resolve()), "rev-parse", "HEAD"],
@@ -647,6 +697,9 @@ def build_plan(
     cache_array_concurrency: int = 2,
     mask_package_array_concurrency: int = 4,
     detect_refine_bundle_concurrency: int = 4,
+    registered_gate_requirement: str = "off",
+    registered_gate_run: str | None = None,
+    selection_policy_id: str = "manual_review_only_v1",
 ) -> ClippedInferencePlan:
     if not targets:
         raise ValueError("At least one target is required.")
@@ -655,6 +708,17 @@ def build_plan(
             "Unsupported subject-mask publication profile: "
             f"{subject_mask_publication_profile!r}."
         )
+    gate_requirement = str(registered_gate_requirement).strip()
+    if gate_requirement not in REGISTERED_GATE_REQUIREMENTS:
+        raise ValueError(
+            "registered_gate_requirement must be off, if_available, or required."
+        )
+    gate_run = str(registered_gate_run or "").strip() or None
+    if gate_requirement == "required" and gate_run is None:
+        raise ValueError("Required registered geometry needs an exact gate run.")
+    policy_id = str(selection_policy_id).strip()
+    if policy_id not in {"manual_review_only_v1", "corroborated_acquisition_v1"}:
+        raise ValueError("Unsupported registered geometry selection policy id.")
     concurrency_values = {
         "cache_bundle_size": cache_bundle_size,
         "max_active_targets": max_active_targets,
@@ -777,11 +841,6 @@ def build_plan(
             )
         )
         work_units = list(detection_plan["work_units"])
-        if len(work_units) != 22:
-            raise ValueError(
-                f"Target {target.target_id!r} must have exactly 22 clip-camera work units; "
-                f"found {len(work_units)}."
-            )
         if {str(unit["camera_serial"]) for unit in work_units} != {
             authority.camera_serial
         }:
@@ -807,11 +866,10 @@ def build_plan(
         subject_mask_cache_run = f"subject_mask_cache_{target_label}"
         subject_mask_bundle_id = f"subject_mask_bundle_{target_label}"
         clips: list[dict[str, Any]] = []
-        ordered_work_units = sorted(
-            work_units,
-            key=lambda item: frame_intervals[
-                (int(item["clip_index"]), str(item["clip_id"]))
-            ][0],
+        ordered_work_units = _order_detection_work_units_by_recording_frame(
+            target_id=target.target_id,
+            work_units=work_units,
+            frame_intervals=frame_intervals,
         )
         for work_unit_index, unit in enumerate(ordered_work_units):
             clip = str(unit["clip_id"])
@@ -899,6 +957,11 @@ def build_plan(
             "subject_mask_cache_run": subject_mask_cache_run,
             "subject_mask_bundle_id": subject_mask_bundle_id,
             "clips": clips,
+            "registered_dish_geometry": {
+                "gate_requirement": gate_requirement,
+                "gate_run": gate_run,
+                "selection_policy_id": policy_id,
+            },
         }
         _refuse_output_collisions(
             target_payload,
@@ -1006,106 +1069,236 @@ def build_plan(
             detect_array_concurrency=detect_array_concurrency,
             refine_bundle_concurrency=detect_refine_bundle_concurrency,
         )
-        detection_module = build_detection_fragment(
-            detection_inputs,
-            raw_module=raw_module,
-        )
-        jobs.extend(detection_module.jobs)
-        fragments.extend(detection_module.fragments)
-        detection_outputs = detection_module.outputs
         target_payload["native_detection_module"] = native_module.outputs.to_json()
+        modern_registered_pipeline = gate_requirement != "off"
+        if modern_registered_pipeline:
+            jobs.extend(native_module.fragment.jobs)
+            fragments.append(native_module.fragment)
+            canonical_refined_run = f"refined_detect_native_{target_label}"
+            postprocess = build_recording_detection_postprocess_fragment(
+                RecordingDetectionPostprocessInputs(
+                    workflow_id=workflow_id,
+                    family=FAMILY,
+                    target=recording_target,
+                    repo=repo,
+                    run_root=run_root,
+                    source_detect_run=native_canonical_run,
+                    quality_run=detect_quality_run,
+                    refined_run=canonical_refined_run,
+                    registered_gate_requirement=gate_requirement,
+                    registered_gate_run=gate_run,
+                    selection_policy_id=policy_id,
+                    upstream_job_keys=(native_module.outputs.terminal_job_key,),
+                    required_artifacts=(native_module.outputs.artifact_key,),
+                )
+            )
+            jobs.extend(postprocess.fragment.jobs)
+            fragments.append(postprocess.fragment)
+            collection_key = f"registered_refined_collection:{target_safe}"
+            collection_receipt = (
+                run_root / "detection_collections" / f"{target_safe}.json"
+            )
+            collection_command = [
+                "scripts/py",
+                "-m",
+                "fisheye.utils.finalize_registered_clipped_refined_collection",
+                "--plan",
+                str(run_root / "plan.json"),
+                "--target-id",
+                target.target_id,
+                "--analysis-zarr",
+                str(target.analysis_zarr),
+                "--collection-id",
+                collection_id,
+                "--refined-run",
+                canonical_refined_run,
+                "--recording-frame-index",
+                str(target.recording_dir / "recording_frame_index.parquet"),
+                "--registered-gate-requirement",
+                gate_requirement,
+                "--result-json",
+                str(collection_receipt),
+            ]
+            if gate_run is not None:
+                collection_command.extend(("--registered-gate-run", gate_run))
+            collection_job = _job(
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=collection_key,
+                stage="refined_detect_collection",
+                command=collection_command,
+                resources=final_cpu,
+                upstream=(postprocess.outputs.terminal_job_key,),
+                expected_outputs=(
+                    target.analysis_zarr
+                    / "experiment_index"
+                    / "finalized_runs"
+                    / collection_id
+                    / "zarr.json",
+                    collection_receipt,
+                ),
+            )
+            jobs.append(collection_job)
+            collection_artifact = f"finalized_refined_detection:{target_safe}"
+            fragments.append(
+                LsfWorkflowFragment(
+                    fragment_id=f"registered_refined_collection:{target_safe}",
+                    jobs=(collection_job,),
+                    requires=(postprocess.outputs.artifact_key,),
+                    provides=(collection_artifact,),
+                    metadata={
+                        "module": "registered_refined_clipped_collection",
+                        "source": postprocess.outputs.to_json(),
+                        "collection_id": collection_id,
+                        "slice_authority": "canonical_recording_refined_run",
+                        "selector_activation": False,
+                    },
+                )
+            )
+            detection_outputs = DetectionFragmentOutputs(
+                target_id=target.target_id,
+                collection_id=collection_id,
+                raw_detection_group_paths=(f"detect_runs/{native_canonical_run}",),
+                quality_source_group_path=f"detect_runs/{native_canonical_run}",
+                quality_group_path=f"detect_quality_runs/{detect_quality_run}",
+                refined_detection_group_paths=(
+                    f"refined_detect_runs/{canonical_refined_run}",
+                ),
+                finalized_collection_group_path=(
+                    f"experiment_index/finalized_runs/{collection_id}"
+                ),
+                terminal_job_key=collection_key,
+                artifact_key=collection_artifact,
+            )
+            target_payload["canonical_refined_run_id"] = canonical_refined_run
+            target_payload["detect_quality_source_group_path"] = (
+                f"detect_runs/{native_canonical_run}"
+            )
+            target_payload["detect_quality_group_path"] = (
+                f"detect_quality_runs/{detect_quality_run}"
+            )
+            downstream_detection_terminal = collection_key
+            downstream_detection_artifact = collection_artifact
+            downstream_detection_authority = {
+                "postprocess": postprocess.outputs.to_json(),
+                "collection_id": collection_id,
+                "collection_receipt": str(collection_receipt),
+            }
+        else:
+            detection_module = build_detection_fragment(
+                detection_inputs,
+                raw_module=raw_module,
+            )
+            jobs.extend(detection_module.jobs)
+            fragments.extend(detection_module.fragments)
+            detection_outputs = detection_module.outputs
         target_payload["detection_module"] = detection_outputs.to_json()
 
-        strict_clip_inputs = tuple(
-            StrictClipRefinedDetectionInput(
-                clip_index=int(clip["clip_index"]),
-                clip_id=str(clip["clip_id"]),
-                archive=(
-                    strict_storage_bundle
-                    / f"clip_{int(clip['clip_index']):06d}_{clip['clip_id']}"
-                    / "refined.zarr"
-                ),
-                run_id=f"strict_{clip['refined_detect_run']}",
+        storage_modules = None
+        if not modern_registered_pipeline:
+            strict_clip_inputs = tuple(
+                StrictClipRefinedDetectionInput(
+                    clip_index=int(clip["clip_index"]),
+                    clip_id=str(clip["clip_id"]),
+                    archive=(
+                        strict_storage_bundle
+                        / f"clip_{int(clip['clip_index']):06d}_{clip['clip_id']}"
+                        / "refined.zarr"
+                    ),
+                    run_id=f"strict_{clip['refined_detect_run']}",
+                )
+                for clip in clips
             )
-            for clip in clips
-        )
-        storage_modules = build_clipped_detection_storage_fragments(
-            ClippedDetectionEvidenceInputs(
-                workflow_id=workflow_id,
-                family=FAMILY,
-                target_id=target.target_id,
-                analysis_zarr=target.analysis_zarr,
-                recording_canonical_archive=target.analysis_zarr,
-                recording_canonical_run_id=native_canonical_run,
-                recording_identity=authority.recording_identity,
-                detection_plan_path=detection_plan_path,
-                collection_id=collection_id,
-                recording_dir=target.recording_dir,
-                bundle_root=strict_storage_bundle,
-                clips=tuple(
-                    ClipDetectionEvidenceInput(
-                        clip_index=int(clip["clip_index"]),
-                        clip_id=str(clip["clip_id"]),
-                        source_detect_group_path=str(clip["detect_group_path"]),
-                        source_refined_group_path=str(
-                            clip["refined_detect_group_path"]
-                        ),
-                        canonical_run_id=f"strict_{clip['detect_run']}",
-                        refined_run_id=f"strict_{clip['refined_detect_run']}",
-                    )
-                    for clip in clips
+            storage_modules = build_clipped_detection_storage_fragments(
+                ClippedDetectionEvidenceInputs(
+                    workflow_id=workflow_id,
+                    family=FAMILY,
+                    target_id=target.target_id,
+                    analysis_zarr=target.analysis_zarr,
+                    recording_canonical_archive=target.analysis_zarr,
+                    recording_canonical_run_id=native_canonical_run,
+                    recording_identity=authority.recording_identity,
+                    detection_plan_path=detection_plan_path,
+                    collection_id=collection_id,
+                    recording_dir=target.recording_dir,
+                    bundle_root=strict_storage_bundle,
+                    clips=tuple(
+                        ClipDetectionEvidenceInput(
+                            clip_index=int(clip["clip_index"]),
+                            clip_id=str(clip["clip_id"]),
+                            source_detect_group_path=str(clip["detect_group_path"]),
+                            source_refined_group_path=str(
+                                clip["refined_detect_group_path"]
+                            ),
+                            canonical_run_id=f"strict_{clip['detect_run']}",
+                            refined_run_id=f"strict_{clip['refined_detect_run']}",
+                        )
+                        for clip in clips
+                    ),
+                    repo=repo,
+                    run_root=run_root,
+                    max_concurrent=detect_refine_bundle_concurrency,
+                    upstream_job_keys=(detection_outputs.terminal_job_key,),
+                    required_artifacts=(detection_outputs.artifact_key,),
                 ),
-                repo=repo,
-                run_root=run_root,
-                max_concurrent=detect_refine_bundle_concurrency,
-                upstream_job_keys=(detection_outputs.terminal_job_key,),
-                required_artifacts=(detection_outputs.artifact_key,),
-            ),
-            ClippedStorageFinalizationInputs(
-                workflow_id=workflow_id,
-                family=FAMILY,
-                target_id=target.target_id,
-                analysis_zarr=target.analysis_zarr,
-                canonical_archive=target.analysis_zarr,
-                canonical_run_id=native_canonical_run,
-                clips=strict_clip_inputs,
-                clipped_binding_path=(
-                    strict_storage_bundle / "clipped_refined_detection_binding.json"
+                ClippedStorageFinalizationInputs(
+                    workflow_id=workflow_id,
+                    family=FAMILY,
+                    target_id=target.target_id,
+                    analysis_zarr=target.analysis_zarr,
+                    canonical_archive=target.analysis_zarr,
+                    canonical_run_id=native_canonical_run,
+                    clips=strict_clip_inputs,
+                    clipped_binding_path=(
+                        strict_storage_bundle
+                        / "clipped_refined_detection_binding.json"
+                    ),
+                    bundle_root=strict_storage_bundle,
+                    refined_run_id=f"refined_detection_snapshot_{target_label}",
+                    refined_lineage_id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"palette:refined-lineage:{authority.recording_identity}",
+                        )
+                    ),
+                    refined_snapshot_id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            "palette:refined-snapshot:"
+                            f"{authority.recording_identity}:{target_label}",
+                        )
+                    ),
+                    crop_run_id=f"crop_v2_{target_label}",
+                    recording_identity=authority.recording_identity,
+                    crop_purpose="keypoints_subject_masks",
+                    roi_width=512,
+                    roi_height=512,
+                    camera_id=authority.camera_serial,
+                    repo=repo,
+                    run_root=run_root,
                 ),
-                bundle_root=strict_storage_bundle,
-                refined_run_id=f"refined_detection_snapshot_{target_label}",
-                refined_lineage_id=str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"palette:refined-lineage:{authority.recording_identity}",
-                    )
-                ),
-                refined_snapshot_id=str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        "palette:refined-snapshot:"
-                        f"{authority.recording_identity}:{target_label}",
-                    )
-                ),
-                crop_run_id=f"crop_v2_{target_label}",
-                recording_identity=authority.recording_identity,
-                crop_purpose="keypoints_subject_masks",
-                roi_width=512,
-                roi_height=512,
-                camera_id=authority.camera_serial,
-                repo=repo,
-                run_root=run_root,
-            ),
-        )
-        jobs.extend(storage_modules.evidence.fragment.jobs)
-        jobs.extend(storage_modules.storage.fragment.jobs)
-        fragments.extend(
-            (storage_modules.evidence.fragment, storage_modules.storage.fragment)
-        )
-        target_payload["strict_detection_storage"] = {
-            "evidence": storage_modules.evidence.outputs.to_json(),
-            "storage": storage_modules.storage.outputs.to_json(),
-        }
+            )
+            jobs.extend(storage_modules.evidence.fragment.jobs)
+            jobs.extend(storage_modules.storage.fragment.jobs)
+            fragments.extend(
+                (storage_modules.evidence.fragment, storage_modules.storage.fragment)
+            )
+            target_payload["strict_detection_storage"] = {
+                "evidence": storage_modules.evidence.outputs.to_json(),
+                "storage": storage_modules.storage.outputs.to_json(),
+            }
+            downstream_detection_terminal = (
+                storage_modules.storage.outputs.terminal_job_key
+            )
+            downstream_detection_artifact = (
+                storage_modules.storage.outputs.crop_artifact_key
+            )
+            downstream_detection_authority = (
+                storage_modules.storage.outputs.to_json()
+            )
+        else:
+            target_payload["strict_detection_storage"] = None
         cache_array_key = f"cache_array:{target_safe}"
         cache_tasks: list[LsfExecutionTask] = []
         for bundle_index, start in enumerate(range(0, len(clips), cache_bundle_size)):
@@ -1160,7 +1353,7 @@ def build_plan(
                 mode=LsfExecutionMode.ARRAY,
                 max_concurrent=cache_array_concurrency,
                 resources=cache_gpu,
-                upstream=(storage_modules.storage.outputs.terminal_job_key,),
+                upstream=(downstream_detection_terminal,),
             )
         )
 
@@ -1779,15 +1972,15 @@ def build_plan(
                 LsfWorkflowFragment(
                     fragment_id=f"crop_roi_cache:{target_safe}",
                     jobs=(job_by_key[cache_array_key], job_by_key[proxy_key]),
-                    requires=(storage_modules.storage.outputs.crop_artifact_key,),
+                    requires=(downstream_detection_artifact,),
                     provides=(crop_cache_artifact,),
                     metadata={
                         "module": "crop_roi_cache",
                         "target_id": target.target_id,
                         "recording_layout": "clipped_collection",
                         "crop_authority": "proxy_crop_runs_bound_to_flat_roi_cache",
-                        "strict_crop_v2_gate": (
-                            storage_modules.storage.outputs.to_json()
+                        "finalized_detection_authority": (
+                            downstream_detection_authority
                         ),
                         "terminal_job_key": proxy_key,
                     },
@@ -1960,6 +2153,11 @@ def build_plan(
                 if job.execution_group is not None
                 and job.execution_group.mode is LsfExecutionMode.BUNDLE
             ),
+            "registered_dish_geometry": {
+                "gate_requirement": gate_requirement,
+                "gate_run": gate_run,
+                "selection_policy_id": policy_id,
+            },
         },
     )
     return ClippedInferencePlan(
@@ -1985,6 +2183,9 @@ def build_plan(
         cache_array_concurrency=int(cache_array_concurrency),
         mask_package_array_concurrency=int(mask_package_array_concurrency),
         detect_refine_bundle_concurrency=int(detect_refine_bundle_concurrency),
+        registered_gate_requirement=gate_requirement,
+        registered_gate_run=gate_run,
+        selection_policy_id=policy_id,
         lsf_workflow=workflow,
     )
 
@@ -2148,6 +2349,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-array-concurrency", type=int, default=2)
     parser.add_argument("--mask-package-array-concurrency", type=int, default=4)
     parser.add_argument("--detect-refine-bundle-concurrency", type=int, default=4)
+    parser.add_argument(
+        "--registered-gate-requirement",
+        choices=tuple(sorted(REGISTERED_GATE_REQUIREMENTS)),
+        default="off",
+    )
+    parser.add_argument("--registered-gate-run")
+    parser.add_argument(
+        "--selection-policy-id",
+        choices=("manual_review_only_v1", "corroborated_acquisition_v1"),
+        default="manual_review_only_v1",
+    )
     parser.add_argument("--no-cleanup-nrs-after-success", action="store_true")
     parser.add_argument(
         "--resume-existing-detections",
@@ -2209,6 +2421,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         cache_array_concurrency=args.cache_array_concurrency,
         mask_package_array_concurrency=args.mask_package_array_concurrency,
         detect_refine_bundle_concurrency=args.detect_refine_bundle_concurrency,
+        registered_gate_requirement=args.registered_gate_requirement,
+        registered_gate_run=args.registered_gate_run,
+        selection_policy_id=args.selection_policy_id,
     )
     result = (
         apply_plan(plan, runner=build_ssh_bsub_runner(args.submit_host))

@@ -41,6 +41,34 @@ WINDOW_FRACTIONS = (0.10, 0.50, 0.90)
 
 
 @dataclass(frozen=True)
+class CircleCandidate:
+    candidate_id: str
+    center_x_px: float
+    center_y_px: float
+    radius_px: float
+    angular_support_fraction: float
+    radial_residual_px: float
+    median_radial_gradient: float
+    evidence_score: float
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "geometry": {
+                "type": "circle",
+                "center_px": {"x": self.center_x_px, "y": self.center_y_px},
+                "radius_px": self.radius_px,
+            },
+            "coordinate_space": "camera_native_pixels",
+            "observed_feature_classification": "unclassified_concentric_rim_edge",
+            "angular_support_fraction": self.angular_support_fraction,
+            "radial_residual_px": self.radial_residual_px,
+            "median_radial_gradient": self.median_radial_gradient,
+            "evidence_score": self.evidence_score,
+        }
+
+
+@dataclass(frozen=True)
 class CircleFit:
     center_x_px: float
     center_y_px: float
@@ -48,6 +76,10 @@ class CircleFit:
     angular_support_fraction: float
     median_radial_gradient: float
     candidate_count: int
+    radial_residual_px: float = 0.0
+    selected_candidate_id: str | None = None
+    selection_reason: str = "median_consensus_v1"
+    frozen_candidates: tuple[CircleCandidate, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -58,10 +90,18 @@ class CircleFit:
             },
             "coordinate_space": "camera_native_pixels",
             "target_feature": TARGET_FEATURE,
+            "intended_target_feature": TARGET_FEATURE,
+            "observed_feature_classification": "unclassified_concentric_rim_edge",
             "target_plane": TARGET_PLANE,
             "angular_support_fraction": self.angular_support_fraction,
+            "radial_residual_px": self.radial_residual_px,
             "median_radial_gradient": self.median_radial_gradient,
             "candidate_count": self.candidate_count,
+            "selected_candidate_id": self.selected_candidate_id,
+            "selection_reason": self.selection_reason,
+            "frozen_candidates": [
+                candidate.to_json() for candidate in self.frozen_candidates
+            ],
         }
 
 
@@ -265,7 +305,7 @@ def _refine_and_score_circle(
     circle: tuple[float, float, float],
     *,
     radial_band_px: float,
-) -> tuple[tuple[float, float, float], float, float]:
+) -> tuple[tuple[float, float, float], float, float, float]:
     refined = circle
     peaks = np.empty(0, dtype=np.float64)
     for _ in range(2):
@@ -283,11 +323,67 @@ def _refine_and_score_circle(
 
     positive = peaks[peaks > 0]
     if len(positive) == 0:
-        return refined, 0.0, 0.0
+        return refined, 0.0, 0.0, float(radial_band_px)
     support_cutoff = max(float(np.percentile(gradient, 85.0)) * 0.35, 1.0)
     support = float(np.mean(peaks >= support_cutoff))
     median = float(np.median(positive))
-    return refined, support, median
+    points, peaks = _radial_evidence(
+        gradient,
+        refined,
+        radial_band_px=radial_band_px,
+    )
+    supported = peaks >= support_cutoff
+    if int(np.count_nonzero(supported)) < 3:
+        residual = float(radial_band_px)
+    else:
+        distances = np.hypot(
+            points[supported, 0] - refined[0],
+            points[supported, 1] - refined[1],
+        )
+        residual = float(np.median(np.abs(distances - refined[2])))
+    return refined, support, median, residual
+
+
+def score_fixed_circle_edge_support(
+    image: np.ndarray,
+    circle: tuple[float, float, float],
+    *,
+    radial_band_px: float = 4.0,
+) -> dict[str, Any]:
+    """Measure image support around a frozen circle without refining its geometry."""
+
+    gradient = _gradient_magnitude(image)
+    points, peaks = _radial_evidence(
+        gradient,
+        circle,
+        radial_band_px=radial_band_px,
+    )
+    positive = peaks[peaks > 0]
+    cutoff = max(float(np.percentile(gradient, 85.0)) * 0.35, 1.0)
+    supported = peaks >= cutoff
+    distances = np.hypot(points[:, 0] - circle[0], points[:, 1] - circle[1])
+    offsets = distances - circle[2]
+    return {
+        "status": "measured",
+        "method": "fixed_circle_radial_gradient_support_v1",
+        "geometry_frozen": True,
+        "radial_band_px": float(radial_band_px),
+        "angular_sample_count": int(len(peaks)),
+        "angular_edge_support_fraction": float(np.mean(supported)),
+        "median_radial_gradient": (
+            float(np.median(positive)) if len(positive) else 0.0
+        ),
+        "median_absolute_radial_offset_px": (
+            float(np.median(np.abs(offsets[supported])))
+            if int(np.count_nonzero(supported))
+            else float(radial_band_px)
+        ),
+        "signed_median_radial_offset_px": (
+            float(np.median(offsets[supported]))
+            if int(np.count_nonzero(supported))
+            else 0.0
+        ),
+    }
 
 
 def _deduplicate_candidates(
@@ -352,34 +448,69 @@ def fit_dish_circle(
         raise RuntimeError("no coarse dish-circle candidates were found")
 
     coarse_gradient = _gradient_magnitude(coarse)
-    ranked: list[tuple[float, tuple[float, float, float], float, float]] = []
+    ranked: list[tuple[float, tuple[float, float, float], float, float, float]] = []
     for candidate in candidates:
-        refined, support, median = _refine_and_score_circle(
+        refined, support, median, residual = _refine_and_score_circle(
             coarse_gradient, candidate, radial_band_px=10.0
         )
         score = median * (0.25 + support)
-        ranked.append((score, refined, support, median))
+        ranked.append((score, refined, support, median, residual))
     ranked.sort(key=lambda item: item[0], reverse=True)
-    _, coarse_circle, _, _ = ranked[0]
 
     inverse_scale = 1.0 / ((scale_x + scale_y) * 0.5)
-    full_circle = (
-        coarse_circle[0] / scale_x,
-        coarse_circle[1] / scale_y,
-        coarse_circle[2] * inverse_scale,
-    )
     full_gradient = _gradient_magnitude(image)
-    refined, support, median = _refine_and_score_circle(
-        full_gradient, full_circle, radial_band_px=max(12.0, 18.0 * inverse_scale)
-    )
-    cx, cy, radius = refined
-    if not all(math.isfinite(value) for value in refined) or radius <= 0:
-        raise RuntimeError("dish-circle refinement produced invalid geometry")
-    if not (
-        -0.05 * width <= cx <= 1.05 * width and -0.05 * height <= cy <= 1.05 * height
+    full_candidates: list[CircleCandidate] = []
+    for index, (_score, coarse_circle, _support, _median, _residual) in enumerate(
+        ranked
     ):
-        raise RuntimeError("dish-circle refinement placed the center outside the image")
-    fit = CircleFit(cx, cy, radius, support, median, len(candidates))
+        full_circle = (
+            coarse_circle[0] / scale_x,
+            coarse_circle[1] / scale_y,
+            coarse_circle[2] * inverse_scale,
+        )
+        refined, support, median, residual = _refine_and_score_circle(
+            full_gradient,
+            full_circle,
+            radial_band_px=max(12.0, 18.0 * inverse_scale),
+        )
+        cx, cy, radius = refined
+        if (
+            not all(math.isfinite(value) for value in refined)
+            or radius <= 0
+            or not (
+                -0.05 * width <= cx <= 1.05 * width
+                and -0.05 * height <= cy <= 1.05 * height
+            )
+        ):
+            continue
+        full_candidates.append(
+            CircleCandidate(
+                candidate_id=f"candidate_{index:03d}",
+                center_x_px=cx,
+                center_y_px=cy,
+                radius_px=radius,
+                angular_support_fraction=support,
+                radial_residual_px=residual,
+                median_radial_gradient=median,
+                evidence_score=median * (0.25 + support),
+            )
+        )
+    if not full_candidates:
+        raise RuntimeError("dish-circle refinement produced no valid candidates")
+    full_candidates.sort(key=lambda item: item.evidence_score, reverse=True)
+    selected = full_candidates[0]
+    fit = CircleFit(
+        selected.center_x_px,
+        selected.center_y_px,
+        selected.radius_px,
+        selected.angular_support_fraction,
+        selected.median_radial_gradient,
+        len(full_candidates),
+        radial_residual_px=selected.radial_residual_px,
+        selected_candidate_id=selected.candidate_id,
+        selection_reason="highest_frozen_radial_evidence_score_v1",
+        frozen_candidates=tuple(full_candidates),
+    )
     edge = np.clip(
         full_gradient / max(float(np.percentile(full_gradient, 99.5)), 1.0) * 255.0,
         0,
@@ -402,6 +533,11 @@ def consensus_circle(fits: Sequence[CircleFit]) -> CircleFit:
             np.median([fit.median_radial_gradient for fit in fits])
         ),
         candidate_count=sum(fit.candidate_count for fit in fits),
+        radial_residual_px=float(
+            np.median([fit.radial_residual_px for fit in fits])
+        ),
+        selected_candidate_id=None,
+        selection_reason="median_of_window_selected_candidates_v1",
     )
 
 
@@ -528,8 +664,16 @@ def decode_keyframe_window_medians_pynvvc(
                     f"decoded keyframe {target} has unexpected shape {frame.shape}"
                 )
             stack[row] = frame
-            hasher.update(frame.tobytes(order="C"))
-            seeks.append({"window": spec.name, **proof})
+            frame_bytes = frame.tobytes(order="C")
+            frame_sha256 = _sha256_bytes(frame_bytes)
+            hasher.update(frame_bytes)
+            seeks.append(
+                {
+                    "window": spec.name,
+                    "decoded_frame_sha256": frame_sha256,
+                    **proof,
+                }
+            )
             del decoder, frame
         medians[spec.name] = temporal_median(stack)
         frame_hashes[spec.name] = hasher.hexdigest()
@@ -580,6 +724,7 @@ def render_acquisition_reveal(
         int(observation["camera"]["width"]),
     )
     reveal_files: dict[str, dict[str, Any]] = {}
+    support_by_window: dict[str, dict[str, Any]] = {}
     for name in WINDOW_NAMES:
         image = composites[name]
         if image.shape != expected_shape:
@@ -620,6 +765,35 @@ def render_acquisition_reveal(
             "delta_center_y_px": palette[1] - acquisition[1],
             "delta_radius_px": palette[2] - acquisition[2],
         }
+        support_by_window[name] = score_fixed_circle_edge_support(
+            image,
+            acquisition,
+        )
+
+    support_values = [
+        support_by_window[name]["angular_edge_support_fraction"]
+        for name in WINDOW_NAMES
+    ]
+    residual_values = [
+        support_by_window[name]["median_absolute_radial_offset_px"]
+        for name in WINDOW_NAMES
+    ]
+    gradient_values = [
+        support_by_window[name]["median_radial_gradient"] for name in WINDOW_NAMES
+    ]
+    acquisition_support = {
+        "status": "measured",
+        "method": "fixed_circle_radial_gradient_support_v1",
+        "fit_frozen_before_measurement": True,
+        "coordinate_space": "camera_native_pixels",
+        "geometry": observation["accepted_inner_rim_boundary"]["geometry"],
+        "source_observation_sha256": _sha256_bytes(observation_bytes),
+        "windows": support_by_window,
+        "median_angular_edge_support_fraction": float(np.median(support_values)),
+        "minimum_angular_edge_support_fraction": float(min(support_values)),
+        "median_absolute_radial_offset_px": float(np.median(residual_values)),
+        "median_radial_gradient": float(np.median(gradient_values)),
+    }
 
     reveal = {
         "schema_id": f"{SCHEMA_ID}.acquisition_reveal",
@@ -636,6 +810,7 @@ def render_acquisition_reveal(
             "accepted_inner_rim_boundary": observation["accepted_inner_rim_boundary"],
         },
         "files": reveal_files,
+        "acquisition_boundary_edge_support": acquisition_support,
         "purpose": "visual_reveal_only_after_blind_palette_fit_was_frozen",
         "prohibitions": [
             "not_a_mask_selection",
@@ -795,12 +970,34 @@ def run_probe(args: argparse.Namespace) -> Path:
                 "center_frame": spec.center_frame,
                 "frame_indices": list(spec.frame_indices),
                 "decoded_luma_sequence_sha256": frame_hashes[spec.name],
+                "decoded_frames": [
+                    {
+                        "frame_index": int(item["target_frame_index"]),
+                        "decoded_frame_sha256": item["decoded_frame_sha256"],
+                    }
+                    for item in decode["seeks"]
+                    if item["window"] == spec.name
+                ],
                 "composite_pixel_sha256": _sha256_bytes(composite.tobytes(order="C")),
                 "fit": fit.to_json(),
                 "files": files,
             }
 
         consensus = consensus_circle(fits)
+        temporal_stability = {
+            "center_x_range": float(
+                max(fit.center_x_px for fit in fits)
+                - min(fit.center_x_px for fit in fits)
+            ),
+            "center_y_range": float(
+                max(fit.center_y_px for fit in fits)
+                - min(fit.center_y_px for fit in fits)
+            ),
+            "radius_range": float(
+                max(fit.radius_px for fit in fits)
+                - min(fit.radius_px for fit in fits)
+            ),
+        }
         report = {
             "schema_id": SCHEMA_ID,
             "schema_version": SCHEMA_VERSION,
@@ -814,6 +1011,7 @@ def run_probe(args: argparse.Namespace) -> Path:
                 "video_path": str(video_path),
                 "video_size_bytes": video_path.stat().st_size,
                 "video_mtime_ns": video_path.stat().st_mtime_ns,
+                "video_sha256": _sha256_file(video_path),
                 "summary_path": str(summary_path),
                 "summary_sha256": _sha256_file(summary_path),
                 "keyframe_summary_path": str(keyframe_path),
@@ -839,10 +1037,21 @@ def run_probe(args: argparse.Namespace) -> Path:
             "decode": decode,
             "windows": windows,
             "consensus_fit": consensus.to_json(),
+            "temporal_stability_px": temporal_stability,
+            "fit_evidence_contract": {
+                "all_window_candidates_frozen": True,
+                "candidate_geometry_revealed_to_acquisition_fit": False,
+                "candidate_feature_classification": (
+                    "unclassified_concentric_rim_edge"
+                ),
+                "selection_scope": "window_consensus_for_review_not_operational_selection",
+            },
             "environment": {
                 "hostname": socket.gethostname(),
                 "platform": platform.platform(),
                 "lsf_job_id": os.environ.get("LSB_JOBID"),
+                "numpy_version": np.__version__,
+                "opencv_version": cv2.__version__,
             },
             "prohibitions": [
                 "not_a_mask_selection",

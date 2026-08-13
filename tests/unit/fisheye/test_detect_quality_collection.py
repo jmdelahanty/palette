@@ -189,6 +189,73 @@ def test_collection_quality_parallel_output_is_keyed_sharded_and_promoted(
     assert validation["instance_key_exact"] is True
 
 
+def test_collection_quality_reads_nested_canonical_instance_table(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "analysis.zarr"
+    root = zarr.open_group(path, mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "width": 100,
+            "height": 100,
+            "total_frames": 4,
+            "experiment_setup": {
+                "setup_type": "single_dish",
+                "total_expected_fish": 1,
+            },
+        }
+    )
+    run = root.create_group("detect_runs").create_group("canonical")
+    instances = run.create_group("instances")
+    instances.create_array(
+        "frame_indices",
+        data=np.asarray([0, 1, 2], dtype=np.int32),
+        chunks=(2,),
+        shards=(4,),
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.asarray(
+            [
+                [0.10, 0.10, 0.10, 0.10],
+                [0.11, 0.10, 0.10, 0.10],
+                [0.12, 0.10, 0.10, 0.10],
+            ],
+            dtype=np.float32,
+        ),
+        chunks=(2, 4),
+        shards=(4, 4),
+    )
+    keys = np.asarray([301, 302, 303], dtype=np.uint64)
+    instances.create_array(
+        "instance_key",
+        data=keys,
+        chunks=(2,),
+        shards=(4,),
+    )
+
+    result = run_collection_detect_quality(
+        zarr_path=path,
+        source_group_path="detect_runs/canonical",
+        output_run="quality_canonical",
+        recording_frame_count=4,
+        width=100,
+        height=100,
+        shard_rows=4,
+        row_chunk_rows=2,
+        frame_chunk_rows=2,
+        workers=1,
+        apply=True,
+    )
+
+    assert result["status"] == "complete"
+    quality = zarr.open_group(path, mode="r", use_consolidated=False)[
+        "detect_quality_runs/quality_canonical"
+    ]
+    np.testing.assert_array_equal(quality["instance_key"][:], keys)
+    assert quality.attrs["source_detection_group_path"] == "detect_runs/canonical"
+
+
 def test_parallel_and_serial_finalizers_are_bit_exact(tmp_path: Path) -> None:
     path = tmp_path / "analysis.zarr"
     _write_source(path)

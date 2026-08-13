@@ -1037,6 +1037,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, default=keypoints.DEFAULT_REGISTRY)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
+    parser.add_argument(
+        "--registered-gate-requirement",
+        choices=("off", "if_available", "required"),
+        default="off",
+    )
+    parser.add_argument("--registered-gate-run")
     parser.add_argument("--model-input-contract", type=Path, required=True)
     parser.add_argument("--pose-schema", default="traditional_v2")
     parser.add_argument("--batch-size-kp", type=int, default=256)
@@ -1254,6 +1260,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         cache_bindings=cache_bindings,
         upstream_jobs=cache_jobs,
+        registered_gate_requirement=args.registered_gate_requirement,
+        registered_gate_run=args.registered_gate_run,
     )
     plan = build_plan(
         keypoint_plan=keypoint_plan,

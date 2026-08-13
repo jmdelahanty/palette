@@ -1011,8 +1011,19 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
     refined_detect_parent.add_group(
         "refined_detect_001",
         attrs={
+            "palette_run_completion_status": "complete",
+            "finalized_recording_authority": True,
             "created_utc": "2026-02-15T00:05:00+00:00",
             "source_detect_run": "detect_001",
+            "registered_detection_gate_requirement": "required",
+            "registered_detection_gate": {
+                "requirement": "required",
+                "status": "applied",
+                "applied": True,
+                "gate_run": "gate_001",
+                "selection_record_schema_version": 2,
+                "comparison_run": "comparison_001",
+            },
             "parameters": {"refine_mode": "interpolated"},
             "coverage_comparison": {"interpolated": {"coverage_percent": 75.0}},
             "detect_review_status": {
@@ -1020,6 +1031,21 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
                 "method": "manual",
                 "reviewer": "pytest",
                 "timestamp_utc": "2026-02-15T00:06:00+00:00",
+            },
+        },
+    )
+    refined_detect_parent.add_group(
+        "refined_detect_001_working",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "created_utc": "2026-02-15T00:04:00+00:00",
+            "source_detect_run": "detect_001",
+            "registered_detection_gate_requirement": "required",
+            "registered_detection_gate": {
+                "requirement": "required",
+                "status": "applied",
+                "applied": True,
+                "gate_run": "gate_001",
             },
         },
     )
@@ -1190,6 +1216,53 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
     )
 
     analysis = root.add_group("analysis")
+    geometry_parent = analysis.add_group("arena_geometry_runs")
+    geometry_parent.add_group(
+        "acquisition_001",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "candidate_kind": "acquisition_registered_dish",
+        },
+    )
+    geometry_parent.add_group(
+        "offline_fit_001",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "candidate_kind": "palette_recording_image_fit",
+        },
+    )
+    comparison_parent = analysis.add_group("arena_geometry_comparison_runs")
+    comparison_parent.add_group(
+        "comparison_001",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "schema_id": "palette.arena_geometry_comparison_run",
+            "review_required": False,
+        },
+    )
+    selection_parent = analysis.add_group("arena_geometry_selection")
+    selection_parent.add_group(
+        "selection_001",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "selection_record": {
+                "schema_version": 2,
+                "decision": {"comparison_binding": {"run_name": "comparison_001"}},
+            },
+        },
+    )
+    gate_parent = analysis.add_group("detection_gate_runs")
+    gate_parent.add_group(
+        "gate_001",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "schema_id": "palette.registered_detection_gate_run",
+            "selection_run": "selection_001",
+            "selection_record_schema_version": 2,
+            "comparison_run": "comparison_001",
+            "source_detection_group_path": "detect_runs/detect_001",
+        },
+    )
     stimulus_parent = analysis.add_group("stimulus_runs", attrs={"latest": "stimulus_001"})
     stimulus_parent.add_group(
         "stimulus_001",
@@ -9125,13 +9198,13 @@ def test_backfill_recording_step_status_dry_run_no_write(
         zarr_use_filter="all",
     )
     assert summary["datasets_scanned"] == 1
-    assert summary["rows_inserted"] == 31
+    assert summary["rows_inserted"] == 37
     assert summary["rows_updated"] == 0
     assert summary["rows_skipped"] == 0
 
     rows_by_status = summary["rows_by_status"]
     assert isinstance(rows_by_status, dict)
-    assert int(rows_by_status["ok"]) == 31
+    assert int(rows_by_status["ok"]) == 37
     assert int(rows_by_status["missing"]) == 0
     assert int(rows_by_status["absent"]) == 0
     assert int(rows_by_status["na"]) == 0
@@ -9176,10 +9249,10 @@ def test_backfill_recording_step_status_apply_and_convergent(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert applied["rows_inserted"] == 31
+    assert applied["rows_inserted"] == 37
     assert applied["rows_updated"] == 0
     assert applied["rows_skipped"] == 0
-    assert applied["history_rows_inserted"] == 31
+    assert applied["history_rows_inserted"] == 37
 
     rows = registry.conn.execute(
         """
@@ -9190,10 +9263,16 @@ def test_backfill_recording_step_status_apply_and_convergent(
         """,
         ("dataset_step_a",),
     ).fetchall()
-    assert len(rows) == 31
+    assert len(rows) == 37
     by_step = {str(row["step_name"]): row for row in rows}
     assert set(by_step.keys()) == {
         "background",
+        "recording_geometry_import",
+        "arena_geometry_offline_fit",
+        "arena_geometry_comparison",
+        "arena_geometry_selection",
+        "registered_detection_gate",
+        "registered_detection_gate_consumption",
         "calibration",
         "crop",
         "detect",
@@ -9345,14 +9424,14 @@ def test_backfill_recording_step_status_apply_and_convergent(
     )
     assert repeat["rows_inserted"] == 0
     assert repeat["rows_updated"] == 0
-    assert repeat["rows_skipped"] == 31
+    assert repeat["rows_skipped"] == 37
     assert repeat["history_rows_inserted"] == 0
 
     history_count = registry.conn.execute(
         "SELECT COUNT(*) AS n FROM recording_step_status_history WHERE dataset_id = ?;",
         ("dataset_step_a",),
     ).fetchone()
-    assert history_count is not None and int(history_count["n"]) == 31
+    assert history_count is not None and int(history_count["n"]) == 37
     registry.close()
 
 
@@ -9406,7 +9485,7 @@ def test_backfill_preserves_operator_inferred_calibration_until_zarr_has_scale(
         zarr_use_filter="all",
     )
     assert preserved["rows_updated"] == 0
-    assert preserved["rows_skipped"] == 31
+    assert preserved["rows_skipped"] == 37
     assert preserved["history_rows_inserted"] == 0
     row = registry.conn.execute(
         """
@@ -9430,7 +9509,7 @@ def test_backfill_preserves_operator_inferred_calibration_until_zarr_has_scale(
         zarr_use_filter="all",
     )
     assert replaced["rows_updated"] == 1
-    assert replaced["rows_skipped"] == 30
+    assert replaced["rows_skipped"] == 36
     assert replaced["history_rows_inserted"] == 1
     row = registry.conn.execute(
         """
@@ -10793,7 +10872,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=("recording_scope_a",),
         zarr_use_filter="all",
     )
-    assert by_recording["rows_inserted"] == 31
+    assert by_recording["rows_inserted"] == 37
     assert by_recording["datasets_skipped_recording_filter"] == 1
 
     by_use = _backfill_recording_step_status(
@@ -10803,7 +10882,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="analysis",
     )
-    assert by_use["rows_inserted"] == 31
+    assert by_use["rows_inserted"] == 37
     assert by_use["datasets_skipped_zarr_use_filter"] == 1
 
     by_scope = _backfill_recording_step_status(
@@ -10813,7 +10892,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert by_scope["rows_inserted"] == 31
+    assert by_scope["rows_inserted"] == 37
     assert by_scope["datasets_skipped_path"] == 1
 
     current_count = registry.conn.execute(

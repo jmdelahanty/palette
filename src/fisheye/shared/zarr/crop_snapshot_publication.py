@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 import uuid
 
 import numpy as np
@@ -178,8 +178,17 @@ def _rebind_authorities(
     source: BoundRefinedDetectionCropSource,
     pixels: BoundCropPixelAuthority,
     expected_camera_identity: str,
+    explicit_refined_source: bool,
 ) -> BoundRefinedDetectionCropSource:
-    observed = bind_refined_detection_crop_source(archive)
+    observed = (
+        bind_refined_detection_crop_source(
+            archive,
+            run_id=source.run_id,
+            allow_selector_ineligible_benchmark=True,
+        )
+        if explicit_refined_source
+        else bind_refined_detection_crop_source(archive)
+    )
     _require_same_refined_source(source, observed)
     pixels.assert_verified()
     if pixels.pixel_authority.camera_identity != expected_camera_identity:
@@ -189,7 +198,14 @@ def _rebind_authorities(
     return observed
 
 
-def _mark_local_production_candidate(run: Any, *, source_run_id: str) -> None:
+def _mark_local_production_candidate(
+    run: Any,
+    *,
+    source_run_id: str,
+    source_manifest_digest: str,
+    registered_gate_requirement: str,
+    registered_gate_evidence: Mapping[str, Any] | None,
+) -> None:
     attrs = dict(run.attrs)
     attrs.pop("shadow_only", None)
     attrs.pop("benchmark_only", None)
@@ -200,6 +216,15 @@ def _mark_local_production_candidate(run: Any, *, source_run_id: str) -> None:
             "stage_selector_eligible": False,
             "production_selector_activation": "deferred",
             "source_refined_run_id": source_run_id,
+            "source_refined_manifest_digest": source_manifest_digest,
+            "source_registered_detection_gate_requirement": (
+                registered_gate_requirement
+            ),
+            "source_registered_detection_gate": (
+                None
+                if registered_gate_evidence is None
+                else json_attr_safe(dict(registered_gate_evidence))
+            ),
         }
     )
     run.attrs.put(attrs)
@@ -342,6 +367,10 @@ def publish_crop_geometry_production_candidate(
     profile: StorageProfile = PUBLISHED_HTTP_V1,
     copy_backend: str = "python",
     keep_scratch: bool = False,
+    source_refined_run_id: str | None = None,
+    registered_gate_requirement: str = "off",
+    registered_gate_run: str | None = None,
+    registered_gate_validator: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, object]:
     """Publish a complete crop candidate without activating production state."""
 
@@ -360,9 +389,94 @@ def publish_crop_geometry_production_candidate(
     if target.exists():
         raise FileExistsError(f"Immutable crop candidate already exists: {target}")
 
-    source = bind_refined_detection_crop_source(archive)
-    if source.selection_mode != "approved_authoritative_refined_v1":
+    explicit_refined_source = bool(str(source_refined_run_id or "").strip())
+    source = (
+        bind_refined_detection_crop_source(
+            archive,
+            run_id=str(source_refined_run_id).strip(),
+            allow_selector_ineligible_benchmark=True,
+        )
+        if explicit_refined_source
+        else bind_refined_detection_crop_source(archive)
+    )
+    if not explicit_refined_source and source.selection_mode != "approved_authoritative_refined_v1":
         raise RuntimeError("Crop production requires the approved refined authority.")
+    gate_requirement = str(registered_gate_requirement).strip()
+    if gate_requirement not in {"off", "if_available", "required"}:
+        raise ValueError(
+            "registered_gate_requirement must be off, if_available, or required."
+        )
+    if gate_requirement != "off" and not explicit_refined_source:
+        raise RuntimeError(
+            "Configured registered geometry requires one explicit finalized refined run."
+        )
+    if gate_requirement == "required" and not str(registered_gate_run or "").strip():
+        raise ValueError("Required-policy crop publication needs one exact gate run.")
+    gate_evidence: Mapping[str, Any] | None = None
+    if explicit_refined_source:
+        if (
+            source.run_group.attrs.get("finalized_recording_authority") is not True
+            or source.run_group.attrs.get("immutable_snapshot") is not True
+        ):
+            raise RuntimeError(
+                "Explicit crop source must be a finalized immutable recording authority."
+            )
+        observed_requirement = str(
+            source.run_group.attrs.get("registered_detection_gate_requirement") or ""
+        ).strip()
+        if observed_requirement != gate_requirement:
+            raise RuntimeError(
+                "Finalized refined source gate requirement differs from crop policy."
+            )
+        raw_gate_evidence = source.run_group.attrs.get("registered_detection_gate")
+        if not isinstance(raw_gate_evidence, Mapping):
+            raise RuntimeError("Finalized refined source lacks gate-consumption evidence.")
+        gate_evidence = raw_gate_evidence
+        applied = (
+            gate_evidence.get("applied") is True
+            and gate_evidence.get("status") == "applied"
+        )
+        expected_gate = str(registered_gate_run or "").strip() or None
+        observed_gate = str(gate_evidence.get("gate_run") or "").strip() or None
+        if expected_gate is not None and observed_gate != expected_gate:
+            raise RuntimeError(
+                "Finalized refined source consumed a different registered gate."
+            )
+        if gate_requirement == "required" and not applied:
+            raise RuntimeError(
+                "Required-policy crop publication needs applied gate consumption."
+            )
+        if applied:
+            if registered_gate_validator is None:
+                raise RuntimeError(
+                    "Applied registered geometry requires an explicit current-gate "
+                    "validator at the crop publication boundary."
+                )
+            current_gate = registered_gate_validator(
+                archive,
+                source_group_path=str(
+                    gate_evidence.get("source_detection_group_path")
+                    or gate_evidence.get("source_detection_path")
+                    or ""
+                ),
+                gate_run=str(observed_gate or ""),
+                expected_instance_keys=np.asarray(
+                    source.arrays["source_detections/instance_key"][...],
+                    dtype=np.uint64,
+                ),
+                require_comparison_bound_selection=True,
+            )
+            current_gate.pop("inside", None)
+            mismatched = [
+                key
+                for key, value in current_gate.items()
+                if key in gate_evidence and gate_evidence.get(key) != value
+            ]
+            if mismatched:
+                raise RuntimeError(
+                    "Finalized refined gate evidence is stale at crop publication: "
+                    + ", ".join(sorted(mismatched))
+                )
     pixels = bind_refined_crop_source_pixel_authority(
         source,
         expected_camera_identity=camera_identity,
@@ -403,7 +517,13 @@ def publish_crop_geometry_production_candidate(
         )
         local_run = local_archive / "crop_runs" / candidate_id
         local_group = zarr.open_group(str(local_run), mode="a", use_consolidated=False)
-        _mark_local_production_candidate(local_group, source_run_id=source.run_id)
+        _mark_local_production_candidate(
+            local_group,
+            source_run_id=source.run_id,
+            source_manifest_digest=str(source.manifest["payload_digest"]),
+            registered_gate_requirement=gate_requirement,
+            registered_gate_evidence=gate_evidence,
+        )
         local_manifest, local_direct, local_consolidated = _build_and_persist_manifest(
             archive_path=local_archive,
             run_id=candidate_id,
@@ -425,6 +545,7 @@ def publish_crop_geometry_production_candidate(
             source=source,
             pixels=pixels,
             expected_camera_identity=camera_identity,
+            explicit_refined_source=explicit_refined_source,
         )
         current_prepared = PreparedCropGeometrySnapshot(
             dimensions=prepared.dimensions,
@@ -483,6 +604,10 @@ def publish_crop_geometry_production_candidate(
                 "source_refined_manifest_digest": source.manifest["payload_digest"],
                 "source_pixel_authority_digest": pixels.binding_document_digest,
                 "selector_activation": "deferred",
+                "registered_gate_requirement": gate_requirement,
+                "registered_gate_run": (
+                    None if gate_evidence is None else gate_evidence.get("gate_run")
+                ),
             },
         )
         imported = True
@@ -492,6 +617,7 @@ def publish_crop_geometry_production_candidate(
             source=source,
             pixels=pixels,
             expected_camera_identity=camera_identity,
+            explicit_refined_source=explicit_refined_source,
         )
         final_prepared = PreparedCropGeometrySnapshot(
             dimensions=prepared.dimensions,
@@ -542,6 +668,14 @@ def publish_crop_geometry_production_candidate(
             ],
             "source_refined_run_id": source.run_id,
             "source_refined_manifest_digest": source.manifest["payload_digest"],
+            "source_refined_selection_mode": source.selection_mode,
+            "registered_gate_requirement": gate_requirement,
+            "registered_gate_run": (
+                None if gate_evidence is None else gate_evidence.get("gate_run")
+            ),
+            "registered_gate_applied": bool(
+                gate_evidence is not None and gate_evidence.get("applied") is True
+            ),
             "source_pixel_authority_digest": pixels.binding_document_digest,
             "source_video_path": str(pixels.source_video_path),
             "storage_profile_id": profile.profile_id,

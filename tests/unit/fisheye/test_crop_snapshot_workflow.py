@@ -59,6 +59,26 @@ def test_crop_fragment_uses_same_publisher_for_whole_recording(tmp_path: Path) -
     )
 
 
+def test_required_crop_fragment_binds_exact_finalized_gate_authority(
+    tmp_path: Path,
+) -> None:
+    values = _inputs(tmp_path, family="analysis.whole")
+    module = build_crop_snapshot_fragment(
+        CropSnapshotFragmentInputs(
+            **{
+                **values.__dict__,
+                "source_refined_run": "refined_final",
+                "registered_gate_requirement": "required",
+                "registered_gate_run": "gate_001",
+            }
+        )
+    )
+    command = " ".join(module.fragment.jobs[0].command)
+    assert "--source-refined-run refined_final" in command
+    assert "--registered-gate-requirement required" in command
+    assert "--registered-gate-run gate_001" in command
+
+
 def test_crop_candidate_cli_builds_fixed_policy_and_writes_receipt(
     monkeypatch,
     tmp_path: Path,

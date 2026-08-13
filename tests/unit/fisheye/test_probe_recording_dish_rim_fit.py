@@ -92,6 +92,12 @@ def test_fit_dish_circle_uses_radial_evidence() -> None:
     assert fit.radius_px == pytest.approx(expected[2], abs=6.0)
     assert fit.angular_support_fraction > 0.70
     assert fit.candidate_count >= 1
+    assert fit.radial_residual_px >= 0.0
+    assert len(fit.frozen_candidates) == fit.candidate_count
+    assert fit.selected_candidate_id in {
+        candidate.candidate_id for candidate in fit.frozen_candidates
+    }
+    assert fit.selection_reason == "highest_frozen_radial_evidence_score_v1"
     assert edge.shape == (512, 512)
     assert edge.dtype == np.uint8
 
@@ -145,6 +151,10 @@ def test_acquisition_reveal_does_not_modify_frozen_fit_report(tmp_path: Path) ->
     reveal = json.loads(reveal_path.read_text())
     assert reveal["purpose"] == "visual_reveal_only_after_blind_palette_fit_was_frozen"
     assert reveal["files"]["early"]["delta_radius_px"] == pytest.approx(1.0)
+    support = reveal["acquisition_boundary_edge_support"]
+    assert support["fit_frozen_before_measurement"] is True
+    assert support["minimum_angular_edge_support_fraction"] > 0.5
+    assert support["geometry"] == observation["accepted_inner_rim_boundary"]["geometry"]
     assert (tmp_path / "early_acquisition_reveal.png").is_file()
 
 

@@ -56,6 +56,8 @@ LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 DEFAULT_DETECT_FAMILY_PATH = "detect_runs"
 _REFINED_DETECT_STATUS_SOURCE = "runtime_refine_detect"
 _DISH_MASK_QUALITY_LABEL = 5
+_REGISTERED_DISH_GATE_QUALITY_LABEL = 6
+_REGISTERED_GATE_REQUIREMENTS = frozenset({"off", "if_available", "required"})
 _DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE = (
     "Interpolation overrides are deprecated and unsupported for refine_detect. "
     "The current sparse-first refine_detect workflow always runs with interpolation disabled."
@@ -460,6 +462,89 @@ def _apply_dish_mask_quality_gate(
     return labels, stats
 
 
+def _apply_registered_detection_gate(
+    *,
+    zarr_path: str | Path,
+    source_detect_path: str,
+    raw_instance_keys: Optional[np.ndarray],
+    detection_quality_labels: np.ndarray,
+    requirement: str,
+    gate_run: Optional[str],
+) -> Tuple[np.ndarray, Dict[str, object]]:
+    """Join one exact keyed gate or preserve an explicit ungated disposition."""
+
+    mode = str(requirement or "off").strip()
+    if mode not in _REGISTERED_GATE_REQUIREMENTS:
+        raise ValueError(
+            "registered_gate_requirement must be off, if_available, or required."
+        )
+    labels = np.asarray(detection_quality_labels, dtype=np.int8).reshape(-1).copy()
+    stats: Dict[str, object] = {
+        "requirement": mode,
+        "status": "off" if mode == "off" else "unavailable",
+        "applied": False,
+        "gate_run": str(gate_run).strip() if gate_run is not None else None,
+        "source_detection_path": source_detect_path,
+        "row_count": int(labels.shape[0]),
+        "rejected_count": 0,
+        "rejection_reason": "outside_registered_detection_gate",
+    }
+    if mode == "off":
+        stats["reason"] = (
+            "configured_off_gate_run_ignored"
+            if gate_run is not None
+            else "configured_off"
+        )
+        return labels, stats
+    if raw_instance_keys is None:
+        message = "Modern registered gating requires source detection instance_key."
+        if mode == "required":
+            raise ValueError(message)
+        stats.update({"status": "rejected_invalid", "reason": message})
+        return labels, stats
+    if gate_run is None or not str(gate_run).strip():
+        message = "No exact registered detection gate run was configured."
+        if mode == "required":
+            raise ValueError(message)
+        stats["reason"] = message
+        return labels, stats
+    try:
+        from ..analysis_workflows.materializers.registered_detection_gate import (
+            validate_registered_detection_gate_consumption,
+        )
+
+        evidence = validate_registered_detection_gate_consumption(
+            zarr_path,
+            source_group_path=source_detect_path,
+            gate_run=str(gate_run),
+            expected_instance_keys=raw_instance_keys,
+            require_comparison_bound_selection=True,
+        )
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        if mode == "required":
+            raise ValueError(
+                f"Required registered detection gate is invalid: {message}"
+            ) from exc
+        stats.update({"status": "rejected_invalid", "reason": message})
+        return labels, stats
+    inside = np.asarray(evidence.pop("inside"), dtype=bool).reshape(-1)
+    if inside.shape != labels.shape:
+        raise ValueError("Registered gate row count differs from quality labels.")
+    outside = ~inside
+    labels[outside] = np.int8(_REGISTERED_DISH_GATE_QUALITY_LABEL)
+    stats.update(evidence)
+    stats.update(
+        {
+            "status": "applied",
+            "applied": True,
+            "reason": "exact_keyed_gate_join_validated",
+            "rejected_count": int(np.count_nonzero(outside)),
+        }
+    )
+    return labels, stats
+
+
 def _quality_guardrail_error(detect_run: str, reason: str, quality_run: Optional[str] = None) -> ValueError:
     target = f"quality run '{quality_run}'" if quality_run else "latest quality run"
     return ValueError(
@@ -700,6 +785,11 @@ def filter_detections(
     dish_mask = detection_quality_labels == _DISH_MASK_QUALITY_LABEL
     if np.any(dish_mask):
         drop_reasons['outside_dish_mask'] = int(np.sum(dish_mask))
+    registered_gate = detection_quality_labels == _REGISTERED_DISH_GATE_QUALITY_LABEL
+    if np.any(registered_gate):
+        drop_reasons['outside_registered_detection_gate'] = int(
+            np.sum(registered_gate)
+        )
     
     # Only keep clean detections (label=0)
     # This also excludes multi-detections (label=4) if present
@@ -1047,6 +1137,8 @@ def interpolate_detections(
 
 
 def _filtered_reason_from_quality_label(label: int) -> str:
+    if label == _REGISTERED_DISH_GATE_QUALITY_LABEL:
+        return "outside_registered_detection_gate"
     if label == _DISH_MASK_QUALITY_LABEL:
         return "outside_dish_mask"
     if label == 4:
@@ -1218,6 +1310,8 @@ def create_refined_run(
     refined_run_name: Optional[str] = None,
     dish_mask_boundary_tolerance_mm: Optional[float] = None,
     pixels_per_mm_camera: Optional[float] = None,
+    registered_gate_requirement: str = "off",
+    registered_gate_run: Optional[str] = None,
     stage_selector_eligible: bool = True,
     emit_completion_status: bool = True,
 ) -> str:
@@ -1247,6 +1341,10 @@ def create_refined_run(
             dish boundary. Defaults to 0.5 mm when a dish mask is present.
         pixels_per_mm_camera: Explicit camera-space calibration override. The
             override is recorded in provenance and does not mutate Zarr calibration.
+        registered_gate_requirement: Explicit modern geometry mode: off,
+            if_available, or required.
+        registered_gate_run: Exact immutable detection-gate run to join. Mutable
+            latest pointers are never resolved by refinement.
         stage_selector_eligible: Whether completion may update the refined-run
             selectors. Set false for explicitly selected canaries and review seeds.
         emit_completion_status: Whether to project the completed stage into the
@@ -1348,6 +1446,13 @@ def create_refined_run(
     console.print("\nLoading detection data...")
     bbox_coords = detect_table['bbox_norm_coords'][:]
     frame_indices = detect_table['frame_indices'][:]
+    raw_instance_keys = (
+        np.asarray(detect_table["instance_key"][:], dtype=np.uint64).reshape(-1)
+        if "instance_key" in detect_table
+        else None
+    )
+    if raw_instance_keys is not None and raw_instance_keys.shape[0] != len(bbox_coords):
+        raise ValueError("detect instance_key length does not match detection row count.")
 
     sampled_import, sampled_meta = _read_sampled_import_meta(root)
     require_quality_for_run = bool(require_detect_quality and not sampled_import)
@@ -1394,18 +1499,30 @@ def create_refined_run(
         refine_mode = "passthrough"
         param_source = "sampled_import_guard"
 
-    dish_mask_spec = _read_dish_mask_spec(root, detect_group)
-    if dish_mask_spec is not None:
-        dish_mask_tolerance = resolve_dish_mask_boundary_tolerance(
-            root,
-            source_group=detect_group,
-            tolerance_mm=resolved_dish_tolerance_mm,
-            pixels_per_mm_camera=resolved_pixels_per_mm_camera,
+    detection_quality_labels, registered_detection_gate = (
+        _apply_registered_detection_gate(
+            zarr_path=zarr_path,
+            source_detect_path=source_detect_path,
+            raw_instance_keys=raw_instance_keys,
+            detection_quality_labels=detection_quality_labels,
+            requirement=registered_gate_requirement,
+            gate_run=registered_gate_run,
         )
-        dish_mask_spec = apply_dish_mask_boundary_tolerance(
-            dish_mask_spec,
-            dish_mask_tolerance,
-        )
+    )
+    dish_mask_spec = None
+    if registered_gate_requirement == "off":
+        dish_mask_spec = _read_dish_mask_spec(root, detect_group)
+        if dish_mask_spec is not None:
+            dish_mask_tolerance = resolve_dish_mask_boundary_tolerance(
+                root,
+                source_group=detect_group,
+                tolerance_mm=resolved_dish_tolerance_mm,
+                pixels_per_mm_camera=resolved_pixels_per_mm_camera,
+            )
+            dish_mask_spec = apply_dish_mask_boundary_tolerance(
+                dish_mask_spec,
+                dish_mask_tolerance,
+            )
     detection_quality_labels, dish_mask_gate = _apply_dish_mask_quality_gate(
         bbox_coords=bbox_coords,
         detection_quality_labels=detection_quality_labels,
@@ -1417,6 +1534,11 @@ def create_refined_run(
     console.print(f"  Filters: {filters}")
     if sampled_import:
         console.print("  Refine mode: passthrough (sampled import)")
+    console.print(
+        "  Registered detection gate: "
+        f"{registered_detection_gate.get('status')} "
+        f"(requirement={registered_detection_gate.get('requirement')})"
+    )
     if dish_mask_gate.get("enabled"):
         console.print(
             "  Dish mask gate: "
@@ -1466,14 +1588,6 @@ def create_refined_run(
     else:
         class_ids = np.zeros(len(bbox_coords), dtype='i4')
         console.print("  [yellow]Note: No class_ids array found, defaulting to 0[/yellow]")
-    raw_instance_keys = (
-        np.asarray(detect_table["instance_key"][:], dtype=np.uint64).reshape(-1)
-        if "instance_key" in detect_table
-        else None
-    )
-    if raw_instance_keys is not None and raw_instance_keys.shape[0] != len(bbox_coords):
-        raise ValueError("detect instance_key length does not match detection row count.")
-    
     console.print(f"  Total detections: {len(bbox_coords)}")
     console.print(f"  Total frames: {num_frames}")
     
@@ -1613,6 +1727,7 @@ def create_refined_run(
         'sampled_import_meta': sampled_meta,
         'detect_quality_guardrail_requested': bool(require_detect_quality),
         'detect_quality_guardrail_enforced': bool(require_quality_for_run),
+        'registered_detection_gate': registered_detection_gate,
         'dish_mask_gate': dish_mask_gate,
         'top_k_selection': top_k_selection,
         'experiment_setup': (
@@ -1634,6 +1749,13 @@ def create_refined_run(
     refined_group.attrs['source_quality_group_path'] = (
         resolved_quality_group_path or "N/A"
     )
+    refined_group.attrs['registered_detection_gate'] = registered_detection_gate
+    refined_group.attrs['registered_detection_gate_requirement'] = (
+        registered_gate_requirement
+    )
+    refined_group.attrs['registered_detection_gate_consumed'] = bool(
+        registered_detection_gate.get("applied")
+    )
     if experiment_setup is not None:
         refined_group.attrs['experiment_setup_path'] = experiment_setup.group_path
         refined_group.attrs['experiment_setup_sha256'] = experiment_setup.record_sha256
@@ -1654,6 +1776,7 @@ def create_refined_run(
         'detect_path': source_detect_path,
         'quality_run': resolved_quality_run or 'N/A',
         'quality_group_path': resolved_quality_group_path or 'N/A',
+        'registered_detection_gate': registered_detection_gate,
         'experiment_setup_path': (
             experiment_setup.group_path if experiment_setup is not None else 'N/A'
         ),
@@ -1767,6 +1890,7 @@ def create_refined_run(
                 if top_k_selection.get("enabled")
                 else "quality_filtered_sparse_instances_no_interpolation"
             ),
+            "registered_detection_gate": registered_detection_gate,
             "dish_mask_gate": dish_mask_gate,
             "top_k_selection": top_k_selection,
         },
@@ -2002,6 +2126,22 @@ Examples:
         ),
     )
     parser.add_argument(
+        '--registered-gate-requirement',
+        choices=tuple(sorted(_REGISTERED_GATE_REQUIREMENTS)),
+        default='off',
+        help=(
+            'Modern registered geometry policy: off, if_available, or required. '
+            'This is independent of the legacy dish-mask configuration.'
+        ),
+    )
+    parser.add_argument(
+        '--registered-gate-run',
+        help=(
+            'Exact analysis/detection_gate_runs child to consume. Refinement never '
+            'resolves a mutable latest gate pointer.'
+        ),
+    )
+    parser.add_argument(
         '--selector-ineligible',
         action='store_true',
         help=(
@@ -2054,6 +2194,8 @@ Examples:
             refined_run_name=args.run_name,
             dish_mask_boundary_tolerance_mm=args.dish_mask_boundary_tolerance_mm,
             pixels_per_mm_camera=args.pixels_per_mm_camera,
+            registered_gate_requirement=args.registered_gate_requirement,
+            registered_gate_run=args.registered_gate_run,
             stage_selector_eligible=not args.selector_ineligible,
             emit_completion_status=not args.skip_completion_status,
         )

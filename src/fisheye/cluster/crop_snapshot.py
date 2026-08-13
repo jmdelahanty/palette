@@ -24,6 +24,9 @@ class CropSnapshotFragmentInputs:
     roi_width: int
     roi_height: int
     camera_id: str
+    source_refined_run: str | None = None
+    registered_gate_requirement: str = "off"
+    registered_gate_run: str | None = None
     upstream_job_keys: tuple[str, ...] = ()
     required_artifacts: tuple[str, ...] = ()
     copy_backend: str = "python"
@@ -34,6 +37,20 @@ class CropSnapshotFragmentInputs:
                 raise ValueError(f"{name} must be a positive exact integer.")
         if self.copy_backend not in {"python", "rsync"}:
             raise ValueError("copy_backend must be 'python' or 'rsync'.")
+        if self.registered_gate_requirement not in {"off", "if_available", "required"}:
+            raise ValueError(
+                "registered_gate_requirement must be off, if_available, or required."
+            )
+        if self.registered_gate_requirement != "off" and not str(
+            self.source_refined_run or ""
+        ).strip():
+            raise ValueError(
+                "Configured registered geometry requires an exact finalized refined run."
+            )
+        if self.registered_gate_requirement == "required" and not str(
+            self.registered_gate_run or ""
+        ).strip():
+            raise ValueError("Required registered geometry needs one exact gate run.")
 
 
 @dataclass(frozen=True)
@@ -100,6 +117,13 @@ def build_crop_snapshot_fragment(
         "--result-json",
         str(receipt),
     ]
+    if inputs.source_refined_run is not None:
+        command.extend(("--source-refined-run", inputs.source_refined_run))
+    command.extend(
+        ("--registered-gate-requirement", inputs.registered_gate_requirement)
+    )
+    if inputs.registered_gate_run is not None:
+        command.extend(("--registered-gate-run", inputs.registered_gate_run))
     resources = LsfResources(
         queue="short",
         ncores=4,
@@ -145,6 +169,9 @@ def build_crop_snapshot_fragment(
             "compute_partition_independent": True,
             "selector_activation": "deferred",
             "registry_update": False,
+            "source_refined_run": inputs.source_refined_run,
+            "registered_gate_requirement": inputs.registered_gate_requirement,
+            "registered_gate_run": inputs.registered_gate_run,
             "outputs": outputs.to_json(),
         },
     )

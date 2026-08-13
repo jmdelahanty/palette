@@ -45,7 +45,7 @@ class _BoundPixels:
 def _wire_authorities(monkeypatch, source, pixels: _BoundPixels) -> list[Path]:
     calls: list[Path] = []
 
-    def bind_source(path: Path):
+    def bind_source(path: Path, **_kwargs):
         calls.append(Path(path))
         return source
 
@@ -56,6 +56,81 @@ def _wire_authorities(monkeypatch, source, pixels: _BoundPixels) -> list[Path]:
         lambda bound_source, *, expected_camera_identity: pixels,
     )
     return calls
+
+
+def test_required_candidate_binds_exact_finalized_gated_refined_authority(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = replace(
+        _refined_source(tmp_path),
+        selection_mode="explicit_selector_ineligible_benchmark",
+    )
+    writable_root = zarr.open_group(
+        str(source.archive_path), mode="a", use_consolidated=False
+    )
+    writable_run = writable_root["refined_detect_runs"][source.run_id]
+    source = replace(
+        source,
+        run_group=writable_run,
+        instances_group=writable_run["instances"],
+    )
+    gate_evidence = {
+        "requirement": "required",
+        "status": "applied",
+        "applied": True,
+        "gate_run": "gate_001",
+        "source_detection_group_path": "detect_runs/detect_001",
+        "selection_run": "selection_001",
+        "selection_record_sha256": "a" * 64,
+        "row_count": source.dimensions.n_source_detections,
+    }
+    source.run_group.attrs.update(
+        {
+            "finalized_recording_authority": True,
+            "immutable_snapshot": True,
+            "registered_detection_gate_requirement": "required",
+            "registered_detection_gate": gate_evidence,
+        }
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pixels = _BoundPixels(
+        pixel_authority=_pixel(),
+        source_video_path=tmp_path / "camera.mp4",
+    )
+    _wire_authorities(monkeypatch, source, pixels)
+    gate_validator = lambda *_args, **_kwargs: {
+            "inside": np.ones(
+                source.dimensions.n_source_detections,
+                dtype=np.bool_,
+            ),
+            "gate_run": "gate_001",
+            "source_detection_group_path": "detect_runs/detect_001",
+            "selection_run": "selection_001",
+            "selection_record_sha256": "a" * 64,
+            "row_count": source.dimensions.n_source_detections,
+        }
+
+    result = publish_crop_geometry_production_candidate(
+        analysis_zarr=source.archive_path,
+        run_id="crop_required",
+        policy=_policy(),
+        expected_camera_identity="cam2010095",
+        scratch_root=scratch,
+        source_refined_run_id=source.run_id,
+        registered_gate_requirement="required",
+        registered_gate_run="gate_001",
+        registered_gate_validator=gate_validator,
+    )
+
+    assert result["registered_gate_applied"] is True
+    assert result["source_refined_run_id"] == source.run_id
+    root = zarr.open_group(
+        str(source.archive_path), mode="r", use_consolidated=False
+    )
+    crop = root["crop_runs"]["crop_required"]
+    assert crop.attrs["source_registered_detection_gate"] == gate_evidence
 
 
 def test_candidate_is_atomically_imported_consolidated_and_unselected(

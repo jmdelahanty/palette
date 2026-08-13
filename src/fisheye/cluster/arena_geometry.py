@@ -23,6 +23,7 @@ class ArenaGeometrySelectionFragmentInputs:
     selection_run: str
     selected_by: str
     decision_reason: str
+    comparison_run: str | None = None
     decision_source: str = "manual_review"
     upstream_job_keys: tuple[str, ...] = ()
     required_artifacts: tuple[str, ...] = ()
@@ -41,6 +42,50 @@ class ArenaGeometrySelectionFragmentInputs:
         ):
             if not str(getattr(self, name)).strip():
                 raise ValueError(f"Geometry selection {name} cannot be empty.")
+
+
+@dataclass(frozen=True)
+class ArenaGeometryComparisonFragmentInputs:
+    workflow_id: str
+    family: str
+    target: RecordingTarget
+    repo: Path
+    run_root: Path
+    acquisition_candidate_run: str
+    palette_candidate_run: str
+    semantic_compatibility: str
+    policy_id: str
+    comparison_run: str
+    detect_source_group_path: str | None = None
+    semantic_reviewer: str | None = None
+    semantic_reviewed_at_utc: str | None = None
+    semantic_evidence_reason: str | None = None
+    upstream_job_keys: tuple[str, ...] = ()
+    required_artifacts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, RecordingTarget):
+            raise TypeError("Geometry comparison target must be a RecordingTarget.")
+        for name in (
+            "workflow_id",
+            "family",
+            "acquisition_candidate_run",
+            "palette_candidate_run",
+            "semantic_compatibility",
+            "policy_id",
+            "comparison_run",
+        ):
+            if not str(getattr(self, name)).strip():
+                raise ValueError(f"Geometry comparison {name} cannot be empty.")
+        review = (
+            self.semantic_reviewer,
+            self.semantic_reviewed_at_utc,
+            self.semantic_evidence_reason,
+        )
+        if any(value is not None for value in review) and not all(
+            str(value or "").strip() for value in review
+        ):
+            raise ValueError("Geometry semantic review fields must be supplied together.")
 
 
 @dataclass(frozen=True)
@@ -93,6 +138,24 @@ class ArenaGeometrySelectionFragmentOutputs:
 
 
 @dataclass(frozen=True)
+class ArenaGeometryComparisonFragmentOutputs:
+    target_id: str
+    comparison_run: str
+    comparison_group_path: str
+    terminal_job_key: str
+    artifact_key: str
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "target_id": self.target_id,
+            "comparison_run": self.comparison_run,
+            "comparison_group_path": self.comparison_group_path,
+            "terminal_job_key": self.terminal_job_key,
+            "artifact_key": self.artifact_key,
+        }
+
+
+@dataclass(frozen=True)
 class RegisteredDetectionGateFragmentOutputs:
     target_id: str
     source_detection_group_path: str
@@ -121,6 +184,92 @@ class ArenaGeometrySelectionWorkflowModule:
 
 
 @dataclass(frozen=True)
+class ArenaGeometryComparisonWorkflowModule:
+    fragment: LsfWorkflowFragment
+    outputs: ArenaGeometryComparisonFragmentOutputs
+
+
+def build_arena_geometry_comparison_fragment(
+    inputs: ArenaGeometryComparisonFragmentInputs,
+) -> ArenaGeometryComparisonWorkflowModule:
+    """Plan immutable comparison evidence without selecting geometry."""
+
+    safe = safe_component(inputs.target.target_id, default="target", max_length=56)
+    job_key = f"arena_geometry_comparison:{safe}"
+    group_path = f"analysis/arena_geometry_comparison_runs/{inputs.comparison_run}"
+    scratch = (
+        f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/"
+        "arena_geometry_comparison"
+    )
+    command = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.publish_arena_geometry_comparison",
+        str(inputs.target.analysis_zarr),
+        "--acquisition-candidate-run",
+        inputs.acquisition_candidate_run,
+        "--palette-candidate-run",
+        inputs.palette_candidate_run,
+        "--semantic-compatibility",
+        inputs.semantic_compatibility,
+        "--policy-id",
+        inputs.policy_id,
+        "--expected-comparison-run",
+        inputs.comparison_run,
+        "--scratch-root",
+        scratch,
+        "--apply",
+    ]
+    if inputs.detect_source_group_path is not None:
+        command.extend(("--detect-source-group", inputs.detect_source_group_path))
+    if inputs.semantic_reviewer is not None:
+        command.extend(("--semantic-reviewer", inputs.semantic_reviewer))
+        command.extend(
+            ("--semantic-reviewed-at-utc", str(inputs.semantic_reviewed_at_utc))
+        )
+        command.extend(
+            ("--semantic-evidence-reason", str(inputs.semantic_evidence_reason))
+        )
+    job = build_job(
+        workflow_id=inputs.workflow_id,
+        family=inputs.family,
+        repo=inputs.repo,
+        run_root=inputs.run_root,
+        job_key=job_key,
+        stage="arena_geometry_comparison",
+        command=tuple(command),
+        resources=LsfResources(queue="short", ncores=2, mem_gb=8, walltime="1:00"),
+        upstream=inputs.upstream_job_keys,
+        expected_outputs=(inputs.target.analysis_zarr / group_path / "zarr.json",),
+        cleanup_paths=(scratch,),
+    )
+    artifact_key = f"arena_geometry_comparison:{safe}"
+    outputs = ArenaGeometryComparisonFragmentOutputs(
+        target_id=inputs.target.target_id,
+        comparison_run=inputs.comparison_run,
+        comparison_group_path=group_path,
+        terminal_job_key=job_key,
+        artifact_key=artifact_key,
+    )
+    return ArenaGeometryComparisonWorkflowModule(
+        fragment=LsfWorkflowFragment(
+            fragment_id=artifact_key,
+            jobs=(job,),
+            requires=inputs.required_artifacts,
+            provides=(artifact_key,),
+            metadata={
+                "module": "arena_geometry_comparison",
+                "recording_layout": inputs.target.layout.value,
+                "candidate_selected": False,
+                "automatic_thresholds_promoted": False,
+                "outputs": outputs.to_json(),
+            },
+        ),
+        outputs=outputs,
+    )
+
+
+@dataclass(frozen=True)
 class RegisteredDetectionGateWorkflowModule:
     fragment: LsfWorkflowFragment
     outputs: RegisteredDetectionGateFragmentOutputs
@@ -137,6 +286,27 @@ def build_arena_geometry_selection_fragment(
     scratch = (
         f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/arena_geometry_selection"
     )
+    command = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.publish_arena_geometry_selection",
+        str(inputs.target.analysis_zarr),
+        "--candidate-run",
+        inputs.candidate_run,
+        "--selected-by",
+        inputs.selected_by,
+        "--decision-reason",
+        inputs.decision_reason,
+        "--decision-source",
+        inputs.decision_source,
+        "--expected-selection-run",
+        inputs.selection_run,
+        "--scratch-root",
+        scratch,
+        "--apply",
+    ]
+    if inputs.comparison_run is not None:
+        command.extend(("--comparison-run", inputs.comparison_run))
     job = build_job(
         workflow_id=inputs.workflow_id,
         family=inputs.family,
@@ -144,25 +314,7 @@ def build_arena_geometry_selection_fragment(
         run_root=inputs.run_root,
         job_key=job_key,
         stage="arena_geometry_selection",
-        command=(
-            "scripts/py",
-            "-m",
-            "fisheye.utils.publish_arena_geometry_selection",
-            str(inputs.target.analysis_zarr),
-            "--candidate-run",
-            inputs.candidate_run,
-            "--selected-by",
-            inputs.selected_by,
-            "--decision-reason",
-            inputs.decision_reason,
-            "--decision-source",
-            inputs.decision_source,
-            "--expected-selection-run",
-            inputs.selection_run,
-            "--scratch-root",
-            scratch,
-            "--apply",
-        ),
+        command=tuple(command),
         resources=LsfResources(queue="short", ncores=1, mem_gb=4, walltime="1:00"),
         upstream=inputs.upstream_job_keys,
         expected_outputs=(inputs.target.analysis_zarr / group_path / "zarr.json",),
@@ -265,8 +417,11 @@ def build_registered_detection_gate_fragment(
 __all__ = [
     "ArenaGeometrySelectionFragmentInputs",
     "ArenaGeometrySelectionWorkflowModule",
+    "ArenaGeometryComparisonFragmentInputs",
+    "ArenaGeometryComparisonWorkflowModule",
     "RegisteredDetectionGateFragmentInputs",
     "RegisteredDetectionGateWorkflowModule",
+    "build_arena_geometry_comparison_fragment",
     "build_arena_geometry_selection_fragment",
     "build_registered_detection_gate_fragment",
 ]

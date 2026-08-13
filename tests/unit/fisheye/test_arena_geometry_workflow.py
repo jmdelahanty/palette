@@ -105,6 +105,48 @@ def test_pre_review_fragment_is_recording_level_and_stops_before_selection(
     assert workflow.metadata["human_review_barrier"] is True
 
 
+def test_pre_review_fragment_uses_producer_native_folder_without_recovery_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture_paths(tmp_path)
+    candidate_path = paths["analysis"] / "analysis" / "arena_geometry_runs" / "native"
+    monkeypatch.setattr(
+        arena_geometry_review,
+        "plan_producer_native_acquisition_geometry_candidate",
+        lambda **_: SimpleNamespace(
+            candidate_id="arena-geometry-acquisition-native",
+            target_run_path=candidate_path,
+        ),
+    )
+
+    module = build_arena_geometry_review_fragment(
+        ArenaGeometryReviewFragmentInputs(
+            workflow_id="geometry_native",
+            target_id="recording_a",
+            recording_dir=paths["recording"],
+            analysis_zarr=paths["analysis"],
+            recovery_receipt_path=None,
+            geometry_source="producer-folder",
+            geometry_camera_serial="2010093",
+            geometry_arena_id="arena_1",
+            source=ArenaGeometryProbeSource(
+                video_path=paths["video"],
+                summary_path=paths["summary"],
+                keyframe_path=paths["keyframes"],
+                acquisition_observation_path=paths["observation"],
+            ),
+            repo=paths["repo"],
+            run_root=tmp_path / "run",
+        )
+    )
+
+    command = " ".join(module.fragment.jobs[0].command)
+    assert "--geometry-source producer-folder" in command
+    assert "--camera-serial 2010093" in command
+    assert "--arena-id arena_1" in command
+    assert module.fragment.metadata["geometry_source"] == "producer-folder"
+
+
 def test_campaign_fragment_uses_independent_lsf_arrays_and_indexed_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

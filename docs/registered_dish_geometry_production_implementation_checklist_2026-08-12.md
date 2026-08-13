@@ -1,8 +1,8 @@
 # Registered dish geometry production implementation checklist
 
 - Decision/checklist date: 2026-08-12
-- Status: implementation started from the clean, CI-green baseline recorded
-  below
+- Status: implementation complete in the isolated worktree; local validation
+  is in progress and branch CI/policy canaries remain blocking
 - Baseline branch: `sun`
 - Implementation baseline commit:
   `5e0150fcdd0f1bcd50dd63e6ca9384fb3c7409ae`
@@ -30,6 +30,33 @@ post-acquisition Palette analysis gating. Live Orange/Citrus masking and
 pre-YOLO masking are out of scope for the first release because their real-time
 reliability has not yet been validated.
 
+## Implementation status (2026-08-13)
+
+Implemented code now covers producer-native folder/H5 ingestion, independent
+multi-candidate fitting, post-freeze acquisition-boundary image support,
+immutable comparison and comparison-bound selection, exact keyed gating,
+fail-closed gate-consuming refinement, immutable refined-detection
+finalization, downstream crop/keypoint/mask no-bypass guards, both recording
+layouts, and the six modern registry stages.
+
+The implementation deliberately does not activate automatic selection or make
+`required` the default. The following evidence remains blocking:
+
+- the checksummed August 10 derivation and August 11 holdout canary;
+- numerical threshold review and a new timestamped policy-promotion decision;
+- a bounded whole-video versus split-clipped parity canary;
+- an explicit pilot/default-activation decision; and
+- required branch CI.
+
+Geometry preparation is intentionally staged. Acquisition import, blind fit,
+raw detection, comparison, reviewed selection, and gate materialization have
+dependency-aware fragments, but review-dependent steps are not presented as a
+single unattended DAG. Once an exact current gate exists, both configured
+detection recipes compose canonical quality, gate-consuming refinement, and
+immutable finalization. The whole-video recipe then publishes an exact crop;
+the existing whole-recording analysis recipe safely continues keypoints and
+subject masks from that crop/cache lineage after the crop exists.
+
 ## Implementation hold
 
 Do not begin implementation from the current checkout until all of the
@@ -49,59 +76,59 @@ following are true:
 
 ### Producer authority
 
-- [ ] Discover producer geometry only through the checksummed
+- [x] Discover producer geometry only through the checksummed
       `recording_geometry_contract.json` pointer in `recording_snapshot.json`,
       or the exact verified Citrus-H5 representation under
       `/recording_geometry_contract`.
-- [ ] Preserve and verify the exact producer bytes and checksums.
-- [ ] Bind exactly one recording, camera serial, arena ID, native extent, and
+- [x] Preserve and verify the exact producer bytes and checksums.
+- [x] Bind exactly one recording, camera serial, arena ID, native extent, and
       persisted Palette source-camera pixel-frame authority.
-- [ ] Fail closed on missing, ambiguous, stale, corrupt, unsupported, or
+- [x] Fail closed on missing, ambiguous, stale, corrupt, unsupported, or
       mismatched authority.
-- [ ] Do not scan calibration directories or choose the newest calibration.
-- [ ] Do not borrow geometry from another recording, camera, or arena.
-- [ ] Do not substitute nominal Citrus experimental-area geometry.
-- [ ] Do not infer authority from mutable current rig configuration.
-- [ ] Keep the historical recovery-receipt route as an explicit compatibility
+- [x] Do not scan calibration directories or choose the newest calibration.
+- [x] Do not borrow geometry from another recording, camera, or arena.
+- [x] Do not substitute nominal Citrus experimental-area geometry.
+- [x] Do not infer authority from mutable current rig configuration.
+- [x] Keep the historical recovery-receipt route as an explicit compatibility
       path, not a requirement for producer-native recordings.
 
 ### Two distinct circles
 
-- [ ] Preserve `accepted_inner_rim_boundary.geometry` as the physical,
+- [x] Preserve `accepted_inner_rim_boundary.geometry` as the physical,
       water-side inner-rim observation.
-- [ ] Preserve `valid_detection_region.geometry` as the separate,
+- [x] Preserve `valid_detection_region.geometry` as the separate,
       outward-forgiving bounding-box-centroid gate.
-- [ ] Never average, collapse, or relabel the two circles.
-- [ ] Use the physical inner rim only for physical-boundary reasoning and any
+- [x] Never average, collapse, or relabel the two circles.
+- [x] Use the physical inner rim only for physical-boundary reasoning and any
       separately approved raster masking policy.
-- [ ] Use the valid detection region for post-detection centroid gating.
-- [ ] Add no Palette 0.5 mm tolerance to the producer gate.
-- [ ] Do not use rounded `palette_dish_mask_v2.json` values as precision
+- [x] Use the valid detection region for post-detection centroid gating.
+- [x] Add no Palette 0.5 mm tolerance to the producer gate.
+- [x] Do not use rounded `palette_dish_mask_v2.json` values as precision
       authority.
-- [ ] Do not promote legacy `analysis_metadata.attrs["dish_mask"]` to modern
+- [x] Do not promote legacy `analysis_metadata.attrs["dish_mask"]` to modern
       selected-geometry authority.
 
 ### Coordinate contract
 
-- [ ] Treat geometry and detections as native camera coordinates with top-left
+- [x] Treat geometry and detections as native camera coordinates with top-left
       origin, +X right, +Y down, continuous XY pixels, and exact native width
       and height.
-- [ ] Do not apply Citrus presentation reflection.
-- [ ] Do not apply camera-to-canvas homography for this gate.
-- [ ] Do not apply a heuristic Y flip.
-- [ ] Include an asymmetric, off-center fixture that would detect any flip,
+- [x] Do not apply Citrus presentation reflection.
+- [x] Do not apply camera-to-canvas homography for this gate.
+- [x] Do not apply a heuristic Y flip.
+- [x] Include an asymmetric, off-center fixture that would detect any flip,
       transpose, integer rounding, or wrong-extent normalization.
 
 ### Immutability and recoverability
 
-- [ ] Do not edit source recordings, producer geometry bundles, Citrus H5
+- [x] Do not edit source recordings, producer geometry bundles, Citrus H5
       inputs, raw detection runs, or existing immutable analysis artifacts.
-- [ ] Publish acquisition candidates, offline-fit candidates, comparisons,
+- [x] Publish acquisition candidates, offline-fit candidates, comparisons,
       selections, and gate tables as separate immutable artifacts.
-- [ ] Keep raw detections recoverable so a policy or geometry change can rerun
+- [x] Keep raw detections recoverable so a policy or geometry change can rerun
       comparison, selection, gating, and dependent processing without rerunning
       YOLO.
-- [ ] A manual correction must publish a new candidate; it must not rewrite an
+- [x] A manual correction must publish a new candidate; it must not rewrite an
       acquisition or Palette candidate.
 
 ## Existing Palette surfaces to extend
@@ -136,28 +163,33 @@ Do not create a parallel mask authority or a second geometry model.
 - [x] The recording-layout contract distinguishes an identity-mapped
       `WHOLE_VIDEO` target from an indexed `CLIPPED_COLLECTION`, including a
       clipped collection containing only one work unit.
-- [ ] Producer-native candidate planning/publication works without a recovery
+- [x] Producer-native candidate planning/publication works without a recovery
       receipt.
-- [ ] Every plausible frozen offline circle is persisted, not only the winner
+- [x] Every plausible frozen offline circle is persisted, not only the winner
       and candidate count.
-- [ ] An immutable canonical comparison artifact exists.
-- [ ] A validated automatic-selection policy and state-to-action matrix exist.
-- [ ] A newly produced clipped detection artifact is converted to canonical
+- [x] An immutable canonical comparison artifact exists.
+- [ ] Numerical automatic-selection thresholds are validated and promoted.
+      The versioned state-to-action machinery exists but remains unpromoted.
+- [x] A newly produced clipped detection artifact is converted to canonical
       recording-bound row identity before any quality or gate consumer requires
       `instance_key`.
-- [ ] The production clipped recipe accepts valid cardinalities instead of
+- [x] The production clipped recipe accepts valid cardinalities instead of
       requiring exactly 22 clip-camera work units.
-- [ ] Whole-video raw detection continues through a composed quality,
-      refinement, finalization, crop, keypoint, and subject-mask recipe.
-- [ ] A reviewed offline-fit candidate and the selection snapshot agree on the
+- [x] Whole-video raw detection continues through composed quality, refinement,
+      immutable finalization, and crop publication; the existing staged
+      whole-recording analysis recipe continues keypoints and subject masks
+      from that exact crop/cache lineage.
+- [x] A reviewed offline-fit candidate and the selection snapshot agree on the
       physical-boundary field contract.
-- [ ] Required selection proves the configured comparison/policy artifact;
+- [x] Required selection proves the configured comparison/policy artifact;
       comparison is not optional in that mode.
-- [ ] The keyed gate proves exact camera and pixel-frame authority, not native
+- [x] The keyed gate proves exact camera and pixel-frame authority, not native
       extent alone.
-- [ ] Required gate consumption is implemented in refined detection.
-- [ ] Default production recipes include the configured geometry chain.
-- [ ] Registry/readiness state represents each modern geometry stage.
+- [x] Required gate consumption is implemented in refined detection.
+- [x] Default whole-video and clipped detection recipes consume an explicitly
+      configured exact gate through immutable finalized refinement. Geometry
+      import/fit/review/selection remain intentionally staged prerequisites.
+- [x] Registry/readiness state represents each modern geometry stage.
 
 ## Recording-layout terminology and production boundary
 
@@ -224,22 +256,22 @@ This prerequisite must land before registered geometry is attached to either
 production recipe. Geometry must not be used to paper over incompatible raw-row
 or downstream authority contracts.
 
-- [ ] Define one canonical recording-bound raw-detection row identity consumed
+- [x] Define one canonical recording-bound raw-detection row identity consumed
       by quality, comparison audits, and the keyed gate.
-- [ ] Convert artifact-local `artifact_row_id` to immutable canonical
+- [x] Convert artifact-local `artifact_row_id` to immutable canonical
       `instance_key` only at an evidence-bound import/finalization boundary;
       preserve the artifact-local identity as lineage.
-- [ ] Ensure the clipped artifact target, canonical recording source, quality
+- [x] Ensure the clipped artifact target, canonical recording source, quality
       source, and gate source bind the same ordered rows and frame map.
-- [ ] Remove the production planner's exact-22 cardinality assumption while
+- [x] Remove the production planner's exact-22 cardinality assumption while
       preserving complete, non-overlapping canonical-frame coverage checks.
-- [ ] Add a composed whole-video quality/refinement/finalization adapter over
+- [x] Add a composed whole-video quality/refinement/finalization adapter over
       canonical top-level `detect_runs/<run>`.
-- [ ] Define one sealed refined-detection authority per layout that downstream
+- [x] Define one sealed refined-detection authority per layout that downstream
       crop/cache stages can consume without reverting to raw detections.
-- [ ] Preserve clipped partition lineage while making whole-video and clipped
+- [x] Preserve clipped partition lineage while making whole-video and clipped
       outputs comparable at the canonical recording level.
-- [ ] Add focused fixtures for one-work-unit clipped, multi-work-unit clipped,
+- [x] Add focused fixtures for one-work-unit clipped, multi-work-unit clipped,
       and whole-video targets.
 - [ ] Prove split/unsplit parity for source-row identity, frame identity,
       quality, refinement, downstream lineage, and registry projection before
@@ -247,88 +279,90 @@ or downstream authority contracts.
 
 ### Slice 1: producer-native candidate ingestion
 
-- [ ] Add a read-only planner for ordinary recording-folder geometry using
+- [x] Add a read-only planner for ordinary recording-folder geometry using
       `load_registered_dish_masks_from_recording_folder`.
-- [ ] Add or reuse the exact Citrus-H5 adapter where the H5 is the chosen
+- [x] Add or reuse the exact Citrus-H5 adapter where the H5 is the chosen
       recording-bound authority.
-- [ ] Require explicit recording, camera, and arena selection when the source
+- [x] Require explicit recording, camera, and arena selection when the source
       contains multiple entries.
-- [ ] Bind the selected normalized geometry to Palette's persisted acquisition
+- [x] Bind the selected normalized geometry to Palette's persisted acquisition
       and continuous source-camera pixel-frame authority.
-- [ ] Build the same canonical acquisition-candidate record used by the
+- [x] Build the same canonical acquisition-candidate record used by the
       existing publisher.
-- [ ] Record exact source artifact paths, identities, byte hashes, schema
+- [x] Record exact source artifact paths, identities, byte hashes, schema
       versions, runtime-application status, and native dimensions.
-- [ ] Revalidate source bytes and frame authority before and after atomic
+- [x] Revalidate source bytes and frame authority before and after atomic
       publication.
-- [ ] Preserve the recovery-receipt planner under an explicitly named legacy
+- [x] Preserve the recovery-receipt planner under an explicitly named legacy
       route.
-- [ ] Update the acquisition-candidate CLI to distinguish native and recovery
+- [x] Update the acquisition-candidate CLI to distinguish native and recovery
       sources without heuristic fallback.
 
 ### Slice 2: recording-layout binding
 
-- [ ] Define one recording-level input contract binding recording identity,
+- [x] Define one recording-level input contract binding recording identity,
       camera serial, arena ID, analysis Zarr, authoritative full-frame video,
       recorder summary, keyframe declaration, native dimensions, source-camera
       authority, and geometry contract digests.
-- [ ] Resolve the same recording-level geometry for whole-video and clipped
+- [x] Resolve the same recording-level geometry for whole-video and clipped
       downstream layouts.
-- [ ] Prove that clips never become independent geometry authorities.
-- [ ] Permit acquisition candidate publication, blind fitting, and raw
+- [x] Prove that clips never become independent geometry authorities.
+- [x] Permit acquisition candidate publication, blind fitting, and raw
       detection to run concurrently after their immutable prerequisites exist.
-- [ ] Neither candidate path may select geometry as a side effect.
+- [x] Neither candidate path may select geometry as a side effect.
 
 ### Slice 3: richer independent fit evidence
 
-- [ ] Keep acquisition geometry unavailable to fitting and candidate ranking.
-- [ ] Persist all deduplicated plausible circle candidates for each early,
+- [x] Keep acquisition geometry unavailable to fitting and candidate ranking.
+- [x] Persist all deduplicated plausible circle candidates for each early,
       middle, and late window.
-- [ ] For every candidate, record geometry, angular support, radial residual or
+- [x] For every candidate, record geometry, angular support, radial residual or
       error, median radial gradient, and rank inputs.
-- [ ] Record the selected per-window candidate and deterministic selection
+- [x] Record the selected per-window candidate and deterministic selection
       reason.
-- [ ] Record consensus geometry, consensus-selection reason, and between-window
+- [x] Record consensus geometry, consensus-selection reason, and between-window
       center/radius variation.
-- [ ] Bind exact source frame identities, decoded frame hashes, video identity,
+- [x] Bind exact source frame identities, decoded frame hashes, video identity,
       native dimensions, algorithm/configuration, software commit, and runtime
       environment.
-- [ ] Freeze and hash the complete fit evidence before opening acquisition
+- [x] Freeze and hash the complete fit evidence before opening acquisition
       geometry for reveal or comparison.
-- [ ] Preserve diagnostic concentric rim candidates even when they are not the
+- [x] Preserve diagnostic concentric rim candidates even when they are not the
       selected consensus candidate.
 
 ### Slice 4: immutable comparison artifact
 
-- [ ] Add a canonical `analysis/arena_geometry_comparison_runs/<run>` artifact
+- [x] Add a canonical `analysis/arena_geometry_comparison_runs/<run>` artifact
       family.
-- [ ] Bind exact acquisition and Palette candidate IDs and record digests.
-- [ ] Bind recording, camera, arena, native extent, and source-camera authority.
-- [ ] Record both observed-feature classifications and semantic compatibility.
-- [ ] Permit direct physical-radius comparison only for the same observed
+- [x] Bind exact acquisition and Palette candidate IDs and record digests.
+- [x] Bind recording, camera, arena, native extent, and source-camera authority.
+- [x] Record both observed-feature classifications and semantic compatibility.
+- [x] Permit direct physical-radius comparison only for the same observed
       physical feature.
-- [ ] Treat `visible_dish_top_rim_edge` versus the Orange water-side inner rim
+- [x] Treat `visible_dish_top_rim_edge` versus the Orange water-side inner rim
       as semantically incompatible unless reviewed evidence explicitly proves
       correspondence.
-- [ ] Record center displacement in native pixels and, when authoritative,
+- [x] Record center displacement in native pixels and, when authoritative,
       dish-top-rim millimetres.
-- [ ] Record signed/absolute radius difference only where semantically valid.
-- [ ] Record maximum boundary separation and circle IoU or mask disagreement.
-- [ ] Record edge support/residual and early/middle/late stability.
-- [ ] Measure acquisition-boundary edge support in recording imagery without
+- [x] Record signed/absolute radius difference only where semantically valid.
+- [x] Record maximum boundary separation and circle IoU or mask disagreement.
+- [x] Record edge support/residual and early/middle/late stability.
+- [x] Measure acquisition-boundary edge support in recording imagery without
       altering the frozen fit.
-- [ ] Optionally bind one exact raw-detection source and record operational gate
+- [x] Optionally bind one exact raw-detection source and record operational gate
       disagreement counts separately from physical-feature comparison.
-- [ ] Record a decision status, policy ID/version, complete thresholds, and
+- [x] Record a decision status, policy ID/version, explicit unpromoted
+      thresholds, remaining measurements, and
       reason codes without selecting or mutating a candidate.
 
 ### Slice 5: versioned selection policy
 
-- [ ] Define a new automatic-selection policy contract; do not disguise an
+- [x] Define a new automatic-selection policy contract; do not disguise an
       automatic decision as the current reviewed-selection v1 policy.
 - [ ] Derive thresholds from an approved multi-camera and repeated-recording
       canary; do not choose thresholds merely to enable automation.
-- [ ] Support at least these evidence outcomes:
+- [x] Support at least these evidence outcomes in the policy state-to-action
+      contract:
   - `corroborated_pass`
   - `review_required`
   - `offline_fit_failed_but_acquisition_geometry_valid`
@@ -336,85 +370,87 @@ or downstream authority contracts.
   - `producer_geometry_invalid`
   - `coordinate_or_extent_mismatch`
   - `comparison_failed`
-- [ ] Record a complete state-to-action matrix for automatic selection, review,
+- [x] Record a complete state-to-action matrix for automatic selection, review,
       fail, and any explicitly permitted uncorroborated use.
-- [ ] On an approved corroborated pass, select the acquisition candidate and
+- [x] Enforce that a future approved corroborated automatic pass can select only
+      the acquisition candidate and
       retain its operator-confirmed physical-rim and producer gate semantics.
-- [ ] Require explicit reviewed selection for a Palette or manual candidate.
-- [ ] Keep all candidates unchanged.
-- [ ] If thresholds are not yet promotable, publish policy machinery in a
+- [x] Require explicit reviewed selection for a Palette or manual candidate.
+- [x] Keep all candidates unchanged.
+- [x] If thresholds are not yet promotable, publish policy machinery in a
       blocking/unpromoted state and report the missing canary measurements.
 
 ### Slice 6: keyed gate and required refinement join
 
-- [ ] Continue materializing `analysis/detection_gate_runs/<run>` against one
+- [x] Continue materializing `analysis/detection_gate_runs/<run>` against one
       exact raw detection source.
-- [ ] Preserve ordered `instance_key`, dense source row identity, frame index,
+- [x] Preserve ordered `instance_key`, dense source row identity, frame index,
       native centroid, full-precision signed distance, inclusive decision,
       rejection reason, and exact selection/candidate digests.
-- [ ] Keep the normative calculation:
+- [x] Keep the normative calculation:
 
   ```text
   signed_distance_px = radius_px - hypot(x_native_px - cx, y_native_px - cy)
   inside = signed_distance_px >= 0
   ```
 
-- [ ] Accept boundary points.
-- [ ] Validate empty-detection sources explicitly.
-- [ ] Add a fail-closed gate consumer for refined detection.
-- [ ] Require exact source detection identity and identical ordered
+- [x] Accept boundary points.
+- [x] Validate empty-detection sources explicitly.
+- [x] Add a fail-closed gate consumer for refined detection.
+- [x] Require exact source detection identity and identical ordered
       `instance_key` coverage.
-- [ ] Reject missing, stale, partial, reordered, duplicated, or extra gate
+- [x] Reject missing, stale, partial, reordered, duplicated, or extra gate
       rows.
-- [ ] Reuse the existing refinement removal-reason records for gate exclusions:
+- [x] Reuse the existing refinement removal-reason records for gate exclusions:
       record `outside_registered_detection_gate`, the exact source
       `instance_key`, and the gate run/digest that supplied the decision.
-- [ ] Do not create a separate rejection-lineage stage or competing rejection
+- [x] Do not create a separate rejection-lineage stage or competing rejection
       artifact.
-- [ ] Do not run the legacy 0.5 mm `analysis_metadata.dish_mask` expansion on a
+- [x] Do not run the legacy 0.5 mm `analysis_metadata.dish_mask` expansion on a
       modern registered gate.
-- [ ] Persist whether gating was required, applied, unavailable, off, or
+- [x] Persist whether gating was required, applied, unavailable, off, or
       rejected as invalid.
-- [ ] Preserve the source raw detection run unchanged.
+- [x] Preserve the source raw detection run unchanged.
 
 ### Slice 7: downstream authority and production recipes
 
-- [ ] Make gated/refined detection the sealed downstream detection authority
+- [x] Make gated/refined detection the sealed downstream detection authority
       when registered geometry is required.
-- [ ] Require crop/cache publication to bind that exact refined authority.
-- [ ] Require keypoint and subject-mask stages to consume crop lineage derived
+- [x] Require crop/cache publication to bind that exact refined authority.
+- [x] Require keypoint and subject-mask stages to consume crop lineage derived
       from that authority rather than a raw-detection bypass.
-- [ ] Add capability-level tests proving no required-policy recipe bypass.
-- [ ] Integrate the chain into the clipped production recipe while preserving
+- [x] Add capability-level tests proving no required-policy recipe bypass.
+- [x] Integrate the chain into the clipped production recipe while preserving
       executable-plan parity outside the new configured policy.
-- [ ] Integrate the same chain into the whole-video recipe through the shared
+- [x] Integrate the same chain into the whole-video recipe through the shared
       canonical detection/refinement authority.
 - [ ] Permit separately staged canaries, but do not claim production geometry
       completion until both production topologies pass their required tests.
-- [ ] Reuse exact valid geometry/comparison/selection/gate artifacts by digest;
+- [x] Reuse exact valid geometry/comparison/selection/gate artifacts by digest;
       do not follow mutable pointers during compute.
-- [ ] Changing selected geometry should rerun gate and dependent processing,
+- [x] Changing selected geometry should rerun gate and dependent processing,
       not raw YOLO detection.
 
 ### Slice 8: registry and readiness
 
-- [ ] Add `recording_geometry_import` readiness evidence for producer geometry
+- [x] Add `recording_geometry_import` readiness evidence for producer geometry
       import.
-- [ ] Add `arena_geometry_offline_fit` readiness evidence for offline fit
+- [x] Add `arena_geometry_offline_fit` readiness evidence for offline fit
       completion.
-- [ ] Add `arena_geometry_comparison` readiness evidence for semantic
+- [x] Add `arena_geometry_comparison` readiness evidence for semantic
       comparison and policy result.
-- [ ] Add `arena_geometry_selection` readiness evidence for the selected
+- [x] Add `arena_geometry_selection` readiness evidence for the selected
       candidate and its comparison/policy binding.
-- [ ] Add `registered_detection_gate` readiness evidence for keyed gate
+- [x] Add `registered_detection_gate` readiness evidence for keyed gate
       completion and currentness.
-- [ ] Add `registered_detection_gate_consumption` readiness evidence extracted
+- [x] Add `registered_detection_gate_consumption` readiness evidence extracted
       from the finalized refined-detection authority.
-- [ ] Represent `review_required` as comparison/selection state, not as an
+- [x] Represent `review_required` as comparison/selection state, not as an
       independent stage.
-- [ ] Add distinct readiness evidence for downstream completion from the gated
-      authority.
-- [ ] Do not reinterpret the legacy tuning-stage `dish_mask=ok` as this chain.
+- [x] Retain distinct existing crop/keypoint/subject-mask completion stages
+      downstream of the finalized gated authority; do not add a duplicate
+      aggregate downstream stage.
+- [x] Do not reinterpret the legacy tuning-stage `dish_mask=ok` as this chain.
 - [ ] Define migrations and compatibility projections only after the modern
       artifact contracts are stable.
 
@@ -422,58 +458,105 @@ or downstream authority contracts.
 
 ### Producer and coordinate validation
 
-- [ ] Folder and exact Citrus-H5 forms normalize to equivalent geometry.
-- [ ] Corrupt contract, pointer, manifest, observation, scope, runtime, or H5
+- [x] Folder and exact Citrus-H5 forms normalize to equivalent geometry.
+- [x] Corrupt contract, pointer, manifest, observation, scope, runtime, or H5
       checksum fails closed.
-- [ ] Wrong camera, arena, registration, native extent, or coordinate authority
+- [x] Wrong camera, arena, registration, native extent, or coordinate authority
       fails closed.
-- [ ] Physical rim and outward gate remain separate at full precision.
-- [ ] No added tolerance is applied; inclusive containment is exact.
-- [ ] Asymmetric off-center geometry proves no flip, reflection, transpose, or
+- [x] Physical rim and outward gate remain separate at full precision.
+- [x] No added tolerance is applied; inclusive containment is exact.
+- [x] Asymmetric off-center geometry proves no flip, reflection, transpose, or
       integer rounding.
-- [ ] Legacy missing geometry remains explicit; no mask is guessed.
+- [x] Legacy missing geometry remains explicit; no mask is guessed.
 
 ### Fit, comparison, and policy validation
 
-- [ ] Fit evidence is frozen before acquisition reveal.
-- [ ] Multiple plausible concentric candidates are retained.
-- [ ] Candidate ranking and consensus are deterministic.
-- [ ] Same-feature comparison differs from semantic incompatibility.
-- [ ] Comparison binds exact candidates and cannot mutate either one.
-- [ ] Automatic pass/review/fail outcomes bind an explicit policy version.
-- [ ] Every policy outcome maps to an explicit workflow action.
-- [ ] Unpromoted thresholds cannot select geometry.
+- [x] Fit evidence is frozen before acquisition reveal.
+- [x] Multiple plausible concentric candidates are retained.
+- [x] Candidate ranking and consensus are deterministic.
+- [x] Same-feature comparison differs from semantic incompatibility.
+- [x] Comparison binds exact candidates and cannot mutate either one.
+- [x] Automatic pass/review/fail outcomes bind an explicit policy version.
+- [x] Every policy outcome maps to an explicit workflow action.
+- [x] Unpromoted thresholds cannot select geometry.
 
 ### Gate and downstream validation
 
-- [ ] Gate rows exactly match raw detection keys and order.
-- [ ] Empty-detection recordings produce a valid complete empty gate.
-- [ ] Missing, stale, partial, reordered, duplicated, or extra rows fail closed.
-- [ ] Rejected detections remain recoverable in unchanged raw detection runs.
-- [ ] `off`, `if_available`, and `required` behavior is explicit and tested.
-- [ ] Modern registered gating does not use the legacy 0.5 mm tolerance.
-- [ ] Whole-video and clipped layouts resolve the same recording-level geometry.
-- [ ] A one-work-unit clipped canary retains indexed parent-frame lineage and
+- [x] Gate rows exactly match raw detection keys and order.
+- [x] Empty-detection recordings produce a valid complete empty gate.
+- [x] Missing, stale, partial, reordered, duplicated, or extra rows fail closed.
+- [x] Rejected detections remain recoverable in unchanged raw detection runs.
+- [x] `off`, `if_available`, and `required` behavior is explicit and tested.
+- [x] Modern registered gating does not use the legacy 0.5 mm tolerance.
+- [x] Whole-video and clipped layouts resolve the same recording-level geometry.
+- [x] A one-work-unit clipped canary fixture retains indexed parent-frame lineage and
       cannot claim recording completion unless it covers the full timeline.
-- [ ] A whole-video target retains identity mapping and is never silently
+- [x] A whole-video target retains identity mapping and is never silently
       reclassified as a one-work-unit clipped collection.
 - [ ] Whole-video and split clipped processing produce equivalent canonical
       row/frame identity and downstream authority on a bounded parity canary.
-- [ ] Required-policy crops, keypoints, and masks cannot bypass gated
+- [x] Required-policy crops, keypoints, and masks cannot bypass gated
       refinement.
 - [ ] Existing immutable v5, legacy, detection, and analysis artifacts remain
       byte-for-byte unchanged.
 
 ### Repository validation and delivery
 
-- [ ] Use `scripts/py` for every Python command.
-- [ ] Run focused and integration Zarr tests outside the Codex sandbox.
-- [ ] Run static compilation and `git diff --check`.
+- [x] Use `scripts/py` for every Python command.
+- [x] Run focused and integration Zarr tests outside the Codex sandbox.
+- [x] Run static compilation, Black check, import-boundary check, file-size
+      ratchet, and `git diff --check`.
 - [ ] Run all required CI checks and record exact results.
 - [ ] Do not describe the branch as complete or merge-ready until required CI
       is green.
 - [ ] Record exact implementation commit, worktree path, canary artifacts, and
       any deferred validation.
+
+## Implemented artifact contracts and local validation
+
+New or extended immutable contracts:
+
+- `palette.arena_geometry_candidate_record` v1 and
+  `palette.arena_geometry_candidate_run` v1;
+- `palette.arena_geometry_comparison_record` v1 and
+  `palette.arena_geometry_comparison_run` v1;
+- `palette.arena_geometry_selection_record` v2, comparison-bound, with the
+  existing selection-run envelope v1;
+- `palette.registered_detection_gate_run` v1;
+- `palette.recording_refined_detection.finalization` v1; and
+- `palette.registered_geometry_clipped_refined_collection.v1`.
+
+Local validation completed from
+`/tmp/palette-registered-dish-geometry-20260813`:
+
+- final changed-surface matrix after CI-boundary refactors: `310 passed` in
+  23.13 seconds;
+- registry/stage-catalog matrix after readiness extraction: `162 passed` in
+  9.87 seconds;
+- crop/finalized-authority matrix after dependency inversion: `16 passed` in
+  6.63 seconds;
+- focused post-freeze edge-support, comparison-bound selection, gate, and
+  finalization tests passed;
+- import-linter: `2 kept, 0 broken`;
+- file-size ratchet: passed for all four guarded files;
+- every modified/untracked Python file passed `scripts/py -m py_compile`;
+- Black check and `git diff --check` passed.
+
+Repository-wide `compileall` remains unsuitable as a clean signal because the
+unchanged legacy file `src/red_to_yolo.py` contains a pre-existing
+`return outside function` syntax error. This change does not touch that file;
+the exact modified-file compilation is green. Required branch CI remains
+blocking until the implementation commit is pushed and all jobs finish.
+
+Current findings by severity:
+
+- Blocking for automatic/default activation: threshold derivation/holdout,
+  split-versus-unsplit canary evidence, operator policy promotion, and branch
+  CI.
+- Blocking for `required` production default: the separate timestamped rollout
+  decision required by OQ10.
+- No unresolved local code/test blocker after the focused regression,
+  import-boundary, and file-size checks.
 
 ## Canary measurements required before threshold promotion
 
@@ -922,12 +1005,14 @@ that policy publication alone cannot change selectors or defaults.
 
 ## Final implementation handoff requirements
 
-- [ ] Findings by severity with file and line references.
-- [ ] Exact schema IDs and versions for new artifacts and policies.
-- [ ] Exact commands and test results.
-- [ ] Operator-review handoff for non-automatic outcomes.
-- [ ] Canary measurements still required, if any.
-- [ ] Confirmation that producer geometry, recordings, raw detections, and
+- [x] Findings by severity and implementation surfaces recorded in this
+      checklist; exact commit references remain pending commit.
+- [x] Exact schema IDs and versions for new artifacts and policies.
+- [x] Exact commands and local test results.
+- [x] Operator-review handoff for non-automatic outcomes in
+      `docs/registered_dish_geometry_operator_review_handoff.md`.
+- [x] Canary measurements still required.
+- [x] Confirmation that producer geometry, recordings, raw detections, and
       existing immutable artifacts were not rewritten.
-- [ ] Confirmation of which recipes and policies are active versus implemented
+- [x] Confirmation of which recipes and policies are active versus implemented
       but intentionally unpromoted.

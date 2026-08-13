@@ -21,6 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--selected-by", required=True)
     parser.add_argument("--decision-reason", required=True)
     parser.add_argument("--decision-source", default="manual_review")
+    parser.add_argument("--comparison-run")
     parser.add_argument("--expected-selection-run", default=None)
     parser.add_argument("--scratch-root", type=Path, default=None)
     parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
@@ -36,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected_by=args.selected_by,
         decision_reason=args.decision_reason,
         decision_source=args.decision_source,
+        comparison_run=args.comparison_run,
     )
     if (
         args.expected_selection_run is not None
