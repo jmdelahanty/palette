@@ -1,8 +1,9 @@
 # Registered dish geometry production implementation checklist
 
 - Decision/checklist date: 2026-08-12
-- Status: implementation complete in the isolated worktree; local validation
-  is in progress and branch CI/policy canaries remain blocking
+- Status: implementation and one clean-commit whole-video canary through crops
+  are locally validated; branch CI, split/clipped parity, and policy-cohort
+  canaries remain blocking for merge or default activation
 - Baseline branch: `sun`
 - Implementation baseline commit:
   `5e0150fcdd0f1bcd50dd63e6ca9384fb3c7409ae`
@@ -10,6 +11,12 @@
   `agent/palette/registered-dish-geometry-production-20260813`
 - Implementation worktree:
   `/tmp/palette-registered-dish-geometry-20260813`
+- Follow-up whole-video canary branch:
+  `agent/palette/goodbatbadbat-geometry-canary-20260813`
+- Follow-up worktree:
+  `/tmp/palette-goodbatbadbat-geometry-canary-20260813`
+- Clean canary implementation commit:
+  `3138c3c34f3620c41c7a4f2480d9e3ad2d27e93f`
 - Baseline required CI:
   `https://github.com/jmdelahantyj/palette/actions/runs/31660860452`
   (`15/15` required jobs successful)
@@ -424,6 +431,10 @@ or downstream authority contracts.
       executable-plan parity outside the new configured policy.
 - [x] Integrate the same chain into the whole-video recipe through the shared
       canonical detection/refinement authority.
+- [x] Normalize whole-video canonical-v2 raw detection publication through a
+      selector-ineligible canonical-v3 successor before strict quality,
+      refinement, and finalization. Clipped native canonical-v3 sources do not
+      receive a redundant successor.
 - [ ] Permit separately staged canaries, but do not claim production geometry
       completion until both production topologies pass their required tests.
 - [x] Reuse exact valid geometry/comparison/selection/gate artifacts by digest;
@@ -509,8 +520,9 @@ or downstream authority contracts.
 - [ ] Run all required CI checks and record exact results.
 - [ ] Do not describe the branch as complete or merge-ready until required CI
       is green.
-- [ ] Record exact implementation commit, worktree path, canary artifacts, and
-      any deferred validation.
+- [x] Record exact implementation commit, worktree path, canary artifacts, and
+      deferred validation. Required CI remains explicitly unrun for the
+      unpushed canary branch.
 
 ## Implemented artifact contracts and local validation
 
@@ -542,6 +554,17 @@ Local validation completed from
 - every modified/untracked Python file passed `scripts/py -m py_compile`;
 - Black check and `git diff --check` passed.
 
+Follow-up validation at clean commit
+`3138c3c34f3620c41c7a4f2480d9e3ad2d27e93f`:
+
+- geometry, canonical-successor, quality, whole-video postprocess, and clipped
+  regression matrix: `84 passed`;
+- post-scratch-path whole-video/shared-DAG rerun: `12 passed`;
+- exact modified Python files compile, Black check passes, and
+  `git diff --check` passes; and
+- the gate and quality artifacts record `git_dirty=false` and the exact clean
+  commit above.
+
 Repository-wide `compileall` remains unsuitable as a clean signal because the
 unchanged legacy file `src/red_to_yolo.py` contains a pre-existing
 `return outside function` syntax error. This change does not touch that file;
@@ -555,16 +578,21 @@ Current findings by severity:
   CI.
 - Blocking for `required` production default: the separate timestamped rollout
   decision required by OQ10.
-- No unresolved local code/test blocker after the focused regression,
-  import-boundary, and file-size checks.
+- Blocking for the all-`goodbatbadbat` cohort: acquisition must inventory and
+  correct the recorder-summary role defect described below without rewriting
+  source recordings.
+- No unresolved local code/test blocker through the whole-video crop boundary.
 
-### `goodbatbadbat` detection-canary preflight (2026-08-13)
+### `goodbatbadbat` whole-video geometry canary (2026-08-13)
 
-The first whole-video dry run against
-`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` remains selector-ineligible and
-has not submitted detection work. It exposed ordinary organized-recording
-layouts that the synthetic contract fixtures did not cover. The follow-up
-implementation now:
+The first whole-video run against
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` completed the reviewed geometry
+chain through a selector-ineligible crop snapshot in the disposable overlay:
+
+`/groups/johnson/johnsonlab/jeremy/staging/palette_canaries/goodbatbadbat_detection_52b70e6a/2026-08-10T17-20-55Z_arena_1_goodbatbadbat`
+
+It first exposed ordinary organized-recording layouts that the synthetic
+contract fixtures did not cover. The follow-up implementation:
 
 - resolves producer geometry from either a direct producer recording root or
   the one fixed organized path `raw/recording_geometry_bundle`, while rejecting
@@ -582,39 +610,91 @@ implementation now:
   as distinct organized artifacts. CSV recorder metadata must never be copied
   or declared as a JSON summary.
 
-The historical `goodbatbadbat` manifest already mislabels the full recorder
-CSV as `*_external_summary.json`. The production source is not repaired in
-place. Canary execution must use a disposable, explicitly
-`selector_eligible=false` overlay containing a metadata-only analysis copy, an
-exact copied geometry bundle, corrected manifest metadata, and a copied
-registry. Video bytes remain read-only at their original path. The overlay and
-its registry must remain outside production selectors, and the shared
-`/groups` Palette checkout must remain unchanged.
+The source recording mislabels a 12 MB recorder frame-ledger CSV as
+`*_external_summary.json` (SHA-256
+`06ed9620dec0cc4bf3d424bf3738a2a523d3a2f9c75ee260322de3fbe60eab48`).
+The source was not repaired in place. The overlay preserves those exact bytes
+as `*.original_mislabeled_frame_ledger.csv` and supplies a separate explicit
+canary-recovery JSON summary at the expected role. This recovery is not a
+producer fix and must not be generalized silently. Acquisition must audit all
+current `goodbatbadbat` recordings and either recover the original producer
+JSON or publish a separately identified, checksummed recovery artifact.
 
-Pre-submission dry-run evidence:
+The overlay is explicitly production/selector-ineligible. Video bytes remain
+read-only at their original path, the original raw YOLO run remains selected
+and unchanged, the shared `/groups` Palette checkout remains unchanged, and no
+refined-detection or crop selector was activated.
 
-- corrected stream inventory: `ok`, with 152,035 full-video frames and no
-  unreadable-summary warning;
-- exact model run:
-  `omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb`, SHA-256
-  `3d8504fde2e9f855903384a67f13ba0d3ba37962362bfcf187a1195b6897b8ff`;
-- producer-native geometry candidate dry run:
-  `arena-geometry-acquisition-955bba2c9d4613e5fa546423`, status
-  `dry_run_validated`; and
-- whole-video raw-detection plan: one L4 GPU task, explicit
-  `registered-gate-requirement=off`, with no job submitted.
+Frozen geometry and review evidence:
 
-Follow-up local validation is green: the six focused geometry/import/
-whole-video/organizer files report `72 passed`; modified Python files compile;
-all modified Black line ranges are clean without broad legacy-file formatting;
-the import contracts report `2 kept, 0 broken`; and the storage census,
-file-size ratchet, and `git diff --check` pass.
+- acquisition candidate:
+  `arena-geometry-acquisition-955bba2c9d4613e5fa546423`;
+- Palette candidate:
+  `arena-geometry-palette-45402e91a517f748586a4075`;
+- comparison:
+  `arena_geometry_comparison_767e2a02771937120850`;
+- reviewed selection:
+  `arena_geometry_selection_d6bad19df399938439bd`, selecting the Palette
+  candidate under `manual_review_only_v1`;
+- acquisition physical inner rim: center
+  `(2259.580078125, 2218.271484375)`, radius `2146.669921875` px;
+- Palette consensus visible edge: center
+  `(2259.768494203492, 2240.8240438811413)`, radius
+  `2160.247866316792` px; and
+- center displacement: `22.553` px. Physical radius-error metrics remain null
+  because review confirms the candidates represent different observed edges.
 
-Raw detection is deliberately ungated for this canary because it supplies the
-exact immutable detection rowset needed by comparison and gate materialization.
-No claim of applied geometry gating is permitted. Submission remains blocked
-until the exact follow-up commit passes every required CI check and is deployed
-through a commit-pinned cluster worktree.
+Operator adjudication: the Palette fit is the correct fit for this recording;
+the acquisition fit is close but slightly misregistered and corresponds to a
+different edge. This is `different_feature_confirmed`, not a same-feature fit
+error and not an automatic corroboration. The workflow correctly requires
+review, and review explicitly selected the Palette candidate. No candidate was
+averaged or mutated.
+
+Against the original immutable 151,706-row YOLO source, the two operational
+gates agreed on 150,407 accepted and 214 rejected rows. The Palette gate alone
+accepted 1,085 additional rows; the acquisition gate alone accepted none.
+Operational disagreement was `0.7152%`. This audit is intentionally separate
+from physical-edge semantic comparison.
+
+Clean-commit downstream evidence:
+
+- canonical-v3 successor:
+  `detect_goodbatbadbat_canary_52b70e6a_canonical_v3_geometry_ready_3138c3c3`,
+  manifest digest
+  `e71af82cc55a5dc4191bfd67630dded17bacff30262d0dc490ee097941411777`;
+- exact gate:
+  `registered_detection_gate_c4f5fe988e567ce17b02`, with 151,492 accepted and
+  214 rejected rows and exact ordered `instance_key` coverage;
+- quality:
+  `detect_quality_goodbatbadbat_geometry_canonical_3138c3c3`, with 151,675
+  clean, 10 blip, 21 jump detections, and 329 empty frames;
+- finalized required-gate refinement:
+  `refined_detect_goodbatbadbat_geometry_canonical_3138c3c3`, with 151,480
+  kept and 226 removed rows (214 outside the registered gate and 2 jump
+  removals), manifest digest
+  `a4073c3f654006a63ef85ec5db265ea5856f5018d97cc1f4334578c158a65de9`;
+- crop snapshot:
+  `crop_goodbatbadbat_geometry_canonical_3138c3c3`, 151,480 rows at
+  `348 x 348`, manifest digest
+  `b67b53f8eb80c93b24235218db9d157d2c8d02bee1c3e88287de3323af0047f0`;
+  and
+- immutable receipts:
+  `run/geometry_canary_3138c3c3/canonical_successor.json`,
+  `run/geometry_canary_3138c3c3/refined_detection.finalization.json`, and
+  `run/geometry_canary_3138c3c3/crop.publication.json`.
+
+The canary proves reviewed selection, exact canonical source normalization,
+keyed gate consumption, immutable refinement, and crop no-bypass lineage for
+the whole-video topology. Actual keypoint and subject-mask inference was not
+run in this canary; their no-bypass contract remains covered by tests and is a
+separate runtime step.
+
+This analysis Zarr is the selected first production-attempt candidate after the
+follow-up branch passes required CI and is deployed from an exact
+commit-pinned worktree. Until then it remains selector-ineligible evidence, not
+a production activation. Cohort processing must also wait for acquisition's
+recorder-summary inventory so malformed role assignments fail before compute.
 
 ## Canary measurements required before threshold promotion
 
