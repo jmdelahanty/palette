@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -10,6 +11,74 @@ DETECTION_INSTANCE_REQUIRED_ARRAYS = (
     "frame_indices",
     "bbox_norm_coords",
 )
+
+_BBOX_CENTER_DERIVATION_SCHEMA = "palette.bbox_center_derivation"
+_BBOX_CENTER_DERIVATION_VERSION = 2
+_BBOX_CENTER_DERIVATION_OPERATION = (
+    "half_open_xyxy_edges_to_continuous_midpoint_v2"
+)
+
+
+def _pixel_authority_pointer(value: object, *, label: str) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object.")
+    record_ref = str(value.get("record_ref") or "").strip()
+    digest = str(value.get("record_sha256") or "").strip().lower()
+    digest = digest.removeprefix("sha256:")
+    if not record_ref:
+        raise ValueError(f"{label} lacks record_ref.")
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(f"{label} has an invalid record_sha256.")
+    return {"record_ref": record_ref, "record_sha256": digest}
+
+
+def resolve_detection_source_pixel_authority(
+    run_attrs: Mapping[str, Any],
+) -> dict[str, str] | None:
+    """Resolve legacy or canonical-v2 source-camera point authority.
+
+    Legacy canonical adapters carry ``source_evidence.source_pixel_authority``.
+    Native canonical-v2 detection runs bind the same continuous point frame as
+    ``bbox_center_derivation.destination_frame``.  When both are present they
+    must agree exactly after SHA-256 prefix normalization.
+    """
+
+    pointers: list[dict[str, str]] = []
+    source_evidence = run_attrs.get("source_evidence")
+    if isinstance(source_evidence, Mapping) and (
+        "source_pixel_authority" in source_evidence
+    ):
+        pointers.append(
+            _pixel_authority_pointer(
+                source_evidence.get("source_pixel_authority"),
+                label="detection source_evidence source_pixel_authority",
+            )
+        )
+
+    derivation = run_attrs.get("bbox_center_derivation")
+    if isinstance(derivation, Mapping):
+        if (
+            derivation.get("schema_id") != _BBOX_CENTER_DERIVATION_SCHEMA
+            or derivation.get("schema_version") != _BBOX_CENTER_DERIVATION_VERSION
+            or derivation.get("operation") != _BBOX_CENTER_DERIVATION_OPERATION
+        ):
+            raise ValueError(
+                "Detection bbox_center_derivation has an unsupported coordinate contract."
+            )
+        pointers.append(
+            _pixel_authority_pointer(
+                derivation.get("destination_frame"),
+                label="detection bbox_center_derivation destination_frame",
+            )
+        )
+
+    if not pointers:
+        return None
+    if any(pointer != pointers[0] for pointer in pointers[1:]):
+        raise ValueError(
+            "Detection source pixel-authority declarations do not agree."
+        )
+    return pointers[0]
 
 
 def resolve_detection_instance_table(run: Any) -> Any:
@@ -61,4 +130,5 @@ __all__ = [
     "DETECTION_INSTANCE_REQUIRED_ARRAYS",
     "read_detection_frame_counts",
     "resolve_detection_instance_table",
+    "resolve_detection_source_pixel_authority",
 ]

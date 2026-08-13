@@ -29,7 +29,10 @@ from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
-from fisheye.shared.detection_tables import resolve_detection_instance_table
+from fisheye.shared.detection_tables import (
+    resolve_detection_instance_table,
+    resolve_detection_source_pixel_authority,
+)
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_provenance import (
     build_writer_run_provenance,
@@ -272,17 +275,15 @@ def _detection_snapshot(
         raise ValueError(
             "Detection source bbox_norm_coords coordinate descriptor is incompatible."
         )
-    source_evidence = attrs.get("source_evidence")
-    pixel_authority = (
-        source_evidence.get("source_pixel_authority")
-        if isinstance(source_evidence, Mapping)
-        else None
-    )
+    pixel_authority = resolve_detection_source_pixel_authority(attrs)
     expected_authority = {
         "record_ref": coordinate_binding.get("pixel_frame_record_ref"),
-        "record_sha256": coordinate_binding.get("pixel_frame_record_sha256"),
+        "record_sha256": _sha256_hex(
+            coordinate_binding.get("pixel_frame_record_sha256"),
+            label="geometry source-camera pixel authority digest",
+        ),
     }
-    if not isinstance(pixel_authority, Mapping) or dict(pixel_authority) != expected_authority:
+    if pixel_authority != expected_authority:
         raise ValueError(
             "Detection source and comparison candidates do not share the exact "
             "persisted source-camera pixel authority."

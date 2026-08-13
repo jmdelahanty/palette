@@ -32,7 +32,10 @@ from fisheye.shared.atomic_run_publisher import (
 from fisheye.shared.detect_quality_contract import (
     CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA,
 )
-from fisheye.shared.detection_tables import resolve_detection_instance_table
+from fisheye.shared.detection_tables import (
+    resolve_detection_instance_table,
+    resolve_detection_source_pixel_authority,
+)
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_provenance import (
     build_writer_run_provenance,
@@ -242,21 +245,7 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         raise ValueError(
             "Canonical detection source bbox_norm_coords lacks its coordinate descriptor."
         )
-    source_pixel_authority = None
-    source_evidence = attrs.get("source_evidence")
-    if isinstance(source_evidence, Mapping):
-        raw_authority = source_evidence.get("source_pixel_authority")
-        if isinstance(raw_authority, Mapping):
-            record_ref = str(raw_authority.get("record_ref") or "").strip()
-            record_sha256 = str(raw_authority.get("record_sha256") or "").strip()
-            if not record_ref or len(record_sha256) != 64:
-                raise ValueError(
-                    "Canonical detection source has invalid source-pixel authority."
-                )
-            source_pixel_authority = {
-                "record_ref": record_ref,
-                "record_sha256": record_sha256,
-            }
+    source_pixel_authority = resolve_detection_source_pixel_authority(attrs)
     signature_payload = {
         "group_path": path,
         "schema_id": attrs.get("schema_id"),

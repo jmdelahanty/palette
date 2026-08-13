@@ -166,6 +166,24 @@ def _write_nested_detection_source(archive: Path) -> str:
     return "detect_runs/detect_native"
 
 
+def _use_canonical_v2_detection_authority(archive: Path, source_path: str) -> None:
+    root = open_zarr_root(archive, mode="a")
+    run = root[source_path]
+    del run.attrs["source_evidence"]
+    run.attrs["bbox_center_derivation"] = {
+        "schema_id": "palette.bbox_center_derivation",
+        "schema_version": 2,
+        "operation": "half_open_xyxy_edges_to_continuous_midpoint_v2",
+        "destination_frame": {
+            "record_ref": (
+                "/analysis/coordinate_frames/source_camera/2010093/"
+                "continuous@pixel_frame_authority"
+            ),
+            "record_sha256": "sha256:" + "e" * 64,
+        },
+    }
+
+
 def test_unresolved_comparison_preserves_semantics_and_blocks_automatic_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -344,6 +362,27 @@ def test_comparison_rejects_detection_source_with_wrong_pixel_authority(
         )
 
 
+def test_comparison_accepts_canonical_v2_center_derivation_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, acquisition, palette = _archive_with_candidates(tmp_path, monkeypatch)
+    detect_source = _write_nested_detection_source(archive)
+    _use_canonical_v2_detection_authority(archive, detect_source)
+
+    plan = comparison.build_arena_geometry_comparison_plan(
+        archive,
+        acquisition_candidate_run=acquisition,
+        palette_candidate_run=palette,
+        semantic_compatibility="projected_edges_unresolved",
+        detect_source_group_path=detect_source,
+    )
+
+    assert plan.comparison_record["operational_gate_disagreement"]["status"] == (
+        "measured"
+    )
+
+
 def test_selection_binds_exact_comparison_and_keeps_boundary_roles_distinct(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -415,6 +454,7 @@ def test_comparison_bound_selection_gates_nested_canonical_detection(
 
     archive, acquisition, palette = _archive_with_candidates(tmp_path, monkeypatch)
     detect_source = _write_nested_detection_source(archive)
+    _use_canonical_v2_detection_authority(archive, detect_source)
     comparison_plan = comparison.build_arena_geometry_comparison_plan(
         archive,
         acquisition_candidate_run=acquisition,
