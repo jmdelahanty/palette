@@ -112,6 +112,15 @@ def _payload_sha256(value: Any) -> str:
     return hashlib.sha256(strict_json_dumps(value).encode("utf-8")).hexdigest()
 
 
+def _sha256_hex(value: object, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a SHA-256 string.")
+    digest = value.strip().lower().removeprefix("sha256:")
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(f"{label} is not a valid SHA-256 digest.")
+    return digest
+
+
 def _safe_name(value: object, *, label: str) -> str:
     text = str(value or "").strip()
     if not text or "/" in text or text in {".", ".."}:
@@ -516,9 +525,13 @@ def build_arena_geometry_comparison_plan(
             raise ValueError(
                 "Acquisition boundary edge support measured a different physical circle."
             )
-        if edge_support.get("source_observation_sha256") != acquisition_record[
-            "acquisition_source"
-        ]["source_observation_sha256"]:
+        if _sha256_hex(
+            edge_support.get("source_observation_sha256"),
+            label="acquisition boundary edge-support observation digest",
+        ) != _sha256_hex(
+            acquisition_record["acquisition_source"]["source_observation_sha256"],
+            label="acquisition candidate source-observation digest",
+        ):
             raise ValueError(
                 "Acquisition boundary edge support does not bind the producer observation."
             )

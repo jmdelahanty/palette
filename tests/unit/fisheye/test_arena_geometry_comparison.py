@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,8 @@ def _write_candidate(parent: zarr.Group, record: dict[str, object]) -> str:
 def _archive_with_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    acquisition_edge_support_digest: str | None = None,
 ) -> tuple[Path, str, str]:
     archive = tmp_path / "recording.zarr"
     root = zarr.open_group(str(archive), mode="w", zarr_format=3)
@@ -52,6 +55,50 @@ def _archive_with_candidates(
         _bound_mask(), recovery_binding=_recovery_binding()
     )
     fit_report, montage = _palette_fit_inputs(tmp_path)
+    if acquisition_edge_support_digest is not None:
+        window_support = {
+            "status": "measured",
+            "method": "fixed_circle_radial_gradient_support_v1",
+            "geometry_frozen": True,
+            "radial_band_px": 4.0,
+            "angular_sample_count": 1440,
+            "angular_edge_support_fraction": 0.92,
+            "median_radial_gradient": 650.0,
+            "median_absolute_radial_offset_px": 0.4,
+            "signed_median_radial_offset_px": 0.1,
+        }
+        reveal = {
+            "schema_id": (
+                "palette.diagnostics.recording_dish_rim_probe.acquisition_reveal"
+            ),
+            "schema_version": 1,
+            "fit_report": {
+                "path": fit_report.name,
+                "sha256": hashlib.sha256(fit_report.read_bytes()).hexdigest(),
+            },
+            "acquisition_boundary_edge_support": {
+                "status": "measured",
+                "method": "fixed_circle_radial_gradient_support_v1",
+                "fit_frozen_before_measurement": True,
+                "coordinate_space": "camera_native_pixels",
+                "geometry": {
+                    "type": "circle",
+                    "center_px": {"x": 320.25, "y": 240.5},
+                    "radius_px": 200.0,
+                },
+                "source_observation_sha256": acquisition_edge_support_digest,
+                "windows": {
+                    name: window_support for name in ("early", "middle", "late")
+                },
+                "median_angular_edge_support_fraction": 0.92,
+                "minimum_angular_edge_support_fraction": 0.92,
+                "median_absolute_radial_offset_px": 0.4,
+                "median_radial_gradient": 650.0,
+            },
+        }
+        (tmp_path / "acquisition_reveal.json").write_text(
+            json.dumps(reveal), encoding="utf-8"
+        )
     monkeypatch.setattr(
         arena_geometry_candidates,
         "_source_camera_candidate_binding",
@@ -151,6 +198,47 @@ def test_unresolved_comparison_preserves_semantics_and_blocks_automatic_selectio
     assert operational["status"] == "measured"
     assert operational["row_count"] == 3
     assert operational["additional_palette_tolerance_px"] == 0.0
+
+
+def test_comparison_normalizes_equivalent_observation_digest_encodings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, acquisition, palette = _archive_with_candidates(
+        tmp_path,
+        monkeypatch,
+        acquisition_edge_support_digest="a" * 64,
+    )
+
+    plan = comparison.build_arena_geometry_comparison_plan(
+        archive,
+        acquisition_candidate_run=acquisition,
+        palette_candidate_run=palette,
+        semantic_compatibility="projected_edges_unresolved",
+    )
+
+    assert plan.comparison_record["acquisition_boundary_edge_support"]["status"] == (
+        "measured"
+    )
+
+
+def test_comparison_rejects_different_observation_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, acquisition, palette = _archive_with_candidates(
+        tmp_path,
+        monkeypatch,
+        acquisition_edge_support_digest="b" * 64,
+    )
+
+    with pytest.raises(ValueError, match="does not bind the producer observation"):
+        comparison.build_arena_geometry_comparison_plan(
+            archive,
+            acquisition_candidate_run=acquisition,
+            palette_candidate_run=palette,
+            semantic_compatibility="projected_edges_unresolved",
+        )
 
 
 def test_same_feature_metrics_require_reviewed_semantic_evidence(
