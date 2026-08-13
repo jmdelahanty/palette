@@ -58,6 +58,28 @@ from fisheye.shared.gpu_runtime_telemetry import (
     GPU_RUNTIME_TELEMETRY_SCHEMA_VERSION,
     require_gpu_runtime_telemetry,
 )
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.subject_mask_cache_publication import (
+    SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    SubjectMaskCoreValidationMode,
+)
+from fisheye.shared.zarr.subject_mask_final_layout_units import (
+    SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS,
+)
+from fisheye.shared.zarr.subject_mask_quality_manifest import (
+    SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.subject_mask_quality_partition import (
+    SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION,
+    SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.subject_mask_quality_publication import (
+    SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 MATRIX_SCHEMA_ID = "palette.subject_mask.single_clip_inference_matrix"
@@ -112,6 +134,67 @@ def _write_task_plan(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
     document["plan_digest"] = canonical_json_sha256(document)
     _write_json_atomic(path, document)
     return document
+
+
+def _apply_current_canary_policy(task_plan: dict[str, Any]) -> None:
+    """Complete a copied legacy plan before promoting it to the current schema."""
+
+    execution = task_plan["execution"]
+    publication = execution["publication"]
+    quality_compute_workers = int(
+        publication.get(
+            "quality_compute_workers",
+            publication.get("core_physical_unit_workers", 1),
+        )
+    )
+    publication.update(
+        {
+            "quality_compute_workers": quality_compute_workers,
+            "quality_manifest_schema_version": (
+                SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+            ),
+            "quality_write_receipt_schema_version": (
+                SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION
+            ),
+            "cache_manifest_schema_version": (
+                SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION
+            ),
+            "bundle_manifest_schema_version": (
+                SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION
+            ),
+            "core_validation_mode": (
+                SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
+            ),
+            "logical_identity_unit_rows": (
+                SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+            ),
+        }
+    )
+    execution["quality_partitions"] = {
+        "compute_workers_per_partition": quality_compute_workers,
+        "execution": "independent_refined_worker_bound_partitions_v1",
+        "publication": "immutable_partition_then_single_owner_merge_v1",
+        "partition_receipt_schema_version": (
+            SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION
+        ),
+        "partition_assembly_schema_version": (
+            SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION
+        ),
+        "finalizer_dense_read_policy": "forbidden_receipt_composition_v1",
+    }
+
+    safety = task_plan["safety"]
+    safety.pop("finalizer_full_dense_decode_hash_allowed", None)
+    safety.pop("quality_finalizer_ordered_dense_identity_scan_required", None)
+    safety.update(
+        {
+            "receipt_bound_composable_dense_identity_required": True,
+            "core_finalizer_full_dense_decode_hash_allowed": False,
+            "quality_receipt_composition_required": True,
+            "quality_finalizer_ordered_dense_identity_scan_allowed": False,
+            "worker_quality_partitions_required": True,
+        }
+    )
 
 
 def _balanced_tasks(repetitions: int) -> list[tuple[int, Mapping[str, Any]]]:
@@ -222,6 +305,7 @@ def prepare_matrix(
                 },
             }
         )
+        _apply_current_canary_policy(task_plan)
         inference = task_plan["execution"]["inference"]
         inference.update(
             {

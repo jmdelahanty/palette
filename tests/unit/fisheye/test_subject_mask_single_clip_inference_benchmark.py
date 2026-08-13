@@ -366,6 +366,51 @@ def test_prepare_matrix_balances_candidates_and_freezes_external_dependency(
     ]
     assert loaded["scheduler"]["after_condition"] == "done(153303424)"
     assert all(Path(task["task_plan_path"]).is_file() for task in loaded["tasks"])
+    task_plan = canary.load_plan(Path(loaded["tasks"][0]["task_plan_path"]))
+    assert task_plan["schema_version"] == canary.PLAN_SCHEMA_VERSION
+    assert task_plan["execution"]["publication"] == {
+        "core_physical_unit_workers": 4,
+        "quality_compute_workers": 4,
+        "quality_manifest_schema_version": (
+            canary.SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION
+        ),
+        "quality_write_receipt_schema_version": (
+            canary.SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION
+        ),
+        "cache_manifest_schema_version": (
+            canary.SUBJECT_MASK_CACHE_RUN_MANIFEST_SCHEMA_VERSION
+        ),
+        "bundle_manifest_schema_version": (
+            canary.SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION
+        ),
+        "core_validation_mode": (
+            canary.SubjectMaskCoreValidationMode.PRODUCTION_COMPOSABLE.value
+        ),
+        "logical_identity_unit_rows": (
+            canary.SUBJECT_MASK_COMPOSABLE_LOGICAL_IDENTITY_UNIT_ROWS
+        ),
+        "ownership_policy": ("bounded_threaded_disjoint_whole_physical_row_bands_v1"),
+    }
+    assert task_plan["execution"]["quality_partitions"] == {
+        "compute_workers_per_partition": 4,
+        "execution": "independent_refined_worker_bound_partitions_v1",
+        "publication": "immutable_partition_then_single_owner_merge_v1",
+        "partition_receipt_schema_version": (
+            canary.SUBJECT_MASK_QUALITY_PARTITION_RECEIPT_SCHEMA_VERSION
+        ),
+        "partition_assembly_schema_version": (
+            canary.SUBJECT_MASK_QUALITY_PARTITION_ASSEMBLY_SCHEMA_VERSION
+        ),
+        "finalizer_dense_read_policy": "forbidden_receipt_composition_v1",
+    }
+    assert task_plan["safety"]["core_finalizer_full_dense_decode_hash_allowed"] is False
+    assert task_plan["safety"]["quality_receipt_composition_required"] is True
+    assert (
+        task_plan["safety"]["quality_finalizer_ordered_dense_identity_scan_allowed"]
+        is False
+    )
+    assert task_plan["safety"]["worker_quality_partitions_required"] is True
+    assert "finalizer_full_dense_decode_hash_allowed" not in task_plan["safety"]
 
 
 def test_workflow_runs_fresh_trials_serially_after_live_array(
