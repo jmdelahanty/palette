@@ -81,9 +81,16 @@ def _write_source_h5(
     *,
     duplicate_key: bool = False,
     target_camera_index: int = 0,
+    state_stimulus_frames: tuple[int, int] = (0, 1),
+    frame_metadata_stimulus_frames: tuple[int, ...] = (0, 1),
 ) -> None:
     states = np.zeros(4, dtype=_chaser_dtype())
-    states["stimulus_frame_num"] = [0, 0, 1, 1]
+    states["stimulus_frame_num"] = [
+        state_stimulus_frames[0],
+        state_stimulus_frames[0],
+        state_stimulus_frames[1],
+        state_stimulus_frames[1],
+    ]
     states["chaser_index"] = [0, 1, 0, 1]
     if duplicate_key:
         states["chaser_index"][1] = 0
@@ -111,7 +118,13 @@ def _write_source_h5(
             ("video_frame_index", "<i8"),
         ]
     )
-    frames = np.asarray([(0, 1, 100, 0), (1, 2, 200, 1)], dtype=frame_dtype)
+    frames = np.asarray(
+        [
+            (stimulus_frame, index + 1, (index + 1) * 100, index)
+            for index, stimulus_frame in enumerate(frame_metadata_stimulus_frames)
+        ],
+        dtype=frame_dtype,
+    )
     with h5py.File(path, "w") as h5:
         tracking = h5.create_group("tracking_data")
         chaser = tracking.create_dataset(
@@ -162,6 +175,9 @@ def _write_recording(
     *,
     duplicate_key: bool = False,
     target_camera_index: int = 0,
+    state_stimulus_frames: tuple[int, int] = (0, 1),
+    frame_metadata_stimulus_frames: tuple[int, ...] = (0, 1),
+    software_version: str = migration.SUPPORTED_CITRUS_VERSION,
 ) -> tuple[Path, Path]:
     recording = root / "recording_goodbatbadbat"
     raw = recording / "raw"
@@ -176,6 +192,8 @@ def _write_recording(
         source_h5,
         duplicate_key=duplicate_key,
         target_camera_index=target_camera_index,
+        state_stimulus_frames=state_stimulus_frames,
+        frame_metadata_stimulus_frames=frame_metadata_stimulus_frames,
     )
     csv_path = cams / "Cam2010093_recording_meta.csv"
     csv_path.write_text(
@@ -237,7 +255,7 @@ def _write_recording(
     snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
     manifest = {
         "protocol_name": migration.SUPPORTED_PROTOCOL,
-        "software_version": migration.SUPPORTED_CITRUS_VERSION,
+        "software_version": software_version,
         "camera_id": "2010093",
         "recording_name": recording.name,
         "orange_session_id": "orange-session",
@@ -334,6 +352,109 @@ def test_migration_materializes_two_chaser_v5_derivative_without_touching_raw(
         assert preflight.has_chaser_states is True
         assert preflight.row_identity_values is not None
         assert preflight.row_identity_values.shape == (4, 2)
+
+
+def test_migration_accepts_and_records_contiguous_pre_chaser_metadata_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirty_version = f"{migration.SUPPORTED_CITRUS_VERSION}-dirty"
+    recording, source_h5 = _write_recording(
+        tmp_path,
+        state_stimulus_frames=(2, 3),
+        frame_metadata_stimulus_frames=(0, 1, 2, 3),
+        software_version=dirty_version,
+    )
+    source_digest = _file_sha256(source_h5)
+
+    dry_run = migration.migrate_recording(recording)
+    assert dry_run["status"] == "would_migrate"
+    assert dry_run["source_citrus_version"] == dirty_version
+    assert dry_run["frame_metadata_coverage_mode"] == (
+        "contiguous_pre_chaser_prefix_v1"
+    )
+    assert dry_run["frame_metadata_prefix_row_count"] == 2
+    assert dry_run["frame_metadata_prefix_stimulus_frame_start"] == 0
+    assert dry_run["frame_metadata_prefix_stimulus_frame_end"] == 1
+
+    _bypass_selected_calibration(monkeypatch)
+    result = migration.migrate_recording(recording, apply=True)
+    assert result["raw_source_unchanged"] is True
+    assert _file_sha256(source_h5) == source_digest
+
+    external = json.loads(Path(result["external_receipt"]).read_text())
+    assert external["source_citrus_version"] == dirty_version
+    assert external["migration_schema_version"] == 2
+    with h5py.File(result["output_h5"], "r") as derivative:
+        embedded = json.loads(
+            derivative[migration.MIGRATION_GROUP_PATH].attrs[
+                migration.MIGRATION_RECEIPT_ATTR
+            ]
+        )
+        assert embedded["schema_version"] == 2
+        assert embedded["source_citrus_version"] == dirty_version
+        assert embedded["frame_metadata_coverage"] == {
+            "mode": "contiguous_pre_chaser_prefix_v1",
+            "chaser_stimulus_frame_start": 2,
+            "chaser_stimulus_frame_end": 3,
+            "pre_chaser_prefix_row_count": 2,
+            "pre_chaser_prefix_stimulus_frame_start": 0,
+            "pre_chaser_prefix_stimulus_frame_end": 1,
+            "source_frame_metadata_preserved_in_derivative": True,
+        }
+        assert derivative["/video_metadata/frame_metadata"].shape == (4,)
+        assert np.array_equal(
+            derivative["/tracking_data/source_acquisition_frame_index"][:],
+            np.asarray([2, 2, 3, 3], dtype=np.int64),
+        )
+
+
+@pytest.mark.parametrize(
+    ("state_frames", "metadata_frames", "message"),
+    [
+        ((2, 3), (0, 1, 2), "missing one or more chaser stimulus frames"),
+        (
+            (1, 3),
+            (0, 1, 2, 3),
+            "must form one contiguous pre-chaser prefix",
+        ),
+        (
+            (2, 3),
+            (0, 1, 1, 2, 3),
+            "stimulus-frame identity must be unique",
+        ),
+        (
+            (2, 3),
+            (0, 1, 2, 3, 4),
+            "must form one contiguous pre-chaser prefix",
+        ),
+    ],
+)
+def test_migration_rejects_ambiguous_or_incomplete_metadata_superset(
+    tmp_path: Path,
+    state_frames: tuple[int, int],
+    metadata_frames: tuple[int, ...],
+    message: str,
+) -> None:
+    recording, _source_h5 = _write_recording(
+        tmp_path,
+        state_stimulus_frames=state_frames,
+        frame_metadata_stimulus_frames=metadata_frames,
+    )
+    with pytest.raises(migration.GoodBatBadBatMigrationError, match=message):
+        migration.plan_migration(recording)
+
+
+def test_migration_rejects_unaudited_citrus_version(tmp_path: Path) -> None:
+    recording, _source_h5 = _write_recording(
+        tmp_path,
+        software_version="v1.2.1-1530-unknown",
+    )
+    with pytest.raises(
+        migration.GoodBatBadBatMigrationError,
+        match="restricted to audited Citrus versions",
+    ):
+        migration.plan_migration(recording)
 
 
 @pytest.mark.parametrize(

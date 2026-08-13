@@ -79,11 +79,17 @@ from fisheye.shared.stimulus_coordinate_contract import (
 
 SUPPORTED_PROTOCOL = "goodbatbadbat"
 SUPPORTED_CITRUS_VERSION = "v1.2.1-1529-g6827d7c"
+SUPPORTED_CITRUS_VERSIONS = frozenset(
+    {
+        SUPPORTED_CITRUS_VERSION,
+        f"{SUPPORTED_CITRUS_VERSION}-dirty",
+    }
+)
 EXPECTED_CHASER_COUNT = 2
 DERIVATIVE_SUFFIX = ".canonical_stimulus_v1.h5"
 
 MIGRATION_SCHEMA_ID = "palette.legacy_goodbatbadbat_stimulus_h5_migration"
-MIGRATION_SCHEMA_VERSION = 1
+MIGRATION_SCHEMA_VERSION = 2
 MIGRATION_GROUP_PATH = "/palette_migration"
 MIGRATION_RECEIPT_ATTR = "migration_receipt"
 MIGRATION_RECEIPT_DIGEST_ATTR = f"{MIGRATION_RECEIPT_ATTR}_sha256"
@@ -219,6 +225,12 @@ class H5Evidence:
     chaser_indices: tuple[int, ...]
     stimulus_frame_count: int
     frame_metadata_row_count: int
+    frame_metadata_coverage_mode: str
+    frame_metadata_prefix_row_count: int
+    frame_metadata_prefix_stimulus_frame_start: int | None
+    frame_metadata_prefix_stimulus_frame_end: int | None
+    chaser_stimulus_frame_start: int
+    chaser_stimulus_frame_end: int
     source_chaser_sha256: str
     source_frame_metadata_sha256: str
     source_bounding_boxes_sha256: str | None
@@ -237,6 +249,7 @@ class MigrationPlan:
     camera_index: int
     recording_id: str
     orange_session_id: str
+    source_citrus_version: str
     total_frames: int
     jsonl_path: Path
     csv_path: Path
@@ -324,15 +337,19 @@ def _single_file(paths: Iterable[Path], *, label: str) -> Path:
 def _manifest_paths(
     recording_dir: Path,
     manifest: Mapping[str, Any],
-) -> tuple[Path, Path, Path, Path, int, str, str, str]:
+) -> tuple[Path, Path, Path, Path, int, str, str, str, str]:
     if manifest.get("protocol_name") != SUPPORTED_PROTOCOL:
         raise GoodBatBadBatMigrationError(
             f"Migration is restricted to {SUPPORTED_PROTOCOL!r} recordings."
         )
-    if manifest.get("software_version") != SUPPORTED_CITRUS_VERSION:
+    source_citrus_version = _required_text(
+        manifest.get("software_version"),
+        label="manifest software_version",
+    )
+    if source_citrus_version not in SUPPORTED_CITRUS_VERSIONS:
         raise GoodBatBadBatMigrationError(
-            "Migration is restricted to Citrus "
-            f"{SUPPORTED_CITRUS_VERSION}."
+            "Migration is restricted to audited Citrus versions: "
+            f"{sorted(SUPPORTED_CITRUS_VERSIONS)}."
         )
     camera_id = _required_text(manifest.get("camera_id"), label="manifest camera_id")
     recording_id = _required_text(
@@ -397,6 +414,7 @@ def _manifest_paths(
         camera_id,
         recording_id,
         orange_session_id,
+        source_citrus_version,
     )
 
 
@@ -677,15 +695,50 @@ def _h5_evidence(
             frames["triggering_camera_frame_id"][:],
             dtype=np.int64,
         )
-        if (
-            np.any(frame_stimulus < 0)
-            or np.unique(frame_stimulus).size != frame_stimulus.size
-            or frame_stimulus.size != unique_stimulus.size
-            or not np.array_equal(np.sort(frame_stimulus), unique_stimulus)
-        ):
+        if np.any(frame_stimulus < 0):
             raise GoodBatBadBatMigrationError(
-                "frame_metadata must contain one exact row for every stimulus frame."
+                "frame_metadata stimulus-frame identity contains negative values."
             )
+        frame_metadata_stimulus, frame_metadata_counts = np.unique(
+            frame_stimulus,
+            return_counts=True,
+        )
+        if np.any(frame_metadata_counts != 1):
+            raise GoodBatBadBatMigrationError(
+                "frame_metadata stimulus-frame identity must be unique."
+            )
+        missing_chaser_stimulus = np.setdiff1d(
+            unique_stimulus,
+            frame_metadata_stimulus,
+            assume_unique=True,
+        )
+        if missing_chaser_stimulus.size:
+            raise GoodBatBadBatMigrationError(
+                "frame_metadata is missing one or more chaser stimulus frames."
+            )
+        extra_frame_metadata_stimulus = np.setdiff1d(
+            frame_metadata_stimulus,
+            unique_stimulus,
+            assume_unique=True,
+        )
+        if extra_frame_metadata_stimulus.size:
+            expected_prefix = np.arange(
+                int(extra_frame_metadata_stimulus[0]),
+                int(unique_stimulus[0]),
+                dtype=np.int64,
+            )
+            if not np.array_equal(extra_frame_metadata_stimulus, expected_prefix):
+                raise GoodBatBadBatMigrationError(
+                    "frame_metadata rows outside chaser coverage must form one "
+                    "contiguous pre-chaser prefix."
+                )
+            frame_metadata_coverage_mode = "contiguous_pre_chaser_prefix_v1"
+            frame_metadata_prefix_start = int(extra_frame_metadata_stimulus[0])
+            frame_metadata_prefix_end = int(extra_frame_metadata_stimulus[-1])
+        else:
+            frame_metadata_coverage_mode = "exact_chaser_frame_set_v1"
+            frame_metadata_prefix_start = None
+            frame_metadata_prefix_end = None
         chaser_trigger_ids = _map_frame_rows(
             frame_stimulus=frame_stimulus,
             frame_values=triggering_ids,
@@ -741,6 +794,12 @@ def _h5_evidence(
             chaser_indices=unique_chasers,
             stimulus_frame_count=int(unique_stimulus.size),
             frame_metadata_row_count=int(frames.shape[0]),
+            frame_metadata_coverage_mode=frame_metadata_coverage_mode,
+            frame_metadata_prefix_row_count=int(extra_frame_metadata_stimulus.size),
+            frame_metadata_prefix_stimulus_frame_start=frame_metadata_prefix_start,
+            frame_metadata_prefix_stimulus_frame_end=frame_metadata_prefix_end,
+            chaser_stimulus_frame_start=int(unique_stimulus[0]),
+            chaser_stimulus_frame_end=int(unique_stimulus[-1]),
             source_chaser_sha256=_h5_dataset_content_digest(chaser),
             source_frame_metadata_sha256=_h5_dataset_content_digest(frames),
             source_bounding_boxes_sha256=bbox_digest,
@@ -766,6 +825,7 @@ def plan_migration(
         camera_id,
         recording_id,
         orange_session_id,
+        source_citrus_version,
     ) = _manifest_paths(recording_dir, manifest)
     session_path = (recording_dir / "raw/recording_session.json").resolve()
     _validate_session_and_snapshot(
@@ -820,6 +880,7 @@ def plan_migration(
         camera_index=int(camera_index_by_ipc[1]),
         recording_id=recording_id,
         orange_session_id=orange_session_id,
+        source_citrus_version=source_citrus_version,
         total_frames=total_frames,
         jsonl_path=jsonl_path,
         csv_path=csv_path,
@@ -942,9 +1003,9 @@ def _migration_receipt(
     return {
         "schema_id": MIGRATION_SCHEMA_ID,
         "schema_version": MIGRATION_SCHEMA_VERSION,
-        "migration_method": "legacy_goodbatbadbat_orange_identity_join_v1",
+        "migration_method": "legacy_goodbatbadbat_orange_identity_join_v2",
         "source_protocol": SUPPORTED_PROTOCOL,
-        "source_citrus_version": SUPPORTED_CITRUS_VERSION,
+        "source_citrus_version": plan.source_citrus_version,
         "source_artifacts": list(plan.artifact_records),
         "source_chaser_states_sha256": evidence.source_chaser_sha256,
         "source_frame_metadata_sha256": evidence.source_frame_metadata_sha256,
@@ -955,6 +1016,19 @@ def _migration_receipt(
         "supported_row_count": plan.supported_row_count,
         "stimulus_frame_count": evidence.stimulus_frame_count,
         "frame_metadata_row_count": evidence.frame_metadata_row_count,
+        "frame_metadata_coverage": {
+            "mode": evidence.frame_metadata_coverage_mode,
+            "chaser_stimulus_frame_start": evidence.chaser_stimulus_frame_start,
+            "chaser_stimulus_frame_end": evidence.chaser_stimulus_frame_end,
+            "pre_chaser_prefix_row_count": evidence.frame_metadata_prefix_row_count,
+            "pre_chaser_prefix_stimulus_frame_start": (
+                evidence.frame_metadata_prefix_stimulus_frame_start
+            ),
+            "pre_chaser_prefix_stimulus_frame_end": (
+                evidence.frame_metadata_prefix_stimulus_frame_end
+            ),
+            "source_frame_metadata_preserved_in_derivative": True,
+        },
         "chaser_indices": list(evidence.chaser_indices),
         "rows_per_stimulus_frame": EXPECTED_CHASER_COUNT,
         "omitted_rows": [],
@@ -991,6 +1065,10 @@ def _migration_receipt(
             "jsonl_csv_camera_frame_id_equal": True,
             "frame_metadata_unique_by_stimulus_frame": True,
             "chaser_rows_resolve_exactly_one_frame_metadata_row": True,
+            "non_chaser_frame_metadata_is_contiguous_pre_chaser_prefix": True,
+            "non_chaser_frame_metadata_row_count": (
+                evidence.frame_metadata_prefix_row_count
+            ),
             "duplicate_composite_keys": 0,
             "missing_ids": 0,
             "camera_mismatches": 0,
@@ -1226,11 +1304,20 @@ def migrate_recording(
         "external_receipt": str(plan.external_receipt),
         "recording_id": plan.recording_id,
         "camera_id": plan.camera_id,
+        "source_citrus_version": plan.source_citrus_version,
         "source_total_frames": plan.total_frames,
         "source_row_count": plan.supported_row_count,
         "supported_row_count": plan.supported_row_count,
         "stimulus_frame_count": evidence.stimulus_frame_count,
         "frame_metadata_row_count": evidence.frame_metadata_row_count,
+        "frame_metadata_coverage_mode": evidence.frame_metadata_coverage_mode,
+        "frame_metadata_prefix_row_count": evidence.frame_metadata_prefix_row_count,
+        "frame_metadata_prefix_stimulus_frame_start": (
+            evidence.frame_metadata_prefix_stimulus_frame_start
+        ),
+        "frame_metadata_prefix_stimulus_frame_end": (
+            evidence.frame_metadata_prefix_stimulus_frame_end
+        ),
         "chaser_indices": list(evidence.chaser_indices),
         "source_acquisition_frame_index_sha256": numpy_content_digest(
             evidence.source_acquisition_frame_index
@@ -1309,6 +1396,9 @@ def migrate_recording(
         "derivative_h5_sha256": derivative_digest,
         "migration_receipt_ref": f"{MIGRATION_GROUP_PATH}@{MIGRATION_RECEIPT_ATTR}",
         "migration_receipt_sha256": canonical_mapping_digest(receipt),
+        "migration_schema_id": MIGRATION_SCHEMA_ID,
+        "migration_schema_version": MIGRATION_SCHEMA_VERSION,
+        "source_citrus_version": plan.source_citrus_version,
         "source_h5": str(plan.source_h5),
         "source_h5_sha256": source_digest_before,
         "canonicalization": "canonical_json_sort_keys_v1",
