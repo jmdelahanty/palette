@@ -46,15 +46,15 @@ from fisheye.shared.detection_model_provenance import (
 )
 from fisheye.shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
+from fisheye.shared.import_video_metadata import (
+    publish_source_camera_pixel_frame_authorities,
+)
 from fisheye.shared.observation_coordinate_publication import (
-    SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
-    SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
     _load_persisted_detection_observation_geometry,
     load_persisted_detection_observation_geometry,
 )
 from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
-    stamp_source_camera_pixel_frame_authority,
 )
 from fisheye.shared.run_provenance import (
     build_run_provenance,
@@ -258,30 +258,7 @@ def _ensure_shared_source_camera_authorities(source_zarr: Path) -> dict[str, str
     """Idempotently materialize deterministic archive-wide camera frames."""
 
     root = open_zarr_root(source_zarr, mode="a")
-    _, acquisition = load_persisted_acquisition_camera_authority(root)
-    camera_id = acquisition.record.camera_id
-    parent = root.require_group("analysis").require_group("coordinate_frames")
-    source_camera = parent.require_group("source_camera").require_group(camera_id)
-    point_node = source_camera.require_group(SOURCE_CAMERA_POINT_PIXEL_CONVENTION)
-    bbox_node = source_camera.require_group(SOURCE_CAMERA_BBOX_PIXEL_CONVENTION)
-    point = stamp_source_camera_pixel_frame_authority(
-        point_node,
-        frame_id=f"{camera_id}_source_camera",
-        pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
-        acquisition_frame=acquisition,
-    )
-    bbox = stamp_source_camera_pixel_frame_authority(
-        bbox_node,
-        frame_id=f"{camera_id}_source_camera_pixel_edge_half_open",
-        pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
-        acquisition_frame=acquisition,
-    )
-    return {
-        "point_record_ref": point.record_ref,
-        "point_record_sha256": point.record_sha256,
-        "bbox_record_ref": bbox.record_ref,
-        "bbox_record_sha256": bbox.record_sha256,
-    }
+    return publish_source_camera_pixel_frame_authorities(root)
 
 
 def _verify_model(model_path: Path, expected_sha256: str) -> dict[str, Any]:

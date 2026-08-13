@@ -421,7 +421,26 @@ def _verify_snapshot_rim_reference(
     rim = _required_mapping(camera.get("dish_top_rim_observation"), label="dish_top_rim_observation")
     if rim.get("artifact_id") != artifact_id:
         raise RecordingGeometryError("recording_snapshot rim artifact_id disagrees with the contract.")
-    if _normalized_sha256(rim.get("sha256"), label="recording_snapshot rim sha256") != source_sha256:
+    checksum_values: list[tuple[str, Any]] = []
+    if rim.get("sha256") is not None:
+        checksum_values.append(("recording_snapshot rim sha256", rim.get("sha256")))
+    source = rim.get("source")
+    if isinstance(source, Mapping) and source.get("sha256") is not None:
+        checksum_values.append(
+            ("recording_snapshot rim source sha256", source.get("sha256"))
+        )
+    if not checksum_values:
+        raise RecordingGeometryError(
+            "recording_snapshot rim reference lacks a SHA-256 checksum."
+        )
+    normalized = {
+        _normalized_sha256(value, label=label) for label, value in checksum_values
+    }
+    if len(normalized) != 1:
+        raise RecordingGeometryError(
+            "recording_snapshot rim checksum fields disagree with each other."
+        )
+    if normalized.pop() != source_sha256:
         raise RecordingGeometryError("recording_snapshot rim checksum disagrees with the contract.")
 
 

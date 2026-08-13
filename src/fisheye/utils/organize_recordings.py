@@ -690,7 +690,9 @@ def _external_ipc_video_streams_payload(
     cam_base: str,
     full_output: Dict[str, Any],
     crop_output: Dict[str, Any],
-    has_frame_clock_metadata: bool = True,
+    full_frame_clock_metadata: Optional[str],
+    has_full_summary: bool,
+    has_full_status: bool,
 ) -> Dict[str, object]:
     full_stream = _drop_none_values(
         {
@@ -701,11 +703,16 @@ def _external_ipc_video_streams_payload(
             "stream_id": _pick_stream_value(full_output, "stream_id"),
             "orange_declared_role": _pick_stream_value(full_output, "role"),
             "video": f"cams/{cam_base}.mp4",
-            "frame_clock_metadata": (
-                f"cams/{cam_base}_meta.csv" if has_frame_clock_metadata else None
-            ),
+            "frame_clock_metadata": full_frame_clock_metadata,
             "keyframes": f"cams/{cam_base}_keyframe.json",
-            "summary": f"cams/{cam_base}_external_summary.json",
+            "summary": (
+                f"cams/{cam_base}_external_summary.json" if has_full_summary else None
+            ),
+            "status": (
+                f"derived/external_recorder/{cam_base}_external_status.json"
+                if has_full_status
+                else None
+            ),
             "frame_clock": "recording_frame_id",
             "coordinate_space": _pick_stream_value(full_output, "coordinate_space"),
             "width": _pick_stream_value(full_output, "width"),
@@ -715,7 +722,9 @@ def _external_ipc_video_streams_payload(
             "codec": _pick_stream_value(full_output, "codec"),
             "container": _pick_stream_value(full_output, "container"),
             "encoded_format": _pick_stream_value(full_output, "encoded_format"),
-            "pixel_source_format": _pick_stream_value(full_output, "pixel_source_format"),
+            "pixel_source_format": _pick_stream_value(
+                full_output, "pixel_source_format"
+            ),
         }
     )
     streams: Dict[str, object] = {"full": full_stream}
@@ -867,11 +876,27 @@ def _append_external_ipc_video_artifacts(
         batch_root=batch_root,
         preferred_dir=full_dir,
     )
-    full_summary = _resolve_external_ipc_path(
+    declared_full_metadata = _resolve_external_ipc_path(
         full_output.get("metadata") if full_output else None,
         batch_root=batch_root,
         preferred_dir=full_dir,
     )
+    metadata_is_legacy_summary = bool(
+        declared_full_metadata is not None
+        and declared_full_metadata.name.endswith("_external_summary.json")
+    )
+    full_metadata = None if metadata_is_legacy_summary else declared_full_metadata
+    full_summary = (
+        declared_full_metadata
+        if metadata_is_legacy_summary
+        else _resolve_external_ipc_path(
+            full_output.get("summary")
+            or full_dir / f"Cam{camera_id}_external_summary.json",
+            batch_root=batch_root,
+            preferred_dir=full_dir,
+        )
+    )
+    full_status = full_dir / f"Cam{camera_id}_external_status.json"
     full_keyframes = _resolve_external_ipc_path(
         full_output.get("keyframes") if full_output else None,
         batch_root=batch_root,
@@ -883,15 +908,22 @@ def _append_external_ipc_video_artifacts(
         preferred_dir=crop_dir,
     )
 
+    full_frame_clock_metadata = None
+    if full_metadata is not None and full_metadata.is_file():
+        full_frame_clock_metadata = f"cams/{cam_base}_external_meta.csv"
+    elif crop_meta is not None and crop_meta.is_file():
+        full_frame_clock_metadata = f"cams/{cam_base}_meta.csv"
     meta["video_streams"] = _external_ipc_video_streams_payload(
         camera_id=camera_id,
         cam_base=cam_base,
         full_output=full_output,
         crop_output=crop_output,
-        # A declared clock path is fail-closed at import time.  Preserve the
-        # compatibility declaration when Orange actually supplied the CSV,
-        # but never author a pointer to a sidecar that is absent from staging.
-        has_frame_clock_metadata=bool(crop_meta is not None and crop_meta.is_file()),
+        # A declared clock path is fail-closed at import time. Prefer Orange's
+        # full-frame metadata CSV; retain the crop-clock compatibility fallback
+        # only when that producer metadata is absent.
+        full_frame_clock_metadata=full_frame_clock_metadata,
+        has_full_summary=bool(full_summary is not None and full_summary.is_file()),
+        has_full_status=full_status.is_file(),
     )
 
     _append_planned_if_present(
@@ -911,6 +943,16 @@ def _append_external_ipc_video_artifacts(
             required=require_compat_camera_metadata or bool(crop_output),
             action="copy",
             missing_label=f"Cam{camera_id}_crop_meta.csv (compatibility camera metadata)",
+        )
+    if full_metadata is not None:
+        _append_planned_if_present(
+            cam_files,
+            full_metadata,
+            f"{cam_base}_external_meta.csv",
+            missing=missing,
+            required=True,
+            action="copy",
+            missing_label=f"external_recorder/Cam{camera_id}_external_meta.csv",
         )
     _append_planned_if_present(
         cam_files,

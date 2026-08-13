@@ -220,6 +220,45 @@ def test_folder_loader_returns_normalized_full_precision_mask(tmp_path: Path) ->
     assert mask.pixel_convention == "continuous"
 
 
+def test_folder_loader_accepts_embedded_snapshot_rim_source_checksum(
+    tmp_path: Path,
+) -> None:
+    _contract, snapshot = _write_folder_bundle(tmp_path)
+    calibrations = snapshot["calibrations"]
+    assert isinstance(calibrations, dict)
+    camera = calibrations["2010093"]
+    assert isinstance(camera, dict)
+    rim = camera["dish_top_rim_observation"]
+    assert isinstance(rim, dict)
+    checksum = rim.pop("sha256")
+    rim["source"] = {"sha256": checksum}
+    (tmp_path / "recording_snapshot.json").write_bytes(_json_bytes(snapshot))
+
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.VALID
+    assert len(result.masks) == 1
+
+
+def test_folder_loader_rejects_conflicting_snapshot_rim_checksums(
+    tmp_path: Path,
+) -> None:
+    _contract, snapshot = _write_folder_bundle(tmp_path)
+    calibrations = snapshot["calibrations"]
+    assert isinstance(calibrations, dict)
+    camera = calibrations["2010093"]
+    assert isinstance(camera, dict)
+    rim = camera["dish_top_rim_observation"]
+    assert isinstance(rim, dict)
+    rim["source"] = {"sha256": "sha256:" + "0" * 64}
+    (tmp_path / "recording_snapshot.json").write_bytes(_json_bytes(snapshot))
+
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert "checksum fields disagree" in result.issues[0].message
+
+
 def test_mask_binds_only_to_matching_palette_source_camera_frame(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

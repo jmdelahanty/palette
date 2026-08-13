@@ -558,6 +558,64 @@ Current findings by severity:
 - No unresolved local code/test blocker after the focused regression,
   import-boundary, and file-size checks.
 
+### `goodbatbadbat` detection-canary preflight (2026-08-13)
+
+The first whole-video dry run against
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` remains selector-ineligible and
+has not submitted detection work. It exposed ordinary organized-recording
+layouts that the synthetic contract fixtures did not cover. The follow-up
+implementation now:
+
+- resolves producer geometry from either a direct producer recording root or
+  the one fixed organized path `raw/recording_geometry_bundle`, while rejecting
+  ambiguous or recording-root-escaping inputs;
+- accepts Orange's checksummed snapshot reference when the rim-observation
+  checksum is represented in the embedded `source.sha256` field, while still
+  rejecting absent, malformed, conflicting, or contract-mismatched checksums;
+- publishes both continuous-point and half-open-bounding-box source-camera
+  authorities during metadata import, instead of relying on a later detector
+  publication helper to repair the archive;
+- resolves normal manifest-relative authoritative-video paths against the
+  canonical recording root and rejects traversal, missing paths, and missing
+  files; and
+- keeps Orange full-frame recorder metadata CSV, JSON summary, and JSON status
+  as distinct organized artifacts. CSV recorder metadata must never be copied
+  or declared as a JSON summary.
+
+The historical `goodbatbadbat` manifest already mislabels the full recorder
+CSV as `*_external_summary.json`. The production source is not repaired in
+place. Canary execution must use a disposable, explicitly
+`selector_eligible=false` overlay containing a metadata-only analysis copy, an
+exact copied geometry bundle, corrected manifest metadata, and a copied
+registry. Video bytes remain read-only at their original path. The overlay and
+its registry must remain outside production selectors, and the shared
+`/groups` Palette checkout must remain unchanged.
+
+Pre-submission dry-run evidence:
+
+- corrected stream inventory: `ok`, with 152,035 full-video frames and no
+  unreadable-summary warning;
+- exact model run:
+  `omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb`, SHA-256
+  `3d8504fde2e9f855903384a67f13ba0d3ba37962362bfcf187a1195b6897b8ff`;
+- producer-native geometry candidate dry run:
+  `arena-geometry-acquisition-955bba2c9d4613e5fa546423`, status
+  `dry_run_validated`; and
+- whole-video raw-detection plan: one L4 GPU task, explicit
+  `registered-gate-requirement=off`, with no job submitted.
+
+Follow-up local validation is green: the six focused geometry/import/
+whole-video/organizer files report `72 passed`; modified Python files compile;
+all modified Black line ranges are clean without broad legacy-file formatting;
+the import contracts report `2 kept, 0 broken`; and the storage census,
+file-size ratchet, and `git diff --check` pass.
+
+Raw detection is deliberately ungated for this canary because it supplies the
+exact immutable detection rowset needed by comparison and gate materialization.
+No claim of applied geometry gating is permitted. Submission remains blocked
+until the exact follow-up commit passes every required CI check and is deployed
+through a commit-pinned cluster worktree.
+
 ## Canary measurements required before threshold promotion
 
 - [ ] Select the approved multi-camera and repeated-recording cohort.

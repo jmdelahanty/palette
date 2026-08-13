@@ -97,6 +97,62 @@ def test_registry_discovery_resolves_exact_authoritative_full_streams(
     assert targets[0].stream_role == AUTHORITATIVE_FULL_FRAME_ROLE
 
 
+def test_registry_discovery_resolves_manifest_relative_full_video_path(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        recording_id = "2026-08-10T17-20-55Z_arena_1_goodbatbadbat"
+        _zarr_path, video_path = _seed_recording(
+            registry,
+            tmp_path / "recordings",
+            recording_id=recording_id,
+            camera_id="2010093",
+        )
+        registry.conn.execute(
+            "UPDATE acquisition_video_streams SET video_path = ? WHERE recording_id = ?",
+            (f"cams/{video_path.name}", recording_id),
+        )
+        registry.conn.commit()
+
+        targets = discover_registry_whole_video_targets(
+            registry,
+            recording_ids=(recording_id,),
+        )
+    finally:
+        registry.close()
+
+    assert targets[0].target.work_units[0].video_path == video_path.resolve()
+
+
+def test_registry_discovery_rejects_relative_full_video_escape(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        recording_id = "2026-08-10T17-20-55Z_arena_1_goodbatbadbat"
+        _seed_recording(
+            registry,
+            tmp_path / "recordings",
+            recording_id=recording_id,
+            camera_id="2010093",
+        )
+        escaped = tmp_path / "recordings" / "outside.mp4"
+        escaped.write_bytes(b"outside")
+        registry.conn.execute(
+            "UPDATE acquisition_video_streams SET video_path = '../outside.mp4' "
+            "WHERE recording_id = ?",
+            (recording_id,),
+        )
+        registry.conn.commit()
+
+        with pytest.raises(ValueError, match="escapes the recording root"):
+            discover_registry_whole_video_targets(
+                registry,
+                recording_ids=(recording_id,),
+            )
+    finally:
+        registry.close()
+
+
 def test_registry_discovery_fails_closed_on_ambiguous_analysis_dataset(
     tmp_path: Path,
 ) -> None:

@@ -229,13 +229,24 @@ def discover_registry_whole_video_targets(
                 f"{AUTHORITATIVE_FULL_FRAME_ROLE!r} stream; found {len(streams)}."
             )
         stream = streams[0]
-        video_path = Path(str(stream["video_path"] or "")).expanduser()
-        if not video_path.is_absolute():
+        recording_dir = _recording_dir_for_zarr(zarr_path)
+        video_value = str(stream["video_path"] or "").strip()
+        if not video_value:
             raise ValueError(
-                f"Registry full-video path must be absolute for {recording_id!r}: "
-                f"{video_path}"
+                f"Registry full-video path is missing for {recording_id!r}."
             )
-        video_path = video_path.resolve()
+        declared_video_path = Path(video_value).expanduser()
+        if declared_video_path.is_absolute():
+            video_path = declared_video_path.resolve()
+        else:
+            video_path = (recording_dir / declared_video_path).resolve()
+            try:
+                video_path.relative_to(recording_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    "Registry relative full-video path escapes the recording root for "
+                    f"{recording_id!r}: {declared_video_path}"
+                ) from exc
         if not video_path.is_file():
             raise FileNotFoundError(
                 f"Registry full-video path is not live for {recording_id!r}: {video_path}"
@@ -253,7 +264,7 @@ def discover_registry_whole_video_targets(
         target = whole_video_recording_target(
             target_id=target_id,
             recording_id=recording_id,
-            recording_dir=_recording_dir_for_zarr(zarr_path),
+            recording_dir=recording_dir,
             analysis_zarr=zarr_path,
             video_path=video_path,
             camera_serial=camera_serial,

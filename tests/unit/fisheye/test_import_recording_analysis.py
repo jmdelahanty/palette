@@ -370,6 +370,14 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
     )
     assert authority.attrs["acquisition_camera_frame"]["width_px"] == 4512
     assert authority.attrs["acquisition_camera_frame"]["height_px"] == 4512
+    continuous = root["analysis/coordinate_frames/source_camera/2010093/continuous"]
+    bbox = root["analysis/coordinate_frames/source_camera/2010093/pixel_edge_half_open"]
+    assert continuous.attrs["pixel_frame_authority"]["pixel_convention"] == (
+        "continuous"
+    )
+    assert bbox.attrs["pixel_frame_authority"]["pixel_convention"] == (
+        "pixel_edge_half_open"
+    )
 
 
 def test_producer_video_metadata_selects_manifest_stream_for_source_video(tmp_path: Path) -> None:

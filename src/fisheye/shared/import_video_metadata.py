@@ -25,6 +25,10 @@ from fisheye.shared.acquisition_publication_status import (
     stamp_acquisition_authority_publication_status,
 )
 from fisheye.shared.encoder_tags import parse_encoder_comment
+from fisheye.shared.coordinate_surface_contract import (
+    SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+    SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+)
 from fisheye.shared.import_profile_contract import (
     IMPORT_PROFILE_SCHEMA_ID,
     PROFILE_METADATA_ONLY_ANALYSIS,
@@ -32,9 +36,11 @@ from fisheye.shared.import_profile_contract import (
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
+    load_persisted_acquisition_camera_authority,
     parse_source_video_metadata,
     stamp_acquisition_camera_frame,
     stamp_acquisition_import_ownership,
+    stamp_source_camera_pixel_frame_authority,
 )
 from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
 
@@ -491,6 +497,40 @@ def _write_metadata(
     return {"raw_video": raw_updates, "root": root_updates}
 
 
+def publish_source_camera_pixel_frame_authorities(
+    root: zarr.Group,
+    *,
+    acquisition_frame: Any | None = None,
+) -> dict[str, str]:
+    """Materialize deterministic source-camera point and bbox frame authorities."""
+
+    if acquisition_frame is None:
+        _ownership, acquisition = load_persisted_acquisition_camera_authority(root)
+    else:
+        acquisition = acquisition_frame
+    camera_id = acquisition.record.camera_id
+    parent = root.require_group("analysis").require_group("coordinate_frames")
+    source_camera = parent.require_group("source_camera").require_group(camera_id)
+    point = stamp_source_camera_pixel_frame_authority(
+        source_camera.require_group(SOURCE_CAMERA_POINT_PIXEL_CONVENTION),
+        frame_id=f"{camera_id}_source_camera",
+        pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+        acquisition_frame=acquisition,
+    )
+    bbox = stamp_source_camera_pixel_frame_authority(
+        source_camera.require_group(SOURCE_CAMERA_BBOX_PIXEL_CONVENTION),
+        frame_id=f"{camera_id}_source_camera_pixel_edge_half_open",
+        pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+        acquisition_frame=acquisition,
+    )
+    return {
+        "point_record_ref": point.record_ref,
+        "point_record_sha256": point.record_sha256,
+        "bbox_record_ref": bbox.record_ref,
+        "bbox_record_sha256": bbox.record_sha256,
+    }
+
+
 def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, str]:
     """Publish the canonical acquisition frame for a metadata-only archive.
 
@@ -616,6 +656,10 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
         authority_node,
         import_ownership=ownership,
     )
+    source_camera_frames = publish_source_camera_pixel_frame_authorities(
+        root,
+        acquisition_frame=frame,
+    )
     try:
         stamp_acquisition_authority_publication_status(
             root,
@@ -635,6 +679,7 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
         "ownership_record_sha256": ownership.record_sha256,
         "frame_record_ref": frame.record_ref,
         "frame_record_sha256": frame.record_sha256,
+        **source_camera_frames,
     }
 
 

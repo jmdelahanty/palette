@@ -323,6 +323,67 @@ def test_plan_producer_native_folder_candidate_without_recovery_receipt(
     ]
 
 
+def test_plan_producer_native_folder_uses_fixed_organized_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recording = tmp_path / "recording"
+    source_zarr = recording / "zarr" / "recording_analysis.zarr"
+    source_zarr.parent.mkdir(parents=True)
+    bundle = recording / "raw" / "recording_geometry_bundle"
+    bundle.mkdir(parents=True)
+    contract = bundle / "recording_geometry_contract.json"
+    contract.write_text('{"contract":"exact"}\n', encoding="utf-8")
+    contract_sha = hashlib.sha256(contract.read_bytes()).hexdigest()
+    (bundle / "recording_snapshot.json").write_text(
+        json.dumps(
+            {
+                "recording_geometry_contract": {
+                    "relative_path": contract.name,
+                    "sha256": "sha256:" + contract_sha,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    mask = _producer_mask(
+        source_kind="orange_recording_folder",
+        source_location=str(bundle.resolve()),
+    )
+    observed: list[Path] = []
+
+    def load_folder(path: Path, **_kwargs):
+        observed.append(Path(path))
+        return _producer_collection(mask)
+
+    monkeypatch.setattr(
+        mod,
+        "load_registered_dish_masks_from_recording_folder",
+        load_folder,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_bind_mask_to_zarr",
+        lambda _source, selected: replace(_bound_mask(), mask=selected),
+    )
+
+    plan = mod.plan_producer_native_acquisition_geometry_candidate(
+        source_zarr=source_zarr,
+        recording_folder=recording,
+        camera_serial="2010093",
+        arena_id="arena_1",
+    )
+
+    assert observed == [bundle.resolve()]
+    assert plan.receipt_path == bundle.resolve()
+    assert [
+        Path(row["path"]).parent for row in plan.run_provenance["input_artifacts"]
+    ] == [
+        bundle.resolve(),
+        bundle.resolve(),
+    ]
+
+
 def test_plan_producer_native_h5_requires_exact_camera_and_arena(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

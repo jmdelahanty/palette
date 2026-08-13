@@ -163,6 +163,53 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: P
     )
 
 
+def test_external_ipc_plan_keeps_full_metadata_summary_and_status_distinct(
+    tmp_path: Path,
+) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    camera = "2010093"
+    full_dir = batch / "external_recorder"
+    full_metadata = _touch(
+        full_dir / f"Cam{camera}_external_meta.csv",
+        "frame_id,recording_frame_id\n1,1\n",
+    )
+    _touch(
+        full_dir / f"Cam{camera}_external_status.json",
+        json.dumps(
+            {
+                "status": "completed",
+                "frames_received": 1,
+                "frames_encoded": 1,
+                "frames_dropped": 0,
+            }
+        ),
+    )
+    session_path = batch / "recording_session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    session["recording_outputs"][camera]["full"]["metadata"] = str(full_metadata)
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+
+    [plan] = organize_recordings._build_external_ipc_plans(
+        batch,
+        dest_root=tmp_path / "recordings",
+        rename_cams=True,
+    )
+
+    cam_base = "Cam2010093_2026-05-29T18-11-16Z_arena_1"
+    cam_sources = {item.dest_name: item.source for item in plan.cam_files}
+    assert cam_sources[f"{cam_base}_external_meta.csv"] == full_metadata.resolve()
+    assert (
+        cam_sources[f"{cam_base}_external_summary.json"]
+        == (full_dir / f"Cam{camera}_external_summary.json").resolve()
+    )
+    full = plan.meta["video_streams"]["streams"]["full"]
+    assert full["frame_clock_metadata"] == f"cams/{cam_base}_external_meta.csv"
+    assert full["summary"] == f"cams/{cam_base}_external_summary.json"
+    assert full["status"] == (
+        f"derived/external_recorder/{cam_base}_external_status.json"
+    )
+
+
 def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(tmp_path: Path) -> None:
     batch = _make_external_ipc_batch(tmp_path)
     for h5_path in batch.rglob("*.h5"):

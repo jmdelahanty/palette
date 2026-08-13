@@ -25,17 +25,28 @@ The full-frame stream is the ingest-authoritative camera video.
 Required organized paths:
 
 - `cams/Cam<camera>_<session>.mp4`
-- `cams/Cam<camera>_<session>_meta.csv`
+- `cams/Cam<camera>_<session>_external_meta.csv` when Orange supplies the
+  full-frame recorder metadata CSV
+- `cams/Cam<camera>_<session>_meta.csv` only as the crop-clock compatibility
+  projection described below
 - `cams/Cam<camera>_<session>_keyframe.json`
 - `cams/Cam<camera>_<session>_external_summary.json`
+- `derived/external_recorder/Cam<camera>_<session>_external_status.json` when
+  Orange supplies the recorder status receipt
 
 Contract:
 
 - `role`: `ingest_authoritative_full_frame`
 - `frame_clock`: `recording_frame_id`
 - `coordinate_space`: full-frame camera pixels when Orange provides it
-- The compatibility `Cam*_meta.csv` may be copied from the crop metadata table
-  when it shares the same `recording_frame_id` and timestamp clock.
+- The full-frame stream's `frame_clock_metadata` points to
+  `*_external_meta.csv` when present. The compatibility `Cam*_meta.csv` may be
+  copied from the crop metadata table when it shares the same
+  `recording_frame_id` and timestamp clock, but it must not be relabeled as a
+  JSON summary.
+- `summary` and `status` are JSON objects. A producer `metadata` path ending in
+  `_external_meta.csv` remains CSV metadata and must not be copied to
+  `*_external_summary.json`.
 
 ### Runtime Crop Stream
 

@@ -1351,6 +1351,29 @@ def _recording_folder_input_artifacts(source_path: Path) -> tuple[dict[str, Any]
     )
 
 
+def _producer_geometry_folder(recording_root: Path) -> Path:
+    """Resolve the one fixed producer bundle layout below a recording root."""
+
+    direct_snapshot = recording_root / "recording_snapshot.json"
+    archived_root = recording_root / "raw" / "recording_geometry_bundle"
+    archived_present = archived_root.exists()
+    if direct_snapshot.is_file() and archived_present:
+        raise RecordingGeometryError(
+            "Producer geometry is ambiguous: both the recording root and the fixed "
+            "organized recording_geometry_bundle contain geometry inputs."
+        )
+    if not archived_present:
+        return recording_root
+    resolved = archived_root.resolve()
+    try:
+        resolved.relative_to(recording_root)
+    except ValueError as exc:
+        raise RecordingGeometryError(
+            "Organized recording geometry bundle escapes the recording root."
+        ) from exc
+    return resolved
+
+
 def _record_from_receipt_and_zarr(
     source_zarr: Path,
     receipt_path: Path,
@@ -1442,12 +1465,13 @@ def plan_producer_native_acquisition_geometry_candidate(
     serial = _required_text(camera_serial, label="camera_serial")
     arena = _required_text(arena_id, label="arena_id")
     if recording_folder is not None:
-        source = Path(recording_folder).expanduser().resolve()
-        if source != recording_root:
+        supplied_recording_root = Path(recording_folder).expanduser().resolve()
+        if supplied_recording_root != recording_root:
             raise RecordingGeometryError(
                 "Producer recording folder and analysis Zarr must belong to the same "
                 "recording root."
             )
+        source = _producer_geometry_folder(supplied_recording_root)
         source_kind = "orange_recording_folder"
         input_artifacts = _recording_folder_input_artifacts(source)
     else:
