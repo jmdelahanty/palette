@@ -61,6 +61,12 @@ from fisheye.shared.run_provenance import (
     validate_run_provenance,
 )
 from fisheye.shared.source_video_metadata import resolve_source_video
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
+from fisheye.shared.zarr_helpers import (
+    reconsolidate_zarr_metadata,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
@@ -73,6 +79,12 @@ PUBLISH_SCHEMA_ID = "palette.node_local_detection_atomic_publish.v1"
 PUBLISH_POLICY = "node_local_complete_run_then_atomic_prfs_publication_v1"
 ROLLBACK_POLICY = "retain_failed_selector_ineligible_child_v1"
 _SELECTOR_ATTRS = ("latest", "latest_complete", "latest_pending")
+DETECTION_CONSOLIDATION_POLICY = (
+    "root_after_detection_selector_activation_direct_consolidated_verified_v1"
+)
+DETECTION_FAILED_VISIBILITY_REPAIR_POLICY = (
+    "root_after_failed_detection_activation_rollback_verified_v1"
+)
 
 
 def _safe_name(value: str) -> str:
@@ -342,8 +354,66 @@ def _validate_run_path(
 @dataclass
 class _DetectionActivation:
     run_name: str
+    source_zarr: Path
     snapshot: dict[str, tuple[bool, Any]] | None = None
     attempted: dict[str, Any] | None = None
+    visibility_report: dict[str, Any] | None = None
+
+    def _validate_consolidated_visibility(self) -> dict[str, Any]:
+        subtree_path = f"detect_runs/{self.run_name}"
+        receipt = validate_direct_consolidated_subtree(
+            self.source_zarr,
+            subtree_path=subtree_path,
+        )
+        direct = zarr.open_group(
+            str(self.source_zarr),
+            mode="r",
+            zarr_format=3,
+            use_consolidated=False,
+        )
+        consolidated = zarr.open_group(
+            str(self.source_zarr),
+            mode="r",
+            zarr_format=3,
+            use_consolidated=True,
+        )
+        direct_parent = direct["detect_runs"]
+        consolidated_parent = consolidated["detect_runs"]
+        for name in _SELECTOR_ATTRS:
+            direct_present = name in direct_parent.attrs
+            consolidated_present = name in consolidated_parent.attrs
+            if direct_present != consolidated_present or (
+                direct_present
+                and direct_parent.attrs.get(name) != consolidated_parent.attrs.get(name)
+            ):
+                raise RuntimeError(
+                    "Detection selector differs between direct and consolidated "
+                    f"metadata: {name!r}."
+                )
+        for label, parent in (
+            ("direct", direct_parent),
+            ("consolidated", consolidated_parent),
+        ):
+            run = parent[self.run_name]
+            if (
+                parent.attrs.get("latest") != self.run_name
+                or parent.attrs.get("latest_complete") != self.run_name
+                or run.attrs.get("palette_run_completion_status") != "complete"
+                or run.attrs.get("stage_selector_eligible") is not True
+            ):
+                raise RuntimeError(
+                    f"{label} detection publication is not selected, complete, "
+                    "and selector eligible."
+                )
+        return {
+            "policy": DETECTION_CONSOLIDATION_POLICY,
+            "subtree_equivalence": receipt.to_json(),
+            "selectors": {
+                name: copy.deepcopy(direct_parent.attrs.get(name))
+                for name in _SELECTOR_ATTRS
+                if name in direct_parent.attrs
+            },
+        }
 
     def activate(self, _root: zarr.Group, parent: zarr.Group, run: zarr.Group) -> None:
         self.snapshot = {
@@ -360,17 +430,24 @@ class _DetectionActivation:
         parent.attrs["latest_complete"] = self.run_name
         parent.attrs["latest"] = self.run_name
         self.attempted = attempted
-        # Literal commit point. No fallible operation belongs after this write.
+        # Detection activation includes the fallible final publication step:
+        # root consolidation and exact direct/consolidated verification.
         run.attrs["stage_selector_eligible"] = True
+        consolidation = reconsolidate_zarr_metadata(
+            self.source_zarr,
+            policy=DETECTION_CONSOLIDATION_POLICY,
+            fail_on_error=True,
+        )
+        self.visibility_report = {
+            **self._validate_consolidated_visibility(),
+            "consolidation": consolidation,
+        }
 
-    def rollback(self, source_zarr: Path) -> None:
+    def rollback(self) -> None:
         if self.snapshot is None or self.attempted is None:
             return
-        root = open_zarr_root(source_zarr, mode="a")
+        root = open_zarr_root(self.source_zarr, mode="a")
         parent = root["detect_runs"]
-        run = parent[self.run_name]
-        if run.attrs.get("stage_selector_eligible") is True:
-            return
         failures: list[str] = []
         for name, (present, value) in self.snapshot.items():
             try:
@@ -391,6 +468,40 @@ class _DetectionActivation:
                 failures.append(f"{name}: {exc}")
         if failures:
             raise RuntimeError(f"Detection selector rollback was incomplete: {failures!r}")
+
+    def repair_failed_visibility(self, target_path: Path) -> None:
+        expected_target = self.source_zarr / "detect_runs" / self.run_name
+        if target_path.resolve() != expected_target.resolve():
+            raise RuntimeError(
+                "Detection visibility repair received an unexpected run path."
+            )
+        reconsolidate_zarr_metadata(
+            self.source_zarr,
+            policy=DETECTION_FAILED_VISIBILITY_REPAIR_POLICY,
+            fail_on_error=True,
+        )
+        if self.snapshot is None:
+            return
+        direct = zarr.open_group(
+            str(self.source_zarr),
+            mode="r",
+            zarr_format=3,
+            use_consolidated=False,
+        )["detect_runs"]
+        consolidated = zarr.open_group(
+            str(self.source_zarr),
+            mode="r",
+            zarr_format=3,
+            use_consolidated=True,
+        )["detect_runs"]
+        for name, (present, value) in self.snapshot.items():
+            for label, parent in (("direct", direct), ("consolidated", consolidated)):
+                if (name in parent.attrs) is not present or (
+                    present and parent.attrs.get(name) != value
+                ):
+                    raise RuntimeError(
+                        f"{label} detection selector rollback differs for {name!r}."
+                    )
 
 
 def _resolution_payload(
@@ -588,7 +699,7 @@ def run_detection_local_publish(
             raise RuntimeError(f"Local detection validation failed: {local_validation}")
 
         shared_authorities = _ensure_shared_source_camera_authorities(source)
-        activation = _DetectionActivation(name)
+        activation = _DetectionActivation(name, source)
 
         def prepare_parents(root: zarr.Group) -> tuple[zarr.Group, ...]:
             return (
@@ -657,7 +768,11 @@ def run_detection_local_publish(
             complete_run=complete_run,
             verify_pointers=verify_pointers,
             activate_run=activation.activate,
-            rollback_activation=lambda: activation.rollback(source),
+            rollback_activation=activation.rollback,
+            repair_failed_publication_visibility=(
+                activation.repair_failed_visibility
+            ),
+            accept_persisted_activation_on_callback_error=False,
             payload_metadata={
                 "source_video_policy": "stream_canonical_prfs_video_in_place_v1",
                 "source_video_path": str(resolved_video),
@@ -669,8 +784,20 @@ def run_detection_local_publish(
                 "detector_seconds": detector_seconds,
             },
         )
+        if activation.visibility_report is None:
+            raise RuntimeError(
+                "Detection activation completed without consolidated visibility proof."
+            )
+        publication["activation_visibility"] = json_attr_safe(
+            activation.visibility_report
+        )
 
-        final_root = open_zarr_root(source, mode="r")
+        final_root = zarr.open_group(
+            str(source),
+            mode="r",
+            zarr_format=3,
+            use_consolidated=True,
+        )
         final_proof = load_persisted_detection_observation_geometry(
             final_root,
             f"detect_runs/{name}",

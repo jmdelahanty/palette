@@ -726,8 +726,16 @@ def atomic_publish_run_group(
     repair_failed_publication_visibility: (
         RepairFailedPublicationVisibility | None
     ) = None,
+    accept_persisted_activation_on_callback_error: bool = True,
 ) -> dict[str, Any]:
-    """Publish one completed local run as a fail-closed transaction."""
+    """Publish one completed local run as a fail-closed transaction.
+
+    By default, an activation callback that raises after persisting the exact
+    final eligibility write is treated as an interrupted acknowledgement of a
+    successful commit. Callers whose activation callback also owns fallible
+    consolidated-visibility validation must disable that recovery so callback
+    failure enters the stage-specific rollback and tombstone path.
+    """
 
     telemetry = PhaseTelemetry(
         materializer="atomic_run_publisher",
@@ -749,6 +757,10 @@ def atomic_publish_run_group(
             "A stage-specific rollback_activation receipt and generic pre-copy "
             "parent rollback are mutually exclusive; choose one exact selector "
             "rollback authority."
+        )
+    if type(accept_persisted_activation_on_callback_error) is not bool:
+        raise TypeError(
+            "accept_persisted_activation_on_callback_error must be one boolean."
         )
     if not spec.source_zarr.is_dir():
         raise FileNotFoundError(f"Authoritative source Zarr not found: {spec.source_zarr}")
@@ -791,6 +803,9 @@ def atomic_publish_run_group(
             repair_failed_publication_visibility=(
                 repair_failed_publication_visibility
             ),
+            accept_persisted_activation_on_callback_error=(
+                accept_persisted_activation_on_callback_error
+            ),
             local_validation=local_validation,
             telemetry=telemetry,
         )
@@ -816,6 +831,7 @@ def _atomic_publish_locked(
     repair_failed_publication_visibility: (
         RepairFailedPublicationVisibility | None
     ),
+    accept_persisted_activation_on_callback_error: bool,
     local_validation: Mapping[str, Any],
     telemetry: PhaseTelemetry,
 ) -> dict[str, Any]:
@@ -1057,7 +1073,13 @@ def _atomic_publish_locked(
                 )
         return result
     except BaseException as exc:
-        if final_activation_attempted:
+        # A literal final-write activator may lose only its acknowledgement.
+        # Visibility-aware activators disable this recovery because a callback
+        # error means their complete publication contract did not pass.
+        if (
+            final_activation_attempted
+            and accept_persisted_activation_on_callback_error
+        ):
             try:
                 committed = _fresh_owned_public_target(
                     spec,

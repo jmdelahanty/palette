@@ -7,11 +7,16 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from fisheye.shared.atomic_run_publisher import (
+    ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
+    AtomicRunPublishSpec,
+    atomic_publish_run_group,
+)
 from fisheye.shared.detection_candidate import (
     DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR,
     node_local_detection_candidate_authority,
 )
+from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
 from fisheye.shared.import_video_metadata import (
     publish_external_video_acquisition_authority,
 )
@@ -20,6 +25,9 @@ from fisheye.shared.pixel_frame_authority import (
 )
 from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+)
 from fisheye.utils import run_detection_local_publish as mod
 
 
@@ -70,6 +78,173 @@ def _external_archive(tmp_path: Path) -> tuple[Path, Path]:
     root.require_group("raw_video")
     publish_external_video_acquisition_authority(root)
     return archive, video
+
+
+def _detection_activation_archive(tmp_path: Path) -> tuple[Path, zarr.Group]:
+    archive = tmp_path / "activation.zarr"
+    root = zarr.open_group(
+        str(archive), mode="w", zarr_format=3, use_consolidated=False
+    )
+    parent = root.require_group("detect_runs")
+    parent.attrs["latest"] = "detect_previous"
+    parent.attrs["latest_complete"] = "detect_previous"
+    previous = parent.require_group("detect_previous")
+    previous.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+    consolidate_metadata_capture_expected_warnings(archive)
+    return archive, parent
+
+
+def test_detection_activation_publishes_verified_consolidated_generation(
+    tmp_path: Path,
+) -> None:
+    archive, parent = _detection_activation_archive(tmp_path)
+    run = parent.require_group("detect_candidate")
+    run.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        }
+    )
+    run.create_array(
+        "instance_key",
+        data=np.asarray([11, 12], dtype=np.uint64),
+        chunks=(2,),
+    )
+    activation = mod._DetectionActivation(  # noqa: SLF001
+        "detect_candidate",
+        archive,
+    )
+
+    activation.activate(
+        zarr.open_group(str(archive), mode="a", use_consolidated=False),
+        parent,
+        run,
+    )
+
+    assert activation.visibility_report is not None
+    assert activation.visibility_report["policy"] == mod.DETECTION_CONSOLIDATION_POLICY
+    assert activation.visibility_report["consolidation"]["status"] == "ok"
+    assert activation.visibility_report["subtree_equivalence"]["array_count"] == 1
+    consolidated = zarr.open_group(
+        str(archive), mode="r", zarr_format=3, use_consolidated=True
+    )
+    consolidated_parent = consolidated["detect_runs"]
+    assert consolidated_parent.attrs["latest"] == "detect_candidate"
+    assert consolidated_parent.attrs["latest_complete"] == "detect_candidate"
+    assert (
+        consolidated_parent["detect_candidate"].attrs["stage_selector_eligible"] is True
+    )
+
+
+def test_detection_activation_consolidation_failure_rolls_back_and_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive, _parent = _detection_activation_archive(tmp_path)
+    local = tmp_path / "local-detection.zarr"
+    local_run = zarr.open_group(
+        str(local), mode="w", zarr_format=3, use_consolidated=False
+    )
+    local_run.attrs.update(
+        {
+            "palette_run_completion_status": "running",
+            "stage_selector_eligible": False,
+        }
+    )
+    local_run.create_array(
+        "instance_key",
+        data=np.asarray([21, 22], dtype=np.uint64),
+        chunks=(2,),
+    )
+    target = archive / "detect_runs" / "detect_candidate"
+    activation = mod._DetectionActivation(  # noqa: SLF001
+        "detect_candidate",
+        archive,
+    )
+    real_consolidate = mod.reconsolidate_zarr_metadata
+    consolidation_calls = 0
+
+    def fail_once(
+        path: Path,
+        *,
+        policy: str,
+        fail_on_error: bool,
+    ) -> dict[str, object]:
+        nonlocal consolidation_calls
+        consolidation_calls += 1
+        if consolidation_calls == 1:
+            raise RuntimeError("injected detection consolidation failure")
+        return real_consolidate(
+            path,
+            policy=policy,
+            fail_on_error=fail_on_error,
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "reconsolidate_zarr_metadata",
+        fail_once,
+    )
+
+    def validate(path: Path) -> dict[str, object]:
+        zarr.open_group(str(path), mode="r", use_consolidated=False)
+        return {"valid": True}
+
+    def prepare(root: zarr.Group) -> tuple[zarr.Group]:
+        return (root["detect_runs"],)
+
+    def complete(_root: zarr.Group, _parent: zarr.Group, run: zarr.Group) -> None:
+        run.attrs["palette_run_completion_status"] = "complete"
+        run.attrs["stage_selector_eligible"] = False
+
+    def verify(root: zarr.Group) -> None:
+        parent = root["detect_runs"]
+        assert parent.attrs["latest"] == "detect_previous"
+        assert parent.attrs["latest_complete"] == "detect_previous"
+
+    with pytest.raises(RuntimeError, match="injected detection consolidation failure"):
+        atomic_publish_run_group(
+            AtomicRunPublishSpec(
+                source_zarr=archive,
+                local_run_path=local,
+                target_run_path=target,
+                run_name="detect_candidate",
+                lock_suffix="detection-consolidation-test",
+                publish_schema_id="palette.test_detection_publication",
+                policy="unit_test",
+                rollback_policy="retain_failed_selector_ineligible_child_v1",
+                content_checksum=True,
+            ),
+            copy_backend="python",
+            validate_run=validate,
+            prepare_parents=prepare,
+            complete_run=complete,
+            verify_pointers=verify,
+            activate_run=activation.activate,
+            rollback_activation=activation.rollback,
+            repair_failed_publication_visibility=(activation.repair_failed_visibility),
+            accept_persisted_activation_on_callback_error=False,
+        )
+
+    assert consolidation_calls == 2
+    direct = zarr.open_group(
+        str(archive), mode="r", zarr_format=3, use_consolidated=False
+    )["detect_runs"]
+    consolidated = zarr.open_group(
+        str(archive), mode="r", zarr_format=3, use_consolidated=True
+    )["detect_runs"]
+    for parent in (direct, consolidated):
+        assert parent.attrs["latest"] == "detect_previous"
+        assert parent.attrs["latest_complete"] == "detect_previous"
+        failed = parent["detect_candidate"]
+        assert failed.attrs["palette_run_completion_status"] == "failed"
+        assert failed.attrs["stage_selector_eligible"] is False
+        assert ATOMIC_PUBLICATION_TOMBSTONE_ATTR in failed.attrs
 
 
 def test_prepare_local_overlay_copies_only_verified_acquisition_metadata(

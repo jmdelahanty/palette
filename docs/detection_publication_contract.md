@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-07-24
+last_verified: 2026-08-13
 stage_arrays_spec: DETECT_SPEC
 -->
 
@@ -40,11 +40,19 @@ detect run.
 5. atomically copies the run group into `detect_runs` while it remains selector
    ineligible;
 6. reopens and proves the published coordinate/lineage contract;
-7. activates `latest` and `latest_complete`; and
-8. emits successful registry bookkeeping only after activation.
+7. updates the direct `latest` and `latest_complete` selectors and marks the
+   completed run selector eligible;
+8. consolidates the archive root as the final published visibility step;
+9. proves the selected run's complete direct/consolidated subtree equivalence
+   and exact selector agreement; and
+10. emits successful registry bookkeeping only after reopening the selected
+    run through consolidated metadata.
 
 Failure before activation leaves the previous canonical selectors and registry
-success state unchanged. Failed local scratch is retained only when explicitly
+success state unchanged. Consolidation or visibility-validation failure after
+the direct selector write restores the prior selectors, retains the attempted
+run as an immutable failed and selector-ineligible tombstone, and reconsolidates
+that fail-closed state. Failed local scratch is retained only when explicitly
 requested.
 
 `run_detect_with_registry_model`, `run_detections_batch`, `palette detect`, and
