@@ -293,14 +293,35 @@ def _derive_video_streams(
     outputs = _external_ipc_output_for_camera(session, camera_id)
     full_output = outputs.get("full") if isinstance(outputs.get("full"), dict) else {}
     crop_output = outputs.get("crop") if isinstance(outputs.get("crop"), dict) else {}
-    if not crop_output and _first_manifest_file(payload, section="derived", suffix="_crop_external.mp4"):
+    if not crop_output and _first_manifest_file(
+        payload, section="derived", suffix="_crop_external.mp4"
+    ):
         crop_output = {"output_kind": "crop"}
+
+    cam_base = Path(full_video).stem
+    full_metadata = recording_dir / "cams" / f"{cam_base}_external_meta.csv"
+    compat_metadata = recording_dir / "cams" / f"{cam_base}_meta.csv"
+    full_frame_clock_metadata = None
+    if full_metadata.is_file():
+        full_frame_clock_metadata = f"cams/{full_metadata.name}"
+    elif compat_metadata.is_file():
+        full_frame_clock_metadata = f"cams/{compat_metadata.name}"
 
     return _external_ipc_video_streams_payload(
         camera_id=camera_id,
-        cam_base=Path(full_video).stem,
+        cam_base=cam_base,
         full_output=full_output,
         crop_output=crop_output,
+        full_frame_clock_metadata=full_frame_clock_metadata,
+        has_full_summary=(
+            recording_dir / "cams" / f"{cam_base}_external_summary.json"
+        ).is_file(),
+        has_full_status=(
+            recording_dir
+            / "derived"
+            / "external_recorder"
+            / f"{cam_base}_external_status.json"
+        ).is_file(),
     )
 
 

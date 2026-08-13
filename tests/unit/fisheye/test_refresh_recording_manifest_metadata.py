@@ -164,7 +164,9 @@ def test_refresh_manifest_metadata_treats_unknown_software_version_as_missing(tm
     assert payload["software_version"] is None
 
 
-def test_refresh_external_ipc_artifacts_copies_context_and_adds_video_streams(tmp_path: Path) -> None:
+def test_refresh_external_ipc_artifacts_copies_context_and_adds_video_streams(
+    tmp_path: Path,
+) -> None:
     recording_dir = tmp_path / "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop"
     h5_path = _write_external_ipc_recording(recording_dir)
     (recording_dir / "cams").mkdir()
@@ -175,6 +177,23 @@ def test_refresh_external_ipc_artifacts_copies_context_and_adds_video_streams(tm
     )
     (
         recording_dir
+        / "cams"
+        / "Cam2010093_2026-06-14T21-12-08Z_arena_1_external_meta.csv"
+    ).write_text("frame_id,recording_frame_id\n0,0\n", encoding="utf-8")
+    (
+        recording_dir
+        / "cams"
+        / "Cam2010093_2026-06-14T21-12-08Z_arena_1_external_summary.json"
+    ).write_text("{}", encoding="utf-8")
+    (recording_dir / "derived" / "external_recorder").mkdir(parents=True)
+    (
+        recording_dir
+        / "derived"
+        / "external_recorder"
+        / "Cam2010093_2026-06-14T21-12-08Z_arena_1_external_status.json"
+    ).write_text('{"status":"completed"}', encoding="utf-8")
+    (
+        recording_dir
         / "derived"
         / "external_crop_recorder"
         / "Cam2010093_2026-06-14T21-12-08Z_arena_1_crop_external.mp4"
@@ -183,7 +202,9 @@ def test_refresh_external_ipc_artifacts_copies_context_and_adds_video_streams(tm
     source_dir = tmp_path / "staging" / "2026_06_14_17_11_56"
     (source_dir / "citrus").mkdir(parents=True)
     (source_dir / "_citrus_transfer_complete.json").write_text("{}", encoding="utf-8")
-    (source_dir / "orange_local_control.events.jsonl").write_text("{}\n", encoding="utf-8")
+    (source_dir / "orange_local_control.events.jsonl").write_text(
+        "{}\n", encoding="utf-8"
+    )
     (source_dir / "citrus" / "startup_threading_startup_1.json").write_text(
         "{}",
         encoding="utf-8",
@@ -250,12 +271,20 @@ def test_refresh_external_ipc_artifacts_copies_context_and_adds_video_streams(tm
     assert rc == 0
     assert (recording_dir / "raw" / "transfer_complete.json").exists()
     assert (recording_dir / "raw" / "orange_local_control.events.jsonl").exists()
-    assert (recording_dir / "derived" / "citrus" / "startup_threading_startup_1.json").exists()
+    assert (
+        recording_dir / "derived" / "citrus" / "startup_threading_startup_1.json"
+    ).exists()
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert "raw/transfer_complete.json" in payload["files"]["raw"]
     assert "raw/orange_local_control.events.jsonl" in payload["files"]["raw"]
-    assert "derived/citrus/startup_threading_startup_1.json" in payload["files"]["derived"]
+    assert (
+        "derived/citrus/startup_threading_startup_1.json" in payload["files"]["derived"]
+    )
     assert payload["video_streams"]["schema_id"] == "orange_runtime_video_streams_v1"
+    full_stream = payload["video_streams"]["streams"]["full"]
+    assert full_stream["frame_clock_metadata"].endswith("_external_meta.csv")
+    assert full_stream["summary"].endswith("_external_summary.json")
+    assert full_stream["status"].endswith("_external_status.json")
     crop_stream = payload["video_streams"]["streams"]["crop"]
     assert crop_stream["role"] == "runtime_derived_acquisition_input"
     assert crop_stream["video_pixel_coordinate_space"] == "crop_frame_pixels"

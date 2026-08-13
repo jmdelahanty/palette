@@ -50,10 +50,6 @@ from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_att
 from fisheye.shared.import_video_metadata import (
     publish_external_video_acquisition_authority,
 )
-from fisheye.shared.pixel_frame_authority import (
-    load_persisted_acquisition_camera_authority,
-    stamp_source_camera_pixel_frame_authority,
-)
 from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_bytes,
@@ -541,18 +537,6 @@ def _install_source_camera_authorities(
         }
     )
     publish_external_video_acquisition_authority(root)
-    _ownership, acquisition = load_persisted_acquisition_camera_authority(
-        root,
-        expected_camera_id="cam2010095",
-    )
-    camera = root.require_group("analysis/coordinate_frames/source_camera/cam2010095")
-    for convention in ("continuous", "pixel_edge_half_open"):
-        stamp_source_camera_pixel_frame_authority(
-            camera.require_group(convention),
-            frame_id=f"cam2010095_{convention}",
-            pixel_convention=convention,
-            acquisition_frame=acquisition,
-        )
 
 
 def _array_reference(value: np.ndarray) -> dict[str, object]:
