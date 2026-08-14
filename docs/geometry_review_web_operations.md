@@ -10,7 +10,7 @@ immutable scientific evidence. Campaign staging receipts are not read.
 The default server mode is read-only. In `dry-run` mode, a confirmed browser
 decision can write only a content-addressed approval request and LSF plan to a
 durable operations directory. In `submit` mode, the browser persists that same
-request and submits a five-job, commit-pinned LSF workflow. The browser process
+request and submits a four-job, commit-pinned LSF workflow. The browser process
 never opens the canonical Zarr for writing and never writes registry status.
 
 The workflow is:
@@ -22,13 +22,16 @@ The workflow is:
    comparison-bound operator selection, and exact keyed centroid gate;
 3. run detection quality and required-gate refinement over the unchanged raw
    detections;
-4. publish a crop snapshot from the finalized gated/refined authority; and
-5. rescan the canonical Zarr against a node-local registry shadow, validate the
+4. rescan the canonical Zarr against a node-local registry shadow, validate the
    complete SQLite database, and atomically publish it only if the canonical
    registry has not changed.
 
-The small publication job requests one CPU and 8 GB. Quality, refinement, and
-crop use the existing production resource envelopes. The final registry job
+Crop publication is intentionally deferred. A later crop workflow can consume
+the exact finalized refined-detection run without rerunning raw detection,
+geometry review, quality, or refinement.
+
+The small publication job requests one CPU and 8 GB. Quality and refinement use
+the existing production resource envelopes. The final registry job
 never performs in-place SQLite writes on the multi-host shared filesystem. It
 preserves an immutable pre-write registry backup below the approval run,
 requires complete SQLite integrity and foreign-key checks before and after the

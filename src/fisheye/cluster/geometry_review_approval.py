@@ -7,10 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from fisheye.cluster.clipped_lsf import build_job
-from fisheye.cluster.crop_snapshot import (
-    CropSnapshotFragmentInputs,
-    build_crop_snapshot_fragment,
-)
 from fisheye.cluster.lsf import LsfResources, LsfWorkflow
 from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN
 from fisheye.cluster.recording_detection_postprocess import (
@@ -58,7 +54,7 @@ def build_geometry_review_approval_workflow(
     palette_repo: str | Path,
     run_root: str | Path,
 ) -> GeometryReviewApprovalWorkflowPlan:
-    """Build publication -> quality -> refinement -> crop -> registry dependencies."""
+    """Build publication -> quality -> refinement -> registry dependencies."""
 
     identity = request.payload["identity"]
     dataset = identity["dataset"]
@@ -136,25 +132,6 @@ def build_geometry_review_approval_workflow(
             upstream_job_keys=(publication_key,),
         )
     )
-    crop = build_crop_snapshot_fragment(
-        CropSnapshotFragmentInputs(
-            workflow_id=request.request_id,
-            family=FAMILY,
-            target_id=target.target_id,
-            analysis_zarr=target.analysis_zarr,
-            repo=repo,
-            run_root=root,
-            run_id=str(pipeline["crop_run"]),
-            purpose=str(processing["crop_purpose"]),
-            roi_width=int(processing["crop_roi_width"]),
-            roi_height=int(processing["crop_roi_height"]),
-            camera_id=str(dataset["camera_serial"]),
-            source_refined_run=str(pipeline["refined_run"]),
-            registered_gate_requirement="required",
-            registered_gate_run=str(pipeline["gate_run"]),
-            upstream_job_keys=(postprocess.outputs.terminal_job_key,),
-        )
-    )
     registry_result = root / "registry_refresh.json"
     registry_backup = (
         root
@@ -187,7 +164,7 @@ def build_geometry_review_approval_workflow(
         resources=LsfResources(
             queue="short", ncores=1, mem_gb=8, walltime="1:00", span_hosts=1
         ),
-        upstream=(crop.outputs.terminal_job_key,),
+        upstream=(postprocess.outputs.terminal_job_key,),
         expected_outputs=(registry_result, registry_backup),
     )
     workflow = LsfWorkflow(
@@ -196,7 +173,6 @@ def build_geometry_review_approval_workflow(
         jobs=(
             publication,
             *postprocess.fragment.jobs,
-            *crop.fragment.jobs,
             registry_job,
         ),
         metadata={
@@ -209,6 +185,8 @@ def build_geometry_review_approval_workflow(
             "selected_candidate_kind": identity["decision"]["selected_candidate_kind"],
             "source_detection_group_path": detection["group_path"],
             "registered_gate_run": pipeline["gate_run"],
+            "processing_scope": "geometry_quality_refinement",
+            "crop_submission": "deferred",
             "raw_detections_preserved": True,
             "browser_writes_canonical_zarr": False,
             "registry_publication_mode": "local_shadow_copy_atomic_replace",

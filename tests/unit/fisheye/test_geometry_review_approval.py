@@ -320,7 +320,6 @@ def test_approval_workflow_is_commit_pinned_and_dependency_ordered(
         "geometry_review_approval_publication",
         "detect_quality",
         "detect_refine",
-        "crop_snapshot_publish",
         "geometry_review_registry_refresh",
     ]
     assert ordered[0].resources.ncores == 1
@@ -336,6 +335,10 @@ def test_approval_workflow_is_commit_pinned_and_dependency_ordered(
     assert str(plan.registry_backup_path) in registry_command
     assert plan.workflow.metadata["palette_commit"] == "a" * 40
     assert plan.workflow.metadata["raw_detections_preserved"] is True
+    assert plan.workflow.metadata["processing_scope"] == (
+        "geometry_quality_refinement"
+    )
+    assert plan.workflow.metadata["crop_submission"] == "deferred"
     assert plan.workflow.metadata["registry_publication_mode"] == (
         "local_shadow_copy_atomic_replace"
     )
