@@ -4,23 +4,63 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
+import math
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.patheffects as path_effects  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 from scipy.ndimage import gaussian_filter  # noqa: E402
 
+from fisheye.analysis.chaser_behavior import (  # noqa: E402
+    BEHAVIOR_CLASS_LABELS,
+    ConfiguredChaserBehavior,
+    resolve_configured_chaser_behaviors,
+)
+from fisheye.analysis.chaser_profiles import (  # noqa: E402
+    ChaserProtocolProfile,
+    default_chaser_protocol_profile_path,
+    load_chaser_protocol_profile,
+    resolve_protocol_payload_path,
+)
 from fisheye.shared.citrus_enums import load_event_types
+from fisheye.shared.directed_transform_chain import (  # noqa: E402
+    apply_bound_directed_transform_chain,
+)
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
+from fisheye.shared.stimulus_coordinate_contract import (  # noqa: E402
+    load_bound_stimulus_coordinate_evidence,
+)
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
+
+CHASER_BEHAVIOR_MARKERS: Mapping[str, str] = {
+    "aggressive": "*",
+    "random_non_chasing": "D",
+    "inert": "o",
+    "unknown": "X",
+}
+
+
+def _unit_color_to_u8(value: float) -> int:
+    number = float(value)
+    if not np.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise ValueError(f"Experimental chaser color channel is invalid: {value!r}.")
+    return int(round(number * 255.0))
+
+
+def _experimental_color_hex(rgba: Sequence[float]) -> str:
+    if len(rgba) != 4:
+        raise ValueError("Experimental chaser color must contain RGBA channels.")
+    channels = tuple(_unit_color_to_u8(float(value)) for value in rgba)
+    return "#{:02x}{:02x}{:02x}".format(*channels[:3])
 
 
 @dataclass(frozen=True)
@@ -35,6 +75,41 @@ class EpochWindow:
     @property
     def duration_s(self) -> float:
         return max(0.0, float(self.end_s) - float(self.start_s))
+
+
+@dataclass(frozen=True)
+class ChaserPositionMarker:
+    chaser_index: int
+    behavior_class_id: int
+    behavior_class: str
+    behavior_marker: str
+    experimental_color_rgba: tuple[float, float, float, float]
+    experimental_color_hex: str
+    camera_x_px: float
+    camera_y_px: float
+    sample_count: int
+    median_drift_px: float
+    max_drift_px: float
+
+
+@dataclass(frozen=True)
+class ChaserPositionOverlay:
+    window_label: str
+    effective_start_frame: int
+    effective_end_frame: int
+    stimulus_run: str
+    source_chaser_path: str
+    source_camera_id: str
+    source_camera_width: int
+    source_camera_height: int
+    coordinate_descriptor_sha256: str
+    frame_transform_manifest_ref: str
+    frame_transform_manifest_sha256: str
+    protocol_profile_id: str
+    protocol_profile_version: int
+    protocol_profile_sha256: str
+    post_settle_duration_s: float
+    markers: tuple[ChaserPositionMarker, ...]
 
 
 @dataclass(frozen=True)
@@ -56,6 +131,7 @@ class HeatmapResult:
     covered_frame_count: int
     coverage_pct: float
     heatmap: np.ndarray
+    chaser_overlay: Optional[ChaserPositionOverlay] = None
 
 
 def default_windows(
@@ -71,7 +147,9 @@ def default_windows(
     post_end = train_end + float(post_minutes) * 60.0
     return [
         EpochWindow(f"first_{_format_minutes(first_minutes)}min", start, first_end),
-        EpochWindow(f"training_{_format_minutes(training_minutes)}min", first_end, train_end),
+        EpochWindow(
+            f"training_{_format_minutes(training_minutes)}min", first_end, train_end
+        ),
         EpochWindow(f"post_{_format_minutes(post_minutes)}min", train_end, post_end),
     ]
 
@@ -112,22 +190,33 @@ def _load_structured_group(node: Any) -> dict[str, np.ndarray]:
         field_names = node.attrs.get("field_names")
         if not field_names:
             field_names = list(node.array_keys())
-        return {str(name): np.asarray(node[str(name)][:]) for name in field_names if str(name) in node}
+        return {
+            str(name): np.asarray(node[str(name)][:])
+            for name in field_names
+            if str(name) in node
+        }
 
     array = np.asarray(node[:])
     if array.dtype.names:
         return {name: np.asarray(array[name]) for name in array.dtype.names}
-    raise ValueError("Expected a column group or structured array with named event fields.")
+    raise ValueError(
+        "Expected a column group or structured array with named event fields."
+    )
 
 
 def _decode_text_value(value: Any) -> str:
     return decode_null_terminated_text(value, errors="ignore").strip()
 
 
-def _event_names_from_columns(root: zarr.Group, columns: dict[str, np.ndarray]) -> np.ndarray:
+def _event_names_from_columns(
+    root: zarr.Group, columns: dict[str, np.ndarray]
+) -> np.ndarray:
     for name_field in ("event_name", "event_type_name", "name"):
         if name_field in columns:
-            return np.array([_decode_text_value(value) for value in columns[name_field]], dtype=object)
+            return np.array(
+                [_decode_text_value(value) for value in columns[name_field]],
+                dtype=object,
+            )
 
     event_type_ids = None
     for id_field in ("event_type_id", "event_type", "event_id"):
@@ -139,7 +228,10 @@ def _event_names_from_columns(root: zarr.Group, columns: dict[str, np.ndarray]) 
 
     event_type_map = load_event_types(root)
     return np.array(
-        [event_type_map.get(int(value), f"UNKNOWN_{int(value)}") for value in event_type_ids],
+        [
+            event_type_map.get(int(value), f"UNKNOWN_{int(value)}")
+            for value in event_type_ids
+        ],
         dtype=object,
     )
 
@@ -151,7 +243,9 @@ def _first_column(columns: dict[str, np.ndarray], *names: str) -> Optional[np.nd
     return None
 
 
-def _first_event_frame(event_frames: dict[str, int], names: Sequence[str]) -> Optional[int]:
+def _first_event_frame(
+    event_frames: dict[str, int], names: Sequence[str]
+) -> Optional[int]:
     for name in names:
         if name in event_frames:
             return int(event_frames[name])
@@ -165,7 +259,9 @@ def build_chaser_event_windows(
     total_frames: int,
 ) -> list[EpochWindow]:
     """Build pre/training/post windows from chaser/protocol camera-frame events."""
-    pre_start = _first_event_frame(event_frames, ("CHASER_PRE_PERIOD_START", "PROTOCOL_START"))
+    pre_start = _first_event_frame(
+        event_frames, ("CHASER_PRE_PERIOD_START", "PROTOCOL_START")
+    )
     training_start = _first_event_frame(event_frames, ("CHASER_TRAINING_START",))
     post_start = _first_event_frame(event_frames, ("CHASER_POST_PERIOD_START",))
     finish = _first_event_frame(
@@ -182,7 +278,9 @@ def build_chaser_event_windows(
     if finish is None:
         finish = int(total_frames) if total_frames > 0 else post_start
 
-    max_frame = int(total_frames) - 1 if total_frames > 0 else max(finish - 1, post_start)
+    max_frame = (
+        int(total_frames) - 1 if total_frames > 0 else max(finish - 1, post_start)
+    )
 
     def window(label: str, start_frame: int, end_frame: int) -> EpochWindow:
         start = max(0, int(start_frame))
@@ -203,13 +301,10 @@ def build_chaser_event_windows(
     ]
 
 
-def resolve_stimulus_event_windows(
+def _resolve_stimulus_run(
     root: zarr.Group,
-    *,
-    fps: float,
-    total_frames: int,
     stimulus_run: Optional[str],
-) -> list[EpochWindow]:
+) -> tuple[str, zarr.Group]:
     analysis = root.get("analysis")
     if analysis is None or "stimulus_runs" not in analysis:
         raise ValueError("Archive has no analysis/stimulus_runs group.")
@@ -222,18 +317,31 @@ def resolve_stimulus_event_windows(
         resolved = run_names[-1] if run_names else None
     if not resolved or resolved not in runs:
         raise ValueError("No usable stimulus run found; pass --stimulus-run.")
+    return resolved, runs[resolved]
 
-    stim_run = runs[resolved]
+
+def resolve_stimulus_event_windows(
+    root: zarr.Group,
+    *,
+    fps: float,
+    total_frames: int,
+    stimulus_run: Optional[str],
+) -> list[EpochWindow]:
+    resolved, stim_run = _resolve_stimulus_run(root, stimulus_run)
     events_node = stim_run.get("events")
     if events_node is None:
         raise ValueError(f"Stimulus run {resolved!r} has no events group.")
     columns = _load_structured_group(events_node)
     event_names = _event_names_from_columns(root, columns)
-    camera_frames = _first_column(columns, "camera_frame_id", "camera_frame_num", "triggering_camera_frame_id")
+    camera_frames = _first_column(
+        columns, "camera_frame_id", "camera_frame_num", "triggering_camera_frame_id"
+    )
     if camera_frames is None:
         raise ValueError(f"Stimulus run {resolved!r} events lack camera frame column.")
     if len(event_names) != len(camera_frames):
-        raise ValueError("Stimulus event name and camera frame columns disagree on length.")
+        raise ValueError(
+            "Stimulus event name and camera frame columns disagree on length."
+        )
 
     event_frames: dict[str, int] = {}
     for event_name, frame_value in zip(event_names, camera_frames):
@@ -246,6 +354,328 @@ def resolve_stimulus_event_windows(
         event_frames.setdefault(name, frame)
 
     return build_chaser_event_windows(event_frames, fps=fps, total_frames=total_frames)
+
+
+def _load_protocol_payload(stimulus_group: zarr.Group) -> dict[str, Any]:
+    raw = stimulus_group.attrs.get("protocol_json")
+    if isinstance(raw, Mapping):
+        payload: Any = dict(raw)
+    elif raw is None:
+        payload = None
+    else:
+        try:
+            payload = json.loads(_decode_text_value(raw))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Stimulus protocol_json is not valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Stimulus run lacks a protocol_json object required for chaser labels."
+        )
+    return payload
+
+
+def _post_settle_duration_s(
+    profile: ChaserProtocolProfile,
+    protocol_payload: Mapping[str, Any],
+) -> float:
+    if profile.role_resolver_id != "configured_chaser_behavior_flags":
+        raise ValueError(
+            "Unsupported chaser role resolver for heatmap overlays: "
+            f"{profile.role_resolver_id!r}."
+        )
+    parameters = profile.analysis_parameters.get("chaser_quadrant_occupancy", {})
+    try:
+        fallback = max(
+            0.0,
+            float(parameters.get("post_settle_duration_fallback_s", 0.0)),
+        )
+    except (TypeError, ValueError):
+        fallback = 0.0
+    source_path = str(parameters.get("post_settle_duration_source") or "").strip()
+    if not source_path:
+        return fallback
+    value = resolve_protocol_payload_path(protocol_payload, source_path)
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def compute_chaser_position_overlays(
+    *,
+    windows: Sequence[EpochWindow],
+    source_acquisition_frame_index: np.ndarray,
+    chaser_index: np.ndarray,
+    chaser_position_arena_xy: np.ndarray,
+    chaser_behavior_class_id: np.ndarray,
+    configured_behaviors: Sequence[ConfiguredChaserBehavior],
+    transform_chain: Any,
+    source_camera_width: int,
+    source_camera_height: int,
+    fps: float,
+    post_settle_duration_s: float,
+    stimulus_run: str,
+    source_chaser_path: str,
+    source_camera_id: str,
+    coordinate_descriptor_sha256: str,
+    frame_transform_manifest_ref: str,
+    frame_transform_manifest_sha256: str,
+    protocol_profile_id: str,
+    protocol_profile_version: int,
+    protocol_profile_sha256: str,
+) -> tuple[ChaserPositionOverlay, ...]:
+    frames = np.asarray(source_acquisition_frame_index, dtype=np.int64).reshape(-1)
+    indices = np.asarray(chaser_index, dtype=np.int64).reshape(-1)
+    positions = np.asarray(chaser_position_arena_xy, dtype=np.float64)
+    class_ids = np.asarray(chaser_behavior_class_id, dtype=np.int64).reshape(-1)
+    if positions.ndim != 2 or positions.shape[1] != 2:
+        raise ValueError("chaser_position_xy must have shape (row, 2).")
+    row_count = int(frames.shape[0])
+    if any(
+        value != row_count
+        for value in (indices.shape[0], positions.shape[0], class_ids.shape[0])
+    ):
+        raise ValueError("Canonical chaser arrays disagree on row count.")
+    if row_count == 0:
+        raise ValueError("Canonical chaser rowset is empty.")
+
+    behavior_by_index: dict[int, ConfiguredChaserBehavior] = {}
+    for behavior in configured_behaviors:
+        index = int(behavior.chaser_index)
+        if index in behavior_by_index:
+            raise ValueError(f"Protocol defines duplicate chaser index {index}.")
+        behavior_by_index[index] = behavior
+    if not behavior_by_index:
+        raise ValueError("Protocol does not define any chasers.")
+    observed_indices = {int(value) for value in np.unique(indices)}
+    configured_indices = set(behavior_by_index)
+    if observed_indices != configured_indices:
+        raise ValueError(
+            "Protocol and canonical chaser rowset disagree on chaser indices: "
+            f"protocol={sorted(configured_indices)}, observed={sorted(observed_indices)}."
+        )
+    for index, behavior in behavior_by_index.items():
+        observed_classes = {
+            int(value) for value in np.unique(class_ids[indices == index])
+        }
+        expected_class = int(behavior.behavior_class_id)
+        if observed_classes != {expected_class}:
+            raise ValueError(
+                f"Chaser {index} behavior classification disagrees with protocol: "
+                f"expected={expected_class}, observed={sorted(observed_classes)}."
+            )
+        expected_label = BEHAVIOR_CLASS_LABELS.get(expected_class)
+        if expected_label is None or str(behavior.behavior_class) != expected_label:
+            raise ValueError(
+                f"Chaser {index} uses unsupported behavior class {expected_class}."
+            )
+
+    if source_camera_width <= 0 or source_camera_height <= 0:
+        raise ValueError("Source-camera extent must be positive.")
+    if not np.isfinite(float(fps)) or float(fps) <= 0:
+        raise ValueError("Heatmap FPS must be positive.")
+
+    overlays: list[ChaserPositionOverlay] = []
+    for window in windows:
+        if window.label not in {"pre_event", "post_event"}:
+            continue
+        if window.start_frame is None or window.end_frame is None:
+            raise ValueError(
+                f"Chaser overlay window {window.label!r} lacks exact frame bounds."
+            )
+        effective_start = int(window.start_frame)
+        if window.label == "post_event":
+            effective_start += int(
+                math.ceil(max(0.0, float(post_settle_duration_s)) * float(fps))
+            )
+        effective_end = int(window.end_frame)
+        if effective_start > effective_end:
+            raise ValueError(
+                f"Post-settle trimming removed the full {window.label!r} window."
+            )
+
+        markers: list[ChaserPositionMarker] = []
+        for index in sorted(behavior_by_index):
+            behavior = behavior_by_index[index]
+            experimental_rgba = (
+                float(behavior.raw_color_rgba[0]),
+                float(behavior.raw_color_rgba[1]),
+                float(behavior.raw_color_rgba[2]),
+                float(behavior.raw_color_rgba[3]),
+            )
+            experimental_hex = _experimental_color_hex(experimental_rgba)
+            behavior_marker = CHASER_BEHAVIOR_MARKERS.get(
+                str(behavior.behavior_class),
+                CHASER_BEHAVIOR_MARKERS["unknown"],
+            )
+            selected = (
+                (indices == index)
+                & (frames >= effective_start)
+                & (frames <= effective_end)
+                & np.isfinite(positions).all(axis=1)
+            )
+            arena_samples = positions[selected]
+            if arena_samples.shape[0] == 0:
+                raise ValueError(
+                    f"No valid chaser {index} samples exist in {window.label!r}."
+                )
+            camera_samples = np.asarray(
+                apply_bound_directed_transform_chain(
+                    arena_samples,
+                    transform_chain,
+                ),
+                dtype=np.float64,
+            )
+            if camera_samples.shape != arena_samples.shape:
+                raise ValueError(
+                    "Arena-to-source-camera transform changed the chaser array shape."
+                )
+            if not np.isfinite(camera_samples).all():
+                raise ValueError(
+                    "Arena-to-source-camera transform produced non-finite chaser positions."
+                )
+            center = np.median(camera_samples, axis=0)
+            x_px = float(center[0])
+            y_px = float(center[1])
+            if not (
+                0.0 <= x_px < float(source_camera_width)
+                and 0.0 <= y_px < float(source_camera_height)
+            ):
+                raise ValueError(
+                    f"Chaser {index} {window.label!r} endpoint falls outside the "
+                    f"source-camera extent: ({x_px:g}, {y_px:g}) not within "
+                    f"{source_camera_width}x{source_camera_height}."
+                )
+            drift = np.linalg.norm(camera_samples - center.reshape(1, 2), axis=1)
+            markers.append(
+                ChaserPositionMarker(
+                    chaser_index=index,
+                    behavior_class_id=int(behavior.behavior_class_id),
+                    behavior_class=str(behavior.behavior_class),
+                    behavior_marker=behavior_marker,
+                    experimental_color_rgba=experimental_rgba,
+                    experimental_color_hex=experimental_hex,
+                    camera_x_px=x_px,
+                    camera_y_px=y_px,
+                    sample_count=int(camera_samples.shape[0]),
+                    median_drift_px=float(np.median(drift)),
+                    max_drift_px=float(np.max(drift)),
+                )
+            )
+        overlays.append(
+            ChaserPositionOverlay(
+                window_label=window.label,
+                effective_start_frame=effective_start,
+                effective_end_frame=effective_end,
+                stimulus_run=str(stimulus_run),
+                source_chaser_path=str(source_chaser_path),
+                source_camera_id=str(source_camera_id),
+                source_camera_width=int(source_camera_width),
+                source_camera_height=int(source_camera_height),
+                coordinate_descriptor_sha256=str(coordinate_descriptor_sha256),
+                frame_transform_manifest_ref=str(frame_transform_manifest_ref),
+                frame_transform_manifest_sha256=str(frame_transform_manifest_sha256),
+                protocol_profile_id=str(protocol_profile_id),
+                protocol_profile_version=int(protocol_profile_version),
+                protocol_profile_sha256=str(protocol_profile_sha256),
+                post_settle_duration_s=float(post_settle_duration_s),
+                markers=tuple(markers),
+            )
+        )
+    if {overlay.window_label for overlay in overlays} != {
+        "pre_event",
+        "post_event",
+    }:
+        raise ValueError(
+            "Behavior-labeled chaser overlays require both pre_event and post_event windows."
+        )
+    return tuple(overlays)
+
+
+def load_chaser_position_overlays(
+    root: zarr.Group,
+    *,
+    windows: Sequence[EpochWindow],
+    stimulus_run: Optional[str],
+    width: int,
+    height: int,
+    fps: float,
+    camera_id: Optional[str],
+) -> tuple[ChaserPositionOverlay, ...]:
+    resolved_run, stimulus_group = _resolve_stimulus_run(root, stimulus_run)
+    tracking = stimulus_group.get("tracking_data")
+    if tracking is None or "chaser_states" not in tracking:
+        raise ValueError(
+            f"Stimulus run {resolved_run!r} has no canonical chaser_states group."
+        )
+    chaser_group = tracking["chaser_states"]
+    required_arrays = (
+        "chaser_index",
+        "chaser_position_xy",
+        "chaser_behavior_class_id",
+    )
+    missing = [name for name in required_arrays if name not in chaser_group]
+    if missing:
+        raise ValueError(
+            f"Canonical chaser rowset is missing required arrays: {missing}."
+        )
+
+    evidence = load_bound_stimulus_coordinate_evidence(
+        stimulus_group,
+        chaser_group,
+        root_node=root,
+    )
+    acquisition = evidence.frame_transform.acquisition_frame.record
+    endpoint = evidence.frame_transform.source_camera_frame.endpoint
+    if int(endpoint.width) != int(width) or int(endpoint.height) != int(height):
+        raise ValueError(
+            "Chaser transform source-camera extent does not match the heatmap: "
+            f"transform={endpoint.width}x{endpoint.height}, heatmap={width}x{height}."
+        )
+    if camera_id is not None and str(camera_id) != str(acquisition.camera_id):
+        raise ValueError(
+            "Chaser transform camera does not match the heatmap camera: "
+            f"transform={acquisition.camera_id!r}, heatmap={camera_id!r}."
+        )
+
+    protocol_payload = _load_protocol_payload(stimulus_group)
+    configured = resolve_configured_chaser_behaviors(protocol_payload)
+    profile = load_chaser_protocol_profile(default_chaser_protocol_profile_path())
+    settle_duration_s = _post_settle_duration_s(profile, protocol_payload)
+    position_array = chaser_group["chaser_position_xy"]
+    descriptor_sha256 = str(
+        position_array.attrs.get("coordinate_descriptor_sha256") or ""
+    ).strip()
+    if len(descriptor_sha256) != 64:
+        raise ValueError(
+            "Canonical chaser_position_xy lacks its coordinate descriptor digest."
+        )
+    source_path = f"analysis/stimulus_runs/{resolved_run}/tracking_data/chaser_states"
+    manifest = evidence.frame_transform.manifest
+    return compute_chaser_position_overlays(
+        windows=windows,
+        source_acquisition_frame_index=evidence.source_acquisition_frame_index,
+        chaser_index=np.asarray(chaser_group["chaser_index"][:]),
+        chaser_position_arena_xy=np.asarray(position_array[:]),
+        chaser_behavior_class_id=np.asarray(
+            chaser_group["chaser_behavior_class_id"][:]
+        ),
+        configured_behaviors=configured,
+        transform_chain=evidence.frame_transform.transform_chain,
+        source_camera_width=int(width),
+        source_camera_height=int(height),
+        fps=float(fps),
+        post_settle_duration_s=float(settle_duration_s),
+        stimulus_run=resolved_run,
+        source_chaser_path=source_path,
+        source_camera_id=str(acquisition.camera_id),
+        coordinate_descriptor_sha256=descriptor_sha256,
+        frame_transform_manifest_ref=manifest.record_ref,
+        frame_transform_manifest_sha256=manifest.record_sha256,
+        protocol_profile_id=profile.profile_id,
+        protocol_profile_version=profile.profile_version,
+        protocol_profile_sha256=profile.sha256,
+    )
 
 
 def _open_root(zarr_path: Path) -> zarr.Group:
@@ -287,7 +717,9 @@ def _attr_float(attrs: Any, *keys: str) -> Optional[float]:
     return None
 
 
-def _resolve_raw_detect_group(root: zarr.Group, run_name: Optional[str]) -> tuple[zarr.Group, str]:
+def _resolve_raw_detect_group(
+    root: zarr.Group, run_name: Optional[str]
+) -> tuple[zarr.Group, str]:
     parent = root.get("detect_runs")
     if parent is None:
         raise ValueError("Archive has no detect_runs group.")
@@ -302,6 +734,22 @@ def _resolve_raw_detect_group(root: zarr.Group, run_name: Optional[str]) -> tupl
     return parent[resolved], f"detect_runs/{resolved}"
 
 
+def _resolve_detection_payload_group(
+    group: zarr.Group,
+    path: str,
+) -> tuple[zarr.Group, str]:
+    if "frame_indices" in group:
+        return group, path
+    instances = group.get("instances")
+    if (
+        instances is not None
+        and "frame_indices" in instances
+        and ("bbox_img_xyxy" in instances or "bbox_norm_coords" in instances)
+    ):
+        return instances, f"{path.rstrip('/')}/instances"
+    return group, path
+
+
 def _resolve_detection_group(
     root: zarr.Group,
     *,
@@ -313,30 +761,71 @@ def _resolve_detection_group(
         path = str(detection_path).strip().strip("/")
         if not path:
             raise ValueError("--detection-path must be non-empty.")
-        return root[path], path, "explicit"
+        group, payload_path = _resolve_detection_payload_group(root[path], path)
+        return group, payload_path, "explicit"
 
     if source == "raw":
         group, path = _resolve_raw_detect_group(root, detect_run)
-        return group, path, "raw"
+        group, payload_path = _resolve_detection_payload_group(group, path)
+        return group, payload_path, "raw"
 
-    resolution = resolve_detection_read_source(root, prefer_curated=True, allow_sparse_fallback=True)
+    resolution = resolve_detection_read_source(
+        root, prefer_curated=True, allow_sparse_fallback=True
+    )
     if not resolution.detection_path:
         raise ValueError("No active detection source resolved.")
-    return root[resolution.detection_path], resolution.detection_path, resolution.detection_kind or "active"
+    group, payload_path = _resolve_detection_payload_group(
+        root[resolution.detection_path], resolution.detection_path
+    )
+    return (
+        group,
+        payload_path,
+        resolution.detection_kind or "active",
+    )
 
 
-def _resolve_dimensions(root: zarr.Group, group: zarr.Group) -> tuple[int, int, float, int]:
+def _resolve_dimensions(
+    root: zarr.Group, group: zarr.Group
+) -> tuple[int, int, float, int]:
     width = (
-        _attr_int(group.attrs, "source_full_width", "source_video_width", "width", "video_width")
-        or _attr_int(root.attrs, "width", "video_width", "source_video_width", "palette_video_width")
+        _attr_int(
+            group.attrs,
+            "source_full_width",
+            "source_video_width",
+            "width",
+            "video_width",
+        )
+        or _attr_int(
+            root.attrs,
+            "width",
+            "video_width",
+            "source_video_width",
+            "palette_video_width",
+        )
         or 4512
     )
     height = (
-        _attr_int(group.attrs, "source_full_height", "source_video_height", "height", "video_height")
-        or _attr_int(root.attrs, "height", "video_height", "source_video_height", "palette_video_height")
+        _attr_int(
+            group.attrs,
+            "source_full_height",
+            "source_video_height",
+            "height",
+            "video_height",
+        )
+        or _attr_int(
+            root.attrs,
+            "height",
+            "video_height",
+            "source_video_height",
+            "palette_video_height",
+        )
         or 4512
     )
-    fps = _attr_float(root.attrs, "fps", "video_fps") or _attr_float(group.attrs, "fps", "video_fps") or 30.0
+    fps = (
+        _attr_float(root.attrs, "fps", "video_fps")
+        or _attr_float(group.attrs, "fps", "video_fps")
+        or 30.0
+    )
     total_frames = (
         _attr_int(root.attrs, "total_frames", "n_frames", "source_video_total_frames")
         or _attr_int(group.attrs, "total_frames", "n_frames")
@@ -345,7 +834,9 @@ def _resolve_dimensions(root: zarr.Group, group: zarr.Group) -> tuple[int, int, 
     return int(width), int(height), float(fps), int(total_frames)
 
 
-def _read_detection_centers(group: zarr.Group, *, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+def _read_detection_centers(
+    group: zarr.Group, *, width: int, height: int
+) -> tuple[np.ndarray, np.ndarray]:
     if "frame_indices" not in group:
         raise ValueError("Detection group missing frame_indices.")
     frame_indices = np.asarray(group["frame_indices"][:], dtype=np.int64).reshape(-1)
@@ -353,14 +844,20 @@ def _read_detection_centers(group: zarr.Group, *, width: int, height: int) -> tu
         bbox = np.asarray(group["bbox_img_xyxy"][:], dtype=np.float64)
         if bbox.ndim != 2 or bbox.shape[1] != 4:
             raise ValueError("bbox_img_xyxy must have shape (N, 4).")
-        centers = np.column_stack([(bbox[:, 0] + bbox[:, 2]) * 0.5, (bbox[:, 1] + bbox[:, 3]) * 0.5])
+        centers = np.column_stack(
+            [(bbox[:, 0] + bbox[:, 2]) * 0.5, (bbox[:, 1] + bbox[:, 3]) * 0.5]
+        )
     elif "bbox_norm_coords" in group:
         bbox = np.asarray(group["bbox_norm_coords"][:], dtype=np.float64)
         if bbox.ndim != 2 or bbox.shape[1] != 4:
             raise ValueError("bbox_norm_coords must have shape (N, 4).")
-        centers = np.column_stack([bbox[:, 0] * float(width), bbox[:, 1] * float(height)])
+        centers = np.column_stack(
+            [bbox[:, 0] * float(width), bbox[:, 1] * float(height)]
+        )
     else:
-        raise ValueError("Detection group has neither bbox_img_xyxy nor bbox_norm_coords.")
+        raise ValueError(
+            "Detection group has neither bbox_img_xyxy nor bbox_norm_coords."
+        )
     if frame_indices.shape[0] != centers.shape[0]:
         raise ValueError("frame_indices and bbox arrays disagree on row count.")
     return frame_indices, centers
@@ -409,7 +906,11 @@ def compute_heatmap(
     mask = (frames >= start_frame) & (frames <= end_frame)
     selected_frames = frames[mask]
     selected_centers = centers[mask]
-    valid = np.isfinite(selected_centers).all(axis=1) if selected_centers.size else np.zeros(0, dtype=bool)
+    valid = (
+        np.isfinite(selected_centers).all(axis=1)
+        if selected_centers.size
+        else np.zeros(0, dtype=bool)
+    )
     selected_frames = selected_frames[valid]
     selected_centers = selected_centers[valid]
     in_bounds = (
@@ -423,7 +924,9 @@ def compute_heatmap(
 
     x_edges = _make_edges(width, bin_size)
     y_edges = _make_edges(height, bin_size)
-    heatmap, _, _ = np.histogram2d(selected_centers[:, 0], selected_centers[:, 1], bins=[x_edges, y_edges])
+    heatmap, _, _ = np.histogram2d(
+        selected_centers[:, 0], selected_centers[:, 1], bins=[x_edges, y_edges]
+    )
     heatmap = heatmap.T
     if smooth_sigma > 0:
         heatmap = gaussian_filter(heatmap, sigma=float(smooth_sigma))
@@ -442,7 +945,15 @@ def compute_heatmap(
     span = max(0, end_frame - start_frame + 1)
     covered = int(np.unique(selected_frames).shape[0]) if selected_frames.size else 0
     coverage = float(covered / span * 100.0) if span else 0.0
-    return heatmap, start_frame, end_frame, span, int(selected_centers.shape[0]), covered, coverage
+    return (
+        heatmap,
+        start_frame,
+        end_frame,
+        span,
+        int(selected_centers.shape[0]),
+        covered,
+        coverage,
+    )
 
 
 def build_heatmaps_for_archive(
@@ -458,7 +969,12 @@ def build_heatmaps_for_archive(
     smooth_sigma: float,
     normalize: str,
     min_score: Optional[float],
+    overlay_chasers: bool = False,
 ) -> list[HeatmapResult]:
+    if overlay_chasers and not windows_from_stimulus:
+        raise ValueError(
+            "Behavior-labeled chaser overlays require --windows-from-stimulus."
+        )
     root = _open_root(zarr_path)
     group, source_path, source_kind = _resolve_detection_group(
         root,
@@ -468,7 +984,9 @@ def build_heatmaps_for_archive(
     )
     width, height, fps, total_frames = _resolve_dimensions(root, group)
     resolved_windows = (
-        resolve_stimulus_event_windows(root, fps=fps, total_frames=total_frames, stimulus_run=stimulus_run)
+        resolve_stimulus_event_windows(
+            root, fps=fps, total_frames=total_frames, stimulus_run=stimulus_run
+        )
         if windows_from_stimulus
         else list(windows or [])
     )
@@ -483,23 +1001,39 @@ def build_heatmaps_for_archive(
         frames = frames[keep]
         centers = centers[keep]
 
-    recording_id = _attr_text(root.attrs, "recording_id", "recording_name") or zarr_path.stem
+    recording_id = (
+        _attr_text(root.attrs, "recording_id", "recording_name") or zarr_path.stem
+    )
     arena_id = _attr_text(root.attrs, "arena_id")
     camera_id = _attr_text(root.attrs, "camera_id", "camera_serial")
-
-    results: list[HeatmapResult] = []
-    for window in resolved_windows:
-        heatmap, start_frame, end_frame, span, detections, covered, coverage = compute_heatmap(
-            frames=frames,
-            centers=centers,
-            window=window,
+    overlays_by_window: dict[str, ChaserPositionOverlay] = {}
+    if overlay_chasers:
+        overlays = load_chaser_position_overlays(
+            root,
+            windows=resolved_windows,
+            stimulus_run=stimulus_run,
             width=width,
             height=height,
             fps=fps,
-            total_frames=total_frames,
-            bin_size=bin_size,
-            smooth_sigma=smooth_sigma,
-            normalize=normalize,
+            camera_id=camera_id,
+        )
+        overlays_by_window = {overlay.window_label: overlay for overlay in overlays}
+
+    results: list[HeatmapResult] = []
+    for window in resolved_windows:
+        heatmap, start_frame, end_frame, span, detections, covered, coverage = (
+            compute_heatmap(
+                frames=frames,
+                centers=centers,
+                window=window,
+                width=width,
+                height=height,
+                fps=fps,
+                total_frames=total_frames,
+                bin_size=bin_size,
+                smooth_sigma=smooth_sigma,
+                normalize=normalize,
+            )
         )
         results.append(
             HeatmapResult(
@@ -520,6 +1054,7 @@ def build_heatmaps_for_archive(
                 covered_frame_count=covered,
                 coverage_pct=coverage,
                 heatmap=heatmap,
+                chaser_overlay=overlays_by_window.get(window.label),
             )
         )
     return results
@@ -538,6 +1073,44 @@ def _window_title(window: EpochWindow) -> str:
     if window.start_frame is not None and window.end_frame is not None:
         frame_text = f"\nframes {window.start_frame}-{window.end_frame}"
     return f"{window.label.replace('_', ' ')}\n{window.start_s/60:.2f}-{window.end_s/60:.2f} min{frame_text}"
+
+
+def _render_chaser_position_overlay(
+    ax: Any,
+    overlay: ChaserPositionOverlay,
+) -> None:
+    for marker in overlay.markers:
+        ax.scatter(
+            [marker.camera_x_px],
+            [marker.camera_y_px],
+            s=150,
+            marker=marker.behavior_marker,
+            color=marker.experimental_color_hex,
+            edgecolor="white",
+            linewidth=1.6,
+            zorder=6,
+        )
+        label = (
+            f"{marker.behavior_class.replace('_', ' ')} chaser {marker.chaser_index}"
+        )
+        text = ax.annotate(
+            label,
+            xy=(marker.camera_x_px, marker.camera_y_px),
+            xytext=(8, 7),
+            textcoords="offset points",
+            ha="left",
+            va="bottom",
+            fontsize=8,
+            fontweight="bold",
+            color="white",
+            zorder=7,
+        )
+        text.set_path_effects(
+            [
+                path_effects.Stroke(linewidth=2.4, foreground="black"),
+                path_effects.Normal(),
+            ]
+        )
 
 
 def render_heatmap_panel(
@@ -561,14 +1134,29 @@ def render_heatmap_panel(
         constrained_layout=True,
     )
 
-    all_maps = [item.heatmap for row in results_by_recording for item in row if item.heatmap.size]
+    all_maps = [
+        item.heatmap
+        for row in results_by_recording
+        for item in row
+        if item.heatmap.size
+    ]
     if normalize == "count":
-        finite_values = np.concatenate([arr[np.isfinite(arr)].reshape(-1) for arr in all_maps]) if all_maps else np.array([])
+        finite_values = (
+            np.concatenate([arr[np.isfinite(arr)].reshape(-1) for arr in all_maps])
+            if all_maps
+            else np.array([])
+        )
         vmax = float(np.percentile(finite_values, 99.0)) if finite_values.size else 1.0
         if vmax <= 0:
             vmax = 1.0
     elif normalize == "density":
-        finite_values = np.concatenate([arr[np.isfinite(arr) & (arr > 0)].reshape(-1) for arr in all_maps]) if all_maps else np.array([])
+        finite_values = (
+            np.concatenate(
+                [arr[np.isfinite(arr) & (arr > 0)].reshape(-1) for arr in all_maps]
+            )
+            if all_maps
+            else np.array([])
+        )
         vmax = float(np.percentile(finite_values, 99.5)) if finite_values.size else 1.0
         if vmax <= 0:
             vmax = 1.0
@@ -587,11 +1175,17 @@ def render_heatmap_panel(
                 item.heatmap,
                 cmap=cmap,
                 origin=origin,
-                extent=[0, item.width, item.height, 0] if origin == "upper" else [0, item.width, 0, item.height],
+                extent=(
+                    [0, item.width, item.height, 0]
+                    if origin == "upper"
+                    else [0, item.width, 0, item.height]
+                ),
                 vmin=0.0,
                 vmax=vmax,
                 interpolation="nearest",
             )
+            if item.chaser_overlay is not None:
+                _render_chaser_position_overlay(ax, item.chaser_overlay)
             if row_idx == 0:
                 ax.set_title(_window_title(item.window), fontsize=10)
             if col_idx == 0:
@@ -611,18 +1205,29 @@ def render_heatmap_panel(
                 va="bottom",
                 fontsize=7,
                 color="white",
-                bbox={"boxstyle": "round", "facecolor": "black", "alpha": 0.55, "linewidth": 0},
+                bbox={
+                    "boxstyle": "round",
+                    "facecolor": "black",
+                    "alpha": 0.55,
+                    "linewidth": 0,
+                },
             )
     if image is not None:
-        label = {"max": "Max-normalized occupancy", "density": "Detection density", "count": "Detection count"}[normalize]
+        label = {
+            "max": "Max-normalized occupancy",
+            "density": "Detection density",
+            "count": "Detection count",
+        }[normalize]
         fig.colorbar(image, ax=axes.ravel().tolist(), shrink=0.82, label=label)
-    fig.suptitle(title, fontsize=13)
+    fig.suptitle(title, fontsize=13, y=1.10)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=180)
+    fig.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
-def write_summary(results_by_recording: Sequence[Sequence[HeatmapResult]], path: Path) -> None:
+def write_summary(
+    results_by_recording: Sequence[Sequence[HeatmapResult]], path: Path
+) -> None:
     payload: list[dict[str, Any]] = []
     for row in results_by_recording:
         for item in row:
@@ -652,6 +1257,11 @@ def write_summary(results_by_recording: Sequence[Sequence[HeatmapResult]], path:
                     "detection_count": item.detection_count,
                     "covered_frame_count": item.covered_frame_count,
                     "coverage_pct": item.coverage_pct,
+                    "chaser_overlay": (
+                        asdict(item.chaser_overlay)
+                        if item.chaser_overlay is not None
+                        else None
+                    ),
                 }
             )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -661,16 +1271,27 @@ def write_summary(results_by_recording: Sequence[Sequence[HeatmapResult]], path:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr", type=Path, nargs="+", help="Analysis Zarr archive(s).")
-    parser.add_argument("--output", type=Path, required=True, help="Output PNG path for the heatmap panel.")
-    parser.add_argument("--summary-json", type=Path, help="Optional JSON summary output path.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output PNG path for the heatmap panel.",
+    )
+    parser.add_argument(
+        "--summary-json", type=Path, help="Optional JSON summary output path."
+    )
     parser.add_argument(
         "--source",
         choices=("active", "raw"),
         default="active",
         help="Detection source. 'active' prefers curated/refined surfaces; 'raw' uses detect_runs latest.",
     )
-    parser.add_argument("--detect-run", help="Raw detect run name when --source raw is used.")
-    parser.add_argument("--detection-path", help="Explicit detection group path inside the archive.")
+    parser.add_argument(
+        "--detect-run", help="Raw detect run name when --source raw is used."
+    )
+    parser.add_argument(
+        "--detection-path", help="Explicit detection group path inside the archive."
+    )
     parser.add_argument("--first-minutes", type=float, default=10.0)
     parser.add_argument("--training-minutes", type=float, default=2.5)
     parser.add_argument("--post-minutes", type=float, default=10.0)
@@ -683,17 +1304,38 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "CHASER_POST_PERIOD_START, and protocol-finish event camera frames."
         ),
     )
-    parser.add_argument("--stimulus-run", help="Stimulus run name for --windows-from-stimulus.")
+    parser.add_argument(
+        "--stimulus-run", help="Stimulus run name for --windows-from-stimulus."
+    )
+    parser.add_argument(
+        "--overlay-chasers",
+        action="store_true",
+        help=(
+            "Label canonical pre/post chaser positions by behavior using the "
+            "exact arena-to-source-camera transform. Requires --windows-from-stimulus."
+        ),
+    )
     parser.add_argument(
         "--window",
         action="append",
         default=[],
         help="Custom window as label:start_s:end_s. Repeatable. Overrides duration defaults.",
     )
-    parser.add_argument("--bin-size", type=int, default=64, help="Heatmap bin size in pixels.")
-    parser.add_argument("--smooth-sigma", type=float, default=1.0, help="Gaussian smoothing sigma in heatmap bins.")
-    parser.add_argument("--min-score", type=float, help="Optional minimum detection confidence.")
-    parser.add_argument("--normalize", choices=("max", "density", "count"), default="max")
+    parser.add_argument(
+        "--bin-size", type=int, default=64, help="Heatmap bin size in pixels."
+    )
+    parser.add_argument(
+        "--smooth-sigma",
+        type=float,
+        default=1.0,
+        help="Gaussian smoothing sigma in heatmap bins.",
+    )
+    parser.add_argument(
+        "--min-score", type=float, help="Optional minimum detection confidence."
+    )
+    parser.add_argument(
+        "--normalize", choices=("max", "density", "count"), default="max"
+    )
     parser.add_argument("--origin", choices=("upper", "lower"), default="upper")
     parser.add_argument("--cmap", default="inferno")
     parser.add_argument("--title", default="Detection centroid heatmaps")
@@ -704,6 +1346,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     if args.windows_from_stimulus and args.window:
         raise ValueError("--window cannot be combined with --windows-from-stimulus.")
+    if args.overlay_chasers and not args.windows_from_stimulus:
+        raise ValueError("--overlay-chasers requires --windows-from-stimulus.")
     windows = None
     if not args.windows_from_stimulus:
         windows = (
@@ -729,6 +1373,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             smooth_sigma=float(args.smooth_sigma),
             normalize=str(args.normalize),
             min_score=args.min_score,
+            overlay_chasers=bool(args.overlay_chasers),
         )
         for path in args.zarr
     ]
