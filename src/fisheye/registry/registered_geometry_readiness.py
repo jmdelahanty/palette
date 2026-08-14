@@ -231,7 +231,6 @@ def project_registered_geometry_stages(
         prerequisite_statuses=(import_status, offline_status),
     )
     if not comparisons and pending_fit_review_runs:
-        comparison_status = "review"
         comparison_reason = "offline_fit_review_required"
     review_runs = [
         name
@@ -239,13 +238,11 @@ def project_registered_geometry_stages(
         if group.attrs.get("review_required") is True  # type: ignore[attr-defined]
     ]
     if review_runs:
-        comparison_status = "review"
         comparison_reason = "review_required"
     selection_status, selection_reason = _status_from_presence(
         present=bool(selections), prerequisite_statuses=(comparison_status,)
     )
     if not selections and (review_runs or pending_fit_review_runs):
-        selection_status = "review"
         selection_reason = (
             "comparison_review_required"
             if review_runs
@@ -412,7 +409,7 @@ def project_registered_geometry_stages(
             upstream={"arena_geometry_comparison": comparison_status},
             review_status=(
                 {"state": "review_required", "reason": selection_reason}
-                if selection_status == "review"
+                if review_runs or pending_fit_review_runs
                 else None
             ),
         ),

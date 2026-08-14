@@ -14,9 +14,11 @@ from fisheye.analysis_workflows.materializers import (
     arena_geometry_fit_review as fit_review,
 )
 from fisheye.diagnostics.probe_recording_dish_rim_fit import write_review_package
+from fisheye.registry.db import Registry
 from fisheye.registry.registered_geometry_readiness import (
     project_registered_geometry_stages,
 )
+from fisheye.registry.status_ledger import upsert_recording_step_status
 from tests.unit.fisheye.test_arena_geometry_candidates import (
     _palette_binding,
     _palette_fit_inputs,
@@ -183,6 +185,100 @@ def test_registry_projection_exposes_embedded_fit_as_review_pending(
         "state": "evidence_complete_review_pending",
         "runs": [plan.run_name],
     }
-    assert comparison.status == "review"
+    assert comparison.status == "missing"
     assert comparison.review_status["fit_review_runs"] == [plan.run_name]
-    assert selection.status == "review"
+    assert selection.status == "absent"
+    assert selection.review_status == {
+        "state": "review_required",
+        "reason": "offline_fit_review_required",
+    }
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_a",
+        session_uuid="session_a",
+        zarr_path=source_zarr,
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    for projection in projections:
+        upsert_recording_step_status(
+            registry,
+            dataset_id="dataset_a",
+            recording_id="recording_a",
+            step_name=projection.step_name,
+            status=projection.status,
+            run_name=projection.run_name,
+            method=projection.method,
+            review_status_json=projection.review_status,
+            details_json=projection.details,
+            source="unit_test",
+        )
+    stored = {
+        str(row["step_name"]): str(row["status"])
+        for row in registry.conn.execute(
+            "SELECT step_name, status FROM recording_step_status WHERE dataset_id = ?",
+            ("dataset_a",),
+        ).fetchall()
+    }
+    registry.close()
+    assert stored["arena_geometry_offline_fit"] == "ok"
+    assert stored["arena_geometry_comparison"] == "missing"
+    assert stored["arena_geometry_selection"] == "absent"
+
+
+def test_registry_projection_keeps_comparison_review_orthogonal_to_stage_status(
+    tmp_path: Path,
+) -> None:
+    source_zarr = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(source_zarr), mode="w", zarr_format=3)
+    analysis = root.require_group("analysis")
+    candidates = analysis.require_group("arena_geometry_runs")
+    acquisition = candidates.require_group("acquisition")
+    acquisition.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "candidate_kind": "acquisition_registered_dish",
+        }
+    )
+    offline = candidates.require_group("offline")
+    offline.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "candidate_kind": "palette_recording_image_fit",
+        }
+    )
+    comparisons = analysis.require_group("arena_geometry_comparison_runs")
+    comparison = comparisons.require_group("comparison")
+    comparison.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "schema_id": "palette.arena_geometry_comparison_run",
+            "review_required": True,
+        }
+    )
+
+    projections = project_registered_geometry_stages(
+        root=root,
+        analysis_group=analysis,
+        common_details={},
+        raw_status="ok",
+        calibration_status="ok",
+        detect_status="ok",
+        detect_quality_status="ok",
+    )
+
+    by_stage = {row.step_name: row for row in projections}
+    projected_comparison = by_stage["arena_geometry_comparison"]
+    selection = by_stage["arena_geometry_selection"]
+    assert projected_comparison.status == "ok"
+    assert projected_comparison.review_status == {
+        "state": "review_required",
+        "runs": ["comparison"],
+    }
+    assert selection.status == "missing"
+    assert selection.review_status == {
+        "state": "review_required",
+        "reason": "comparison_review_required",
+    }
