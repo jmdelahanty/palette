@@ -17,6 +17,9 @@
   `/tmp/palette-goodbatbadbat-geometry-canary-20260813`
 - Clean canary implementation commit:
   `3138c3c34f3620c41c7a4f2480d9e3ad2d27e93f`
+- Geometry approval/registry reconciliation follow-up branch:
+  `agent/palette/geometry-review-approval-20260814` (commit and required CI
+  pending)
 - Baseline required CI:
   `https://github.com/jmdelahantyj/palette/actions/runs/31660860452`
   (`15/15` required jobs successful)
@@ -473,13 +476,63 @@ or downstream authority contracts.
 - [x] Do not reinterpret the legacy tuning-stage `dish_mask=ok` as this chain.
 - [x] Project a complete embedded fit-review run as
       `arena_geometry_offline_fit=ok` with an explicit review-pending state;
-      project comparison and selection as `review` until the human decision
-      and immutable downstream artifacts exist.
+      project comparison and selection with a valid ledger status plus explicit
+      `review_status_json` until the human decision and immutable downstream
+      artifacts exist. Never write the invalid ledger status `review`.
 - [x] In the campaign DAG, serialize one fail-closed registry refresh after all
       acquisition-import and fit-review array tasks complete. Parallel workers
       never write the registry directly.
 - [ ] Define migrations and compatibility projections only after the modern
       artifact contracts are stable.
+
+### Slice 8b: registry-backed operator approval and publication
+
+- [x] Make the normal web queue registry-backed and actionable-only by default;
+      keep completed/running states behind explicit diagnostic
+      `--include-inactive true`.
+- [x] Reject dataset/stage recording-ID mismatches instead of displaying or
+      approving a rebound row.
+- [x] Reconcile `recording_step_status` from the canonical Zarr during the
+      campaign's final registry scan; a plain dataset rescan is not sufficient.
+- [x] Keep the web server read-only by default and require an authenticated,
+      explicit `dry-run` or `submit` launch to expose approval controls.
+- [x] Bind one immutable approval request to the dataset, recording, canonical
+      Zarr, fit-review run/digest, acquisition candidate/digest, exact raw
+      detection source/binding, operator choice, semantic classification,
+      reviewer, reason, time, Palette commit, and required-gate output IDs.
+- [x] Require typed confirmation and support only exact Palette-versus-
+      acquisition selection; do not average or edit either candidate.
+- [x] Keep direct-Zarr mode diagnostic-only and prevent the browser from
+      writing canonical Zarr or registry state.
+- [x] Submit a commit-pinned LSF dependency chain for publication, quality,
+      required-gate refinement, crop, and final registry reconciliation.
+- [x] Keep the final registry mutation off the shared SQLite file: validate and
+      preserve the canonical source, reconcile a node-local shadow, reject a
+      concurrent source change, fully validate the candidate and staged copy,
+      and publish by atomic rename. Never rely on `quick_check` as the
+      production integrity gate.
+- [x] Refuse submit mode for a dirty deployment or without an explicit
+      successful-required-CI assertion.
+- [x] Refuse stale/rebound/non-actionable inputs, changed source digests,
+      conflicting active selections, and browser override of partial/completed
+      lifecycle artifacts.
+- [x] Preserve raw detections and use canonical `instance_key` as the keyed gate
+      and refinement identity.
+- [ ] Validate an actionable production recording through copied-registry
+      request/plan dry-run without changing canonical metadata.
+- [ ] Run all required CI checks for the exact approval implementation commit.
+- [ ] Deploy that green commit and perform the first operator-approved canonical
+      publication; verify the final registry row leaves the actionable queue.
+
+Registry incident note (2026-08-13/14): the canonical registry developed
+secondary-index corruption during the preceding goodbatbadbat rescan window.
+The pre-rescan backup passed complete integrity; the affected file returned
+`quick_check=ok` but 100 rows from `integrity_check`. A quiescent, index-only
+repair was published on 2026-08-14 after preserving the exact corrupt file,
+rebuilding indexes in a separate copy, and matching all 58 tables and 48,804
+rows with an index-independent logical hash. This incident is the reason the
+approval finalizer uses shadow-copy publication; it does not establish that
+multi-host in-place SQLite writes are safe.
 
 ## Required validation coverage
 

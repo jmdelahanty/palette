@@ -182,7 +182,8 @@ scripts/backup_palette_registry.sh
 ```
 
 Default behavior:
-- source registry: `/nvme1/palette_registry.sqlite`
+- source registry:
+  `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`
 - backup directory: `/groups/ahrens/ahrenslab/jeremy/zebrobot/backups`
 - retention: delete `palette_registry_*.sqlite` files older than 7 days only
   after a new backup has been created and verified
@@ -194,5 +195,28 @@ Recommended cron entry:
 ```
 
 The backup script verifies that the source registry exists and is non-empty,
-uses SQLite's `.backup` command, runs `PRAGMA quick_check` on the source and
-backup, and refuses to report success for a missing or zero-byte backup.
+uses SQLite's `.backup` command, runs the complete `PRAGMA integrity_check` and
+`PRAGMA foreign_key_check` on both source and backup, and refuses to report
+success for a missing or zero-byte backup. `quick_check` is insufficient here:
+on 2026-08-13 it returned `ok` for a registry whose secondary indexes failed
+the complete integrity check.
+
+Shared-filesystem mutation must use a local shadow copy and atomic publication,
+not in-place SQLite writes from an LSF compute node. The safe rescan form is:
+
+```bash
+scripts/py -m fisheye.utils.registry_rescan \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --safe-shadow-publish \
+  --backup-path /durable/operations/registry_before_OPERATION.sqlite \
+  --fail-on-error \
+  --reconcile-step-status \
+  /path/to/canonical.analysis.zarr
+```
+
+That mode validates the source fully, creates an immutable SQLite backup,
+mutates and validates a node-local candidate, rejects a concurrent source
+change, validates the staged shared-filesystem copy, and atomically replaces
+the canonical file. Its lock coordinates callers using this publication path;
+it is not permission for unrelated legacy writers to mutate the NFS-hosted
+registry concurrently.

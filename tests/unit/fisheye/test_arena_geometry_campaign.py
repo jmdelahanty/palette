@@ -202,5 +202,6 @@ def test_campaign_plan_freezes_exact_sources_and_stops_before_review(
     )
     assert "fisheye.utils.registry_rescan" in registry_command
     assert "--fail-on-error" in registry_command
+    assert "--reconcile-step-status" in registry_command
     assert str(paths["analysis"]) in registry_command
     assert plan.to_json()["registry_update"] is True

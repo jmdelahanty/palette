@@ -2,16 +2,40 @@
 
 ## Purpose and authority boundaries
 
-`apps/marimo/geometry_review.py` is an operator-facing, read-only evidence
-viewer. The Palette SQLite registry supplies the queue and canonical analysis
-Zarr paths. The selected canonical Zarr supplies immutable scientific evidence.
-Campaign staging receipts are not read.
+`apps/marimo/geometry_review.py` is an operator-facing evidence viewer with an
+explicitly opt-in approval launcher. The Palette SQLite registry supplies the
+queue and canonical analysis Zarr paths. The selected canonical Zarr supplies
+immutable scientific evidence. Campaign staging receipts are not read.
 
-The app has no controls or code paths for recording review decisions. It does
-not select geometry, publish candidates, change registry stage state,
-materialize comparisons or gates, trigger refinement, or write a Zarr. A
-reviewer copies the exact run IDs and digests from the handoff panel into the
-separate pipeline operation appropriate to the reviewed decision.
+The default server mode is read-only. In `dry-run` mode, a confirmed browser
+decision can write only a content-addressed approval request and LSF plan to a
+durable operations directory. In `submit` mode, the browser persists that same
+request and submits a five-job, commit-pinned LSF workflow. The browser process
+never opens the canonical Zarr for writing and never writes registry status.
+
+The workflow is:
+
+1. revalidate the exact registry item, fit-review digest, acquisition
+   candidate, raw-detection source, recording/camera/arena identity, and Palette
+   commit;
+2. publish the reviewed Palette candidate, immutable comparison,
+   comparison-bound operator selection, and exact keyed centroid gate;
+3. run detection quality and required-gate refinement over the unchanged raw
+   detections;
+4. publish a crop snapshot from the finalized gated/refined authority; and
+5. rescan the canonical Zarr against a node-local registry shadow, validate the
+   complete SQLite database, and atomically publish it only if the canonical
+   registry has not changed.
+
+The small publication job requests one CPU and 8 GB. Quality, refinement, and
+crop use the existing production resource envelopes. The final registry job
+never performs in-place SQLite writes on the multi-host shared filesystem. It
+preserves an immutable pre-write registry backup below the approval run,
+requires complete SQLite integrity and foreign-key checks before and after the
+local mutation, rejects any concurrent canonical change, and publishes one
+fully validated database by atomic rename. A different active
+selection, stale source digest, incomplete/reordered gate, registry binding
+mismatch, dirty deployment, or missing required-CI assertion fails closed.
 
 The registry contract remains unchanged. `recording_step_status.status` is one
 of `ok`, `missing`, `absent`, `na`, or `error`. Human review state is read from
@@ -21,11 +45,21 @@ of `ok`, `missing`, `absent`, `na`, or `error`. Human review state is read from
 
 Registry mode is the normal operator mode. It queries SQLite in read-only mode,
 does not recursively scan `/groups`, and opens only the Zarr selected in the
-recording dropdown.
+recording dropdown. By default it contains only actionable registry rows—those
+waiting for review or carrying a geometry error. Completed and merely running
+recordings are not mixed into the operator queue.
 
 ```bash
 scripts/run_geometry_review.sh \
-  --registry /nvme1/palette_registry.sqlite
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
+```
+
+For diagnostics only, include inactive geometry states explicitly:
+
+```bash
+scripts/run_geometry_review.sh \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --include-inactive true
 ```
 
 An exact dataset and immutable run can be selected at launch:
@@ -44,6 +78,67 @@ scripts/run_geometry_review.sh \
   --zarr-path /path/to/recording_analysis.zarr \
   --run-id arena-geometry-fit-review-EXACT_ID
 ```
+
+Direct mode never exposes approval controls because it has no registry-backed
+actionability or dataset identity.
+
+## Enabling approval
+
+Launch `dry-run` first to validate the exact decision request and dependency
+plan without submitting LSF or changing the canonical Zarr/registry:
+
+```bash
+export PALETTE_GEOMETRY_REVIEW_TOKEN='use-an-operator-managed-secret'
+
+scripts/run_geometry_review.sh \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --approval-mode dry-run \
+  --palette-repo /groups/johnson/johnsonlab/jeremy/palette-deployments/EXACT_COMMIT \
+  --approval-root /groups/johnson/johnsonlab/jeremy/operations/palette_geometry_review_approvals \
+  --reviewer operator@example.org
+```
+
+The approval root is durable operational state. Do not place it under a
+campaign staging tree or inside an analysis Zarr. It contains immutable
+requests, exact workflow plans, submission receipts, status receipts, logs,
+publication results, and final registry-refresh results.
+Each submitted run also contains
+`registry_backups/palette_registry_before_<request-id>.sqlite`; retain that
+backup with the approval audit record.
+
+Only after every required CI job is successful for the exact deployed commit,
+launch submit mode:
+
+```bash
+scripts/run_geometry_review.sh \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --approval-mode submit \
+  --required-ci-success true \
+  --palette-repo /groups/johnson/johnsonlab/jeremy/palette-deployments/EXACT_COMMIT \
+  --approval-root /groups/johnson/johnsonlab/jeremy/operations/palette_geometry_review_approvals \
+  --submit-host login1-citrus-poller \
+  --reviewer operator@example.org
+```
+
+The server launch refuses either approval mode without a Marimo token. Submit
+mode also refuses a dirty Palette deployment or an absent explicit required-CI
+assertion. The Palette deployment, approval root, authoritative registry, and
+analysis Zarr must all be visible from the LSF environment.
+
+The form requires an exact acquisition candidate and raw detection run, one of
+the two operational choices (Palette or acquisition), a reviewed edge-identity
+classification, reviewer, reason, and typed `SELECT PALETTE` or
+`SELECT ACQUISITION` confirmation. The choice controls only the
+bounding-box-centroid gate. It does not change or reinterpret the physical
+inner-rim raster-mask authority.
+
+Requests are content-addressed. Repeating the identical submitted request
+returns its existing submission receipt instead of launching duplicate jobs.
+An incomplete or failed prior submission is not automatically resubmitted;
+inspect its exact status and outputs before an explicit recovery. A recording
+with an existing downstream candidate/comparison/selection/gate chain is
+disabled in the browser so this interface cannot become a correction or
+override path.
 
 The app defaults to `127.0.0.1:8772`. Configure binding and Marimo access with:
 
@@ -142,20 +237,31 @@ Palette checkout and execute the same `scripts/py -m ...` command. Scanner
 delivery results are operational audit records only and never mark scientific
 work complete.
 
-## Validation and read-only smoke
+## Validation and safe smoke
 
 Static and deterministic checks:
 
 ```bash
 scripts/py -m py_compile <changed-python-files>
 scripts/py -m pytest -p no:cacheprovider \
+  tests/unit/fisheye/test_geometry_review_approval.py \
   tests/unit/fisheye/test_geometry_review_evidence.py \
-  tests/unit/fisheye/test_geometry_review_registry_notifications.py -q
+  tests/unit/fisheye/test_geometry_review_registry_notifications.py \
+  tests/unit/fisheye/test_registry_shadow_publish.py \
+  tests/unit/fisheye/test_registry_rescan.py \
+  tests/unit/fisheye/test_arena_geometry_campaign.py -q
 scripts/py -m marimo check apps/marimo/geometry_review.py
 git diff --check
 ```
 
-The production smoke fixture is inspected read-only. A smoke should record the
-exact run, review-record digest, montage and panel bindings, and confirm that
-the root and `zarr.json` modification times did not change. Never use an append
-or update mode for this smoke.
+The first production-data smoke remains read-only: use a copied registry under
+`/tmp`, reconcile one canonical Zarr into that copy, load the actionable queue,
+and build a `dry-run` request/plan under `/tmp`. Record the exact run,
+review-record digest, acquisition candidate, raw-detection binding, montage and
+panel bindings, and confirm that the canonical root and `zarr.json`
+modification times did not change. Never use submit/apply mode for this smoke.
+
+Canonical submission is permitted only after that exact commit's required CI
+is green. After the final registry-reconciliation job succeeds, the recording
+must leave the default actionable queue and appear as
+`gate_and_refinement_consumed` only under `--include-inactive true`.

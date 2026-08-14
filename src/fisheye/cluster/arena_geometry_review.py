@@ -575,6 +575,7 @@ def _build_registry_refresh_job(
         "--result-json",
         str(result),
         "--fail-on-error",
+        "--reconcile-step-status",
         *(str(path) for path in dict.fromkeys(analysis_zarrs)),
     )
     return build_job(

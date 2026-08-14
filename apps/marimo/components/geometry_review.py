@@ -18,12 +18,15 @@ from fisheye.analysis_workflows.materializers.arena_geometry_fit_review import (
     JSON_BYTES_SCHEMA_ID,
     PROBE_SCHEMA_ID,
 )
+from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
+    ACQUISITION_CANDIDATE_KIND,
+)
+from fisheye.registry.geometry_review_approval import detection_source_binding
 from fisheye.shared.json_safety import strict_json_dumps
 from fisheye.shared.plot_artifacts import PNG_ARTIFACT_SCHEMA_ID
 from fisheye.shared.zarr_io import open_zarr_root
 
 from .zarr_workspace import ZarrExplorationWorkspace
-
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_PNG_BYTES = 50 * 1024 * 1024
@@ -107,6 +110,21 @@ class GeometryReviewEvidence:
         return tuple(
             self.artifacts[f"source_panel_{index}"].payload for index in range(3)
         )  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
+class GeometryApprovalCandidateOption:
+    run_id: str
+    candidate_kind: str
+    candidate_record_sha256: str
+
+
+@dataclass(frozen=True)
+class GeometryApprovalDetectionOption:
+    group_path: str
+    run_id: str
+    row_count: int
+    binding_sha256: str
 
 
 def dropdown_label_for_value(
@@ -205,7 +223,9 @@ def resolve_fit_review_run(
 ) -> FitReviewRunOption:
     if requested_run_id is not None:
         requested = _safe_run_id(requested_run_id)
-        selected = next((option for option in options if option.run_id == requested), None)
+        selected = next(
+            (option for option in options if option.run_id == requested), None
+        )
         if selected is None:
             raise GeometryEvidenceError(
                 f"Requested fit-review run {requested!r} is not one complete pending "
@@ -274,9 +294,7 @@ def _verify_bound_artifact(
             f"Bound artifact {role!r} must be one rank-1 byte array."
         )
     if str(info.get("dtype")) != "uint8":
-        raise GeometryEvidenceError(
-            f"Bound artifact {role!r} must use uint8 storage."
-        )
+        raise GeometryEvidenceError(f"Bound artifact {role!r} must use uint8 storage.")
     observed_length = int(info.get("elements") or 0)
     declared_length = binding.get("byte_length")
     if (
@@ -309,9 +327,12 @@ def _verify_bound_artifact(
         raise GeometryEvidenceError(
             f"Artifact {role!r} node byte length disagrees with review_record."
         )
-    if _required_digest(
-        node_attrs.get("content_sha256"), label=f"artifact {role!r} node digest"
-    ) != expected_digest:
+    if (
+        _required_digest(
+            node_attrs.get("content_sha256"), label=f"artifact {role!r} node digest"
+        )
+        != expected_digest
+    ):
         raise GeometryEvidenceError(
             f"Artifact {role!r} node digest disagrees with review_record."
         )
@@ -418,7 +439,10 @@ def load_geometry_lifecycle(
                 digest_attr="candidate_record_sha256",
             )
             source = record.get("palette_fit_source")
-            if isinstance(source, Mapping) and source.get("fit_review_run") == fit_review_run:
+            if (
+                isinstance(source, Mapping)
+                and source.get("fit_review_run") == fit_review_run
+            ):
                 candidates.append(
                     {
                         "run_id": name,
@@ -445,11 +469,15 @@ def load_geometry_lifecycle(
                 digest_attr="comparison_record_sha256",
             )
             bindings = record.get("candidate_bindings")
-            bound_ids = {
-                str(value.get("candidate_id"))
-                for value in bindings.values()
-                if isinstance(bindings, Mapping) and isinstance(value, Mapping)
-            } if isinstance(bindings, Mapping) else set()
+            bound_ids = (
+                {
+                    str(value.get("candidate_id"))
+                    for value in bindings.values()
+                    if isinstance(bindings, Mapping) and isinstance(value, Mapping)
+                }
+                if isinstance(bindings, Mapping)
+                else set()
+            )
             if candidate_ids & bound_ids:
                 comparisons.append(
                     {
@@ -477,7 +505,11 @@ def load_geometry_lifecycle(
                 digest_attr="selection_record_sha256",
             )
             decision = record.get("decision")
-            comparison = decision.get("comparison_binding") if isinstance(decision, Mapping) else None
+            comparison = (
+                decision.get("comparison_binding")
+                if isinstance(decision, Mapping)
+                else None
+            )
             selected = record.get("selected_candidate")
             if (
                 isinstance(comparison, Mapping)
@@ -506,13 +538,9 @@ def load_geometry_lifecycle(
                 {
                     "run_id": name,
                     "selection_run": attrs.get("selection_run"),
-                    "selection_record_sha256": attrs.get(
-                        "selection_record_sha256"
-                    ),
+                    "selection_record_sha256": attrs.get("selection_record_sha256"),
                     "comparison_run": attrs.get("comparison_run"),
-                    "comparison_record_sha256": attrs.get(
-                        "comparison_record_sha256"
-                    ),
+                    "comparison_record_sha256": attrs.get("comparison_record_sha256"),
                     "selected_candidate_record_sha256": attrs.get(
                         "selected_candidate_record_sha256"
                     ),
@@ -554,14 +582,19 @@ def load_geometry_review_evidence(
     record = attrs.get("review_record")
     if not isinstance(record, Mapping):
         raise GeometryEvidenceError("Fit-review run lacks review_record.")
-    if record.get("schema_id") != FIT_REVIEW_RECORD_SCHEMA_ID or record.get(
-        "schema_version"
-    ) != 1:
+    if (
+        record.get("schema_id") != FIT_REVIEW_RECORD_SCHEMA_ID
+        or record.get("schema_version") != 1
+    ):
         raise GeometryEvidenceError("Fit-review review_record schema is unsupported.")
     observed_record_digest = _canonical_sha256(record)
     if observed_record_digest != selected.review_record_sha256:
         raise GeometryEvidenceError("Fit-review review_record SHA-256 mismatch.")
-    for field in ("candidate_published", "candidate_selected", "detection_gate_applied"):
+    for field in (
+        "candidate_published",
+        "candidate_selected",
+        "detection_gate_applied",
+    ):
         if attrs.get(field) is not False:
             raise GeometryEvidenceError(
                 f"Immutable fit-review evidence has unsafe {field}={attrs.get(field)!r}."
@@ -608,7 +641,9 @@ def load_geometry_review_evidence(
         or fit_report.get("status") != "provisional_visual_review_required"
         or fit_report.get("fit_frozen_before_acquisition_reveal") is not True
     ):
-        raise GeometryEvidenceError("Frozen fit-report schema or status is unsupported.")
+        raise GeometryEvidenceError(
+            "Frozen fit-report schema or status is unsupported."
+        )
     windows = fit_report.get("windows")
     if not isinstance(windows, Mapping) or set(windows) != {"early", "middle", "late"}:
         raise GeometryEvidenceError(
@@ -618,9 +653,13 @@ def load_geometry_review_evidence(
     reveal = reveal_artifact.json_value if reveal_artifact is not None else None
     if reveal is not None:
         reveal_fit = reveal.get("fit_report")
-        if not isinstance(reveal_fit, Mapping) or _required_digest(
-            reveal_fit.get("sha256"), label="acquisition reveal fit-report digest"
-        ) != verified["fit_report"].content_sha256:
+        if (
+            not isinstance(reveal_fit, Mapping)
+            or _required_digest(
+                reveal_fit.get("sha256"), label="acquisition reveal fit-report digest"
+            )
+            != verified["fit_report"].content_sha256
+        ):
             raise GeometryEvidenceError(
                 "Acquisition reveal does not bind the exact frozen fit report."
             )
@@ -637,6 +676,71 @@ def load_geometry_review_evidence(
         acquisition_reveal=reveal,
         lifecycle=lifecycle,
     )
+
+
+def discover_geometry_approval_inputs(
+    workspace: ZarrExplorationWorkspace,
+    *,
+    evidence: GeometryReviewEvidence,
+) -> tuple[
+    tuple[GeometryApprovalCandidateOption, ...],
+    tuple[GeometryApprovalDetectionOption, ...],
+]:
+    """List exact immutable acquisition candidates and raw detection sources."""
+
+    camera_serial = str(
+        evidence.review_record.get("source", {}).get("camera_serial") or ""
+    ).strip()
+    acquisition: list[GeometryApprovalCandidateOption] = []
+    for name, attrs in _complete_children(workspace, "analysis/arena_geometry_runs"):
+        if attrs.get("stage_selector_eligible") is not True:
+            continue
+        path = f"analysis/arena_geometry_runs/{name}"
+        try:
+            record = _detached_record(
+                workspace,
+                path,
+                record_attr="candidate_record",
+                digest_attr="candidate_record_sha256",
+            )
+        except GeometryEvidenceError:
+            continue
+        arena = record.get("arena_binding")
+        if (
+            record.get("candidate_kind") != ACQUISITION_CANDIDATE_KIND
+            or not isinstance(arena, Mapping)
+            or str(arena.get("camera_serial") or "") != camera_serial
+        ):
+            continue
+        acquisition.append(
+            GeometryApprovalCandidateOption(
+                run_id=name,
+                candidate_kind=ACQUISITION_CANDIDATE_KIND,
+                candidate_record_sha256=_required_digest(
+                    attrs.get("candidate_record_sha256"),
+                    label=f"candidate {name} digest",
+                ),
+            )
+        )
+
+    detections: list[GeometryApprovalDetectionOption] = []
+    for name, attrs in _complete_children(workspace, "detect_runs"):
+        if attrs.get("palette_run_completion_status") != "complete":
+            continue
+        path = f"detect_runs/{name}"
+        try:
+            binding = detection_source_binding(workspace.handle(), path)
+        except Exception:
+            continue
+        detections.append(
+            GeometryApprovalDetectionOption(
+                group_path=path,
+                run_id=name,
+                row_count=int(binding["row_count"]),
+                binding_sha256=str(binding["binding_sha256"]),
+            )
+        )
+    return tuple(acquisition), tuple(detections)
 
 
 def numerical_fit_rows(evidence: GeometryReviewEvidence) -> list[dict[str, Any]]:
@@ -665,14 +769,32 @@ def numerical_fit_rows(evidence: GeometryReviewEvidence) -> list[dict[str, Any]]
         rows.append(
             {
                 "window": name,
-                "center_frame": window.get("center_frame") if isinstance(window, Mapping) else None,
+                "center_frame": (
+                    window.get("center_frame") if isinstance(window, Mapping) else None
+                ),
                 "center_x_px": center.get("x") if isinstance(center, Mapping) else None,
                 "center_y_px": center.get("y") if isinstance(center, Mapping) else None,
-                "radius_px": geometry.get("radius_px") if isinstance(geometry, Mapping) else None,
-                "angular_support": fit.get("angular_support_fraction") if isinstance(fit, Mapping) else None,
-                "radial_residual_px": fit.get("radial_residual_px") if isinstance(fit, Mapping) else None,
-                "median_radial_gradient": fit.get("median_radial_gradient") if isinstance(fit, Mapping) else None,
-                "observed_feature": fit.get("observed_feature_classification") if isinstance(fit, Mapping) else None,
+                "radius_px": (
+                    geometry.get("radius_px") if isinstance(geometry, Mapping) else None
+                ),
+                "angular_support": (
+                    fit.get("angular_support_fraction")
+                    if isinstance(fit, Mapping)
+                    else None
+                ),
+                "radial_residual_px": (
+                    fit.get("radial_residual_px") if isinstance(fit, Mapping) else None
+                ),
+                "median_radial_gradient": (
+                    fit.get("median_radial_gradient")
+                    if isinstance(fit, Mapping)
+                    else None
+                ),
+                "observed_feature": (
+                    fit.get("observed_feature_classification")
+                    if isinstance(fit, Mapping)
+                    else None
+                ),
                 "center_displacement_px": displacement,
                 "acquisition_reveal_delta_radius_px_diagnostic_only": (
                     reveal.get("delta_radius_px")
@@ -686,11 +808,14 @@ def numerical_fit_rows(evidence: GeometryReviewEvidence) -> list[dict[str, Any]]
 
 __all__ = [
     "GeometryEvidenceError",
+    "GeometryApprovalCandidateOption",
+    "GeometryApprovalDetectionOption",
     "GeometryLifecycleEvidence",
     "GeometryReviewEvidence",
     "GeometryRunSelectionRequired",
     "VerifiedEvidenceArtifact",
     "discover_fit_review_runs",
+    "discover_geometry_approval_inputs",
     "dropdown_label_for_value",
     "load_geometry_lifecycle",
     "load_geometry_review_evidence",

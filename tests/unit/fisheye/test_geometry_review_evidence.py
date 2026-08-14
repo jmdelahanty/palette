@@ -12,6 +12,7 @@ from apps.marimo.components.geometry_review import (
     GeometryEvidenceError,
     GeometryRunSelectionRequired,
     discover_fit_review_runs,
+    discover_geometry_approval_inputs,
     dropdown_label_for_value,
     load_geometry_review_evidence,
     numerical_fit_rows,
@@ -52,7 +53,11 @@ class _FakeGroup:
         return self.members.keys()
 
     def group_keys(self):
-        return [name for name, value in self.members.items() if isinstance(value, _FakeGroup)]
+        return [
+            name
+            for name, value in self.members.items()
+            if isinstance(value, _FakeGroup)
+        ]
 
     def __getitem__(self, path: str):
         node: object = self
@@ -133,7 +138,9 @@ def _artifact(
     }
     attrs = {
         "artifact_schema_id": (
-            PNG_ARTIFACT_SCHEMA_ID if media_type == "image/png" else JSON_BYTES_SCHEMA_ID
+            PNG_ARTIFACT_SCHEMA_ID
+            if media_type == "image/png"
+            else JSON_BYTES_SCHEMA_ID
         ),
         "media_type": media_type,
         "content_sha256": digest,
@@ -162,10 +169,26 @@ def _run(
         },
     }
     payloads = {
-        "review_montage": ("bound/montage-custom", "image/png", b"\x89PNG\r\n\x1a\nmontage"),
-        "source_panel_0": ("bound/panel-early-custom", "image/png", b"\x89PNG\r\n\x1a\nearly"),
-        "source_panel_1": ("bound/panel-middle-custom", "image/png", b"\x89PNG\r\n\x1a\nmiddle"),
-        "source_panel_2": ("bound/panel-late-custom", "image/png", b"\x89PNG\r\n\x1a\nlate"),
+        "review_montage": (
+            "bound/montage-custom",
+            "image/png",
+            b"\x89PNG\r\n\x1a\nmontage",
+        ),
+        "source_panel_0": (
+            "bound/panel-early-custom",
+            "image/png",
+            b"\x89PNG\r\n\x1a\nearly",
+        ),
+        "source_panel_1": (
+            "bound/panel-middle-custom",
+            "image/png",
+            b"\x89PNG\r\n\x1a\nmiddle",
+        ),
+        "source_panel_2": (
+            "bound/panel-late-custom",
+            "image/png",
+            b"\x89PNG\r\n\x1a\nlate",
+        ),
         "fit_report": ("bound/fit-custom", "application/json", fit_payload),
         "acquisition_reveal": (
             "bound/reveal-custom",
@@ -212,9 +235,7 @@ def _run(
 
 def _workspace(*runs: tuple[str, _FakeGroup]) -> ZarrExplorationWorkspace:
     parent = _FakeGroup({name: run for name, run in runs})
-    root = _FakeGroup(
-        {"analysis": _FakeGroup({"arena_geometry_fit_runs": parent})}
-    )
+    root = _FakeGroup({"analysis": _FakeGroup({"arena_geometry_fit_runs": parent})})
     return ZarrExplorationWorkspace(
         zarr_path=Path("/canonical/recording_analysis.zarr"),
         _root=root,
@@ -236,9 +257,7 @@ def test_mapped_marimo_dropdown_defaults_use_display_label() -> None:
         "recording-1 · fit_evidence_awaiting_review · dataset-1": "dataset-1"
     }
 
-    direct_label = dropdown_label_for_value(
-        direct_options, selected_value="__direct__"
-    )
+    direct_label = dropdown_label_for_value(direct_options, selected_value="__direct__")
     registry_label = dropdown_label_for_value(
         registry_options, selected_value="dataset-1"
     )
@@ -311,9 +330,7 @@ def test_digest_mismatch_fails_before_rendering() -> None:
 
 def test_json_digest_and_declared_length_are_validated() -> None:
     run, arrays = _run()
-    changed = arrays["fit_report"].values.tobytes().replace(
-        b"2010093", b"2010094", 1
-    )
+    changed = arrays["fit_report"].values.tobytes().replace(b"2010093", b"2010094", 1)
     arrays["fit_report"].values[:] = np.frombuffer(changed, dtype=np.uint8)
     with pytest.raises(GeometryEvidenceError, match="fit_report.*SHA-256 mismatch"):
         load_geometry_review_evidence(
@@ -396,3 +413,51 @@ def test_published_open_is_read_only_consolidated_and_never_falls_back(
     monkeypatch.setattr(geometry_review, "open_zarr_root", _stale)
     with pytest.raises(GeometryEvidenceError, match="will not fall back"):
         open_published_geometry_workspace(archive)
+
+
+def test_approval_input_discovery_returns_exact_candidate_and_detection_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, _arrays = _run()
+    workspace = _workspace(("arena-geometry-fit-review-exact", run))
+    evidence = load_geometry_review_evidence(workspace)
+    candidate_record = {
+        "candidate_kind": geometry_review.ACQUISITION_CANDIDATE_KIND,
+        "arena_binding": {"camera_serial": "2010093"},
+    }
+    candidate_digest = hashlib.sha256(
+        strict_json_dumps(candidate_record).encode("utf-8")
+    ).hexdigest()
+    candidate = _FakeGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "candidate_record": candidate_record,
+            "candidate_record_sha256": candidate_digest,
+        }
+    )
+    detection = _FakeGroup(attrs={"palette_run_completion_status": "complete"})
+    analysis = workspace.handle("analysis")
+    analysis.members["arena_geometry_runs"] = _FakeGroup(
+        {"acquisition-exact": candidate}
+    )
+    workspace.handle().members["detect_runs"] = _FakeGroup({"raw-exact": detection})
+    monkeypatch.setattr(
+        geometry_review,
+        "detection_source_binding",
+        lambda _root, path: {
+            "group_path": path,
+            "run_name": "raw-exact",
+            "row_count": 42,
+            "binding_sha256": "d" * 64,
+        },
+    )
+
+    candidates, detections = discover_geometry_approval_inputs(
+        workspace, evidence=evidence
+    )
+
+    assert [item.run_id for item in candidates] == ["acquisition-exact"]
+    assert candidates[0].candidate_record_sha256 == candidate_digest
+    assert [item.group_path for item in detections] == ["detect_runs/raw-exact"]
+    assert detections[0].row_count == 42

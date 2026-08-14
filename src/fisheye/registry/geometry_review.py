@@ -21,7 +21,6 @@ from fisheye.status_page.query import (
 
 from .status_ledger import RECORDING_STEP_STATUSES
 
-
 REGISTERED_GEOMETRY_STAGES = (
     "recording_geometry_import",
     "arena_geometry_offline_fit",
@@ -112,7 +111,9 @@ def _walk_values(value: object) -> Iterable[tuple[str, object]]:
             yield from _walk_values(child)
 
 
-def _named_text(payloads: Sequence[Mapping[str, Any] | None], names: set[str]) -> str | None:
+def _named_text(
+    payloads: Sequence[Mapping[str, Any] | None], names: set[str]
+) -> str | None:
     for payload in payloads:
         if not isinstance(payload, Mapping):
             continue
@@ -202,9 +203,13 @@ def _semantic_state(stage: GeometryStageState) -> str:
         )
         return review_reason or review_state
     if stage.status == "error":
-        return _named_text(
-            (stage.details,), {"evidence_outcome", "semantic_compatibility", "reason"}
-        ) or "error"
+        return (
+            _named_text(
+                (stage.details,),
+                {"evidence_outcome", "semantic_compatibility", "reason"},
+            )
+            or "error"
+        )
     return stage.status
 
 
@@ -271,8 +276,8 @@ def load_geometry_review_queue(
     sql = f"""
         SELECT
             d.dataset_id,
-            COALESCE(NULLIF(trim(rss.recording_id), ''), d.recording_id, d.dataset_id)
-                AS recording_id,
+            d.recording_id AS dataset_recording_id,
+            rss.recording_id AS stage_recording_id,
             d.zarr_path,
             r.camera_id,
             r.arena_id,
@@ -286,11 +291,11 @@ def load_geometry_review_queue(
         FROM datasets AS d
         JOIN recording_step_status AS rss ON rss.dataset_id = d.dataset_id
         LEFT JOIN recordings AS r
-          ON r.recording_id = COALESCE(NULLIF(trim(rss.recording_id), ''), d.recording_id)
+          ON r.recording_id = d.recording_id
         WHERE rss.step_name IN ({placeholders})
           AND (d.status IS NULL OR d.status != 'missing')
           AND (d.zarr_use = 'analysis' OR d.zarr_path LIKE '%_analysis.zarr')
-        ORDER BY recording_id, d.dataset_id, rss.step_name
+        ORDER BY d.recording_id, d.dataset_id, rss.step_name
     """
     with open_readonly_connection(resolved) as conn:
         rows = conn.execute(sql, REGISTERED_GEOMETRY_STAGES).fetchall()
@@ -298,6 +303,19 @@ def load_geometry_review_queue(
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
         dataset_id = str(row["dataset_id"])
+        dataset_recording_id = _optional_text(row["dataset_recording_id"])
+        stage_recording_id = _optional_text(row["stage_recording_id"])
+        if dataset_recording_id is None:
+            raise GeometryReviewRegistryError(
+                f"Geometry review dataset {dataset_id!r} lacks recording_id."
+            )
+        if stage_recording_id != dataset_recording_id:
+            raise GeometryReviewRegistryError(
+                "Geometry review dataset/stage recording binding mismatch: "
+                f"dataset={dataset_id!r}, dataset_recording_id="
+                f"{dataset_recording_id!r}, stage_recording_id="
+                f"{stage_recording_id!r}, step={row['step_name']!r}."
+            )
         status = str(row["status"] or "").strip()
         if status not in RECORDING_STEP_STATUSES:
             raise GeometryReviewRegistryError(
@@ -316,7 +334,7 @@ def load_geometry_review_queue(
         item = grouped.setdefault(
             dataset_id,
             {
-                "recording_id": str(row["recording_id"] or dataset_id),
+                "recording_id": dataset_recording_id,
                 "zarr_path": Path(str(row["zarr_path"])).expanduser(),
                 "camera_serial": _optional_text(row["camera_id"]),
                 "arena_id": _optional_text(row["arena_id"]),
@@ -362,7 +380,10 @@ def load_geometry_review_queue(
                 stages=stages,
             )
         )
-    return sorted(queue, key=lambda item: (not item.actionable, item.recording_id, item.dataset_id))
+    return sorted(
+        queue,
+        key=lambda item: (not item.actionable, item.recording_id, item.dataset_id),
+    )
 
 
 def actionable_geometry_transitions(
@@ -404,7 +425,12 @@ def actionable_geometry_transitions(
                 )
     return sorted(
         transitions,
-        key=lambda item: (item.recording_id, item.stage, item.semantic_state, item.run_id),
+        key=lambda item: (
+            item.recording_id,
+            item.stage,
+            item.semantic_state,
+            item.run_id,
+        ),
     )
 
 

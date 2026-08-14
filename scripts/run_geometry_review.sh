@@ -16,6 +16,17 @@ Usage:
 
 Registry mode reads queue paths from SQLite and opens only the selected Zarr.
 Direct mode opens exactly one explicit canonical analysis Zarr.
+The registry queue shows only actionable approval/review states by default;
+pass --include-inactive true for diagnostic inspection.
+
+Approval is disabled unless explicitly configured. Approval mode additionally
+requires --palette-repo and a durable --approval-root outside campaign staging:
+
+  --approval-mode dry-run
+  --approval-mode submit --required-ci-success true
+
+Submit mode launches publication -> quality -> required-gate refinement ->
+crop -> registry reconciliation through --submit-host.
 
 Optional environment:
   PALETTE_GEOMETRY_REVIEW_HOST   bind host (default 127.0.0.1)
@@ -31,14 +42,26 @@ fi
 
 APP_ARGS=("$@")
 MODE_COUNT=0
+APPROVAL_MODE="disabled"
+PREVIOUS_ARG=""
 for arg in "$@"; do
   if [[ "$arg" == "--registry" || "$arg" == "--zarr-path" ]]; then
     MODE_COUNT=$((MODE_COUNT + 1))
   fi
+  if [[ "$PREVIOUS_ARG" == "--approval-mode" ]]; then
+    APPROVAL_MODE="$arg"
+  elif [[ "$arg" == --approval-mode=* ]]; then
+    APPROVAL_MODE="${arg#--approval-mode=}"
+  fi
+  PREVIOUS_ARG="$arg"
 done
 if [[ "$MODE_COUNT" -ne 1 ]]; then
   echo "Choose exactly one of --registry or --zarr-path." >&2
   usage >&2
+  exit 2
+fi
+if [[ "$APPROVAL_MODE" != "disabled" && -z "$TOKEN" ]]; then
+  echo "Approval modes require PALETTE_GEOMETRY_REVIEW_TOKEN." >&2
   exit 2
 fi
 

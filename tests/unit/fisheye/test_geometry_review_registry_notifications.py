@@ -26,8 +26,7 @@ def _registry(path: Path, *, checked_status: bool = True) -> Path:
         else "TEXT NOT NULL"
     )
     with sqlite3.connect(path) as conn:
-        conn.executescript(
-            f"""
+        conn.executescript(f"""
             CREATE TABLE datasets (
                 dataset_id TEXT PRIMARY KEY,
                 recording_id TEXT,
@@ -52,8 +51,7 @@ def _registry(path: Path, *, checked_status: bool = True) -> Path:
                 updated_utc TEXT,
                 PRIMARY KEY (dataset_id, step_name)
             );
-            """
-        )
+            """)
     return path
 
 
@@ -150,6 +148,21 @@ def test_registry_queue_rejects_invalid_status_review(tmp_path: Path) -> None:
         load_geometry_review_queue(registry)
 
 
+def test_registry_queue_rejects_dataset_stage_recording_mismatch(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path / "registry.sqlite")
+    _insert_dataset(registry, index=1, review=_pending(1))
+    with sqlite3.connect(registry) as conn:
+        conn.execute(
+            "UPDATE recording_step_status SET recording_id = 'wrong-recording' "
+            "WHERE dataset_id = 'dataset-1'"
+        )
+
+    with pytest.raises(GeometryReviewRegistryError, match="binding mismatch"):
+        load_geometry_review_queue(registry)
+
+
 def test_errors_are_actionable_but_missing_and_running_are_not(tmp_path: Path) -> None:
     registry = _registry(tmp_path / "registry.sqlite")
     _insert_dataset(
@@ -207,13 +220,19 @@ def test_outbox_digest_is_batched_and_durable_across_scans(tmp_path: Path) -> No
     assert "recording-2" in body
     assert "dataset_id=dataset-1" in body
     with sqlite3.connect(state) as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM geometry_review_notification_events "
-            "WHERE delivered_utc IS NOT NULL"
-        ).fetchone()[0] == 2
-        assert conn.execute(
-            "SELECT COUNT(*) FROM geometry_review_notification_scans"
-        ).fetchone()[0] == 2
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM geometry_review_notification_events "
+                "WHERE delivered_utc IS NOT NULL"
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM geometry_review_notification_scans"
+            ).fetchone()[0]
+            == 2
+        )
 
 
 @pytest.mark.parametrize("mode,dry_run", [("disabled", False), ("outbox", True)])
@@ -318,9 +337,7 @@ def test_smtp_transport_is_reused_without_network(
 
     assert result.delivery["status"] == "sent"
     assert len(sent) == 1
-    assert sent[0]["X-Palette-Labeling-Notification-Kind"] == (
-        "geometry_review_digest"
-    )
+    assert sent[0]["X-Palette-Labeling-Notification-Kind"] == ("geometry_review_digest")
 
 
 def test_notification_state_cannot_be_registry_or_zarr_data(tmp_path: Path) -> None:
