@@ -16,6 +16,10 @@ from fisheye.registry.geometry_review import (
     GeometryReviewQueueItem,
     GeometryStageState,
 )
+from fisheye.shared.zarr.detection_schema import (
+    CanonicalDetectionDimensions,
+    derive_canonical_detection_geometry,
+)
 
 
 class _Root:
@@ -33,6 +37,15 @@ def _modern_detection_group() -> _Group:
     instance_keys = np.asarray([11, 12, 13], dtype=np.uint64)
     source_frames = np.asarray([0, 2, 4], dtype=np.int64)
     row_count = int(instance_keys.shape[0])
+    bbox_norm = np.tile(
+        np.asarray([[0.5, 0.5, 0.1, 0.1]], dtype=np.float32),
+        (row_count, 1),
+    )
+    bbox_img, centers_img = derive_canonical_detection_geometry(
+        bbox_norm,
+        source_width=4512,
+        source_height=4512,
+    )
     group_path = "detect_runs/raw-modern"
     temporal = {
         "schema_id": "palette.source_row_temporal_authority",
@@ -53,13 +66,13 @@ def _modern_detection_group() -> _Group:
         "source_identity_mode": "instance_key",
         "source_leading_dimension": row_count,
         "source_acquisition_frame_index": {
-            "ref": f"/{group_path}/source_acquisition_frame_index",
+            "ref": f"/{group_path}/instances/source_acquisition_frame_index",
             "dtype": "<i8",
             "shape": [row_count],
             "content_sha256": approval.array_values_sha256(source_frames),
         },
         "observation_instance_key": {
-            "ref": f"/{group_path}/instance_key",
+            "ref": f"/{group_path}/instances/instance_key",
             "dtype": "<u8",
             "shape": [row_count],
             "content_sha256": approval.array_values_sha256(instance_keys),
@@ -67,8 +80,12 @@ def _modern_detection_group() -> _Group:
     }
     attrs = {
         "palette_run_completion_status": "complete",
-        "source_video_width": 4512,
-        "source_video_height": 4512,
+        "run_manifest": {
+            "schema_id": "palette.canonical_detection.run_manifest",
+            "schema_version": 3,
+            "payload_digest": "e" * 64,
+            "payload": {"run_id": "raw-modern"},
+        },
         "validated_backend_result_count": 5,
         "source_row_temporal_authority": temporal,
         "source_row_temporal_authority_sha256": approval._sha256(temporal),
@@ -85,16 +102,36 @@ def _modern_detection_group() -> _Group:
             "errors": [],
         },
     }
-    return _Group(
+    instances = _Group(
         {
             "instance_key": instance_keys,
-            "bbox_norm_coords": np.zeros((row_count, 4), dtype=np.float64),
+            "bbox_norm_coords": bbox_norm,
+            "bbox_img_xyxy": bbox_img,
+            "centers_img_xy": centers_img,
+            "scores": np.ones(row_count, dtype=np.float32),
+            "class_ids": np.zeros(row_count, dtype=np.int32),
             "frame_indices": np.asarray([0, 2, 4], dtype=np.int32),
             "source_acquisition_frame_index": source_frames,
-            "frame_counts": np.asarray([1, 0, 1, 0, 1], dtype=np.int32),
-            "n_detections": np.asarray([1, 0, 1, 0, 1], dtype=np.int32),
+            "frame_row_offsets": np.asarray([0, 1, 1, 2, 2, 3], dtype=np.int64),
         },
+        attrs={},
+    )
+    return _Group(
+        {"instances": instances},
         attrs=attrs,
+    )
+
+
+def _stub_canonical_dimensions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        approval,
+        "canonical_detection_dimensions_from_manifest",
+        lambda _manifest: CanonicalDetectionDimensions(
+            n_frames=5,
+            n_instances=3,
+            source_width=4512,
+            source_height=4512,
+        ),
     )
 
 
@@ -218,29 +255,35 @@ def test_approval_request_changes_when_operator_choice_changes(
     assert palette.gate_run != acquisition.gate_run
 
 
-def test_detection_binding_uses_sealed_modern_frame_count_authorities() -> None:
+def test_detection_binding_uses_sealed_modern_frame_count_authorities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = "detect_runs/raw-modern"
     group = _modern_detection_group()
+    _stub_canonical_dimensions(monkeypatch)
 
     binding = approval.detection_source_binding({path: group}, path)
 
     assert binding["frame_count"] == 5
     assert binding["frame_count_authority"]["declarations"] == {
+        "canonical_run_manifest": 5,
         "source_row_temporal_authority": 5,
         "immutable_yolo_storage_validation": 5,
         "validated_backend_result_count": 5,
-        "array:frame_counts": 5,
-        "array:n_detections": 5,
+        "array:frame_row_offsets": 5,
     }
     assert binding["frame_count_authority"][
         "source_row_temporal_authority_sha256"
     ] == group.attrs["source_row_temporal_authority_sha256"]
 
 
-def test_detection_binding_rejects_disagreeing_modern_frame_count() -> None:
+def test_detection_binding_rejects_disagreeing_modern_frame_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = "detect_runs/raw-modern"
     group = _modern_detection_group()
     group.attrs["validated_backend_result_count"] = 6
+    _stub_canonical_dimensions(monkeypatch)
 
     with pytest.raises(
         approval.GeometryReviewApprovalError,
@@ -249,14 +292,41 @@ def test_detection_binding_rejects_disagreeing_modern_frame_count() -> None:
         approval.detection_source_binding({path: group}, path)
 
 
-def test_detection_binding_rejects_stale_temporal_authority_digest() -> None:
+def test_detection_binding_rejects_stale_temporal_authority_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = "detect_runs/raw-modern"
     group = _modern_detection_group()
     group.attrs["source_row_temporal_authority_sha256"] = "d" * 64
+    _stub_canonical_dimensions(monkeypatch)
 
     with pytest.raises(
         approval.GeometryReviewApprovalError,
         match="temporal-authority digest is stale",
+    ):
+        approval.detection_source_binding({path: group}, path)
+
+
+def test_detection_binding_rejects_flat_run_without_manifest() -> None:
+    path = "detect_runs/raw-modern"
+    group = _modern_detection_group()
+    group.attrs.pop("run_manifest")
+
+    with pytest.raises(
+        approval.GeometryReviewApprovalError,
+        match="lacks its exact canonical run_manifest",
+    ):
+        approval.detection_source_binding({path: group}, path)
+
+
+def test_detection_binding_rejects_pre_coordinate_manifest() -> None:
+    path = "detect_runs/raw-modern"
+    group = _modern_detection_group()
+    group.attrs["run_manifest"]["schema_version"] = 2
+
+    with pytest.raises(
+        approval.GeometryReviewApprovalError,
+        match="not a coordinate-aware canonical-v3 run",
     ):
         approval.detection_source_binding({path: group}, path)
 

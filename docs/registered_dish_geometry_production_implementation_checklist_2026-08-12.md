@@ -447,6 +447,12 @@ or downstream authority contracts.
       selector-ineligible canonical-v3 successor before strict quality,
       refinement, and finalization. Clipped native canonical-v3 sources do not
       receive a redundant successor.
+- [x] Require geometry-review approval inputs to carry a deeply valid,
+      coordinate-aware canonical-v3 run manifest whose run ID, dimensions,
+      canonical array schema, and frame cardinality match the exact persisted
+      source. Flat detection intermediates and pre-coordinate manifests are
+      not review-actionable and fail closed during request creation and job
+      revalidation.
 - [ ] Permit separately staged canaries, but do not claim production geometry
       completion until both production topologies pass their required tests.
 - [x] Reuse exact valid geometry/comparison/selection/gate artifacts by digest;

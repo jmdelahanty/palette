@@ -34,10 +34,17 @@ from fisheye.analysis_workflows.materializers.arena_geometry_fit_review import (
     FIT_REVIEW_RUN_SCHEMA_ID,
     FIT_REVIEW_RUNS_PARENT,
 )
-from fisheye.shared.detection_tables import resolve_detection_instance_table
 from fisheye.shared.coordinate_frame_record import array_values_sha256
-from fisheye.shared.detection_tables import resolve_detection_source_pixel_authority
+from fisheye.shared.detection_tables import (
+    resolve_detection_instance_table,
+    resolve_detection_source_pixel_authority,
+)
 from fisheye.shared.json_safety import strict_json_dumps, write_json_atomic
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    canonical_detection_dimensions_from_manifest,
+)
+from fisheye.shared.zarr.detection_schema import CANONICAL_DETECTION_SCHEMA_V1
 from fisheye.shared.zarr_io import open_zarr_root
 
 from .geometry_review import GeometryReviewRegistryError, load_geometry_review_queue
@@ -230,12 +237,18 @@ def _detection_frame_count_binding(
     *,
     group_path: str,
     attrs: Mapping[str, Any],
+    manifest_frame_count: int,
     row_count: int,
     instance_key_sha256: str,
 ) -> tuple[int, dict[str, Any]]:
-    """Resolve exact legacy or canonical-v2 detection frame cardinality."""
+    """Cross-check exact canonical-v3 detection frame cardinality."""
 
-    declarations: dict[str, int] = {}
+    declarations: dict[str, int] = {
+        "canonical_run_manifest": _positive_int(
+            manifest_frame_count,
+            label="Canonical detection manifest frame count",
+        )
+    }
     for name in ("frame_count", "recording_frame_count"):
         if attrs.get(name) is not None:
             declarations[f"attribute:{name}"] = _positive_int(
@@ -271,7 +284,8 @@ def _detection_frame_count_binding(
         observation_key = temporal.get("observation_instance_key")
         if (
             not isinstance(observation_key, Mapping)
-            or observation_key.get("ref") != f"/{group_path}/instance_key"
+            or observation_key.get("ref")
+            != f"/{group_path}/instances/instance_key"
             or observation_key.get("shape") != [row_count]
             or observation_key.get("content_sha256") != instance_key_sha256
         ):
@@ -282,7 +296,7 @@ def _detection_frame_count_binding(
         if (
             not isinstance(source_frames, Mapping)
             or source_frames.get("ref")
-            != f"/{group_path}/source_acquisition_frame_index"
+            != f"/{group_path}/instances/source_acquisition_frame_index"
             or source_frames.get("shape") != [row_count]
             or "source_acquisition_frame_index" not in table
         ):
@@ -340,6 +354,15 @@ def _detection_frame_count_binding(
                 )
             declarations[f"array:{name}"] = int(shape[0])
 
+    frame_row_offsets = table.get("frame_row_offsets")
+    if frame_row_offsets is not None:
+        shape = tuple(int(value) for value in frame_row_offsets.shape)
+        if len(shape) != 1 or shape[0] <= 1:
+            raise GeometryReviewApprovalError(
+                "Detection frame_row_offsets has invalid frame-domain cardinality."
+            )
+        declarations["array:frame_row_offsets"] = int(shape[0]) - 1
+
     if not declarations:
         raise GeometryReviewApprovalError(
             "Detection source lacks an exact frame-count authority."
@@ -376,13 +399,51 @@ def detection_source_binding(root: Any, group_path: str) -> dict[str, Any]:
         raise GeometryReviewApprovalError(
             f"Detection source {path!r} is not a complete immutable run."
         )
-    table = resolve_detection_instance_table(group)
-    required = ("instance_key", "bbox_norm_coords", "frame_indices")
-    if any(name not in table for name in required):
+    manifest = attrs.get("run_manifest")
+    if not isinstance(manifest, Mapping):
         raise GeometryReviewApprovalError(
-            f"Detection source {path!r} lacks canonical instance arrays."
+            f"Detection source {path!r} lacks its exact canonical run_manifest."
         )
+    if manifest.get("schema_version") != (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        raise GeometryReviewApprovalError(
+            f"Detection source {path!r} is not a coordinate-aware canonical-v3 run."
+        )
+    payload = manifest.get("payload")
+    if not isinstance(payload, Mapping) or payload.get("run_id") != run_name:
+        raise GeometryReviewApprovalError(
+            f"Detection source {path!r} run_manifest does not bind its exact run name."
+        )
+    try:
+        dimensions = canonical_detection_dimensions_from_manifest(manifest)
+    except (TypeError, ValueError) as exc:
+        raise GeometryReviewApprovalError(
+            f"Detection source {path!r} has an invalid canonical run_manifest: {exc}"
+        ) from exc
+    table = resolve_detection_instance_table(group)
+    canonical_arrays: dict[str, Any] = {}
+    for canonical_path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths:
+        name = canonical_path.removeprefix("instances/")
+        if name not in table:
+            raise GeometryReviewApprovalError(
+                f"Detection source {path!r} lacks canonical array {canonical_path!r}."
+            )
+        canonical_arrays[canonical_path] = table[name]
+    try:
+        CANONICAL_DETECTION_SCHEMA_V1.require(
+            canonical_arrays,
+            dimensions=dimensions,
+        )
+    except (TypeError, ValueError) as exc:
+        raise GeometryReviewApprovalError(
+            f"Detection source {path!r} violates the canonical detection schema: {exc}"
+        ) from exc
     row_count = int(table["instance_key"].shape[0])
+    if row_count != int(dimensions.n_instances):
+        raise GeometryReviewApprovalError(
+            f"Detection source {path!r} row count disagrees with its run_manifest."
+        )
     if (
         tuple(table["bbox_norm_coords"].shape) != (row_count, 4)
         or tuple(table["frame_indices"].shape) != (row_count,)
@@ -404,24 +465,24 @@ def detection_source_binding(root: Any, group_path: str) -> dict[str, Any]:
         table,
         group_path=path,
         attrs=attrs,
+        manifest_frame_count=int(dimensions.n_frames),
         row_count=row_count,
         instance_key_sha256=instance_key_sha256,
     )
     snapshot = {
         "group_path": path,
         "run_name": run_name,
-        "schema_id": attrs.get("schema_id"),
+        "schema_id": manifest.get("schema_id"),
+        "canonical_run_manifest_schema_version": manifest.get("schema_version"),
         "row_count": row_count,
         "frame_count": frame_count,
         "frame_count_authority": frame_count_authority,
-        "source_video_width": attrs.get("source_video_width") or attrs.get("width"),
-        "source_video_height": attrs.get("source_video_height") or attrs.get("height"),
+        "source_video_width": int(dimensions.source_width),
+        "source_video_height": int(dimensions.source_height),
         "instance_key_sha256": instance_key_sha256,
         "frame_indices_sha256": array_values_sha256(frame_indices),
         "bbox_norm_coords_sha256": array_values_sha256(bbox_norm_coords),
-        "canonical_run_manifest_payload_digest": attrs.get(
-            "canonical_run_manifest_payload_digest"
-        ),
+        "canonical_run_manifest_payload_digest": manifest.get("payload_digest"),
         "decoded_array_sha256": attrs.get("decoded_array_sha256"),
         "instance_key_contract": attrs.get("instance_key_contract"),
         "instance_key_frame_domain": attrs.get("instance_key_frame_domain"),
