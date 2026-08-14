@@ -8,6 +8,14 @@ Purpose: plan a reusable epoch/segment analysis layer that can support
 GoodCopBadCop and future protocols without forcing protocol-specific biology
 into shared helper code.
 
+For the accepted design that composes canonical stimulus steps into exact
+frame sets, generic and protocol-specific analysis offers, scientific
+contrasts, and durable plot recipes, see
+[`composable_stimulus_analysis_and_plot_recipes_design.md`](composable_stimulus_analysis_and_plot_recipes_design.md).
+This older plan remains the implementation history for the shared epoch helper
+and persisted histogram work; it does not define the newer composition or plot
+publication contracts.
+
 ## Motivation
 
 GoodCopBadCop now has several event-aligned analysis surfaces:
