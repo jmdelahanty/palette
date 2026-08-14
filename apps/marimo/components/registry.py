@@ -749,6 +749,21 @@ def _registry_analysis_zarrs(
     return candidates
 
 
+def discover_geometry_review_queue(
+    registry_path: Path | str,
+    *,
+    include_inactive: bool = False,
+):
+    """Build the registered-geometry queue through Palette's read-only registry path."""
+
+    from fisheye.registry.geometry_review import load_geometry_review_queue
+
+    return load_geometry_review_queue(
+        registry_path,
+        include_inactive=include_inactive,
+    )
+
+
 def discover_protocol_recording_options(
     seed_zarr_path: Path | str,
     *,
