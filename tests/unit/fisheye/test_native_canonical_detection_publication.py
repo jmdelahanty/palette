@@ -61,6 +61,37 @@ def _bound():
     )
 
 
+def _bound_empty():
+    counts = np.zeros(3, dtype=np.int32)
+    return bind_clipped_detection_artifacts(
+        [
+            ClippedDetectionArtifactMember(
+                work_unit_id="clip_work_0",
+                artifact_run_id="artifact_0",
+                clip_id="clip_000000",
+                clip_index=0,
+                camera_serial="2010093",
+                source_width=640,
+                source_height=480,
+                artifact_manifest_sha256="a" * 64,
+                run_group_tree_sha256="b" * 64,
+                parent_frame_indices=np.arange(3, dtype=np.int64),
+                frame_indices=np.empty(0, dtype=np.int32),
+                bbox_norm_coords=np.empty((0, 4), dtype=np.float64),
+                scores=np.empty(0, dtype=np.float32),
+                class_ids=np.empty(0, dtype=np.int32),
+                artifact_row_id=np.empty(0, dtype=np.uint64),
+                frame_counts=counts,
+                n_detections=counts.copy(),
+            )
+        ],
+        recording_identity=RECORDING_IDENTITY,
+        n_frames=3,
+        source_width=640,
+        source_height=480,
+    )
+
+
 def _provenance() -> dict[str, object]:
     return {
         "schema": "palette.run_provenance.v1",
@@ -114,7 +145,13 @@ def _archive(path: Path) -> tuple[dict[str, str], dict[str, str]]:
     )
 
 
-def _candidate(tmp_path: Path, frame: dict[str, str], pixel: dict[str, str]):
+def _candidate(
+    tmp_path: Path,
+    frame: dict[str, str],
+    pixel: dict[str, str],
+    *,
+    active: bool = False,
+):
     return write_native_clipped_detection_candidate(
         _bound(),
         destination=tmp_path / "candidate.zarr",
@@ -126,6 +163,8 @@ def _candidate(tmp_path: Path, frame: dict[str, str], pixel: dict[str, str]):
         source_pixel_authority=pixel,
         model_artifact_sha256="3" * 64,
         run_provenance=_provenance(),
+        coordinate_catalog=active,
+        publication_selector_eligible=active,
     )
 
 
@@ -161,6 +200,115 @@ def test_native_candidate_is_atomically_published_but_not_selected(
     assert run.attrs["stage_selector_eligible"] is False
     assert run.attrs["run_manifest"]["schema_version"] == 2
     assert np.asarray(run["instances/frame_row_offsets"][:]).tolist() == [0, 1, 1, 2]
+
+
+def test_coordinate_v3_candidate_is_activated_only_after_publication_validation(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    frame, pixel = _archive(archive)
+    candidate = _candidate(tmp_path, frame, pixel, active=True)
+
+    result = publish_native_canonical_detection_candidate(
+        analysis_zarr=archive,
+        candidate_zarr=candidate.output_path,
+        run_id=RUN_ID,
+        recording_identity=RECORDING_IDENTITY,
+        expected_manifest_schema_version=3,
+        activate=True,
+    )
+
+    assert result["status"] == "complete"
+    assert result["native_run_manifest_schema_version"] == 3
+    assert result["selector_eligible"] is True
+    assert result["selector_activation"] == "complete"
+    assert result["activation_visibility"]["run_id"] == RUN_ID
+
+    direct = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    for root in (direct, consolidated):
+        family = root["detect_runs"]
+        assert family.attrs["latest"] == RUN_ID
+        assert family.attrs["latest_complete"] == RUN_ID
+        assert family.attrs["canonical_detection_authority_contract"] == (
+            "palette.canonical_detection.run_manifest.v3"
+        )
+        assert family.attrs["canonical_detection_manifest_digest"] == (
+            candidate.manifest["payload_digest"]
+        )
+        assert family[RUN_ID].attrs["stage_selector_eligible"] is True
+        assert family[RUN_ID].attrs["run_manifest"]["schema_version"] == 3
+
+
+def test_empty_coordinate_v3_publication_preserves_full_frame_domain(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    frame, pixel = _archive(archive)
+    candidate = write_native_clipped_detection_candidate(
+        _bound_empty(),
+        destination=tmp_path / "empty_candidate.zarr",
+        run_id=RUN_ID,
+        recording_identity=RECORDING_IDENTITY,
+        producer_id="fisheye.detection.detect_yolo",
+        producer_version="e3936b9a",
+        source_frame_authority=frame,
+        source_pixel_authority=pixel,
+        model_artifact_sha256="3" * 64,
+        run_provenance=_provenance(),
+        coordinate_catalog=True,
+        publication_selector_eligible=True,
+    )
+
+    publish_native_canonical_detection_candidate(
+        analysis_zarr=archive,
+        candidate_zarr=candidate.output_path,
+        run_id=RUN_ID,
+        recording_identity=RECORDING_IDENTITY,
+        expected_manifest_schema_version=3,
+        activate=True,
+    )
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    run = root[f"detect_runs/{RUN_ID}"]
+    assert np.asarray(run["instances/frame_row_offsets"][:]).tolist() == [0, 0, 0, 0]
+    assert np.asarray(run["instances/instance_key"][:]).size == 0
+    assert run.attrs["run_manifest"]["schema_version"] == 3
+    assert run.attrs["stage_selector_eligible"] is True
+
+
+def test_coordinate_v3_activation_failure_restores_selectors_and_tombstones(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    frame, pixel = _archive(archive)
+    candidate = _candidate(tmp_path, frame, pixel, active=True)
+    monkeypatch.setattr(
+        publication_mod._NativeDetectionActivation,
+        "_validate_visibility",
+        lambda _self: (_ for _ in ()).throw(
+            RuntimeError("activation visibility failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="activation visibility failure"):
+        publish_native_canonical_detection_candidate(
+            analysis_zarr=archive,
+            candidate_zarr=candidate.output_path,
+            run_id=RUN_ID,
+            recording_identity=RECORDING_IDENTITY,
+            expected_manifest_schema_version=3,
+            activate=True,
+        )
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    family = root["detect_runs"]
+    run = family[RUN_ID]
+    assert family.attrs.get("latest") is None
+    assert family.attrs.get("latest_complete") is None
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs["palette_run_completion_status"] == "failed"
 
 
 def test_native_publication_tolerates_unrelated_legacy_root_infinity(

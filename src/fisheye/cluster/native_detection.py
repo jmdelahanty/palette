@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -14,6 +14,7 @@ from fisheye.cluster.clipped_lsf import (
 )
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import (
+    LsfDependency,
     LsfExecutionMode,
     LsfResources,
     LsfWorkflow,
@@ -24,6 +25,11 @@ from fisheye.cluster.lsf.runtime import (
     RUNTIME_JOB_ID_TOKEN,
     RUNTIME_JOB_INDEX_TOKEN,
     RUNTIME_USER_TOKEN,
+)
+from fisheye.utils.run_detection_artifact import (
+    FRAME_MAPPING_MODE_CHOICES,
+    FRAME_MAPPING_MODE_IDENTITY,
+    FRAME_MAPPING_MODE_INDEXED,
 )
 
 
@@ -60,6 +66,7 @@ class NativeDetectionClipSpec:
     artifact_run_id: str
     artifact_group_path: str
     report_path: Path
+    frame_mapping_mode: str = FRAME_MAPPING_MODE_INDEXED
 
     @classmethod
     def from_plan_work_unit(
@@ -90,6 +97,7 @@ class NativeDetectionClipSpec:
             artifact_run_id=artifact_run_id,
             artifact_group_path=artifact_group_path,
             report_path=report_path,
+            frame_mapping_mode=FRAME_MAPPING_MODE_INDEXED,
         )
 
     def __post_init__(self) -> None:
@@ -100,6 +108,8 @@ class NativeDetectionClipSpec:
             )
         if parts[-1] != self.artifact_run_id:
             raise ValueError("Artifact group path and run id disagree.")
+        if self.frame_mapping_mode not in FRAME_MAPPING_MODE_CHOICES:
+            raise ValueError("Native artifact frame mapping mode is unsupported.")
 
 
 @dataclass(frozen=True)
@@ -143,6 +153,15 @@ class NativeDetectionFragmentInputs:
         ):
             if len(values) != len(set(values)):
                 raise ValueError(f"Native detection clip {name} values must be unique.")
+        mapping_modes = {clip.frame_mapping_mode for clip in self.clips}
+        if len(mapping_modes) != 1:
+            raise ValueError("Native detection work units must share one mapping mode.")
+        if FRAME_MAPPING_MODE_IDENTITY in mapping_modes and len(self.clips) != 1:
+            raise ValueError("Identity mapping requires exactly one whole-video work unit.")
+
+    @property
+    def frame_mapping_mode(self) -> str:
+        return self.clips[0].frame_mapping_mode
 
 
 @dataclass(frozen=True)
@@ -164,9 +183,9 @@ class NativeDetectionFragmentOutputs:
             "publication_receipt_path": str(self.publication_receipt_path),
             "terminal_job_key": self.terminal_job_key,
             "artifact_key": self.artifact_key,
-            "native_run_manifest_schema_version": 2,
+            "native_run_manifest_schema_version": 3,
             "logical_schema_version": 1,
-            "selector_eligible": False,
+            "selector_eligible": True,
         }
 
 
@@ -174,6 +193,12 @@ class NativeDetectionFragmentOutputs:
 class NativeDetectionWorkflowModule:
     fragment: LsfWorkflowFragment
     outputs: NativeDetectionFragmentOutputs
+
+
+@dataclass(frozen=True)
+class NativeDetectionCohortWorkflowModule:
+    fragment: LsfWorkflowFragment
+    outputs: tuple[NativeDetectionFragmentOutputs, ...]
 
 
 def build_native_detection_fragment(
@@ -230,8 +255,8 @@ def build_native_detection_fragment(
             str(clip.clip_index),
             "--camera-serial",
             clip.camera_serial,
-            "--recording-frame-index",
-            str(inputs.recording_dir / "recording_frame_index.parquet"),
+            "--frame-mapping-mode",
+            clip.frame_mapping_mode,
             "--run-name",
             clip.artifact_run_id,
             "--report",
@@ -241,6 +266,13 @@ def build_native_detection_fragment(
             "--decode-backend",
             "pynvvc_luma_rgb",
         ]
+        if clip.frame_mapping_mode == FRAME_MAPPING_MODE_INDEXED:
+            command.extend(
+                (
+                    "--recording-frame-index",
+                    str(inputs.recording_dir / "recording_frame_index.parquet"),
+                )
+            )
         if inputs.resume_existing_artifacts:
             command.append("--reuse-existing")
         tasks.append(
@@ -299,8 +331,8 @@ def build_native_detection_fragment(
         "fisheye.utils.assemble_clipped_native_detection",
         "--analysis-zarr",
         str(inputs.analysis_zarr),
-        "--recording-frame-index",
-        str(inputs.recording_dir / "recording_frame_index.parquet"),
+        "--frame-mapping-mode",
+        inputs.frame_mapping_mode,
         "--recording-identity",
         inputs.recording_identity,
         "--n-frames",
@@ -332,6 +364,13 @@ def build_native_detection_fragment(
         "--result-json",
         str(receipt),
     ]
+    if inputs.frame_mapping_mode == FRAME_MAPPING_MODE_INDEXED:
+        assemble.extend(
+            (
+                "--recording-frame-index",
+                str(inputs.recording_dir / "recording_frame_index.parquet"),
+            )
+        )
     for clip in inputs.clips:
         assemble.extend(("--work-unit-report", str(clip.report_path)))
     publish_key = f"detect_native_publish:{target_safe}"
@@ -375,7 +414,7 @@ def build_native_detection_fragment(
             "target_id": inputs.target_id,
             "artifact_namespace": "detection_artifact_runs",
             "canonical_namespace": "detect_runs",
-            "selector_activation": "deferred",
+            "selector_activation": "atomic_after_canonical_v3_validation",
             "registry_update": False,
             "outputs": outputs.to_json(),
         },
@@ -400,10 +439,103 @@ def compose_native_detection_workflow(
         metadata={
             "workflow_scope": "native_canonical_detection",
             "target_count": len(modules),
-            "selector_activation": "deferred",
+            "selector_activation": "atomic_after_canonical_v3_validation",
             "outputs": [module.outputs.to_json() for module in modules],
         },
     )
+
+
+def build_native_detection_cohort_fragment(
+    inputs: tuple[NativeDetectionFragmentInputs, ...],
+    *,
+    max_concurrent: int,
+) -> NativeDetectionCohortWorkflowModule:
+    """Share one bounded GPU artifact array across recording publications."""
+
+    if not inputs:
+        raise ValueError("A native detection cohort requires at least one target.")
+    if int(max_concurrent) <= 0:
+        raise ValueError("Native detection cohort concurrency must be positive.")
+    first = inputs[0]
+    invariant_fields = (
+        "workflow_id",
+        "family",
+        "repo",
+        "run_root",
+        "model",
+        "upstream_job_keys",
+        "required_artifacts",
+        "resume_existing_artifacts",
+    )
+    for item in inputs[1:]:
+        mismatched = [
+            name
+            for name in invariant_fields
+            if getattr(item, name) != getattr(first, name)
+        ]
+        if mismatched:
+            raise ValueError(
+                "Native cohort members must share scheduler bindings; "
+                f"mismatched fields: {mismatched!r}."
+            )
+    modules = tuple(build_native_detection_fragment(item) for item in inputs)
+    artifact_jobs = tuple(module.fragment.jobs[0] for module in modules)
+    tasks = tuple(
+        task
+        for job in artifact_jobs
+        for task in job.execution_group.tasks  # type: ignore[union-attr]
+    )
+    workflow_safe = safe_component(
+        first.workflow_id,
+        default="native_detection",
+        max_length=56,
+    )
+    array_key = f"detect_artifact_array:{workflow_safe}"
+    array_job = build_task_group_job(
+        workflow_id=first.workflow_id,
+        family=first.family,
+        repo=first.repo,
+        run_root=first.run_root,
+        job_key=array_key,
+        stage=(
+            "detect_artifact_reuse"
+            if first.resume_existing_artifacts
+            else "detect_artifact"
+        ),
+        tasks=tasks,
+        mode=LsfExecutionMode.ARRAY,
+        max_concurrent=int(max_concurrent),
+        resources=artifact_jobs[0].resources,
+        upstream=first.upstream_job_keys,
+    )
+    publish_jobs = tuple(
+        replace(
+            module.fragment.jobs[1],
+            dependency=LsfDependency((array_key,)),
+        )
+        for module in modules
+    )
+    outputs = tuple(module.outputs for module in modules)
+    fragment = LsfWorkflowFragment(
+        fragment_id=f"native_detection_cohort:{workflow_safe}",
+        jobs=(array_job, *publish_jobs),
+        requires=first.required_artifacts,
+        provides=tuple(output.artifact_key for output in outputs),
+        metadata={
+            "module": "native_detection_cohort",
+            "target_count": len(inputs),
+            "work_unit_count": len(tasks),
+            "scheduler_execution": "bounded_lsf_array",
+            "max_concurrent": min(int(max_concurrent), len(tasks)),
+            "artifact_namespace": "detection_artifact_runs",
+            "canonical_namespace": "detect_runs",
+            "canonical_manifest_schema_version": 3,
+            "selector_activation": "atomic_after_canonical_v3_validation",
+            "registry_update": False,
+            "outputs": [output.to_json() for output in outputs],
+        },
+    )
+    return NativeDetectionCohortWorkflowModule(fragment=fragment, outputs=outputs)
 
 
 __all__ = [
@@ -413,6 +545,8 @@ __all__ = [
     "NativeDetectionFragmentOutputs",
     "NativeDetectionModelSpec",
     "NativeDetectionWorkflowModule",
+    "NativeDetectionCohortWorkflowModule",
+    "build_native_detection_cohort_fragment",
     "build_native_detection_fragment",
     "compose_native_detection_workflow",
 ]

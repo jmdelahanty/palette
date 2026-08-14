@@ -8,6 +8,7 @@ from fisheye.refinement.refine_detect import (
     _build_sparse_refined_inputs_from_filtered,
     _filtered_reason_from_quality_label,
     _get_sampled_frame_count,
+    _require_quality_matches_active_canonical_manifest,
     _reject_deprecated_interpolation_overrides,
     _resolve_detection_quality_labels,
     _select_per_frame_top_k_raw_indices,
@@ -222,6 +223,18 @@ def test_get_refinement_parameters_defaults_max_gap_to_0() -> None:
 def test_reject_deprecated_interpolation_overrides() -> None:
     with pytest.raises(ValueError, match="Interpolation overrides are deprecated and unsupported"):
         _reject_deprecated_interpolation_overrides(max_gap=5, interpolation_method=None)
+
+
+def test_active_refinement_rejects_stale_quality_manifest_digest() -> None:
+    quality = _FakeGroup()
+    quality.attrs["source_detect_run_manifest_digest"] = "a" * 64
+    manifest = {"payload_digest": "b" * 64}
+
+    with pytest.raises(ValueError, match="different canonical manifest digest"):
+        _require_quality_matches_active_canonical_manifest(quality, manifest)
+
+    quality.attrs["source_detect_run_manifest_digest"] = "b" * 64
+    _require_quality_matches_active_canonical_manifest(quality, manifest)
 
 
 def test_registered_gate_modes_are_explicit_and_fail_closed(

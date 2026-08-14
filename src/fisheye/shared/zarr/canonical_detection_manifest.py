@@ -46,6 +46,15 @@ CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 CANONICAL_DETECTION_RUN_MANIFEST_PERSISTED_PATH = (
     "detect_runs/<run>/zarr.json.attributes.run_manifest"
 )
+CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR = (
+    "canonical_detection_authority_contract"
+)
+CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR = (
+    "canonical_detection_manifest_digest"
+)
+CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3 = (
+    "palette.canonical_detection.run_manifest.v3"
+)
 CANONICAL_DETECTION_LOGICAL_CONTENT_SCHEMA_ID = (
     "palette.canonical_detection.logical_content"
 )
@@ -1189,7 +1198,61 @@ def refined_source_identity_from_canonical_manifest(manifest: Mapping[str, Any])
     )
 
 
+def require_active_coordinate_canonical_detection(
+    root: Any,
+    *,
+    group_path: str,
+) -> Mapping[str, Any]:
+    """Require one exact selected canonical-v3 detection authority."""
+
+    parts = tuple(part for part in str(group_path).strip("/").split("/") if part)
+    if len(parts) != 2 or parts[0] != "detect_runs":
+        raise ValueError(
+            "Active canonical detection must be addressed as detect_runs/<run>."
+        )
+    run_id = parts[1]
+    parent = root["detect_runs"]
+    if run_id not in parent:
+        raise ValueError(f"Canonical detection run is missing: {group_path}")
+    run = parent[run_id]
+    if parent.attrs.get("latest") != run_id:
+        raise ValueError("Canonical detection run is not the latest selector.")
+    if parent.attrs.get("latest_complete") != run_id:
+        raise ValueError("Canonical detection run is not latest_complete.")
+    if parent.attrs.get(CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR) != (
+        CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3
+    ):
+        raise ValueError("Detection family lacks canonical-v3 authority policy.")
+    if run.attrs.get("palette_run_completion_status") != "complete":
+        raise ValueError("Canonical detection run is not complete.")
+    if run.attrs.get("stage_selector_eligible") is not True:
+        raise ValueError("Canonical detection run is not selector eligible.")
+    manifest = run.attrs.get(CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest, Mapping):
+        raise ValueError("Canonical detection run lacks its manifest.")
+    errors = validate_canonical_detection_run_manifest(manifest)
+    if errors:
+        raise ValueError("Canonical detection manifest is invalid: " + "; ".join(errors))
+    if manifest.get("schema_version") != (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        raise ValueError("Canonical detection run manifest is not v3.")
+    payload = manifest["payload"]
+    if payload.get("run_id") != run_id:
+        raise ValueError("Canonical detection manifest run id differs.")
+    if payload["publication"].get("stage_selector_eligible") is not True:
+        raise ValueError("Canonical detection manifest is not selector eligible.")
+    if parent.attrs.get(CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR) != manifest.get(
+        "payload_digest"
+    ):
+        raise ValueError("Detection family canonical manifest digest is stale.")
+    return manifest
+
+
 __all__ = [
+    "CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR",
+    "CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3",
+    "CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR",
     "CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION",
     "CANONICAL_DETECTION_ARRAY_DIGEST_ALGORITHM",
     "CANONICAL_DETECTION_LEGACY_SOURCE_SCHEMA_ID",
@@ -1211,6 +1274,7 @@ __all__ = [
     "canonical_detection_logical_content_document",
     "canonical_detection_metadata_declarations_digest",
     "normalize_canonical_detection_metadata_declarations",
+    "require_active_coordinate_canonical_detection",
     "refined_source_identity_from_canonical_manifest",
     "validate_canonical_detection_publication",
     "validate_canonical_detection_run_manifest",

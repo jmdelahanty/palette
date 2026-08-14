@@ -1,4 +1,4 @@
-"""Run, publish, and validate one clipped YOLO work unit inside one LSF job."""
+"""Run, import, and validate one native YOLO artifact work unit in one job."""
 
 from __future__ import annotations
 
@@ -13,7 +13,11 @@ from typing import Any, Sequence
 
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.utils.import_run_group_artifact import apply_import
-from fisheye.utils.run_detection_artifact import build_detection_artifact
+from fisheye.utils.run_detection_artifact import (
+    FRAME_MAPPING_MODE_CHOICES,
+    FRAME_MAPPING_MODE_INDEXED,
+    build_detection_artifact,
+)
 from fisheye.utils.validate_imported_run_group import validate_imported_run_group
 
 
@@ -52,7 +56,8 @@ def run_work_unit(
     clip_id: str,
     clip_index: int,
     camera_serial: str,
-    recording_frame_index: Path,
+    recording_frame_index: Path | None,
+    frame_mapping_mode: str = FRAME_MAPPING_MODE_INDEXED,
     run_name: str,
     report_path: Path,
     batch_size: int = 16,
@@ -60,6 +65,20 @@ def run_work_unit(
     reuse_existing: bool = False,
 ) -> dict[str, Any]:
     """Build and import a detection, or revalidate an already imported run."""
+
+    if frame_mapping_mode not in FRAME_MAPPING_MODE_CHOICES:
+        raise ValueError(
+            f"frame_mapping_mode must be one of {FRAME_MAPPING_MODE_CHOICES}."
+        )
+    if frame_mapping_mode == FRAME_MAPPING_MODE_INDEXED:
+        if recording_frame_index is None:
+            raise ValueError(
+                "recording_frame_index mapping requires --recording-frame-index."
+            )
+    elif recording_frame_index is not None:
+        raise ValueError(
+            "--recording-frame-index is only valid with recording_frame_index mapping."
+        )
 
     artifact: dict[str, Any] | None
     if reuse_existing:
@@ -93,6 +112,7 @@ def run_work_unit(
             clip_index=int(clip_index),
             camera_serial=camera_serial,
             recording_frame_index=recording_frame_index,
+            frame_mapping_mode=frame_mapping_mode,
             run_name=run_name,
             command=[sys.executable, "-m", "fisheye.utils.run_clipped_detection_work_unit"],
         )
@@ -121,7 +141,10 @@ def run_work_unit(
         "clip_id": clip_id,
         "clip_index": int(clip_index),
         "camera_serial": camera_serial,
-        "recording_frame_index": str(recording_frame_index),
+        "recording_frame_index": (
+            str(recording_frame_index) if recording_frame_index is not None else None
+        ),
+        "frame_mapping_mode": str(frame_mapping_mode),
         "target_zarr": str(target_zarr),
         "target_group_path": target_group_path,
         "run_name": run_name,
@@ -156,7 +179,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip-id", required=True)
     parser.add_argument("--clip-index", required=True, type=int)
     parser.add_argument("--camera-serial", required=True)
-    parser.add_argument("--recording-frame-index", required=True, type=Path)
+    parser.add_argument("--recording-frame-index", type=Path)
+    parser.add_argument(
+        "--frame-mapping-mode",
+        choices=FRAME_MAPPING_MODE_CHOICES,
+        default=FRAME_MAPPING_MODE_INDEXED,
+    )
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -185,7 +213,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         clip_id=args.clip_id,
         clip_index=args.clip_index,
         camera_serial=args.camera_serial,
-        recording_frame_index=args.recording_frame_index.expanduser().resolve(),
+        recording_frame_index=(
+            args.recording_frame_index.expanduser().resolve()
+            if args.recording_frame_index is not None
+            else None
+        ),
+        frame_mapping_mode=args.frame_mapping_mode,
         run_name=args.run_name,
         report_path=args.report.expanduser().resolve(),
         batch_size=args.batch_size,

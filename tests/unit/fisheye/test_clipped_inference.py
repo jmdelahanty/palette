@@ -452,6 +452,12 @@ def test_required_geometry_uses_canonical_refined_collection_without_legacy_bypa
     assert "finalize_registered_clipped_refined_collection" in rendered
     assert "--registered-gate-requirement required" in rendered
     assert "--registered-gate-run gate_exact_v1" in rendered
+    quality = jobs[f"recording_detect_quality:{target_safe}"]
+    refine = jobs[f"recording_detect_refine:{target_safe}"]
+    assert "--require-active-canonical-source" in quality.command
+    assert " ".join(refine.command).count(
+        "--require-active-canonical-source"
+    ) == 2
     cache = jobs[f"cache_array:{target_safe}"]
     assert cache.dependency.upstream_job_keys == (collection.job_key,)
     crop_fragment = next(
@@ -734,7 +740,7 @@ def test_detection_module_composes_as_a_first_class_detection_only_workflow(
     assert len(_execution_tasks(detection_only.jobs[3])) == 2
 
 
-def test_whole_video_raw_detection_uses_atomic_local_publisher(
+def test_whole_video_flat_raw_detection_recipe_is_retired(
     tmp_path: Path,
 ) -> None:
     target = whole_video_recording_target(
@@ -746,47 +752,31 @@ def test_whole_video_raw_detection_uses_atomic_local_publisher(
         camera_serial="2010093",
     )
     run_name = "detect_batman_fixture"
-    module = build_raw_detection_fragment(
-        RawDetectionFragmentInputs(
-            workflow_id="batman_raw_detect",
-            family="production_inference",
-            target_label="batman_arena_1",
-            target=target,
-            repo=tmp_path / "repo",
-            run_root=tmp_path / "run",
-            work_units=(
-                RawDetectionWorkUnitSpec(
-                    work_unit=target.work_units[0],
-                    detect_run=run_name,
-                    detect_group_path=f"detect_runs/{run_name}",
+    with pytest.raises(ValueError, match="flat whole-video raw publisher is retired"):
+        build_raw_detection_fragment(
+            RawDetectionFragmentInputs(
+                workflow_id="batman_raw_detect",
+                family="production_inference",
+                target_label="batman_arena_1",
+                target=target,
+                repo=tmp_path / "repo",
+                run_root=tmp_path / "run",
+                work_units=(
+                    RawDetectionWorkUnitSpec(
+                        work_unit=target.work_units[0],
+                        detect_run=run_name,
+                        detect_group_path=f"detect_runs/{run_name}",
+                    ),
                 ),
-            ),
-            model=DetectionModelSpec(
-                set_id="detect_set",
-                run_id="detect_run",
-                path=tmp_path / "model.pt",
-                sha256="a" * 64,
-            ),
-            registry_path=tmp_path / "palette_registry.sqlite",
+                model=DetectionModelSpec(
+                    set_id="detect_set",
+                    run_id="detect_run",
+                    path=tmp_path / "model.pt",
+                    sha256="a" * 64,
+                ),
+                registry_path=tmp_path / "palette_registry.sqlite",
+            )
         )
-    )
-
-    job = module.fragment.jobs[0]
-    command = list(job.command)
-    assert job.execution_group is None
-    assert "fisheye.utils.run_detection_local_publish" in command
-    assert command[command.index("--zarr") + 1] == str(target.analysis_zarr)
-    assert command[command.index("--video") + 1] == str(target.work_units[0].video_path)
-    assert command[command.index("--run-name") + 1] == run_name
-    assert command[command.index("--decode-backend") + 1] == "pynvvc_nv12_rgb"
-    resize_index = command.index("--resize-dims")
-    assert command[resize_index + 1 : resize_index + 3] == ["640", "640"]
-    assert module.outputs.raw_detection_group_paths == (f"detect_runs/{run_name}",)
-    assert module.fragment.metadata is not None
-    assert module.fragment.metadata["recording_layout"] == "whole_video"
-    assert module.fragment.metadata["publication_policy"] == (
-        "node_local_complete_run_then_atomic_prfs_publication_v1"
-    )
 
 
 def test_whole_video_raw_detection_fails_closed_on_noncanonical_binding(
@@ -841,7 +831,7 @@ def test_whole_video_raw_detection_fails_closed_on_noncanonical_binding(
         RawDetectionFragmentInputs(**kwargs)
 
 
-def test_raw_detection_workflow_composes_clipped_and_whole_targets(
+def test_raw_detection_workflow_refuses_whole_target_legacy_adapter(
     tmp_path: Path,
 ) -> None:
     clipped_target = clipped_recording_target(
@@ -891,42 +881,30 @@ def test_raw_detection_workflow_composes_clipped_and_whole_targets(
             model=model,
         )
     )
-    whole_module = build_raw_detection_fragment(
-        RawDetectionFragmentInputs(
-            workflow_id="mixed",
-            family="production_inference",
-            target_label="whole",
-            target=whole_target,
-            repo=tmp_path / "repo",
-            run_root=tmp_path / "run",
-            work_units=(
-                RawDetectionWorkUnitSpec(
-                    work_unit=whole_target.work_units[0],
-                    detect_run="detect_whole",
-                    detect_group_path="detect_runs/detect_whole",
+    with pytest.raises(ValueError, match="flat whole-video raw publisher is retired"):
+        build_raw_detection_fragment(
+            RawDetectionFragmentInputs(
+                workflow_id="mixed",
+                family="production_inference",
+                target_label="whole",
+                target=whole_target,
+                repo=tmp_path / "repo",
+                run_root=tmp_path / "run",
+                work_units=(
+                    RawDetectionWorkUnitSpec(
+                        work_unit=whole_target.work_units[0],
+                        detect_run="detect_whole",
+                        detect_group_path="detect_runs/detect_whole",
+                    ),
                 ),
-            ),
-            model=model,
-            registry_path=tmp_path / "registry.sqlite",
+                model=model,
+                registry_path=tmp_path / "registry.sqlite",
+            )
         )
-    )
 
-    composed = compose_raw_detection_workflow(
-        workflow_id="mixed",
-        family="production_inference",
-        modules=(clipped_module, whole_module),
+    assert clipped_module.fragment.metadata["recording_layout"] == (
+        "clipped_collection"
     )
-
-    assert [job.job_key for job in composed.topological_jobs()] == [
-        "detect_array:clipped",
-        "detect:whole",
-    ]
-    assert composed.metadata is not None
-    assert composed.metadata["target_count"] == 2
-    assert [
-        fragment["metadata"]["recording_layout"]
-        for fragment in composed.metadata["fragments"]
-    ] == ["clipped_collection", "whole_video"]
 
 
 def test_detection_fragment_split_preserves_pre_split_job_contract() -> None:

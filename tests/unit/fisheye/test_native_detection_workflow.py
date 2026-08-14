@@ -82,6 +82,7 @@ def test_native_detection_fragment_separates_artifacts_from_canonical_run(
     assert "--target-group-path" in command
     assert "detection_artifact_runs/detect_artifact_0" in command
     assert "/detect_runs/" not in command
+    assert "--frame-mapping-mode recording_frame_index" in command
 
     assert publish_job.job_key == "detect_native_publish:recording_a"
     assert publish_job.dependency.upstream_job_keys == (array_job.job_key,)
@@ -99,9 +100,9 @@ def test_native_detection_fragment_separates_artifacts_from_canonical_run(
         "/detection_artifact_runs/" in path
         for path in outputs["artifact_group_paths"]
     )
-    assert outputs["native_run_manifest_schema_version"] == 2
+    assert outputs["native_run_manifest_schema_version"] == 3
     assert outputs["logical_schema_version"] == 1
-    assert outputs["selector_eligible"] is False
+    assert outputs["selector_eligible"] is True
     assert module.fragment.metadata["registry_update"] is False
 
 
@@ -120,7 +121,9 @@ def test_native_detection_module_is_detection_only_and_composable(
         "detect_native_publish:recording_a",
     ]
     assert workflow.metadata["workflow_scope"] == "native_canonical_detection"
-    assert workflow.metadata["selector_activation"] == "deferred"
+    assert workflow.metadata["selector_activation"] == (
+        "atomic_after_canonical_v3_validation"
+    )
     assert module.fragment.provides == ("canonical_detection:recording_a",)
 
 

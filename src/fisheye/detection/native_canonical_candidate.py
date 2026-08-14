@@ -177,6 +177,7 @@ def write_native_clipped_detection_candidate(
     run_provenance: Mapping[str, Any],
     profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
     coordinate_catalog: bool = False,
+    publication_selector_eligible: bool = False,
 ) -> NativeCanonicalDetectionCandidate:
     """Materialize one complete native canonical candidate on local storage.
 
@@ -190,6 +191,8 @@ def write_native_clipped_detection_candidate(
     normalized_run_id = _require_run_id(run_id)
     if type(coordinate_catalog) is not bool:
         raise TypeError("coordinate_catalog must be an exact bool.")
+    if type(publication_selector_eligible) is not bool:
+        raise TypeError("publication_selector_eligible must be an exact bool.")
     if str(recording_identity).strip() != str(
         bound.binding_evidence["document"]["recording_identity"]
     ):
@@ -331,7 +334,7 @@ def write_native_clipped_detection_candidate(
                 direct_metadata_declarations=direct,
                 consolidated_metadata_declarations=consolidated,
                 source_evidence_kind="native_detection",
-                selector_eligible=False,
+                selector_eligible=publication_selector_eligible,
             )
             expected_manifest_version = (
                 CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
@@ -345,7 +348,7 @@ def write_native_clipped_detection_candidate(
                 source_evidence=source_evidence,
                 direct_metadata_declarations=direct,
                 consolidated_metadata_declarations=consolidated,
-                selector_eligible=False,
+                selector_eligible=publication_selector_eligible,
             )
             expected_manifest_version = (
                 CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
@@ -381,6 +384,7 @@ def write_native_clipped_detection_candidate(
             "run_id": normalized_run_id,
             "native_run_manifest_schema_version": manifest["schema_version"],
             "coordinate_catalog": coordinate_catalog,
+            "publication_selector_eligible": publication_selector_eligible,
             "logical_schema_version": CANONICAL_DETECTION_SCHEMA_V1.schema_version,
             "storage_profile_id": plans.profile.profile_id,
             "run_manifest_digest": manifest["payload_digest"],

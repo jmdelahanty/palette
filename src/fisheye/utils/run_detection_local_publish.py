@@ -567,8 +567,16 @@ def run_detection_local_publish(
     keep_scratch: bool = False,
     model_resolution_payload: Mapping[str, Any] | None = None,
     run_provenance: Mapping[str, Any] | None = None,
+    legacy_compatibility_publish: bool = False,
 ) -> dict[str, Any]:
-    """Build one raw detection run locally and publish it fail-closed."""
+    """Build one historical flat run only through explicit compatibility mode."""
+
+    if legacy_compatibility_publish is not True:
+        raise RuntimeError(
+            "Flat detect_runs publication is retired from production. Use the "
+            "artifact-first native canonical-v3 workflow, or explicitly set "
+            "legacy_compatibility_publish=True for a documented recovery case."
+        )
 
     started = time.perf_counter()
     source = Path(source_zarr).expanduser().resolve()
@@ -921,6 +929,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
     parser.add_argument("--keep-scratch", action="store_true")
+    parser.add_argument(
+        "--legacy-compatibility-publish",
+        action="store_true",
+        help="Explicitly authorize the retired flat-layout recovery publisher.",
+    )
     parser.add_argument("--result-json", type=Path)
     return parser
 
@@ -955,6 +968,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             use_gpu=False if args.cpu else None,
             copy_backend=args.copy_backend,
             keep_scratch=args.keep_scratch,
+            legacy_compatibility_publish=args.legacy_compatibility_publish,
         )
     except Exception as exc:
         result = {

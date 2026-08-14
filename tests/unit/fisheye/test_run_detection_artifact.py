@@ -318,3 +318,41 @@ def test_build_detection_artifact_rejects_selector_promotion(tmp_path: Path) -> 
             artifact_dir=tmp_path / "artifact",
             latest_policy="set_latest_explicit",
         )
+
+
+def test_whole_video_work_unit_requires_explicit_identity_mapping(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+
+    with pytest.raises(ValueError, match="explicitly declare.*identity"):
+        mod.build_detection_artifact(
+            video_path=video,
+            target_zarr=target_zarr,
+            artifact_dir=tmp_path / "artifact",
+            clip_id="whole_video",
+            clip_index=0,
+            camera_serial="2010093",
+        )
+
+
+def test_identity_mapping_forbids_recording_frame_index(tmp_path: Path) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+
+    with pytest.raises(ValueError, match="forbid recording_frame_index"):
+        mod.build_detection_artifact(
+            video_path=video,
+            target_zarr=target_zarr,
+            artifact_dir=tmp_path / "artifact",
+            clip_id="whole_video",
+            clip_index=0,
+            camera_serial="2010093",
+            recording_frame_index=tmp_path / "recording_frame_index.parquet",
+            frame_mapping_mode="identity",
+        )

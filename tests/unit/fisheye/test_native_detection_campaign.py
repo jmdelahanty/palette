@@ -112,7 +112,7 @@ def test_archive_authority_uses_one_verified_acquisition_record(tmp_path: Path) 
     )
 
 
-def test_campaign_materializes_selector_ineligible_array_and_publish_plan(
+def test_campaign_materializes_canonical_v3_publish_and_registry_plan(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -155,12 +155,16 @@ def test_campaign_materializes_selector_ineligible_array_and_publish_plan(
 
     payload = campaign.materialize_plan_bundle(plan)
 
-    assert payload["selector_activation"] == "deferred"
-    assert payload["registry_update"] is False
-    assert len(plan.workflow.jobs) == 2
-    array_job, publish_job = plan.workflow.topological_jobs()
+    assert payload["selector_activation"] == (
+        "atomic_after_canonical_v3_validation"
+    )
+    assert payload["registry_update"] == "serial_safe_shadow_reconciliation"
+    assert len(plan.workflow.jobs) == 3
+    array_job, publish_job, registry_job = plan.workflow.topological_jobs()
     assert array_job.metadata["execution_mode"] == "array"
     assert publish_job.dependency.upstream_job_keys == (array_job.job_key,)
+    assert registry_job.dependency.upstream_job_keys == (publish_job.job_key,)
+    assert "fisheye.utils.registry_rescan" in registry_job.command
     assert (run_root / "plan.json").is_file()
     assert (run_root / "lsf_plan.json").is_file()
     assert (run_root / "targets" / "recording_a" / "detection_plan.json").is_file()

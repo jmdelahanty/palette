@@ -12,6 +12,8 @@ from fisheye.cluster.whole_video_detection import (
     materialize_plan_bundle,
 )
 from fisheye.cluster.clipped_detection import DetectionModelSpec
+from fisheye.cluster.native_detection import NativeDetectionAuthoritySpec
+from fisheye.cluster.native_detection_authority import NativeArchiveAuthority
 from fisheye.registry.db import Registry
 
 
@@ -64,6 +66,36 @@ def _seed_recording(
     )
     registry.conn.commit()
     return zarr_path, video_path
+
+
+def _patch_native_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "fisheye.cluster.whole_video_detection._repo_commit",
+        lambda _repo: "e" * 40,
+    )
+
+    def authority(target):
+        camera = target.work_units[0].camera_serial
+        pointer = NativeDetectionAuthoritySpec(
+            record_ref=f"/analysis/acquisition_camera_frames/{camera}@record",
+            record_sha256="a" * 64,
+        )
+        return NativeArchiveAuthority(
+            recording_identity=target.recording_id,
+            camera_serial=camera,
+            n_frames=12,
+            source_width=640,
+            source_height=480,
+            frame=pointer,
+            pixel=pointer,
+        )
+
+    monkeypatch.setattr(
+        "fisheye.cluster.whole_video_detection.load_native_archive_authority",
+        authority,
+    )
 
 
 def test_registry_discovery_resolves_exact_authoritative_full_streams(
@@ -214,6 +246,7 @@ def test_whole_video_cohort_is_one_bounded_atomic_detection_array(
         "fisheye.cluster.whole_video_detection.resolve_detection_model_for_targets",
         lambda *_args, **_kwargs: model,
     )
+    _patch_native_authority(monkeypatch)
 
     run_root = tmp_path / "run"
     plan = build_plan(
@@ -228,7 +261,7 @@ def test_whole_video_cohort_is_one_bounded_atomic_detection_array(
     )
 
     assert len(plan.targets) == 3
-    assert len(plan.lsf_workflow.jobs) == 1
+    assert len(plan.lsf_workflow.jobs) == 5
     job = plan.lsf_workflow.jobs[0]
     assert job.execution_group is not None
     assert job.execution_group.mode is LsfExecutionMode.ARRAY
@@ -239,11 +272,31 @@ def test_whole_video_cohort_is_one_bounded_atomic_detection_array(
     assert build_bsub_command(job)[2].endswith("[1-3]%2")
     commands = [task.command for task in job.execution_group.tasks]
     assert all(
-        "fisheye.utils.run_detection_local_publish" in command for command in commands
+        "fisheye.utils.run_clipped_detection_work_unit" in command
+        for command in commands
     )
+    assert all("--frame-mapping-mode" in command for command in commands)
+    assert all("identity" in command for command in commands)
     assert all("--model-sha256" in command for command in commands)
-    assert len({command[command.index("--zarr") + 1] for command in commands}) == 3
+    assert len(
+        {command[command.index("--target-zarr") + 1] for command in commands}
+    ) == 3
     assert len({command[command.index("--video") + 1] for command in commands}) == 3
+    assert all(
+        publish.dependency.upstream_job_keys == (job.job_key,)
+        for publish in plan.lsf_workflow.jobs[1:-1]
+    )
+    assert all(
+        "fisheye.utils.assemble_clipped_native_detection"
+        in " ".join(publish.command)
+        for publish in plan.lsf_workflow.jobs[1:-1]
+    )
+    registry_job = plan.lsf_workflow.jobs[-1]
+    assert registry_job.dependency.upstream_job_keys == tuple(
+        publish.job_key for publish in plan.lsf_workflow.jobs[1:-1]
+    )
+    assert "fisheye.utils.registry_rescan" in registry_job.command
+    assert plan.detect_run == "detect_batman_detection_canary_canonical_v3"
     assert plan.lsf_workflow.metadata is not None
     assert plan.lsf_workflow.metadata["target_count"] == 3
 
@@ -285,6 +338,7 @@ def test_whole_video_registered_geometry_composes_canonical_postprocess(
         "fisheye.cluster.whole_video_detection.resolve_detection_model_for_targets",
         lambda *_args, **_kwargs: model,
     )
+    _patch_native_authority(monkeypatch)
 
     plan = build_plan(
         registry_path=registry_path,
@@ -298,29 +352,23 @@ def test_whole_video_registered_geometry_composes_canonical_postprocess(
         registered_gate_run="gate_exact_v1",
     )
 
-    assert len(plan.lsf_workflow.jobs) == 5
+    assert len(plan.lsf_workflow.jobs) == 6
     assert plan.quality_run == "detect_quality_geometry_required"
     assert plan.refined_run == "refined_detect_geometry_required"
     assert plan.crop_run == "crop_geometry_required"
     assert plan.registered_gate_requirement == "required"
     assert len(plan.postprocess_outputs) == 1
-    canonicalize, quality, refine, crop = plan.lsf_workflow.jobs[1:]
-    assert canonicalize.dependency.upstream_job_keys == (
+    publish, quality, refine, crop = plan.lsf_workflow.jobs[1:-1]
+    assert publish.dependency.upstream_job_keys == (
         plan.lsf_workflow.jobs[0].job_key,
     )
-    rendered_canonicalize = " ".join(canonicalize.command)
-    assert "fisheye.utils.publish_canonical_detection_successor" in (
-        rendered_canonicalize
-    )
-    assert (
-        "--source-detect-group detect_runs/detect_geometry_required"
-        in rendered_canonicalize
-    )
-    assert "--successor-run detect_geometry_required_canonical_v3" in (
-        rendered_canonicalize
-    )
-    assert quality.dependency.upstream_job_keys == (canonicalize.job_key,)
+    rendered_publish = " ".join(publish.command)
+    assert "fisheye.utils.assemble_clipped_native_detection" in rendered_publish
+    assert "--frame-mapping-mode identity" in rendered_publish
+    assert "--run-id detect_geometry_required_canonical_v3" in rendered_publish
+    assert quality.dependency.upstream_job_keys == (publish.job_key,)
     assert "detect_runs/detect_geometry_required_canonical_v3" in quality.command
+    assert "--require-active-canonical-source" in quality.command
     rendered_refine = " ".join(refine.command)
     assert "--registered-gate-requirement required" in rendered_refine
     assert "--registered-gate-run gate_exact_v1" in rendered_refine
@@ -329,12 +377,15 @@ def test_whole_video_registered_geometry_composes_canonical_postprocess(
         "--canonical-detect-run detect_geometry_required_canonical_v3"
         in rendered_refine
     )
+    assert rendered_refine.count("--require-active-canonical-source") == 2
     assert crop.dependency.upstream_job_keys == (refine.job_key,)
     rendered_crop = " ".join(crop.command)
     assert "--source-refined-run refined_detect_geometry_required" in rendered_crop
     assert "--registered-gate-requirement required" in rendered_crop
     assert "--registered-gate-run gate_exact_v1" in rendered_crop
     assert len(plan.crop_outputs) == 1
+    registry_job = plan.lsf_workflow.jobs[-1]
+    assert registry_job.dependency.upstream_job_keys == (crop.job_key,)
     assert plan.lsf_workflow.metadata["registered_dish_geometry"] == {
         "gate_requirement": "required",
         "gate_run": "gate_exact_v1",

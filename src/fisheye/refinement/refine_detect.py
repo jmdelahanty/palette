@@ -50,6 +50,9 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
 )
 from ..shared.zarr_helpers import open_zarr_group_direct
+from ..shared.zarr.canonical_detection_manifest import (
+    require_active_coordinate_canonical_detection,
+)
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -552,6 +555,26 @@ def _quality_guardrail_error(detect_run: str, reason: str, quality_run: Optional
         "Run `python -m fisheye.refinement.detect_quality <zarr_path>` for this detect run, "
         "or pass --allow-missing-quality to opt out."
     )
+
+
+def _require_quality_matches_active_canonical_manifest(
+    quality_group: Any | None,
+    active_source_manifest: Mapping[str, Any] | None,
+) -> None:
+    """Fail before refinement writes when quality used another raw authority."""
+
+    if quality_group is None or active_source_manifest is None:
+        raise ValueError(
+            "Active canonical refinement requires exact detection-quality evidence."
+        )
+    quality_manifest_digest = str(
+        quality_group.attrs.get("source_detect_run_manifest_digest") or ""
+    ).strip()
+    if quality_manifest_digest != active_source_manifest.get("payload_digest"):
+        raise ValueError(
+            "Detection quality was computed from a different canonical "
+            "manifest digest."
+        )
 
 
 def _group_at(root: zarr.Group, group_path: str) -> zarr.Group:
@@ -1314,6 +1337,7 @@ def create_refined_run(
     registered_gate_run: Optional[str] = None,
     stage_selector_eligible: bool = True,
     emit_completion_status: bool = True,
+    require_active_canonical_source: bool = False,
 ) -> str:
     """
     Create a refined detection run with sparse-first curated detect surfaces.
@@ -1349,6 +1373,8 @@ def create_refined_run(
             selectors. Set false for explicitly selected canaries and review seeds.
         emit_completion_status: Whether to project the completed stage into the
             registry/status system. Set false for unregistered benchmark canaries.
+        require_active_canonical_source: Require the exact source run to remain
+            the selected canonical-v3 detection authority.
         
     Returns:
         Name of created refined run
@@ -1416,6 +1442,8 @@ def create_refined_run(
     if remove_blips is not None:
         filters_config['remove_blips'] = remove_blips
         param_source = 'cli_override'
+    if type(require_active_canonical_source) is not bool:
+        raise TypeError("require_active_canonical_source must be an exact bool.")
     
     # Build filter list
     filters = []
@@ -1436,6 +1464,12 @@ def create_refined_run(
         detect_run = root[detect_family_path].attrs['latest']
     
     source_detect_path = _join_group_path(detect_family_path, detect_run)
+    active_source_manifest = None
+    if require_active_canonical_source:
+        active_source_manifest = require_active_coordinate_canonical_detection(
+            root,
+            group_path=source_detect_path,
+        )
     detect_group = root[source_detect_path]
     detect_table = resolve_detection_instance_table(detect_group)
     console.print(f"Source detect run: [cyan]{detect_run}[/cyan]")
@@ -1479,6 +1513,11 @@ def create_refined_run(
         if quality_group is not None
         else None
     )
+    if require_active_canonical_source:
+        _require_quality_matches_active_canonical_manifest(
+            quality_group,
+            active_source_manifest,
+        )
     experiment_setup = None
     try:
         experiment_setup = resolve_experiment_setup(root, allow_legacy=True)
@@ -1727,6 +1766,7 @@ def create_refined_run(
         'sampled_import_meta': sampled_meta,
         'detect_quality_guardrail_requested': bool(require_detect_quality),
         'detect_quality_guardrail_enforced': bool(require_quality_for_run),
+        'require_active_canonical_source': require_active_canonical_source,
         'registered_detection_gate': registered_detection_gate,
         'dish_mask_gate': dish_mask_gate,
         'top_k_selection': top_k_selection,
@@ -2157,6 +2197,11 @@ Examples:
             'Use for unregistered benchmark canaries.'
         ),
     )
+    parser.add_argument(
+        '--require-active-canonical-source',
+        action='store_true',
+        help='Fail unless the source is the selected canonical-v3 detection authority.',
+    )
     
     args = parser.parse_args()
     
@@ -2198,6 +2243,7 @@ Examples:
             registered_gate_run=args.registered_gate_run,
             stage_selector_eligible=not args.selector_ineligible,
             emit_completion_status=not args.skip_completion_status,
+            require_active_canonical_source=args.require_active_canonical_source,
         )
         
         print(f"\n✓ Created refined run: {run_name}")

@@ -1088,6 +1088,7 @@ def build_plan(
                     registered_gate_requirement=gate_requirement,
                     registered_gate_run=gate_run,
                     selection_policy_id=policy_id,
+                    require_active_canonical_source=True,
                     upstream_job_keys=(native_module.outputs.terminal_job_key,),
                     required_artifacts=(native_module.outputs.artifact_key,),
                 )

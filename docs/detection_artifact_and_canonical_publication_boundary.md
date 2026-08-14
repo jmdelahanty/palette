@@ -95,27 +95,27 @@ must bind the successors.
 
 ### Producer boundary
 
-- [ ] Whole-video inference writes only `detection_artifact_runs`.
+- [x] Whole-video inference writes only `detection_artifact_runs`.
 - [x] Clipped native inference writes only `detection_artifact_runs`.
-- [ ] Whole-video identity mapping is explicit and independently validated.
+- [x] Whole-video identity mapping is explicit and independently validated.
 - [x] Clipped local-to-recording frame mapping is explicit and independently
       validated.
-- [ ] The production native candidate defaults to canonical-v3 with a
+- [x] The production native candidate defaults to canonical-v3 with a
       coordinate catalog.
-- [ ] The canonical finalizer is mandatory in whole-video, one-clip, and
+- [x] The canonical finalizer is mandatory in whole-video, one-clip, and
       multi-clip production recipes.
-- [ ] Production recipes expose no path that can report detection completion
+- [x] Production recipes expose no path that can report detection completion
       from an artifact or historical flat run.
 
 ### Publication and registry
 
-- [ ] Canonical placement remains ineligible until deep post-copy validation.
-- [ ] Selector activation is rollback-safe and validates fresh consolidated
+- [x] Canonical placement remains ineligible until deep post-copy validation.
+- [x] Selector activation is rollback-safe and validates fresh consolidated
       visibility.
-- [ ] Publication receipts record the exact canonical manifest digest.
-- [ ] Registry extraction marks `detect=ok` only for an eligible, selected,
+- [x] Publication receipts record the exact canonical manifest digest.
+- [x] Registry extraction marks `detect=ok` only for an eligible, selected,
       canonical-v3 manifest-bearing run.
-- [ ] Registry reconciliation is serialized after parallel publications.
+- [x] Registry reconciliation is serialized after parallel publications.
 
 ### Consumers
 
@@ -123,7 +123,7 @@ must bind the successors.
       payload digest.
 - [x] Recording-level detection quality validates canonical manifests.
 - [ ] Shared planner inputs carry the expected canonical manifest digest.
-- [ ] Refinement verifies the same run ID and digest selected by quality.
+- [x] Refinement verifies the same run ID and digest selected by quality.
 - [ ] Crop, pose, mask, analytics, and export planners reject artifact and flat
       layouts through one shared canonical-source validator.
 - [ ] Geometry-review discovery and approval expose only eligible canonical-v3
@@ -133,14 +133,21 @@ must bind the successors.
 
 - [x] Historical flat-to-canonical successor publication remains an explicit
       compatibility command.
-- [ ] The older direct `run_detection_local_publish` adapter is removed from
+- [x] The older direct `run_detection_local_publish` adapter is removed from
       production recipes and retained only as a named compatibility surface.
-- [ ] Existing immutable artifacts and canonical successors remain unchanged.
-- [ ] Empty-detection recordings retain all `F+1` frame offsets and a valid
+- [x] Existing immutable artifacts and canonical successors remain unchanged.
+- [x] Empty-detection recordings retain all `F+1` frame offsets and a valid
       canonical manifest.
-- [ ] Focused tests cover whole-video identity, one-clip indexed, multi-clip,
+- [x] Focused tests cover whole-video identity, one-clip indexed, multi-clip,
       artifact rejection, canonical-v3 enforcement, selector rollback, stale
       manifest digests, and registry fail-closed behavior.
+
+The unchecked consumer items are intentionally still open. In particular,
+the historical clipped `off`-geometry tail and its detect-quality recovery
+tooling still consume per-clip compatibility sources. Registered clipped
+production, whole-video production, and native recording campaigns use the
+active canonical-v3 source validator. The remaining consumers must be migrated
+before the acceptance criteria can be treated as fully satisfied.
 
 ## Acceptance criteria
 
@@ -155,4 +162,3 @@ must bind the successors.
   schema and coordinate contract.
 - Existing GoodBatBadBat raw detections and canonical successors remain
   byte-for-byte unchanged.
-

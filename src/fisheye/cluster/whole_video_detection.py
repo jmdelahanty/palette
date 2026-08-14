@@ -5,17 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from fisheye.cluster.clipped_detection import (
     DetectionModelSpec,
-    RawDetectionFragmentInputs,
-    RawDetectionWorkUnitSpec,
-    build_whole_video_raw_detection_cohort_fragment,
 )
 from fisheye.cluster.clipped_inference import build_ssh_bsub_runner
+from fisheye.cluster.clipped_lsf import build_job
 from fisheye.cluster.crop_snapshot import (
     CropSnapshotFragmentInputs,
     CropSnapshotFragmentOutputs,
@@ -23,7 +22,9 @@ from fisheye.cluster.crop_snapshot import (
 )
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import (
+    LsfResources,
     LsfWorkflow,
+    LsfWorkflowFragment,
     compose_lsf_workflow,
     submit_lsf_workflow,
     write_json_snapshot,
@@ -31,6 +32,15 @@ from fisheye.cluster.lsf import (
 from fisheye.cluster.recording_layout import (
     RecordingTarget,
     whole_video_recording_target,
+)
+from fisheye.cluster.native_detection import (
+    NativeDetectionClipSpec,
+    NativeDetectionFragmentInputs,
+    NativeDetectionModelSpec,
+    build_native_detection_cohort_fragment,
+)
+from fisheye.cluster.native_detection_authority import (
+    load_native_archive_authority,
 )
 from fisheye.cluster.recording_detection_postprocess import (
     REGISTERED_GATE_REQUIREMENTS,
@@ -46,12 +56,26 @@ from fisheye.registry.model_resolution import (
     resolve_recording_id,
     verify_deployment_artifact_content,
 )
+from fisheye.utils.run_detection_artifact import FRAME_MAPPING_MODE_IDENTITY
 
 
 PLAN_SCHEMA = "palette.whole_video_detection_cohort_plan.v1"
 FAMILY = "whole_video_detection"
 DEFAULT_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
 AUTHORITATIVE_FULL_FRAME_ROLE = "ingest_authoritative_full_frame"
+
+
+def _repo_commit(repo: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    commit = result.stdout.strip()
+    if len(commit) != 40:
+        raise ValueError("Palette checkout did not resolve one full commit SHA.")
+    return commit
 
 
 @dataclass(frozen=True)
@@ -412,8 +436,8 @@ def build_plan(
         max_length=96,
     )
     detect_run = safe_component(
-        f"detect_{safe_label}",
-        default="detect_whole_video",
+        f"detect_{safe_label}_canonical_v3",
+        default="detect_whole_video_canonical_v3",
         max_length=120,
     )
     quality_run = (
@@ -462,7 +486,8 @@ def build_plan(
     finally:
         registry.close()
 
-    fragment_inputs: list[RawDetectionFragmentInputs] = []
+    producer_version = _repo_commit(resolved_repo)
+    fragment_inputs: list[NativeDetectionFragmentInputs] = []
     for item in targets:
         target = item.target
         detect_group = f"detect_runs/{detect_run}"
@@ -471,27 +496,67 @@ def build_plan(
                 "Whole-video cohort planning refuses existing detection output: "
                 f"{target.analysis_zarr / detect_group}"
             )
+        authority = load_native_archive_authority(target)
+        work_unit = target.work_units[0]
+        if work_unit.camera_serial != authority.camera_serial:
+            raise ValueError(
+                "Whole-video stream camera differs from acquisition authority."
+            )
+        artifact_run = safe_component(
+            f"detect_artifact_{safe_label}",
+            default="detect_artifact_whole_video",
+            max_length=120,
+        )
+        artifact_group = f"detection_artifact_runs/{artifact_run}"
+        if (target.analysis_zarr / artifact_group).exists():
+            raise FileExistsError(
+                "Whole-video cohort planning refuses existing detection artifact: "
+                f"{target.analysis_zarr / artifact_group}"
+            )
+        report_path = (
+            resolved_run_root / "targets" / target.target_id / "detection_artifact.json"
+        )
         fragment_inputs.append(
-            RawDetectionFragmentInputs(
+            NativeDetectionFragmentInputs(
                 workflow_id=workflow_id,
                 family=FAMILY,
-                target_label=target.target_id,
-                target=target,
+                target_id=target.target_id,
+                recording_identity=authority.recording_identity,
+                recording_dir=target.recording_dir,
+                analysis_zarr=target.analysis_zarr,
                 repo=resolved_repo,
                 run_root=resolved_run_root,
-                work_units=(
-                    RawDetectionWorkUnitSpec(
-                        work_unit=target.work_units[0],
-                        detect_run=detect_run,
-                        detect_group_path=detect_group,
+                canonical_run_id=detect_run,
+                n_frames=authority.n_frames,
+                source_width=authority.source_width,
+                source_height=authority.source_height,
+                source_frame_authority=authority.frame,
+                source_pixel_authority=authority.pixel,
+                producer_version=producer_version,
+                clips=(
+                    NativeDetectionClipSpec(
+                        work_unit_id=work_unit.work_unit_id,
+                        clip_id="whole_video",
+                        clip_index=0,
+                        camera_serial=work_unit.camera_serial,
+                        video_path=work_unit.video_path,
+                        artifact_run_id=artifact_run,
+                        artifact_group_path=artifact_group,
+                        report_path=report_path,
+                        frame_mapping_mode=FRAME_MAPPING_MODE_IDENTITY,
                     ),
                 ),
-                model=model,
-                registry_path=resolved_registry,
+                model=NativeDetectionModelSpec(
+                    set_id=model.set_id,
+                    run_id=model.run_id,
+                    path=model.path,
+                    sha256=model.sha256,
+                ),
+                detect_array_concurrency=int(max_concurrent),
             )
         )
-    cohort = build_whole_video_raw_detection_cohort_fragment(
-        fragment_inputs,
+    cohort = build_native_detection_cohort_fragment(
+        tuple(fragment_inputs),
         max_concurrent=int(max_concurrent),
     )
     postprocess_modules = ()
@@ -507,12 +572,8 @@ def build_plan(
                     repo=resolved_repo,
                     run_root=resolved_run_root,
                     source_detect_run=detect_run,
-                    canonicalize_legacy_source=True,
-                    canonical_source_run=safe_component(
-                        f"{detect_run}_canonical_v3",
-                        default="detect_whole_video_canonical_v3",
-                        max_length=120,
-                    ),
+                    canonicalize_legacy_source=False,
+                    require_active_canonical_source=True,
                     quality_run=quality_run,
                     refined_run=refined_run,
                     registered_gate_requirement=gate_requirement,
@@ -562,6 +623,77 @@ def build_plan(
             )
             for item in targets
         )
+    if crop_modules:
+        registry_upstream = tuple(
+            module.outputs.terminal_job_key for module in crop_modules
+        )
+    elif postprocess_modules:
+        registry_upstream = tuple(
+            module.outputs.terminal_job_key for module in postprocess_modules
+        )
+    else:
+        registry_upstream = tuple(
+            output.terminal_job_key for output in cohort.outputs
+        )
+    registry_result = resolved_run_root / "registry_refresh.json"
+    registry_backup = (
+        resolved_run_root
+        / "registry_backups"
+        / f"palette_registry_before_{workflow_id}.sqlite"
+    )
+    registry_key = f"registry_reconcile:{workflow_id}"
+    registry_job = build_job(
+        workflow_id=workflow_id,
+        family=FAMILY,
+        repo=resolved_repo,
+        run_root=resolved_run_root,
+        job_key=registry_key,
+        stage="registry_reconcile",
+        command=(
+            "scripts/py",
+            "-m",
+            "fisheye.utils.registry_rescan",
+            "--registry",
+            str(resolved_registry),
+            "--result-json",
+            str(registry_result),
+            "--fail-on-error",
+            "--reconcile-step-status",
+            "--safe-shadow-publish",
+            "--backup-path",
+            str(registry_backup),
+            *(str(item.target.analysis_zarr) for item in targets),
+        ),
+        resources=LsfResources(
+            queue="short",
+            ncores=1,
+            mem_gb=8,
+            walltime="1:00",
+            span_hosts=1,
+        ),
+        upstream=registry_upstream,
+        expected_outputs=(registry_result, registry_backup),
+    )
+    registry_fragment = LsfWorkflowFragment(
+        fragment_id=f"registry_reconcile:{workflow_id}",
+        jobs=(registry_job,),
+        requires=tuple(
+            (
+                module.outputs.artifact_key
+                for module in (
+                    crop_modules or postprocess_modules
+                )
+            )
+        )
+        if (crop_modules or postprocess_modules)
+        else tuple(output.artifact_key for output in cohort.outputs),
+        provides=(f"registry_reconciled:{workflow_id}",),
+        metadata={
+            "module": "serial_registry_reconciliation",
+            "target_count": len(targets),
+            "safe_shadow_publish": True,
+        },
+    )
     workflow = compose_lsf_workflow(
         workflow_id=workflow_id,
         family=FAMILY,
@@ -569,6 +701,7 @@ def build_plan(
             cohort.fragment,
             *(module.fragment for module in postprocess_modules),
             *(module.fragment for module in crop_modules),
+            registry_fragment,
         ),
         metadata={
             "workflow_scope": "registry_discovered_whole_video_raw_detection",
@@ -636,7 +769,7 @@ def materialize_plan_bundle(plan: WholeVideoDetectionCohortPlan) -> dict[str, ob
                 f"Run root has mismatched LSF plan evidence: {lsf_path}"
             )
         return existing
-    for name in ("logs", "status", "targets"):
+    for name in ("logs", "status", "targets", "native_detection", "registry_backups"):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
     write_json_snapshot(plan_path, payload)
     write_json_snapshot(lsf_path, plan.lsf_workflow.to_json())

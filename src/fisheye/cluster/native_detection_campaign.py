@@ -1,4 +1,4 @@
-"""Plan and submit selector-ineligible native canonical detection campaigns."""
+"""Plan and submit artifact-first canonical-v3 detection campaigns."""
 
 from __future__ import annotations
 
@@ -24,16 +24,19 @@ from fisheye.cluster.keypoints.common import (
 from fisheye.cluster.lsf import (
     CommandRunner,
     LsfWorkflow,
+    LsfResources,
+    LsfWorkflowFragment,
     build_ssh_bsub_runner,
+    compose_lsf_workflow,
     submit_lsf_workflow,
     write_json_snapshot,
 )
+from fisheye.cluster.clipped_lsf import build_job
 from fisheye.cluster.native_detection import (
     NativeDetectionClipSpec,
     NativeDetectionFragmentInputs,
     NativeDetectionModelSpec,
     build_native_detection_fragment,
-    compose_native_detection_workflow,
 )
 from fisheye.cluster.native_detection_authority import (
     load_native_archive_authority,
@@ -75,8 +78,8 @@ class NativeDetectionCampaignPlan:
             "target_count": len(self.targets),
             "targets": [dict(item) for item in self.target_plans],
             "model_bindings": [item.to_json() for item in self.model_bindings],
-            "selector_activation": "deferred",
-            "registry_update": False,
+            "selector_activation": "atomic_after_canonical_v3_validation",
+            "registry_update": "serial_safe_shadow_reconciliation",
             "lsf_workflow": self.workflow.to_json(),
         }
 
@@ -252,10 +255,66 @@ def build_plan(
             }
         )
 
-    workflow = compose_native_detection_workflow(
+    registry_result = resolved_run_root / "registry_refresh.json"
+    registry_backup = (
+        resolved_run_root
+        / "registry_backups"
+        / f"palette_registry_before_{workflow_id}.sqlite"
+    )
+    registry_key = f"registry_reconcile:{workflow_id}"
+    registry_job = build_job(
         workflow_id=workflow_id,
         family=FAMILY,
-        modules=tuple(modules),
+        repo=resolved_repo,
+        run_root=resolved_run_root,
+        job_key=registry_key,
+        stage="registry_reconcile",
+        command=(
+            "scripts/py",
+            "-m",
+            "fisheye.utils.registry_rescan",
+            "--registry",
+            str(resolved_registry),
+            "--result-json",
+            str(registry_result),
+            "--fail-on-error",
+            "--reconcile-step-status",
+            "--safe-shadow-publish",
+            "--backup-path",
+            str(registry_backup),
+            *(str(target.analysis_zarr) for target in targets),
+        ),
+        resources=LsfResources(
+            queue="short", ncores=1, mem_gb=8, walltime="1:00", span_hosts=1
+        ),
+        upstream=tuple(module.outputs.terminal_job_key for module in modules),
+        expected_outputs=(registry_result, registry_backup),
+    )
+    registry_fragment = LsfWorkflowFragment(
+        fragment_id=f"registry_reconcile:{workflow_id}",
+        jobs=(registry_job,),
+        requires=tuple(module.outputs.artifact_key for module in modules),
+        provides=(f"registry_reconciled:{workflow_id}",),
+        metadata={
+            "module": "serial_registry_reconciliation",
+            "target_count": len(targets),
+            "safe_shadow_publish": True,
+        },
+    )
+    workflow = compose_lsf_workflow(
+        workflow_id=workflow_id,
+        family=FAMILY,
+        fragments=(
+            *(module.fragment for module in modules),
+            registry_fragment,
+        ),
+        metadata={
+            "workflow_scope": "native_canonical_detection",
+            "target_count": len(modules),
+            "selector_activation": "atomic_after_canonical_v3_validation",
+            "registry_update": "serial_safe_shadow_reconciliation",
+            "outputs": [module.outputs.to_json() for module in modules],
+        },
     )
     return NativeDetectionCampaignPlan(
         run_label=label,
@@ -283,7 +342,14 @@ def materialize_plan_bundle(plan: NativeDetectionCampaignPlan) -> dict[str, Any]
         if not lsf_path.is_file() or _read_strict_json(lsf_path) != plan.workflow.to_json():
             raise FileExistsError(f"Run root has mismatched LSF evidence: {lsf_path}")
         return existing
-    for name in ("logs", "status", "progress", "targets", "native_detection"):
+    for name in (
+        "logs",
+        "status",
+        "progress",
+        "targets",
+        "native_detection",
+        "registry_backups",
+    ):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
     for target, detection_plan in zip(
         plan.target_plans,
