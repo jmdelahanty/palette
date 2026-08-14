@@ -88,10 +88,7 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         id="arena_geometry_offline_fit",
         depends_on=("raw",),
         invalidates=("arena_geometry_comparison",),
-        artifact_families=(
-            "analysis/arena_geometry_fit_runs",
-            "analysis/arena_geometry_runs",
-        ),
+        artifact_families=("analysis/arena_geometry_fit_runs",),
         category=RECORDING_METADATA,
         description="Independent early/middle/late recording-image rim-fit evidence.",
     ),
