@@ -471,7 +471,10 @@ def test_materialize_byte_planned_tail_candidate_never_updates_selectors(
     _patch_provenance(monkeypatch)
     source = tmp_path / "source.zarr"
     scratch = tmp_path / "scratch"
-    _build_source_zarr(source, row_count=20_000)
+    # Candidate planning is selected by the explicit storage profile, not a
+    # data-volume threshold. Nine rows retain the complete scientific and
+    # publication proof without creating thousands of two-row source chunks.
+    _build_source_zarr(source, row_count=9)
     source_root = zarr.open_group(str(source), mode="a", use_consolidated=False)
     shape = source_root["analysis/subject_shape_runs/shape_001"]
     frames = np.asarray(shape["source_acquisition_frame_index"][:], dtype=np.int64)
@@ -516,7 +519,7 @@ def test_materialize_byte_planned_tail_candidate_never_updates_selectors(
     consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
     consolidated_run = consolidated["analysis/tail_kinematics_runs/tail_candidate"]
     assert consolidated_run.attrs["stage_selector_eligible"] is False
-    assert np.asarray(consolidated_run["tail_angle_rad"][:]).shape == (20_000, 10)
+    assert np.asarray(consolidated_run["tail_angle_rad"][:]).shape == (9, 10)
 
 
 def test_typed_candidate_executes_all_phases_and_supports_owned_tombstone(

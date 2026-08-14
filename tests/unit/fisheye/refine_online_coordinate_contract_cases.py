@@ -1,8 +1,13 @@
+"""Shared refine-online contract cases collected by independent test modules."""
+
 from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime as RealDatetime
 from io import StringIO
+from pathlib import Path
+import shutil
+import tempfile
 
 import numpy as np
 import pytest
@@ -56,6 +61,42 @@ def _run_refinement(root: zarr.Group, *, chaser_index: int = 0) -> tuple[str, za
         created_at_utc="2026-07-19T12:00:00+00:00",
     )
     return run_name, root[mod.REFINED_ONLINE_GROUP][run_name]
+
+
+_COMPLETED_REFINEMENT_TEMPLATE: Path | None = None
+_COMPLETED_REFINEMENT_FIXTURE_DIRS: list[tempfile.TemporaryDirectory[str]] = []
+
+
+def _completed_refinement_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[zarr.Group, zarr.Group]:
+    """Clone one real completed publication for isolated reader-tamper proofs."""
+
+    global _COMPLETED_REFINEMENT_TEMPLATE
+    if _COMPLETED_REFINEMENT_TEMPLATE is None:
+        template_root, _ = _canonical_fixture(monkeypatch)
+        _run_refinement(template_root)
+        template_dir = tempfile.TemporaryDirectory(
+            prefix="palette_refine_online_completed_template_"
+        )
+        _COMPLETED_REFINEMENT_FIXTURE_DIRS.append(template_dir)
+        template_path = Path(template_dir.name) / "analysis.zarr"
+        shutil.copytree(Path(template_root.store.root), template_path)
+        _COMPLETED_REFINEMENT_TEMPLATE = template_path
+
+    clone_dir = tempfile.TemporaryDirectory(
+        prefix="palette_refine_online_completed_clone_"
+    )
+    _COMPLETED_REFINEMENT_FIXTURE_DIRS.append(clone_dir)
+    clone_path = Path(clone_dir.name) / "analysis.zarr"
+    shutil.copytree(_COMPLETED_REFINEMENT_TEMPLATE, clone_path)
+    root = zarr.open_group(str(clone_path), mode="a", use_consolidated=False)
+    monkeypatch.setattr(mod.zarr, "open", lambda *args, **kwargs: root)
+    monkeypatch.setattr(mod, "get_git_info", lambda: {})
+    monkeypatch.setattr(mod, "get_environment_info", lambda: {"platform": {}})
+    parent = root[mod.REFINED_ONLINE_GROUP]
+    run_name = parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR]
+    return root, parent[run_name]
 
 
 def _replace_descriptor(node: zarr.Array, payload: dict[str, object]) -> None:
@@ -335,8 +376,7 @@ def test_refinement_publishes_stimulus_identity_temporal_authority_and_v2_surfac
 def test_completion_rejects_identity_acquisition_and_surface_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _ = _canonical_fixture(monkeypatch)
-    _, run = _run_refinement(root)
+    root, run = _completed_refinement_fixture(monkeypatch)
 
     original_key = np.asarray(run[STIMULUS_STATE_KEY_ARRAY_REF][:]).copy()
     run[STIMULUS_STATE_KEY_ARRAY_REF][0] = 999
@@ -367,8 +407,7 @@ def test_completion_rejects_identity_acquisition_and_surface_drift(
 def test_completion_rejects_wrong_transform_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _ = _canonical_fixture(monkeypatch)
-    _, run = _run_refinement(root)
+    root, run = _completed_refinement_fixture(monkeypatch)
     node = run["filtered/positions_px"]
     payload = deepcopy(node.attrs[COORDINATE_DESCRIPTOR_ATTR])
     overlay = payload["source_camera_overlay"]
@@ -387,8 +426,7 @@ def test_completion_rejects_missing_lineage_or_unsupported_space(
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
 ) -> None:
-    root, _ = _canonical_fixture(monkeypatch)
-    _, run = _run_refinement(root)
+    root, run = _completed_refinement_fixture(monkeypatch)
     node = run["filtered/positions_px"]
     payload = deepcopy(node.attrs[COORDINATE_DESCRIPTOR_ATTR])
     if mutation == "missing_lineage":
@@ -458,8 +496,7 @@ def test_failed_fresh_complete_load_rolls_back_run_and_all_selectors(
 def test_public_coordinate_loaders_cannot_read_staging_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _ = _canonical_fixture(monkeypatch)
-    _, run = _run_refinement(root)
+    root, run = _completed_refinement_fixture(monkeypatch)
 
     with pytest.raises(TypeError, match="require_complete"):
         mod.load_bound_refined_online_coordinate_evidence(
@@ -669,8 +706,7 @@ def test_source_authority_tamper_fails_before_output_creation(
 def test_completion_rejects_processing_lineage_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _ = _canonical_fixture(monkeypatch)
-    _, run = _run_refinement(root)
+    root, run = _completed_refinement_fixture(monkeypatch)
 
     processing = deepcopy(run.attrs[mod.PROCESSING_RECORD_ATTR])
     processing["parameters"]["max_gap"] += 1
@@ -684,3 +720,14 @@ def test_completion_rejects_processing_lineage_drift(
         match="processing record is stale or inconsistent",
     ):
         mod.load_bound_refined_online_coordinate_evidence(root, run)
+
+
+def test_completed_refinement_fixture_clones_are_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, first = _completed_refinement_fixture(monkeypatch)
+    first.attrs["clone_isolation_sentinel"] = "first"
+
+    _, second = _completed_refinement_fixture(monkeypatch)
+
+    assert "clone_isolation_sentinel" not in second.attrs

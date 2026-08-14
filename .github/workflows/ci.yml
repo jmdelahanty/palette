@@ -163,8 +163,8 @@ jobs:
           fi
 
       - name: Restore canonical subject-shape source fixture
-        if: steps.subject-shape-fixture-owner.outputs.selected == 'true'
-        uses: actions/cache@v4
+        id: subject-shape-fixture-cache
+        uses: actions/cache/restore@v4
         with:
           path: .pytest_cache/palette-subject-shape-fixture
           key: palette-subject-shape-fixture-v1-${{ runner.os }}-${{ github.sha }}
@@ -195,7 +195,40 @@ jobs:
 
       - name: Run non-GPU test shard
         run: |
+          mkdir -p .ci-results
           python scripts/ci_pytest_shard.py \
             --shard-index "${{ matrix.shard }}" \
             --shard-count 12 \
-            -- -q -m "not gpu" --durations=25 --durations-min=1.0
+            -- -q -m "not gpu" --durations=25 --durations-min=1.0 \
+            -o junit_family=legacy \
+            -o junit_duration_report=total \
+            --junitxml=".ci-results/pytest-shard-${{ matrix.shard }}.xml"
+
+      - name: Summarize per-file pytest durations
+        if: always()
+        run: |
+          if test -f ".ci-results/pytest-shard-${{ matrix.shard }}.xml"; then
+            python scripts/ci_pytest_junit_summary.py \
+              --junitxml ".ci-results/pytest-shard-${{ matrix.shard }}.xml" \
+              --shard-index "${{ matrix.shard }}" \
+              --output ".ci-results/pytest-shard-${{ matrix.shard }}.json"
+          fi
+
+      - name: Upload pytest duration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-duration-shard-${{ matrix.shard }}
+          path: .ci-results/pytest-shard-${{ matrix.shard }}.*
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Save canonical subject-shape source fixture
+        if: >-
+          ${{ success()
+              && steps.subject-shape-fixture-owner.outputs.selected == 'true'
+              && steps.subject-shape-fixture-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .pytest_cache/palette-subject-shape-fixture
+          key: palette-subject-shape-fixture-v1-${{ runner.os }}-${{ github.sha }}

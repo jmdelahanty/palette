@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from scripts.ci_pytest_shard import (
+    HISTORICAL_TEST_FILE_COST_OVERRIDES,
     PROOF_HEAVY_TEST_COST_MULTIPLIER,
     PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES,
     REPOSITORY_ROOT,
@@ -79,10 +80,30 @@ def test_measured_long_suites_are_separate_in_current_twelve_shard_assignment() 
         for shard_index, shard in enumerate(shards)
         for path in shard
         if path.name in PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES
+        or path.relative_to(REPOSITORY_ROOT).as_posix()
+        in HISTORICAL_TEST_FILE_COST_OVERRIDES
     }
 
-    assert owners.keys() == PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES.keys()
+    expected_names = set(PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES)
+    expected_names.update(
+        Path(path).name for path in HISTORICAL_TEST_FILE_COST_OVERRIDES
+    )
+    assert owners.keys() == expected_names
     assert len(set(owners.values())) == len(owners)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_cost"),
+    sorted(HISTORICAL_TEST_FILE_COST_OVERRIDES.items()),
+)
+def test_historical_runtime_override_uses_repository_relative_path(
+    relative_path: str,
+    expected_cost: int,
+) -> None:
+    test_file = REPOSITORY_ROOT / relative_path
+
+    assert test_file.is_file()
+    assert estimated_test_file_cost(test_file) == expected_cost
 
 
 def test_proof_heavy_files_are_distributed_before_ordinary_fill(tmp_path: Path) -> None:

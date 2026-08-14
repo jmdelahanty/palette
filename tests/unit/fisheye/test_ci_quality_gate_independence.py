@@ -68,3 +68,31 @@ def test_each_quality_gate_command_has_exactly_one_job_owner() -> None:
             if command in _run_commands(job)
         ]
         assert owners == [expected_owner]
+
+
+def test_test_shards_publish_complete_file_timing_evidence() -> None:
+    steps = _ci_jobs()["tests"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+
+    run_command = str(by_name["Run non-GPU test shard"]["run"])
+    assert "--junitxml=" in run_command
+    assert "junit_family=legacy" in run_command
+    assert "junit_duration_report=total" in run_command
+    assert "ci_pytest_junit_summary.py" in str(
+        by_name["Summarize per-file pytest durations"]["run"]
+    )
+    upload = by_name["Upload pytest duration evidence"]
+    assert upload["uses"] == "actions/upload-artifact@v4"
+    assert upload["if"] == "always()"
+
+
+def test_subject_shape_fixture_restores_for_all_shards_but_has_one_writer() -> None:
+    steps = _ci_jobs()["tests"]["steps"]
+    by_name = {step.get("name"): step for step in steps}
+
+    restore = by_name["Restore canonical subject-shape source fixture"]
+    assert restore["uses"] == "actions/cache/restore@v4"
+    assert "if" not in restore
+    save = by_name["Save canonical subject-shape source fixture"]
+    assert save["uses"] == "actions/cache/save@v4"
+    assert "subject-shape-fixture-owner.outputs.selected == 'true'" in save["if"]
