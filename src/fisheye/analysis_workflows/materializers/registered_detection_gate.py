@@ -166,17 +166,6 @@ def _source_dimensions(
                 "Canonical detection manifest instance count differs from its "
                 "persisted table."
             )
-        for label, declared, canonical in (
-            ("width", width_value, dimensions.source_width),
-            ("height", height_value, dimensions.source_height),
-            ("frame count", frame_count_value, dimensions.n_frames),
-        ):
-            if declared is not None and _positive_int(
-                declared, label=f"detection source {label}"
-            ) != int(canonical):
-                raise ValueError(
-                    f"Detection source {label} disagrees with its canonical manifest."
-                )
         width_value = dimensions.source_width
         height_value = dimensions.source_height
         frame_count_value = dimensions.n_frames

@@ -12,6 +12,7 @@ from fisheye.analysis_workflows.materializers import arena_geometry_candidates
 from fisheye.analysis_workflows.materializers import arena_geometry_comparison as comparison
 from fisheye.analysis_workflows.materializers import arena_geometry_selection as selection
 from fisheye.shared.json_safety import strict_json_dumps
+from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
 from fisheye.shared.zarr_io import open_zarr_root
 from tests.unit.fisheye.test_arena_geometry_candidates import (
     _bound_mask,
@@ -216,6 +217,49 @@ def test_unresolved_comparison_preserves_semantics_and_blocks_automatic_selectio
     assert operational["status"] == "measured"
     assert operational["row_count"] == 3
     assert operational["additional_palette_tolerance_px"] == 0.0
+
+
+def test_comparison_uses_canonical_manifest_extent_over_legacy_attrs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, acquisition, palette = _archive_with_candidates(tmp_path, monkeypatch)
+    detect_source = _write_nested_detection_source(archive)
+    root = open_zarr_root(archive, mode="a")
+    source = root[detect_source]
+    source.attrs["source_video_width"] = 64
+    source.attrs["source_video_height"] = 48
+    source.attrs["run_manifest"] = {
+        "schema_id": "palette.canonical_detection.run_manifest",
+        "payload_digest": "f" * 64,
+    }
+    del source["instances/bbox_norm_coords"].attrs["coordinate_descriptor"]
+    monkeypatch.setattr(
+        comparison,
+        "canonical_detection_dimensions_from_manifest",
+        lambda _manifest: CanonicalDetectionDimensions(
+            n_frames=3,
+            n_instances=3,
+            source_width=640,
+            source_height=480,
+        ),
+    )
+
+    plan = comparison.build_arena_geometry_comparison_plan(
+        archive,
+        acquisition_candidate_run=acquisition,
+        palette_candidate_run=palette,
+        semantic_compatibility="projected_edges_unresolved",
+        policy_id=comparison.MANUAL_REVIEW_POLICY_ID,
+        detect_source_group_path=detect_source,
+    )
+
+    signature = plan.comparison_record["operational_gate_disagreement"][
+        "source_signature_payload"
+    ]
+    assert signature["source_video_width"] == 640
+    assert signature["source_video_height"] == 480
+    assert signature["canonical_run_manifest_payload_digest"] == "f" * 64
 
 
 def test_comparison_normalizes_equivalent_observation_digest_encodings(

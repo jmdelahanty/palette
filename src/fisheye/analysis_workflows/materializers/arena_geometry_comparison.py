@@ -38,6 +38,10 @@ from fisheye.shared.run_provenance import (
     build_writer_run_provenance,
     validate_run_provenance,
 )
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID,
+    canonical_detection_dimensions_from_manifest,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -261,19 +265,46 @@ def _detection_snapshot(
         raise ValueError("Detection source instance_key values are not unique.")
     width_px = int(coordinate_binding["native_width_px"])
     height_px = int(coordinate_binding["native_height_px"])
-    observed_width = int(attrs.get("source_video_width") or attrs.get("width") or 0)
-    observed_height = int(attrs.get("source_video_height") or attrs.get("height") or 0)
+    manifest = attrs.get("run_manifest")
+    manifest_digest: str | None = None
+    if (
+        isinstance(manifest, Mapping)
+        and manifest.get("schema_id") == CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID
+    ):
+        dimensions = canonical_detection_dimensions_from_manifest(manifest)
+        if int(dimensions.n_instances) != len(keys):
+            raise ValueError(
+                "Canonical detection manifest instance count differs from its "
+                "persisted table."
+            )
+        observed_width = int(dimensions.source_width)
+        observed_height = int(dimensions.source_height)
+        manifest_digest = _sha256_hex(
+            manifest.get("payload_digest"),
+            label="canonical detection manifest payload digest",
+        )
+    else:
+        observed_width = int(attrs.get("source_video_width") or attrs.get("width") or 0)
+        observed_height = int(
+            attrs.get("source_video_height") or attrs.get("height") or 0
+        )
     if (observed_width, observed_height) != (width_px, height_px):
         raise ValueError(
             "Detection source and geometry comparison native extents disagree."
         )
     descriptor = table["bbox_norm_coords"].attrs.get("coordinate_descriptor")
-    if not isinstance(descriptor, Mapping) or (
-        descriptor.get("geometry_type") != "bbox_cxcywh"
-        or tuple(descriptor.get("component_units") or ()) != ("normalized",) * 4
-    ):
+    if descriptor is not None:
+        if not isinstance(descriptor, Mapping) or (
+            descriptor.get("geometry_type") != "bbox_cxcywh"
+            or tuple(descriptor.get("component_units") or ()) != ("normalized",) * 4
+        ):
+            raise ValueError(
+                "Detection source bbox_norm_coords coordinate descriptor is "
+                "incompatible."
+            )
+    elif manifest_digest is None:
         raise ValueError(
-            "Detection source bbox_norm_coords coordinate descriptor is incompatible."
+            "Detection source bbox_norm_coords lacks coordinate authority."
         )
     pixel_authority = resolve_detection_source_pixel_authority(attrs)
     expected_authority = {
@@ -295,11 +326,13 @@ def _detection_snapshot(
         "instance_key_sha256": _array_digest(keys),
         "frame_indices_sha256": _array_digest(frames),
         "bbox_norm_coords_sha256": _array_digest(boxes),
-        "source_video_width": attrs.get("source_video_width") or attrs.get("width"),
-        "source_video_height": attrs.get("source_video_height") or attrs.get("height"),
+        "source_video_width": observed_width,
+        "source_video_height": observed_height,
         "source_pixel_authority": expected_authority,
         "run_provenance": attrs.get("run_provenance"),
     }
+    if manifest_digest is not None:
+        signature_payload["canonical_run_manifest_payload_digest"] = manifest_digest
     return {
         "group_path": path,
         "row_count": len(keys),

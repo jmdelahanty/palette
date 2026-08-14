@@ -283,8 +283,9 @@ def test_gate_reads_extent_from_canonical_detection_manifest(
     source_path = _write_detection_source(archive)
     root = open_zarr_root(archive, mode="a")
     source = root[source_path]
-    for name in ("source_video_width", "source_video_height", "num_frames"):
-        del source.attrs[name]
+    source.attrs["source_video_width"] = 64
+    source.attrs["source_video_height"] = 48
+    source.attrs["num_frames"] = 1
     del source["bbox_norm_coords"].attrs["coordinate_descriptor"]
     source.attrs["run_manifest"] = {
         "payload_digest": "f" * 64,
