@@ -3,8 +3,8 @@
 This is the pre-review workflow only.  Each target publishes its immutable
 acquisition candidate and independently generates a blind keyframe-only
 Palette fit/reveal package.  The campaign stops before reviewed-candidate
-publication, comparison, operational selection, detection gating, or registry
-mutation.
+publication, comparison, operational selection, or detection gating.  A final
+serialized job refreshes registry projections from the immutable Zarr results.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from fisheye.cluster.keypoints.common import (
 )
 from fisheye.cluster.lsf import (
     CommandRunner,
+    LsfResources,
     LsfWorkflow,
     build_ssh_bsub_runner,
     submit_lsf_workflow,
@@ -243,9 +244,7 @@ def load_target_manifest(path: Path) -> tuple[ArenaGeometryTarget, ...]:
                 acquisition_observation_path=(
                     Path(str(observation)) if observation else None
                 ),
-                geometry_source=str(
-                    row.get("geometry_source") or "recovery-receipt"
-                ),
+                geometry_source=str(row.get("geometry_source") or "recovery-receipt"),
                 geometry_camera_serial=(
                     str(row.get("geometry_camera_serial"))
                     if row.get("geometry_camera_serial") is not None
@@ -295,6 +294,7 @@ class ArenaGeometryCampaignPlan:
     repo_commit: str
     registry: Path
     run_root: Path
+    probe_queue: str
     targets: tuple[ArenaGeometryTarget, ...]
     module: ArenaGeometryReviewArrayWorkflowModule
     workflow: LsfWorkflow
@@ -308,6 +308,7 @@ class ArenaGeometryCampaignPlan:
             "repo_commit": self.repo_commit,
             "registry": str(self.registry),
             "run_root": str(self.run_root),
+            "probe_queue": self.probe_queue,
             "target_count": len(self.targets),
             "targets": [
                 {**target.to_json(), "outputs": output.to_json()}
@@ -321,7 +322,7 @@ class ArenaGeometryCampaignPlan:
             "candidate_comparison": "not_scheduled",
             "operational_selection": "not_scheduled",
             "detection_gating": "not_scheduled",
-            "registry_update": False,
+            "registry_update": True,
             "lsf_workflow": self.workflow.to_json(),
         }
 
@@ -335,6 +336,7 @@ def build_plan(
     run_root: Path,
     acquisition_array_concurrency: int = 8,
     probe_array_concurrency: int = 4,
+    probe_queue: str = "gpu_l4",
 ) -> ArenaGeometryCampaignPlan:
     if not targets:
         raise ValueError("Arena-geometry campaign requires at least one target.")
@@ -343,6 +345,9 @@ def build_plan(
     resolved_repo = repo.expanduser().resolve()
     resolved_registry = registry_path.expanduser().resolve()
     resolved_run_root = run_root.expanduser().resolve()
+    queue = str(probe_queue).strip()
+    if queue not in {"gpu_l4", "gpu_t4"}:
+        raise ValueError("Geometry probe queue must be gpu_l4 or gpu_t4.")
     commit = _repo_commit(resolved_repo)
     fragment_inputs: list[ArenaGeometryReviewFragmentInputs] = []
     for target in targets:
@@ -370,6 +375,15 @@ def build_plan(
                 ),
                 repo=resolved_repo,
                 run_root=resolved_run_root,
+                registry_path=resolved_registry,
+                probe_resources=LsfResources(
+                    queue=queue,
+                    ncores=8,
+                    mem_gb=32,
+                    gpus=1,
+                    walltime="1:00",
+                    span_hosts=1,
+                ),
             )
         )
     module = build_arena_geometry_review_array_fragment(
@@ -388,6 +402,7 @@ def build_plan(
         repo_commit=commit,
         registry=resolved_registry,
         run_root=resolved_run_root,
+        probe_queue=queue,
         targets=tuple(targets),
         module=module,
         workflow=workflow,
@@ -443,6 +458,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--acquisition-array-concurrency", type=int, default=8)
     parser.add_argument("--probe-array-concurrency", type=int, default=4)
     parser.add_argument(
+        "--probe-queue",
+        choices=("gpu_l4", "gpu_t4"),
+        default="gpu_l4",
+    )
+    parser.add_argument(
         "--submit-host",
         default=os.environ.get("PALETTE_LSF_SUBMIT_HOST", DEFAULT_SUBMIT_HOST),
     )
@@ -464,6 +484,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=args.run_root,
         acquisition_array_concurrency=args.acquisition_array_concurrency,
         probe_array_concurrency=args.probe_array_concurrency,
+        probe_queue=args.probe_queue,
     )
     result = (
         apply_plan(plan, runner=build_ssh_bsub_runner(args.submit_host))
@@ -480,11 +501,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "target_count": len(plan.targets),
         "job_count": len(plan.workflow.jobs),
         "execution_mode": "lsf_arrays",
+        "probe_queue": plan.probe_queue,
         "human_review_barrier": True,
         "post_review_publication": "not_scheduled",
         "operational_selection": "not_scheduled",
         "detection_gating": "not_scheduled",
-        "registry_update": False,
+        "registry_update": True,
         "result": result if args.apply else None,
     }
     if args.json:

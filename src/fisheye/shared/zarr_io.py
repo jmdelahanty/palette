@@ -14,8 +14,10 @@ _ZARR_V2_METADATA_NAMES = (".zarray", ".zattrs", ".zgroup", ".zmetadata")
 def open_zarr_root(
     zarr_path: PathLike,
     mode: str = "r",
+    *,
+    use_consolidated: bool | None = False,
 ) -> zarr.Group:
-    """Open a Palette Zarr-v3 archive without stale consolidated metadata.
+    """Open a Palette Zarr-v3 archive with an explicit metadata lifecycle mode.
 
     Parameters
     ----------
@@ -23,6 +25,11 @@ def open_zarr_root(
         Filesystem path to the `.zarr` directory.
     mode:
         Access mode passed through to Zarr (default "r").
+    use_consolidated:
+        Metadata mode passed through to Zarr. Mutable/archive-writer callers use
+        the historical default ``False``. Readers of selector-visible immutable
+        publications must pass ``True`` so missing or stale consolidated
+        metadata fails closed instead of being silently bypassed.
     """
     zarr_path = Path(zarr_path)
     v2_metadata = [
@@ -37,7 +44,7 @@ def open_zarr_root(
         str(zarr_path),
         mode=mode,
         zarr_format=3,
-        use_consolidated=False,
+        use_consolidated=use_consolidated,
     )
     try:
         setattr(group, "_palette_fs_path", str(zarr_path.expanduser().resolve()))

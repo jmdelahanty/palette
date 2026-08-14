@@ -33,6 +33,25 @@ fail() {
   exit 1
 }
 
+validate_registry() {
+  local label="$1"
+  local path="$2"
+  local integrity
+  local foreign_keys
+  integrity="$(sqlite3 -readonly "$path" "PRAGMA integrity_check;" 2>&1)" || {
+    fail "$label integrity_check failed: $integrity"
+  }
+  if [[ "$integrity" != "ok" ]]; then
+    fail "$label integrity_check returned: $integrity"
+  fi
+  foreign_keys="$(sqlite3 -readonly "$path" "PRAGMA foreign_key_check;" 2>&1)" || {
+    fail "$label foreign_key_check failed: $foreign_keys"
+  }
+  if [[ -n "$foreign_keys" ]]; then
+    fail "$label foreign_key_check returned: $foreign_keys"
+  fi
+}
+
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 BACKUP_DIR="${PALETTE_REGISTRY_BACKUP_DIR:-/groups/ahrens/ahrenslab/jeremy/zebrobot/backups}"
 DAYS_TO_KEEP="${PALETTE_REGISTRY_BACKUP_DAYS_TO_KEEP:-7}"
@@ -79,12 +98,7 @@ if [[ ! -s "$REGISTRY" ]]; then
   fail "Registry is empty: $REGISTRY"
 fi
 
-SOURCE_CHECK="$(sqlite3 "$REGISTRY" "PRAGMA quick_check;" 2>&1)" || {
-  fail "Source registry quick_check failed: $SOURCE_CHECK"
-}
-if [[ "$SOURCE_CHECK" != "ok" ]]; then
-  fail "Source registry quick_check returned: $SOURCE_CHECK"
-fi
+validate_registry "Source registry" "$REGISTRY"
 
 mkdir -p "$BACKUP_DIR"
 
@@ -109,18 +123,13 @@ if [[ ! -s "$TMP_BACKUP" ]]; then
   fail "Backup file is missing or empty: $TMP_BACKUP"
 fi
 
-BACKUP_CHECK="$(sqlite3 "$TMP_BACKUP" "PRAGMA quick_check;" 2>&1)" || {
-  fail "Backup quick_check failed: $BACKUP_CHECK"
-}
-if [[ "$BACKUP_CHECK" != "ok" ]]; then
-  fail "Backup quick_check returned: $BACKUP_CHECK"
-fi
+validate_registry "Backup" "$TMP_BACKUP"
 
 mv "$TMP_BACKUP" "$BACKUP_FILE"
 trap - EXIT
 
 BACKUP_SIZE="$(du -h "$BACKUP_FILE" | cut -f1)"
-log "Backup successful - $BACKUP_FILE ($BACKUP_SIZE) via sqlite3 backup"
+log "Backup successful - $BACKUP_FILE ($BACKUP_SIZE) via sqlite3 backup; full integrity and foreign keys verified"
 
 DELETED_COUNT=0
 while IFS= read -r old_backup; do

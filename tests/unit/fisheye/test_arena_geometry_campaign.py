@@ -32,6 +32,18 @@ def _target_files(tmp_path: Path) -> dict[str, Path]:
     for path in files.values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n")
+    files["summary"].write_text(
+        json.dumps(
+            {
+                "frames_received": 100,
+                "fps": 100.0,
+                "video_metadata": {
+                    "camera_serial": "1",
+                    "geometry": {"source_width": 640, "source_height": 480},
+                },
+            }
+        )
+    )
     return {"recording": recording, "analysis": analysis, **files}
 
 
@@ -156,21 +168,40 @@ def test_campaign_plan_freezes_exact_sources_and_stops_before_review(
             ),
         ),
     )
+    registry = tmp_path / "registry.sqlite"
+    registry.write_bytes(b"sqlite-fixture")
 
     plan = build_plan(
         targets=load_target_manifest(manifest),
         run_label="canary",
         repo=repo,
-        registry_path=tmp_path / "registry.sqlite",
+        registry_path=registry,
         run_root=tmp_path / "run",
+        probe_array_concurrency=1,
+        probe_queue="gpu_t4",
     )
 
     assert plan.repo_commit == "a" * 40
-    assert len(plan.workflow.jobs) == 2
+    assert len(plan.workflow.jobs) == 3
     assert plan.to_json()["post_review_publication"] == "not_scheduled"
     assert plan.to_json()["operational_selection"] == "not_scheduled"
     assert plan.to_json()["detection_gating"] == "not_scheduled"
+    assert plan.to_json()["probe_queue"] == "gpu_t4"
+    assert plan.workflow.jobs[1].resources.queue == "gpu_t4"
+    assert plan.workflow.jobs[1].execution_group.max_concurrent == 1
     acquisition_task = plan.workflow.jobs[0].execution_group.tasks[0]
     acquisition_command = " ".join(acquisition_task.command)
     assert f"--analysis-zarr {paths['analysis']}" in acquisition_command
     assert "publish_arena_geometry_selection" not in acquisition_command
+    registry_job = plan.workflow.jobs[2]
+    registry_command = " ".join(registry_job.command)
+    assert registry_job.dependency is not None
+    assert registry_job.dependency.upstream_job_keys == (
+        "arena_geometry_acquisition_array",
+        "arena_geometry_probe_array",
+    )
+    assert "fisheye.utils.registry_rescan" in registry_command
+    assert "--fail-on-error" in registry_command
+    assert "--reconcile-step-status" in registry_command
+    assert str(paths["analysis"]) in registry_command
+    assert plan.to_json()["registry_update"] is True

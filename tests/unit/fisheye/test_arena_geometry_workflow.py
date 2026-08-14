@@ -43,6 +43,18 @@ def _fixture_paths(tmp_path: Path) -> dict[str, Path]:
     for path in files.values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n")
+    files["summary"].write_text(
+        json.dumps(
+            {
+                "frames_received": 100,
+                "fps": 100.0,
+                "video_metadata": {
+                    "camera_serial": "1",
+                    "geometry": {"source_width": 640, "source_height": 480},
+                },
+            }
+        )
+    )
     return {"recording": recording, "analysis": analysis, "repo": repo, **files}
 
 
@@ -85,6 +97,7 @@ def test_pre_review_fragment_is_recording_level_and_stops_before_selection(
     assert f"--analysis-zarr {paths['analysis']}" in acquisition_command
     probe_command = " ".join(probe.command)
     assert "probe_recording_dish_rim_fit" in probe_command
+    assert "publish_arena_geometry_fit_review" in probe_command
     assert f"--keyframes {paths['keyframes']}" in probe_command
     assert "--acquisition-observation" in probe_command
     assert "publish_reviewed_palette_geometry_candidate" not in probe_command
@@ -97,6 +110,12 @@ def test_pre_review_fragment_is_recording_level_and_stops_before_selection(
     assert module.fragment.metadata["selection_activation"] == "deferred"
     assert module.fragment.metadata["registry_update"] is False
     assert module.outputs.review_receipt_path.name == "review_package.json"
+    assert module.outputs.fit_review_import_receipt_path.name == (
+        "fit_review_import.json"
+    )
+    assert module.outputs.to_json()["review_evidence_storage"] == (
+        "analysis_zarr_embedded"
+    )
 
     workflow = compose_arena_geometry_workflow(
         workflow_id="geometry_canary", modules=(module,)
@@ -215,6 +234,20 @@ def test_direct_review_fragment_rejects_source_outside_recording(
         )
 
 
+def test_direct_review_fragment_rejects_malformed_summary_before_submit(
+    tmp_path: Path,
+) -> None:
+    paths = _fixture_paths(tmp_path)
+    paths["summary"].write_text("frame,timestamp\n0,0.0\n")
+
+    with pytest.raises(ValueError, match="summary is not a JSON object"):
+        ArenaGeometryProbeSource(
+            video_path=paths["video"],
+            summary_path=paths["summary"],
+            keyframe_path=paths["keyframes"],
+        )
+
+
 def test_direct_review_fragment_rejects_clip_as_recording_geometry_source(
     tmp_path: Path,
 ) -> None:
@@ -223,9 +256,10 @@ def test_direct_review_fragment_rejects_clip_as_recording_geometry_source(
     clip_video = clip_dir / paths["video"].name
     clip_summary = clip_dir / paths["summary"].name
     clip_keyframes = clip_dir / paths["keyframes"].name
-    for path in (clip_video, clip_summary, clip_keyframes):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"source")
+    clip_video.parent.mkdir(parents=True, exist_ok=True)
+    clip_video.write_bytes(b"source")
+    clip_summary.write_bytes(paths["summary"].read_bytes())
+    clip_keyframes.write_bytes(paths["keyframes"].read_bytes())
 
     with pytest.raises(ValueError, match="recording-level video"):
         ArenaGeometryReviewFragmentInputs(
@@ -333,3 +367,45 @@ def test_post_review_publication_remains_pointerless_and_separate(
     assert module.fragment.metadata["selection_activation"] == "deferred"
     assert module.fragment.metadata["detection_gate_applied"] is False
     assert module.fragment.metadata["registry_update"] is False
+
+
+def test_post_review_publication_prefers_embedded_fit_review_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture_paths(tmp_path)
+    candidate_path = paths["analysis"] / "analysis" / "arena_geometry_runs" / "p"
+    monkeypatch.setattr(
+        arena_geometry_review,
+        "plan_reviewed_palette_geometry_candidate",
+        lambda **kwargs: SimpleNamespace(
+            candidate_id=(
+                "arena-geometry-palette-p"
+                if kwargs["fit_review_run"] == "arena-geometry-fit-review-a"
+                else "wrong"
+            ),
+            target_run_path=candidate_path,
+        ),
+    )
+
+    module = build_reviewed_arena_geometry_candidate_fragment(
+        ReviewedArenaGeometryCandidateFragmentInputs(
+            workflow_id="geometry_reviewed",
+            target_id="recording_a",
+            analysis_zarr=paths["analysis"],
+            fit_report_path=None,
+            review_montage_path=None,
+            review_receipt_path=None,
+            fit_review_run="arena-geometry-fit-review-a",
+            reviewer="reviewer",
+            reviewed_at_utc="2026-08-13T12:00:00+00:00",
+            repo=paths["repo"],
+            run_root=tmp_path / "run",
+        )
+    )
+
+    command = " ".join(module.fragment.jobs[0].command)
+    assert "--fit-review-run arena-geometry-fit-review-a" in command
+    assert "--fit-report" not in command
+    assert module.fragment.metadata["review_source_ref"] == (
+        "analysis/arena_geometry_fit_runs/arena-geometry-fit-review-a"
+    )

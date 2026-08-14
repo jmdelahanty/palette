@@ -19,8 +19,15 @@ from fisheye.shared.json_safety import write_json_atomic
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zarr", type=Path, required=True)
-    parser.add_argument("--fit-report", type=Path, required=True)
-    parser.add_argument("--review-montage", type=Path, required=True)
+    parser.add_argument("--fit-report", type=Path)
+    parser.add_argument("--review-montage", type=Path)
+    parser.add_argument(
+        "--fit-review-run",
+        help=(
+            "Immutable analysis/arena_geometry_fit_runs run containing the fit, "
+            "reveal, panels, and montage. Preferred over external staging files."
+        ),
+    )
     parser.add_argument("--reviewer", required=True)
     parser.add_argument(
         "--reviewed-at-utc",
@@ -49,10 +56,22 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    external_supplied = args.fit_report is not None or args.review_montage is not None
+    if args.fit_review_run is not None and external_supplied:
+        raise ValueError(
+            "Choose --fit-review-run or the external fit-report/montage pair, not both."
+        )
+    if args.fit_review_run is None and (
+        args.fit_report is None or args.review_montage is None
+    ):
+        raise ValueError(
+            "Supply --fit-review-run or both --fit-report and --review-montage."
+        )
     plan = plan_reviewed_palette_geometry_candidate(
         source_zarr=args.zarr,
         fit_report_path=args.fit_report,
         montage_path=args.review_montage,
+        fit_review_run=args.fit_review_run,
         reviewer=args.reviewer,
         reviewed_at_utc=args.reviewed_at_utc,
     )

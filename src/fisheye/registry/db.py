@@ -9,7 +9,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoReturn, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    NoReturn,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import numpy as np
 import yaml
@@ -42,12 +55,17 @@ from .extractors.masks import (
     _extract_subject_mask_data_profile_rows,
     _extract_subject_mask_performance_rows,
 )
-from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
-from .acquisition_batches import RegistryAcquisitionBatchMixin, validate_acquisition_batch_id
+from .extractors.quality import (
+    _extract_detect_quality_rows,
+    _extract_keypoint_quality_rows,
+)
+from .acquisition_batches import (
+    RegistryAcquisitionBatchMixin,
+    validate_acquisition_batch_id,
+)
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
 from .temp_store_guard import assert_temp_store_registration_allowed
-
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
@@ -70,17 +88,11 @@ PIGMENTATION_PHENOTYPE_VALUES = frozenset(
     }
 )
 PIGMENT_CELL_STATUS_VOCABULARY_ID = "palette.pigment_cell_status.v1"
-PIGMENT_CELL_STATUS_VALUES = frozenset(
-    {"normal", "reduced", "absent", "increased", "altered_distribution", "unknown"}
-)
+PIGMENT_CELL_STATUS_VALUES = frozenset({"normal", "reduced", "absent", "increased", "altered_distribution", "unknown"})
 PIGMENT_PATTERN_STATUS_VOCABULARY_ID = "palette.pigment_pattern_status.v1"
-PIGMENT_PATTERN_STATUS_VALUES = frozenset(
-    {"wild_type", "altered", "mosaic", "unknown"}
-)
+PIGMENT_PATTERN_STATUS_VALUES = frozenset({"wild_type", "altered", "mosaic", "unknown"})
 OPTICAL_TRANSPARENCY_VOCABULARY_ID = "palette.optical_transparency.v1"
-OPTICAL_TRANSPARENCY_VALUES = frozenset(
-    {"normal", "partially_transparent", "transparent", "unknown"}
-)
+OPTICAL_TRANSPARENCY_VALUES = frozenset({"normal", "partially_transparent", "transparent", "unknown"})
 PIGMENTATION_TRAIT_VOCABULARIES: Mapping[str, tuple[str, frozenset[str]]] = {
     PIGMENTATION_PHENOTYPE_TRAIT_NAME: (
         PIGMENTATION_PHENOTYPE_VOCABULARY_ID,
@@ -132,14 +144,9 @@ def _validate_trait_assignment(
     expected_vocabulary_id, allowed_values = vocabulary
     if normalized_value not in allowed_values:
         allowed = ", ".join(sorted(allowed_values))
-        raise ValueError(
-            f"Unsupported {normalized_name} value {normalized_value!r}; "
-            f"expected one of: {allowed}."
-        )
+        raise ValueError(f"Unsupported {normalized_name} value {normalized_value!r}; expected one of: {allowed}.")
     if vocabulary_id is not None and str(vocabulary_id).strip() != expected_vocabulary_id:
-        raise ValueError(
-            f"{normalized_name} requires vocabulary_id={expected_vocabulary_id!r}."
-        )
+        raise ValueError(f"{normalized_name} requires vocabulary_id={expected_vocabulary_id!r}.")
     return normalized_name, normalized_value, expected_vocabulary_id
 
 
@@ -454,7 +461,13 @@ def _training_model_discovery_metadata(
     if resolved_task_type:
         payload["task_type"] = resolved_task_type
 
-    for key in ("best_val_dice", "best_epoch", "epochs", "train_samples", "val_samples"):
+    for key in (
+        "best_val_dice",
+        "best_epoch",
+        "epochs",
+        "train_samples",
+        "val_samples",
+    ):
         if key in final and final[key] is not None:
             payload[key] = final[key]
 
@@ -594,9 +607,7 @@ def resolve_dataset_id(root: zarr.Group, zarr_path: Path) -> Tuple[str, Optional
     session_uuid = _extract_session_uuid(root)
     if not session_uuid:
         manifest = _extract_recording_manifest(zarr_path)
-        session_uuid = _decode_attr(manifest.get("session_uuid")) or _decode_attr(
-            manifest.get("recording_id")
-        )
+        session_uuid = _decode_attr(manifest.get("session_uuid")) or _decode_attr(manifest.get("recording_id"))
     dataset_id = session_uuid or f"path-{_compute_path_hash(zarr_path)[:12]}"
     return dataset_id, session_uuid
 
@@ -673,7 +684,9 @@ def _extract_protocol(root: zarr.Group) -> Tuple[Optional[str], Optional[str]]:
     return str(name) if name else None, proto_hash
 
 
-def _extract_snapshot(root: zarr.Group) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _extract_snapshot(
+    root: zarr.Group,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     try:
         canonical = resolve_subject_metadata(root, allow_legacy=True)
     except MissingSubjectMetadataError:
@@ -788,10 +801,7 @@ def _extract_recording_context(
         "arena_id": first_text("arena_id"),
         "camera_id": first_text("camera_id"),
         "canvas_name": first_text("canvas_name"),
-        "protocol_name": (
-            first_text("protocol_name", "protocol_name_from_definition")
-            or protocol_name
-        ),
+        "protocol_name": (first_text("protocol_name", "protocol_name_from_definition") or protocol_name),
         "dish_design": first_text("dish_design") or _decode_attr(acquisition.get("dish_design")),
     }
 
@@ -974,7 +984,7 @@ def _extract_acquisition(root: zarr.Group) -> Dict[str, Any]:
         "encoder_fps": _as_float(encoder_fps),
         "encoder_color": _as_int(encoder_color),
         "encoder_params_json": _json_dumps(encoder_params) if encoder_params else None,
-        "compression_name": str(compression_name) if compression_name is not None else None,
+        "compression_name": (str(compression_name) if compression_name is not None else None),
         "compression_level": compression_level,
         "exposure": exposure,
         "exposure_unit": "us" if exposure is not None else None,
@@ -987,8 +997,8 @@ def _extract_acquisition(root: zarr.Group) -> Dict[str, Any]:
         "camera_serial": str(camera_serial) if camera_serial is not None else None,
         "camera_metadata_json": _json_dumps(camera_meta) if camera_meta else None,
         "has_images_ds": bool(has_images_ds) if has_images_ds is not None else None,
-        "has_images_ds_rgb": bool(has_images_ds_rgb) if has_images_ds_rgb is not None else None,
-        "downsample_formats_json": _json_dumps(downsample_formats) if downsample_formats else None,
+        "has_images_ds_rgb": (bool(has_images_ds_rgb) if has_images_ds_rgb is not None else None),
+        "downsample_formats_json": (_json_dumps(downsample_formats) if downsample_formats else None),
     }
 
 
@@ -998,8 +1008,7 @@ def _extract_provenance(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     dish = snapshot.get("dish") or snapshot
     cross = snapshot.get("cross") or {}
     identity_is_placeholder = (
-        str(snapshot.get("identity_scope") or "").strip().casefold()
-        == "recording_local_placeholder"
+        str(snapshot.get("identity_scope") or "").strip().casefold() == "recording_local_placeholder"
     )
     return {
         "fish_id": None if identity_is_placeholder else snapshot.get("fish_id"),
@@ -1065,7 +1074,11 @@ def _infer_zarr_origin_use(
             purpose_origin = "derived"
     if kind_norm == "source_recording":
         kind_origin = "source"
-    elif kind_norm in {"derived_analysis", "derived_training_merge", "model_input_export"}:
+    elif kind_norm in {
+        "derived_analysis",
+        "derived_training_merge",
+        "model_input_export",
+    }:
         kind_origin = "derived"
     else:
         kind_origin = None
@@ -1101,7 +1114,11 @@ def _canonical_run_path(path: Optional[str]) -> Optional[str]:
     if normalized is None:
         return None
     parts = normalized.split("/")
-    if len(parts) >= 2 and parts[0] in {"refined_detect_runs", "refined_runs", "detect_runs"}:
+    if len(parts) >= 2 and parts[0] in {
+        "refined_detect_runs",
+        "refined_runs",
+        "detect_runs",
+    }:
         return "/".join(parts[:2])
     return normalized
 
@@ -1162,17 +1179,14 @@ def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:
             if raw_source.size > 0:
                 unique, counts = np.unique(raw_source, return_counts=True)
                 source_code_counts = {
-                    str(int(code)): int(count)
-                    for code, count in zip(unique.tolist(), counts.tolist())
+                    str(int(code)): int(count) for code, count in zip(unique.tolist(), counts.tolist())
                 }
 
         n_real_attr = _as_int(crop_group.attrs.get("n_real_detections"))
         n_interp_attr = _as_int(crop_group.attrs.get("n_interpolated_detections"))
         n_real = source_code_counts.get("0", n_real_attr if n_real_attr is not None else total_detections)
         n_interpolated = source_code_counts.get("1", n_interp_attr if n_interp_attr is not None else 0)
-        includes_interpolated = bool(
-            crop_group.attrs.get("includes_interpolated", n_interpolated > 0)
-        )
+        includes_interpolated = bool(crop_group.attrs.get("includes_interpolated", n_interpolated > 0))
 
         counts_payload = {
             "crop_run": crop_run_name,
@@ -1281,15 +1295,13 @@ class Registry(
         return bind_migrations(self)
 
     def _ensure_schema_version_table(self) -> None:
-        self.conn.execute(
-            """
+        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 applied_utc TEXT NOT NULL
             );
-            """
-        )
+            """)
         self.conn.commit()
 
     def _current_schema_version(self) -> Optional[int]:
@@ -1302,14 +1314,12 @@ class Registry(
         return int(value)
 
     def _has_legacy_schema(self) -> bool:
-        row = self.conn.execute(
-            """
+        row = self.conn.execute("""
             SELECT 1
             FROM sqlite_master
             WHERE type='table' AND name='datasets'
             LIMIT 1;
-            """
-        ).fetchone()
+            """).fetchone()
         return row is not None
 
     def _table_exists(self, table_name: str) -> bool:
@@ -1386,8 +1396,7 @@ class Registry(
     def _create_detect_model_performance_summary_view(self, *, source_view: str, target_view: str) -> None:
         cur = self.conn.cursor()
         cur.execute(f"DROP VIEW IF EXISTS {target_view};")
-        cur.execute(
-            f"""
+        cur.execute(f"""
             CREATE VIEW {target_view} AS
             WITH base AS (
                 SELECT
@@ -1582,14 +1591,12 @@ class Registry(
                 g.model_run_id,
                 g.model_name,
                 g.model_path;
-            """
-        )
+            """)
 
     def _refresh_keypoint_quality_current_view(self) -> None:
         cur = self.conn.cursor()
         cur.execute("DROP VIEW IF EXISTS keypoint_quality_current;")
-        cur.execute(
-            """
+        cur.execute("""
             CREATE VIEW keypoint_quality_current AS
             WITH latest_keypoint AS (
                 SELECT
@@ -1639,14 +1646,12 @@ class Registry(
                 zarr_mtime_ns
             FROM ranked
             WHERE _rn = 1;
-            """
-        )
+            """)
 
     def _refresh_detect_quality_current_view(self) -> None:
         cur = self.conn.cursor()
         cur.execute("DROP VIEW IF EXISTS detect_quality_current;")
-        cur.execute(
-            """
+        cur.execute("""
             CREATE VIEW detect_quality_current AS
             WITH ranked AS (
                 SELECT
@@ -1688,15 +1693,12 @@ class Registry(
                 zarr_mtime_ns
             FROM ranked
             WHERE _rn = 1;
-            """
-        )
+            """)
         cur.execute("DROP VIEW IF EXISTS refined_detect_review_current;")
-        cur.execute(
-            """
+        cur.execute("""
             CREATE VIEW refined_detect_review_current AS
             SELECT * FROM detect_quality_current;
-            """
-        )
+            """)
 
     def _ensure_training_model_input_shape_columns(self) -> None:
         self._ensure_columns(
@@ -1926,8 +1928,7 @@ class Registry(
         return False
 
     def _backfill_training_model_input_shapes(self) -> None:
-        rows = self.conn.execute(
-            """
+        rows = self.conn.execute("""
             SELECT
                 tm.run_id,
                 tm.final_metrics_json,
@@ -1947,8 +1948,7 @@ class Registry(
                 tm.input_shape_status
             FROM training_models tm
             LEFT JOIN training_runs tr ON tr.run_id = tm.run_id;
-            """
-        ).fetchall()
+            """).fetchall()
         for row in rows:
             final_payload = _json_loads(row["final_metrics_json"])
             metadata_payload = _json_loads(row["metadata_json"])
@@ -2035,8 +2035,7 @@ class Registry(
     def _refresh_model_input_shapes_view(self) -> None:
         cur = self.conn.cursor()
         cur.execute("DROP VIEW IF EXISTS model_input_shapes;")
-        cur.execute(
-            """
+        cur.execute("""
             CREATE VIEW model_input_shapes AS
             SELECT
                 'training' AS artifact_kind,
@@ -2136,13 +2135,11 @@ class Registry(
             FROM tensorrt_models trt
             LEFT JOIN training_models tm ON tm.run_id = trt.run_id
             LEFT JOIN training_runs tr ON tr.run_id = trt.run_id;
-            """
-        )
+            """)
 
     def _ensure_analytics_manifest_tables(self) -> None:
         cur = self.conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS analytics_collections (
                 collection_id TEXT NOT NULL,
                 manifest_sha256 TEXT NOT NULL,
@@ -2158,10 +2155,8 @@ class Registry(
                 metadata_json TEXT,
                 PRIMARY KEY (collection_id, manifest_sha256)
             );
-            """
-        )
-        cur.execute(
-            """
+            """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS analytics_exports (
                 export_run_id TEXT PRIMARY KEY,
                 collection_id TEXT,
@@ -2182,10 +2177,8 @@ class Registry(
                 status TEXT,
                 metadata_json TEXT
             );
-            """
-        )
-        cur.execute(
-            """
+            """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS analytics_export_tables (
                 export_run_id TEXT NOT NULL,
                 table_name TEXT NOT NULL,
@@ -2197,29 +2190,21 @@ class Registry(
                 PRIMARY KEY (export_run_id, table_name),
                 FOREIGN KEY(export_run_id) REFERENCES analytics_exports(export_run_id) ON DELETE CASCADE
             );
-            """
-        )
-        cur.execute(
-            """
+            """)
+        cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_analytics_collections_status
             ON analytics_collections(status, collection_id);
-            """
-        )
-        cur.execute(
-            """
+            """)
+        cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_analytics_exports_collection
             ON analytics_exports(collection_id, collection_manifest_sha256, status);
-            """
-        )
-        cur.execute(
-            """
+            """)
+        cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_analytics_export_tables_name
             ON analytics_export_tables(table_name, export_run_id);
-            """
-        )
+            """)
         cur.execute("DROP VIEW IF EXISTS analytics_export_overview;")
-        cur.execute(
-            """
+        cur.execute("""
             CREATE VIEW analytics_export_overview AS
             SELECT
                 ae.export_run_id,
@@ -2242,8 +2227,7 @@ class Registry(
             LEFT JOIN analytics_collections ac
               ON ac.collection_id = ae.collection_id
              AND ac.manifest_sha256 = ae.collection_manifest_sha256;
-            """
-        )
+            """)
 
     def _ensure_training_model_discovery_columns(self) -> None:
         self._ensure_columns(
@@ -2261,19 +2245,14 @@ class Registry(
             },
         )
         cur = self.conn.cursor()
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_training_models_task_status ON training_models(task_type, status);"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_training_models_label_schema ON training_models(label_schema_id);"
-        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_training_models_task_status ON training_models(task_type, status);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_training_models_label_schema ON training_models(label_schema_id);")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_training_models_component_coverage ON training_models(component_coverage_key);"
         )
 
     def _backfill_training_model_discovery_metadata(self) -> None:
-        rows = self.conn.execute(
-            """
+        rows = self.conn.execute("""
             SELECT
                 tm.run_id,
                 tm.metadata_json,
@@ -2282,8 +2261,7 @@ class Registry(
                 tr.task_type AS run_task_type
             FROM training_models tm
             LEFT JOIN training_runs tr ON tr.run_id = tm.run_id;
-            """
-        ).fetchall()
+            """).fetchall()
         for row in rows:
             final_metrics = _json_loads(row["final_metrics_json"]) or {}
             existing_metadata = _json_loads(row["metadata_json"]) or {}
@@ -2336,8 +2314,7 @@ class Registry(
     def _refresh_subject_mask_training_models_view(self) -> None:
         cur = self.conn.cursor()
         cur.execute("DROP VIEW IF EXISTS subject_mask_training_models;")
-        cur.execute(
-            """
+        cur.execute("""
             CREATE VIEW subject_mask_training_models AS
             SELECT
                 tm.run_id,
@@ -2363,14 +2340,10 @@ class Registry(
             LEFT JOIN training_runs tr ON tr.run_id = tm.run_id
             WHERE COALESCE(tm.task_type, tr.task_type) = 'subject_masks'
                OR json_type(tm.final_metrics_json, '$.subject_mask_model_summary') IS NOT NULL;
-            """
-        )
+            """)
 
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
-        existing = {
-            row["name"]
-            for row in self.conn.execute(f"PRAGMA table_info({table});").fetchall()
-        }
+        existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table});").fetchall()}
         for name, ddl in columns.items():
             if name in existing:
                 continue
@@ -2451,7 +2424,7 @@ class Registry(
         payload = {
             "skeleton_id": skeleton_id,
             "spec_sha256": spec_sha256,
-            "name": str(name).strip() if isinstance(name, str) and str(name).strip() else None,
+            "name": (str(name).strip() if isinstance(name, str) and str(name).strip() else None),
             "kpt_shape_json": _json_dumps(spec.get("kpt_shape")),
             "keypoint_labels_json": _json_dumps(spec.get("keypoint_labels")),
             "edges_json": _json_dumps(spec.get("skeleton_edges")),
@@ -2773,7 +2746,7 @@ class Registry(
             "schema_version": schema_version,
             "tool": tool,
             "palette_git_commit": palette_git_commit,
-            "palette_git_dirty": None if palette_git_dirty is None else int(bool(palette_git_dirty)),
+            "palette_git_dirty": (None if palette_git_dirty is None else int(bool(palette_git_dirty))),
             "source_recording_count": source_recording_count,
             "table_count": len(table_names),
             "diagnostics_count": diagnostics_count,
@@ -2886,7 +2859,7 @@ class Registry(
             "fish_id": provenance.get("fish_id"),
             "subject_count": provenance.get("subject_count"),
             "dish_id": provenance.get("dish_id"),
-            "dish_design": acquisition.get("dish_design") if write_legacy_recording_context_snapshot else None,
+            "dish_design": (acquisition.get("dish_design") if write_legacy_recording_context_snapshot else None),
             "cross_id": provenance.get("cross_id"),
             "line_strain": provenance.get("line_strain"),
             "genotype": provenance.get("genotype"),
@@ -2894,10 +2867,10 @@ class Registry(
             "species": provenance.get("species"),
             "sex": provenance.get("sex"),
             "dpf_at_acquisition": provenance.get("dpf_at_acquisition"),
-            "rig_id": context.get("rig_id") if write_legacy_recording_context_snapshot else None,
-            "arena_id": context.get("arena_id") if write_legacy_recording_context_snapshot else None,
-            "camera_id": context.get("camera_id") if write_legacy_recording_context_snapshot else None,
-            "canvas_name": context.get("canvas_name") if write_legacy_recording_context_snapshot else None,
+            "rig_id": (context.get("rig_id") if write_legacy_recording_context_snapshot else None),
+            "arena_id": (context.get("arena_id") if write_legacy_recording_context_snapshot else None),
+            "camera_id": (context.get("camera_id") if write_legacy_recording_context_snapshot else None),
+            "canvas_name": (context.get("canvas_name") if write_legacy_recording_context_snapshot else None),
             "fps": acquisition.get("fps"),
             "video_codec": acquisition.get("video_codec"),
             "video_pix_fmt": acquisition.get("video_pix_fmt"),
@@ -2933,7 +2906,7 @@ class Registry(
             "has_images_ds": acquisition.get("has_images_ds"),
             "has_images_ds_rgb": acquisition.get("has_images_ds_rgb"),
             "downsample_formats_json": acquisition.get("downsample_formats_json"),
-            "protocol_name": protocol_name if write_legacy_recording_context_snapshot else None,
+            "protocol_name": (protocol_name if write_legacy_recording_context_snapshot else None),
             "protocol_hash": protocol_hash,
             "snapshot_status": provenance.get("snapshot_status"),
             "snapshot_missing_json": _json_dumps(provenance.get("snapshot_missing")),
@@ -3053,10 +3026,7 @@ class Registry(
 
         if not recording_id or not snapshot:
             return
-        if (
-            str(snapshot.get("identity_scope") or "").strip().casefold()
-            == "recording_local_placeholder"
-        ):
+        if str(snapshot.get("identity_scope") or "").strip().casefold() == "recording_local_placeholder":
             return
         raw_ids = snapshot.get("subject_ids") or snapshot.get("fish_ids")
         if isinstance(raw_ids, (list, tuple)):
@@ -3087,11 +3057,7 @@ class Registry(
         sex = _as_text(provenance.get("sex"))
         genotype = _as_text(provenance.get("genotype"))
         line_strain = _as_text(provenance.get("line_strain"))
-        dpf = _as_int(
-            provenance.get("dpf_at_acquisition")
-            or snapshot.get("dpf_at_acquisition")
-            or snapshot.get("dpf")
-        )
+        dpf = _as_int(provenance.get("dpf_at_acquisition") or snapshot.get("dpf_at_acquisition") or snapshot.get("dpf"))
         parents = provenance.get("parents")
         now = _utc_now()
         source_payload = _json_dumps(
@@ -3101,10 +3067,13 @@ class Registry(
                 "subject_count": subject_count,
             }
         )
-        recording_exists = self.conn.execute(
-            "SELECT 1 FROM recordings WHERE recording_id = ?;",
-            (recording_id,),
-        ).fetchone() is not None
+        recording_exists = (
+            self.conn.execute(
+                "SELECT 1 FROM recordings WHERE recording_id = ?;",
+                (recording_id,),
+            ).fetchone()
+            is not None
+        )
 
         if cross_id:
             self.conn.execute(
@@ -3281,12 +3250,10 @@ class Registry(
 
         normalized_species = str(species).strip()
         normalized_canonical_strain = str(canonical_strain).strip()
-        normalized_name, normalized_value, resolved_vocabulary_id = (
-            _validate_trait_assignment(
-                trait_name=trait_name,
-                trait_value=trait_value,
-                vocabulary_id=vocabulary_id,
-            )
+        normalized_name, normalized_value, resolved_vocabulary_id = _validate_trait_assignment(
+            trait_name=trait_name,
+            trait_value=trait_value,
+            vocabulary_id=vocabulary_id,
         )
         normalized_method = str(assignment_method).strip().lower()
         if not normalized_species:
@@ -3356,12 +3323,10 @@ class Registry(
 
         normalized_recording_id = str(recording_id).strip()
         normalized_subject_id = str(subject_id).strip()
-        normalized_name, normalized_value, resolved_vocabulary_id = (
-            _validate_trait_assignment(
-                trait_name=trait_name,
-                trait_value=trait_value,
-                vocabulary_id=vocabulary_id,
-            )
+        normalized_name, normalized_value, resolved_vocabulary_id = _validate_trait_assignment(
+            trait_name=trait_name,
+            trait_value=trait_value,
+            vocabulary_id=vocabulary_id,
         )
         normalized_method = str(assignment_method).strip().lower()
         if not normalized_recording_id or not normalized_subject_id:
@@ -4299,12 +4264,8 @@ class Registry(
             """,
             (str(dataset_id), str(dataset_id)),
         ).fetchone()
-        has_recording_context = bool(
-            row is not None and int(row["has_recording_context"] or 0) == 1
-        )
-        has_normalized_subject_context = bool(
-            row is not None and int(row["has_normalized_subject_context"] or 0) == 1
-        )
+        has_recording_context = bool(row is not None and int(row["has_recording_context"] or 0) == 1)
+        has_normalized_subject_context = bool(row is not None and int(row["has_normalized_subject_context"] or 0) == 1)
         return (not has_recording_context, not has_normalized_subject_context)
 
     @staticmethod
@@ -5006,7 +4967,10 @@ class Registry(
 
     def replace_detect_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self._maybe_transaction():
-            self.conn.execute("DELETE FROM detect_performance WHERE dataset_id = ?;", (str(dataset_id),))
+            self.conn.execute(
+                "DELETE FROM detect_performance WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
@@ -5054,7 +5018,10 @@ class Registry(
             self._profile_duplicate_context_write_policy(str(dataset_id))
         )
         with self._maybe_transaction():
-            self.conn.execute("DELETE FROM detection_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
+            self.conn.execute(
+                "DELETE FROM detection_data_profile WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
@@ -5116,7 +5083,10 @@ class Registry(
             self._profile_duplicate_context_write_policy(str(dataset_id))
         )
         with self._maybe_transaction():
-            self.conn.execute("DELETE FROM keypoint_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
+            self.conn.execute(
+                "DELETE FROM keypoint_data_profile WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
@@ -5182,7 +5152,10 @@ class Registry(
             self._profile_duplicate_context_write_policy(str(dataset_id))
         )
         with self._maybe_transaction():
-            self.conn.execute("DELETE FROM subject_mask_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
+            self.conn.execute(
+                "DELETE FROM subject_mask_data_profile WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
@@ -5283,7 +5256,10 @@ class Registry(
 
     def replace_keypoint_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self._maybe_transaction():
-            self.conn.execute("DELETE FROM keypoint_performance WHERE dataset_id = ?;", (str(dataset_id),))
+            self.conn.execute(
+                "DELETE FROM keypoint_performance WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
@@ -5385,7 +5361,10 @@ class Registry(
 
     def replace_subject_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self._maybe_transaction():
-            self.conn.execute("DELETE FROM subject_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
+            self.conn.execute(
+                "DELETE FROM subject_mask_performance WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
@@ -5539,7 +5518,10 @@ class Registry(
 
     def replace_subject_mask_component_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self._maybe_transaction():
-            self.conn.execute("DELETE FROM subject_mask_component_quality WHERE dataset_id = ?;", (str(dataset_id),))
+            self.conn.execute(
+                "DELETE FROM subject_mask_component_quality WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
@@ -6123,10 +6105,7 @@ class Registry(
             sql.append("AND review_intended_use = ?")
             params.append(str(review_intended_use))
         if max_interpolated_detections_rate is not None:
-            sql.append(
-                "AND interpolated_detections_rate IS NOT NULL "
-                "AND interpolated_detections_rate <= ?"
-            )
+            sql.append("AND interpolated_detections_rate IS NOT NULL AND interpolated_detections_rate <= ?")
             params.append(float(max_interpolated_detections_rate))
         sql.append("ORDER BY dataset_id, detect_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
@@ -6554,7 +6533,12 @@ class Registry(
         # This prevents reintroducing legacy dataset_id=session_uuid rows during rescans.
         assert session_uuid is not None  # for type checkers
         candidate = f"{session_uuid}:z{current_hash[:12]}"
-        for extra in ("", current_hash[12:16], current_hash[16:20], current_hash[20:24]):
+        for extra in (
+            "",
+            current_hash[12:16],
+            current_hash[16:20],
+            current_hash[20:24],
+        ):
             resolved = candidate if not extra else f"{candidate}{extra}"
             existing = self.conn.execute(
                 "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
@@ -6733,7 +6717,12 @@ class Registry(
             (str(dataset_id),),
         ).fetchone()
         if row is None:
-            return {"recording_id": None, "zarr_use": None, "genotype": None, "dpf_at_acquisition": None}
+            return {
+                "recording_id": None,
+                "zarr_use": None,
+                "genotype": None,
+                "dpf_at_acquisition": None,
+            }
         dpf_raw = row["dpf_at_acquisition"]
         try:
             dpf = int(dpf_raw) if dpf_raw is not None else None
@@ -7144,9 +7133,7 @@ class Registry(
             max_batch = self._int_or_none(shape_list[0]) if len(shape_list) >= 1 else None
             img_h = self._int_or_none(shape_list[2]) if len(shape_list) >= 3 else None
             img_w = self._int_or_none(shape_list[3]) if len(shape_list) >= 4 else None
-            dynamic_shapes = int(
-                any(self._int_or_none(dimension) is None for dimension in shape_list)
-            )
+            dynamic_shapes = int(any(self._int_or_none(dimension) is None for dimension in shape_list))
 
         if (img_h is None or img_w is None) and isinstance(imgsz, (list, tuple)):
             if len(imgsz) >= 2:
@@ -7223,9 +7210,7 @@ class Registry(
                 raw_versions = metadata.get("plugin_versions")
                 if isinstance(raw_versions, dict):
                     plugin_versions = {
-                        str(key): str(value)
-                        for key, value in raw_versions.items()
-                        if key and value is not None
+                        str(key): str(value) for key, value in raw_versions.items() if key and value is not None
                     }
 
                 raw_requires = metadata.get("requires_plugins")
@@ -7250,9 +7235,7 @@ class Registry(
                         str(build_env.get("cuda_version")) if build_env.get("cuda_version") else None
                     )
                     exporter_hostname = (
-                        str(build_env.get("system_hostname"))
-                        if build_env.get("system_hostname")
-                        else None
+                        str(build_env.get("system_hostname")) if build_env.get("system_hostname") else None
                     )
 
             manifest_payload = self._read_json_path(manifest_path)
@@ -7273,7 +7256,7 @@ class Registry(
             if max_batch is None:
                 max_batch = self._int_or_none(export_payload.get("max_batch"))
             nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
-                manifest_payload=manifest_payload if isinstance(manifest_payload, dict) else None,
+                manifest_payload=(manifest_payload if isinstance(manifest_payload, dict) else None),
                 metadata=metadata if isinstance(metadata, dict) else None,
             )
             if metadata:
@@ -7307,12 +7290,10 @@ class Registry(
                 skeleton_id=skeleton_id,
                 detection_model_run_id=run_id,
                 path=path,
-                sha256=str(metadata.get("sha256")) if metadata and metadata.get("sha256") else None,
+                sha256=(str(metadata.get("sha256")) if metadata and metadata.get("sha256") else None),
                 manifest_path=manifest_path,
                 manifest_sha256=(
-                    str(metadata.get("manifest_sha256"))
-                    if metadata and metadata.get("manifest_sha256")
-                    else None
+                    str(metadata.get("manifest_sha256")) if metadata and metadata.get("manifest_sha256") else None
                 ),
                 opset=onnx_opset,
                 nms_conf=nms_conf,
@@ -7367,22 +7348,12 @@ class Registry(
                         skeleton_id = schema_skeleton_id
                 build_env = metadata.get("build_env")
                 if isinstance(build_env, dict):
-                    trt_version = (
-                        str(build_env.get("tensorrt_version"))
-                        if build_env.get("tensorrt_version")
-                        else None
-                    )
-                    cuda_version = (
-                        str(build_env.get("cuda_version")) if build_env.get("cuda_version") else None
-                    )
+                    trt_version = str(build_env.get("tensorrt_version")) if build_env.get("tensorrt_version") else None
+                    cuda_version = str(build_env.get("cuda_version")) if build_env.get("cuda_version") else None
                     system_hostname = (
-                        str(build_env.get("system_hostname"))
-                        if build_env.get("system_hostname")
-                        else None
+                        str(build_env.get("system_hostname")) if build_env.get("system_hostname") else None
                     )
-                    gpu_name = (
-                        str(build_env.get("gpu_name")) if build_env.get("gpu_name") else None
-                    )
+                    gpu_name = str(build_env.get("gpu_name")) if build_env.get("gpu_name") else None
                     torch_device = build_env.get("torch_device")
                     if isinstance(torch_device, dict):
                         compute_capability = (
@@ -7408,9 +7379,7 @@ class Registry(
                 raw_versions = metadata.get("plugin_versions")
                 if isinstance(raw_versions, dict):
                     plugin_versions = {
-                        str(key): str(value)
-                        for key, value in raw_versions.items()
-                        if key and value is not None
+                        str(key): str(value) for key, value in raw_versions.items() if key and value is not None
                     }
 
                 raw_requires = metadata.get("requires_plugins")
@@ -7443,7 +7412,7 @@ class Registry(
             if max_batch is None:
                 max_batch = self._int_or_none(export_payload.get("max_batch"))
             nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
-                manifest_payload=manifest_payload if isinstance(manifest_payload, dict) else None,
+                manifest_payload=(manifest_payload if isinstance(manifest_payload, dict) else None),
                 metadata=metadata if isinstance(metadata, dict) else None,
             )
             if metadata and input_shape_text is None:
@@ -7458,7 +7427,7 @@ class Registry(
                     imgsz=metadata.get("imgsz"),
                 )
 
-            if (plugin_ops is None and plugin_versions is None and requires_plugins is None):
+            if plugin_ops is None and plugin_versions is None and requires_plugins is None:
                 onnx_ref = metadata.get("onnx_run_id") if isinstance(metadata, dict) else None
                 onnx_run_id = str(onnx_ref or run_id)
                 onnx_row = self.conn.execute(
@@ -7514,12 +7483,10 @@ class Registry(
                 onnx_run_id=onnx_run_ref,
                 precision=self._infer_tensorrt_precision(path=path, metadata=metadata),
                 path=path,
-                sha256=str(metadata.get("sha256")) if metadata and metadata.get("sha256") else None,
+                sha256=(str(metadata.get("sha256")) if metadata and metadata.get("sha256") else None),
                 manifest_path=manifest_path,
                 manifest_sha256=(
-                    str(metadata.get("manifest_sha256"))
-                    if metadata and metadata.get("manifest_sha256")
-                    else None
+                    str(metadata.get("manifest_sha256")) if metadata and metadata.get("manifest_sha256") else None
                 ),
                 nms_conf=nms_conf,
                 nms_iou=nms_iou,
@@ -7747,18 +7714,14 @@ class Registry(
     ) -> None:
         plugin_ops_norm = [str(item) for item in (plugin_ops or []) if item]
         plugin_versions_norm = {
-            str(key): str(value)
-            for key, value in (plugin_versions or {}).items()
-            if key and value is not None
+            str(key): str(value) for key, value in (plugin_versions or {}).items() if key and value is not None
         }
-        requires_plugins_norm = (
-            int(bool(requires_plugins)) if requires_plugins is not None else None
-        )
+        requires_plugins_norm = int(bool(requires_plugins)) if requires_plugins is not None else None
         payload = {
             "run_id": str(run_id),
             "set_id": str(set_id) if set_id else None,
             "skeleton_id": str(skeleton_id) if skeleton_id else None,
-            "detection_model_run_id": str(detection_model_run_id) if detection_model_run_id else None,
+            "detection_model_run_id": (str(detection_model_run_id) if detection_model_run_id else None),
             "path": str(path) if path else None,
             "sha256": sha256,
             "manifest_path": str(manifest_path) if manifest_path else None,
@@ -7771,22 +7734,14 @@ class Registry(
             "img_h": self._int_or_none(img_h),
             "img_w": self._int_or_none(img_w),
             "max_batch": self._int_or_none(max_batch),
-            "dynamic_shapes": (
-                int(bool(dynamic_shapes)) if dynamic_shapes is not None else None
-            ),
+            "dynamic_shapes": (int(bool(dynamic_shapes)) if dynamic_shapes is not None else None),
             "file_size_bytes": self._int_or_none(file_size_bytes),
-            "exporter_torch_version": (
-                str(exporter_torch_version) if exporter_torch_version else None
-            ),
-            "exporter_cuda_version": (
-                str(exporter_cuda_version) if exporter_cuda_version else None
-            ),
+            "exporter_torch_version": (str(exporter_torch_version) if exporter_torch_version else None),
+            "exporter_cuda_version": (str(exporter_cuda_version) if exporter_cuda_version else None),
             "exporter_hostname": str(exporter_hostname) if exporter_hostname else None,
             "requires_plugins": requires_plugins_norm,
-            "plugin_ops_json": _json_dumps(plugin_ops_norm) if plugin_ops_norm else None,
-            "plugin_versions_json": (
-                _json_dumps(plugin_versions_norm) if plugin_versions_norm else None
-            ),
+            "plugin_ops_json": (_json_dumps(plugin_ops_norm) if plugin_ops_norm else None),
+            "plugin_versions_json": (_json_dumps(plugin_versions_norm) if plugin_versions_norm else None),
             "metadata_json": _json_dumps(metadata),
             "created_utc": _utc_now(),
         }
@@ -7872,18 +7827,14 @@ class Registry(
     ) -> None:
         plugin_ops_norm = [str(item) for item in (plugin_ops or []) if item]
         plugin_versions_norm = {
-            str(key): str(value)
-            for key, value in (plugin_versions or {}).items()
-            if key and value is not None
+            str(key): str(value) for key, value in (plugin_versions or {}).items() if key and value is not None
         }
-        requires_plugins_norm = (
-            int(bool(requires_plugins)) if requires_plugins is not None else None
-        )
+        requires_plugins_norm = int(bool(requires_plugins)) if requires_plugins is not None else None
         payload = {
             "run_id": str(run_id),
             "set_id": str(set_id) if set_id else None,
             "skeleton_id": str(skeleton_id) if skeleton_id else None,
-            "detection_model_run_id": str(detection_model_run_id) if detection_model_run_id else None,
+            "detection_model_run_id": (str(detection_model_run_id) if detection_model_run_id else None),
             "onnx_run_id": str(onnx_run_id) if onnx_run_id else None,
             "precision": str(precision).strip().lower() if precision else "fp16",
             "path": str(path) if path else None,
@@ -7897,21 +7848,17 @@ class Registry(
             "img_h": self._int_or_none(img_h),
             "img_w": self._int_or_none(img_w),
             "max_batch": self._int_or_none(max_batch),
-            "dynamic_shapes": (
-                int(bool(dynamic_shapes)) if dynamic_shapes is not None else None
-            ),
+            "dynamic_shapes": (int(bool(dynamic_shapes)) if dynamic_shapes is not None else None),
             "file_size_bytes": self._int_or_none(file_size_bytes),
             "trt_version": str(trt_version) if trt_version else None,
             "cuda_version": str(cuda_version) if cuda_version else None,
-            "compute_capability": str(compute_capability) if compute_capability else None,
+            "compute_capability": (str(compute_capability) if compute_capability else None),
             "gpu_name": str(gpu_name) if gpu_name else None,
             "gpu_uuid": str(gpu_uuid) if gpu_uuid else None,
             "system_hostname": str(system_hostname) if system_hostname else None,
             "requires_plugins": requires_plugins_norm,
-            "plugin_ops_json": _json_dumps(plugin_ops_norm) if plugin_ops_norm else None,
-            "plugin_versions_json": (
-                _json_dumps(plugin_versions_norm) if plugin_versions_norm else None
-            ),
+            "plugin_ops_json": (_json_dumps(plugin_ops_norm) if plugin_ops_norm else None),
+            "plugin_versions_json": (_json_dumps(plugin_versions_norm) if plugin_versions_norm else None),
             "metadata_json": _json_dumps(metadata),
             "created_utc": _utc_now(),
         }
@@ -8018,9 +7965,7 @@ class Registry(
             raise ValueError("artifact_kind is required")
         status_text = str(status or "candidate").strip().lower()
         precision_text = str(precision).strip().lower() if precision else None
-        target_class_text = (
-            str(target_hardware_class).strip() if target_hardware_class else None
-        )
+        target_class_text = str(target_hardware_class).strip() if target_hardware_class else None
 
         def _slug(value: Optional[str], fallback: str) -> str:
             text = str(value or fallback).strip().lower()
@@ -8032,7 +7977,9 @@ class Registry(
             identity_tail = (
                 str(engine_sha256).strip().lower()[:12]
                 if engine_sha256
-                else Path(engine_path).stem if engine_path else "unhashed"
+                else Path(engine_path).stem
+                if engine_path
+                else "unhashed"
             )
             artifact_id = "_".join(
                 [
@@ -8048,29 +7995,21 @@ class Registry(
         payload = {
             "artifact_id": str(artifact_id),
             "run_id": run_id_text,
-            "source_onnx_run_id": str(source_onnx_run_id).strip()
-            if source_onnx_run_id
-            else None,
+            "source_onnx_run_id": (str(source_onnx_run_id).strip() if source_onnx_run_id else None),
             "source_onnx_path": str(source_onnx_path) if source_onnx_path else None,
-            "source_onnx_sha256": str(source_onnx_sha256).strip().lower()
-            if source_onnx_sha256
-            else None,
+            "source_onnx_sha256": (str(source_onnx_sha256).strip().lower() if source_onnx_sha256 else None),
             "artifact_kind": kind_text,
             "deployment_runtime": runtime_text,
             "target_hardware_class": target_class_text,
-            "target_gpu_name": str(target_gpu_name).strip() if target_gpu_name else None,
-            "target_compute_capability": str(target_compute_capability).strip()
-            if target_compute_capability
-            else None,
+            "target_gpu_name": (str(target_gpu_name).strip() if target_gpu_name else None),
+            "target_compute_capability": (
+                str(target_compute_capability).strip() if target_compute_capability else None
+            ),
             "precision": precision_text,
             "engine_path": str(engine_path) if engine_path else None,
-            "engine_sha256": str(engine_sha256).strip().lower()
-            if engine_sha256
-            else None,
+            "engine_sha256": (str(engine_sha256).strip().lower() if engine_sha256 else None),
             "manifest_path": str(manifest_path) if manifest_path else None,
-            "manifest_sha256": str(manifest_sha256).strip().lower()
-            if manifest_sha256
-            else None,
+            "manifest_sha256": (str(manifest_sha256).strip().lower() if manifest_sha256 else None),
             "status": status_text,
             "validation_summary_json": _json_dumps(validation_summary),
             "trtexec_path": str(trtexec_path) if trtexec_path else None,
@@ -8078,9 +8017,7 @@ class Registry(
             "cuda_version": str(cuda_version).strip() if cuda_version else None,
             "builder_optimization_level": self._int_or_none(builder_optimization_level),
             "avg_timing": self._int_or_none(avg_timing),
-            "profiling_verbosity": str(profiling_verbosity).strip()
-            if profiling_verbosity
-            else None,
+            "profiling_verbosity": (str(profiling_verbosity).strip() if profiling_verbosity else None),
             "cuda_graph": _as_bool_int(cuda_graph),
             "nms_conf": _as_float(nms_conf),
             "nms_iou": _as_float(nms_iou),
@@ -8178,8 +8115,7 @@ class Registry(
         if precision is not None:
             sql.append("AND precision = ?")
             params.append(str(precision).strip().lower())
-        sql.append(
-            """
+        sql.append("""
             ORDER BY
                 CASE status
                     WHEN 'preferred' THEN 0
@@ -8190,20 +8126,37 @@ class Registry(
                 END,
                 updated_utc DESC,
                 artifact_id ASC
-            """
-        )
+            """)
         if limit is not None:
             sql.append("LIMIT ?")
             params.append(self._int_or_none(limit) or 0)
         return self.conn.execute("\n".join(sql), params).fetchall()
 
-    def scan_zarr(self, zarr_path: Path) -> Optional[str]:
+    def scan_zarr(
+        self,
+        zarr_path: Path,
+        *,
+        include_step_status: bool = False,
+    ) -> Optional[str]:
         if not zarr_path.exists():
             return None
         if _is_empty_zarr_stub(zarr_path):
             return None
         root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
-        return self.register_from_root(root, zarr_path)
+        dataset_id = self.register_from_root(root, zarr_path)
+        if include_step_status:
+            from .maintenance import reconcile_recording_step_status_for_dataset
+
+            fallbacks = self._profile_context_fallbacks(dataset_id)
+            reconcile_recording_step_status_for_dataset(
+                self,
+                dataset_id=dataset_id,
+                zarr_path=zarr_path,
+                root=root,
+                recording_id=fallbacks["recording_id"],
+                zarr_use=fallbacks["zarr_use"],
+            )
+        return dataset_id
 
     def reconcile_missing_datasets(self, *, scope_paths: Optional[Iterable[Path]] = None) -> Dict[str, int]:
         """
@@ -8379,7 +8332,10 @@ class Registry(
         add_clause("AND dcc.experiment_context_status = ?", experiment_context_status)
         add_clause("AND dcc.experiment_context_source = ?", experiment_context_source)
         if stimulus_runs_available is not None:
-            add_clause("AND dcc.stimulus_runs_available = ?", int(bool(stimulus_runs_available)))
+            add_clause(
+                "AND dcc.stimulus_runs_available = ?",
+                int(bool(stimulus_runs_available)),
+            )
         add_clause("AND dcc.fps >= ?", fps_min)
         add_clause("AND dcc.fps <= ?", fps_max)
         add_clause("AND dcc.exposure >= ?", exposure_min)
@@ -8415,14 +8371,10 @@ class Registry(
         if model_input is not None:
             mode = str(model_input).strip().lower()
             if mode == "gray":
-                sql.append(
-                    "AND (COALESCE(dcc.has_images_ds, 0) = 1 "
-                    "OR dcc.downsample_formats_json LIKE '%\"gray\"%')"
-                )
+                sql.append("AND (COALESCE(dcc.has_images_ds, 0) = 1 OR dcc.downsample_formats_json LIKE '%\"gray\"%')")
             elif mode == "rgb":
                 sql.append(
-                    "AND (COALESCE(dcc.has_images_ds_rgb, 0) = 1 "
-                    "OR dcc.downsample_formats_json LIKE '%\"rgb\"%')"
+                    "AND (COALESCE(dcc.has_images_ds_rgb, 0) = 1 OR dcc.downsample_formats_json LIKE '%\"rgb\"%')"
                 )
             else:
                 raise ValueError(f"Unsupported model_input '{model_input}'. Expected 'gray' or 'rgb'.")

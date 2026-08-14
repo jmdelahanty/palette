@@ -109,7 +109,9 @@ scripts/py -m fisheye.cluster.arena_geometry_campaign \
 Submission uses the Citrus login poller by default. Array concurrency is
 explicit (`8` acquisition tasks and `4` GPU probes by default) and can be
 changed with `--acquisition-array-concurrency` and
-`--probe-array-concurrency`:
+`--probe-array-concurrency`. The probe queue is explicit as `gpu_l4` or
+`gpu_t4`. A serial T4 canary uses `--probe-queue gpu_t4
+--probe-array-concurrency 1`:
 
 ```bash
 scripts/py -m fisheye.cluster.arena_geometry_campaign \
@@ -117,15 +119,19 @@ scripts/py -m fisheye.cluster.arena_geometry_campaign \
   --run-label batman_geometry_canary \
   --run-root /groups/.../arena_geometry_campaigns/batman_geometry_canary \
   --repo /groups/.../palette-worktrees/<exact-commit> \
+  --probe-queue gpu_t4 \
+  --probe-array-concurrency 1 \
   --apply --json
 ```
 
 The immutable bundle contains `plan.json`, `lsf_plan.json`, per-job runtime
-status, scheduler logs, and `lsf_submission.json` after submission.
+status, scheduler logs, and `lsf_submission.json` after submission. A final
+serialized short-queue job refreshes the exact target rows in the Palette
+registry after both arrays succeed.
 
 ## Human review and later publication
 
-The review package contains:
+The node-local review package contains:
 
 - `fit_report.json`;
 - early, middle, and late temporal medians and fit overlays;
@@ -133,15 +139,21 @@ The review package contains:
 - `dish_rim_review_montage.png`; and
 - `review_package.json`.
 
-A reviewer must inspect the montage before the separate
+The probe task immediately imports the complete package into immutable,
+selector-ineligible
+`analysis/arena_geometry_fit_runs/<content-derived-run>` storage, then deletes
+node scratch. The embedded run contains the report, receipt, optional reveal,
+montage, and three source panels. A reviewer must inspect those embedded
+artifacts before the separate
 `build_reviewed_arena_geometry_candidate_fragment` is used. That fragment
-recomputes the fit-report and montage digests from the receipt before planning
-publication. A changed file fails closed. Publishing the reviewed candidate
+binds the exact fit-review run and digest. Publishing the reviewed candidate
 still does not select it or apply it to detections.
 
 Operational selection and keyed detection-gate materialization exist as
-separate explicit workflow modules. Registry projection remains deferred. None
-of these steps may be silently appended below the pre-review campaign.
+separate explicit workflow modules. The campaign registry refresh reports
+offline fit completion and review-pending state; selection and gate completion
+remain absent. None of those operational steps may be silently appended below
+the pre-review campaign.
 
 The implementation keeps the lifecycle boundary visible in code:
 

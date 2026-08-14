@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.refinement import detect_quality_collection as collection
 from fisheye.shared.detect_quality_contract import CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA
+from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
 from fisheye.refinement.detect_quality_collection import (
     BLIP,
     CLEAN,
@@ -333,6 +335,52 @@ def test_collection_quality_resolves_full_frame_geometry_from_source_group(
     assert result["params"]["height"] == 4512
     assert result["params"]["full_frame_geometry_source"] == (
         "source:source_video_width/source_video_height"
+    )
+
+
+def test_collection_quality_uses_canonical_manifest_over_legacy_attrs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "analysis.zarr"
+    _write_source(path)
+    root = zarr.open_group(path, mode="a", use_consolidated=False)
+    source = root["detect_runs/detect_source"]
+    source.attrs.update(
+        {
+            "source_video_width": 10,
+            "source_video_height": 10,
+            "recording_frame_count": 1,
+            "run_manifest": {
+                "schema_id": "palette.canonical_detection.run_manifest",
+                "payload_digest": "f" * 64,
+            },
+        }
+    )
+    monkeypatch.setattr(
+        collection,
+        "canonical_detection_dimensions_from_manifest",
+        lambda _manifest: CanonicalDetectionDimensions(
+            n_frames=8,
+            n_instances=6,
+            source_width=100,
+            source_height=100,
+        ),
+    )
+
+    result = run_collection_detect_quality(
+        zarr_path=path,
+        source_group_path="detect_runs/detect_source",
+        output_run="quality_canonical_manifest",
+        workers=1,
+        apply=False,
+    )
+
+    assert result["params"]["recording_frame_count"] == 8
+    assert result["params"]["width"] == 100
+    assert result["params"]["height"] == 100
+    assert result["params"]["full_frame_geometry_source"] == (
+        "source:canonical_run_manifest"
     )
 
 

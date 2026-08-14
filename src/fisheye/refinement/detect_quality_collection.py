@@ -37,6 +37,11 @@ from ..shared.detect_quality_contract import (
 from ..shared.detection_tables import resolve_detection_instance_table
 from ..shared.experiment_setup import resolve_expected_subject_count
 from ..shared.run_provenance import build_writer_run_provenance
+from ..shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID,
+    canonical_detection_dimensions_from_manifest,
+)
+from ..shared.zarr.detection_schema import CanonicalDetectionDimensions
 from ..shared.zarr_io import open_zarr_root
 from ..shared.zarr_run_completion import (
     RUN_PROVENANCE_ATTR,
@@ -183,12 +188,40 @@ def _ancestor_groups(root: Any, group_path: str) -> Iterable[tuple[str, Any]]:
         yield path, _group_at(root, path)
 
 
+def _canonical_source_dimensions(
+    source: Any,
+    *,
+    row_count: int,
+) -> CanonicalDetectionDimensions | None:
+    manifest = source.attrs.get("run_manifest")
+    if not isinstance(manifest, Mapping):
+        return None
+    if manifest.get("schema_id") != CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID:
+        return None
+    dimensions = canonical_detection_dimensions_from_manifest(manifest)
+    if int(dimensions.n_instances) != int(row_count):
+        raise ValueError(
+            "Canonical detection manifest instance count differs from its "
+            "persisted table."
+        )
+    return dimensions
+
+
 def _resolve_frame_count(
     root: Any,
     source: Any,
     source_group_path: str,
     explicit: int | None,
+    canonical_dimensions: CanonicalDetectionDimensions | None,
 ) -> int:
+    if canonical_dimensions is not None:
+        canonical = int(canonical_dimensions.n_frames)
+        if explicit is not None and _positive_int(explicit) != canonical:
+            raise ValueError(
+                "Explicit recording frame count conflicts with the canonical "
+                "detection manifest."
+            )
+        return canonical
     if explicit is not None:
         resolved = _positive_int(explicit)
         if resolved is None:
@@ -228,9 +261,22 @@ def _resolve_geometry(
     *,
     explicit_width: float | None,
     explicit_height: float | None,
+    canonical_dimensions: CanonicalDetectionDimensions | None,
 ) -> tuple[float, float, str]:
     if (explicit_width is None) != (explicit_height is None):
         raise ValueError("Explicit full-frame width and height must be provided together.")
+
+    if canonical_dimensions is not None:
+        width = float(canonical_dimensions.source_width)
+        height = float(canonical_dimensions.source_height)
+        if explicit_width is not None and explicit_height is not None and (
+            float(explicit_width), float(explicit_height)
+        ) != (width, height):
+            raise ValueError(
+                "Explicit full-frame geometry conflicts with the canonical "
+                "detection manifest."
+            )
+        return width, height, "source:canonical_run_manifest"
 
     source_geometry = _geometry_from_attrs(source.attrs, scope="source")
     if source.attrs.get("schema_id") == CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA:
@@ -784,17 +830,23 @@ def run_collection_detect_quality(
     source_group = _group_at(root, source_group_path)
     source = resolve_detection_instance_table(source_group)
     row_count = _validate_source(source)
+    canonical_dimensions = _canonical_source_dimensions(
+        source_group,
+        row_count=row_count,
+    )
     resolved_frame_count = _resolve_frame_count(
         root,
         source_group,
         source_group_path,
         recording_frame_count,
+        canonical_dimensions,
     )
     resolved_width, resolved_height, geometry_source = _resolve_geometry(
         root,
         source_group,
         explicit_width=width,
         explicit_height=height,
+        canonical_dimensions=canonical_dimensions,
     )
     effective_jump = _effective_jump_threshold_pixels(
         jump_threshold,

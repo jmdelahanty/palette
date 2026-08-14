@@ -18,6 +18,10 @@ from typing import Any, Mapping
 
 import zarr
 
+from fisheye.analysis_workflows.materializers.arena_geometry_fit_review import (
+    FIT_REVIEW_RUNS_PARENT,
+    load_arena_geometry_fit_review_evidence,
+)
 from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
@@ -54,7 +58,6 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
     require_runs_parent,
 )
-
 
 CANDIDATE_RECORD_SCHEMA_ID = "palette.arena_geometry_candidate_record"
 CANDIDATE_RECORD_SCHEMA_VERSION = 1
@@ -445,23 +448,51 @@ def _source_camera_candidate_binding(
 def build_reviewed_palette_geometry_candidate_record(
     *,
     source_zarr: str | Path,
-    fit_report_path: str | Path,
-    montage_path: str | Path,
+    fit_report_path: str | Path | None = None,
+    montage_path: str | Path | None = None,
+    fit_review_run: str | None = None,
     review: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Normalize one reviewed blind fit without reinterpreting acquisition geometry."""
 
     zarr_path = Path(source_zarr).expanduser().resolve()
-    report_path = Path(fit_report_path).expanduser().resolve()
-    review_montage = Path(montage_path).expanduser().resolve()
-    if not report_path.is_file() or not review_montage.is_file():
-        raise FileNotFoundError(
-            "Palette fit report and review montage must both exist."
+    embedded_evidence = None
+    if fit_review_run is not None:
+        if fit_report_path is not None or montage_path is not None:
+            raise RecordingGeometryError(
+                "Choose the embedded fit-review run or external fit files, not both."
+            )
+        embedded_evidence = load_arena_geometry_fit_review_evidence(
+            zarr_path,
+            run_name=_required_text(fit_review_run, label="fit_review_run"),
         )
-    report_bytes = report_path.read_bytes()
+        report_bytes = embedded_evidence.fit_report_bytes
+        montage_bytes = embedded_evidence.montage_bytes
+        reveal_bytes = embedded_evidence.acquisition_reveal_bytes
+        report_ref = embedded_evidence.fit_report_ref
+        montage_ref = embedded_evidence.montage_ref
+        reveal_ref = embedded_evidence.acquisition_reveal_ref
+    else:
+        if fit_report_path is None or montage_path is None:
+            raise RecordingGeometryError(
+                "External Palette evidence requires both fit report and review montage."
+            )
+        report_path = Path(fit_report_path).expanduser().resolve()
+        review_montage = Path(montage_path).expanduser().resolve()
+        if not report_path.is_file() or not review_montage.is_file():
+            raise FileNotFoundError(
+                "Palette fit report and review montage must both exist."
+            )
+        report_bytes = report_path.read_bytes()
+        montage_bytes = review_montage.read_bytes()
+        report_ref = str(report_path)
+        montage_ref = str(review_montage)
+        reveal_path = report_path.with_name("acquisition_reveal.json")
+        reveal_bytes = reveal_path.read_bytes() if reveal_path.is_file() else None
+        reveal_ref = str(reveal_path) if reveal_bytes is not None else None
     try:
         report = json.loads(report_bytes)
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RecordingGeometryError("Palette fit report is not valid JSON.") from exc
     if (
         report.get("schema_id") != "palette.diagnostics.recording_dish_rim_probe"
@@ -555,7 +586,10 @@ def build_reviewed_palette_geometry_candidate_record(
             raise RecordingGeometryError(
                 f"Palette {name} frozen candidates must be a list of records."
             )
-        if fit_method.endswith("multicandidate_radial_edge_circle_v2") and not raw_candidates:
+        if (
+            fit_method.endswith("multicandidate_radial_edge_circle_v2")
+            and not raw_candidates
+        ):
             raise RecordingGeometryError(
                 f"Palette {name} v2 fit did not preserve its frozen candidates."
             )
@@ -692,17 +726,15 @@ def build_reviewed_palette_geometry_candidate_record(
     ys = [value[1] for value in window_values]
     radii = [value[2] for value in window_values]
     report_sha256 = hashlib.sha256(report_bytes).hexdigest()
-    reveal_path = report_path.with_name("acquisition_reveal.json")
     acquisition_boundary_edge_support: dict[str, Any] = {
         "status": "not_measured",
         "reason": "acquisition_reveal_not_present_at_candidate_publication",
     }
     acquisition_reveal_binding: dict[str, Any] | None = None
-    if reveal_path.is_file():
-        reveal_bytes = reveal_path.read_bytes()
+    if reveal_bytes is not None:
         try:
             reveal = json.loads(reveal_bytes)
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RecordingGeometryError(
                 "Acquisition reveal is not valid JSON."
             ) from exc
@@ -737,9 +769,60 @@ def build_reviewed_palette_geometry_candidate_record(
                 "Acquisition reveal lacks post-freeze boundary support evidence."
             )
         acquisition_reveal_binding = {
-            "path": str(reveal_path),
+            "path": _required_text(reveal_ref, label="acquisition_reveal_ref"),
             "sha256": hashlib.sha256(reveal_bytes).hexdigest(),
         }
+    palette_fit_source = {
+        "fit_report_path": report_ref,
+        "fit_report_sha256": report_sha256,
+        "fit_report_schema_id": report.get("schema_id"),
+        "fit_report_schema_version": report.get("schema_version"),
+        "fit_method": fit_method,
+        "blind_to_acquisition_geometry": (
+            _required_mapping(
+                report.get("parameters"), label="fit_report.parameters"
+            ).get("acquisition_geometry_available_to_fitter")
+            is False
+        ),
+        "source_video_path": source.get("video_path"),
+        "source_video_size_bytes": int(source.get("video_size_bytes")),
+        "source_summary_sha256": _required_sha256(
+            source.get("summary_sha256"), label="fit_report.source.summary_sha256"
+        ),
+        "probe_declared_target_feature": report.get("target_feature"),
+        "reviewed_semantic_correction": {
+            "status": "reviewer_corrected_probe_feature_label",
+            "reviewed_feature": "visible_dish_top_rim_edge",
+            "reason": "visual_review_found_fit_on_top_rim_not_inner_water_side",
+        },
+        "review_montage_path": montage_ref,
+        "review_montage_sha256": hashlib.sha256(montage_bytes).hexdigest(),
+        "windows": normalized_windows,
+        "fit_evidence_contract": _canonical_copy(
+            report.get("fit_evidence_contract")
+            or {
+                "all_window_candidates_frozen": False,
+                "candidate_geometry_revealed_to_acquisition_fit": False,
+                "candidate_feature_classification": "legacy_unspecified",
+                "selection_scope": "legacy_review_only",
+            }
+        ),
+        "temporal_stability_px": {
+            "center_x_range": max(xs) - min(xs),
+            "center_y_range": max(ys) - min(ys),
+            "radius_range": max(radii) - min(radii),
+        },
+        "acquisition_boundary_edge_support": acquisition_boundary_edge_support,
+        "acquisition_reveal_binding": acquisition_reveal_binding,
+    }
+    if embedded_evidence is not None:
+        palette_fit_source.update(
+            {
+                "review_evidence_storage": "embedded_zarr_fit_review_run_v1",
+                "fit_review_run": embedded_evidence.run_name,
+                "fit_review_record_sha256": (embedded_evidence.review_record_sha256),
+            }
+        )
     record = {
         "schema_id": CANDIDATE_RECORD_SCHEMA_ID,
         "schema_version": CANDIDATE_RECORD_SCHEMA_VERSION,
@@ -764,48 +847,7 @@ def build_reviewed_palette_geometry_candidate_record(
             "is_final_acquisition_tolerance": False,
         },
         "coordinate_binding": coordinate,
-        "palette_fit_source": {
-            "fit_report_path": str(report_path),
-            "fit_report_sha256": report_sha256,
-            "fit_report_schema_id": report.get("schema_id"),
-            "fit_report_schema_version": report.get("schema_version"),
-            "fit_method": fit_method,
-            "blind_to_acquisition_geometry": (
-                _required_mapping(
-                    report.get("parameters"), label="fit_report.parameters"
-                ).get("acquisition_geometry_available_to_fitter")
-                is False
-            ),
-            "source_video_path": source.get("video_path"),
-            "source_video_size_bytes": int(source.get("video_size_bytes")),
-            "source_summary_sha256": _required_sha256(
-                source.get("summary_sha256"), label="fit_report.source.summary_sha256"
-            ),
-            "probe_declared_target_feature": report.get("target_feature"),
-            "reviewed_semantic_correction": {
-                "status": "reviewer_corrected_probe_feature_label",
-                "reviewed_feature": "visible_dish_top_rim_edge",
-                "reason": "visual_review_found_fit_on_top_rim_not_inner_water_side",
-            },
-            "review_montage_path": str(review_montage),
-            "review_montage_sha256": _file_sha256(review_montage),
-            "windows": normalized_windows,
-            "fit_evidence_contract": _canonical_copy(
-                report.get("fit_evidence_contract") or {
-                    "all_window_candidates_frozen": False,
-                    "candidate_geometry_revealed_to_acquisition_fit": False,
-                    "candidate_feature_classification": "legacy_unspecified",
-                    "selection_scope": "legacy_review_only",
-                }
-            ),
-            "temporal_stability_px": {
-                "center_x_range": max(xs) - min(xs),
-                "center_y_range": max(ys) - min(ys),
-                "radius_range": max(radii) - min(radii),
-            },
-            "acquisition_boundary_edge_support": acquisition_boundary_edge_support,
-            "acquisition_reveal_binding": acquisition_reveal_binding,
-        },
+        "palette_fit_source": palette_fit_source,
         "review": review_payload,
         "candidate_policy": {
             "publication_role": "candidate_only",
@@ -906,6 +948,29 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
         _required_text(source.get(name), label=f"palette_fit_source.{name}")
     for name in ("fit_report_sha256", "source_summary_sha256", "review_montage_sha256"):
         _required_sha256(source.get(name), label=f"palette_fit_source.{name}")
+    review_storage = source.get("review_evidence_storage")
+    if review_storage is not None:
+        if review_storage != "embedded_zarr_fit_review_run_v1":
+            raise RecordingGeometryError(
+                "Palette fit review evidence storage contract is unsupported."
+            )
+        fit_review_run = _required_text(
+            source.get("fit_review_run"),
+            label="palette_fit_source.fit_review_run",
+        )
+        if Path(fit_review_run).name != fit_review_run:
+            raise RecordingGeometryError("Palette fit-review run ID is unsafe.")
+        _required_sha256(
+            source.get("fit_review_record_sha256"),
+            label="palette_fit_source.fit_review_record_sha256",
+        )
+        expected_prefix = f"analysis/{FIT_REVIEW_RUNS_PARENT}/{fit_review_run}/"
+        if not source["fit_report_path"].startswith(expected_prefix) or not source[
+            "review_montage_path"
+        ].startswith(expected_prefix):
+            raise RecordingGeometryError(
+                "Palette candidate does not bind its embedded fit-review run."
+            )
     if source.get("blind_to_acquisition_geometry") is not True:
         raise RecordingGeometryError(
             "Palette fit was not blind to acquisition geometry."
@@ -934,12 +999,17 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
         raise RecordingGeometryError(
             "Palette fit evidence must declare whether every candidate was frozen."
         )
-    if evidence_contract.get("candidate_geometry_revealed_to_acquisition_fit") is not False:
+    if (
+        evidence_contract.get("candidate_geometry_revealed_to_acquisition_fit")
+        is not False
+    ):
         raise RecordingGeometryError(
             "Palette fit evidence was not frozen blind to acquisition geometry."
         )
     for name, raw_window in windows.items():
-        window = _required_mapping(raw_window, label=f"palette_fit_source.windows.{name}")
+        window = _required_mapping(
+            raw_window, label=f"palette_fit_source.windows.{name}"
+        )
         _circle_mapping(window.get("geometry"), label=f"{name}.geometry")
         for metric in (
             "angular_support_fraction",
@@ -1056,8 +1126,7 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
     reveal_binding = source.get("acquisition_reveal_binding")
     if support_status == "measured":
         if (
-            boundary_support.get("method")
-            != "fixed_circle_radial_gradient_support_v1"
+            boundary_support.get("method") != "fixed_circle_radial_gradient_support_v1"
             or boundary_support.get("fit_frozen_before_measurement") is not True
             or boundary_support.get("coordinate_space") != "camera_native_pixels"
         ):
@@ -1108,7 +1177,13 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
             reveal_binding,
             label="palette_fit_source.acquisition_reveal_binding",
         )
-        _required_text(reveal.get("path"), label="acquisition_reveal_binding.path")
+        reveal_path = _required_text(
+            reveal.get("path"), label="acquisition_reveal_binding.path"
+        )
+        if review_storage is not None and not reveal_path.startswith(expected_prefix):
+            raise RecordingGeometryError(
+                "Acquisition reveal does not bind the embedded fit-review run."
+            )
         _required_sha256(
             reveal.get("sha256"), label="acquisition_reveal_binding.sha256"
         )
@@ -1295,6 +1370,7 @@ def _recording_folder_input_artifacts(source_path: Path) -> tuple[dict[str, Any]
             f"Producer-native recording snapshot is missing: {snapshot}"
         )
     try:
+
         def reject_constant(value: str) -> None:
             raise ValueError(f"non-finite JSON constant {value!r}")
 
@@ -1307,13 +1383,19 @@ def _recording_folder_input_artifacts(source_path: Path) -> tuple[dict[str, Any]
             f"Producer-native recording snapshot is invalid: {exc}"
         ) from exc
     pointer = _required_mapping(
-        payload.get("recording_geometry_contract") if isinstance(payload, Mapping) else None,
+        (
+            payload.get("recording_geometry_contract")
+            if isinstance(payload, Mapping)
+            else None
+        ),
         label="recording_snapshot.recording_geometry_contract",
     )
     relative = Path(
         _required_text(pointer.get("relative_path"), label="geometry relative_path")
     )
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+    if relative.is_absolute() or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
         raise RecordingGeometryError(
             "Recording geometry contract pointer must stay below the recording root."
         )
@@ -1551,16 +1633,15 @@ def plan_producer_native_acquisition_geometry_candidate(
 def plan_reviewed_palette_geometry_candidate(
     *,
     source_zarr: str | Path,
-    fit_report_path: str | Path,
-    montage_path: str | Path,
+    fit_report_path: str | Path | None = None,
+    montage_path: str | Path | None = None,
+    fit_review_run: str | None = None,
     reviewer: str,
     reviewed_at_utc: str,
 ) -> ArenaGeometryCandidatePlan:
     """Plan a reviewed image-derived candidate without selecting or applying it."""
 
     zarr_path = Path(source_zarr).expanduser().resolve()
-    report_path = Path(fit_report_path).expanduser().resolve()
-    review_montage = Path(montage_path).expanduser().resolve()
     review = {
         "status": "reviewer_accepted_for_offline_detection_gate_audit",
         "reviewer": _required_text(reviewer, label="reviewer"),
@@ -1571,25 +1652,48 @@ def plan_reviewed_palette_geometry_candidate(
     }
     record = build_reviewed_palette_geometry_candidate_record(
         source_zarr=zarr_path,
-        fit_report_path=report_path,
-        montage_path=review_montage,
+        fit_report_path=fit_report_path,
+        montage_path=montage_path,
+        fit_review_run=fit_review_run,
         review=review,
     )
     digest = _payload_sha256(record)
     candidate_id = f"arena-geometry-palette-{digest[:24]}"
+    source = _required_mapping(
+        record.get("palette_fit_source"), label="palette_fit_source"
+    )
+    input_run_ids: dict[str, Any] = {}
     input_artifacts: list[dict[str, Any]] = [
         {
             "role": "palette_blind_dish_rim_fit_report",
-            "path": str(report_path),
-            "sha256": _file_sha256(report_path),
+            "path": source["fit_report_path"],
+            "sha256": source["fit_report_sha256"],
         },
         {
             "role": "palette_dish_rim_review_montage",
-            "path": str(review_montage),
-            "sha256": _file_sha256(review_montage),
+            "path": source["review_montage_path"],
+            "sha256": source["review_montage_sha256"],
         },
     ]
-    reveal_binding = record["palette_fit_source"].get("acquisition_reveal_binding")
+    if source.get("review_evidence_storage") is not None:
+        run_name = _required_text(
+            source.get("fit_review_run"), label="palette_fit_source.fit_review_run"
+        )
+        input_run_ids = {
+            "arena_geometry_fit_review": run_name,
+            "arena_geometry_fit_review_record_sha256": _required_sha256(
+                source.get("fit_review_record_sha256"),
+                label="palette_fit_source.fit_review_record_sha256",
+            ),
+        }
+        receipt_path = zarr_path / "analysis" / FIT_REVIEW_RUNS_PARENT / run_name
+        receipt_sha256 = input_run_ids["arena_geometry_fit_review_record_sha256"]
+    else:
+        if fit_report_path is None:
+            raise RecordingGeometryError("External Palette fit report is missing.")
+        receipt_path = Path(fit_report_path).expanduser().resolve()
+        receipt_sha256 = _file_sha256(receipt_path)
+    reveal_binding = source.get("acquisition_reveal_binding")
     if isinstance(reveal_binding, Mapping):
         input_artifacts.append(
             {
@@ -1609,7 +1713,7 @@ def plan_reviewed_palette_geometry_candidate(
             "gate_derivation": "direct_from_reviewed_visible_dish_top_rim_edge",
             "operational_selection": "not_performed",
         },
-        input_run_ids={},
+        input_run_ids=input_run_ids,
         input_artifacts=tuple(input_artifacts),
         include_system_context=False,
     )
@@ -1621,8 +1725,8 @@ def plan_reviewed_palette_geometry_candidate(
         )
     return ArenaGeometryCandidatePlan(
         source_zarr=zarr_path,
-        receipt_path=report_path,
-        receipt_sha256=_file_sha256(report_path),
+        receipt_path=receipt_path,
+        receipt_sha256=receipt_sha256,
         candidate_id=candidate_id,
         candidate_record_sha256=digest,
         candidate_record=record,
@@ -1811,19 +1915,39 @@ def _revalidate_candidate_sources(
             label="palette_fit_source",
         )
         review = _required_mapping(plan.candidate_record.get("review"), label="review")
-        current_record = build_reviewed_palette_geometry_candidate_record(
-            source_zarr=plan.source_zarr,
-            fit_report_path=plan.receipt_path,
-            montage_path=_required_text(
-                source.get("review_montage_path"),
-                label="palette_fit_source.review_montage_path",
-            ),
-            review=review,
-        )
+        if source.get("review_evidence_storage") is not None:
+            fit_review_run = _required_text(
+                source.get("fit_review_run"),
+                label="palette_fit_source.fit_review_run",
+            )
+            current_record = build_reviewed_palette_geometry_candidate_record(
+                source_zarr=plan.source_zarr,
+                fit_review_run=fit_review_run,
+                review=review,
+            )
+            evidence = load_arena_geometry_fit_review_evidence(
+                plan.source_zarr,
+                run_name=fit_review_run,
+            )
+            current_report_sha256 = hashlib.sha256(
+                evidence.fit_report_bytes
+            ).hexdigest()
+            current_receipt_sha256 = evidence.review_record_sha256
+        else:
+            current_record = build_reviewed_palette_geometry_candidate_record(
+                source_zarr=plan.source_zarr,
+                fit_report_path=plan.receipt_path,
+                montage_path=_required_text(
+                    source.get("review_montage_path"),
+                    label="palette_fit_source.review_montage_path",
+                ),
+                review=review,
+            )
+            current_report_sha256 = _file_sha256(plan.receipt_path)
+            current_receipt_sha256 = current_report_sha256
         current_digest = _payload_sha256(current_record)
-        current_report_sha256 = _file_sha256(plan.receipt_path)
         if (
-            current_report_sha256 != plan.receipt_sha256
+            current_receipt_sha256 != plan.receipt_sha256
             or current_digest != plan.candidate_record_sha256
             or current_record != plan.candidate_record
         ):
@@ -1833,6 +1957,7 @@ def _revalidate_candidate_sources(
             "source_kind": PALETTE_CANDIDATE_KIND,
             "fit_report_sha256": current_report_sha256,
             "review_montage_sha256": source.get("review_montage_sha256"),
+            "fit_review_run": source.get("fit_review_run"),
             "candidate_record_sha256": current_digest,
         }
     raise RuntimeError(f"Unsupported candidate source kind: {plan.candidate_kind!r}.")
