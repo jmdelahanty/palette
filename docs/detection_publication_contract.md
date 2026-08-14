@@ -6,8 +6,9 @@ last_verified: 2026-08-13
 stage_arrays_spec: DETECT_SPEC
 -->
 
-Canonical detection has one construction boundary and two publication
-adapters. The numerical writer never chooses or mutates a live canonical run.
+Canonical detection has one construction boundary and one production
+artifact-to-canonical publication pipeline. The numerical writer never chooses
+or mutates a live canonical run.
 
 This is the authoritative detection-publication contract. For stage ordering,
 see [recording_analysis_pipeline_contract.md](recording_analysis_pipeline_contract.md).
@@ -28,7 +29,7 @@ outputs remain useful for development and compute smokes, but they are not
 canonical publications and must not be presented as a recording's selected
 detect run.
 
-## Full-recording publication
+## Historical direct full-recording publication
 
 `fisheye.utils.run_detection_local_publish`:
 
@@ -55,18 +56,21 @@ run as an immutable failed and selector-ineligible tombstone, and reconsolidates
 that fail-closed state. Failed local scratch is retained only when explicitly
 requested.
 
-`run_detect_with_registry_model`, `run_detections_batch`, `palette detect`, and
-the recording pipeline all route through this adapter. Canonical execution
-requires a registered model path, digest, run ID, and set ID. Detection cannot
-create or overwrite acquisition metadata; importing the recording is a
-prerequisite.
+This direct adapter is retained as an explicit compatibility surface. New
+production recipes must not route through it because its detector-local layout
+is published directly below `detect_runs` before canonical assembly.
 
-## Clipped and transport publication
+## Production artifact and canonical publication
 
 `fisheye.utils.run_detection_artifact` uses the same candidate builder but
-packages an unbound run-group artifact. The clip-aware importer binds canonical
-recording/frame identity, validates the package, and publishes it. This remains
-the appropriate adapter for clipped fan-out and explicit transport boundaries.
+packages an unbound run-group artifact below `detection_artifact_runs`. The
+native binder validates all work-unit packages, binds canonical recording/frame
+identity, and publishes the sole production authority below `detect_runs`.
+Whole videos use one identity-mapped work unit; clipped recordings use one or
+more indexed work units.
+
+The complete accepted boundary and implementation checklist are in
+[detection_artifact_and_canonical_publication_boundary.md](detection_artifact_and_canonical_publication_boundary.md).
 
 ## Removed paths
 
