@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 concurrency:
@@ -9,6 +11,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  generated-artifacts:
+    name: generated artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check generated Zarr inventories
+        run: |
+          PYTHONPATH=src python -m fisheye.diagnostics.zarr_storage_census --check
+
   # Keep these liveness gates independent: a stale import-layer declaration
   # must not suppress the file-size ratchet or pytest collection.
   import-boundaries:
@@ -93,6 +112,7 @@ jobs:
 
   tests:
     name: non-gpu tests (shard ${{ matrix.shard }})
+    needs: generated-artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
