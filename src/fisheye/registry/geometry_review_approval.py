@@ -218,6 +218,148 @@ def _fit_review_binding(root: Any, run_name: str) -> dict[str, Any]:
     }
 
 
+def _positive_int(value: object, *, label: str) -> int:
+    if type(value) is not int or int(value) <= 0:
+        raise GeometryReviewApprovalError(f"{label} must be one positive integer.")
+    return int(value)
+
+
+def _detection_frame_count_binding(
+    group: Any,
+    table: Any,
+    *,
+    group_path: str,
+    attrs: Mapping[str, Any],
+    row_count: int,
+    instance_key_sha256: str,
+) -> tuple[int, dict[str, Any]]:
+    """Resolve exact legacy or canonical-v2 detection frame cardinality."""
+
+    declarations: dict[str, int] = {}
+    for name in ("frame_count", "recording_frame_count"):
+        if attrs.get(name) is not None:
+            declarations[f"attribute:{name}"] = _positive_int(
+                attrs.get(name), label=f"Detection {name}"
+            )
+
+    temporal = attrs.get("source_row_temporal_authority")
+    temporal_digest: str | None = None
+    if temporal is not None:
+        if not isinstance(temporal, Mapping):
+            raise GeometryReviewApprovalError(
+                "Detection source_row_temporal_authority must be an object."
+            )
+        if (
+            temporal.get("schema_id") != "palette.source_row_temporal_authority"
+            or temporal.get("schema_version") != 1
+            or temporal.get("source_rowset_ref") != f"/{group_path}"
+            or temporal.get("source_identity_domain") != "observation_instance"
+            or temporal.get("source_identity_mode") != "instance_key"
+            or temporal.get("source_leading_dimension") != row_count
+        ):
+            raise GeometryReviewApprovalError(
+                "Detection source_row_temporal_authority has incompatible identity."
+            )
+        temporal_digest = _required_sha256(
+            attrs.get("source_row_temporal_authority_sha256"),
+            label="Detection source-row temporal-authority digest",
+        )
+        if temporal_digest != _sha256(temporal):
+            raise GeometryReviewApprovalError(
+                "Detection source-row temporal-authority digest is stale."
+            )
+        observation_key = temporal.get("observation_instance_key")
+        if (
+            not isinstance(observation_key, Mapping)
+            or observation_key.get("ref") != f"/{group_path}/instance_key"
+            or observation_key.get("shape") != [row_count]
+            or observation_key.get("content_sha256") != instance_key_sha256
+        ):
+            raise GeometryReviewApprovalError(
+                "Detection temporal authority does not bind the exact instance keys."
+            )
+        source_frames = temporal.get("source_acquisition_frame_index")
+        if (
+            not isinstance(source_frames, Mapping)
+            or source_frames.get("ref")
+            != f"/{group_path}/source_acquisition_frame_index"
+            or source_frames.get("shape") != [row_count]
+            or "source_acquisition_frame_index" not in table
+        ):
+            raise GeometryReviewApprovalError(
+                "Detection temporal authority lacks its exact source-frame array."
+            )
+        source_frame_values = np.asarray(table["source_acquisition_frame_index"][:])
+        if (
+            tuple(source_frame_values.shape) != (row_count,)
+            or source_frames.get("content_sha256")
+            != array_values_sha256(source_frame_values)
+        ):
+            raise GeometryReviewApprovalError(
+                "Detection source-frame array differs from its temporal authority."
+            )
+        declarations["source_row_temporal_authority"] = _positive_int(
+            temporal.get("source_total_frames"),
+            label="Detection source_total_frames",
+        )
+
+    storage = attrs.get("immutable_yolo_storage_validation")
+    if storage is not None:
+        if (
+            not isinstance(storage, Mapping)
+            or storage.get("schema_id")
+            != "palette.immutable_yolo_storage_completion.v1"
+            or storage.get("status") != "ok"
+            or storage.get("stage") != "detect"
+            or storage.get("row_count") != row_count
+            or storage.get("errors") not in (None, [])
+        ):
+            raise GeometryReviewApprovalError(
+                "Detection immutable-YOLO storage validation is incompatible."
+            )
+        declarations["immutable_yolo_storage_validation"] = _positive_int(
+            storage.get("frame_count"),
+            label="Detection storage-validation frame_count",
+        )
+
+    if attrs.get("validated_backend_result_count") is not None:
+        declarations["validated_backend_result_count"] = _positive_int(
+            attrs.get("validated_backend_result_count"),
+            label="Detection validated_backend_result_count",
+        )
+
+    for name in ("frame_counts", "n_detections"):
+        node = table.get(name)
+        if node is None and table is not group:
+            node = group.get(name)
+        if node is not None:
+            shape = tuple(int(value) for value in node.shape)
+            if len(shape) != 1 or shape[0] <= 0:
+                raise GeometryReviewApprovalError(
+                    f"Detection {name} has invalid frame-domain cardinality."
+                )
+            declarations[f"array:{name}"] = int(shape[0])
+
+    if not declarations:
+        raise GeometryReviewApprovalError(
+            "Detection source lacks an exact frame-count authority."
+        )
+    values = set(declarations.values())
+    if len(values) != 1:
+        raise GeometryReviewApprovalError(
+            "Detection frame-count authorities disagree: "
+            + ", ".join(f"{name}={value}" for name, value in declarations.items())
+        )
+    frame_count = next(iter(values))
+    return frame_count, {
+        "schema_id": "palette.geometry_review_detection_frame_count_binding",
+        "schema_version": 1,
+        "frame_count": frame_count,
+        "declarations": declarations,
+        "source_row_temporal_authority_sha256": temporal_digest,
+    }
+
+
 def detection_source_binding(root: Any, group_path: str) -> dict[str, Any]:
     """Freeze metadata identity for one exact complete canonical detection run."""
 
@@ -256,15 +398,25 @@ def detection_source_binding(root: Any, group_path: str) -> dict[str, Any]:
         )
     frame_indices = np.asarray(table["frame_indices"][:])
     bbox_norm_coords = np.asarray(table["bbox_norm_coords"][:])
+    instance_key_sha256 = array_values_sha256(instance_keys)
+    frame_count, frame_count_authority = _detection_frame_count_binding(
+        group,
+        table,
+        group_path=path,
+        attrs=attrs,
+        row_count=row_count,
+        instance_key_sha256=instance_key_sha256,
+    )
     snapshot = {
         "group_path": path,
         "run_name": run_name,
         "schema_id": attrs.get("schema_id"),
         "row_count": row_count,
-        "frame_count": attrs.get("frame_count") or attrs.get("recording_frame_count"),
+        "frame_count": frame_count,
+        "frame_count_authority": frame_count_authority,
         "source_video_width": attrs.get("source_video_width") or attrs.get("width"),
         "source_video_height": attrs.get("source_video_height") or attrs.get("height"),
-        "instance_key_sha256": array_values_sha256(instance_keys),
+        "instance_key_sha256": instance_key_sha256,
         "frame_indices_sha256": array_values_sha256(frame_indices),
         "bbox_norm_coords_sha256": array_values_sha256(bbox_norm_coords),
         "canonical_run_manifest_payload_digest": attrs.get(

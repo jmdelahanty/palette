@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import fisheye.registry.geometry_review_approval as approval
@@ -20,6 +21,81 @@ from fisheye.registry.geometry_review import (
 class _Root:
     def __init__(self, *, attrs: dict[str, object] | None = None) -> None:
         self.attrs = dict(attrs or {})
+
+
+class _Group(dict[str, object]):
+    def __init__(self, values: dict[str, object], *, attrs: dict[str, object]) -> None:
+        super().__init__(values)
+        self.attrs = attrs
+
+
+def _modern_detection_group() -> _Group:
+    instance_keys = np.asarray([11, 12, 13], dtype=np.uint64)
+    source_frames = np.asarray([0, 2, 4], dtype=np.int64)
+    row_count = int(instance_keys.shape[0])
+    group_path = "detect_runs/raw-modern"
+    temporal = {
+        "schema_id": "palette.source_row_temporal_authority",
+        "schema_version": 1,
+        "acquisition_camera_frame": {
+            "record_ref": "/analysis/acquisition_camera_frames/camera-1@acquisition_camera_frame",
+            "record_sha256": "a" * 64,
+        },
+        "recording_id": "recording-1",
+        "camera_id": "camera-1",
+        "source_total_frames": 5,
+        "source_rowset_ref": f"/{group_path}",
+        "source_row_identity": {
+            "record_ref": f"/{group_path}@row_identity_contract",
+            "record_sha256": "b" * 64,
+        },
+        "source_identity_domain": "observation_instance",
+        "source_identity_mode": "instance_key",
+        "source_leading_dimension": row_count,
+        "source_acquisition_frame_index": {
+            "ref": f"/{group_path}/source_acquisition_frame_index",
+            "dtype": "<i8",
+            "shape": [row_count],
+            "content_sha256": approval.array_values_sha256(source_frames),
+        },
+        "observation_instance_key": {
+            "ref": f"/{group_path}/instance_key",
+            "dtype": "<u8",
+            "shape": [row_count],
+            "content_sha256": approval.array_values_sha256(instance_keys),
+        },
+    }
+    attrs = {
+        "palette_run_completion_status": "complete",
+        "source_video_width": 4512,
+        "source_video_height": 4512,
+        "validated_backend_result_count": 5,
+        "source_row_temporal_authority": temporal,
+        "source_row_temporal_authority_sha256": approval._sha256(temporal),
+        "source_pixel_authority": {
+            "record_ref": "/analysis/coordinate_frames/source_camera/camera-1/continuous@pixel_frame_authority",
+            "record_sha256": "c" * 64,
+        },
+        "immutable_yolo_storage_validation": {
+            "schema_id": "palette.immutable_yolo_storage_completion.v1",
+            "status": "ok",
+            "stage": "detect",
+            "row_count": row_count,
+            "frame_count": 5,
+            "errors": [],
+        },
+    }
+    return _Group(
+        {
+            "instance_key": instance_keys,
+            "bbox_norm_coords": np.zeros((row_count, 4), dtype=np.float64),
+            "frame_indices": np.asarray([0, 2, 4], dtype=np.int32),
+            "source_acquisition_frame_index": source_frames,
+            "frame_counts": np.asarray([1, 0, 1, 0, 1], dtype=np.int32),
+            "n_detections": np.asarray([1, 0, 1, 0, 1], dtype=np.int32),
+        },
+        attrs=attrs,
+    )
 
 
 def _build_request(
@@ -140,6 +216,49 @@ def test_approval_request_changes_when_operator_choice_changes(
 
     assert palette.request_id != acquisition.request_id
     assert palette.gate_run != acquisition.gate_run
+
+
+def test_detection_binding_uses_sealed_modern_frame_count_authorities() -> None:
+    path = "detect_runs/raw-modern"
+    group = _modern_detection_group()
+
+    binding = approval.detection_source_binding({path: group}, path)
+
+    assert binding["frame_count"] == 5
+    assert binding["frame_count_authority"]["declarations"] == {
+        "source_row_temporal_authority": 5,
+        "immutable_yolo_storage_validation": 5,
+        "validated_backend_result_count": 5,
+        "array:frame_counts": 5,
+        "array:n_detections": 5,
+    }
+    assert binding["frame_count_authority"][
+        "source_row_temporal_authority_sha256"
+    ] == group.attrs["source_row_temporal_authority_sha256"]
+
+
+def test_detection_binding_rejects_disagreeing_modern_frame_count() -> None:
+    path = "detect_runs/raw-modern"
+    group = _modern_detection_group()
+    group.attrs["validated_backend_result_count"] = 6
+
+    with pytest.raises(
+        approval.GeometryReviewApprovalError,
+        match="frame-count authorities disagree",
+    ):
+        approval.detection_source_binding({path: group}, path)
+
+
+def test_detection_binding_rejects_stale_temporal_authority_digest() -> None:
+    path = "detect_runs/raw-modern"
+    group = _modern_detection_group()
+    group.attrs["source_row_temporal_authority_sha256"] = "d" * 64
+
+    with pytest.raises(
+        approval.GeometryReviewApprovalError,
+        match="temporal-authority digest is stale",
+    ):
+        approval.detection_source_binding({path: group}, path)
 
 
 def test_registry_precondition_requires_exact_actionable_pending_run(
