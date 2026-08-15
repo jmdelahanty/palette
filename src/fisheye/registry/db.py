@@ -5711,12 +5711,29 @@ class Registry(
                 payload.setdefault("roi_image_representation", None)
                 payload.setdefault("roi_pixel_contract_name", None)
                 payload.setdefault("roi_pixel_contract_json", None)
+                for name in (
+                    "crop_schema_id",
+                    "source_pixels",
+                    "provider_record_sha256",
+                    "routing_policy_id",
+                    "crop_policy_id",
+                    "source_acquisition_mode",
+                    "source_acquisition_ledger_record_sha256",
+                    "acquisition_video_rows",
+                    "full_frame_recovery_rows",
+                    "crop_pixel_routing_ready",
+                ):
+                    payload.setdefault(name, None)
                 self.conn.execute(
                     """
                     INSERT INTO crop_quality (
                         dataset_id, crop_run, recording_id, zarr_use, crop_created_utc,
                         source_detect_run, source_refined_run, detection_source_type, detection_source_path,
                         crop_storage_mode, roi_image_representation, roi_pixel_contract_name, roi_pixel_contract_json,
+                        crop_schema_id, source_pixels, provider_record_sha256, routing_policy_id,
+                        crop_policy_id, source_acquisition_mode,
+                        source_acquisition_ledger_record_sha256,
+                        acquisition_video_rows, full_frame_recovery_rows, crop_pixel_routing_ready,
                         total_rois, frames_with_crops, total_frames, percent_frames_with_crops,
                         includes_interpolated, n_real_detections, n_interpolated_detections,
                         review_state, review_method, review_intended_use, review_reviewer,
@@ -5726,6 +5743,10 @@ class Registry(
                         :dataset_id, :crop_run, :recording_id, :zarr_use, :crop_created_utc,
                         :source_detect_run, :source_refined_run, :detection_source_type, :detection_source_path,
                         :crop_storage_mode, :roi_image_representation, :roi_pixel_contract_name, :roi_pixel_contract_json,
+                        :crop_schema_id, :source_pixels, :provider_record_sha256, :routing_policy_id,
+                        :crop_policy_id, :source_acquisition_mode,
+                        :source_acquisition_ledger_record_sha256,
+                        :acquisition_video_rows, :full_frame_recovery_rows, :crop_pixel_routing_ready,
                         :total_rois, :frames_with_crops, :total_frames, :percent_frames_with_crops,
                         :includes_interpolated, :n_real_detections, :n_interpolated_detections,
                         :review_state, :review_method, :review_intended_use, :review_reviewer,

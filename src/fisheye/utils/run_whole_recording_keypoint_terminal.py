@@ -21,6 +21,7 @@ import uuid
 import numpy as np
 import zarr
 
+from fisheye.cluster.keypoints.common import validate_crop_run_provider_record
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.model_input_transform import (
     MODEL_INPUT_TRANSFORM_CHOICES,
@@ -197,6 +198,7 @@ def run_whole_recording_keypoint_terminal(
     analysis_zarr: Path,
     crop_run: str,
     cache_manifest: Path,
+    roi_provider_record_sha256: str | None = None,
     registry: Path,
     model_set_id: str,
     model_run_id: str,
@@ -254,6 +256,11 @@ def run_whole_recording_keypoint_terminal(
     try:
         local_archive = _stage_crop_shell(
             archive, crop_run=crop_run, destination=scratch / "compute"
+        )
+        roi_provider = validate_crop_run_provider_record(
+            analysis_zarr=local_archive,
+            crop_run=crop_run,
+            expected_record_sha256=roi_provider_record_sha256,
         )
         result = run_keypoints_with_registry_model(
             recording_dir=recording_dir,
@@ -381,6 +388,9 @@ def run_whole_recording_keypoint_terminal(
                 ),
                 "cache_manifest_sha256": cache_binding["manifest_sha256"],
                 "cache_payload_sha256": cache_binding["payload_sha256"],
+                "roi_provider": (
+                    dict(roi_provider) if roi_provider is not None else None
+                ),
                 "model_input_mode": run.attrs.get("input_mode_effective"),
                 "model_input_transform": run.attrs.get("model_input_transform"),
                 "model_input_stride": run.attrs.get("model_input_stride"),
@@ -426,6 +436,9 @@ def run_whole_recording_keypoint_terminal(
             },
             "source_array_hashes": array_hashes,
             "cache": cache_binding,
+            "roi_provider": (
+                dict(roi_provider) if roi_provider is not None else None
+            ),
             "model": {
                 "set_id": model_set_id,
                 "run_id": model_run_id,
@@ -471,6 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-zarr", type=Path, required=True)
     parser.add_argument("--crop-run", required=True)
     parser.add_argument("--cache-manifest", type=Path, required=True)
+    parser.add_argument("--roi-provider-record-sha256")
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-run-id", required=True)
@@ -507,6 +521,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         analysis_zarr=args.analysis_zarr,
         crop_run=args.crop_run,
         cache_manifest=args.cache_manifest,
+        roi_provider_record_sha256=args.roi_provider_record_sha256,
         registry=args.registry,
         model_set_id=args.model_set_id,
         model_run_id=args.model_run_id,

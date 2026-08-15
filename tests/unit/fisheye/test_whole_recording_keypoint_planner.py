@@ -187,6 +187,11 @@ def _build_plan(
             rejected_sources={"persisted_roi_images": "missing"},
         ),
     )
+    monkeypatch.setattr(
+        planner,
+        "validate_crop_run_provider_record",
+        lambda **_kwargs: None,
+    )
     cache_bindings = None
     upstream_jobs: tuple[LsfJob, ...] = ()
     if planned_caches:

@@ -108,6 +108,17 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
   `crop_stream_consumer_ready` ledger readiness.
 - New zebrafish workflow defaults and production entry points use 384 x 384;
   persisted 348 x 348 artifacts remain unchanged.
+- The hybrid provider builder now defaults to the pointer-selected canonical
+  ledger and joins it to strict finalized refined detections by recording frame.
+  Its historical instance-key join is available only through the explicit
+  `legacy_crop_run` compatibility mode.
+- Hybrid crop runs carry a digest-bound provider record over exact refined-row,
+  ledger-row, source-kind, reason-code, and ROI arrays. Whole-recording keypoint
+  planning and terminal startup validate that exact digest when a hybrid run is
+  configured.
+- Registry schema 69 projects `crop_pixel_routing_ready`, provider identity,
+  crop/routing policies, and acquisition-versus-recovery counts separately from
+  raw crop-stream availability.
 
 ### Missing or not production-complete
 
@@ -122,16 +133,17 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
   the existing documented `stat_v1` fingerprint.
 - Full-frame bounds validation for crop origins still needs a recording-level
   native-extent authority where Orange's full-stream manifest omits dimensions.
-- The current acquisition crop-run geometry is based on the selected live box;
-  production GoodBatBadBat crop geometry should remain bound to the selected
+- The old acquisition crop-run geometry remains based on the selected live box
+  and is compatibility-only. New hybrid provider rows are bound to the selected
   offline refined-detection rowset.
 - Acquisition detection import remains a nonselector
   `detection_artifact_runs` compatibility surface; canonical promotion is not
   implemented.
-- Whole-recording production keypoint orchestration still assumes a flat ROI
-  cache rather than a generic acquisition/hybrid provider manifest.
-- Registry readiness now expresses raw-stream canonicalization, but routing
-  completeness and downstream provider consumption remain future stages.
+- Whole-recording keypoint orchestration now pins the exact hybrid provider
+  record, but still materializes/uses a whole-rowset flat ROI cache for terminal
+  inference. Direct grouped provider-block execution remains future work.
+- Registry readiness now expresses raw-stream canonicalization and routing
+  completeness; completed keypoint provider consumption remains future work.
 - Crimson has not validated direct raw acquisition-stream reads or the intended
   acquisition/hybrid crop-run consumer chain.
 
@@ -197,8 +209,8 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
 - [x] Define a sidecar identity policy. Crop metadata, keyframe, summary, status,
   and live-event sidecars are small enough to receive full content hashes.
 - [x] Define stream import completion and validation schemas.
-- [ ] Define a versioned crop-pixel routing policy and reason-code vocabulary.
-- [ ] Define `zebrafish_crop_384_v1` as a species-aware 384 x 384 crop geometry
+- [x] Define a versioned crop-pixel routing policy and reason-code vocabulary.
+- [x] Define `zebrafish_crop_384_v1` as a species-aware 384 x 384 crop geometry
   profile rather than changing an unexplained global integer default.
 - [x] Inventory and update all production-facing 348 defaults, including shared
   crop defaults, default configuration, geometry-review approval planning,
@@ -208,9 +220,10 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
   to a larger submitted extent, and retain its declared preprocessing identity.
 - [x] Preserve existing 348 x 348 runs unchanged and classify them through their
   original crop-policy identity.
-- [ ] Freeze full-frame edge handling for 384 x 384 fallback crops, including
+- [x] Freeze full-frame edge handling for 384 x 384 fallback crops, including
   whether the ROI origin is clamped or pixels outside the native extent are
-  zero-filled. Record that decision in `zebrafish_crop_384_v1`.
+  zero-filled. `zebrafish_crop_384_v1` uses translation-only centering and
+  zero-fills pixels outside the native extent without changing coordinates.
 - [ ] Define a versioned GoodBatBadBat crop-sufficiency policy. Do not invent
   pass thresholds merely to enable automation.
 - [x] Record explicit non-goals for the first implementation:
@@ -312,43 +325,46 @@ selected_live_detection_confidence
 
 ### Rowset
 
-- [ ] Resolve one exact, complete, selector-eligible refined-detection run and
+- [x] Resolve one exact, complete, finalized immutable refined-detection run and
   its exact dish-gate/selection lineage.
-- [ ] Build one canonical 384 x 384 crop row per selected refined-detection
+- [x] Build one canonical 384 x 384 crop row per selected refined-detection
   instance using `zebrafish_crop_384_v1`.
-- [ ] Preserve the refined-detection `instance_key` as the crop observation key;
+- [x] Preserve the refined-detection `instance_key` as the crop observation key;
   do not mint a replacement identity from the live acquisition box.
-- [ ] Require identical ordered `instance_key` coverage between the selected
+- [x] Require identical ordered `instance_key` coverage between the selected
   refined instances and the derived crop rowset.
-- [ ] Preserve `source_refined_row_ids`, frame indices, acquisition-frame
+- [x] Preserve `source_refined_row_ids`, frame indices, acquisition-frame
   indices, full-frame ROI placement, bbox geometry, and crop-policy identity.
 
 ### Acquisition-video eligibility
 
 For each canonical crop row:
 
-- [ ] Resolve exactly one raw acquisition crop ledger row for the same recording
+- [x] Resolve exactly one raw acquisition crop ledger row for the same recording
   frame.
 - [ ] Require a decodable, nonblank crop-video frame with exact 384 x 384
   dimensions and valid full-frame placement.
-- [ ] Treat the complete recorded 384 x 384 acquisition crop window as the
+- [x] Treat the complete recorded 384 x 384 acquisition crop window as the
   candidate ROI; do not take a smaller subwindow.
-- [ ] Test whether the selected refined fish bbox and the versioned required
+- [x] Test whether the selected refined fish bbox and the versioned required
   context margin are contained within that recorded crop window.
-- [ ] When eligible, use the complete crop-video frame and record its exact
+- [x] When eligible, use the complete crop-video frame and record its exact
   native full-frame origin from `source_crop_xywh`.
-- [ ] Do not use the selected live bbox as the canonical analysis bbox.
-- [ ] Record full-precision containment margins and policy result.
+- [x] Do not use the selected live bbox as the canonical analysis bbox.
+- [x] Record full-precision containment margins and policy result.
 
 ### Full-frame fallback
 
-- [ ] Route blank, missing, ambiguous, undecodable, or insufficient acquisition
+- [x] Route blank, missing, ambiguous, or insufficient acquisition
   crops to a 384 x 384 full-frame recovery ROI generated from the canonical
   refined detection.
-- [ ] Materialize only fallback rows into a node-local supplemental flat cache.
+- [x] Materialize only fallback rows into a supplemental flat cache. Production
+  cluster execution must place its work/cache path according to the job plan;
+  the disposable canary uses `/tmp`.
 - [ ] Bind the cache manifest to the exact full-frame media identity, crop run,
   row IDs, crop policy, and software identity.
-- [ ] Preserve explicit routing reasons, including at least:
+- [x] Preserve explicit routing reasons for every statically classifiable route,
+  including:
 
 ```text
 acquisition_crop_selected
@@ -363,17 +379,20 @@ full_frame_recovery_selected
 unrecoverable
 ```
 
-- [ ] Fail closed if any canonical row has no valid provider.
+- [x] Fail closed if any canonical row has no valid provider. Decode failures
+  currently fail the publication rather than silently changing a frozen route;
+  `acquisition_crop_decode_failed` remains reserved for a later prevalidated
+  decode-evidence generation.
 
 ### Immutable routing artifact
 
-- [ ] Publish the provider decision as part of the canonical crop run or as one
+- [x] Publish the provider decision as part of the canonical crop run or as one
   exactly bound immutable provider manifest.
-- [ ] Store source kind, raw stream row, crop-video frame, full-frame ROI origin,
+- [x] Store source kind, raw stream row, crop-video frame, full-frame ROI origin,
   supplemental-cache row, and reason code per crop row.
-- [ ] Bind the exact raw acquisition stream generation, refined detection run,
+- [x] Bind the exact raw acquisition stream generation, refined detection run,
   full-frame source, crop policy, and geometry selection digests.
-- [ ] Ensure provider policy can change by publishing a successor without
+- [x] Ensure provider policy can change by publishing a successor without
   rewriting raw acquisition arrays or refined detections.
 
 ## Phase 4: Production model-consumer integration
@@ -396,9 +415,9 @@ unrecoverable
 - [ ] Merge model outputs back into canonical crop-run row order.
 - [ ] Require exact `source_crop_row_ids` and `instance_key` coverage in raw
   keypoint output.
-- [ ] Extend terminal receipts and finalizers to bind crop run, provider
+- [x] Extend terminal receipts to bind crop run, provider
   manifest, source media, rowset digest, model, and configuration.
-- [ ] Make stale, partial, duplicated, reordered, or mismatched provider rows
+- [x] Make stale, partial, duplicated, reordered, or mismatched provider rows
   block publication.
 - [ ] Record whether each output row used acquisition crop pixels or full-frame
   recovery.
@@ -412,7 +431,8 @@ unrecoverable
 
 ## Phase 5: Registry and campaign orchestration
 
-- [ ] Add separate registry/readiness state for:
+- [x] Add separate registry/readiness state for raw acquisition crop import and
+  crop-pixel routing. Keypoint/subject-mask consumption states remain pending:
 
 ```text
 acquisition_crop_inventory

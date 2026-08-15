@@ -28,6 +28,7 @@ from fisheye.cluster.keypoints.common import (
     safe_component,
     validate_flat_roi_cache_binding,
     validate_keypoint_input_dag,
+    validate_crop_run_provider_record,
     validate_registered_geometry_crop_authority,
     validate_registered_analysis_zarr,
 )
@@ -80,6 +81,7 @@ class WholeRecordingTarget:
     analysis_zarr: Path
     roi_cache_manifest: Path
     crop_run: str | None
+    roi_provider_record_sha256: str | None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -95,6 +97,7 @@ class PlannedWholeRecordingTarget:
     target: WholeRecordingTarget
     model: PoseModelBinding
     cache: FlatRoiCacheBinding
+    roi_provider: Mapping[str, Any] | None
     model_input_contract: PoseModelInputContractBinding
     model_input_runtime: PoseModelInputRuntimePlan
     model_input_transform: ModelInputTransform
@@ -114,6 +117,9 @@ class PlannedWholeRecordingTarget:
             "target": self.target.to_json(),
             "model": self.model.to_json(),
             "cache": self.cache.to_json(),
+            "roi_provider": (
+                dict(self.roi_provider) if self.roi_provider is not None else None
+            ),
             "model_input_contract": self.model_input_contract.to_json(),
             "model_input_runtime": self.model_input_runtime.to_json(),
             "model_input_transform": self.model_input_transform.to_attrs(),
@@ -241,6 +247,9 @@ def load_target_manifest(path: Path) -> tuple[WholeRecordingTarget, ...]:
                     field="roi_cache_manifest",
                 ),
                 crop_run=crop_run_value or None,
+                roi_provider_record_sha256=(
+                    str(raw.get("roi_provider_record_sha256") or "").strip() or None
+                ),
             )
         )
 
@@ -518,6 +527,11 @@ def build_plan(
             cache=cache,
             min_roi_size=int(min_roi_size),
         )
+        roi_provider = validate_crop_run_provider_record(
+            analysis_zarr=target.analysis_zarr,
+            crop_run=cache.crop_run,
+            expected_record_sha256=target.roi_provider_record_sha256,
+        )
         validate_registered_geometry_crop_authority(
             analysis_zarr=target.analysis_zarr,
             crop_run=cache.crop_run,
@@ -561,6 +575,11 @@ def build_plan(
             run_names=run_names,
             model=model,
             cache=cache,
+            roi_provider_record_sha256=(
+                None
+                if roi_provider is None
+                else str(roi_provider["record_sha256"])
+            ),
             model_input_runtime=model_input_runtime,
             pose_schema=pose_schema,
             batch_size=int(batch_size),
@@ -597,6 +616,7 @@ def build_plan(
                 target=target,
                 model=model,
                 cache=cache,
+                roi_provider=roi_provider,
                 model_input_contract=model_contract,
                 model_input_runtime=model_input_runtime,
                 model_input_transform=model_input_transform,

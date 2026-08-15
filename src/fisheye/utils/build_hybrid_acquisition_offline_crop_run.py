@@ -1,16 +1,17 @@
 """Build reviewed hybrid crop runs backed by crop video plus offline ROI cache.
 
-The output crop run is geometry-only. Rows from Orange's acquisition crop video
-read directly from the crop MP4 when their stable observation identity matches
-and the reviewed box remains contained by that video window. Manual, unmatched,
-or geometrically incompatible reviewed rows read from a supplemental flat ROI
-cache pre-decoded from the full camera video.
+The output crop run is geometry-only.  The production route joins the canonical
+raw acquisition crop ledger to reviewed detections by recording frame.  Live
+detection identities and boxes remain evidence only; the reviewed refined rowset
+is the sole analysis-instance and bbox authority.  An explicit legacy route
+retains the historical instance-key join for already-published compatibility
+artifacts.
 """
 
 from __future__ import annotations
 
-from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -23,7 +24,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.acquisition_crop_stream_ledger import (
+    ACQUISITION_CROP_LEDGER_RUNS_GROUP,
+    validate_current_acquisition_crop_stream_ledger,
+)
+from fisheye.shared.batch_logging import utc_now as _utc_now
 from fisheye.shared.composite_crop import assert_crop_run_unreferenced
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.crop_geometry import (
     compute_centered_roi_mapping,
     resolve_full_frame_shape,
@@ -54,6 +61,12 @@ from fisheye.shared.zarr.refined_detection_manifest import (
     REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE,
     validate_refined_detection_authority_provenance,
 )
+from fisheye.shared.zarr.refined_detection_crop_source import (
+    bind_refined_detection_crop_source,
+)
+from fisheye.shared.zarr.refined_detection_manifest import (
+    REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE,
+)
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_failed,
@@ -61,9 +74,13 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
-SCHEMA_ID = "palette.hybrid_acquisition_offline_crop_run.v2"
+SCHEMA_ID = "palette.hybrid_acquisition_offline_crop_run.v3"
 DEFAULT_RUN_PREFIX = "crop_hybrid_acquisition_offline"
 DECODE_MODES = ("auto", "indexed", "sequential")
+ACQUISITION_SOURCE_MODES = ("canonical_ledger", "legacy_crop_run")
+PRODUCTION_ROUTING_POLICY_ID = "goodbatbadbat_crop_pixel_routing_v1"
+PRODUCTION_CROP_POLICY_ID = "zebrafish_crop_384_v1"
+PRODUCTION_CONTEXT_MARGIN_PX = 0.0
 SOURCE_PIXEL_KIND_CODE_MAP = {
     "acquisition_crop_video": 0,
     "offline_full_frame_supplemental_flat_cache": 1,
@@ -74,6 +91,16 @@ CROP_STATE_CODE_MAP = {
 }
 DETECTION_SOURCE_CODE_MAP = {
     "reviewed_refined_detection": 1,
+}
+ROUTING_REASON_CODE_MAP = {
+    "acquisition_crop_selected": 0,
+    "blank_acquisition_crop": 1,
+    "acquisition_no_detection": 2,
+    "acquisition_crop_missing": 3,
+    "canonical_roi_not_contained": 4,
+    "frame_identity_mismatch": 5,
+    "coordinate_or_extent_mismatch": 6,
+    "legacy_instance_key_not_matched": 7,
 }
 
 
@@ -93,6 +120,90 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        _json_safe(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _array_sha256(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(np.asarray(value))
+    digest = hashlib.sha256()
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(json.dumps(list(array.shape), separators=(",", ":")).encode("ascii"))
+    digest.update(memoryview(array).cast("B"))
+    return digest.hexdigest()
+
+
+def _resolve_canonical_crop_ledger(
+    root: zarr.Group,
+    *,
+    expected_record_sha256: str | None,
+) -> tuple[zarr.Group, str, str]:
+    publication = validate_current_acquisition_crop_stream_ledger(
+        root,
+        expected_record_sha256=expected_record_sha256,
+    )
+    stream = root["analysis/acquisition_video_streams/streams/crop"]
+    run = stream[ACQUISITION_CROP_LEDGER_RUNS_GROUP][publication.run_name]
+    return run, publication.run_name, publication.record_sha256
+
+
+def _ledger_crop_video_path(ledger_group: zarr.Group) -> Path:
+    raw = str(ledger_group.attrs.get("source_video_path") or "").strip()
+    if not raw:
+        raise ValueError("Canonical acquisition crop ledger lacks source_video_path.")
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Canonical acquisition crop video not found: {path}")
+    return path
+
+
+def _ledger_roi_shape(ledger_group: zarr.Group) -> tuple[int, int]:
+    contract = ledger_group.attrs.get("source_stream_contract")
+    if not isinstance(contract, Mapping):
+        raise ValueError("Canonical acquisition crop ledger lacks source_stream_contract.")
+    try:
+        width = int(contract.get("width"))
+        height = int(contract.get("height"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Canonical crop stream width/height are not integers.") from exc
+    if width <= 0 or height <= 0:
+        raise ValueError("Canonical crop stream width/height must be positive.")
+    return height, width
+
+
+def _bound_stat_media_identity(
+    *,
+    path: Path,
+    attrs: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    strategy = str(attrs.get("source_video_fingerprint_strategy") or "").strip()
+    fingerprint = str(attrs.get("source_video_fingerprint") or "").strip()
+    try:
+        declared_size = int(attrs.get("source_video_size_bytes"))
+        declared_mtime = int(attrs.get("source_video_mtime_ns"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} lacks its declared stat media identity.") from exc
+    if strategy != "stat_v1" or len(fingerprint) != 64:
+        raise ValueError(f"{label} lacks a valid stat_v1 media fingerprint.")
+    observed = path.stat()
+    if (
+        int(observed.st_size) != declared_size
+        or int(observed.st_mtime_ns) != declared_mtime
+    ):
+        raise ValueError(f"{label} changed after its declared media fingerprint.")
+    return {
+        "path": str(path),
+        "strategy": strategy,
+        "fingerprint": fingerprint,
+        "size_bytes": declared_size,
+        "mtime_ns": declared_mtime,
+    }
 
 
 def _create_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
@@ -283,6 +394,94 @@ def _require_approved_refined_input(
     raise ValueError(
         "Reviewed hybrid crop publication requires an approved refined-detection "
         "input authorized for analysis or training."
+    )
+
+
+def _resolve_refined_input(
+    *,
+    archive_path: Path,
+    root: zarr.Group,
+    run_name: str | None,
+) -> tuple[zarr.Group, str, str, Mapping[str, np.ndarray], str | None, str | None]:
+    """Resolve legacy curated or strict finalized refined authority."""
+
+    parent = root.get("refined_detect_runs")
+    explicit = str(run_name or "").strip()
+    candidate = parent.get(explicit) if parent is not None and explicit else None
+    strict_manifest = (
+        candidate.attrs.get(REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE)
+        if candidate is not None
+        else None
+    )
+    if isinstance(strict_manifest, Mapping):
+        bound = bind_refined_detection_crop_source(
+            archive_path,
+            run_id=explicit,
+            allow_selector_ineligible_benchmark=True,
+        )
+        attrs = bound.run_group.attrs
+        gate = attrs.get("registered_detection_gate")
+        if (
+            attrs.get("finalized_recording_authority") is not True
+            or attrs.get("immutable_snapshot") is not True
+            or attrs.get("status") != "complete"
+        ):
+            raise ValueError(
+                "Strict refined crop input must be a complete finalized immutable "
+                "recording authority."
+            )
+        if (
+            attrs.get("registered_detection_gate_requirement") != "required"
+            or not isinstance(gate, Mapping)
+            or gate.get("applied") is not True
+            or gate.get("status") != "applied"
+            or gate.get("ordered_instance_key_coverage_exact") is not True
+        ):
+            raise ValueError(
+                "Strict refined crop input lacks exact required dish-gate consumption."
+            )
+        instances = bound.instances_group
+        frames = np.asarray(instances["frame_indices"][:], dtype=np.int64)
+        acquisition_frames = np.asarray(
+            instances["source_acquisition_frame_index"][:], dtype=np.int64
+        )
+        if not np.array_equal(frames, acquisition_frames):
+            raise ValueError(
+                "Strict full-recording refined rows disagree with acquisition-frame "
+                "identity."
+            )
+        payload = {
+            "frame_indices": frames,
+            "bbox_norm_coords": np.asarray(instances["bbox_norm_coords"][:]),
+            "bbox_img_xyxy": np.asarray(instances["bbox_img_xyxy"][:]),
+            "instance_key": np.asarray(instances["instance_key"][:]),
+            "refined_row_ids": np.asarray(instances["refined_row_ids"][:]),
+            "source_detect_row_index": np.asarray(
+                instances["source_detect_row_index"][:]
+            ),
+        }
+        return (
+            bound.run_group,
+            bound.run_id,
+            "explicit_finalized_recording_authority_v1",
+            payload,
+            str(bound.manifest["payload_digest"]),
+            str(bound.logical_content_digest),
+        )
+
+    refined_group, resolved_run = resolve_curated_refined_detect_run(
+        root, run_name=run_name
+    )
+    selection_mode = _require_approved_refined_input(
+        root, refined_group, run_name=resolved_run
+    )
+    return (
+        refined_group,
+        resolved_run,
+        selection_mode,
+        extract_present_curated_rows(refined_group),
+        None,
+        None,
     )
 
 
@@ -681,6 +880,362 @@ def _default_manifest_path(recording_dir: Path, zarr_path: Path, run_name: str) 
     )
 
 
+def _prepare_canonical_ledger_hybrid_payload(
+    *,
+    root: zarr.Group,
+    ledger_group: zarr.Group,
+    refined_payload: Mapping[str, np.ndarray],
+    frame_width: int,
+    frame_height: int,
+    roi_shape: tuple[int, int],
+    context_margin_px: float = PRODUCTION_CONTEXT_MARGIN_PX,
+) -> dict[str, np.ndarray | dict[str, int]]:
+    """Route reviewed rows through the frame-complete acquisition ledger.
+
+    This join deliberately ignores the live detector's observation identity and
+    geometry.  The acquisition row is selected only by the recording frame;
+    refined ``instance_key`` and bbox values remain authoritative.
+    """
+
+    if tuple(int(value) for value in roi_shape) != (
+        DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+        DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+    ):
+        raise ValueError(
+            f"{PRODUCTION_CROP_POLICY_ID} requires exact "
+            f"{DEFAULT_ZEBRAFISH_CROP_SIZE_PX}x{DEFAULT_ZEBRAFISH_CROP_SIZE_PX} "
+            f"acquisition crops; observed {roi_shape[1]}x{roi_shape[0]}."
+        )
+    margin = float(context_margin_px)
+    if not np.isfinite(margin) or margin < 0:
+        raise ValueError("context_margin_px must be finite and non-negative.")
+
+    ledger_frames = np.asarray(
+        ledger_group["source_recording_frame_indices"][:], dtype=np.int64
+    ).reshape(-1)
+    ledger_rows = int(ledger_frames.shape[0])
+    if np.unique(ledger_frames).shape[0] != ledger_rows:
+        raise ValueError("Canonical acquisition crop ledger frame indices are duplicated.")
+    ledger_frame_ids = np.asarray(
+        ledger_group["source_recording_frame_ids"][:], dtype=np.int64
+    ).reshape(-1)
+    ledger_meta_rows = np.asarray(
+        ledger_group["source_crop_meta_row_indices"][:], dtype=np.int64
+    ).reshape(-1)
+    ledger_video_frames = np.asarray(
+        ledger_group["source_crop_video_frame_indices"][:], dtype=np.int64
+    ).reshape(-1)
+    ledger_local_frames = np.asarray(
+        ledger_group["source_crop_local_frame_ids"][:], dtype=np.int64
+    ).reshape(-1)
+    ledger_has_detection = np.asarray(
+        ledger_group["has_detection"][:], dtype=bool
+    ).reshape(-1)
+    ledger_blank = np.asarray(ledger_group["blank_frame"][:], dtype=bool).reshape(-1)
+    ledger_crop_valid = np.asarray(
+        ledger_group["crop_rect_valid"][:], dtype=bool
+    ).reshape(-1)
+    ledger_crop_xywh = np.asarray(
+        ledger_group["source_crop_xywh"][:], dtype=np.float64
+    ).reshape(-1, 4)
+    row_aligned = {
+        "source_recording_frame_ids": ledger_frame_ids,
+        "source_crop_meta_row_indices": ledger_meta_rows,
+        "source_crop_video_frame_indices": ledger_video_frames,
+        "source_crop_local_frame_ids": ledger_local_frames,
+        "has_detection": ledger_has_detection,
+        "blank_frame": ledger_blank,
+        "crop_rect_valid": ledger_crop_valid,
+        "source_crop_xywh": ledger_crop_xywh,
+    }
+    bad_lengths = {
+        name: int(values.shape[0])
+        for name, values in row_aligned.items()
+        if int(values.shape[0]) != ledger_rows
+    }
+    if bad_lengths:
+        raise ValueError(
+            "Canonical acquisition crop ledger arrays are not row aligned: "
+            f"{bad_lengths}."
+        )
+
+    refined_frames = np.asarray(
+        refined_payload["frame_indices"], dtype=np.int64
+    ).reshape(-1)
+    refined_rows = int(refined_frames.shape[0])
+    refined_keys = np.asarray(refined_payload.get("instance_key"))
+    if refined_keys.shape != (refined_rows,) or refined_keys.dtype != np.dtype(np.uint64):
+        raise ValueError(
+            "Refined detection instance_key must have exact uint64 shape "
+            f"({refined_rows},)."
+        )
+    if np.unique(refined_keys).shape[0] != refined_rows:
+        raise ValueError("Refined detection instance_key values must be unique.")
+    refined_keys = np.asarray(refined_keys, dtype=np.uint64)
+    canonical_order = np.lexsort((refined_keys, refined_frames))
+    if not np.array_equal(canonical_order, np.arange(refined_rows, dtype=np.int64)):
+        raise ValueError(
+            "Reviewed refined rows must already be ordered by frame_indices and "
+            "instance_key; routing does not reorder scientific authority."
+        )
+
+    refined_bbox_norm = np.asarray(
+        refined_payload["bbox_norm_coords"], dtype=np.float32
+    ).reshape(-1, 4)
+    if refined_bbox_norm.shape != (refined_rows, 4):
+        raise ValueError(
+            f"Refined bbox_norm_coords must have exact shape ({refined_rows}, 4)."
+        )
+    refined_bbox_img, _ = derive_canonical_detection_geometry(
+        refined_bbox_norm,
+        source_width=int(frame_width),
+        source_height=int(frame_height),
+    )
+    refined_bbox_img = np.asarray(refined_bbox_img, dtype=np.float32)
+    valid_bbox = np.logical_and(
+        np.isfinite(refined_bbox_img).all(axis=1),
+        np.logical_and(
+            refined_bbox_img[:, 2] > refined_bbox_img[:, 0],
+            refined_bbox_img[:, 3] > refined_bbox_img[:, 1],
+        ),
+    )
+    if not np.all(valid_bbox):
+        bad = np.flatnonzero(~valid_bbox)[:10]
+        raise ValueError(
+            "Reviewed refined detections must have finite positive boxes; bad rows "
+            f"include {bad.tolist()}."
+        )
+
+    row_by_frame = {int(frame): row for row, frame in enumerate(ledger_frames.tolist())}
+    matched_rows = np.asarray(
+        [row_by_frame.get(int(frame), -1) for frame in refined_frames], dtype=np.int64
+    )
+    has_frame_match = matched_rows >= 0
+    frame_identity_agrees = np.zeros(refined_rows, dtype=bool)
+    if np.any(has_frame_match):
+        matched = matched_rows[has_frame_match]
+        frame_identity_agrees[has_frame_match] = np.logical_and(
+            ledger_frames[matched] == refined_frames[has_frame_match],
+            ledger_frame_ids[matched] == refined_frames[has_frame_match] + 1,
+        )
+
+    matched_crop_xywh = np.full((refined_rows, 4), np.nan, dtype=np.float64)
+    matched_has_detection = np.zeros(refined_rows, dtype=bool)
+    matched_blank = np.ones(refined_rows, dtype=bool)
+    matched_crop_valid = np.zeros(refined_rows, dtype=bool)
+    if np.any(has_frame_match):
+        matched = matched_rows[has_frame_match]
+        matched_crop_xywh[has_frame_match] = ledger_crop_xywh[matched]
+        matched_has_detection[has_frame_match] = ledger_has_detection[matched]
+        matched_blank[has_frame_match] = ledger_blank[matched]
+        matched_crop_valid[has_frame_match] = ledger_crop_valid[matched]
+
+    rounded_crop_xywh = np.rint(matched_crop_xywh)
+    integral_crop_geometry = np.logical_and(
+        np.isfinite(matched_crop_xywh).all(axis=1),
+        np.all(np.isclose(matched_crop_xywh, rounded_crop_xywh, atol=0.0), axis=1),
+    )
+    expected_w = int(roi_shape[1])
+    expected_h = int(roi_shape[0])
+    exact_extent = np.logical_and(
+        matched_crop_xywh[:, 2] == float(expected_w),
+        matched_crop_xywh[:, 3] == float(expected_h),
+    )
+    in_native_bounds = np.logical_and.reduce(
+        (
+            matched_crop_xywh[:, 0] >= 0.0,
+            matched_crop_xywh[:, 1] >= 0.0,
+            matched_crop_xywh[:, 0] + matched_crop_xywh[:, 2] <= float(frame_width),
+            matched_crop_xywh[:, 1] + matched_crop_xywh[:, 3] <= float(frame_height),
+        )
+    )
+    valid_placement = np.logical_and.reduce(
+        (matched_crop_valid, integral_crop_geometry, exact_extent, in_native_bounds)
+    )
+
+    containment_margins = np.full((refined_rows, 4), np.nan, dtype=np.float32)
+    if np.any(has_frame_match):
+        crop = matched_crop_xywh[has_frame_match]
+        bbox = refined_bbox_img[has_frame_match]
+        containment_margins[has_frame_match] = np.column_stack(
+            (
+                bbox[:, 0] - crop[:, 0],
+                bbox[:, 1] - crop[:, 1],
+                crop[:, 0] + crop[:, 2] - bbox[:, 2],
+                crop[:, 1] + crop[:, 3] - bbox[:, 3],
+            )
+        ).astype(np.float32, copy=False)
+    contains_context = np.logical_and(
+        np.isfinite(containment_margins).all(axis=1),
+        np.all(containment_margins >= margin, axis=1),
+    )
+
+    video_mask = np.logical_and.reduce(
+        (
+            has_frame_match,
+            frame_identity_agrees,
+            matched_has_detection,
+            ~matched_blank,
+            valid_placement,
+            contains_context,
+        )
+    )
+    supplemental_mask = ~video_mask
+    reason_codes = np.full(
+        refined_rows,
+        ROUTING_REASON_CODE_MAP["acquisition_crop_selected"],
+        dtype=np.int8,
+    )
+    reason_codes[~has_frame_match] = ROUTING_REASON_CODE_MAP[
+        "acquisition_crop_missing"
+    ]
+    reason_codes[np.logical_and(has_frame_match, ~frame_identity_agrees)] = (
+        ROUTING_REASON_CODE_MAP["frame_identity_mismatch"]
+    )
+    eligible_prefix = np.logical_and(has_frame_match, frame_identity_agrees)
+    reason_codes[np.logical_and(eligible_prefix, matched_blank)] = ROUTING_REASON_CODE_MAP[
+        "blank_acquisition_crop"
+    ]
+    reason_codes[
+        np.logical_and.reduce((eligible_prefix, ~matched_blank, ~matched_has_detection))
+    ] = ROUTING_REASON_CODE_MAP["acquisition_no_detection"]
+    reason_codes[
+        np.logical_and.reduce(
+            (eligible_prefix, ~matched_blank, matched_has_detection, ~valid_placement)
+        )
+    ] = ROUTING_REASON_CODE_MAP["coordinate_or_extent_mismatch"]
+    reason_codes[
+        np.logical_and.reduce(
+            (
+                eligible_prefix,
+                ~matched_blank,
+                matched_has_detection,
+                valid_placement,
+                ~contains_context,
+            )
+        )
+    ] = ROUTING_REASON_CODE_MAP["canonical_roi_not_contained"]
+
+    supplemental_origins, supplemental_sizes = compute_centered_roi_mapping(
+        refined_bbox_img[supplemental_mask], roi_size=roi_shape
+    )
+    roi_origins = np.zeros((refined_rows, 2), dtype=np.int32)
+    roi_sizes = np.tile(
+        np.asarray([[expected_w, expected_h]], dtype=np.int32), (refined_rows, 1)
+    )
+    if np.any(video_mask):
+        roi_origins[video_mask] = rounded_crop_xywh[video_mask, :2].astype(np.int32)
+    roi_origins[supplemental_mask] = supplemental_origins
+    roi_sizes[supplemental_mask] = supplemental_sizes
+    bbox_roi = _bbox_roi_xyxy(refined_bbox_img, roi_origins)
+    bbox_crop_norm = _bbox_crop_norm_xywh(bbox_roi, roi_shape)
+
+    def _matched_values(name: str, *, dtype: Any, fill: Any) -> np.ndarray:
+        source = np.asarray(row_aligned[name], dtype=dtype).reshape(-1)
+        result = np.full(refined_rows, fill, dtype=dtype)
+        result[has_frame_match] = source[matched_rows[has_frame_match]]
+        return result
+
+    refined_row_ids = np.asarray(
+        refined_payload.get("refined_row_ids", np.arange(refined_rows)), dtype=np.int64
+    ).reshape(-1)
+    source_detect_rows = np.asarray(
+        refined_payload.get("source_detect_row_index", np.full(refined_rows, -1)),
+        dtype=np.int64,
+    ).reshape(-1)
+    if refined_row_ids.shape != (refined_rows,) or source_detect_rows.shape != (
+        refined_rows,
+    ):
+        raise ValueError("Refined row lineage arrays do not match the reviewed row count.")
+
+    provider_crop_xywh = np.column_stack((roi_origins, roi_sizes)).astype(np.float64)
+    combined: dict[str, np.ndarray | dict[str, int]] = {
+        "instance_key": refined_keys,
+        "frame_indices": refined_frames,
+        "source_frame_indices": refined_frames,
+        "source_acquisition_frame_index": refined_frames,
+        "source_recording_frame_ids": np.where(
+            has_frame_match,
+            _matched_values("source_recording_frame_ids", dtype=np.int64, fill=-1),
+            refined_frames + 1,
+        ).astype(np.int64),
+        "source_crop_meta_row_indices": _matched_values(
+            "source_crop_meta_row_indices", dtype=np.int64, fill=-1
+        ),
+        "source_acquisition_crop_row_indices": matched_rows,
+        "source_crop_video_frame_indices": _matched_values(
+            "source_crop_video_frame_indices", dtype=np.int64, fill=-1
+        ),
+        "source_crop_local_frame_ids": _matched_values(
+            "source_crop_local_frame_ids", dtype=np.int64, fill=-1
+        ),
+        "source_acquisition_crop_xywh": matched_crop_xywh,
+        "source_crop_xywh": provider_crop_xywh,
+        "roi_coordinates_full": roi_origins,
+        "roi_sizes_full": roi_sizes,
+        "bbox_img_xyxy": refined_bbox_img,
+        "bbox_norm_coords": refined_bbox_norm,
+        "bbox_roi_xyxy": bbox_roi.astype(np.float32),
+        "bbox_crop_norm_coords": bbox_crop_norm.astype(np.float32),
+        "containment_margins_px": containment_margins,
+        "detection_success": np.ones(refined_rows, dtype=bool),
+        "detection_source": np.full(
+            refined_rows,
+            DETECTION_SOURCE_CODE_MAP["reviewed_refined_detection"],
+            dtype=np.int8,
+        ),
+        "source_pixel_kind_codes": np.where(
+            video_mask,
+            SOURCE_PIXEL_KIND_CODE_MAP["acquisition_crop_video"],
+            SOURCE_PIXEL_KIND_CODE_MAP[
+                "offline_full_frame_supplemental_flat_cache"
+            ],
+        ).astype(np.int8),
+        "crop_state_codes": np.where(
+            video_mask,
+            CROP_STATE_CODE_MAP["reviewed_acquisition_crop_reused"],
+            CROP_STATE_CODE_MAP["reviewed_supplemental_crop_materialized"],
+        ).astype(np.int8),
+        "routing_reason_codes": reason_codes,
+        "source_refined_row_ids": refined_row_ids,
+        "source_detect_row_index": source_detect_rows,
+    }
+    supplemental_rows = np.full(refined_rows, -1, dtype=np.int64)
+    supplemental_rows[supplemental_mask] = np.arange(
+        int(np.count_nonzero(supplemental_mask)), dtype=np.int64
+    )
+    combined["supplemental_cache_row_indices"] = supplemental_rows
+
+    total_frames = max(
+        int(root.attrs.get("total_frames") or 0),
+        int(refined_frames.max()) + 1 if refined_frames.size else 0,
+    )
+    frame_counts = np.zeros(total_frames, dtype=np.int32)
+    if total_frames:
+        np.add.at(frame_counts, refined_frames, 1)
+    combined["frame_counts"] = frame_counts
+    frame_offsets = np.zeros(total_frames + 1, dtype=np.int64)
+    frame_offsets[1:] = np.cumsum(frame_counts, dtype=np.int64)
+    combined["frame_row_offsets"] = frame_offsets
+    combined["detection_indices"] = np.arange(refined_rows, dtype=np.int64)
+    reverse_reasons = {value: key for key, value in ROUTING_REASON_CODE_MAP.items()}
+    reason_histogram = {
+        reverse_reasons[int(code)]: int(np.count_nonzero(reason_codes == code))
+        for code in sorted(set(reason_codes.tolist()))
+    }
+    combined["summary"] = {
+        "acquisition_ledger_rows_available": ledger_rows,
+        "reviewed_refined_rows": refined_rows,
+        "acquisition_video_rows_reused": int(np.count_nonzero(video_mask)),
+        "supplemental_rows_materialized": int(np.count_nonzero(supplemental_mask)),
+        "matched_acquisition_ledger_rows": int(np.count_nonzero(has_frame_match)),
+        "total_rows": refined_rows,
+        "total_frames": total_frames,
+        **{f"routing_reason_{name}": count for name, count in reason_histogram.items()},
+    }
+    return combined
+
+
 def _prepare_hybrid_payload(
     *,
     root: zarr.Group,
@@ -966,6 +1521,8 @@ def _prepare_hybrid_payload(
 def build_hybrid_acquisition_offline_crop_run(
     zarr_path: str | Path,
     *,
+    acquisition_source_mode: str = "canonical_ledger",
+    acquisition_ledger_record_sha256: str | None = None,
     acquisition_crop_run: str | None = None,
     refined_detect_run: str | None = None,
     run_name: str | None = None,
@@ -974,10 +1531,27 @@ def build_hybrid_acquisition_offline_crop_run(
     supplemental_manifest_path: str | Path | None = None,
     decode_mode: str = "auto",
     decode_chunk_frames: int = 1,
+    context_margin_px: float = PRODUCTION_CONTEXT_MARGIN_PX,
     overwrite: bool = False,
     set_latest_any: bool = False,
     apply: bool = False,
 ) -> dict[str, Any]:
+    if acquisition_source_mode not in ACQUISITION_SOURCE_MODES:
+        raise ValueError(
+            f"acquisition_source_mode must be one of {ACQUISITION_SOURCE_MODES}."
+        )
+    if acquisition_source_mode == "canonical_ledger" and acquisition_crop_run:
+        raise ValueError(
+            "--acquisition-crop-run is valid only with the explicit "
+            "legacy_crop_run acquisition source mode."
+        )
+    if (
+        acquisition_source_mode == "legacy_crop_run"
+        and acquisition_ledger_record_sha256 is not None
+    ):
+        raise ValueError(
+            "An acquisition ledger digest cannot be used with legacy_crop_run mode."
+        )
     archive_path = Path(zarr_path).expanduser().resolve()
     resolved_recording_dir = _resolve_recording_dir(
         archive_path,
@@ -995,53 +1569,164 @@ def build_hybrid_acquisition_offline_crop_run(
     root = zarr.open_group(
         str(archive_path), mode="a" if apply else "r", use_consolidated=False
     )
-    crop_parent, acquisition_group, resolved_acquisition_run = _resolve_crop_run(
-        root, acquisition_crop_run
-    )
-    refined_group, resolved_refined_run = resolve_curated_refined_detect_run(
-        root, run_name=refined_detect_run
-    )
-    refined_selection_mode = _require_approved_refined_input(
-        root,
+    if acquisition_source_mode == "canonical_ledger":
+        (
+            acquisition_group,
+            resolved_acquisition_run,
+            resolved_acquisition_record_sha256,
+        ) = _resolve_canonical_crop_ledger(
+            root,
+            expected_record_sha256=acquisition_ledger_record_sha256,
+        )
+        crop_parent = root.require_group("crop_runs")
+        acquisition_crop_video_path = _ledger_crop_video_path(acquisition_group)
+        roi_shape = _ledger_roi_shape(acquisition_group)
+    else:
+        crop_parent, acquisition_group, resolved_acquisition_run = _resolve_crop_run(
+            root, acquisition_crop_run
+        )
+        resolved_acquisition_record_sha256 = None
+        raw_crop_video = str(
+            acquisition_group.attrs.get("source_crop_video_path")
+            or acquisition_group.attrs.get("source_video_path")
+            or ""
+        ).strip()
+        if not raw_crop_video:
+            raise ValueError("Legacy acquisition crop run lacks its crop-video path.")
+        acquisition_crop_video_path = Path(raw_crop_video).expanduser().resolve()
+        if not acquisition_crop_video_path.is_file():
+            raise FileNotFoundError(
+                f"Legacy acquisition crop video not found: {acquisition_crop_video_path}"
+            )
+        roi_shape = _resolve_roi_shape(acquisition_group)
+    (
         refined_group,
-        run_name=resolved_refined_run,
+        resolved_refined_run,
+        refined_selection_mode,
+        refined_payload,
+        refined_manifest_digest,
+        refined_logical_content_digest,
+    ) = _resolve_refined_input(
+        archive_path=archive_path,
+        root=root,
+        run_name=refined_detect_run,
     )
-    refined_payload = extract_present_curated_rows(refined_group)
     frame_height, frame_width = resolve_full_frame_shape(root)
-    roi_shape = _resolve_roi_shape(acquisition_group)
     full_video_path = _resolve_source_video_path(
         root=root,
         recording_dir=resolved_recording_dir,
         explicit=Path(source_video_path) if source_video_path is not None else None,
     )
-    payload = _prepare_hybrid_payload(
-        root=root,
-        acquisition_group=acquisition_group,
-        refined_payload=refined_payload,
-        frame_width=frame_width,
-        frame_height=frame_height,
-        roi_shape=roi_shape,
-    )
+    if acquisition_source_mode == "canonical_ledger":
+        full_video_identity = _bound_stat_media_identity(
+            path=full_video_path,
+            attrs=root.attrs,
+            label="Full-frame source video",
+        )
+        crop_video_identity = _bound_stat_media_identity(
+            path=acquisition_crop_video_path,
+            attrs=acquisition_group.attrs,
+            label="Acquisition crop video",
+        )
+        payload = _prepare_canonical_ledger_hybrid_payload(
+            root=root,
+            ledger_group=acquisition_group,
+            refined_payload=refined_payload,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            roi_shape=roi_shape,
+            context_margin_px=float(context_margin_px),
+        )
+        routing_policy_id = PRODUCTION_ROUTING_POLICY_ID
+        crop_policy_id = PRODUCTION_CROP_POLICY_ID
+    else:
+        full_video_identity = {"path": str(full_video_path), "strategy": "legacy_unbound"}
+        crop_video_identity = {
+            "path": str(acquisition_crop_video_path),
+            "strategy": "legacy_unbound",
+        }
+        payload = _prepare_hybrid_payload(
+            root=root,
+            acquisition_group=acquisition_group,
+            refined_payload=refined_payload,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            roi_shape=roi_shape,
+        )
+        legacy_pixel_kinds = np.asarray(
+            payload["source_pixel_kind_codes"], dtype=np.int8
+        )
+        payload["routing_reason_codes"] = np.where(
+            legacy_pixel_kinds
+            == SOURCE_PIXEL_KIND_CODE_MAP["acquisition_crop_video"],
+            ROUTING_REASON_CODE_MAP["acquisition_crop_selected"],
+            ROUTING_REASON_CODE_MAP["legacy_instance_key_not_matched"],
+        ).astype(np.int8)
+        routing_policy_id = "legacy_instance_key_match_then_bbox_containment_v1"
+        crop_policy_id = "legacy_acquisition_crop_extent"
     summary = dict(payload.pop("summary"))  # type: ignore[arg-type]
     offline_rows = np.flatnonzero(
         np.asarray(payload["source_pixel_kind_codes"], dtype=np.int8)
         == SOURCE_PIXEL_KIND_CODE_MAP["offline_full_frame_supplemental_flat_cache"]
     )
+    provider_rowset_record = {
+        "schema_id": "palette.roi_pixel_provider_record.v1",
+        "schema_version": 1,
+        "crop_run": str(resolved_run_name),
+        "acquisition_source_mode": acquisition_source_mode,
+        "acquisition_source_run": str(resolved_acquisition_run),
+        "acquisition_ledger_record_sha256": resolved_acquisition_record_sha256,
+        "refined_detect_run": str(resolved_refined_run),
+        "refined_selection_mode": refined_selection_mode,
+        "refined_manifest_digest": refined_manifest_digest,
+        "refined_logical_content_digest": refined_logical_content_digest,
+        "full_frame_media_identity": full_video_identity,
+        "acquisition_crop_media_identity": crop_video_identity,
+        "routing_policy_id": routing_policy_id,
+        "crop_policy_id": crop_policy_id,
+        "context_margin_px": float(context_margin_px),
+        "roi_shape": [int(roi_shape[0]), int(roi_shape[1])],
+        "frame_shape": [int(frame_height), int(frame_width)],
+        "row_count": int(np.asarray(payload["instance_key"]).shape[0]),
+        "rowset_array_sha256": {
+            name: _array_sha256(np.asarray(payload[name]))
+            for name in (
+                "instance_key",
+                "frame_indices",
+                "source_refined_row_ids",
+                "source_acquisition_crop_row_indices",
+                "source_pixel_kind_codes",
+                "routing_reason_codes",
+                "roi_coordinates_full",
+                "roi_sizes_full",
+            )
+        },
+    }
+    provider_record_sha256 = _canonical_json_sha256(provider_rowset_record)
 
     plan = {
         "status": "dry_run" if not apply else "planned",
         "zarr_path": str(archive_path),
         "recording_dir": str(resolved_recording_dir),
         "source_video_path": str(full_video_path),
+        "source_crop_video_path": str(acquisition_crop_video_path),
+        "acquisition_source_mode": acquisition_source_mode,
         "acquisition_crop_run": str(resolved_acquisition_run),
+        "acquisition_ledger_record_sha256": resolved_acquisition_record_sha256,
         "refined_detect_run": str(resolved_refined_run),
         "refined_selection_mode": refined_selection_mode,
+        "refined_manifest_digest": refined_manifest_digest,
+        "refined_logical_content_digest": refined_logical_content_digest,
         "target_crop_run": str(resolved_run_name),
         "supplemental_manifest_path": str(manifest_path),
         "roi_shape": [int(roi_shape[0]), int(roi_shape[1])],
         "frame_shape": [int(frame_height), int(frame_width)],
         "decode_mode_requested": str(decode_mode),
         "decode_chunk_frames": int(decode_chunk_frames),
+        "routing_policy_id": routing_policy_id,
+        "crop_policy_id": crop_policy_id,
+        "context_margin_px": float(context_margin_px),
+        "provider_record_sha256": provider_record_sha256,
         "set_latest_any": bool(set_latest_any),
         "summary": summary,
     }
@@ -1078,7 +1763,7 @@ def build_hybrid_acquisition_offline_crop_run(
     mark_run_started(group, run_name=resolved_run_name, stage="crop")
     started = time.perf_counter()
     try:
-        for name in (
+        array_names = [
             "instance_key",
             "frame_indices",
             "source_frame_indices",
@@ -1088,6 +1773,7 @@ def build_hybrid_acquisition_offline_crop_run(
             "source_acquisition_crop_row_indices",
             "source_crop_video_frame_indices",
             "source_crop_local_frame_ids",
+            "source_acquisition_crop_xywh",
             "source_crop_xywh",
             "roi_coordinates_full",
             "roi_sizes_full",
@@ -1095,17 +1781,22 @@ def build_hybrid_acquisition_offline_crop_run(
             "bbox_norm_coords",
             "bbox_roi_xyxy",
             "bbox_crop_norm_coords",
+            "containment_margins_px",
             "detection_success",
             "detection_source",
             "source_pixel_kind_codes",
             "crop_state_codes",
+            "routing_reason_codes",
             "supplemental_cache_row_indices",
             "source_refined_row_ids",
             "source_detect_row_index",
             "frame_counts",
             "frame_row_offsets",
             "detection_indices",
-        ):
+        ]
+        for name in array_names:
+            if name not in payload:
+                continue
             _create_array(group, name, np.asarray(payload[name]))
         stamp_geometry_preload_attrs(group)
 
@@ -1123,21 +1814,45 @@ def build_hybrid_acquisition_offline_crop_run(
             "decode_backend": "pynvvc_luma",
             "decode_mode_requested": str(decode_mode),
             "source_video_path": str(full_video_path),
-            "source_crop_video_path": acquisition_group.attrs.get(
-                "source_crop_video_path"
-            )
-            or acquisition_group.attrs.get("source_video_path"),
-            "source_acquisition_crop_run": str(resolved_acquisition_run),
+            "source_crop_video_path": str(acquisition_crop_video_path),
+            "source_full_frame_media_identity": full_video_identity,
+            "source_acquisition_crop_media_identity": crop_video_identity,
+            "source_acquisition_mode": acquisition_source_mode,
+            "source_acquisition_crop_run": (
+                str(resolved_acquisition_run)
+                if acquisition_source_mode == "legacy_crop_run"
+                else None
+            ),
+            "source_acquisition_crop_ledger_run": (
+                str(resolved_acquisition_run)
+                if acquisition_source_mode == "canonical_ledger"
+                else None
+            ),
+            "source_acquisition_crop_ledger_record_sha256": (
+                resolved_acquisition_record_sha256
+            ),
             "source_refined_detect_run": str(resolved_refined_run),
+            "source_refined_run_id": str(resolved_refined_run),
+            "source_refined_manifest_digest": refined_manifest_digest,
+            "source_refined_logical_content_digest": (
+                refined_logical_content_digest
+            ),
             "source_refined_detection_selection_mode": refined_selection_mode,
+            "source_registered_detection_gate_requirement": refined_group.attrs.get(
+                "registered_detection_gate_requirement"
+            ),
+            "source_registered_detection_gate": refined_group.attrs.get(
+                "registered_detection_gate"
+            ),
             "supplemental_roi_cache_manifest": (
                 str(manifest_path) if supplemental_manifest else None
             ),
             "source_pixel_kind_code_map": SOURCE_PIXEL_KIND_CODE_MAP,
             "crop_state_code_map": CROP_STATE_CODE_MAP,
+            "routing_reason_code_map": ROUTING_REASON_CODE_MAP,
             "detection_source_code_map": DETECTION_SOURCE_CODE_MAP,
-            "source_crop_video_frame_indices_semantics": "zero_based_frame_index_in_acquisition_crop_video_or_-1_for_supplemental_rows",
-            "source_acquisition_crop_row_indices_semantics": "row_index_in_source_acquisition_crop_run_or_-1_for_supplemental_rows",
+            "source_crop_video_frame_indices_semantics": "zero_based_frame_index_in_acquisition_crop_video_when_a_frame-ledger_row_exists_or_-1_when_missing",
+            "source_acquisition_crop_row_indices_semantics": "row_index_in_source_acquisition_ledger_or_legacy_crop_run_or_-1_when_missing",
             "supplemental_cache_row_indices_semantics": "row_index_in_supplemental_flat_roi_cache_or_-1_for_acquisition_video_rows",
             "roi_coordinates_full_coordinate_space": "source_image_xy",
             "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
@@ -1145,7 +1860,15 @@ def build_hybrid_acquisition_offline_crop_run(
             "bbox_authority": "reviewed_refined_detection",
             "rowset_authority": "complete_reviewed_refined_detection_instances",
             "row_identity": "instance_key",
-            "source_pixel_routing_policy": "instance_key_match_then_reviewed_bbox_containment_v1",
+            "source_pixel_routing_policy": routing_policy_id,
+            "crop_policy_id": crop_policy_id,
+            "crop_policy_edge_handling": "translation_only_centered_roi_with_zero_fill_outside_native_extent",
+            "routing_context_margin_px": float(context_margin_px),
+            "routing_containment_boundary": "inclusive",
+            "routing_decode_validation": "runtime_fail_closed_and_separate_canary_sample_v1",
+            "provider_record": provider_rowset_record,
+            "provider_record_sha256": provider_record_sha256,
+            "provider_manifest_kind": "crop_run_attrs_and_row_aligned_arrays_v1",
             "stage_selector_eligible": False,
             "registry_activation": "deferred",
             "summary_statistics": summary,
@@ -1173,12 +1896,19 @@ def build_hybrid_acquisition_offline_crop_run(
             parameters={
                 "run_name": resolved_run_name,
                 "decode_mode": str(decode_mode),
+                "acquisition_source_mode": acquisition_source_mode,
+                "routing_policy_id": routing_policy_id,
+                "crop_policy_id": crop_policy_id,
+                "context_margin_px": float(context_margin_px),
                 "set_latest_any": bool(set_latest_any),
             },
             inputs={
                 "zarr_path": str(archive_path),
                 "source_video_path": str(full_video_path),
-                "source_acquisition_crop_run": str(resolved_acquisition_run),
+                "source_acquisition_run": str(resolved_acquisition_run),
+                "source_acquisition_ledger_record_sha256": (
+                    resolved_acquisition_record_sha256
+                ),
                 "source_refined_detect_run": str(resolved_refined_run),
             },
             artifacts={
@@ -1215,12 +1945,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Create a hybrid crop run that uses acquisition crop-video rows plus a "
-            "supplemental flat cache, routed per reviewed detection instance_key."
+            "supplemental flat cache. The default production route joins the "
+            "canonical acquisition ledger by recording frame."
         )
     )
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument(
-        "--acquisition-crop-run", help="Existing acquisition crop-video crop run."
+        "--acquisition-source-mode",
+        choices=ACQUISITION_SOURCE_MODES,
+        default="canonical_ledger",
+        help=(
+            "Use the pointer-selected canonical raw ledger (default), or explicitly "
+            "request the historical instance-key crop-run compatibility route."
+        ),
+    )
+    parser.add_argument(
+        "--acquisition-ledger-record-sha256",
+        help="Optional exact expected canonical ledger record digest.",
+    )
+    parser.add_argument(
+        "--acquisition-crop-run",
+        help=(
+            "Existing acquisition crop-video crop run; valid only with "
+            "--acquisition-source-mode legacy_crop_run."
+        ),
     )
     parser.add_argument(
         "--refined-detect-run",
@@ -1244,6 +1992,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--decode-mode", choices=DECODE_MODES, default="auto")
     parser.add_argument("--decode-chunk-frames", type=int, default=1)
+    parser.add_argument(
+        "--context-margin-px",
+        type=float,
+        default=PRODUCTION_CONTEXT_MARGIN_PX,
+        help=(
+            "Required inclusive reviewed-bbox margin inside an acquisition crop. "
+            "The frozen v1 policy default is 0 pixels."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--set-latest-any", action="store_true")
     parser.add_argument(
@@ -1258,6 +2015,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     report = build_hybrid_acquisition_offline_crop_run(
         args.zarr_path,
+        acquisition_source_mode=args.acquisition_source_mode,
+        acquisition_ledger_record_sha256=args.acquisition_ledger_record_sha256,
         acquisition_crop_run=args.acquisition_crop_run,
         refined_detect_run=args.refined_detect_run,
         run_name=args.run_name,
@@ -1266,6 +2025,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         supplemental_manifest_path=args.supplemental_manifest_path,
         decode_mode=args.decode_mode,
         decode_chunk_frames=args.decode_chunk_frames,
+        context_margin_px=args.context_margin_px,
         overwrite=args.overwrite,
         set_latest_any=args.set_latest_any,
         apply=args.apply,
