@@ -67,6 +67,7 @@ from fisheye.shared.zarr.refined_detection_crop_source import (
 from fisheye.shared.zarr.refined_detection_manifest import (
     REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE,
 )
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_failed,
@@ -1928,6 +1929,25 @@ def build_hybrid_acquisition_offline_crop_run(
         if set_latest_any:
             crop_parent.attrs["latest_any"] = resolved_run_name
             crop_parent.attrs["latest_hybrid_acquisition_offline"] = resolved_run_name
+        consolidation = consolidate_metadata_capture_expected_warnings(archive_path)
+        consolidated_root = zarr.open_group(
+            str(archive_path), mode="r", use_consolidated=True
+        )
+        if (
+            "crop_runs" not in consolidated_root
+            or resolved_run_name not in consolidated_root["crop_runs"]
+        ):
+            raise RuntimeError(
+                "Consolidated metadata does not expose the completed hybrid crop run."
+            )
+        consolidated_run = consolidated_root["crop_runs"][resolved_run_name]
+        if (
+            consolidated_run.attrs.get("provider_record_sha256")
+            != provider_record_sha256
+        ):
+            raise RuntimeError(
+                "Consolidated metadata exposes a stale hybrid provider record."
+            )
         return {
             **plan,
             "status": "ok",
@@ -1935,9 +1955,19 @@ def build_hybrid_acquisition_offline_crop_run(
             "host": socket.gethostname(),
             "pid": int(os.getpid()),
             "supplemental_cache": supplemental_manifest,
+            "metadata_consolidation": consolidation,
         }
     except Exception as exc:
-        mark_run_failed(group, error=str(exc))
+        mark_run_failed(
+            group,
+            parent_group=crop_parent,
+            run_name=resolved_run_name,
+            error=str(exc),
+        )
+        try:
+            consolidate_metadata_capture_expected_warnings(archive_path)
+        except Exception:
+            pass
         raise
 
 

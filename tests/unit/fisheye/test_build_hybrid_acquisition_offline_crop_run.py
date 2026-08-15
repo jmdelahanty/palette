@@ -427,6 +427,53 @@ def test_build_hybrid_apply_keeps_reviewed_candidate_selector_ineligible(
         run["source_acquisition_crop_row_indices"][:], [0, -1, 1]
     )
     assert "selected_live_detection_bbox_img_xyxy" not in run
+    consolidated = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
+    consolidated_run = consolidated["crop_runs/crop_hybrid_reviewed_v2"]
+    assert consolidated_run.attrs["provider_record_sha256"] == report[
+        "provider_record_sha256"
+    ]
+    assert "unexpected_warning_count" in report["metadata_consolidation"]
+
+
+def test_build_hybrid_consolidation_failure_marks_run_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path, source_video = _make_hybrid_source_archive(tmp_path)
+
+    monkeypatch.setattr(
+        mod,
+        "_write_supplemental_cache",
+        lambda **_kwargs: {"schema": "fake.test.flat_roi_cache", "cache_complete": True},
+    )
+    calls = 0
+
+    def fail_consolidation(_archive_path: Path) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("synthetic consolidation failure")
+
+    monkeypatch.setattr(
+        mod, "consolidate_metadata_capture_expected_warnings", fail_consolidation
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic consolidation failure"):
+        build_hybrid_acquisition_offline_crop_run(
+            zarr_path,
+            acquisition_source_mode="legacy_crop_run",
+            acquisition_crop_run="crop_acquisition",
+            refined_detect_run="refined_detect_001",
+            run_name="crop_hybrid_consolidation_failure",
+            source_video_path=source_video,
+            apply=True,
+        )
+
+    assert calls == 2
+    direct = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    failed = direct["crop_runs/crop_hybrid_consolidation_failure"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert "palette_run_completed_at_utc" not in failed.attrs
+    assert "synthetic consolidation failure" in failed.attrs["palette_run_error"]
 
 
 def test_canonical_ledger_routing_uses_frame_identity_and_preserves_refined_keys(
