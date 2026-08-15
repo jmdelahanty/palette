@@ -231,6 +231,17 @@ recording through terminal inference, strict candidate finalization, keypoint
 quality, and refinement. Operator confirmation and required CI remain mandatory
 before the 84-recording campaign.
 
+The immutable successor contract is
+`pose_model_input_contract_v2_goodbatbadbat_384_v1.json`, with file SHA-256
+`f95265c0708063af7ac9d03dc68435a85ff17fa619be102fb99de13d4988b928`
+and payload digest
+`cd2b6050ef24cbcaf70cb5c73a4812225077739c5639ba202d701d6e4ca568ef`.
+It approves only Ultralytics 8.3.169 for the 384 x 384 profile because that is
+the exact runtime used by the reviewed LSF canary. The workstation environment
+currently resolves 8.3.214 and therefore fails this profile's runtime check by
+design. A cheap LSF runtime-and-contract preflight must precede the complete
+recording canary; do not add 8.3.214 without separate empirical evidence.
+
 ## Current implementation boundary
 
 ### Present
@@ -565,7 +576,7 @@ unrecoverable
   acquisition-plus-fallback work package with an exact signed provider rowset.
 - [x] Publish the bounded canary evidence and montage durably, complete visual
   review, and freeze the decision in a checksummed review receipt.
-- [ ] Add an exact accepted 384 x 384 identity profile in a successor immutable
+- [x] Add an exact accepted 384 x 384 identity profile in a successor immutable
   model-input contract; do not broaden or rewrite the existing 352 profile.
 - [ ] Record any later Ultralytics/network resize as the separate framework
   preprocessing stage already required by the pose model-input contract.
