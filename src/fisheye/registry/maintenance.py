@@ -5567,6 +5567,11 @@ def _build_recording_step_rows_from_root(
         else _extract_detect_method(detect_group)
     )
     detect_coverage = None if detect_uses_collection else _extract_coverage_pct(detect_group)
+    detect_manifest_digest = None
+    if detect_group is not None and not detect_uses_collection:
+        detect_manifest = detect_group.attrs.get("run_manifest")
+        if isinstance(detect_manifest, Mapping):
+            detect_manifest_digest = detect_manifest.get("payload_digest")
 
     detect_quality_method: Optional[str] = None
     if detect_uses_collection and detect_collection is not None:
@@ -6405,6 +6410,7 @@ def _build_recording_step_rows_from_root(
                 "canonical_detection_authority_errors": list(
                     detect_authority_errors
                 ),
+                "canonical_detection_manifest_digest": detect_manifest_digest,
                 "source_detect_identity_kind": detect_identity_kind,
                 "reason": detect_reason,
                 "latest_selector": detect_selection,

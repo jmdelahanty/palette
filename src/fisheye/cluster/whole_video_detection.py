@@ -574,6 +574,11 @@ def build_plan(
                     source_detect_run=detect_run,
                     canonicalize_legacy_source=False,
                     require_active_canonical_source=True,
+                    source_publication_receipt=(
+                        outputs_by_target[
+                            item.target.target_id
+                        ].publication_receipt_path
+                    ),
                     quality_run=quality_run,
                     refined_run=refined_run,
                     registered_gate_requirement=gate_requirement,

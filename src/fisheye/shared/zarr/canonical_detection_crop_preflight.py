@@ -13,6 +13,7 @@ from fisheye.shared.observation_coordinate_publication import (
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     canonical_detection_dimensions_from_manifest,
+    require_active_coordinate_canonical_detection,
     validate_canonical_detection_publication,
 )
 from fisheye.shared.zarr.canonical_detection_shadow import (
@@ -98,6 +99,7 @@ def inspect_canonical_detection_crop_preflight(
     detection_run_id: str,
     policy: CropGeometryPolicy,
     allow_selector_ineligible_candidate: bool = False,
+    expected_manifest_digest: str | None = None,
 ) -> dict[str, object]:
     """Validate one exact canonical-v3 run and derive its crop placement."""
 
@@ -157,6 +159,18 @@ def inspect_canonical_detection_crop_preflight(
         raise ValueError(
             "Selector-ineligible canonical detection requires an explicit "
             "read-only candidate-preflight allowance."
+        )
+    if not allow_selector_ineligible_candidate:
+        require_active_coordinate_canonical_detection(
+            root,
+            group_path=run_path,
+            expected_manifest_digest=expected_manifest_digest,
+        )
+    elif expected_manifest_digest is not None and (
+        manifest.get("payload_digest") != expected_manifest_digest
+    ):
+        raise ValueError(
+            "Canonical candidate manifest digest differs from the expected digest."
         )
 
     recording_identity = str(root.attrs.get("recording_id") or "").strip()

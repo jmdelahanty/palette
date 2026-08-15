@@ -135,6 +135,9 @@ from ..shared.transform_authority import (
     stamp_crop_placement_transform_authority,
 )
 from ..shared.zarr.chunk_profiles import create_geometry_preload_array
+from ..shared.zarr.canonical_detection_manifest import (
+    require_active_coordinate_canonical_detection,
+)
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -484,6 +487,7 @@ class _CanonicalCropPreflight:
     frame_shape: Tuple[int, int]
     total_frames: int
     acquisition_mode: str
+    source_manifest_digest: str
 
     @property
     def row_count(self) -> int:
@@ -549,6 +553,7 @@ def _canonical_crop_arrays(
     frame_shape: Tuple[int, int],
     policy: CropGeometryPolicy,
     require_sorted_frames: bool,
+    source_manifest_digest: str,
 ) -> _CanonicalCropPreflight:
     values = detection_observation_geometry_values(source_geometry)
     payload = _extract_detection_row_payload(source_group)
@@ -656,6 +661,7 @@ def _canonical_crop_arrays(
         frame_shape=(int(frame_height), int(frame_width)),
         total_frames=int(source_geometry.frame_evidence.acquisition_frame.record.source_total_frames),
         acquisition_mode="",
+        source_manifest_digest=source_manifest_digest,
     )
 
 
@@ -687,6 +693,15 @@ def _preflight_ordinary_crop_coordinates(
         raise OrdinaryCropCoordinateError(
             "Crop source is not the exact root-owned canonical detection rowset."
         )
+    try:
+        source_manifest = require_active_coordinate_canonical_detection(
+            root,
+            group_path=normalized_source_path,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OrdinaryCropCoordinateError(
+            f"Crop source is not the active canonical-v3 authority: {exc}"
+        ) from exc
 
     status = load_acquisition_authority_publication_status(root)
     if status.status != ACQUISITION_AUTHORITY_PUBLISHED:
@@ -807,6 +822,7 @@ def _preflight_ordinary_crop_coordinates(
         frame_shape=frame_shape,
         policy=policy,
         require_sorted_frames=(video_source_type == "zarr"),
+        source_manifest_digest=str(source_manifest["payload_digest"]),
     )
     _validate_frame_indices_in_bounds(
         result.frame_indices,
@@ -828,6 +844,7 @@ def _preflight_ordinary_crop_coordinates(
         frame_shape=result.frame_shape,
         total_frames=total_frames,
         acquisition_mode=expected_mode,
+        source_manifest_digest=result.source_manifest_digest,
     )
 
 
@@ -870,6 +887,7 @@ def _write_canonical_crop_coordinate_arrays(
             "instance_key_policy": "copied_from_exact_canonical_detection_source",
             "coordinate_contract_mode": "canonical",
             "source_acquisition_authority_mode": preflight.acquisition_mode,
+            "source_detection_manifest_digest": preflight.source_manifest_digest,
             "crop_geometry_policy": preflight.policy.as_manifest(),
             "crop_geometry_policy_digest": preflight.policy.payload_digest,
             "crop_padding_mode": preflight.policy.padding_mode.value,

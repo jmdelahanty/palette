@@ -78,6 +78,23 @@ Compatibility readers may inspect historical layouts only through an
 explicitly named migration or recovery command. Compatibility fallback is not
 a production selector policy.
 
+When canonical publication occurs earlier in the same planned workflow, the
+manifest digest does not exist yet. The plan therefore carries the immutable
+native-publication receipt path. Quality, refinement, and finalization resolve
+the digest from that receipt at execution time, verify that the receipt names
+the exact expected `detect_runs/<run>` path, and then require that digest to be
+the currently selected canonical-v3 authority. Plans for an already-published
+source carry the digest directly. Exactly one form is required; neither an
+unbound “latest” lookup nor both competing forms are accepted.
+
+The enforcement boundary is transitive for downstream image products. Crop
+construction directly validates and records the selected detection manifest
+digest. Modern pose and subject-mask workflows consume that canonical crop or
+the geometry-gated refined detection lineage; they do not independently reopen
+detector artifacts. Direct raw-detection analytics, including chaser-distance
+publication, call the same active canonical-source validator and bind the
+manifest digest in their input authority record.
+
 ## Existing GoodBatBadBat evidence
 
 The 84 analysis Zarrs contain immutable historical flat runs at:
@@ -122,11 +139,13 @@ must bind the successors.
 - [x] Registered detection gates require a canonical manifest and bind its
       payload digest.
 - [x] Recording-level detection quality validates canonical manifests.
-- [ ] Shared planner inputs carry the expected canonical manifest digest.
+- [x] Shared planner inputs carry either the expected canonical manifest digest
+      or the exact immutable publication receipt that resolves it.
 - [x] Refinement verifies the same run ID and digest selected by quality.
-- [ ] Crop, pose, mask, analytics, and export planners reject artifact and flat
-      layouts through one shared canonical-source validator.
-- [ ] Geometry-review discovery and approval expose only eligible canonical-v3
+- [x] Crop and direct analytics use the shared canonical-source validator;
+      pose, mask, and export plans inherit the bound canonical crop/refined
+      lineage and cannot reopen artifact or flat detection layouts.
+- [x] Geometry-review discovery and approval expose only eligible canonical-v3
       sources.
 
 ### Compatibility and regression safety
@@ -142,12 +161,11 @@ must bind the successors.
       artifact rejection, canonical-v3 enforcement, selector rollback, stale
       manifest digests, and registry fail-closed behavior.
 
-The unchecked consumer items are intentionally still open. In particular,
-the historical clipped `off`-geometry tail and its detect-quality recovery
-tooling still consume per-clip compatibility sources. Registered clipped
-production, whole-video production, and native recording campaigns use the
-active canonical-v3 source validator. The remaining consumers must be migrated
-before the acceptance criteria can be treated as fully satisfied.
+The historical clipped `off`-geometry tail and its detect-quality recovery
+tooling remain explicit compatibility surfaces and may consume per-clip legacy
+sources. They cannot claim active canonical authority, become production
+selectors, enter the geometry-review queue, or satisfy the modern production
+acceptance criteria.
 
 ## Acceptance criteria
 

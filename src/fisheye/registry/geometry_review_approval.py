@@ -43,6 +43,7 @@ from fisheye.shared.json_safety import strict_json_dumps, write_json_atomic
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     canonical_detection_dimensions_from_manifest,
+    require_active_coordinate_canonical_detection,
 )
 from fisheye.shared.zarr.detection_schema import CANONICAL_DETECTION_SCHEMA_V1
 from fisheye.shared.zarr_io import open_zarr_root
@@ -393,16 +394,20 @@ def detection_source_binding(root: Any, group_path: str) -> dict[str, Any]:
             "Approval postprocessing currently requires one exact detect_runs/<run>."
         )
     run_name = _safe_name(parts[1], label="source detection run")
+    try:
+        manifest = require_active_coordinate_canonical_detection(
+            root,
+            group_path=path,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GeometryReviewApprovalError(
+            f"Detection source {path!r} is not the active canonical-v3 authority: {exc}"
+        ) from exc
     group = _group(root, path, label="Detection source")
     attrs = dict(group.attrs)
     if attrs.get("palette_run_completion_status") != "complete":
         raise GeometryReviewApprovalError(
             f"Detection source {path!r} is not a complete immutable run."
-        )
-    manifest = attrs.get("run_manifest")
-    if not isinstance(manifest, Mapping):
-        raise GeometryReviewApprovalError(
-            f"Detection source {path!r} lacks its exact canonical run_manifest."
         )
     if manifest.get("schema_version") != (
         CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
@@ -763,6 +768,7 @@ def verify_geometry_review_registry_precondition(
 ) -> None:
     dataset = request.payload["identity"]["dataset"]
     evidence = request.payload["identity"]["evidence"]["fit_review"]
+    detection = request.payload["identity"]["detection_source"]
     try:
         queue = load_geometry_review_queue(
             dataset["registry_path"], include_inactive=True
@@ -779,9 +785,13 @@ def verify_geometry_review_registry_precondition(
         item.recording_id != dataset["recording_id"]
         or item.zarr_path.expanduser().resolve() != Path(dataset["analysis_zarr"])
         or not item.actionable
+        or item.detection_run != detection["run_name"]
+        or item.detection_manifest_digest
+        != detection["canonical_run_manifest_payload_digest"]
     ):
         raise GeometryReviewApprovalError(
-            "Approval registry dataset is stale, non-actionable, or rebound."
+            "Approval registry dataset or canonical detection authority is stale, "
+            "non-actionable, or rebound."
         )
     fit_stage = item.stage("arena_geometry_offline_fit")
     review = fit_stage.review_status if fit_stage is not None else None

@@ -1,9 +1,8 @@
 """Materialize immutable registered-dish gate decisions for detections.
 
 The output is a compact keyed decision table.  It does not copy detections and
-does not mutate or filter its immutable source.  Both canonical whole-video
-``detect_runs`` and recording-ordered clipped ``detect_collection_sources``
-are accepted through the same bounded input contract.
+does not mutate or filter its immutable source.  Production inputs are exact,
+active canonical-v3 ``detect_runs`` publications.
 """
 
 from __future__ import annotations
@@ -29,9 +28,6 @@ from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
-from fisheye.shared.detect_quality_contract import (
-    CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA,
-)
 from fisheye.shared.detection_tables import (
     resolve_detection_instance_table,
     resolve_detection_source_pixel_authority,
@@ -47,6 +43,7 @@ from fisheye.shared.selector_activation import (
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
     canonical_detection_dimensions_from_manifest,
+    require_active_coordinate_canonical_detection,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -148,7 +145,7 @@ def _source_dimensions(
     *,
     row_count: int,
 ) -> tuple[int, int, int, str | None]:
-    """Resolve one legacy or canonical-manifest detection extent."""
+    """Resolve one canonical-manifest detection extent."""
 
     width_value = attrs.get("source_video_width") or attrs.get("width")
     height_value = attrs.get("source_video_height") or attrs.get("height")
@@ -234,6 +231,15 @@ def _selection_snapshot(root: Any, selection_run: str) -> dict[str, Any]:
 def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
     path = _safe_group_path(source_group_path)
     try:
+        active_manifest = require_active_coordinate_canonical_detection(
+            root,
+            group_path=path,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Detection source {path!r} is not the active canonical-v3 authority: {exc}"
+        ) from exc
+    try:
         group = _group_at(root, path)
     except KeyError as exc:
         raise ValueError(f"Detection source is missing: {path}") from exc
@@ -260,21 +266,19 @@ def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
         table,
         row_count=rows,
     )
+    if manifest_digest != active_manifest["payload_digest"]:
+        raise ValueError(
+            "Detection source canonical manifest changed during gate preflight."
+        )
 
-    # Canonical whole-video detection arrays carry their coordinate descriptor.
-    # The clipped collection source is itself the bounded adapter: its schema,
-    # native dimensions, recording-parent frames, and copied bbox column define
-    # the same normalized cx/cy/w/h surface.
     descriptor = table["bbox_norm_coords"].attrs.get("coordinate_descriptor")
-    source_schema = str(attrs.get("schema_id") or "")
-    is_collection_adapter = source_schema == CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA
     if isinstance(descriptor, Mapping):
         if (
             descriptor.get("geometry_type") != "bbox_cxcywh"
             or tuple(descriptor.get("component_units") or ()) != ("normalized",) * 4
         ):
             raise ValueError("bbox_norm_coords coordinate descriptor is incompatible.")
-    elif not is_collection_adapter and manifest_digest is None:
+    elif manifest_digest is None:
         raise ValueError(
             "Canonical detection source bbox_norm_coords lacks its coordinate descriptor."
         )

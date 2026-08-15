@@ -92,6 +92,28 @@ def _insert_dataset(
                 json.dumps(details) if details is not None else None,
             ),
         )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO recording_step_status VALUES (
+                ?, ?, 'detect', 'ok', ?, NULL, ?, 'test',
+                '2026-08-14T12:00:00Z'
+            )
+            """,
+            (
+                dataset_id,
+                recording_id,
+                f"detect-canonical-{index}",
+                json.dumps(
+                    {
+                        "canonical_detection_authority_errors": [],
+                        "source_detect_identity_kind": "run",
+                        "canonical_detection_manifest_digest": (
+                            format(index % 16, "x") * 64
+                        ),
+                    }
+                ),
+            ),
+        )
 
 
 def _pending(index: int) -> dict[str, object]:
@@ -129,10 +151,38 @@ def test_registry_queue_uses_valid_status_plus_review_json(tmp_path: Path) -> No
     assert queue[0].geometry_state == "fit_evidence_awaiting_review"
     assert queue[0].camera_serial == "camera-1"
     assert queue[0].arena_id == "arena-1"
+    assert queue[0].detection_run == "detect-canonical-1"
+    assert queue[0].detection_manifest_digest == "1" * 64
     transitions = actionable_geometry_transitions(queue)
     assert len(transitions) == 1
     assert transitions[0].run_id == "arena-geometry-fit-review-1"
     assert transitions[0].digest == "1" * 64
+
+
+def test_registry_queue_hides_geometry_without_eligible_canonical_detection(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path / "registry.sqlite")
+    _insert_dataset(registry, index=1, review=_pending(1))
+    with sqlite3.connect(registry) as conn:
+        conn.execute(
+            """
+            UPDATE recording_step_status
+            SET details_json = ?
+            WHERE dataset_id = 'dataset-1' AND step_name = 'detect'
+            """,
+            (
+                json.dumps(
+                    {
+                        "canonical_detection_authority_errors": ["legacy_flat_layout"],
+                        "source_detect_identity_kind": "run",
+                        "canonical_detection_manifest_digest": "1" * 64,
+                    }
+                ),
+            ),
+        )
+
+    assert load_geometry_review_queue(registry) == []
 
 
 def test_registry_queue_rejects_invalid_status_review(tmp_path: Path) -> None:

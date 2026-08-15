@@ -58,14 +58,21 @@ from fisheye.shared.directed_transform_v2 import (
     apply_bound_directed_transform_v2,
     require_bound_directed_transform_v2,
 )
-from fisheye.shared.observation_coordinate_publication import (
-    BoundDetectionObservationGeometry,
-    load_persisted_detection_observation_geometry,
+from fisheye.shared.detection_tables import (
+    resolve_detection_instance_table,
+    resolve_detection_source_pixel_authority,
+)
+from fisheye.shared.pixel_frame_authority import (
+    load_persisted_acquisition_camera_authority,
 )
 from fisheye.shared.proof_verification import proof_verification_operation
 from fisheye.shared.stimulus_coordinate_contract import (
     BoundStimulusCoordinateEvidence,
     load_bound_stimulus_coordinate_evidence,
+)
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    canonical_detection_dimensions_from_manifest,
+    require_active_coordinate_canonical_detection,
 )
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
@@ -304,6 +311,10 @@ def _mapping_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _canonical_detection_array_sha256(values: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(values).view(np.uint8)).hexdigest()
+
+
 def _array(node: Any, *, label: str) -> np.ndarray:
     try:
         values = np.array(node[:], copy=True, order="C")
@@ -384,15 +395,6 @@ def _positive_fps(root: Any, acquisition: Any) -> tuple[float, str]:
     )
 
 
-def _same_frame(left: Any, right: Any) -> bool:
-    return (
-        left.archive_identity == right.archive_identity
-        and left.record_ref == right.record_ref
-        and left.record_sha256 == right.record_sha256
-        and left.endpoint == right.endpoint
-    )
-
-
 def _identity_component(
     evidence: BoundStimulusCoordinateEvidence,
     component: str,
@@ -440,10 +442,14 @@ class BoundChaserDistanceSourceContext:
 
     root_node: Any = field(repr=False, compare=False)
     archive_identity: ArchiveIdentity
+    recording_id: str
     detection_path: str
     stimulus_run: str
     stimulus_path: str
-    detection: BoundDetectionObservationGeometry = field(repr=False, compare=False)
+    detection_manifest_digest: str
+    detection_row_identity: Mapping[str, str]
+    detection_temporal_authority: Mapping[str, str]
+    detection_source_camera_frame: Any = field(repr=False, compare=False)
     stimulus: BoundStimulusCoordinateEvidence = field(repr=False, compare=False)
     detection_centers: np.ndarray = field(repr=False, compare=False)
     detection_frames: np.ndarray = field(repr=False, compare=False)
@@ -469,9 +475,13 @@ class BoundChaserDistanceSourceContext:
         *,
         root_node: Any,
         archive: ArchiveIdentity,
+        recording_id: str,
         detection_path: str,
         stimulus_run: str,
-        detection: BoundDetectionObservationGeometry,
+        detection_manifest_digest: str,
+        detection_row_identity: Mapping[str, str],
+        detection_temporal_authority: Mapping[str, str],
+        detection_source_camera_frame: Any,
         stimulus: BoundStimulusCoordinateEvidence,
         detection_centers: np.ndarray,
         detection_frames: np.ndarray,
@@ -509,10 +519,22 @@ class BoundChaserDistanceSourceContext:
             object.__setattr__(self, name, array)
         object.__setattr__(self, "root_node", root_node)
         object.__setattr__(self, "archive_identity", archive)
+        object.__setattr__(self, "recording_id", recording_id)
         object.__setattr__(self, "detection_path", detection_path)
         object.__setattr__(self, "stimulus_run", stimulus_run)
         object.__setattr__(self, "stimulus_path", f"analysis/stimulus_runs/{stimulus_run}")
-        object.__setattr__(self, "detection", detection)
+        object.__setattr__(self, "detection_manifest_digest", detection_manifest_digest)
+        object.__setattr__(self, "detection_row_identity", dict(detection_row_identity))
+        object.__setattr__(
+            self,
+            "detection_temporal_authority",
+            dict(detection_temporal_authority),
+        )
+        object.__setattr__(
+            self,
+            "detection_source_camera_frame",
+            detection_source_camera_frame,
+        )
         object.__setattr__(self, "stimulus", stimulus)
         object.__setattr__(self, "total_frames", total_frames)
         object.__setattr__(self, "fps", fps)
@@ -572,10 +594,14 @@ def load_chaser_distance_source_context(
     detection_path = _controlled_detection_path(detection_path)
     stimulus_run = _controlled_stimulus_run(stimulus_run)
     try:
-        detection = load_persisted_detection_observation_geometry(
+        detection_manifest = require_active_coordinate_canonical_detection(
             root_node,
-            detection_path,
+            group_path=detection_path,
         )
+        detection_run = root_node[detection_path]
+        detection_table = resolve_detection_instance_table(detection_run)
+        dimensions = canonical_detection_dimensions_from_manifest(detection_manifest)
+        _, acquisition = load_persisted_acquisition_camera_authority(root_node)
         stimulus_group = root_node[f"analysis/stimulus_runs/{stimulus_run}"]
         chaser_group = stimulus_group["tracking_data/chaser_states"]
         stimulus = load_bound_stimulus_coordinate_evidence(
@@ -588,30 +614,45 @@ def load_chaser_distance_source_context(
     except Exception as exc:
         _fail(f"Canonical chaser-distance source preflight failed: {exc}.")
 
-    detection_frame = detection.frame_evidence.source_camera_frame
     stimulus_frame = stimulus.frame_transform.source_camera_frame
-    if not _same_frame(detection_frame, stimulus_frame):
+    payload = detection_manifest["payload"]
+    source_evidence = payload["source_evidence"]
+    source_pixel_authority = source_evidence.get("source_pixel_authority")
+    if source_pixel_authority is None:
+        source_pixel_authority = resolve_detection_source_pixel_authority(
+            dict(detection_run.attrs)
+        )
+    if source_pixel_authority != _frame_pointer(stimulus_frame):
         _fail(
             "Detection and stimulus calibration do not bind the same exact "
             "source-camera frame."
         )
-    if (
-        detection.temporal_authority.acquisition_frame.record_ref
-        != stimulus.source_temporal_authority.acquisition_frame.record_ref
-        or detection.temporal_authority.acquisition_frame.record_sha256
-        != stimulus.source_temporal_authority.acquisition_frame.record_sha256
-    ):
+    acquisition_pointer = _frame_pointer(acquisition)
+    recording_id = str(source_evidence["recording_identity"])
+    if recording_id != acquisition.record.recording_id:
+        _fail(
+            "Detection canonical source evidence and the analysis archive do not "
+            "bind the same recording identity."
+        )
+    if source_evidence["source_frame_authority"] != acquisition_pointer:
+        _fail(
+            "Detection canonical source evidence and the analysis archive do not "
+            "bind the same exact acquisition-frame authority."
+        )
+    stimulus_acquisition = _frame_pointer(
+        stimulus.source_temporal_authority.acquisition_frame
+    )
+    if acquisition_pointer != stimulus_acquisition:
         _fail("Detection and stimulus rows bind different acquisition-frame domains.")
 
-    rowset = root_node[detection_path]
-    centers_node = detection.centers_image.coordinate_node
-    frames_node = rowset["source_acquisition_frame_index"]
-    if "scores" not in rowset or "confidence_scores" in rowset:
+    centers_node = detection_table["centers_img_xy"]
+    frames_node = detection_table["source_acquisition_frame_index"]
+    if "scores" not in detection_table or "confidence_scores" in detection_table:
         _fail(
             "Canonical chaser distance requires exactly detect_runs/<run>/scores; "
             "missing or competing score surfaces are unsupported."
         )
-    scores_node = rowset["scores"]
+    scores_node = detection_table["scores"]
     centers = _array(centers_node, label="detection centers_img_xy")
     frames = _array(frames_node, label="detection source acquisition frames")
     scores = _array(scores_node, label="detection scores")
@@ -627,6 +668,16 @@ def load_chaser_distance_source_context(
         or not np.isfinite(scores).all()
     ):
         _fail("Canonical detection centers, frames, or scores have invalid exact layout.")
+    manifest_arrays = payload["logical_content"]["document"]["arrays"]
+    for path, values in (
+        ("instances/centers_img_xy", centers),
+        ("instances/source_acquisition_frame_index", frames),
+        ("instances/scores", scores),
+    ):
+        if _canonical_detection_array_sha256(values) != manifest_arrays[path]["sha256"]:
+            _fail(
+                f"Canonical detection array {path!r} differs from its active manifest."
+            )
 
     surface_matches = [
         item
@@ -669,8 +720,14 @@ def load_chaser_distance_source_context(
     ):
         _fail("Stimulus chaser_index identity is invalid or outside int16 range.")
 
-    acquisition = detection.frame_evidence.acquisition_frame
     total_frames = int(acquisition.record.source_total_frames)
+    if (
+        dimensions.n_frames != total_frames
+        or dimensions.n_instances != centers.shape[0]
+    ):
+        _fail(
+            "Canonical detection dimensions differ from the acquisition or exact rowset."
+        )
     if total_frames <= 0:
         _fail("Acquisition frame authority has no positive total frame count.")
     for values, label in (
@@ -711,14 +768,14 @@ def load_chaser_distance_source_context(
     )
 
     signature = {
+        "recording_id": recording_id,
         "detection_path": detection_path,
+        "detection_manifest_digest": detection_manifest["payload_digest"],
         "detection_row_identity": {
-            "record_ref": detection.row_identity.record_ref,
-            "record_sha256": detection.row_identity.record_sha256,
+            "record_ref": f"/{detection_path}@run_manifest.logical_content",
+            "record_sha256": payload["logical_content"]["digest"],
         },
-        "detection_temporal_authority": _record_pointer(
-            detection.temporal_authority
-        ),
+        "detection_temporal_authority": acquisition_pointer,
         "detection_centers": _payload(centers_node),
         "detection_frames": _payload(frames_node),
         "detection_scores": _payload(scores_node),
@@ -751,9 +808,13 @@ def load_chaser_distance_source_context(
     return BoundChaserDistanceSourceContext(
         root_node=root_node,
         archive=common_archive,
+        recording_id=recording_id,
         detection_path=detection_path,
         stimulus_run=stimulus_run,
-        detection=detection,
+        detection_manifest_digest=str(detection_manifest["payload_digest"]),
+        detection_row_identity=signature["detection_row_identity"],
+        detection_temporal_authority=acquisition_pointer,
+        detection_source_camera_frame=stimulus_frame,
         stimulus=stimulus,
         detection_centers=centers,
         detection_frames=frames,
@@ -935,7 +996,6 @@ def _equal_array(actual: Any, expected: np.ndarray, *, label: str) -> None:
 def _input_authority_record(
     context: BoundChaserDistanceSourceContext,
 ) -> dict[str, Any]:
-    detection = context.detection
     stimulus = context.stimulus
     transform = stimulus.frame_transform
     camera_to_canvas = transform.canvas_to_source_camera.inverse_of
@@ -944,12 +1004,10 @@ def _input_authority_record(
         "schema_id": INPUT_AUTHORITY_SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
         "source_detection_path": context.detection_path,
-        "source_detection_row_identity": {
-            "record_ref": detection.row_identity.record_ref,
-            "record_sha256": detection.row_identity.record_sha256,
-        },
-        "source_detection_temporal_authority": _record_pointer(
-            detection.temporal_authority
+        "source_detection_manifest_digest": context.detection_manifest_digest,
+        "source_detection_row_identity": dict(context.detection_row_identity),
+        "source_detection_temporal_authority": dict(
+            context.detection_temporal_authority
         ),
         "source_detection_centers": dict(context.detection_centers_payload),
         "source_detection_frames": dict(context.detection_frames_payload),
@@ -1164,7 +1222,7 @@ def _coordinate_bindings(
         collection_record,
         int(run_group["chasers/chaser_index"].shape[0]),
     )
-    source_camera = context.detection.frame_evidence.source_camera_frame
+    source_camera = context.detection_source_camera_frame
     frame_transform = context.stimulus.frame_transform
     specs: dict[str, dict[str, Any]] = {
         "positions/fish_centroid_img_xy": {

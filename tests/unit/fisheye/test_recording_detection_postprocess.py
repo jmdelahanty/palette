@@ -197,6 +197,7 @@ def test_active_canonical_source_is_enforced_by_quality_refine_and_finalize(
             tmp_path,
             target,
             require_active_canonical_source=True,
+            expected_source_manifest_digest="a" * 64,
         )
     )
 
@@ -204,7 +205,10 @@ def test_active_canonical_source_is_enforced_by_quality_refine_and_finalize(
     assert "--require-active-canonical-source" in quality.command
     assert " ".join(refine.command).count("--require-active-canonical-source") == 2
     assert module.outputs.require_active_canonical_source is True
+    assert module.outputs.expected_source_manifest_digest == "a" * 64
     assert module.outputs.to_json()["require_active_canonical_source"] is True
+    assert quality.command.count("--expected-source-manifest-digest") == 1
+    assert " ".join(refine.command).count("--expected-source-manifest-digest") == 2
 
     with pytest.raises(ValueError, match="cannot claim active canonical authority"):
         _inputs(

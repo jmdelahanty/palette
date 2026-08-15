@@ -129,6 +129,10 @@ def build_geometry_review_approval_workflow(
             registered_gate_requirement="required",
             registered_gate_run=str(pipeline["gate_run"]),
             selection_policy_id=str(pipeline["selection_policy_id"]),
+            require_active_canonical_source=True,
+            expected_source_manifest_digest=str(
+                detection["canonical_run_manifest_payload_digest"]
+            ),
             upstream_job_keys=(publication_key,),
         )
     )

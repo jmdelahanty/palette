@@ -7,6 +7,7 @@ schema v1 and remain selector-ineligible until a separate activation gate.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Mapping
@@ -1202,6 +1203,7 @@ def require_active_coordinate_canonical_detection(
     root: Any,
     *,
     group_path: str,
+    expected_manifest_digest: str | None = None,
 ) -> Mapping[str, Any]:
     """Require one exact selected canonical-v3 detection authority."""
 
@@ -1246,7 +1248,85 @@ def require_active_coordinate_canonical_detection(
         "payload_digest"
     ):
         raise ValueError("Detection family canonical manifest digest is stale.")
+    if expected_manifest_digest is not None:
+        expected = _require_sha256(
+            expected_manifest_digest,
+            name="expected_manifest_digest",
+        )
+        if manifest.get("payload_digest") != expected:
+            raise ValueError(
+                "Active canonical detection manifest digest differs from the "
+                "planner-bound expectation."
+            )
     return manifest
+
+
+def canonical_detection_manifest_digest_from_publication_receipt(
+    receipt_path: str | Path,
+    *,
+    expected_group_path: str,
+) -> str:
+    """Resolve one finished native-publication digest from an immutable receipt."""
+
+    path = Path(receipt_path).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Canonical detection publication receipt is unreadable: {path}"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("Canonical detection publication receipt must be an object.")
+    expected_path = str(expected_group_path).strip().strip("/")
+    parts = tuple(part for part in expected_path.split("/") if part)
+    if len(parts) != 2 or parts[0] != "detect_runs":
+        raise ValueError(
+            "Expected canonical detection group must be detect_runs/<run>."
+        )
+    if (
+        payload.get("schema_id")
+        != "palette.native_canonical_detection_publication"
+        or payload.get("schema_version") != 1
+        or payload.get("status") != "complete"
+        or payload.get("group_path") != expected_path
+        or payload.get("run_id") != parts[1]
+        or payload.get("native_run_manifest_schema_version")
+        != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        or payload.get("selector_eligible") is not True
+        or payload.get("selector_activation") != "complete"
+    ):
+        raise ValueError(
+            "Canonical detection publication receipt is not one complete, active "
+            "canonical-v3 publication for the expected source."
+        )
+    return _require_sha256(
+        payload.get("run_manifest_digest"),
+        name="publication receipt run_manifest_digest",
+    )
+
+
+def resolve_expected_canonical_detection_manifest_digest(
+    *,
+    expected_group_path: str,
+    expected_manifest_digest: str | None = None,
+    publication_receipt_path: str | Path | None = None,
+) -> str:
+    """Resolve exactly one planner-bound canonical source expectation."""
+
+    direct = str(expected_manifest_digest or "").strip() or None
+    receipt = publication_receipt_path
+    if (direct is None) == (receipt is None):
+        raise ValueError(
+            "Canonical detection source requires exactly one expected manifest "
+            "digest or publication receipt."
+        )
+    if direct is not None:
+        return _require_sha256(direct, name="expected_manifest_digest")
+    assert receipt is not None
+    return canonical_detection_manifest_digest_from_publication_receipt(
+        receipt,
+        expected_group_path=expected_group_path,
+    )
 
 
 __all__ = [
@@ -1263,6 +1343,7 @@ __all__ = [
     "CANONICAL_DETECTION_METADATA_DIGEST_SCOPE",
     "CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE",
     "CANONICAL_DETECTION_RUN_MANIFEST_PERSISTED_PATH",
+    "canonical_detection_manifest_digest_from_publication_receipt",
     "CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID",
     "build_canonical_detection_run_manifest",
     "build_coordinate_canonical_detection_run_manifest",
@@ -1275,6 +1356,7 @@ __all__ = [
     "canonical_detection_metadata_declarations_digest",
     "normalize_canonical_detection_metadata_declarations",
     "require_active_coordinate_canonical_detection",
+    "resolve_expected_canonical_detection_manifest_digest",
     "refined_source_identity_from_canonical_manifest",
     "validate_canonical_detection_publication",
     "validate_canonical_detection_run_manifest",

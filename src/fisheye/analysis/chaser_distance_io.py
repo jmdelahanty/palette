@@ -662,9 +662,7 @@ def load_chaser_distance_run(
     return ChaserDistanceReadSnapshot(
         run_name=resolved_name,
         run_path=run_path,
-        recording_id=(
-            bound.source_context.detection.frame_evidence.acquisition_frame.record.recording_id
-        ),
+        recording_id=bound.source_context.recording_id,
         authority_status=VERIFIED_AUTHORITY_STATUS,
         archive_identity=bound.source_context.archive_identity,
         source_detection_path=str(input_authority["source_detection_path"]),

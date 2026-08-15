@@ -41,6 +41,7 @@ from ..shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID,
     canonical_detection_dimensions_from_manifest,
     require_active_coordinate_canonical_detection,
+    resolve_expected_canonical_detection_manifest_digest,
 )
 from ..shared.zarr.detection_schema import CanonicalDetectionDimensions
 from ..shared.zarr_io import open_zarr_root
@@ -817,6 +818,8 @@ def run_collection_detect_quality(
     apply: bool = False,
     promote: bool = True,
     require_active_canonical_source: bool = False,
+    expected_source_manifest_digest: str | None = None,
+    source_publication_receipt: str | Path | None = None,
 ) -> dict[str, Any]:
     archive = Path(zarr_path).expanduser().resolve()
     source_group_path = _safe_group_path(source_group_path)
@@ -833,10 +836,21 @@ def run_collection_detect_quality(
     if type(require_active_canonical_source) is not bool:
         raise TypeError("require_active_canonical_source must be an exact bool.")
     root = open_zarr_root(archive, mode="r")
+    bound_manifest_digest: str | None = None
     if require_active_canonical_source:
+        bound_manifest_digest = resolve_expected_canonical_detection_manifest_digest(
+            expected_group_path=source_group_path,
+            expected_manifest_digest=expected_source_manifest_digest,
+            publication_receipt_path=source_publication_receipt,
+        )
         require_active_coordinate_canonical_detection(
             root,
             group_path=source_group_path,
+            expected_manifest_digest=bound_manifest_digest,
+        )
+    elif expected_source_manifest_digest is not None or source_publication_receipt is not None:
+        raise ValueError(
+            "Canonical source expectations require require_active_canonical_source."
         )
     expected_subject_count, experiment_setup = resolve_expected_subject_count(
         root,
@@ -889,6 +903,12 @@ def run_collection_detect_quality(
         "source_group_path": source_group_path,
         "source_identity": source_identity,
         "require_active_canonical_source": require_active_canonical_source,
+        "expected_source_manifest_digest": bound_manifest_digest,
+        "source_publication_receipt": (
+            str(Path(source_publication_receipt).expanduser().resolve())
+            if source_publication_receipt is not None
+            else None
+        ),
         "recording_frame_count": resolved_frame_count,
         "width": resolved_width,
         "height": resolved_height,
@@ -1194,6 +1214,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail unless the source is the selected canonical-v3 detection authority.",
     )
+    parser.add_argument("--expected-source-manifest-digest")
+    parser.add_argument("--source-publication-receipt", type=Path)
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -1222,6 +1244,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         apply=args.apply,
         promote=not args.no_promote,
         require_active_canonical_source=args.require_active_canonical_source,
+        expected_source_manifest_digest=args.expected_source_manifest_digest,
+        source_publication_receipt=args.source_publication_receipt,
     )
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))

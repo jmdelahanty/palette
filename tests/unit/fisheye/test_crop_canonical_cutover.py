@@ -127,6 +127,11 @@ def _install_fake_acquisition_authority(
         "detection_observation_geometry_values",
         lambda _source: _source_geometry_values(),
     )
+    monkeypatch.setattr(
+        crop_module,
+        "require_active_coordinate_canonical_detection",
+        lambda *_args, **_kwargs: {"payload_digest": "f" * 64},
+    )
 
 
 def test_canonical_crop_arrays_preserve_existing_placement_numerics(
@@ -148,6 +153,7 @@ def test_canonical_crop_arrays_preserve_existing_placement_numerics(
         frame_shape=(10, 10),
         policy=_policy(),
         require_sorted_frames=True,
+        source_manifest_digest="f" * 64,
     )
 
     np.testing.assert_array_equal(result.roi_coordinates_full, [[3, 3]])
@@ -181,6 +187,7 @@ def test_canonical_crop_arrays_fully_contained_policy_rejects_padded_roi(
             frame_shape=(10, 10),
             policy=_policy(crop_module.CropPaddingMode.REQUIRE_FULLY_CONTAINED),
             require_sorted_frames=True,
+            source_manifest_digest="f" * 64,
         )
 
 
@@ -206,6 +213,7 @@ def test_canonical_crop_arrays_zero_padding_policy_accepts_edge_crossing(
         frame_shape=(10, 10),
         policy=_policy(),
         require_sorted_frames=True,
+        source_manifest_digest="f" * 64,
     )
 
     np.testing.assert_array_equal(result.roi_coordinates_full, [[-1, -1]])
@@ -224,6 +232,7 @@ def test_canonical_crop_arrays_zero_padding_policy_accepts_edge_crossing(
     assert output.attrs["crop_padding_mode"] == "zero_outside_source_frame"
     assert output.attrs["padded_roi_count"] == 1
     assert output.attrs["source_frame_shape_hw"] == [10, 10]
+    assert output.attrs["source_detection_manifest_digest"] == "f" * 64
 
 
 def test_ordinary_crop_default_is_348_square_zero_padding() -> None:
@@ -271,6 +280,7 @@ def test_canonical_crop_arrays_reject_coordinate_relabeling(
             frame_shape=(10, 10),
             policy=_policy(),
             require_sorted_frames=True,
+            source_manifest_digest="f" * 64,
         )
 
 
@@ -481,6 +491,7 @@ def test_validated_canonical_zero_rows_create_no_crop_run_or_pending_pointer(
             frame_shape=(10, 10),
             total_frames=1,
             acquisition_mode=crop_module.MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+            source_manifest_digest="f" * 64,
         )
 
     monkeypatch.setattr(
@@ -717,6 +728,7 @@ def _publication_fixture() -> tuple[Any, Any, Any, Any]:
         frame_shape=(10, 10),
         total_frames=1,
         acquisition_mode="materialized_source_frames_v1",
+        source_manifest_digest="f" * 64,
     )
     return root, parent, run, (preflight, selector_snapshot)
 
