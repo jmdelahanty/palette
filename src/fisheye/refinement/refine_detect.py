@@ -52,6 +52,7 @@ from ..shared.zarr_run_completion import (
 from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr.canonical_detection_manifest import (
     require_active_coordinate_canonical_detection,
+    resolve_expected_canonical_detection_manifest_digest,
 )
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -1338,6 +1339,8 @@ def create_refined_run(
     stage_selector_eligible: bool = True,
     emit_completion_status: bool = True,
     require_active_canonical_source: bool = False,
+    expected_source_manifest_digest: str | None = None,
+    source_publication_receipt: str | Path | None = None,
 ) -> str:
     """
     Create a refined detection run with sparse-first curated detect surfaces.
@@ -1375,6 +1378,10 @@ def create_refined_run(
             registry/status system. Set false for unregistered benchmark canaries.
         require_active_canonical_source: Require the exact source run to remain
             the selected canonical-v3 detection authority.
+        expected_source_manifest_digest: Exact planner-bound manifest digest for
+            an already-published canonical source.
+        source_publication_receipt: Immutable native-publication receipt used to
+            resolve the expected digest when inference is an upstream job.
         
     Returns:
         Name of created refined run
@@ -1465,10 +1472,21 @@ def create_refined_run(
     
     source_detect_path = _join_group_path(detect_family_path, detect_run)
     active_source_manifest = None
+    bound_manifest_digest: str | None = None
     if require_active_canonical_source:
+        bound_manifest_digest = resolve_expected_canonical_detection_manifest_digest(
+            expected_group_path=source_detect_path,
+            expected_manifest_digest=expected_source_manifest_digest,
+            publication_receipt_path=source_publication_receipt,
+        )
         active_source_manifest = require_active_coordinate_canonical_detection(
             root,
             group_path=source_detect_path,
+            expected_manifest_digest=bound_manifest_digest,
+        )
+    elif expected_source_manifest_digest is not None or source_publication_receipt is not None:
+        raise ValueError(
+            "Canonical source expectations require require_active_canonical_source."
         )
     detect_group = root[source_detect_path]
     detect_table = resolve_detection_instance_table(detect_group)
@@ -1767,6 +1785,12 @@ def create_refined_run(
         'detect_quality_guardrail_requested': bool(require_detect_quality),
         'detect_quality_guardrail_enforced': bool(require_quality_for_run),
         'require_active_canonical_source': require_active_canonical_source,
+        'expected_source_manifest_digest': bound_manifest_digest,
+        'source_publication_receipt': (
+            str(Path(source_publication_receipt).expanduser().resolve())
+            if source_publication_receipt is not None
+            else None
+        ),
         'registered_detection_gate': registered_detection_gate,
         'dish_mask_gate': dish_mask_gate,
         'top_k_selection': top_k_selection,
@@ -2202,6 +2226,8 @@ Examples:
         action='store_true',
         help='Fail unless the source is the selected canonical-v3 detection authority.',
     )
+    parser.add_argument('--expected-source-manifest-digest')
+    parser.add_argument('--source-publication-receipt', type=Path)
     
     args = parser.parse_args()
     
@@ -2244,6 +2270,8 @@ Examples:
             stage_selector_eligible=not args.selector_ineligible,
             emit_completion_status=not args.skip_completion_status,
             require_active_canonical_source=args.require_active_canonical_source,
+            expected_source_manifest_digest=args.expected_source_manifest_digest,
+            source_publication_receipt=args.source_publication_receipt,
         )
         
         print(f"\n✓ Created refined run: {run_name}")

@@ -65,6 +65,8 @@ class GeometryReviewQueueItem:
     geometry_state: str
     actionable: bool
     stages: tuple[GeometryStageState, ...]
+    detection_run: str | None = None
+    detection_manifest_digest: str | None = None
 
     def stage(self, step_name: str) -> GeometryStageState | None:
         return next(
@@ -217,6 +219,34 @@ def _is_actionable(stage: GeometryStageState) -> bool:
     return stage.status == "error" or stage.review_state in ACTIONABLE_REVIEW_STATES
 
 
+def _eligible_canonical_detection_binding(
+    *,
+    status: object,
+    run_name: object,
+    details: Mapping[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Return the exact registry-projected canonical-v3 authority or fail closed."""
+
+    run = _optional_text(run_name)
+    if (
+        str(status or "").strip() != "ok"
+        or run is None
+        or not isinstance(details, Mapping)
+    ):
+        return None
+    errors = details.get("canonical_detection_authority_errors")
+    digest = _optional_text(details.get("canonical_detection_manifest_digest"))
+    if (
+        errors != []
+        or details.get("source_detect_identity_kind") != "run"
+        or digest is None
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest.lower())
+    ):
+        return None
+    return run, digest.lower()
+
+
 def _geometry_state(stages: Sequence[GeometryStageState]) -> str:
     actionable = [stage for stage in stages if _is_actionable(stage)]
     for stage in actionable:
@@ -287,9 +317,15 @@ def load_geometry_review_queue(
             rss.review_status_json,
             rss.details_json,
             rss.source,
-            rss.updated_utc
+            rss.updated_utc,
+            detect_status.status AS detection_status,
+            detect_status.run_name AS detection_run_name,
+            detect_status.details_json AS detection_details_json
         FROM datasets AS d
         JOIN recording_step_status AS rss ON rss.dataset_id = d.dataset_id
+        LEFT JOIN recording_step_status AS detect_status
+          ON detect_status.dataset_id = d.dataset_id
+         AND detect_status.step_name = 'detect'
         LEFT JOIN recordings AS r
           ON r.recording_id = d.recording_id
         WHERE rss.step_name IN ({placeholders})
@@ -331,6 +367,15 @@ def load_geometry_review_queue(
             row["details_json"],
             label=f"{dataset_id}.{row['step_name']}.details_json",
         )
+        detection_details = _json_object(
+            row["detection_details_json"],
+            label=f"{dataset_id}.detect.details_json",
+        )
+        detection_binding = _eligible_canonical_detection_binding(
+            status=row["detection_status"],
+            run_name=row["detection_run_name"],
+            details=detection_details,
+        )
         item = grouped.setdefault(
             dataset_id,
             {
@@ -338,9 +383,15 @@ def load_geometry_review_queue(
                 "zarr_path": Path(str(row["zarr_path"])).expanduser(),
                 "camera_serial": _optional_text(row["camera_id"]),
                 "arena_id": _optional_text(row["arena_id"]),
+                "detection_binding": detection_binding,
                 "stages": [],
             },
         )
+        if item["detection_binding"] != detection_binding:
+            raise GeometryReviewRegistryError(
+                f"Geometry review dataset {dataset_id!r} has inconsistent "
+                "detection authority rows."
+            )
         if item["camera_serial"] is None:
             item["camera_serial"] = _named_text(
                 (review_status, details), {"camera_serial", "camera_id"}
@@ -364,6 +415,9 @@ def load_geometry_review_queue(
     queue: list[GeometryReviewQueueItem] = []
     order = {name: index for index, name in enumerate(REGISTERED_GEOMETRY_STAGES)}
     for dataset_id, raw in grouped.items():
+        detection_binding = raw["detection_binding"]
+        if detection_binding is None:
+            continue
         stages = tuple(sorted(raw["stages"], key=lambda stage: order[stage.step_name]))
         actionable = any(_is_actionable(stage) for stage in stages)
         if not include_inactive and not actionable:
@@ -378,6 +432,8 @@ def load_geometry_review_queue(
                 geometry_state=_geometry_state(stages),
                 actionable=actionable,
                 stages=stages,
+                detection_run=detection_binding[0],
+                detection_manifest_digest=detection_binding[1],
             )
         )
     return sorted(

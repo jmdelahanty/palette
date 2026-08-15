@@ -28,6 +28,8 @@ class RecordingDetectionPostprocessInputs:
     canonicalize_legacy_source: bool = False
     canonical_source_run: str | None = None
     require_active_canonical_source: bool = False
+    expected_source_manifest_digest: str | None = None
+    source_publication_receipt: Path | None = None
     registered_gate_requirement: str = "off"
     registered_gate_run: str | None = None
     selection_policy_id: str = "manual_review_only_v1"
@@ -51,6 +53,38 @@ class RecordingDetectionPostprocessInputs:
             raise TypeError("canonicalize_legacy_source must be an exact bool.")
         if type(self.require_active_canonical_source) is not bool:
             raise TypeError("require_active_canonical_source must be an exact bool.")
+        if self.canonicalize_legacy_source and self.require_active_canonical_source:
+            raise ValueError(
+                "Legacy successor compatibility cannot claim active canonical authority."
+            )
+        expected_digest = (
+            str(self.expected_source_manifest_digest or "").strip().lower() or None
+        )
+        if expected_digest is not None and (
+            len(expected_digest) != 64
+            or any(character not in "0123456789abcdef" for character in expected_digest)
+        ):
+            raise ValueError("expected_source_manifest_digest must be one SHA-256 digest.")
+        object.__setattr__(self, "expected_source_manifest_digest", expected_digest)
+        receipt = (
+            Path(self.source_publication_receipt).expanduser().resolve()
+            if self.source_publication_receipt is not None
+            else None
+        )
+        object.__setattr__(self, "source_publication_receipt", receipt)
+        if self.require_active_canonical_source and (
+            (expected_digest is None) == (receipt is None)
+        ):
+            raise ValueError(
+                "Active canonical postprocess requires exactly one expected source "
+                "manifest digest or publication receipt."
+            )
+        if not self.require_active_canonical_source and (
+            expected_digest is not None or receipt is not None
+        ):
+            raise ValueError(
+                "Canonical source expectations require active canonical enforcement."
+            )
         canonical_source_run = str(self.canonical_source_run or "").strip() or None
         object.__setattr__(self, "canonical_source_run", canonical_source_run)
         if self.canonicalize_legacy_source and canonical_source_run is None:
@@ -65,10 +99,6 @@ class RecordingDetectionPostprocessInputs:
         if canonical_source_run == self.source_detect_run:
             raise ValueError(
                 "Canonical detection successor must differ from its source run."
-            )
-        if self.canonicalize_legacy_source and self.require_active_canonical_source:
-            raise ValueError(
-                "Legacy successor compatibility cannot claim active canonical authority."
             )
         requirement = str(self.registered_gate_requirement).strip()
         if requirement not in REGISTERED_GATE_REQUIREMENTS:
@@ -99,6 +129,8 @@ class RecordingDetectionPostprocessOutputs:
     source_detect_group_path: str
     canonical_successor_receipt: str | None
     require_active_canonical_source: bool
+    expected_source_manifest_digest: str | None
+    source_publication_receipt: str | None
     quality_run: str
     quality_group_path: str
     working_refined_run: str
@@ -122,6 +154,8 @@ class RecordingDetectionPostprocessOutputs:
             "require_active_canonical_source": (
                 self.require_active_canonical_source
             ),
+            "expected_source_manifest_digest": self.expected_source_manifest_digest,
+            "source_publication_receipt": self.source_publication_receipt,
             "quality_run": self.quality_run,
             "quality_group_path": self.quality_group_path,
             "working_refined_run": self.working_refined_run,
@@ -158,6 +192,17 @@ def build_recording_detection_postprocess_fragment(
     )
     assert effective_source_run is not None
     source_group = f"detect_runs/{effective_source_run}"
+    source_expectation_args: tuple[str, ...] = ()
+    if inputs.expected_source_manifest_digest is not None:
+        source_expectation_args = (
+            "--expected-source-manifest-digest",
+            inputs.expected_source_manifest_digest,
+        )
+    elif inputs.source_publication_receipt is not None:
+        source_expectation_args = (
+            "--source-publication-receipt",
+            str(inputs.source_publication_receipt),
+        )
     quality_group = f"detect_quality_runs/{inputs.quality_run}"
     working_refined_run = safe_component(
         f"{inputs.refined_run}__working",
@@ -267,6 +312,7 @@ def build_recording_detection_postprocess_fragment(
                 if inputs.require_active_canonical_source
                 else ()
             ),
+            *source_expectation_args,
         ),
         resources=LsfResources(queue="short", ncores=4, mem_gb=32, walltime="1:00"),
         upstream=quality_upstream,
@@ -297,6 +343,7 @@ def build_recording_detection_postprocess_fragment(
         refine_command.extend(("--registered-gate-run", inputs.registered_gate_run))
     if inputs.require_active_canonical_source:
         refine_command.append("--require-active-canonical-source")
+        refine_command.extend(source_expectation_args)
     validate_command = (
         "scripts/py",
         "-m",
@@ -339,6 +386,7 @@ def build_recording_detection_postprocess_fragment(
         finalize_command.extend(("--registered-gate-run", inputs.registered_gate_run))
     if inputs.require_active_canonical_source:
         finalize_command.append("--require-active-canonical-source")
+        finalize_command.extend(source_expectation_args)
     refine_key = f"recording_detect_refine:{safe}"
     refine = build_job(
         workflow_id=inputs.workflow_id,
@@ -378,6 +426,12 @@ def build_recording_detection_postprocess_fragment(
             else None
         ),
         require_active_canonical_source=inputs.require_active_canonical_source,
+        expected_source_manifest_digest=inputs.expected_source_manifest_digest,
+        source_publication_receipt=(
+            str(inputs.source_publication_receipt)
+            if inputs.source_publication_receipt is not None
+            else None
+        ),
         quality_run=inputs.quality_run,
         quality_group_path=quality_group,
         working_refined_run=working_refined_run,

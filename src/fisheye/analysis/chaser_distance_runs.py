@@ -808,6 +808,13 @@ def _build_canonical_chaser_distance_result(
         detect_run=detect_run,
         detection_path=detection_path,
     )
+    resolved_parts = resolved_detection_path.split("/")
+    if (
+        len(resolved_parts) == 3
+        and resolved_parts[0] == "detect_runs"
+        and resolved_parts[2] == "instances"
+    ):
+        resolved_detection_path = "/".join(resolved_parts[:2])
     context = load_chaser_distance_source_context(
         root,
         detection_path=resolved_detection_path,

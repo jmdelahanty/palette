@@ -41,6 +41,7 @@ from fisheye.shared.run_provenance import (
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID,
     canonical_detection_dimensions_from_manifest,
+    require_active_coordinate_canonical_detection,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -246,6 +247,15 @@ def _detection_snapshot(
 ) -> dict[str, Any]:
     path = _safe_group_path(source_group_path)
     try:
+        active_manifest = require_active_coordinate_canonical_detection(
+            root,
+            group_path=path,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Detection source {path!r} is not the active canonical-v3 authority: {exc}"
+        ) from exc
+    try:
         group = root[path]
     except KeyError as exc:
         raise ValueError(f"Detection source is missing: {path}") from exc
@@ -283,6 +293,10 @@ def _detection_snapshot(
             manifest.get("payload_digest"),
             label="canonical detection manifest payload digest",
         )
+        if manifest_digest != active_manifest["payload_digest"]:
+            raise ValueError(
+                "Detection source canonical manifest changed during comparison preflight."
+            )
     else:
         observed_width = int(attrs.get("source_video_width") or attrs.get("width") or 0)
         observed_height = int(

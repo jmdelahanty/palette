@@ -29,6 +29,9 @@ def build_crop_signature(attrs: Mapping[str, object]) -> Dict[str, object]:
         "detection_source_path": attrs.get("detection_source_path"),
         "source_coords_path": attrs.get("source_coords_path"),
         "detection_source_type": attrs.get("detection_source_type"),
+        "source_detection_manifest_digest": attrs.get(
+            "source_detection_manifest_digest"
+        ),
         "detection_selection_policy": attrs.get(
             "detection_selection_policy",
             attrs.get("detection_preferred_policy"),

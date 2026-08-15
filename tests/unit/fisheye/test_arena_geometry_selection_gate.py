@@ -27,6 +27,27 @@ from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
 
 
+@pytest.fixture(autouse=True)
+def _canonical_detection_authority_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate,
+        "require_active_coordinate_canonical_detection",
+        lambda root, *, group_path, **_kwargs: root[group_path].attrs["run_manifest"],
+    )
+    monkeypatch.setattr(
+        gate,
+        "canonical_detection_dimensions_from_manifest",
+        lambda _manifest: CanonicalDetectionDimensions(
+            n_frames=10,
+            n_instances=3,
+            source_width=640,
+            source_height=480,
+        ),
+    )
+
+
 def _candidate_record() -> dict[str, object]:
     mask = RegisteredDishMask(
         key=RegisteredDishMaskKey("omnifin0", "shadow", "arena_1", "2010093"),
@@ -126,6 +147,10 @@ def _write_detection_source(archive: Path) -> str:
             "source_video_width": 640,
             "source_video_height": 480,
             "num_frames": 10,
+            "run_manifest": {
+                "payload_digest": "f" * 64,
+                "fixture": "canonical-v3",
+            },
         }
     )
     bbox = source.create_array(

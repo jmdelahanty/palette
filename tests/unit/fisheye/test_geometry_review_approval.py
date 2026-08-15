@@ -133,6 +133,11 @@ def _stub_canonical_dimensions(monkeypatch: pytest.MonkeyPatch) -> None:
             source_height=4512,
         ),
     )
+    monkeypatch.setattr(
+        approval,
+        "require_active_coordinate_canonical_detection",
+        lambda root, *, group_path, **_kwargs: root[group_path].attrs["run_manifest"],
+    )
 
 
 def _build_request(
@@ -193,6 +198,7 @@ def _build_request(
             "frame_count": 100,
             "source_video_width": 4512,
             "source_video_height": 4512,
+            "canonical_run_manifest_payload_digest": "5" * 64,
             "binding_sha256": "3" * 64,
         },
     )
@@ -237,6 +243,7 @@ def test_approval_request_is_content_addressed_and_freezes_exact_sources(
         "frame_count": 100,
         "source_video_width": 4512,
         "source_video_height": 4512,
+        "canonical_run_manifest_payload_digest": "5" * 64,
     }
     assert first.payload["identity"]["decision"]["selected_candidate_kind"] == (
         "palette"
@@ -314,7 +321,7 @@ def test_detection_binding_rejects_flat_run_without_manifest() -> None:
 
     with pytest.raises(
         approval.GeometryReviewApprovalError,
-        match="lacks its exact canonical run_manifest",
+        match="active canonical-v3 authority",
     ):
         approval.detection_source_binding({path: group}, path)
 
@@ -326,7 +333,7 @@ def test_detection_binding_rejects_pre_coordinate_manifest() -> None:
 
     with pytest.raises(
         approval.GeometryReviewApprovalError,
-        match="not a coordinate-aware canonical-v3 run",
+        match="active canonical-v3 authority",
     ):
         approval.detection_source_binding({path: group}, path)
 
@@ -356,6 +363,8 @@ def test_registry_precondition_requires_exact_actionable_pending_run(
         geometry_state="fit_evidence_awaiting_review",
         actionable=True,
         stages=(fit_stage,),
+        detection_run="raw-1",
+        detection_manifest_digest="5" * 64,
     )
     monkeypatch.setattr(
         approval, "load_geometry_review_queue", lambda *_a, **_k: [item]

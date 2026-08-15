@@ -10,6 +10,7 @@ import zarr
 
 from fisheye.analysis_workflows.materializers import arena_geometry_candidates
 from fisheye.analysis_workflows.materializers import arena_geometry_comparison as comparison
+from fisheye.analysis_workflows.materializers import registered_detection_gate as gate
 from fisheye.analysis_workflows.materializers import arena_geometry_selection as selection
 from fisheye.shared.json_safety import strict_json_dumps
 from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
@@ -47,6 +48,35 @@ def _archive_with_candidates(
     *,
     acquisition_edge_support_digest: str | None = None,
 ) -> tuple[Path, str, str]:
+    manifest_reader = lambda root, *, group_path, **_kwargs: dict(
+        root[group_path].attrs["run_manifest"]
+    )
+    monkeypatch.setattr(
+        comparison,
+        "require_active_coordinate_canonical_detection",
+        manifest_reader,
+    )
+    monkeypatch.setattr(
+        gate,
+        "require_active_coordinate_canonical_detection",
+        manifest_reader,
+    )
+    dimensions = lambda _manifest: CanonicalDetectionDimensions(
+        n_frames=3,
+        n_instances=3,
+        source_width=640,
+        source_height=480,
+    )
+    monkeypatch.setattr(
+        comparison,
+        "canonical_detection_dimensions_from_manifest",
+        dimensions,
+    )
+    monkeypatch.setattr(
+        gate,
+        "canonical_detection_dimensions_from_manifest",
+        dimensions,
+    )
     archive = tmp_path / "recording.zarr"
     root = zarr.open_group(str(archive), mode="w", zarr_format=3)
     parent = root.require_group("analysis").create_group(
@@ -131,7 +161,7 @@ def _write_nested_detection_source(archive: Path) -> str:
     run.attrs.update(
         {
             "palette_run_completion_status": "complete",
-            "stage_selector_eligible": False,
+            "stage_selector_eligible": True,
             "source_video_width": 640,
             "source_video_height": 480,
             "num_frames": 3,
@@ -143,6 +173,12 @@ def _write_nested_detection_source(archive: Path) -> str:
                     ),
                     "record_sha256": "e" * 64,
                 }
+            },
+            "run_manifest": {
+                "schema_id": "palette.canonical_detection.run_manifest",
+                "schema_version": 3,
+                "payload_digest": "f" * 64,
+                "payload": {"run_id": "detect_native"},
             },
         }
     )

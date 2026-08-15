@@ -12,6 +12,9 @@ import zarr
 from fisheye.analysis import import_stimulus_to_zarr as stimulus_import
 from fisheye.analysis import chaser_distance_coordinate_publication as publication_module
 from fisheye.analysis import chaser_distance_runs as runs_module
+from fisheye.analysis_workflows.native_canonical_detection_publication import (
+    publish_native_canonical_detection_candidate,
+)
 from fisheye.analysis.chaser_distance_coordinate_publication import (
     CHASER_COLLECTION_AUTHORITY_ATTR,
     CHASER_DISTANCE_PARENT_PUBLICATION_LEASE_ATTR,
@@ -32,6 +35,13 @@ from fisheye.analysis.chaser_distance_runs import (
     write_chaser_distance_run,
 )
 from fisheye.detection import detect_yolo as detect_mod
+from fisheye.detection.clipped_native_binding import (
+    ClippedDetectionArtifactMember,
+    bind_clipped_detection_artifacts,
+)
+from fisheye.detection.native_canonical_candidate import (
+    write_native_clipped_detection_candidate,
+)
 from fisheye.shared.coordinate_descriptor import COORDINATE_DESCRIPTOR_ATTR
 from fisheye.shared.coordinate_record import coordinate_record_sha256
 from fisheye.shared.instance_keys import instance_key_attrs, mint_detection_instance_keys
@@ -83,14 +93,19 @@ _TEST_MODEL_ARTIFACT = {
 }
 
 
-def _publish_detection(root: zarr.Group) -> str:
+def _publish_detection(
+    root: zarr.Group,
+    *,
+    analysis_zarr: Path,
+    scratch_root: Path,
+) -> str:
     _authority_node, acquisition = load_persisted_acquisition_camera_authority(
         root,
         expected_camera_id="2010093",
     )
     parent = root.require_group("detect_runs")
-    run = parent.create_group("canonical")
-    mark_run_started(run, run_name="canonical", stage="detect")
+    run = parent.create_group("legacy_source")
+    mark_run_started(run, run_name="legacy_source", stage="detect")
     evidence, _checkpoints = detect_mod._publish_detection_frame_evidence(  # noqa: SLF001
         root,
         run,
@@ -222,15 +237,73 @@ def _publish_detection(root: zarr.Group) -> str:
             "coordinate_contract": "canonical_v2",
             RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
             RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
-            "stage_selector_eligible": True,
+            "stage_selector_eligible": False,
         }
     )
-    parent.attrs.update(
-        {
-            "latest": "canonical",
-            "latest_complete": "canonical",
-            "authoritative_run": "canonical",
-        }
+    counts = np.asarray([1, 1], dtype=np.int32)
+    bound = bind_clipped_detection_artifacts(
+        [
+            ClippedDetectionArtifactMember(
+                work_unit_id="full_video_work_0",
+                artifact_run_id="legacy_source",
+                clip_id="full_video",
+                clip_index=0,
+                camera_serial=acquisition.record.camera_id,
+                source_width=4512,
+                source_height=4512,
+                artifact_manifest_sha256="d" * 64,
+                run_group_tree_sha256="e" * 64,
+                parent_frame_indices=np.arange(2, dtype=np.int64),
+                frame_indices=frame_indices,
+                bbox_norm_coords=normalized,
+                scores=np.asarray([0.8, 0.9], dtype=np.float32),
+                class_ids=class_ids,
+                artifact_row_id=np.arange(2, dtype=np.uint64),
+                frame_counts=counts,
+                n_detections=counts.copy(),
+            )
+        ],
+        recording_identity=acquisition.record.recording_id,
+        n_frames=2,
+        source_width=4512,
+        source_height=4512,
+    )
+    candidate = write_native_clipped_detection_candidate(
+        bound,
+        destination=scratch_root / "canonical_detection_candidate.zarr",
+        run_id="canonical",
+        recording_identity=acquisition.record.recording_id,
+        producer_id="fisheye.test.chaser_distance",
+        producer_version="canonical-v3-fixture",
+        source_frame_authority={
+            "record_ref": acquisition.record_ref,
+            "record_sha256": acquisition.record_sha256,
+        },
+        source_pixel_authority={
+            "record_ref": evidence.source_camera_frame.record_ref,
+            "record_sha256": evidence.source_camera_frame.record_sha256,
+        },
+        model_artifact_sha256=_TEST_MODEL_ARTIFACT["sha256"],
+        run_provenance={
+            "schema": "palette.run_provenance.v1",
+            "git_sha": "f" * 40,
+            "config_hash": "a" * 64,
+            "params": {},
+            "input_run_ids": {"legacy_source": "legacy_source"},
+            "input_artifacts": [_TEST_MODEL_ARTIFACT],
+            "command": "test canonical chaser-distance fixture",
+            "fisheye_version": "test",
+        },
+        coordinate_catalog=True,
+        publication_selector_eligible=True,
+    )
+    publish_native_canonical_detection_candidate(
+        analysis_zarr=analysis_zarr,
+        candidate_zarr=candidate.output_path,
+        run_id="canonical",
+        recording_identity=acquisition.record.recording_id,
+        expected_manifest_schema_version=3,
+        activate=True,
     )
     return "detect_runs/canonical"
 
@@ -241,7 +314,11 @@ def _canonical_sources(tmp_path: Path) -> tuple[Path, str, str]:
     _prepare_acquisition_authority(zarr_path, total_frames=2)
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     root.attrs["fps"] = 120.0
-    detection_path = _publish_detection(root)
+    detection_path = _publish_detection(
+        root,
+        analysis_zarr=zarr_path,
+        scratch_root=tmp_path,
+    )
     _write_stimulus_h5_with_arena_relative_chaser_states(
         h5_path,
         multi_chaser=True,
@@ -470,7 +547,7 @@ def test_cached_source_validator_rejects_stale_template_copy(
 ) -> None:
     zarr_path, detection_path, _stimulus_run = canonical_source_archive
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    root[f"{detection_path}/scores"][0] = np.float32(0.1)
+    root[f"{detection_path}/instances/scores"][0] = np.float32(0.1)
 
     with pytest.raises(ChaserDistanceCoordinateError):
         _validate_cached_canonical_source_archive(zarr_path)
@@ -505,6 +582,9 @@ def test_canonical_chaser_distance_publishes_exact_coordinate_contract(
     assert run.attrs[INPUT_AUTHORITY_ATTR]["numeric_transform_direction"] == (
         "source_camera_image_px_to_selected_canvas_px_then_"
         "inverse_arena_to_selected_canvas_to_arena_relative_canvas_px"
+    )
+    assert run.attrs[INPUT_AUTHORITY_ATTR]["source_detection_manifest_digest"] == (
+        root[_CANONICAL_DETECTION_PATH].attrs["run_manifest"]["payload_digest"]
     )
     assert run.attrs[MEASUREMENT_AUTHORITY_ATTR]["pixels_per_mm_projector"] == 5.0
     assert run.attrs["stage_selector_eligible"] is True
@@ -592,7 +672,7 @@ def test_canonical_writer_rechecks_source_before_any_output_mutation(
         stimulus_run=stimulus_run,
     )
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    root[f"{detection_path}/scores"][0] = np.float32(0.1)
+    root[f"{detection_path}/instances/scores"][0] = np.float32(0.1)
 
     with pytest.raises(ChaserDistanceCoordinateError, match="changed after binding"):
         write_chaser_distance_run(

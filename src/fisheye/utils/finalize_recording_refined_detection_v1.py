@@ -22,6 +22,7 @@ from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.canonical_detection_manifest import (
     canonical_detection_dimensions_from_manifest,
     require_active_coordinate_canonical_detection,
+    resolve_expected_canonical_detection_manifest_digest,
     refined_source_identity_from_canonical_manifest,
     validate_canonical_detection_publication,
 )
@@ -251,6 +252,8 @@ def finalize_recording_refined_detection_v1(
     copy_backend: str = "python",
     keep_scratch: bool = False,
     require_active_canonical_source: bool = False,
+    expected_source_manifest_digest: str | None = None,
+    source_publication_receipt: str | Path | None = None,
 ) -> dict[str, object]:
     """Freeze, validate, and atomically import one immutable refined authority."""
 
@@ -283,10 +286,21 @@ def finalize_recording_refined_detection_v1(
         raise FileExistsError(f"Immutable finalized refined run already exists: {target}")
 
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    bound_manifest_digest: str | None = None
     if require_active_canonical_source:
+        bound_manifest_digest = resolve_expected_canonical_detection_manifest_digest(
+            expected_group_path=f"detect_runs/{canonical_name}",
+            expected_manifest_digest=expected_source_manifest_digest,
+            publication_receipt_path=source_publication_receipt,
+        )
         require_active_coordinate_canonical_detection(
             root,
             group_path=f"detect_runs/{canonical_name}",
+            expected_manifest_digest=bound_manifest_digest,
+        )
+    elif expected_source_manifest_digest is not None or source_publication_receipt is not None:
+        raise ValueError(
+            "Canonical source expectations require require_active_canonical_source."
         )
     canonical, canonical_manifest, dimensions, _canonical_arrays = _load_canonical_source(
         root,
@@ -499,6 +513,12 @@ def finalize_recording_refined_detection_v1(
                 "required_active_canonical_source": (
                     require_active_canonical_source
                 ),
+                "expected_source_manifest_digest": bound_manifest_digest,
+                "source_publication_receipt": (
+                    str(Path(source_publication_receipt).expanduser().resolve())
+                    if source_publication_receipt is not None
+                    else None
+                ),
                 "working_refined_run": working_name,
                 "output_run": final_name,
                 "output_group_path": f"refined_detect_runs/{final_name}",
@@ -546,6 +566,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
     parser.add_argument("--keep-scratch", action="store_true")
     parser.add_argument("--require-active-canonical-source", action="store_true")
+    parser.add_argument("--expected-source-manifest-digest")
+    parser.add_argument("--source-publication-receipt", type=Path)
     parser.add_argument("--result-json", type=Path, required=True)
     return parser
 
@@ -566,6 +588,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             copy_backend=args.copy_backend,
             keep_scratch=bool(args.keep_scratch),
             require_active_canonical_source=args.require_active_canonical_source,
+            expected_source_manifest_digest=args.expected_source_manifest_digest,
+            source_publication_receipt=args.source_publication_receipt,
         )
     except Exception as exc:
         result = {
