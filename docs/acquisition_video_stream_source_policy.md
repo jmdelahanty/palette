@@ -19,6 +19,13 @@ The presence of the crop stream means "this artifact exists and can be used by
 eligible consumers." It does not mean keypoints, subject masks, crops, training
 exports, or review tools used that stream.
 
+The productionization follow-on for complete per-frame Zarr import and current
+GoodBatBadBat hybrid pixel routing is documented in
+[`goodbatbadbat_acquisition_crop_stream_production_checklist_20260815.md`](goodbatbadbat_acquisition_crop_stream_production_checklist_20260815.md).
+Future recordings that intentionally retain crop pixels without continuous
+full-frame video are a separate storage profile governed by
+[`crop_only_recording_storage_profile.md`](crop_only_recording_storage_profile.md).
+
 ## Availability Surface
 
 Recording import/backfill mirrors acquisition media inventory into:
