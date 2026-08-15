@@ -199,6 +199,38 @@ the 384 acquisition profile. A future model is multi-size-capable only after
 each intended deployment profile has its own accepted runtime and scientific
 validation evidence.
 
+The bounded evidence was durably published after visual inspection at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/
+goodbatbadbat_hybrid_pose_384_canary_20260815_v1/
+```
+
+The review bundle was produced by clean commit
+`8d053e4cd499cb92855ca8c797e9c64e2e079904`. Its review-record digest is
+`1652839606af97ce2c145451b8979441270c0f17e2050d3cc3de158be1f9a13e`;
+the copied 37,748,736-byte pixel payload retained SHA-256
+`8327b37c341b12379ae379ada2fc478a66267ddf76a864209d80007ee014fccc`.
+The bundle contains all 256 pixels and identities, extracted keypoint arrays,
+the original canary receipt, an all-row overview, a failure/low-confidence
+montage, and a provider-spread montage.
+
+The agent visual screen decision digest is
+`3da2964eba3c8601342587065625de9af89549dd74fba40481a10133c083ab09`.
+All five landmarks were anatomically consistent across reviewed acquisition and
+fallback successes. No crop-origin shift, scale error, provider-specific
+coordinate offset, axis flip, or systematic snout-tail reversal was visible.
+The three failures were explicit misses rather than fabricated coordinates;
+two overlapped the dish rim and one otherwise visible fish was missed.
+
+That decision is deliberately
+`pass_for_successor_384_profile_and_full_recording_canary`. It does not authorize
+a production selector or corpus campaign. The next evidence is a successor
+immutable model-input contract followed by one complete selector-ineligible
+recording through terminal inference, strict candidate finalization, keypoint
+quality, and refinement. Operator confirmation and required CI remain mandatory
+before the 84-recording campaign.
+
 ## Current implementation boundary
 
 ### Present
@@ -264,9 +296,9 @@ validation evidence.
 - Whole-recording keypoint orchestration now pins the exact hybrid provider
   record, but still materializes/uses a whole-rowset flat ROI cache for terminal
   inference. Direct grouped provider-block execution remains future work.
-- A signed balanced 384 x 384 work-package canary completed successfully, but
-  its evidence remains in disposable staging and has not yet passed visual
-  scientific review or been bound into a successor model-input contract.
+- A signed balanced 384 x 384 work-package canary and durable visual screen
+  passed. Its source terminal remains selector-ineligible staging evidence; a
+  successor model-input contract and complete recording canary remain pending.
 - Registry readiness now expresses raw-stream canonicalization and routing
   completeness; completed keypoint provider consumption remains future work.
 - Crimson has not validated direct raw acquisition-stream reads or the intended
@@ -531,7 +563,7 @@ unrecoverable
   submitted extent and its existing inverse coordinate mapping.
 - [x] Prove selector-ineligible 384 x 384 tensor/runtime execution on a balanced
   acquisition-plus-fallback work package with an exact signed provider rowset.
-- [ ] Publish the bounded canary evidence and montage durably, complete visual
+- [x] Publish the bounded canary evidence and montage durably, complete visual
   review, and freeze the decision in a checksummed review receipt.
 - [ ] Add an exact accepted 384 x 384 identity profile in a successor immutable
   model-input contract; do not broaden or rewrite the existing 352 profile.
@@ -659,7 +691,7 @@ Use commit-pinned, selector-ineligible outputs until all required checks pass.
    temporal clusters of fallback.
 7. [ ] Decode a deterministic sample from each provider and verify placement.
 8. [x] Run a bounded, signed, balanced keypoint inference canary at 384 x 384.
-9. [ ] Publish and visually review the bounded keypoint evidence, including all
+9. [x] Publish and visually review the bounded keypoint evidence, including all
    failures and deterministic samples from both pixel providers.
 10. [ ] Compare keypoint output with the existing flat/full-frame path using a
    frozen row sample and evidence-derived tolerances.
