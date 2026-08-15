@@ -82,6 +82,59 @@ not evidence that acquisition crop ingestion is already production-complete and
 not the intended new zebrafish geometry. Do not overwrite or promote it as part
 of this work. Publish a 384 x 384 successor under the new crop-policy identity.
 
+### Selector-ineligible hybrid-provider canary evidence
+
+Commit-pinned real-data validation completed on 2026-08-15 at commit
+`a8aa4555b9f4cd48f715355872c6eb97760a8e78`. The canonical representative
+analysis Zarr and both source MP4s were read-only. All writes were confined to:
+
+```text
+/groups/johnson/johnsonlab/jeremy/staging/
+palette_hybrid_crop_provider_canary_20260815_40b597e6/
+```
+
+The disposable overlay bound:
+
+- canonical acquisition-ledger record SHA-256
+  `9c8d72952633e6991e8d6f2bb34f3b22ec4b2437be03b2d81f7acc1fdd4039d8`;
+- strict finalized refined run
+  `refined_detect_goodbatbadbat_geometry_production_400fce8f`;
+- refined manifest digest
+  `18b65cf76dc90bce32dafc5369be3741d38ac72783ad5d8f9d021ba96c5143cd`;
+- refined logical-content digest
+  `36ef5c8c48c7635138cf6707d7c6150677a6a5f5c759caf6c997aba60db1429e`.
+
+LSF job `153425527` completed successfully in 54.99 seconds on an L4 host. It
+published selector-ineligible run
+`crop_hybrid_goodbatbadbat_cluster_canary_v2` with provider-record SHA-256
+`30f8d3b3f5564a6578e3d0c36f27eba1c375bc7205ca8ed2b1e69801948df9ca`.
+Independent direct and consolidated readers both validated that digest and the
+complete 151,478-row provider record. Routing was:
+
+| Route | Rows | Fraction |
+| --- | ---: | ---: |
+| Acquisition crop video | 149,440 | 98.654590% |
+| Full-frame supplemental cache | 2,038 | 1.345410% |
+| Missing/unrecoverable | 0 | 0% |
+
+Every fallback reason was `blank_acquisition_crop`. The supplemental payload
+contained only those 2,038 rows and occupied 300,515,328 bytes; the 149,440
+acquisition-backed images were not duplicated into the Zarr or cache.
+
+The first real writer pass exposed that the completed run was absent from the
+archive's older consolidated generation. Commit `a8aa4555` makes root
+consolidation and consolidated provider-digest visibility mandatory final
+publication steps, and marks/reconsolidates the run as failed if sealing fails.
+The second writer pass above proved the fixed behavior.
+
+LSF job `153425528` then decoded crop rows 3,982 through 3,984, whose source
+codes are acquisition, supplemental, acquisition, as one ordered
+`uint8[3,384,384]` batch through `CropImageSource`. The output used pixel
+contract `orange_mono_pynvvc_luma_hybrid_uint8_v1`, had a nonempty value range
+of 31 through 231, and completed with return code zero. Required CI remains
+unrun for `a8aa4555`; this evidence does not make the branch merge-ready or
+authorize production selectors.
+
 ## Current implementation boundary
 
 ### Present
@@ -116,13 +169,18 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
   ledger-row, source-kind, reason-code, and ROI arrays. Whole-recording keypoint
   planning and terminal startup validate that exact digest when a hybrid run is
   configured.
+- Hybrid crop publication now consolidates the archive only after all payload,
+  attrs, provenance, completion, and optional nonauthoritative `latest_any`
+  writes, then verifies that the consolidated generation exposes the exact
+  provider digest.
 - Registry schema 69 projects `crop_pixel_routing_ready`, provider identity,
   crop/routing policies, and acquisition-versus-recovery counts separately from
   raw crop-stream availability.
 
 ### Missing or not production-complete
 
-- The implementation branch is not deployed and has not passed required CI.
+- The implementation branch has a commit-pinned experimental deployment but is
+  not production-deployed and has not passed required CI.
 - A selector-ineligible disposable canary against the representative real
   GoodBatBadBat sources passed with 152,035 rows, 149,989 detected rows, 2,046
   blank rows, 25 arrays, four hashed sidecars, and validated consolidated
