@@ -135,6 +135,70 @@ of 31 through 231, and completed with return code zero. Required CI remains
 unrun for `a8aa4555`; this evidence does not make the branch merge-ready or
 authorize production selectors.
 
+### Signed 384 x 384 keypoint canary and model-input policy
+
+A successor selector-ineligible canary completed on 2026-08-15 at commit
+`8380406ed29c2d160c2831abfe7c77abc9dadab9`. It used a signed hybrid-provider
+rowset and a balanced 256-row work package containing 128 acquisition-video
+rows and 128 full-frame fallback rows. The exact keypoint model was
+`pose_all_registry_reviewed_v2_kpt5_warm_v2_20260520_retry2`, with model
+SHA-256
+`cce63d534a8f1491db1e2c71cb9236768c445722013dc39faeaf62a9d0a9a377`.
+
+The three relevant image extents were all 384 x 384:
+
+| Extent | Canary value | Meaning |
+| --- | --- | --- |
+| Persisted crop geometry | 384 x 384 | The canonical zebrafish ROI and coordinate frame |
+| Submitted tensor | 384 x 384 | The array passed to the pose runtime |
+| Network input | 384 x 384 | The stride-aligned extent consumed by the model |
+
+Because 384 is divisible by the model's verified stride of 32, this profile
+uses an identity spatial transform and requires no model-input padding. This is
+separate from the crop builder's zero fill at source-image boundaries: crop
+boundary fill preserves the canonical 384 x 384 ROI, whereas model-input
+padding exists only to satisfy a declared network-input extent.
+
+The model's historical training images were stored at 512 x 512, but the
+Ultralytics training pipeline submitted resized 256 x 256 tensors to the
+network. A convolutional pose model can execute at other stride-compatible
+spatial extents; architectural compatibility does not establish scientific
+accuracy at that extent. The bounded 384 x 384 canary therefore supplies
+runtime and preliminary empirical evidence, not production approval.
+
+The terminal canary produced 253 successful poses from 256 rows (98.83%):
+125 of 128 acquisition-backed rows and 128 of 128 fallback rows. The three
+failures were explicit `no_pose_detection_above_threshold` outcomes. Ordered
+crop rows, instance keys, source-row signatures, provider digest, and the exact
+work-package pixel digest were preserved. The run remained under
+`keypoint_shard_runs`, declared `stage_selector_eligible=false`, and did not
+modify a canonical recording or selector.
+
+Before production use:
+
+- publish the bounded pixels, row identities, keypoint arrays, result receipt,
+  and review montage in a durable benchmark location outside staging;
+- visually inspect deterministic acquisition and fallback samples, all three
+  failures, and low-confidence successes;
+- record an explicit accept/reject decision with the reviewed artifact digests;
+- publish a successor to `pose_model_input_contract_v2.json` rather than
+  rewriting that immutable evidence, adding an exact 384 x 384 identity profile
+  bound to Ultralytics 8.3.169 and the reviewed canary;
+- make target manifests and production recipes require that exact successor
+  contract and profile; and
+- complete required CI before any selector, shared-checkout, or production
+  campaign activation.
+
+For future model training, retain both 512 x 512 and 384 x 384 native examples
+with their original source geometry and reversible preprocessing provenance.
+Use 384 x 384 as the primary zebrafish deployment profile. Mixed-size training
+may vary stride-aligned input size between batches, but every tensor in one
+batch must share a shape. Source balance and per-profile validation must be
+reported separately so a large legacy 512 corpus cannot hide regressions on
+the 384 acquisition profile. A future model is multi-size-capable only after
+each intended deployment profile has its own accepted runtime and scientific
+validation evidence.
+
 ## Current implementation boundary
 
 ### Present
@@ -200,6 +264,9 @@ authorize production selectors.
 - Whole-recording keypoint orchestration now pins the exact hybrid provider
   record, but still materializes/uses a whole-rowset flat ROI cache for terminal
   inference. Direct grouped provider-block execution remains future work.
+- A signed balanced 384 x 384 work-package canary completed successfully, but
+  its evidence remains in disposable staging and has not yet passed visual
+  scientific review or been bound into a successor model-input contract.
 - Registry readiness now expresses raw-stream canonicalization and routing
   completeness; completed keypoint provider consumption remains future work.
 - Crimson has not validated direct raw acquisition-stream reads or the intended
@@ -462,6 +529,12 @@ unrecoverable
 - [ ] Feed native 384 x 384 input directly when model and stride contracts permit
   it; otherwise use the existing centered `pad_to_size` transform for a larger
   submitted extent and its existing inverse coordinate mapping.
+- [x] Prove selector-ineligible 384 x 384 tensor/runtime execution on a balanced
+  acquisition-plus-fallback work package with an exact signed provider rowset.
+- [ ] Publish the bounded canary evidence and montage durably, complete visual
+  review, and freeze the decision in a checksummed review receipt.
+- [ ] Add an exact accepted 384 x 384 identity profile in a successor immutable
+  model-input contract; do not broaden or rewrite the existing 352 profile.
 - [ ] Record any later Ultralytics/network resize as the separate framework
   preprocessing stage already required by the pose model-input contract.
 - [ ] Do not silently center-crop acquisition frames back to 348 x 348.
@@ -585,13 +658,15 @@ Use commit-pinned, selector-ineligible outputs until all required checks pass.
 6. [ ] Measure acquisition-selected versus full-frame-fallback counts and inspect
    temporal clusters of fallback.
 7. [ ] Decode a deterministic sample from each provider and verify placement.
-8. [ ] Run a bounded keypoint inference canary.
-9. [ ] Compare keypoint output with the existing flat/full-frame path using a
+8. [x] Run a bounded, signed, balanced keypoint inference canary at 384 x 384.
+9. [ ] Publish and visually review the bounded keypoint evidence, including all
+   failures and deterministic samples from both pixel providers.
+10. [ ] Compare keypoint output with the existing flat/full-frame path using a
    frozen row sample and evidence-derived tolerances.
-10. [ ] Complete Crimson exact-reader and visualization checks.
-11. [ ] Run focused local tests, the optimized required CI shards, and any
+11. [ ] Complete Crimson exact-reader and visualization checks.
+12. [ ] Run focused local tests, the optimized required CI shards, and any
     required cluster canary.
-12. [ ] Only after CI is green, publish a production-eligible selector in a new
+13. [ ] Only after CI is green, publish a production-eligible selector in a new
     commit-pinned deployment.
 
 ## Phase 8: GoodBatBadBat rollout
