@@ -14,6 +14,9 @@ import uuid
 import numpy as np
 import zarr
 
+from fisheye.shared.hybrid_crop_provider import (
+    validate_hybrid_crop_signed_identity,
+)
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
@@ -22,7 +25,13 @@ from fisheye.shared.zarr.clipped_keypoint_finalization import (
     publish_selector_ineligible_clipped_keypoint_chain,
 )
 from fisheye.shared.zarr.crop_shadow import (
+    CropGeometryShadowPublication,
     open_persisted_crop_geometry_publication,
+)
+from fisheye.shared.zarr.crop_consumer import (
+    CROP_RUN_REFERENCE_SIGNED_PROFILE,
+    build_crop_run_reference,
+    validate_crop_run_reference,
 )
 from fisheye.shared.zarr.keypoint_bundle_production_publication import (
     publish_keypoint_v2_production_candidate_chain,
@@ -177,6 +186,141 @@ def _dispositions(
     )
 
 
+def _require_terminal_crop_provider_compatible(
+    *,
+    archive: Path,
+    crop: CropGeometryShadowPublication,
+    terminal_crop_run: str,
+    terminal_receipt: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Bind a terminal pixel provider to the strict crop-v2 geometry authority.
+
+    Whole-recording inference may read pixels from a signed hybrid acquisition /
+    offline provider while publication remains bound to the independently sealed
+    crop-v2 geometry run.  The two are interchangeable only for this terminal
+    result when their complete ordered geometry rowsets agree exactly and the
+    terminal cache receipt binds the live signed provider identity.
+    """
+
+    provider_run = str(terminal_crop_run).strip()
+    if not provider_run or "/" in provider_run:
+        raise ValueError("terminal_crop_run must be one nonempty archive group name.")
+    if provider_run == crop.run_id:
+        return {
+            "mode": "strict_crop_v2_pixels",
+            "geometry_crop_run": crop.run_id,
+            "terminal_crop_run": provider_run,
+            "ordered_geometry_coverage_exact": True,
+        }
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    try:
+        provider = root[f"crop_runs/{provider_run}"]
+    except KeyError as exc:
+        raise FileNotFoundError(
+            f"Terminal crop provider not found: crop_runs/{provider_run}"
+        ) from exc
+    reference = validate_crop_run_reference(
+        build_crop_run_reference(provider, run_id=provider_run)
+    )
+    if reference.get("profile") != CROP_RUN_REFERENCE_SIGNED_PROFILE:
+        raise ValueError(
+            "A separate terminal crop provider must use the signed-current profile."
+        )
+
+    payload = terminal_receipt.get("payload")
+    cache = payload.get("cache") if isinstance(payload, Mapping) else None
+    if not isinstance(cache, Mapping):
+        raise ValueError("Terminal receipt lacks cache evidence.")
+    cache_manifest_path = Path(str(cache.get("manifest_path") or "")).expanduser().resolve()
+    cache_manifest = _read_json(cache_manifest_path)
+    cache_source = cache_manifest.get("source")
+    observed_reference = (
+        cache_source.get("crop_run_reference")
+        if isinstance(cache_source, Mapping)
+        else None
+    )
+    if observed_reference != reference:
+        raise ValueError(
+            "Terminal cache binds a different signed crop-provider reference."
+        )
+
+    provider_record_sha256 = str(provider.attrs.get("provider_record_sha256") or "")
+    signed = validate_hybrid_crop_signed_identity(
+        provider,
+        expected_provider_record_sha256=provider_record_sha256,
+    )
+    preprocessing = payload.get("preprocessing")
+    document = (
+        preprocessing.get("document")
+        if isinstance(preprocessing, Mapping)
+        else None
+    )
+    roi_provider = document.get("roi_provider") if isinstance(document, Mapping) else None
+    expected_terminal_provider = {
+        "crop_run": provider_run,
+        "record_sha256": signed["provider_record_sha256"],
+        "source_pixel_fingerprint": signed["source_pixel_fingerprint"],
+        "source_rowset_fingerprint": signed["source_rowset_fingerprint"],
+        "source_row_signature_spec_digest": signed[
+            "source_row_signature_spec_digest"
+        ],
+    }
+    if not isinstance(roi_provider, Mapping) or any(
+        roi_provider.get(name) != value
+        for name, value in expected_terminal_provider.items()
+    ):
+        raise ValueError(
+            "Terminal preprocessing evidence differs from the live signed provider."
+        )
+
+    crop_payload = crop.manifest.get("payload")
+    crop_source = (
+        crop_payload.get("source_refined_snapshot")
+        if isinstance(crop_payload, Mapping)
+        else None
+    )
+    if not isinstance(crop_source, Mapping) or provider.attrs.get(
+        "source_refined_run_id"
+    ) != crop_source.get("run_id"):
+        raise ValueError(
+            "Terminal pixel provider and crop-v2 bind different refined sources."
+        )
+
+    exact_paths = (
+        "instance_key",
+        "source_refined_row_ids",
+        "frame_indices",
+        "source_acquisition_frame_index",
+        "roi_coordinates_full",
+        "roi_sizes_full",
+    )
+    mismatched: list[str] = []
+    for path in exact_paths:
+        if path not in provider or not np.array_equal(
+            np.asarray(provider[path][...]),
+            np.asarray(crop.arrays[path][...]),
+        ):
+            mismatched.append(path)
+    if mismatched:
+        raise ValueError(
+            "Terminal pixel provider differs from crop-v2 geometry at: "
+            + ", ".join(mismatched)
+        )
+    return {
+        "mode": "signed_hybrid_pixels_with_strict_crop_v2_geometry",
+        "geometry_crop_run": crop.run_id,
+        "geometry_crop_manifest_digest": crop.manifest["payload_digest"],
+        "terminal_crop_run": provider_run,
+        "terminal_crop_reference": reference,
+        "provider_record_sha256": signed["provider_record_sha256"],
+        "source_pixel_fingerprint": signed["source_pixel_fingerprint"],
+        "source_rowset_fingerprint": signed["source_rowset_fingerprint"],
+        "ordered_geometry_coverage_exact": True,
+        "exact_geometry_paths": list(exact_paths),
+    }
+
+
 def finalize_whole_recording_keypoint_v2(
     *,
     analysis_zarr: Path,
@@ -192,12 +336,14 @@ def finalize_whole_recording_keypoint_v2(
     scratch_root: Path,
     result_json: Path,
     copy_backend: str = "python",
+    terminal_crop_run: str | None = None,
 ) -> Mapping[str, Any]:
     archive = analysis_zarr.expanduser().resolve()
+    resolved_terminal_crop_run = str(terminal_crop_run or crop_run).strip()
     receipt, terminal, model = _load_terminal(
         terminal_artifact,
         expected_analysis_zarr=archive,
-        expected_crop_run=crop_run,
+        expected_crop_run=resolved_terminal_crop_run,
     )
     payload = receipt["payload"]
     binding = model.get("pose_model_schema_binding")
@@ -210,6 +356,12 @@ def finalize_whole_recording_keypoint_v2(
         raise ValueError("Terminal receipt lacks preprocessing evidence.")
     preprocessing = keypoint_preprocessing_from_manifest(preprocessing_value)
     crop = open_persisted_crop_geometry_publication(archive, run_id=crop_run)
+    crop_provider_binding = _require_terminal_crop_provider_compatible(
+        archive=archive,
+        crop=crop,
+        terminal_crop_run=resolved_terminal_crop_run,
+        terminal_receipt=receipt,
+    )
     crop_payload = crop.manifest.get("payload")
     crop_source = (
         crop_payload.get("source_refined_snapshot")
@@ -288,6 +440,7 @@ def finalize_whole_recording_keypoint_v2(
             "analysis_zarr": str(archive),
             "terminal_artifact": str(terminal_artifact.expanduser().resolve()),
             "terminal_receipt_digest": receipt["payload_digest"],
+            "crop_provider_binding": crop_provider_binding,
             "runs": publication["runs"],
             "publication": publication,
             "selector_eligible": False,
@@ -305,6 +458,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--analysis-zarr", type=Path, required=True)
     parser.add_argument("--crop-run", required=True)
+    parser.add_argument(
+        "--terminal-crop-run",
+        help=(
+            "Signed pixel-provider crop run bound by the terminal receipt. "
+            "Defaults to the strict --crop-run authority."
+        ),
+    )
     parser.add_argument("--terminal-artifact", type=Path, required=True)
     parser.add_argument("--raw-run", required=True)
     parser.add_argument("--quality-run", required=True)
@@ -335,6 +495,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scratch_root=args.scratch_root,
         result_json=args.result_json,
         copy_backend=args.copy_backend,
+        terminal_crop_run=args.terminal_crop_run,
     )
     print(json.dumps(result, sort_keys=True))
     return 0
