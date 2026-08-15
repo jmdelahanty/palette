@@ -101,7 +101,23 @@ def _stage_crop_shell(
     if not source.is_dir():
         raise FileNotFoundError(f"Crop run not found: {source}")
     local = destination / "analysis.zarr"
+    source_root = zarr.open_group(
+        str(analysis_zarr), mode="r", zarr_format=3, use_consolidated=False
+    )
     root = zarr.open_group(str(local), mode="w-", zarr_format=3)
+    # The crop run owns row geometry, but keypoint coordinates are also
+    # normalized against the source-camera raster.  Preserve the source root
+    # authority in this ephemeral shell instead of creating an attr-empty root.
+    # The shell is never published: only its completed terminal run is copied
+    # into the immutable workflow artifact below.
+    root.attrs.update(dict(source_root.attrs))
+    raw_video = source_root.get("raw_video")
+    images_full = raw_video.get("images_full") if raw_video is not None else None
+    image_shape = tuple(getattr(images_full, "shape", ()))
+    if len(image_shape) == 3:
+        root.attrs.setdefault("total_frames", int(image_shape[0]))
+        root.attrs.setdefault("video_height", int(image_shape[1]))
+        root.attrs.setdefault("video_width", int(image_shape[2]))
     require_runs_parent(root, "crop_runs")
     shutil.copytree(source, local / "crop_runs" / crop_run, copy_function=shutil.copy2)
     return local
