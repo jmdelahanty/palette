@@ -37,6 +37,10 @@ from fisheye.shared.crop_geometry import (
 )
 from fisheye.shared.flat_roi_cache import FLAT_ROI_CACHE_LAYOUT, FLAT_ROI_CACHE_SCHEMA
 from fisheye.shared.flat_roi_cache import _crop_pynvvc_luma_frame  # noqa: PLC2701
+from fisheye.shared.hybrid_crop_provider import (
+    HYBRID_CROP_RUN_SCHEMA_ID,
+    build_hybrid_crop_provider_identity,
+)
 from fisheye.shared.refined_detect_curation import (
     extract_present_curated_rows,
     resolve_curated_refined_detect_run,
@@ -75,7 +79,7 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
-SCHEMA_ID = "palette.hybrid_acquisition_offline_crop_run.v3"
+SCHEMA_ID = HYBRID_CROP_RUN_SCHEMA_ID
 DEFAULT_RUN_PREFIX = "crop_hybrid_acquisition_offline"
 DECODE_MODES = ("auto", "indexed", "sequential")
 ACQUISITION_SOURCE_MODES = ("canonical_ledger", "legacy_crop_run")
@@ -1398,6 +1402,13 @@ def _prepare_hybrid_payload(
     ).reshape(-1, 4)
     if np.any(video_mask):
         source_crop_xywh[video_mask] = video_crop_xywh[matched_online_rows[video_mask]]
+    source_acquisition_crop_xywh = np.full(
+        (refined_rows, 4), np.nan, dtype=np.float64
+    )
+    if np.any(video_mask):
+        source_acquisition_crop_xywh[video_mask] = video_crop_xywh[
+            matched_online_rows[video_mask]
+        ]
 
     refined_row_ids = np.asarray(
         refined_payload.get("refined_row_ids", np.arange(refined_rows)),
@@ -1436,6 +1447,7 @@ def _prepare_hybrid_payload(
         "source_crop_local_frame_ids": _online_values(
             "source_crop_local_frame_ids", dtype=np.int64, fill=-1
         ),
+        "source_acquisition_crop_xywh": source_acquisition_crop_xywh,
         "source_crop_xywh": source_crop_xywh,
         "roi_coordinates_full": roi_coordinates.astype(np.int32, copy=False),
         "roi_sizes_full": roi_sizes.astype(np.int32, copy=False),
@@ -1670,6 +1682,7 @@ def build_hybrid_acquisition_offline_crop_run(
         np.asarray(payload["source_pixel_kind_codes"], dtype=np.int8)
         == SOURCE_PIXEL_KIND_CODE_MAP["offline_full_frame_supplemental_flat_cache"]
     )
+    hybrid_pixel_contract = orange_mono_pynvvc_luma_hybrid_pixel_contract()
     provider_rowset_record = {
         "schema_id": "palette.roi_pixel_provider_record.v1",
         "schema_version": 1,
@@ -1696,14 +1709,28 @@ def build_hybrid_acquisition_offline_crop_run(
                 "frame_indices",
                 "source_refined_row_ids",
                 "source_acquisition_crop_row_indices",
+                "source_acquisition_crop_xywh",
+                "source_crop_video_frame_indices",
+                "source_crop_xywh",
                 "source_pixel_kind_codes",
                 "routing_reason_codes",
                 "roi_coordinates_full",
                 "roi_sizes_full",
+                "bbox_norm_coords",
+                "crop_state_codes",
+                "supplemental_cache_row_indices",
             )
         },
     }
     provider_record_sha256 = _canonical_json_sha256(provider_rowset_record)
+    provider_identity = build_hybrid_crop_provider_identity(
+        payload,
+        provider_record_sha256=provider_record_sha256,
+        routing_policy_id=routing_policy_id,
+        crop_policy_id=crop_policy_id,
+        pixel_contract=hybrid_pixel_contract,
+    )
+    payload["source_row_signature"] = provider_identity.row_signatures.signatures
 
     plan = {
         "status": "dry_run" if not apply else "planned",
@@ -1728,6 +1755,12 @@ def build_hybrid_acquisition_offline_crop_run(
         "crop_policy_id": crop_policy_id,
         "context_margin_px": float(context_margin_px),
         "provider_record_sha256": provider_record_sha256,
+        "source_row_signature_spec_digest": (
+            provider_identity.row_signatures.spec.spec_digest
+        ),
+        "source_pixel_fingerprint": provider_identity.source_pixel_fingerprint,
+        "source_rowset_fingerprint": provider_identity.source_rowset_fingerprint,
+        "crop_signature": dict(provider_identity.crop_signature),
         "set_latest_any": bool(set_latest_any),
         "summary": summary,
     }
@@ -1794,6 +1827,7 @@ def build_hybrid_acquisition_offline_crop_run(
             "frame_counts",
             "frame_row_offsets",
             "detection_indices",
+            "source_row_signature",
         ]
         for name in array_names:
             if name not in payload:
@@ -1802,7 +1836,6 @@ def build_hybrid_acquisition_offline_crop_run(
         stamp_geometry_preload_attrs(group)
 
         now = _utc_now()
-        hybrid_pixel_contract = orange_mono_pynvvc_luma_hybrid_pixel_contract()
         attrs = {
             "schema_id": SCHEMA_ID,
             "crop_storage_mode": "geometry_only",
@@ -1877,6 +1910,7 @@ def build_hybrid_acquisition_offline_crop_run(
             "status": "completed",
             "completed_at_utc": now,
             "duration_seconds": float(time.perf_counter() - started),
+            **provider_identity.attrs(),
         }
         if supplemental_manifest is not None:
             attrs["supplemental_roi_cache_manifest_payload"] = supplemental_manifest
@@ -1947,6 +1981,13 @@ def build_hybrid_acquisition_offline_crop_run(
         ):
             raise RuntimeError(
                 "Consolidated metadata exposes a stale hybrid provider record."
+            )
+        if (
+            consolidated_run.attrs.get("source_rowset_fingerprint")
+            != provider_identity.source_rowset_fingerprint
+        ):
+            raise RuntimeError(
+                "Consolidated metadata exposes a stale hybrid signed rowset."
             )
         return {
             **plan,

@@ -29,6 +29,7 @@ from fisheye.shared.flat_roi_cache import (
     crop_run_name_from_manifest,
     load_flat_roi_cache_manifest,
 )
+from fisheye.shared.hybrid_crop_provider import validate_hybrid_crop_signed_identity
 from fisheye.shared.pose_model_input_contract import PoseModelInputRuntimePlan
 from fisheye.shared.roi_pixel_contract import normalize_pixel_contract
 from fisheye.shared.run_provenance import json_ready
@@ -129,6 +130,10 @@ def validate_crop_run_provider_record(
             raise ValueError(
                 f"ROI provider rowset array {array_name!r} digest is stale."
             )
+    signed_identity = validate_hybrid_crop_signed_identity(
+        group,
+        expected_provider_record_sha256=observed_digest,
+    )
     return {
         "schema_id": str(record["schema_id"]),
         "record_sha256": observed_digest,
@@ -140,6 +145,13 @@ def validate_crop_run_provider_record(
         "acquisition_ledger_record_sha256": record.get(
             "acquisition_ledger_record_sha256"
         ),
+        "source_row_signature_spec_digest": signed_identity[
+            "source_row_signature_spec_digest"
+        ],
+        "source_pixel_fingerprint": signed_identity["source_pixel_fingerprint"],
+        "source_rowset_fingerprint": signed_identity["source_rowset_fingerprint"],
+        "crop_signature": signed_identity["crop_signature"],
+        "crop_revision": signed_identity["crop_revision"],
     }
 
 

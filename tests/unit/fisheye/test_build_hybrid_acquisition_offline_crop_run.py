@@ -17,7 +17,16 @@ from fisheye.utils.build_hybrid_acquisition_offline_crop_run import (
 from fisheye.shared.acquisition_crop_stream_ledger import (
     publish_acquisition_crop_stream_ledger,
 )
+from fisheye.shared.crop_pixel_work_package import (
+    SIGNED_SOURCE_BINDING_PROFILE,
+    _source_binding,
+)
 from fisheye.shared.refined_detect_curation import extract_present_curated_rows
+from fisheye.shared.row_source_signature import load_row_source_signature_spec
+from fisheye.shared.zarr.crop_consumer import (
+    CROP_RUN_REFERENCE_SIGNED_PROFILE,
+    build_crop_run_reference,
+)
 
 
 def _create_array(group, name: str, data) -> None:
@@ -557,6 +566,24 @@ def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
     assert run.attrs["source_acquisition_crop_ledger_record_sha256"] == ledger_digest
     assert run.attrs["provider_record_sha256"] == report["provider_record_sha256"]
     assert run.attrs["stage_selector_eligible"] is False
+    assert run["source_row_signature"].shape == (4, 32)
+    assert run["source_row_signature"].dtype == np.dtype(np.uint8)
+    assert run.attrs["source_rowset_fingerprint"] == report[
+        "source_rowset_fingerprint"
+    ]
+    signature_spec = load_row_source_signature_spec(run.attrs)
+    assert signature_spec.spec_digest == report[
+        "source_row_signature_spec_digest"
+    ]
+    reference = build_crop_run_reference(
+        run,
+        run_id="crop_hybrid_ledger_v1",
+    )
+    assert reference["profile"] == CROP_RUN_REFERENCE_SIGNED_PROFILE
+    package_binding = _source_binding(run, run_id="crop_hybrid_ledger_v1")
+    assert package_binding["source_binding_profile"] == (
+        SIGNED_SOURCE_BINDING_PROFILE
+    )
     np.testing.assert_array_equal(run["instance_key"][:], [501, 502, 503, 504])
     np.testing.assert_array_equal(run["routing_reason_codes"][:], [0, 1, 4, 6])
     binding = validate_crop_run_provider_record(
@@ -567,11 +594,31 @@ def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
     assert binding is not None
     assert binding["row_count"] == 4
     assert binding["acquisition_ledger_record_sha256"] == ledger_digest
+    assert binding["source_rowset_fingerprint"] == report[
+        "source_rowset_fingerprint"
+    ]
     with pytest.raises(ValueError, match="digest mismatch"):
         validate_crop_run_provider_record(
             analysis_zarr=zarr_path,
             crop_run="crop_hybrid_ledger_v1",
             expected_record_sha256="f" * 64,
+        )
+
+    writable = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    signature_array = writable[
+        "crop_runs/crop_hybrid_ledger_v1/source_row_signature"
+    ]
+    signature_array[0, 0] = np.uint8(int(signature_array[0, 0]) ^ 1)
+    with pytest.raises(ValueError, match="source_row_signature payload is stale"):
+        _source_binding(
+            writable["crop_runs/crop_hybrid_ledger_v1"],
+            run_id="crop_hybrid_ledger_v1",
+        )
+    with pytest.raises(ValueError, match="source_row_signature payload is stale"):
+        validate_crop_run_provider_record(
+            analysis_zarr=zarr_path,
+            crop_run="crop_hybrid_ledger_v1",
+            expected_record_sha256=report["provider_record_sha256"],
         )
 
 
