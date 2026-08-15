@@ -206,8 +206,7 @@ def _assert_detection_output_target_is_not_canonical(
     if looks_canonical:
         raise RuntimeError(
             "Direct detection writes to a canonical analysis Zarr are forbidden. "
-            "Build a node-local candidate and publish it through "
-            "fisheye.utils.run_detection_local_publish."
+            "Run the artifact-first native canonical-v3 detection workflow."
         )
 
 

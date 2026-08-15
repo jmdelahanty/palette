@@ -179,3 +179,38 @@ def test_legacy_canonicalization_requires_distinct_successor(tmp_path: Path) -> 
             canonicalize_legacy_source=True,
             canonical_source_run="detect_native",
         )
+
+
+def test_active_canonical_source_is_enforced_by_quality_refine_and_finalize(
+    tmp_path: Path,
+) -> None:
+    target = whole_video_recording_target(
+        target_id="whole",
+        recording_id="recording",
+        recording_dir=tmp_path / "recording",
+        analysis_zarr=tmp_path / "recording" / "analysis.zarr",
+        video_path=tmp_path / "recording" / "video.mp4",
+        camera_serial="2010093",
+    )
+    module = build_recording_detection_postprocess_fragment(
+        _inputs(
+            tmp_path,
+            target,
+            require_active_canonical_source=True,
+        )
+    )
+
+    quality, refine = module.fragment.jobs
+    assert "--require-active-canonical-source" in quality.command
+    assert " ".join(refine.command).count("--require-active-canonical-source") == 2
+    assert module.outputs.require_active_canonical_source is True
+    assert module.outputs.to_json()["require_active_canonical_source"] is True
+
+    with pytest.raises(ValueError, match="cannot claim active canonical authority"):
+        _inputs(
+            tmp_path,
+            target,
+            canonicalize_legacy_source=True,
+            canonical_source_run="detect_native_canonical_v3",
+            require_active_canonical_source=True,
+        )

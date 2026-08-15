@@ -53,3 +53,21 @@ def test_atomic_publisher_does_not_depend_on_registry_command_module() -> None:
 
 def test_latest_based_direct_submitter_is_retired() -> None:
     assert not (REPO_ROOT / "scripts/submit_detect_quality_refine_bsub.sh").exists()
+
+
+def test_whole_video_production_planner_uses_artifact_first_native_publication() -> None:
+    source = (
+        REPO_ROOT / "src/fisheye/cluster/whole_video_detection.py"
+    ).read_text(encoding="utf-8")
+    assert "run_detection_local_publish" not in source
+    assert "build_native_detection_cohort_fragment" in source
+    assert "FRAME_MAPPING_MODE_IDENTITY" in source
+    assert "require_active_canonical_source=True" in source
+
+
+def test_flat_local_publisher_is_explicit_compatibility_only() -> None:
+    source = (
+        REPO_ROOT / "src/fisheye/utils/run_detection_local_publish.py"
+    ).read_text(encoding="utf-8")
+    assert "legacy_compatibility_publish: bool = False" in source
+    assert "Flat detect_runs publication is retired from production" in source

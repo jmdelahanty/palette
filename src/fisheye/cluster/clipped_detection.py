@@ -546,7 +546,10 @@ def build_raw_detection_fragment(
     if inputs.target.layout is RecordingLayout.CLIPPED_COLLECTION:
         job = _clipped_raw_detection_job(inputs, target_safe=target_safe)
     elif inputs.target.layout is RecordingLayout.WHOLE_VIDEO:
-        job = _whole_video_raw_detection_job(inputs, target_safe=target_safe)
+        raise ValueError(
+            "The flat whole-video raw publisher is retired from production recipes; "
+            "use fisheye.cluster.native_detection with identity frame mapping."
+        )
     else:  # pragma: no cover - enum construction already fails closed
         raise ValueError(f"Unsupported recording layout: {inputs.target.layout!r}")
     artifact_key = f"raw_detection_work_units:{target_safe}"
@@ -592,6 +595,10 @@ def build_whole_video_raw_detection_cohort_fragment(
     node-local candidate, and one atomic publication boundary.
     """
 
+    raise ValueError(
+        "The flat whole-video detection cohort is retired; use the artifact-first "
+        "native detection cohort."
+    )
     cohort = tuple(inputs)
     if not cohort:
         raise ValueError("A whole-video detection cohort requires at least one target.")

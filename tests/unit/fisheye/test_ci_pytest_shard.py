@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from scripts.ci_pytest_shard import (
+    HISTORICAL_TEST_FILE_COST_OVERRIDES,
     PROOF_HEAVY_TEST_COST_MULTIPLIER,
     PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES,
     REPOSITORY_ROOT,
@@ -71,18 +72,45 @@ def test_estimated_cost_uses_measured_proof_heavy_override(
     assert estimated_test_file_cost(test_file) == 100 * multiplier
 
 
-def test_measured_long_suites_are_separate_in_current_twelve_shard_assignment() -> None:
+def test_measured_dominant_suites_are_separate_in_current_sixteen_shards() -> None:
     test_files = discover_test_files(REPOSITORY_ROOT / "tests")
-    shards = assign_test_file_shards(test_files, shard_count=12)
+    shards = assign_test_file_shards(test_files, shard_count=16)
     owners = {
         path.name: shard_index
         for shard_index, shard in enumerate(shards)
         for path in shard
         if path.name in PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES
+        or path.relative_to(REPOSITORY_ROOT).as_posix()
+        in HISTORICAL_TEST_FILE_COST_OVERRIDES
     }
 
-    assert owners.keys() == PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES.keys()
-    assert len(set(owners.values())) == len(owners)
+    expected_names = set(PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES)
+    expected_names.update(
+        Path(path).name for path in HISTORICAL_TEST_FILE_COST_OVERRIDES
+    )
+    assert owners.keys() == expected_names
+    dominant_names = {
+        path.name
+        for shard in shards
+        for path in shard
+        if path.name in expected_names and estimated_test_file_cost(path) >= 100_000
+    }
+    dominant_owners = {owners[name] for name in dominant_names}
+    assert len(dominant_owners) == len(dominant_names)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_cost"),
+    sorted(HISTORICAL_TEST_FILE_COST_OVERRIDES.items()),
+)
+def test_historical_runtime_override_uses_repository_relative_path(
+    relative_path: str,
+    expected_cost: int,
+) -> None:
+    test_file = REPOSITORY_ROOT / relative_path
+
+    assert test_file.is_file()
+    assert estimated_test_file_cost(test_file) == expected_cost
 
 
 def test_proof_heavy_files_are_distributed_before_ordinary_fill(tmp_path: Path) -> None:

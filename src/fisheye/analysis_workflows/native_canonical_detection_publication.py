@@ -10,6 +10,8 @@ unchanged.
 
 from __future__ import annotations
 
+import copy
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -32,6 +34,9 @@ from fisheye.detection.native_canonical_candidate import (
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
+    CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_canonical_detection_publication,
@@ -50,6 +55,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
+    reconsolidate_zarr_metadata,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -65,6 +71,9 @@ NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_VERSION = 1
 NATIVE_CANONICAL_DETECTION_PUBLICATION_POLICY = (
     "node_local_native_manifest_v2_then_atomic_selector_ineligible_import_v1"
 )
+NATIVE_CANONICAL_DETECTION_ACTIVE_PUBLICATION_POLICY = (
+    "node_local_coordinate_manifest_v3_then_atomic_activation_v1"
+)
 NATIVE_CANONICAL_DETECTION_ROLLBACK_POLICY = (
     "retain_failed_owner_bound_selector_ineligible_child_v1"
 )
@@ -76,6 +85,157 @@ _SELECTOR_ATTRS = (
     "latest_pending",
     "authoritative_run",
 )
+_ACTIVATION_PARENT_ATTRS = (
+    *_SELECTOR_ATTRS,
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
+    CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
+)
+NATIVE_DETECTION_ACTIVATION_CONSOLIDATION_POLICY = (
+    "canonical_detection_v3_selector_activation_direct_consolidated_verified_v1"
+)
+NATIVE_DETECTION_FAILED_ACTIVATION_REPAIR_POLICY = (
+    "canonical_detection_v3_failed_activation_rollback_verified_v1"
+)
+
+
+@dataclass
+class _NativeDetectionActivation:
+    archive: Path
+    run_id: str
+    manifest: Mapping[str, Any]
+    plans: Any
+    snapshot: dict[str, tuple[bool, Any]] | None = None
+    attempted: dict[str, Any] | None = None
+    visibility_report: dict[str, Any] | None = None
+
+    def _validate_visibility(self) -> dict[str, Any]:
+        direct_root = zarr.open_group(
+            str(self.archive), mode="r", zarr_format=3, use_consolidated=False
+        )
+        consolidated_root = zarr.open_group(
+            str(self.archive), mode="r", zarr_format=3, use_consolidated=True
+        )
+        for label, root in (
+            ("direct", direct_root),
+            ("consolidated", consolidated_root),
+        ):
+            family = root["detect_runs"]
+            run = family[self.run_id]
+            if (
+                family.attrs.get("latest") != self.run_id
+                or family.attrs.get("latest_complete") != self.run_id
+                or family.attrs.get(CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR)
+                != CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3
+                or family.attrs.get(CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR)
+                != self.manifest.get("payload_digest")
+                or run.attrs.get("palette_run_completion_status") != "complete"
+                or run.attrs.get("stage_selector_eligible") is not True
+                or dict(run.attrs.get("run_manifest") or {})
+                != dict(self.manifest)
+            ):
+                raise RuntimeError(
+                    f"{label} canonical detection is not selected, complete, "
+                    "and selector eligible."
+                )
+        direct, consolidated = canonical_detection_metadata_declaration_maps(
+            self.archive,
+            run_id=self.run_id,
+            plans=self.plans,
+        )
+        arrays = {
+            path: direct_root[f"detect_runs/{self.run_id}/{path}"]
+            for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths
+        }
+        errors = validate_canonical_detection_publication(
+            self.manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+        )
+        if errors:
+            raise RuntimeError(
+                "Activated canonical detection validation failed: "
+                + "; ".join(errors)
+            )
+        return {
+            "policy": NATIVE_DETECTION_ACTIVATION_CONSOLIDATION_POLICY,
+            "run_id": self.run_id,
+            "selectors": {
+                "latest": self.run_id,
+                "latest_complete": self.run_id,
+            },
+            "manifest_digest": self.manifest.get("payload_digest"),
+        }
+
+    def activate(self, _root: Any, family: Any, run: Any) -> None:
+        self.snapshot = {
+            name: (name in family.attrs, copy.deepcopy(family.attrs.get(name)))
+            for name in _ACTIVATION_PARENT_ATTRS
+        }
+        self.attempted = {
+            "latest": self.run_id,
+            "latest_complete": self.run_id,
+            CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR: (
+                CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3
+            ),
+            CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR: self.manifest.get(
+                "payload_digest"
+            ),
+        }
+        family.attrs["latest"] = self.run_id
+        family.attrs["latest_complete"] = self.run_id
+        family.attrs[CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR] = (
+            CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3
+        )
+        family.attrs[CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR] = (
+            self.manifest.get("payload_digest")
+        )
+        if family.attrs.get("latest_pending") == self.run_id:
+            del family.attrs["latest_pending"]
+            self.attempted["latest_pending"] = None
+        run.attrs["stage_selector_eligible"] = True
+        consolidation = reconsolidate_zarr_metadata(
+            self.archive,
+            policy=NATIVE_DETECTION_ACTIVATION_CONSOLIDATION_POLICY,
+            fail_on_error=True,
+        )
+        self.visibility_report = {
+            **self._validate_visibility(),
+            "consolidation": consolidation,
+        }
+
+    def rollback(self) -> None:
+        if self.snapshot is None or self.attempted is None:
+            return
+        root = open_zarr_root(self.archive, mode="a")
+        family = root["detect_runs"]
+        for name, (present, value) in self.snapshot.items():
+            attempted = self.attempted.get(name, object())
+            current_present = name in family.attrs
+            current_value = family.attrs.get(name)
+            owned = (
+                (attempted is None and not current_present)
+                or (
+                    attempted is not None
+                    and current_present
+                    and current_value == attempted
+                )
+            )
+            if not owned:
+                continue
+            if present:
+                family.attrs[name] = copy.deepcopy(value)
+            elif name in family.attrs:
+                del family.attrs[name]
+        if self.run_id in family:
+            family[self.run_id].attrs["stage_selector_eligible"] = False
+
+    def repair_failed_visibility(self, _target_path: Path) -> None:
+        reconsolidate_zarr_metadata(
+            self.archive,
+            policy=NATIVE_DETECTION_FAILED_ACTIVATION_REPAIR_POLICY,
+            fail_on_error=True,
+        )
 
 
 def _read_strict_json(path: Path) -> dict[str, Any]:
@@ -392,23 +552,41 @@ def publish_native_canonical_detection_candidate(
     candidate_zarr: Path,
     run_id: str,
     recording_identity: str,
+    expected_manifest_schema_version: int = (
+        CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+    ),
+    activate: bool = False,
     copy_backend: str = "python",
     result_json: Path | None = None,
 ) -> dict[str, object]:
-    """Atomically place one validated manifest-v2 raw run without activation."""
+    """Atomically publish one canonical raw run and optionally activate it."""
 
     archive = analysis_zarr.expanduser().resolve()
     if not archive.is_dir():
         raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
     if copy_backend not in {"python", "rsync"}:
         raise ValueError("copy_backend must be 'python' or 'rsync'.")
+    if type(activate) is not bool:
+        raise TypeError("activate must be an exact bool.")
     identity = str(recording_identity).strip()
     if not identity:
         raise ValueError("recording_identity cannot be empty.")
     candidate = load_native_canonical_detection_candidate(
         candidate_zarr,
         run_id=run_id,
+        expected_manifest_schema_version=expected_manifest_schema_version,
     )
+    payload = candidate.manifest.get("payload")
+    publication_contract = (
+        payload.get("publication") if isinstance(payload, Mapping) else None
+    )
+    if not isinstance(publication_contract, Mapping):
+        raise ValueError("Native candidate has no publication contract.")
+    if publication_contract.get("stage_selector_eligible") is not activate:
+        raise ValueError(
+            "Candidate manifest selector eligibility differs from the requested "
+            "publication mode."
+        )
     target = archive / "detect_runs" / candidate.run_id
     if target.exists():
         raise FileExistsError(f"Immutable native detection target exists: {target}")
@@ -423,6 +601,16 @@ def publish_native_canonical_detection_candidate(
     )
 
     local_run = candidate.output_path / "detect_runs" / candidate.run_id
+    activation = (
+        _NativeDetectionActivation(
+            archive=archive,
+            run_id=candidate.run_id,
+            manifest=candidate.manifest,
+            plans=candidate.plans,
+        )
+        if activate
+        else None
+    )
 
     def validator(path: Path) -> Mapping[str, Any]:
         return _validate_standalone_run(
@@ -446,7 +634,11 @@ def publish_native_canonical_detection_candidate(
             run_name=candidate.run_id,
             lock_suffix="native_canonical_detection_publication",
             publish_schema_id=NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
-            policy=NATIVE_CANONICAL_DETECTION_PUBLICATION_POLICY,
+            policy=(
+                NATIVE_CANONICAL_DETECTION_ACTIVE_PUBLICATION_POLICY
+                if activate
+                else NATIVE_CANONICAL_DETECTION_PUBLICATION_POLICY
+            ),
             rollback_policy=NATIVE_CANONICAL_DETECTION_ROLLBACK_POLICY,
             content_checksum=True,
         ),
@@ -458,14 +650,32 @@ def publish_native_canonical_detection_candidate(
             current,
             run_id=candidate.run_id,
         ),
+        activate_run=(activation.activate if activation is not None else None),
+        rollback_activation=(activation.rollback if activation is not None else None),
+        repair_failed_publication_visibility=(
+            activation.repair_failed_visibility
+            if activation is not None
+            else None
+        ),
+        accept_persisted_activation_on_callback_error=False,
         payload_metadata={
-            "snapshot_role": "canonical_raw_detection_native_v2",
+            "snapshot_role": (
+                "canonical_raw_detection_coordinate_v3"
+                if expected_manifest_schema_version
+                == CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+                else "canonical_raw_detection_native_v2"
+            ),
             "logical_schema_version": CANONICAL_DETECTION_SCHEMA_V1.schema_version,
-            "selector_activation": "deferred",
+            "selector_activation": "atomic" if activate else "deferred",
         },
     )
-
     try:
+        if activate and (
+            activation is None or activation.visibility_report is None
+        ):
+            raise RuntimeError(
+                "Canonical detection activation completed without visibility proof."
+            )
         consolidation = consolidate_metadata_capture_expected_warnings(archive)
         root = open_zarr_root(archive, mode="r")
         _verify_native_source_authorities(
@@ -488,7 +698,22 @@ def publish_native_canonical_detection_candidate(
             consolidated_metadata_declarations=consolidated,
             arrays=arrays,
         )
-        _require_unselected(root, run_id=candidate.run_id)
+        if activate:
+            family = root["detect_runs"]
+            if (
+                family.attrs.get("latest") != candidate.run_id
+                or family.attrs.get("latest_complete") != candidate.run_id
+                or family.attrs.get(CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR)
+                != CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3
+                or family.attrs.get(CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR)
+                != candidate.manifest.get("payload_digest")
+                or run.attrs.get("stage_selector_eligible") is not True
+            ):
+                raise RuntimeError(
+                    "Canonical detection activation is not visible after copy."
+                )
+        else:
+            _require_unselected(root, run_id=candidate.run_id)
         if errors:
             raise RuntimeError(
                 "Published native canonical detection validation failed: "
@@ -496,6 +721,9 @@ def publish_native_canonical_detection_candidate(
             )
     except BaseException as exc:
         try:
+            if activation is not None:
+                activation.rollback()
+                activation.repair_failed_visibility(target)
             tombstone_native_canonical_detection_postcopy_failure(
                 analysis_zarr=archive,
                 run_id=candidate.run_id,
@@ -520,9 +748,7 @@ def publish_native_canonical_detection_candidate(
         "recording_identity": identity,
         "run_id": candidate.run_id,
         "group_path": f"detect_runs/{candidate.run_id}",
-        "native_run_manifest_schema_version": (
-            CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
-        ),
+        "native_run_manifest_schema_version": expected_manifest_schema_version,
         "logical_schema_version": CANONICAL_DETECTION_SCHEMA_V1.schema_version,
         "run_manifest_digest": candidate.manifest["payload_digest"],
         "storage_profile_id": candidate.plans.profile.profile_id,
@@ -530,8 +756,11 @@ def publish_native_canonical_detection_candidate(
         "publication": publication,
         "consolidation": consolidation,
         "source_authorities_revalidated_after_copy": True,
-        "selector_eligible": False,
-        "selector_activation": "deferred_separate_reviewed_change",
+        "selector_eligible": activate,
+        "selector_activation": "complete" if activate else "deferred",
+        "activation_visibility": (
+            activation.visibility_report if activation is not None else None
+        ),
         "registry_updated": False,
     }
     safe_result = json_attr_safe(result)

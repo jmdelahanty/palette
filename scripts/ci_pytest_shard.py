@@ -17,8 +17,27 @@ from typing import Sequence
 
 import pytest
 
+if __package__:
+    from scripts.ci_pytest_timings import (
+        DEFAULT_BASELINE_PATH,
+        load_duration_baseline,
+        measured_duration_seconds,
+    )
+else:
+    from ci_pytest_timings import (
+        DEFAULT_BASELINE_PATH,
+        load_duration_baseline,
+        measured_duration_seconds,
+    )
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+DURATION_BASELINE = (
+    load_duration_baseline(DEFAULT_BASELINE_PATH)
+    if DEFAULT_BASELINE_PATH.is_file()
+    else {"files": {}}
+)
+COST_UNITS_PER_SECOND = 1_000
 
 # A four-shard workstation run on 2026-07-22 finished in 9, 38, 61, and 51
 # minutes despite nearly equal source-byte loads. The first eight-shard run
@@ -34,7 +53,6 @@ PROOF_HEAVY_TEST_FILE_NAMES = frozenset(
         "test_finalize_subject_masks.py",
         "test_keypoint_coordinate_publication.py",
         "test_observation_coordinate_publication.py",
-        "test_refine_online_coordinate_contract.py",
         "test_refined_subject_mask_coordinate_publication.py",
         "test_stimulus_response.py",
         "test_subject_mask_coordinate_publication.py",
@@ -52,14 +70,39 @@ PROOF_HEAVY_TEST_COST_MULTIPLIER = 6
 # about 11m.  Keep the overrides narrow and evidence-based so the greedy
 # assignment cannot place both long suites on one worker again.
 PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES = {
-    "test_refine_online_coordinate_contract.py": 30,
     "test_subject_shape_coordinate_publication.py": 12,
+}
+
+# GitHub Actions run 31840775086 measured the formerly monolithic
+# refine-online contract suite at 20m42s. Its unchanged cases are now exposed
+# through five thin collection modules so whole-file sharding can schedule
+# them independently. Fixed relative-path costs preserve the measured balance;
+# wrapper source bytes are intentionally not used as a runtime proxy.
+HISTORICAL_TEST_FILE_COST_OVERRIDES = {
+    "tests/unit/fisheye/test_refine_online_coordinate_completion_validation.py": 120_000,
+    "tests/unit/fisheye/test_refine_online_coordinate_lifecycle_guards.py": 50_814,
+    "tests/unit/fisheye/test_refine_online_coordinate_lifecycle_rollback.py": 200_118,
+    "tests/unit/fisheye/test_refine_online_coordinate_loading.py": 29_187,
+    "tests/unit/fisheye/test_refine_online_coordinate_publication.py": 160_000,
 }
 
 
 def estimated_test_file_cost(path: Path) -> int:
     """Return one deterministic relative runtime estimate for ``path``."""
 
+    try:
+        relative_path = path.resolve().relative_to(REPOSITORY_ROOT.resolve()).as_posix()
+    except ValueError:
+        relative_path = None
+    if relative_path in HISTORICAL_TEST_FILE_COST_OVERRIDES:
+        return HISTORICAL_TEST_FILE_COST_OVERRIDES[relative_path]
+    measured_seconds = measured_duration_seconds(
+        path,
+        repository_root=REPOSITORY_ROOT,
+        baseline=DURATION_BASELINE,
+    )
+    if measured_seconds is not None:
+        return max(1, round(measured_seconds * COST_UNITS_PER_SECOND))
     size = path.stat().st_size
     multiplier = 1
     if path.name in PROOF_HEAVY_TEST_FILE_NAMES:

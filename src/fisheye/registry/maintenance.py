@@ -31,6 +31,13 @@ from .extractors.masks import (
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
 from .registered_geometry_readiness import project_registered_geometry_stages
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
+    CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    validate_canonical_detection_run_manifest,
+)
 from fisheye.shared.zarr_run_completion import (
     is_run_complete,
     is_run_complete_in_parent,
@@ -59,6 +66,60 @@ EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
 )
 
 CLIPPED_DETECT_COLLECTION_SCHEMA = "palette.refined_detect_clip_collection.v1"
+
+
+def _required_canonical_detection_errors(
+    parent: object,
+    group: object,
+    *,
+    run_name: str,
+    required: bool = False,
+) -> tuple[str, ...]:
+    """Validate a selected run when its family declares canonical-v3 authority."""
+
+    parent_attrs = getattr(parent, "attrs", {})
+    contract = parent_attrs.get(CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR)
+    if contract is None:
+        return (
+            ("production detection lacks canonical-v3 authority contract",)
+            if required
+            else ()
+        )
+    errors: list[str] = []
+    if contract != CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3:
+        errors.append("unsupported canonical detection authority contract")
+    if parent_attrs.get("latest") != run_name:
+        errors.append("latest selector differs from selected canonical run")
+    if parent_attrs.get("latest_complete") != run_name:
+        errors.append("latest_complete differs from selected canonical run")
+    attrs = getattr(group, "attrs", {})
+    if attrs.get("palette_run_completion_status") != "complete":
+        errors.append("selected canonical detection is not complete")
+    if attrs.get("stage_selector_eligible") is not True:
+        errors.append("selected canonical detection is not selector eligible")
+    manifest = attrs.get("run_manifest")
+    if not isinstance(manifest, Mapping):
+        errors.append("selected canonical detection has no run manifest")
+        return tuple(dict.fromkeys(errors))
+    errors.extend(validate_canonical_detection_run_manifest(manifest))
+    if manifest.get("schema_version") != (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        errors.append("selected canonical detection manifest is not v3")
+    payload = manifest.get("payload")
+    if not isinstance(payload, Mapping) or payload.get("run_id") != run_name:
+        errors.append("selected canonical detection manifest run id differs")
+    publication = payload.get("publication") if isinstance(payload, Mapping) else None
+    if (
+        not isinstance(publication, Mapping)
+        or publication.get("stage_selector_eligible") is not True
+    ):
+        errors.append("canonical detection manifest is not selector eligible")
+    if parent_attrs.get(CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR) != manifest.get(
+        "payload_digest"
+    ):
+        errors.append("canonical detection family manifest digest is stale")
+    return tuple(dict.fromkeys(errors))
 
 
 def _raise_eye_mask_registry_writes_retired() -> NoReturn:
@@ -5454,6 +5515,17 @@ def _build_recording_step_rows_from_root(
 
     detect_parent = root.get("detect_runs")  # type: ignore[attr-defined]
     detect_run, detect_group, detect_selection = _resolve_latest_group(detect_parent)
+    detect_authority_errors: tuple[str, ...] = ()
+    if detect_parent is not None and detect_group is not None and detect_run is not None:
+        detect_authority_errors = _required_canonical_detection_errors(
+            detect_parent,
+            detect_group,
+            run_name=detect_run,
+            required=is_production,
+        )
+        if detect_authority_errors:
+            detect_group = None
+            detect_selection = "invalid_canonical_detection_authority"
     refined_detect_parent = root.get("refined_detect_runs")  # type: ignore[attr-defined]
     if refined_detect_parent is None:
         refined_detect_parent = root.get("refined_runs")  # type: ignore[attr-defined]
@@ -5468,7 +5540,10 @@ def _build_recording_step_rows_from_root(
     )
     detect_collection_details = detect_collection.details() if detect_collection else {}
     detect_uses_collection = bool(
-        detect_group is None and detect_collection is not None and detect_collection.valid
+        not detect_authority_errors
+        and detect_group is None
+        and detect_collection is not None
+        and detect_collection.valid
     )
     if detect_uses_collection and detect_collection is not None:
         detect_run = detect_collection.collection_id
@@ -5481,6 +5556,9 @@ def _build_recording_step_rows_from_root(
     )
     if detect_uses_collection:
         detect_reason = "present_collection_manifest"
+    elif detect_authority_errors:
+        detect_status = "error"
+        detect_reason = "invalid_canonical_detection_authority"
     elif detect_group is None and detect_collection is not None and not detect_collection.valid:
         detect_reason = "invalid_latest_collection"
     detect_method = (
@@ -6324,6 +6402,9 @@ def _build_recording_step_rows_from_root(
             details={
                 **common_details,
                 **detect_collection_details,
+                "canonical_detection_authority_errors": list(
+                    detect_authority_errors
+                ),
                 "source_detect_identity_kind": detect_identity_kind,
                 "reason": detect_reason,
                 "latest_selector": detect_selection,

@@ -2323,7 +2323,7 @@
         {
           "dtype": "int8",
           "occurrence_ids": [
-            "schema-writer-9cdd852ca180ead5"
+            "schema-writer-42f64d94506b69df"
           ],
           "shape": "(row_count,)"
         },
@@ -4462,7 +4462,7 @@
         {
           "dtype": "uint64",
           "occurrence_ids": [
-            "schema-writer-39036b0689ab717a"
+            "schema-writer-5f328910d524187c"
           ],
           "shape": "(row_count,)"
         },
@@ -6210,7 +6210,7 @@
         {
           "dtype": "int8",
           "occurrence_ids": [
-            "schema-writer-3322d91089061267"
+            "schema-writer-5c8bff32a1433a65"
           ],
           "shape": "(resolved_frame_count,)"
         },
@@ -35743,8 +35743,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_yolo.py",
-      "line": 1068,
-      "occurrence_id": "schema-writer-b286e9ccccfd0b5a",
+      "line": 1067,
+      "occurrence_id": "schema-writer-eac1c9e19e809eb1",
       "path_pattern": "<run_group>/coordinate_transforms/source_camera_normalized_to_image",
       "required": null,
       "shape_expression": "shape(normalized_to_pixel_matrix(bbox_source_camera))",
@@ -35756,7 +35756,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-3449af7675bc3814"
+      "writer_site_id": "writer-e0c19dc26363add7"
     },
     {
       "access_pattern": "windowed",
@@ -36695,8 +36695,8 @@
       "dtype_expression": "np.int8",
       "dynamic_name": false,
       "file": "src/fisheye/refinement/detect_quality_collection.py",
-      "line": 1019,
-      "occurrence_id": "schema-writer-3322d91089061267",
+      "line": 1039,
+      "occurrence_id": "schema-writer-5c8bff32a1433a65",
       "path_pattern": "<require_runs_parent(write_root, 'detect_quality_runs')>/<output_run>/quality_flags",
       "required": null,
       "shape_expression": "(resolved_frame_count,)",
@@ -36708,7 +36708,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-87dad4c31b8fb1ca"
+      "writer_site_id": "writer-8055902d1c2c99c3"
     },
     {
       "access_pattern": "unclassified",
@@ -36729,8 +36729,8 @@
       "dtype_expression": "np.int8",
       "dynamic_name": false,
       "file": "src/fisheye/refinement/detect_quality_collection.py",
-      "line": 1026,
-      "occurrence_id": "schema-writer-9cdd852ca180ead5",
+      "line": 1046,
+      "occurrence_id": "schema-writer-42f64d94506b69df",
       "path_pattern": "<require_runs_parent(write_root, 'detect_quality_runs')>/<output_run>/detection_quality_labels",
       "required": null,
       "shape_expression": "(row_count,)",
@@ -36742,7 +36742,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7727851d6ff62ba3"
+      "writer_site_id": "writer-e51059227bcc7b94"
     },
     {
       "access_pattern": "unclassified",
@@ -36763,8 +36763,8 @@
       "dtype_expression": "np.uint64",
       "dynamic_name": false,
       "file": "src/fisheye/refinement/detect_quality_collection.py",
-      "line": 1033,
-      "occurrence_id": "schema-writer-39036b0689ab717a",
+      "line": 1053,
+      "occurrence_id": "schema-writer-5f328910d524187c",
       "path_pattern": "<require_runs_parent(write_root, 'detect_quality_runs')>/<output_run>/instance_key",
       "required": null,
       "shape_expression": "(row_count,)",
@@ -36776,7 +36776,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-152395b017ad860e"
+      "writer_site_id": "writer-3d677134f4d7fa3b"
     },
     {
       "access_pattern": "unclassified",
@@ -74375,7 +74375,7 @@
     "parsed_writer_candidate_module_count": 212,
     "reader_required_array_declaration_count": 95,
     "resolved_writer_leaf_name_count": 628,
-    "scanned_python_module_count": 1458,
+    "scanned_python_module_count": 1461,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

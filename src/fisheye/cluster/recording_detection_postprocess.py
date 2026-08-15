@@ -27,6 +27,7 @@ class RecordingDetectionPostprocessInputs:
     refined_run: str
     canonicalize_legacy_source: bool = False
     canonical_source_run: str | None = None
+    require_active_canonical_source: bool = False
     registered_gate_requirement: str = "off"
     registered_gate_run: str | None = None
     selection_policy_id: str = "manual_review_only_v1"
@@ -48,6 +49,8 @@ class RecordingDetectionPostprocessInputs:
                 raise ValueError(f"Detection postprocess {name} cannot be empty.")
         if type(self.canonicalize_legacy_source) is not bool:
             raise TypeError("canonicalize_legacy_source must be an exact bool.")
+        if type(self.require_active_canonical_source) is not bool:
+            raise TypeError("require_active_canonical_source must be an exact bool.")
         canonical_source_run = str(self.canonical_source_run or "").strip() or None
         object.__setattr__(self, "canonical_source_run", canonical_source_run)
         if self.canonicalize_legacy_source and canonical_source_run is None:
@@ -62,6 +65,10 @@ class RecordingDetectionPostprocessInputs:
         if canonical_source_run == self.source_detect_run:
             raise ValueError(
                 "Canonical detection successor must differ from its source run."
+            )
+        if self.canonicalize_legacy_source and self.require_active_canonical_source:
+            raise ValueError(
+                "Legacy successor compatibility cannot claim active canonical authority."
             )
         requirement = str(self.registered_gate_requirement).strip()
         if requirement not in REGISTERED_GATE_REQUIREMENTS:
@@ -91,6 +98,7 @@ class RecordingDetectionPostprocessOutputs:
     source_detect_run: str
     source_detect_group_path: str
     canonical_successor_receipt: str | None
+    require_active_canonical_source: bool
     quality_run: str
     quality_group_path: str
     working_refined_run: str
@@ -111,6 +119,9 @@ class RecordingDetectionPostprocessOutputs:
             "source_detect_run": self.source_detect_run,
             "source_detect_group_path": self.source_detect_group_path,
             "canonical_successor_receipt": self.canonical_successor_receipt,
+            "require_active_canonical_source": (
+                self.require_active_canonical_source
+            ),
             "quality_run": self.quality_run,
             "quality_group_path": self.quality_group_path,
             "working_refined_run": self.working_refined_run,
@@ -251,6 +262,11 @@ def build_recording_detection_postprocess_fragment(
             work_dir,
             "--apply",
             "--json",
+            *(
+                ("--require-active-canonical-source",)
+                if inputs.require_active_canonical_source
+                else ()
+            ),
         ),
         resources=LsfResources(queue="short", ncores=4, mem_gb=32, walltime="1:00"),
         upstream=quality_upstream,
@@ -279,6 +295,8 @@ def build_recording_detection_postprocess_fragment(
     ]
     if inputs.registered_gate_run is not None:
         refine_command.extend(("--registered-gate-run", inputs.registered_gate_run))
+    if inputs.require_active_canonical_source:
+        refine_command.append("--require-active-canonical-source")
     validate_command = (
         "scripts/py",
         "-m",
@@ -319,6 +337,8 @@ def build_recording_detection_postprocess_fragment(
     ]
     if inputs.registered_gate_run is not None:
         finalize_command.extend(("--registered-gate-run", inputs.registered_gate_run))
+    if inputs.require_active_canonical_source:
+        finalize_command.append("--require-active-canonical-source")
     refine_key = f"recording_detect_refine:{safe}"
     refine = build_job(
         workflow_id=inputs.workflow_id,
@@ -357,6 +377,7 @@ def build_recording_detection_postprocess_fragment(
             if canonical_successor_receipt is not None
             else None
         ),
+        require_active_canonical_source=inputs.require_active_canonical_source,
         quality_run=inputs.quality_run,
         quality_group_path=quality_group,
         working_refined_run=working_refined_run,

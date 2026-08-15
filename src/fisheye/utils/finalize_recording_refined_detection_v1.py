@@ -21,6 +21,7 @@ from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.canonical_detection_manifest import (
     canonical_detection_dimensions_from_manifest,
+    require_active_coordinate_canonical_detection,
     refined_source_identity_from_canonical_manifest,
     validate_canonical_detection_publication,
 )
@@ -249,6 +250,7 @@ def finalize_recording_refined_detection_v1(
     scratch_root: Path,
     copy_backend: str = "python",
     keep_scratch: bool = False,
+    require_active_canonical_source: bool = False,
 ) -> dict[str, object]:
     """Freeze, validate, and atomically import one immutable refined authority."""
 
@@ -269,6 +271,8 @@ def finalize_recording_refined_detection_v1(
         raise ValueError("Unsupported registered geometry selection policy id.")
     if copy_backend not in {"python", "rsync"}:
         raise ValueError("copy_backend must be python or rsync.")
+    if type(require_active_canonical_source) is not bool:
+        raise TypeError("require_active_canonical_source must be an exact bool.")
     if registered_gate_requirement == "required" and not str(
         registered_gate_run or ""
     ).strip():
@@ -279,6 +283,11 @@ def finalize_recording_refined_detection_v1(
         raise FileExistsError(f"Immutable finalized refined run already exists: {target}")
 
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    if require_active_canonical_source:
+        require_active_coordinate_canonical_detection(
+            root,
+            group_path=f"detect_runs/{canonical_name}",
+        )
     canonical, canonical_manifest, dimensions, _canonical_arrays = _load_canonical_source(
         root,
         archive,
@@ -487,6 +496,9 @@ def finalize_recording_refined_detection_v1(
                 "finalized_at_utc": utc_now(),
                 "analysis_zarr": str(archive),
                 "canonical_detect_run": canonical_name,
+                "required_active_canonical_source": (
+                    require_active_canonical_source
+                ),
                 "working_refined_run": working_name,
                 "output_run": final_name,
                 "output_group_path": f"refined_detect_runs/{final_name}",
@@ -533,6 +545,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scratch-root", type=Path, required=True)
     parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
     parser.add_argument("--keep-scratch", action="store_true")
+    parser.add_argument("--require-active-canonical-source", action="store_true")
     parser.add_argument("--result-json", type=Path, required=True)
     return parser
 
@@ -552,6 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             scratch_root=args.scratch_root,
             copy_backend=args.copy_backend,
             keep_scratch=bool(args.keep_scratch),
+            require_active_canonical_source=args.require_active_canonical_source,
         )
     except Exception as exc:
         result = {

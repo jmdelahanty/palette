@@ -56,6 +56,14 @@ LATEST_POLICY_CHOICES = (
     "set_latest_explicit",
 )
 ARTIFACT_CLI_LATEST_POLICY_CHOICES = (DO_NOT_SET_LATEST,)
+FRAME_MAPPING_MODE_UNBOUND = "unbound"
+FRAME_MAPPING_MODE_IDENTITY = "identity"
+FRAME_MAPPING_MODE_INDEXED = "recording_frame_index"
+FRAME_MAPPING_MODE_CHOICES = (
+    FRAME_MAPPING_MODE_UNBOUND,
+    FRAME_MAPPING_MODE_IDENTITY,
+    FRAME_MAPPING_MODE_INDEXED,
+)
 REQUIRED_DETECT_ARRAYS = (
     "frame_indices",
     "bbox_norm_coords",
@@ -402,6 +410,7 @@ def build_detection_artifact(
     clip_index: Optional[int] = None,
     camera_serial: Optional[str] = None,
     recording_frame_index: Optional[Path] = None,
+    frame_mapping_mode: Optional[str] = None,
     run_name: Optional[str] = None,
     model_sha256: Optional[str] = None,
     model_registry_set_id: Optional[str] = None,
@@ -421,6 +430,46 @@ def build_detection_artifact(
         if tarball_output is not None
         else artifact_dir.parent / f"{artifact_dir.name}.tar.gz"
     )
+    clip_context = _clip_context(
+        workflow_id=workflow_id,
+        recording_id=recording_id,
+        clip_id=clip_id,
+        clip_index=clip_index,
+        camera_serial=camera_serial,
+    )
+    mapping_mode = str(frame_mapping_mode or "").strip() or None
+    if mapping_mode is not None and mapping_mode not in FRAME_MAPPING_MODE_CHOICES:
+        raise ValueError(
+            f"frame_mapping_mode must be one of {FRAME_MAPPING_MODE_CHOICES}."
+        )
+    work_unit_identity_context = bool(clip_id or camera_serial or recording_frame_index)
+    if mapping_mode is None:
+        if recording_frame_index is not None:
+            mapping_mode = FRAME_MAPPING_MODE_INDEXED
+        elif work_unit_identity_context:
+            raise ValueError(
+                "Detection work-unit artifacts without a recording-frame index "
+                "must explicitly declare frame_mapping_mode='identity'."
+            )
+        else:
+            mapping_mode = FRAME_MAPPING_MODE_UNBOUND
+    if mapping_mode == FRAME_MAPPING_MODE_UNBOUND:
+        if work_unit_identity_context:
+            raise ValueError(
+                "Unbound detection artifacts cannot declare clip, camera, or "
+                "recording-frame-index identity."
+            )
+    elif mapping_mode == FRAME_MAPPING_MODE_IDENTITY:
+        if not clip_id or not camera_serial or recording_frame_index is not None:
+            raise ValueError(
+                "Identity-mapped detection artifacts require clip_id and "
+                "camera_serial and forbid recording_frame_index."
+            )
+    elif not clip_id or not camera_serial or recording_frame_index is None:
+        raise ValueError(
+            "Indexed detection artifacts require clip_id, camera_serial, and "
+            "recording_frame_index together."
+        )
 
     if latest_policy not in LATEST_POLICY_CHOICES:
         raise ValueError(f"latest_policy must be one of {LATEST_POLICY_CHOICES}")
@@ -433,6 +482,14 @@ def build_detection_artifact(
         raise FileNotFoundError(f"video path does not exist: {video_path}")
     if not target_zarr.exists():
         raise FileNotFoundError(f"target analysis zarr does not exist: {target_zarr}")
+    canonical_recording_identity = _canonical_recording_identity(target_zarr)
+    if mapping_mode == FRAME_MAPPING_MODE_INDEXED:
+        assert recording_frame_index is not None
+        _load_parent_frame_mapping(
+            recording_frame_index,
+            camera_serial=str(camera_serial),
+            clip_id=str(clip_id),
+        )
     if artifact_dir.exists():
         if not overwrite_artifact:
             raise FileExistsError(f"artifact directory already exists: {artifact_dir}")
@@ -455,28 +512,6 @@ def build_detection_artifact(
     )
     command_list = list(command) if command is not None else sys.argv
     command_text = " ".join(command_list)
-    clip_context = _clip_context(
-        workflow_id=workflow_id,
-        recording_id=recording_id,
-        clip_id=clip_id,
-        clip_index=clip_index,
-        camera_serial=camera_serial,
-    )
-    clipped_identity_context = bool(clip_id or camera_serial or recording_frame_index)
-    if clipped_identity_context and not (
-        clip_id and camera_serial and recording_frame_index is not None
-    ):
-        raise ValueError(
-            "Clipped detection artifacts require clip_id, camera_serial, and "
-            "recording_frame_index together for stable instance_key minting."
-        )
-    canonical_recording_identity = _canonical_recording_identity(target_zarr)
-    if recording_frame_index is not None:
-        _load_parent_frame_mapping(
-            recording_frame_index,
-            camera_serial=str(camera_serial),
-            clip_id=str(clip_id),
-        )
     _write_json(
         artifact_dir / "logs" / "job_context.json",
         {
@@ -493,6 +528,7 @@ def build_detection_artifact(
                 if recording_frame_index is not None
                 else None
             ),
+            "frame_mapping_mode": mapping_mode,
             "coordinate_contract_mode": "artifact_unbound",
             "run_family": RUN_FAMILY,
             "stage_selector_eligible": False,
@@ -527,6 +563,7 @@ def build_detection_artifact(
                 if recording_frame_index is not None
                 else None
             ),
+            "frame_mapping_mode": mapping_mode,
             "coordinate_contract_mode": "artifact_unbound",
             "run_family": RUN_FAMILY,
             "stage_selector_eligible": False,
@@ -593,9 +630,13 @@ def build_detection_artifact(
     git_info = get_git_info()
     timing = _extract_timing(source_run_group)
     target_group_path = f"{RUN_FAMILY}/{run_name}"
-    intended_target_group_path = _intended_target_group_path(
-        run_name=run_name,
-        clip_context=clip_context,
+    intended_target_group_path = (
+        target_group_path
+        if mapping_mode == FRAME_MAPPING_MODE_IDENTITY
+        else _intended_target_group_path(
+            run_name=run_name,
+            clip_context=clip_context,
+        )
     )
     manifest = {
         "artifact_schema": ARTIFACT_SCHEMA,
@@ -612,6 +653,7 @@ def build_detection_artifact(
         "artifact_family_contract": DETECTION_ARTIFACT_FAMILY_CONTRACT,
         "stage_selector_eligible": False,
         "artifact_scope": clip_context.get("scope", "archive_top_level"),
+        "frame_mapping_mode": mapping_mode,
         "clip_context": clip_context,
         "source_inputs": [
             {"path": str(video_path), "role": "source_video"},
@@ -635,6 +677,7 @@ def build_detection_artifact(
                 if recording_frame_index is not None
                 else None
             ),
+            "frame_mapping_mode": mapping_mode,
         },
         "timing": timing,
         "artifact_timing": artifact_timing,
@@ -671,6 +714,7 @@ def build_detection_artifact(
         "target_group_path": target_group_path,
         "intended_target_group_path": intended_target_group_path,
         "artifact_scope": clip_context.get("scope", "archive_top_level"),
+        "frame_mapping_mode": mapping_mode,
         "clip_context": clip_context,
         "manifest_path": str(artifact_dir / "artifact_manifest.json"),
         "artifact_timing": artifact_timing,
@@ -731,6 +775,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Canonical recording_frame_index.parquet used to mint clipped instance keys.",
     )
+    parser.add_argument(
+        "--frame-mapping-mode",
+        choices=FRAME_MAPPING_MODE_CHOICES,
+        default=None,
+        help=(
+            "Explicit work-unit mapping: identity for a whole recording, "
+            "recording_frame_index for clips, or unbound for transport-only use."
+        ),
+    )
     parser.add_argument("--run-name", default=None, help="Optional explicit detect run group name")
     return parser
 
@@ -764,6 +817,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             clip_index=args.clip_index,
             camera_serial=args.camera_serial,
             recording_frame_index=args.recording_frame_index,
+            frame_mapping_mode=args.frame_mapping_mode,
             run_name=args.run_name,
             model_sha256=args.model_sha256,
             model_registry_set_id=args.model_registry_set_id,

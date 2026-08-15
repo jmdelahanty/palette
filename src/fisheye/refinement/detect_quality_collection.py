@@ -40,6 +40,7 @@ from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID,
     canonical_detection_dimensions_from_manifest,
+    require_active_coordinate_canonical_detection,
 )
 from ..shared.zarr.detection_schema import CanonicalDetectionDimensions
 from ..shared.zarr_io import open_zarr_root
@@ -364,7 +365,14 @@ def _resolve_source_identity(root: Any, source_group_path: str) -> dict[str, str
             }
     parts = _safe_group_path(source_group_path).split("/")
     if len(parts) >= 2 and parts[0] == "detect_runs":
-        return {"kind": "run", "id": parts[1], "path": "/".join(parts[:2])}
+        identity = {"kind": "run", "id": parts[1], "path": "/".join(parts[:2])}
+        group = _group_at(root, identity["path"])
+        manifest = group.attrs.get("run_manifest")
+        if isinstance(manifest, Mapping):
+            digest = str(manifest.get("payload_digest") or "").strip()
+            if digest:
+                identity["manifest_digest"] = digest
+        return identity
     for path, group in _ancestor_groups(root, source_group_path):
         run = str(group.attrs.get("source_detect_run") or "").strip()
         if run:
@@ -808,6 +816,7 @@ def run_collection_detect_quality(
     work_dir: str | Path | None = None,
     apply: bool = False,
     promote: bool = True,
+    require_active_canonical_source: bool = False,
 ) -> dict[str, Any]:
     archive = Path(zarr_path).expanduser().resolve()
     source_group_path = _safe_group_path(source_group_path)
@@ -821,7 +830,14 @@ def run_collection_detect_quality(
         raise ValueError("blip_gap_threshold must be positive.")
     if relocation_cluster_radius_fraction <= 0:
         raise ValueError("relocation_cluster_radius_fraction must be positive.")
+    if type(require_active_canonical_source) is not bool:
+        raise TypeError("require_active_canonical_source must be an exact bool.")
     root = open_zarr_root(archive, mode="r")
+    if require_active_canonical_source:
+        require_active_coordinate_canonical_detection(
+            root,
+            group_path=source_group_path,
+        )
     expected_subject_count, experiment_setup = resolve_expected_subject_count(
         root,
         expected_subject_count,
@@ -872,6 +888,7 @@ def run_collection_detect_quality(
         "label_schema": LABEL_SCHEMA,
         "source_group_path": source_group_path,
         "source_identity": source_identity,
+        "require_active_canonical_source": require_active_canonical_source,
         "recording_frame_count": resolved_frame_count,
         "width": resolved_width,
         "height": resolved_height,
@@ -986,6 +1003,9 @@ def run_collection_detect_quality(
                     "source_detect_identity_kind": source_identity["kind"],
                     "source_detect_run": source_identity["id"],
                     "source_detect_path": source_identity["path"],
+                    "source_detect_run_manifest_digest": source_identity.get(
+                        "manifest_digest"
+                    ),
                     "source_detection_group_path": source_group_path,
                     "source_row_count": row_count,
                     "recording_frame_count": resolved_frame_count,
@@ -1169,6 +1189,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--no-promote", action="store_true")
+    parser.add_argument(
+        "--require-active-canonical-source",
+        action="store_true",
+        help="Fail unless the source is the selected canonical-v3 detection authority.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -1196,6 +1221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         work_dir=args.work_dir,
         apply=args.apply,
         promote=not args.no_promote,
+        require_active_canonical_source=args.require_active_canonical_source,
     )
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))

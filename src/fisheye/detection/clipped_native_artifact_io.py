@@ -18,6 +18,11 @@ from fisheye.detection.clipped_native_binding import (
     ClippedDetectionArtifactMember,
 )
 from fisheye.utils.validate_imported_run_group import validate_imported_run_group
+from fisheye.utils.run_detection_artifact import (
+    FRAME_MAPPING_MODE_CHOICES,
+    FRAME_MAPPING_MODE_IDENTITY,
+    FRAME_MAPPING_MODE_INDEXED,
+)
 
 
 CLIPPED_DETECTION_WORK_UNIT_REPORT_SCHEMA = (
@@ -107,8 +112,9 @@ def load_clipped_detection_artifact_member(
     report_path: Path,
     *,
     analysis_zarr: Path,
-    recording_frame_index: Path,
+    recording_frame_index: Path | None,
     recording_identity: str,
+    n_frames: int | None = None,
     source_width: int,
     source_height: int,
 ) -> tuple[ClippedDetectionArtifactMember, dict[str, object]]:
@@ -173,6 +179,18 @@ def load_clipped_detection_artifact_member(
             raise ValueError(f"Artifact manifest/report {name} identity mismatch.")
     if clip_context.get("recording_id") != recording_identity:
         raise ValueError("Artifact manifest recording identity mismatch.")
+    report_mapping_mode = str(
+        report.get("frame_mapping_mode") or FRAME_MAPPING_MODE_INDEXED
+    )
+    manifest_mapping_mode = str(
+        manifest.get("frame_mapping_mode") or FRAME_MAPPING_MODE_INDEXED
+    )
+    if report_mapping_mode not in FRAME_MAPPING_MODE_CHOICES:
+        raise ValueError(
+            f"Unsupported work-unit frame mapping mode: {report_mapping_mode!r}."
+        )
+    if manifest_mapping_mode != report_mapping_mode:
+        raise ValueError("Artifact manifest/report frame mapping modes disagree.")
 
     run = zarr.open_group(
         str(archive / group_path),
@@ -196,11 +214,46 @@ def load_clipped_detection_artifact_member(
         )
     clip_id = str(report["clip_id"])
     camera_serial = str(report["camera_serial"])
-    parent_frames = load_parent_frame_mapping(
-        recording_frame_index,
-        camera_serial=camera_serial,
-        clip_id=clip_id,
-    )
+    if report_mapping_mode == FRAME_MAPPING_MODE_INDEXED:
+        if recording_frame_index is None:
+            raise ValueError(
+                "recording_frame_index mapping requires a canonical frame index."
+            )
+        expected_index = recording_frame_index.expanduser().resolve()
+        reported_index_value = str(
+            report.get("recording_frame_index") or ""
+        ).strip()
+        if reported_index_value:
+            reported_index = Path(reported_index_value).expanduser().resolve()
+            if reported_index != expected_index:
+                raise ValueError(
+                    "Work-unit report names a different recording frame index."
+                )
+        parent_frames = load_parent_frame_mapping(
+            expected_index,
+            camera_serial=camera_serial,
+            clip_id=clip_id,
+        )
+    elif report_mapping_mode == FRAME_MAPPING_MODE_IDENTITY:
+        if recording_frame_index is not None or report.get("recording_frame_index"):
+            raise ValueError(
+                "Identity-mapped work units must not name a recording frame index."
+            )
+        if n_frames is None:
+            raise ValueError(
+                "Identity-mapped artifact binding requires authoritative n_frames."
+            )
+        observed_frame_count = int(run["frame_counts"].shape[0])
+        if observed_frame_count != int(n_frames):
+            raise ValueError(
+                "Identity-mapped artifact frame count differs from recording authority: "
+                f"observed={observed_frame_count}, expected={int(n_frames)}."
+            )
+        parent_frames = np.arange(int(n_frames), dtype=np.int64)
+    else:
+        raise ValueError(
+            "Native canonical binding forbids unbound artifact frame mapping."
+        )
     run_tree_hash = str(
         (manifest.get("checksums") or {}).get("run_group_tree_hash")
         if isinstance(manifest.get("checksums"), Mapping)
@@ -233,6 +286,7 @@ def load_clipped_detection_artifact_member(
         "artifact_group_path": group_path,
         "artifact_manifest_sha256": persisted_manifest_sha256,
         "run_group_tree_sha256": run_tree_hash,
+        "frame_mapping_mode": report_mapping_mode,
         "run_provenance": dict(run.attrs.get("run_provenance") or {}),
     }
     return member, evidence

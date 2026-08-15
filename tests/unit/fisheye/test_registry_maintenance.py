@@ -63,6 +63,7 @@ from fisheye.registry.maintenance import (
     _is_safe_artifact_path,
     _normalize_run_ids,
     _recording_calibration_status,
+    _required_canonical_detection_errors,
     _resolve_detect_quality_group,
     _resolve_existing_run_ids,
     _reconcile_stale_in_progress_runs,
@@ -72,6 +73,11 @@ from fisheye.registry.maintenance import (
 from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
+    CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
+)
 from tests.unit.fisheye._eye_mask_registry_seed import insert_eye_mask_performance
 from tests.unit.fisheye.registry_test_fixtures import registry_from_empty_template
 
@@ -831,6 +837,51 @@ def _add_fake_group_path(
     if attrs:
         current.attrs.update(attrs)
     return current
+
+
+def test_registry_rejects_old_layout_under_canonical_detection_authority() -> None:
+    run_id = "detect_old_layout"
+    parent = _FakeGroup(
+        attrs={
+            "latest": run_id,
+            "latest_complete": run_id,
+            CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR: (
+                CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3
+            ),
+            CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR: "a" * 64,
+        }
+    )
+    run = parent.add_group(
+        run_id,
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "run_manifest": {
+                "schema_id": "palette.canonical_detection.run_manifest",
+                "schema_version": 2,
+                "payload_digest": "a" * 64,
+                "payload": {"run_id": run_id},
+            },
+        },
+    )
+
+    errors = _required_canonical_detection_errors(
+        parent,
+        run,
+        run_name=run_id,
+    )
+
+    assert "selected canonical detection manifest is not v3" in errors
+    assert errors
+
+    legacy_parent = _FakeGroup(attrs={"latest": run_id, "latest_complete": run_id})
+    legacy_run = legacy_parent.add_group(run_id, attrs={})
+    assert _required_canonical_detection_errors(
+        legacy_parent,
+        legacy_run,
+        run_name=run_id,
+        required=True,
+    ) == ("production detection lacks canonical-v3 authority contract",)
 
 
 def _configure_manifest_only_clipped_detect_collection(

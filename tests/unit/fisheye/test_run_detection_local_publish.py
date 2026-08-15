@@ -275,6 +275,18 @@ def test_prepare_local_overlay_copies_only_verified_acquisition_metadata(
     acquisition.assert_verified()
 
 
+def test_flat_local_publisher_requires_explicit_legacy_compatibility() -> None:
+    with pytest.raises(RuntimeError, match="retired from production"):
+        mod.run_detection_local_publish(
+            source_zarr=Path("/missing/analysis.zarr"),
+            model_path=Path("/missing/model.pt"),
+            model_sha256="a" * 64,
+            model_run_id="model-run",
+            model_set_id="model-set",
+            registry_path=Path("/missing/registry.sqlite"),
+        )
+
+
 def test_prepare_local_overlay_rejects_materialized_raw_video(tmp_path: Path) -> None:
     source, _video = _external_archive(tmp_path)
     root = zarr.open_group(source, mode="a", use_consolidated=False)

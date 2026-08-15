@@ -56,7 +56,7 @@ def _evidence(model_sha256: str) -> dict[str, object]:
     }
 
 
-def test_assembler_binds_then_publishes_one_native_v2_run(
+def test_assembler_binds_then_publishes_one_coordinate_v3_run(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -73,7 +73,7 @@ def test_assembler_binds_then_publishes_one_native_v2_run(
         return SimpleNamespace(
             output_path=kwargs["destination"],
             run_id=kwargs["run_id"],
-            receipt={"native_run_manifest_schema_version": 2},
+            receipt={"native_run_manifest_schema_version": 3},
         )
 
     def fake_publish(**kwargs):
@@ -81,7 +81,7 @@ def test_assembler_binds_then_publishes_one_native_v2_run(
         return {
             "status": "complete",
             "group_path": "detect_runs/detect_native",
-            "selector_eligible": False,
+            "selector_eligible": True,
             "registry_updated": False,
         }
 
@@ -118,13 +118,17 @@ def test_assembler_binds_then_publishes_one_native_v2_run(
 
     assert result["status"] == "complete"
     assert result["canonical_group_path"] == "detect_runs/detect_native"
-    assert result["native_run_manifest_schema_version"] == 2
+    assert result["native_run_manifest_schema_version"] == 3
     assert result["logical_schema_version"] == 1
     bound = calls["bound"]
     assert bound.dimensions.n_instances == 2
     assert calls["candidate_kwargs"]["source_frame_authority"] == frame_authority
     assert calls["candidate_kwargs"]["source_pixel_authority"] == pixel_authority
+    assert calls["candidate_kwargs"]["coordinate_catalog"] is True
+    assert calls["candidate_kwargs"]["publication_selector_eligible"] is True
     assert calls["publish_kwargs"]["run_id"] == "detect_native"
+    assert calls["publish_kwargs"]["expected_manifest_schema_version"] == 3
+    assert calls["publish_kwargs"]["activate"] is True
 
 
 def test_assembler_rejects_artifact_from_a_different_model(
