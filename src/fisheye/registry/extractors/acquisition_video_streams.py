@@ -178,6 +178,32 @@ def _extract_acquisition_video_stream_rows(
                 "frame_clock_metadata_row_count": _file_row_count(files, "frame_clock_metadata"),
                 "frames_encoded": _as_int(summary.get("frames_encoded")),
                 "frames_dropped": _as_int(summary.get("frames_dropped")),
+                "canonical_ledger_status": _decode_attr(
+                    stream_attrs.get("canonical_ledger_status")
+                ),
+                "canonical_ledger_run": _decode_attr(stream_attrs.get("canonical_ledger_run")),
+                "canonical_ledger_path": _decode_attr(stream_attrs.get("canonical_ledger_path")),
+                "canonical_ledger_record_sha256": _decode_attr(
+                    stream_attrs.get("canonical_ledger_record_sha256")
+                ),
+                "canonical_ledger_source_metadata_sha256": _decode_attr(
+                    stream_attrs.get("canonical_ledger_source_metadata_sha256")
+                ),
+                "canonical_ledger_source_video_fingerprint": _decode_attr(
+                    stream_attrs.get("canonical_ledger_source_video_fingerprint")
+                ),
+                "canonical_ledger_row_count": _as_int(
+                    stream_attrs.get("canonical_ledger_row_count")
+                ),
+                "canonical_ledger_detected_row_count": _as_int(
+                    stream_attrs.get("canonical_ledger_detected_row_count")
+                ),
+                "canonical_ledger_blank_row_count": _as_int(
+                    stream_attrs.get("canonical_ledger_blank_row_count")
+                ),
+                "canonical_ledger_imported_at_utc": _decode_attr(
+                    stream_attrs.get("canonical_ledger_imported_at_utc")
+                ),
                 "contract_json": _canonical_json_text(contract),
                 "files_json": _canonical_json_text(files),
                 "summary_json": _canonical_json_text(summary),

@@ -19,6 +19,9 @@ import zarr
 
 from fisheye.shared.acquisition_frame_clock import import_acquisition_frame_clock
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
+from fisheye.shared.acquisition_crop_stream_ledger import (
+    validate_current_acquisition_crop_stream_ledger,
+)
 from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PUBLISHED,
     load_acquisition_authority_publication_status,
@@ -28,6 +31,7 @@ from fisheye.shared.experiment_setup import (
     publish_experiment_setup,
 )
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.import_video_metadata import (
     probe_video_metadata,
     publish_external_video_acquisition_authority,
@@ -544,6 +548,36 @@ def process_recording_import(
                     returncode=int(stim_rc),
                     error="stimulus import failed",
                 )
+
+    crop_ledger = (
+        stream_inventory.get("streams", {}).get("crop", {}).get("canonical_ledger", {})
+        if isinstance(stream_inventory, dict)
+        else {}
+    )
+    if crop_ledger:
+        try:
+            expected_digest = str(crop_ledger["canonical_ledger_record_sha256"])
+            consolidate_metadata_capture_expected_warnings(plan.zarr_path)
+            consolidated = zarr.open_group(
+                str(plan.zarr_path), mode="r", use_consolidated=True
+            )
+            validate_current_acquisition_crop_stream_ledger(
+                consolidated,
+                expected_record_sha256=expected_digest,
+            )
+        except Exception as exc:
+            return RecordingImportResult(
+                ok=False,
+                failed_step="consolidate_acquisition_crop_ledger",
+                error=str(exc),
+            )
+        _log(
+            logger,
+            "acquisition_crop_ledger_consolidated",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            record_sha256=expected_digest,
+        )
 
     return RecordingImportResult(ok=True)
 

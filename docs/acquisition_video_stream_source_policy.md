@@ -40,9 +40,11 @@ That surface describes file paths, stream-level sidecars, row counts,
 availability status, crop metadata location, frame clock, dimensions, codec, and
 other stream facts when available.
 
-Future work may also mirror per-frame crop metadata arrays from the crop-meta
-CSV into the analysis zarr. Those arrays should still be treated as acquisition
-media metadata, not as proof that any model stage consumed crop-video pixels.
+Palette mirrors every crop-meta CSV row into a digest-bound immutable ledger at
+`analysis/acquisition_video_streams/streams/crop/ledger_runs/<run>`. The crop
+stream's `canonical_ledger_*` attrs are written pointer-last after validation.
+These arrays are acquisition media metadata, not proof that any model stage
+consumed crop-video pixels.
 
 ## Orange External Crop Metadata Contract
 

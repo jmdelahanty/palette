@@ -5747,6 +5747,19 @@ class Registry(
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
+                for name in (
+                    "canonical_ledger_status",
+                    "canonical_ledger_run",
+                    "canonical_ledger_path",
+                    "canonical_ledger_record_sha256",
+                    "canonical_ledger_source_metadata_sha256",
+                    "canonical_ledger_source_video_fingerprint",
+                    "canonical_ledger_row_count",
+                    "canonical_ledger_detected_row_count",
+                    "canonical_ledger_blank_row_count",
+                    "canonical_ledger_imported_at_utc",
+                ):
+                    payload.setdefault(name, None)
                 self.conn.execute(
                     """
                     INSERT INTO acquisition_video_streams (
@@ -5763,6 +5776,12 @@ class Registry(
                         keyframes_exists, summary_exists, status_exists,
                         metadata_row_count, frame_clock_metadata_row_count,
                         frames_encoded, frames_dropped,
+                        canonical_ledger_status, canonical_ledger_run, canonical_ledger_path,
+                        canonical_ledger_record_sha256,
+                        canonical_ledger_source_metadata_sha256,
+                        canonical_ledger_source_video_fingerprint,
+                        canonical_ledger_row_count, canonical_ledger_detected_row_count,
+                        canonical_ledger_blank_row_count, canonical_ledger_imported_at_utc,
                         contract_json, files_json, summary_json, updated_utc
                     )
                     VALUES (
@@ -5779,6 +5798,12 @@ class Registry(
                         :keyframes_exists, :summary_exists, :status_exists,
                         :metadata_row_count, :frame_clock_metadata_row_count,
                         :frames_encoded, :frames_dropped,
+                        :canonical_ledger_status, :canonical_ledger_run, :canonical_ledger_path,
+                        :canonical_ledger_record_sha256,
+                        :canonical_ledger_source_metadata_sha256,
+                        :canonical_ledger_source_video_fingerprint,
+                        :canonical_ledger_row_count, :canonical_ledger_detected_row_count,
+                        :canonical_ledger_blank_row_count, :canonical_ledger_imported_at_utc,
                         :contract_json, :files_json, :summary_json, :updated_utc
                     );
                     """,

@@ -15,6 +15,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 
 from fisheye.registry.db import RegistryPaths
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 
 
 SCHEMA_VERSION = "palette.acquisition_crop_video_roi_readiness_report.v1"
@@ -526,7 +527,7 @@ def build_acquisition_crop_video_roi_readiness_report(
     dataset_contains: Optional[str] = None,
     zarr_use: str = "all",
     active_only: bool = True,
-    min_crop_size: int = 348,
+    min_crop_size: int = DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
     probe_video: bool = False,
 ) -> dict[str, Any]:
     conn = sqlite3.connect(str(registry_path))
@@ -618,7 +619,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-crop-size",
         type=int,
-        default=348,
+        default=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
         help="Minimum crop video width/height considered usable for current RedScare-style models.",
     )
     parser.add_argument(

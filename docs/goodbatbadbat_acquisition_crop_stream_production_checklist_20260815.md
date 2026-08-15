@@ -29,8 +29,10 @@ The acquisition crop video supplies high-fidelity pixels. It does not replace
 offline detection authority, quality, refinement, reviewed dish geometry, or
 explicit downstream source selection.
 
-This document is an implementation plan. It does not change selectors, mutate
-recordings, submit production jobs, or authorize crop-only retention.
+This document is an implementation checklist. Checked items describe code on
+the implementation branch; they do not authorize selector changes, recording
+mutation, production jobs, or crop-only retention. Required CI and a
+selector-ineligible real-recording canary remain mandatory before deployment.
 
 ## Corpus snapshot
 
@@ -97,28 +99,39 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
   rows with full-frame recovered rows in a supplemental flat cache.
 - Offline raw detection, geometry gating, quality, and refined-detection products
   exist for the GoodBatBadBat campaign.
+- The implementation branch publishes
+  `palette.acquisition_crop_stream_ledger.v1` as pointer-last immutable runs
+  below `analysis/acquisition_video_streams/streams/crop/ledger_runs`.
+- Normal recording import and the explicit acquisition-stream backfill command
+  use the same complete-ledger writer.
+- The registry distinguishes crop-media availability from
+  `crop_stream_consumer_ready` ledger readiness.
+- New zebrafish workflow defaults and production entry points use 384 x 384;
+  persisted 348 x 348 artifacts remain unchanged.
 
 ### Missing or not production-complete
 
-- Normal import does not mirror the complete per-frame crop ledger into Zarr
-  arrays.
-- The inventory is availability metadata, not an immutable source snapshot.
-- Current acquisition crop-run creation excludes blank/no-detection rows, so it
-  cannot serve as the complete raw acquisition record.
+- The implementation branch is not deployed and has not passed required CI.
+- A selector-ineligible disposable canary against the representative real
+  GoodBatBadBat sources passed with 152,035 rows, 149,989 detected rows, 2,046
+  blank rows, 25 arrays, four hashed sidecars, and validated consolidated
+  visibility. The canonical analysis Zarr was not opened for writing.
+- Existing recordings have not yet been backfilled with the complete ledger.
+- Live-event sidecars are not yet canonicalized. Declared crop metadata,
+  keyframe, summary, and status sidecars are SHA-256 bound; the large MP4 uses
+  the existing documented `stat_v1` fingerprint.
+- Full-frame bounds validation for crop origins still needs a recording-level
+  native-extent authority where Orange's full-stream manifest omits dimensions.
 - The current acquisition crop-run geometry is based on the selected live box;
   production GoodBatBadBat crop geometry should remain bound to the selected
   offline refined-detection rowset.
-- Palette still carries 348 x 348 defaults in generic configuration, shared crop
-  defaults, geometry-review approval planning, and some crop publication tools.
-  The new zebrafish default must be introduced as an explicit 384 x 384 policy
-  without reinterpreting existing 348 x 348 runs.
 - Acquisition detection import remains a nonselector
   `detection_artifact_runs` compatibility surface; canonical promotion is not
   implemented.
 - Whole-recording production keypoint orchestration still assumes a flat ROI
   cache rather than a generic acquisition/hybrid provider manifest.
-- Registry readiness does not yet express raw-stream canonicalization, routing
-  completeness, and downstream provider consumption as distinct stages.
+- Registry readiness now expresses raw-stream canonicalization, but routing
+  completeness and downstream provider consumption remain future stages.
 - Crimson has not validated direct raw acquisition-stream reads or the intended
   acquisition/hybrid crop-run consumer chain.
 
@@ -155,15 +168,15 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
 
 ## Phase 0: Freeze schemas and policy identities
 
-- [ ] Define a versioned raw acquisition crop-stream schema under
+- [x] Define a versioned raw acquisition crop-stream schema under
   `analysis/acquisition_video_streams/streams/crop`.
-- [ ] Decide whether the first version extends the existing stream group in
+- [x] Decide whether the first version extends the existing stream group in
   place or publishes immutable import generations with an explicit current
   pointer. Prefer immutable generations if repeat import can produce differing
   bytes or metadata.
-- [ ] Freeze names, dtypes, dimensions, null/sentinel rules, chunking, and
+- [x] Freeze names, dtypes, dimensions, null/sentinel rules, chunking, and
   coordinate semantics for the complete frame ledger.
-- [ ] Freeze the distinction between:
+- [x] Freeze the distinction between:
   - raw acquisition stream rows;
   - all live detector observations;
   - the one live detection selected by the crop controller;
@@ -177,29 +190,30 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
     acceptable;
   - a versioned bounded fingerprint only when explicitly permitted, labeled as
     weaker than a content hash.
-- [ ] Do not hash every decoded frame. Benchmark sequential container hashing
-  separately from decode and record its PRFS cost before choosing the campaign
-  policy.
-- [ ] Define a sidecar identity policy. Crop metadata, keyframe, summary, status,
+- [x] Do not hash every decoded frame. The first implementation uses a full
+  SHA-256 for crop metadata and the documented cheap `stat_v1` MP4 fingerprint.
+  Benchmark sequential container hashing separately from decode before changing
+  that campaign policy.
+- [x] Define a sidecar identity policy. Crop metadata, keyframe, summary, status,
   and live-event sidecars are small enough to receive full content hashes.
-- [ ] Define stream import completion and validation schemas.
+- [x] Define stream import completion and validation schemas.
 - [ ] Define a versioned crop-pixel routing policy and reason-code vocabulary.
 - [ ] Define `zebrafish_crop_384_v1` as a species-aware 384 x 384 crop geometry
   profile rather than changing an unexplained global integer default.
-- [ ] Inventory and update all production-facing 348 defaults, including shared
+- [x] Inventory and update all production-facing 348 defaults, including shared
   crop defaults, default configuration, geometry-review approval planning,
   readiness reporting, preflight, and crop publication entry points.
-- [ ] Keep persisted crop geometry separate from model tensor size. Reuse the
+- [x] Keep persisted crop geometry separate from model tensor size. Reuse the
   existing reversible `ModelInputTransform` for identity or centered zero-padding
   to a larger submitted extent, and retain its declared preprocessing identity.
-- [ ] Preserve existing 348 x 348 runs unchanged and classify them through their
+- [x] Preserve existing 348 x 348 runs unchanged and classify them through their
   original crop-policy identity.
 - [ ] Freeze full-frame edge handling for 384 x 384 fallback crops, including
   whether the ROI origin is clamped or pixels outside the native extent are
   zero-filled. Record that decision in `zebrafish_crop_384_v1`.
 - [ ] Define a versioned GoodBatBadBat crop-sufficiency policy. Do not invent
   pass thresholds merely to enable automation.
-- [ ] Record explicit non-goals for the first implementation:
+- [x] Record explicit non-goals for the first implementation:
   - no full-video deletion;
   - no live-detection promotion to scientific authority;
   - no pre-inference dish masking change;
@@ -209,12 +223,12 @@ of this work. Publish a 384 x 384 successor under the new crop-policy identity.
 
 ### Import arrays
 
-- [ ] Add row-aligned Zarr arrays for every crop-stream frame, including at
+- [x] Add row-aligned Zarr arrays for every crop-stream frame, including at
   least:
 
 ```text
 source_recording_frame_ids
-source_acquisition_frame_index
+source_recording_frame_indices
 source_crop_meta_row_indices
 source_crop_video_frame_indices
 source_crop_local_frame_ids
@@ -228,44 +242,47 @@ selected_live_detection_xywh
 selected_live_detection_confidence
 ```
 
-- [ ] Preserve producer row order and an explicit source CSV row index.
-- [ ] Store crop placement in native full-frame `xywh` pixels.
-- [ ] Store the selected live detection as separate provenance, not canonical
+- [x] Preserve producer row order and an explicit source CSV row index.
+- [x] Store crop placement in native full-frame `xywh` pixels.
+- [x] Store the selected live detection as separate provenance, not canonical
   crop geometry and not a reviewed detection authority.
-- [ ] Preserve blank/no-detection rows instead of dropping them.
-- [ ] Attach array-level coordinate, index-base, unit, and sentinel semantics.
-- [ ] Use chunking suitable for Crimson/TensorStore frame-window reads and
+- [x] Preserve blank/no-detection rows instead of dropping them.
+- [x] Attach array/group-level coordinate, index-base, unit, and sentinel semantics.
+- [x] Use chunking suitable for Crimson/TensorStore frame-window reads and
   Palette vectorized scans; record the profile ID.
 
 ### Validation
 
-- [ ] Resolve the crop stream only from the exact recording manifest declaration.
+- [x] Resolve the crop stream only from the exact recording manifest declaration.
   Do not scan for newest or convenient files in production import.
 - [ ] Require exact recording, camera, frame clock, and native extent agreement.
-- [ ] Require declared crop metadata row count and crop-video frame count to
+  Recording/camera/frame-clock and crop-video extent are enforced; full-frame
+  bounds remain pending where producer manifests omit full-stream dimensions.
+- [x] Require declared crop metadata row count and crop-video frame count to
   agree, or publish an explicit failed/incomplete import without guessing.
-- [ ] Validate `recording_frame_id` monotonicity, uniqueness, and index-base
+- [x] Validate `recording_frame_id` monotonicity, uniqueness, and index-base
   contract.
-- [ ] Validate crop-video frame-index coverage and dropped-frame semantics.
-- [ ] Validate `has_detection`/`blank_frame` combinations.
+- [x] Validate crop-video frame-index coverage and dropped-frame semantics.
+- [x] Validate `has_detection`/`blank_frame` combinations.
 - [ ] Validate finite, positive, in-bounds crop geometry for nonblank rows.
-- [ ] Validate selected live-detection geometry separately from crop geometry.
+- [x] Validate selected live-detection geometry separately from crop geometry.
 - [ ] Bind summary/status/keyframe declarations and their checksums.
 - [ ] Record parser, schema, software, and configuration identity.
-- [ ] Publish complete frame-domain evidence and summary counts.
-- [ ] Make exact repeat import idempotent; make disagreement fail closed rather
+- [x] Publish complete frame-domain evidence and summary counts.
+- [x] Make exact repeat import idempotent; make disagreement fail closed rather
   than overwrite.
 
 ### Publication
 
-- [ ] Stage each recording's new Zarr payload privately.
-- [ ] Validate all arrays, attrs, source identities, and logical digests before
+- [x] Stage each recording's new Zarr payload as an unselected immutable run.
+- [x] Validate all arrays, attrs, source identities, and logical digests before
   publication.
-- [ ] Publish atomically within one recording Zarr.
-- [ ] Update direct selection/import metadata only after payload validation.
-- [ ] Consolidate the root as the final visibility step and validate that the
+- [x] Publish atomically for readers within one recording Zarr by selecting the
+  immutable run only after payload completion.
+- [x] Update direct selection/import metadata only after payload validation.
+- [x] Consolidate the root as the final visibility step and validate that the
   consolidated generation includes the new stream state.
-- [ ] Add a focused backfill command for existing GoodBatBadBat recordings and
+- [x] Add a focused backfill command for existing GoodBatBadBat recordings and
   make normal import perform the same operation for future recordings.
 - [ ] Emit one durable per-recording result receipt suitable for campaign-level
   reconciliation.

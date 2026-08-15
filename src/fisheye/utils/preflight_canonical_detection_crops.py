@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.zarr.canonical_detection_crop_preflight import (
     CANONICAL_DETECTION_CROP_PREFLIGHT_SCHEMA_ID,
     inspect_canonical_detection_crop_preflight,
@@ -102,8 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Frozen canonical-successor cohort plan; mutually exclusive with one archive.",
     )
-    parser.add_argument("--roi-width", type=int, default=348)
-    parser.add_argument("--roi-height", type=int, default=348)
+    parser.add_argument("--roi-width", type=int, default=DEFAULT_ZEBRAFISH_CROP_SIZE_PX)
+    parser.add_argument("--roi-height", type=int, default=DEFAULT_ZEBRAFISH_CROP_SIZE_PX)
     parser.add_argument(
         "--padding-mode",
         choices=tuple(item.value for item in CropPaddingMode),

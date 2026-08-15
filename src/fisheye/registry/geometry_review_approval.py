@@ -35,6 +35,7 @@ from fisheye.analysis_workflows.materializers.arena_geometry_fit_review import (
     FIT_REVIEW_RUNS_PARENT,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.detection_tables import (
     resolve_detection_instance_table,
     resolve_detection_source_pixel_authority,
@@ -529,8 +530,8 @@ def build_geometry_review_approval_request(
     reviewed_at_utc: str,
     decision_reason: str,
     palette_commit: str,
-    crop_roi_width: int = 348,
-    crop_roi_height: int = 348,
+    crop_roi_width: int = DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+    crop_roi_height: int = DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
 ) -> GeometryReviewApprovalRequest:
     """Build one exact request without writing the registry or analysis Zarr."""
 

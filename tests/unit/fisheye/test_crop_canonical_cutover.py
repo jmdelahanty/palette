@@ -235,16 +235,16 @@ def test_canonical_crop_arrays_zero_padding_policy_accepts_edge_crossing(
     assert output.attrs["source_detection_manifest_digest"] == "f" * 64
 
 
-def test_ordinary_crop_default_is_348_square_zero_padding() -> None:
+def test_ordinary_crop_default_is_384_square_zero_padding() -> None:
     root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
 
     parameters, source = crop_module.get_crop_parameters(root, {})
     policy = crop_module.ordinary_crop_geometry_policy_from_parameters(parameters)
 
     assert source == "config_default"
-    assert parameters["roi_sz"] == [348, 348]
+    assert parameters["roi_sz"] == [384, 384]
     assert parameters["padding_mode"] == "zero_outside_source_frame"
-    assert policy.fixed_size_wh == (348, 348)
+    assert policy.fixed_size_wh == (384, 384)
     assert (
         policy.padding_mode
         is crop_module.CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME

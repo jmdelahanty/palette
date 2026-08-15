@@ -233,7 +233,8 @@ analysis/acquisition_video_streams/
   streams/
     crop/
       immutable stream manifest
-      complete per-frame metadata arrays
+      ledger_runs/<run>/
+        complete per-frame metadata arrays
       source-media identity
       producer-sidecar identities
 ```
