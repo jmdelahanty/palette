@@ -120,7 +120,7 @@ def _run_shard(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shard-count", type=int, default=12)
+    parser.add_argument("--shard-count", type=int, default=16)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument(

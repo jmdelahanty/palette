@@ -71,10 +71,13 @@ def test_each_quality_gate_command_has_exactly_one_job_owner() -> None:
 
 
 def test_test_shards_publish_complete_file_timing_evidence() -> None:
-    steps = _ci_jobs()["tests"]["steps"]
+    test_job = _ci_jobs()["tests"]
+    assert test_job["strategy"]["matrix"]["shard"] == list(range(16))
+    steps = test_job["steps"]
     by_name = {step.get("name"): step for step in steps}
 
     run_command = str(by_name["Run non-GPU test shard"]["run"])
+    assert "--shard-count 16" in run_command
     assert "--junitxml=" in run_command
     assert "junit_family=legacy" in run_command
     assert "junit_duration_report=total" in run_command
@@ -90,6 +93,12 @@ def test_subject_shape_fixture_restores_for_all_shards_but_has_one_writer() -> N
     steps = _ci_jobs()["tests"]["steps"]
     by_name = {step.get("name"): step for step in steps}
 
+    assert "--shard-count 16" in str(
+        by_name["Select canonical subject-shape fixture owner"]["run"]
+    )
+    assert "--shard-count 16" in str(
+        by_name["Select canonical subject-mask finalizer fixture owner"]["run"]
+    )
     restore = by_name["Restore canonical subject-shape source fixture"]
     assert restore["uses"] == "actions/cache/restore@v4"
     assert "if" not in restore

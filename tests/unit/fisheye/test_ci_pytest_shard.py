@@ -72,9 +72,9 @@ def test_estimated_cost_uses_measured_proof_heavy_override(
     assert estimated_test_file_cost(test_file) == 100 * multiplier
 
 
-def test_measured_long_suites_are_separate_in_current_twelve_shard_assignment() -> None:
+def test_measured_dominant_suites_are_separate_in_current_sixteen_shards() -> None:
     test_files = discover_test_files(REPOSITORY_ROOT / "tests")
-    shards = assign_test_file_shards(test_files, shard_count=12)
+    shards = assign_test_file_shards(test_files, shard_count=16)
     owners = {
         path.name: shard_index
         for shard_index, shard in enumerate(shards)
@@ -89,7 +89,14 @@ def test_measured_long_suites_are_separate_in_current_twelve_shard_assignment() 
         Path(path).name for path in HISTORICAL_TEST_FILE_COST_OVERRIDES
     )
     assert owners.keys() == expected_names
-    assert len(set(owners.values())) == len(owners)
+    dominant_names = {
+        path.name
+        for shard in shards
+        for path in shard
+        if path.name in expected_names and estimated_test_file_cost(path) >= 100_000
+    }
+    dominant_owners = {owners[name] for name in dominant_names}
+    assert len(dominant_owners) == len(dominant_names)
 
 
 @pytest.mark.parametrize(

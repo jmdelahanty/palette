@@ -118,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     env:
       MPLBACKEND: Agg
       PALETTE_PYTHON: python
@@ -154,7 +154,7 @@ jobs:
         run: |
           if python scripts/ci_pytest_shard.py \
             --shard-index "${{ matrix.shard }}" \
-            --shard-count 12 \
+            --shard-count 16 \
             --list-only \
             | grep -Fxq "tests/unit/fisheye/test_subject_shape_runs.py"; then
             echo "selected=true" >> "$GITHUB_OUTPUT"
@@ -176,7 +176,7 @@ jobs:
         run: |
           if python scripts/ci_pytest_shard.py \
             --shard-index "${{ matrix.shard }}" \
-            --shard-count 12 \
+            --shard-count 16 \
             --list-only \
             | grep -Fxq "tests/unit/fisheye/test_finalize_subject_masks.py"; then
             echo "selected=true" >> "$GITHUB_OUTPUT"
@@ -198,7 +198,7 @@ jobs:
           mkdir -p .ci-results
           python scripts/ci_pytest_shard.py \
             --shard-index "${{ matrix.shard }}" \
-            --shard-count 12 \
+            --shard-count 16 \
             -- -q -m "not gpu" --durations=25 --durations-min=1.0 \
             -o junit_family=legacy \
             -o junit_duration_report=total \
