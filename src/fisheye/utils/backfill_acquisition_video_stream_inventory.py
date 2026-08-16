@@ -18,7 +18,10 @@ from fisheye.shared.acquisition_video_streams import (
     write_acquisition_video_stream_inventory,
 )
 from fisheye.shared.batch_logging import utc_now
-from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+    open_zarr_group_direct,
+)
 
 
 @dataclass(frozen=True)
@@ -136,7 +139,7 @@ def _emit_jsonl(handle: TextIO | None, payload: dict[str, Any]) -> None:
 
 def _apply_plan(plan: InventoryBackfillPlan, *, imported_at_utc: str) -> InventoryBackfillPlan:
     manifest = _load_manifest(plan.manifest_path)
-    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    root = open_zarr_group_direct(plan.zarr_path, mode="r+")
     inventory = write_acquisition_video_stream_inventory(
         root,
         plan.recording_dir,

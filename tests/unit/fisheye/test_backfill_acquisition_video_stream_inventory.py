@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import warnings
+
+import zarr
 
 from fisheye.utils import backfill_acquisition_video_stream_inventory as mod
 
@@ -123,6 +126,13 @@ def test_main_apply_writes_inventory(monkeypatch, tmp_path: Path) -> None:
 
     recording_dir = _write_recording_with_crop_stream(tmp_path)
     fake_root = _FakeGroup()
+    direct_opens: list[tuple[Path, str]] = []
+
+    def _open_direct(path: Path, *, mode: str):
+        direct_opens.append((Path(path), mode))
+        return fake_root
+
+    monkeypatch.setattr(mod, "open_zarr_group_direct", _open_direct)
     monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
     monkeypatch.setattr(
         mod,
@@ -133,9 +143,59 @@ def test_main_apply_writes_inventory(monkeypatch, tmp_path: Path) -> None:
     rc = mod.main([str(recording_dir), "--apply"])
 
     assert rc == 0
+    assert direct_opens == [
+        (
+            recording_dir / "zarr" / f"{recording_dir.name}_analysis.zarr",
+            "r+",
+        )
+    ]
     assert fake_root.attrs["acquisition_video_streams_available"] is True
     assert fake_root.attrs["acquisition_crop_video_available"] is True
     assert fake_root.attrs["acquisition_crop_ledger_available"] is True
     streams = fake_root.groups["analysis"].groups["acquisition_video_streams"].groups["streams"]
     assert streams.groups["crop"].attrs["files"]["metadata"]["data_row_count"] == 2
     assert streams.groups["crop"].attrs["canonical_ledger_row_count"] == 2
+
+
+def test_main_apply_adopts_direct_ledger_hidden_by_stale_consolidated_metadata(
+    tmp_path: Path,
+) -> None:
+    recording_dir = _write_recording_with_crop_stream(tmp_path)
+    zarr_path = recording_dir / "zarr" / f"{recording_dir.name}_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.require_group("analysis").require_group("acquisition_video_streams").require_group(
+        "streams"
+    ).require_group("crop")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        zarr.consolidate_metadata(
+            str(zarr_path),
+            path="analysis/acquisition_video_streams/streams/crop",
+        )
+        zarr.consolidate_metadata(str(zarr_path))
+
+    manifest = mod._load_manifest(recording_dir / "recording_manifest.json")
+    mutable_from_stale_view = zarr.open_group(str(zarr_path), mode="r+")
+    mod.write_acquisition_video_stream_inventory(
+        mutable_from_stale_view,
+        recording_dir,
+        manifest,
+        imported_at_utc="2026-08-16T01:36:13+00:00",
+    )
+    direct = mod.open_zarr_group_direct(zarr_path, mode="r")
+    direct_crop = direct["analysis/acquisition_video_streams/streams/crop"]
+    original_run = str(direct_crop.attrs["canonical_ledger_run"])
+    stale = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
+    assert stale["analysis/acquisition_video_streams/streams/crop"].get("ledger_runs") is None
+
+    rc = mod.main([str(recording_dir), "--apply"])
+
+    assert rc == 0
+    repaired_direct = mod.open_zarr_group_direct(zarr_path, mode="r")
+    repaired_crop = repaired_direct["analysis/acquisition_video_streams/streams/crop"]
+    assert repaired_crop.attrs["canonical_ledger_run"] == original_run
+    assert repaired_crop.attrs["canonical_ledger_idempotent"] is True
+    assert list(repaired_crop["ledger_runs"].group_keys()) == [original_run]
+    consolidated = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
+    consolidated_crop = consolidated["analysis/acquisition_video_streams/streams/crop"]
+    assert original_run in consolidated_crop["ledger_runs"]
