@@ -6,6 +6,7 @@ from pathlib import Path
 import zarr
 
 from fisheye.registry.db import Registry
+from fisheye.shared import acquisition_video_streams as acquisition_streams
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
 
 
@@ -71,6 +72,10 @@ def _write_recording_with_inventory(tmp_path: Path) -> Path:
                     "codec": "hevc",
                     "encoded_format": "nv12",
                     "pixel_source_format": "mono8",
+                    "color_range": "pc",
+                    "color_space": "bt709",
+                    "color_transfer": "bt709",
+                    "color_primaries": "bt709",
                 },
             },
         },
@@ -111,6 +116,12 @@ def test_schema_has_acquisition_video_streams_table_and_views(tmp_path: Path) ->
                 """
             )
         }
+        columns = {
+            str(row["name"])
+            for row in registry.conn.execute(
+                "PRAGMA table_info(acquisition_video_streams);"
+            )
+        }
     finally:
         registry.close()
 
@@ -119,6 +130,70 @@ def test_schema_has_acquisition_video_streams_table_and_views(tmp_path: Path) ->
         "dataset_acquisition_video_streams_current",
         "recording_acquisition_video_streams_current",
         "recording_crop_video_available_current",
+    }
+    assert {
+        "color_range",
+        "color_space",
+        "color_transfer",
+        "color_primaries",
+    } <= columns
+
+
+def test_inventory_backfills_colorimetry_from_exact_stream_probe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = _write_recording_with_inventory(tmp_path)
+    recording_dir = zarr_path.parent.parent
+    manifest = json.loads(
+        (recording_dir / "recording_manifest.json").read_text(encoding="utf-8")
+    )
+    crop = manifest["video_streams"]["streams"]["crop"]
+    for field in (
+        "color_range",
+        "color_space",
+        "color_transfer",
+        "color_primaries",
+    ):
+        crop.pop(field)
+    crop_video = recording_dir / crop["video"]
+    monkeypatch.setattr(
+        acquisition_streams,
+        "probe_video_colorimetry_attrs",
+        lambda path: {
+            "video_color_range": "pc",
+            "video_color_space": "bt709",
+            "video_color_transfer": "bt709",
+            "video_color_primaries": "bt709",
+        }
+        if path == crop_video
+        else {},
+    )
+
+    inventory = acquisition_streams.build_acquisition_video_stream_inventory(
+        recording_dir,
+        manifest,
+        imported_at_utc="2026-08-16T12:00:00+00:00",
+    )
+
+    assert inventory is not None
+    stream = inventory["streams"]["crop"]
+    assert stream["contract"]["color_range"] == "pc"
+    assert stream["contract"]["color_space"] == "bt709"
+    assert stream["contract"]["color_transfer"] == "bt709"
+    assert stream["contract"]["color_primaries"] == "bt709"
+    assert stream["colorimetry_observation"] == {
+        "schema_id": "palette.acquisition_video_colorimetry_observation.v1",
+        "authority": "ffprobe_stream",
+        "video_path": str(crop_video),
+        "observed": {
+            "color_range": "pc",
+            "color_space": "bt709",
+            "color_transfer": "bt709",
+            "color_primaries": "bt709",
+        },
+        "manifest_declared": {},
+        "mismatches": {},
     }
 
 
@@ -129,7 +204,9 @@ def test_scan_zarr_populates_acquisition_crop_video_view(tmp_path: Path) -> None
         dataset_id = registry.scan_zarr(zarr_path)
         rows = registry.conn.execute(
             """
-            SELECT stream_key, output_kind, video_exists, metadata_exists, metadata_row_count
+            SELECT stream_key, output_kind, video_exists, metadata_exists,
+                   metadata_row_count, color_range, color_space,
+                   color_transfer, color_primaries
             FROM acquisition_video_streams
             WHERE dataset_id = ?
             ORDER BY stream_key;
@@ -141,6 +218,7 @@ def test_scan_zarr_populates_acquisition_crop_video_view(tmp_path: Path) -> None
             SELECT recording_id, crop_stream_available, crop_stream_consumer_ready,
                    availability_status,
                    video_pixel_coordinate_space, source_geometry_coordinate_space,
+                   color_range, color_space, color_transfer, color_primaries,
                    metadata_row_count, frames_encoded, frames_dropped,
                    canonical_ledger_status, canonical_ledger_row_count
             FROM recording_crop_video_available_current
@@ -158,12 +236,20 @@ def test_scan_zarr_populates_acquisition_crop_video_view(tmp_path: Path) -> None
     assert int(rows[0]["video_exists"]) == 1
     assert int(rows[0]["metadata_exists"]) == 1
     assert int(rows[0]["metadata_row_count"]) == 2
+    assert rows[0]["color_range"] == "pc"
+    assert rows[0]["color_space"] == "bt709"
+    assert rows[0]["color_transfer"] == "bt709"
+    assert rows[0]["color_primaries"] == "bt709"
     assert crop is not None
     assert int(crop["crop_stream_available"]) == 1
     assert int(crop["crop_stream_consumer_ready"]) == 1
     assert crop["availability_status"] == "ok"
     assert crop["video_pixel_coordinate_space"] == "crop_frame_pixels"
     assert crop["source_geometry_coordinate_space"] == "full_frame_pixels"
+    assert crop["color_range"] == "pc"
+    assert crop["color_space"] == "bt709"
+    assert crop["color_transfer"] == "bt709"
+    assert crop["color_primaries"] == "bt709"
     assert int(crop["metadata_row_count"]) == 2
     assert int(crop["frames_encoded"]) == 2
     assert int(crop["frames_dropped"]) == 0

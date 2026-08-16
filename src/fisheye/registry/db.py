@@ -5769,6 +5769,7 @@ class Registry(
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
                 for name in (
+                    "color_range", "color_space", "color_transfer", "color_primaries",
                     "canonical_ledger_status",
                     "canonical_ledger_run",
                     "canonical_ledger_path",
@@ -5790,6 +5791,7 @@ class Registry(
                         keyframes_path, summary_path, status_path,
                         width, height, frame_count, frame_rate, codec, container,
                         encoded_format, pixel_source_format,
+                        color_range, color_space, color_transfer, color_primaries,
                         video_pixel_coordinate_space, source_geometry_coordinate_space,
                         blank_frame_policy, selection_policy,
                         availability_status, inventory_status,
@@ -5812,6 +5814,7 @@ class Registry(
                         :keyframes_path, :summary_path, :status_path,
                         :width, :height, :frame_count, :frame_rate, :codec, :container,
                         :encoded_format, :pixel_source_format,
+                        :color_range, :color_space, :color_transfer, :color_primaries,
                         :video_pixel_coordinate_space, :source_geometry_coordinate_space,
                         :blank_frame_policy, :selection_policy,
                         :availability_status, :inventory_status,

@@ -141,6 +141,97 @@ class _FakeRootForFrameIndex:
         return None
 
 
+def test_container_color_range_uses_ffprobe_and_ignores_legacy_literal(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    source_root = _FakeRootForFrameIndex({})
+    source_group = _FakeRootForFrameIndex(
+        {
+            "generated_by": mod.MODULE_NAME,
+            "container_color_range_observed": "tv",
+        }
+    )
+    monkeypatch.setattr(
+        mod,
+        "probe_video_colorimetry_attrs",
+        lambda path: {"video_color_range": "pc"} if path == video else {},
+    )
+
+    value, observation = mod._resolve_observed_container_color_range(
+        source_root=source_root,
+        source_group=source_group,
+        video_paths=[video],
+    )
+
+    assert value == "pc"
+    assert observation["authority"] == "ffprobe_stream"
+    assert observation["ignored_recorded_observations"] == [
+        {
+            "source": "source_crop_attr",
+            "value": "tv",
+            "reason": "legacy_regenerator_literal_has_no_observation_evidence",
+        }
+    ]
+
+
+def test_container_color_range_rejects_missing_authority() -> None:
+    with pytest.raises(ValueError, match="no authority was available"):
+        mod._resolve_observed_container_color_range(
+            source_root=_FakeRootForFrameIndex({}),
+            source_group=_FakeRootForFrameIndex({}),
+            video_paths=[],
+        )
+
+
+def test_container_color_range_rejects_mixed_referenced_videos(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    monkeypatch.setattr(
+        mod,
+        "probe_video_colorimetry_attrs",
+        lambda path: {
+            "video_color_range": "pc" if path == first else "tv"
+        },
+    )
+
+    with pytest.raises(ValueError, match="mixed container color-range"):
+        mod._resolve_observed_container_color_range(
+            source_root=_FakeRootForFrameIndex({}),
+            source_group=_FakeRootForFrameIndex({}),
+            video_paths=[first, second],
+        )
+
+
+def test_container_color_range_rejects_ffprobe_recorded_disagreement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    monkeypatch.setattr(
+        mod,
+        "probe_video_colorimetry_attrs",
+        lambda _path: {"video_color_range": "pc"},
+    )
+
+    with pytest.raises(ValueError, match="ffprobe and recorded"):
+        mod._resolve_observed_container_color_range(
+            source_root=_FakeRootForFrameIndex({}),
+            source_group=_FakeRootForFrameIndex(
+                {"container_color_range_observed": "tv"}
+            ),
+            video_paths=[video],
+        )
+
+
 def _make_training_archive(tmp_path: Path) -> tuple[Path, list[np.ndarray]]:
     zarr_path = tmp_path / "recording_training.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -166,6 +257,7 @@ def _make_training_archive(tmp_path: Path) -> tuple[Path, list[np.ndarray]]:
     crop.attrs["video_source_type"] = "zarr"
     crop.attrs["roi_size"] = [2, 2]
     crop.attrs["source_video_path"] = str(tmp_path / "source.mp4")
+    crop.attrs["container_color_range_observed"] = "pc"
 
     frames = [
         np.arange(4 * 5, dtype=np.uint8).reshape(4, 5) + np.uint8(frame_idx * 20)
@@ -199,6 +291,7 @@ def _make_external_cache_materialization(
             "height": 6,
             "crop_signature": "crop-signature-v2",
             "crop_revision": "crop-revision-v2",
+            "container_color_range_observed": "pc",
             "run_manifest": {
                 "schema_id": "palette.stage.crop_geometry.run_manifest",
                 "schema_version": 1,
@@ -414,6 +507,11 @@ def test_regenerate_training_crops_pynvvc_writes_new_luma_crop_run(
     )
     assert (
         target.attrs["roi_pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+    )
+    assert target.attrs["container_color_range_observed"] == "pc"
+    assert (
+        target.attrs["container_color_range_observation"]["authority"]
+        == "recorded_source_metadata"
     )
     assert np.array_equal(
         target["source_frame_indices"][:], np.array([0, 2, 4], dtype=np.int64)

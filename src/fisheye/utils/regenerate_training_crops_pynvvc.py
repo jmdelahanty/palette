@@ -42,8 +42,10 @@ from fisheye.shared.roi_pixel_contract import (
     DECODE_BACKEND_PYNVVC_LUMA,
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
     SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+    normalize_observed_container_color_range,
     orange_mono_pynvvc_luma_pixel_contract,
 )
+from fisheye.shared.import_video_metadata import probe_video_colorimetry_attrs
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr.training_crop_materialization import (
     TRAINING_CROP_MATERIALIZATION_BINDING_ATTRIBUTE,
@@ -118,6 +120,187 @@ def _first_positive_int(*values: Any) -> int | None:
         if parsed > 0:
             return parsed
     return None
+
+
+def _recorded_container_color_range_candidates(
+    source_root: Any,
+    source_group: Any,
+) -> tuple[list[tuple[str, object]], list[dict[str, Any]]]:
+    candidates: list[tuple[str, object]] = []
+    ignored: list[dict[str, Any]] = []
+
+    source_observation = source_group.attrs.get(
+        "container_color_range_observation"
+    )
+    source_value = source_group.attrs.get("container_color_range_observed")
+    generated_by = _valid_attr_text(source_group.attrs.get("generated_by"))
+    if source_value not in (None, ""):
+        if generated_by == MODULE_NAME and not isinstance(source_observation, Mapping):
+            ignored.append(
+                {
+                    "source": "source_crop_attr",
+                    "value": str(source_value),
+                    "reason": "legacy_regenerator_literal_has_no_observation_evidence",
+                }
+            )
+        else:
+            candidates.append(("source_crop_attr", source_value))
+
+    root_attrs = getattr(source_root, "attrs", {})
+    for name in ("video_color_range", "container_color_range_observed"):
+        value = root_attrs.get(name)
+        if value not in (None, ""):
+            candidates.append((f"source_root_attr.{name}", value))
+
+    metadata = root_attrs.get("source_video_metadata")
+    if isinstance(metadata, Mapping):
+        for name in ("video_color_range", "color_range"):
+            value = metadata.get(name)
+            if value not in (None, ""):
+                candidates.append((f"source_video_metadata.{name}", value))
+
+    raw_video = source_root.get("raw_video")
+    if raw_video is not None:
+        raw_attrs = getattr(raw_video, "attrs", {})
+        for name in ("video_color_range", "container_color_range_observed"):
+            value = raw_attrs.get(name)
+            if value not in (None, ""):
+                candidates.append((f"raw_video_attr.{name}", value))
+    return candidates, ignored
+
+
+def _cache_source_video_paths(
+    cache_manifest: Mapping[str, Any] | None,
+    *,
+    manifest_path: Path | None,
+) -> list[Path]:
+    if not isinstance(cache_manifest, Mapping):
+        return []
+    source = cache_manifest.get("source")
+    if not isinstance(source, Mapping):
+        return []
+    raw = _valid_attr_text(source.get("frame_source_path"))
+    if raw is None:
+        return []
+    path = Path(raw).expanduser()
+    if not path.is_absolute() and manifest_path is not None:
+        path = manifest_path.parent / path
+    return [path.resolve()]
+
+
+def _resolve_observed_container_color_range(
+    *,
+    source_root: Any,
+    source_group: Any,
+    video_paths: Sequence[Path],
+) -> tuple[str, dict[str, Any]]:
+    recorded, ignored = _recorded_container_color_range_candidates(
+        source_root,
+        source_group,
+    )
+    normalized_recorded: list[dict[str, str]] = []
+    invalid_recorded: list[dict[str, str]] = []
+    for source, raw_value in recorded:
+        try:
+            value = normalize_observed_container_color_range(raw_value)
+        except ValueError as exc:
+            invalid_recorded.append(
+                {"source": source, "value": str(raw_value), "error": str(exc)}
+            )
+        else:
+            normalized_recorded.append({"source": source, "value": value})
+
+    canonical_paths = sorted({str(Path(path).expanduser().resolve()) for path in video_paths})
+    probed: list[dict[str, str]] = []
+    probe_failures: list[str] = []
+    existing_paths = [Path(path) for path in canonical_paths if Path(path).is_file()]
+    missing_paths = [path for path in canonical_paths if not Path(path).is_file()]
+    for path in existing_paths:
+        attrs = probe_video_colorimetry_attrs(path)
+        raw_value = attrs.get("video_color_range")
+        if raw_value in (None, ""):
+            probe_failures.append(str(path))
+            continue
+        probed.append(
+            {
+                "source": "ffprobe_stream",
+                "path": str(path),
+                "value": normalize_observed_container_color_range(raw_value),
+            }
+        )
+
+    if probed:
+        if probe_failures:
+            raise ValueError(
+                "Exact container color-range observation is missing for referenced "
+                f"video path(s): {probe_failures!r}."
+            )
+        probed_values = {item["value"] for item in probed}
+        if len(probed_values) != 1:
+            raise ValueError(
+                "Referenced source videos have mixed container color-range "
+                f"observations: {probed!r}."
+            )
+        value = next(iter(probed_values))
+        recorded_disagreements = [
+            item for item in normalized_recorded if item["value"] != value
+        ]
+        if recorded_disagreements:
+            raise ValueError(
+                "ffprobe and recorded container color-range authorities disagree: "
+                f"ffprobe={probed!r}, recorded={recorded_disagreements!r}."
+            )
+        if missing_paths and not normalized_recorded:
+            raise ValueError(
+                "Some referenced source videos are unavailable for ffprobe and no "
+                "recorded observation covers them: "
+                f"{missing_paths!r}."
+            )
+        return value, {
+            "schema_id": "palette.container_color_range_observation.v1",
+            "value": value,
+            "authority": (
+                "ffprobe_stream_with_recorded_coverage"
+                if missing_paths
+                else "ffprobe_stream"
+            ),
+            "video_paths": canonical_paths,
+            "ffprobe_observations": probed,
+            "recorded_observations": normalized_recorded,
+            "superseded_recorded_observations": [],
+            "invalid_recorded_observations": invalid_recorded,
+            "ignored_recorded_observations": ignored,
+        }
+
+    if existing_paths and not normalized_recorded:
+        raise ValueError(
+            "ffprobe did not provide container color_range for referenced video "
+            f"path(s), and no exact recorded observation exists: {canonical_paths!r}."
+        )
+    recorded_values = {item["value"] for item in normalized_recorded}
+    if len(recorded_values) > 1:
+        raise ValueError(
+            "Recorded container color-range authorities disagree: "
+            f"{normalized_recorded!r}."
+        )
+    if len(recorded_values) != 1:
+        raise ValueError(
+            "Training crop materialization requires an exact observed container "
+            "color_range from ffprobe or recorded source metadata; no authority "
+            "was available."
+        )
+    value = next(iter(recorded_values))
+    return value, {
+        "schema_id": "palette.container_color_range_observation.v1",
+        "value": value,
+        "authority": "recorded_source_metadata",
+        "video_paths": canonical_paths,
+        "ffprobe_observations": [],
+        "recorded_observations": normalized_recorded,
+        "superseded_recorded_observations": [],
+        "invalid_recorded_observations": invalid_recorded,
+        "ignored_recorded_observations": ignored,
+    }
 
 
 def _resolve_crop_run(root: Any, crop_run: str | None) -> str:
@@ -859,6 +1042,28 @@ def regenerate_training_crops_pynvvc(
             frame_to_rows=frame_to_rows,
             max_frame=max_frame,
         )
+    color_range_video_paths: list[Path] = []
+    if resolved_video_path is not None:
+        color_range_video_paths.append(resolved_video_path)
+    elif clipped_mapping is not None:
+        color_range_video_paths.extend(
+            Path(str(path)) for path in clipped_mapping["video_paths"]
+        )
+    else:
+        color_range_video_paths.extend(
+            _cache_source_video_paths(
+                cache_manifest,
+                manifest_path=cache_manifest_path,
+            )
+        )
+    (
+        observed_container_color_range,
+        container_color_range_observation,
+    ) = _resolve_observed_container_color_range(
+        source_root=source_root,
+        source_group=source_group,
+        video_paths=color_range_video_paths,
+    )
     contract = (
         dict(cache_pixel_contract)
         if cache_pixel_contract is not None
@@ -906,6 +1111,8 @@ def regenerate_training_crops_pynvvc(
         "roi_chunk_len": int(layout.roi_chunk_len),
         "pixel_contract": contract,
         "pixel_contract_name": pixel_contract_name,
+        "container_color_range_observed": observed_container_color_range,
+        "container_color_range_observation": container_color_range_observation,
         "materialization_provider": materialization_provider,
         "materialization_provider_contract": list(
             TRAINING_CROP_MATERIALIZATION_PROVIDERS
@@ -980,7 +1187,8 @@ def regenerate_training_crops_pynvvc(
         "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
         "source_decode_surface": "nv12_y_plane_uint8",
         "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
-        "container_color_range_observed": "tv",
+        "container_color_range_observed": observed_container_color_range,
+        "container_color_range_observation": container_color_range_observation,
         "container_color_range_handling": contract.get(
             "container_color_range_handling"
         ),

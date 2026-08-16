@@ -72,6 +72,22 @@ jobs:
           python scripts/check_file_size_ratchet.py
           git diff --exit-code -- scripts/file_size_ratchet_baseline.json
 
+  observed-metadata-literals:
+    name: observed metadata literals
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Reject guessed observation metadata
+        run: python scripts/check_observed_metadata_literals.py
+
   quality:
     name: package and collection
     runs-on: ubuntu-latest
