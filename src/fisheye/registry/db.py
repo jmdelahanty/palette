@@ -65,8 +65,8 @@ from .acquisition_batches import (
 )
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
+from . import identity as registry_identity
 from .temp_store_guard import assert_temp_store_registration_allowed
-
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
     "Standalone eye-mask registry write paths are retired. Historical "
@@ -1289,7 +1289,7 @@ class Registry(
     def _init_schema(self) -> None:
         self.conn.execute("PRAGMA foreign_keys = ON;")
         self._ensure_schema_version_table()
-        self._apply_schema_migrations()
+        registry_identity.apply_migrations_and_validate_identity(self.conn, self._apply_schema_migrations)
 
     def _schema_migrations(self) -> List[Tuple[int, str, Callable[[], None]]]:
         return bind_migrations(self)
@@ -1368,14 +1368,14 @@ class Registry(
         if current is None:
             if self._has_legacy_schema():
                 # Existing registry predates schema_version tracking.
-                self.conn.execute("BEGIN IMMEDIATE;")
-                try:
-                    self._record_schema_version(version=latest, name="legacy_bootstrap")
-                    self.conn.execute(f"PRAGMA user_version = {int(latest)};")
-                    self.conn.commit()
-                except Exception:
-                    self.conn.rollback()
-                    raise
+                # Its historical migrations cannot be proven after the fact,
+                # so mint an identity that carries that uncertainty forever
+                # instead of silently presenting the database as verified.
+                registry_identity.bootstrap_legacy_registry_identity(
+                    self.conn,
+                    latest_schema_version=latest,
+                    minted_at_utc=_utc_now(),
+                )
                 return
             current = 0
 

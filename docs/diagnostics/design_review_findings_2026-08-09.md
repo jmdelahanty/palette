@@ -370,16 +370,14 @@ from their registered hash" are single queries/status lines.
 
 ## Wave 3 — Audit integrity
 
-**W3.1 — Registry instance identity.**
-No `registry_id`/UUID/`PRAGMA application_id` exists; a frozen cohort manifest records
-path + schema_version only (`cohorts/registry.py:498-503`) — cannot distinguish the
-canonical `/groups` registry from a stale copy (the class of bug that caused the
-"12 fish" under-selection). Mint an immutable identity row on `_init_schema`; bind
-`registry_uuid` into frozen manifests; make `legacy_bootstrap` (`db.py:1443-1452`)
-mint `legacy_bootstrap_unverified` instead of self-certifying as fully migrated.
-Fix the two docs still pointing at stale `/nvme1`:
-`docs/registry_data_governance_policy.md:173`, `docs/registry_browser/README.md:36`.
-Acceptance: manifests carry registry_uuid; docs point at the canonical path.
+**W3.1 — Registry instance identity. [IMPLEMENTED]**
+Migration 71 creates exactly one immutable `registry_identity` row containing a
+canonical UUID, minting provenance, and timestamp. Managed registries use
+`schema_managed`; an unversioned legacy bootstrap is explicitly recorded as
+`legacy_bootstrap_unverified`. New frozen cohort manifests bind and hash this UUID,
+while historical v1 manifests remain readable. Cohort consumers can require the
+supplied registry to match the frozen UUID before submission. Registry documentation
+and browser examples now point at the canonical `/groups` registry.
 
 **W3.2 — Wire the existing doc/schema checkers into CI.**
 Two additions next to the ratchet step:

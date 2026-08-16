@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from uuid import UUID
 
 import pytest
 
@@ -13,14 +14,17 @@ from fisheye.analytics_exports.chaser_authority import (
     build_chaser_export_source_authority,
     write_chaser_export_authority_set,
 )
+from fisheye.cohorts.cli import main as cohort_cli_main
 from fisheye.cohorts.registry import (
     CohortSelectionError,
     build_cohort_plan,
+    compute_manifest_sha256,
     freeze_cohort,
     validate_frozen_cohort,
+    validate_frozen_cohort_registry_binding,
 )
 from fisheye.cohorts.release import main as cohort_release_main
-from fisheye.cohorts.spec import CohortSpec, CohortSpecError
+from fisheye.cohorts.spec import CohortSpec, CohortSpecError, canonical_sha256
 from fisheye.registry.db import Registry
 
 
@@ -191,7 +195,14 @@ def test_exact_protocol_freeze_includes_every_matching_dataset(tmp_path: Path) -
     plan = build_cohort_plan(registry_path, _spec())
     assert plan["summary"]["included_count"] == 2
     assert plan["summary"]["excluded_count"] == 1
+    assert plan["schema_version"] == 2
+    assert str(UUID(plan["registry"]["registry_uuid"])) == (
+        plan["registry"]["registry_uuid"]
+    )
+    assert plan["registry"]["identity_provenance"] == "schema_managed"
     frozen = freeze_cohort(plan)
+    assert frozen["schema_version"] == 2
+    assert frozen["registry"]["registry_uuid"] == plan["registry"]["registry_uuid"]
     assert frozen["member_count"] == 2
     assert [row["dataset_id"] for row in frozen["members"]] == [
         "matching_a",
@@ -205,6 +216,95 @@ def test_exact_protocol_freeze_includes_every_matching_dataset(tmp_path: Path) -
     errors = validate_frozen_cohort(frozen)
     assert any("recording_id is duplicated" in error for error in errors)
     assert "manifest_sha256 mismatch" in errors
+
+
+def test_frozen_cohort_registry_binding_rejects_another_registry(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.sqlite"
+    source = Registry(source_path)
+    _seed_dataset(
+        source,
+        tmp_path,
+        dataset_id="matching",
+        recording_id="recording",
+        protocol_hash=HASH_A,
+    )
+    source.close()
+    manifest = freeze_cohort(build_cohort_plan(source_path, _spec()))
+
+    assert validate_frozen_cohort_registry_binding(manifest, source_path) == []
+
+    other_path = tmp_path / "other.sqlite"
+    Registry(other_path).close()
+    errors = validate_frozen_cohort_registry_binding(manifest, other_path)
+    assert len(errors) == 1
+    assert "registry UUID mismatch" in errors[0]
+
+    manifest_path = tmp_path / "cohort.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert (
+        cohort_cli_main(
+            [
+                "validate",
+                str(manifest_path),
+                "--check-hash",
+                "--registry",
+                str(source_path),
+            ]
+        )
+        == 0
+    )
+    assert (
+        cohort_cli_main(
+            [
+                "validate",
+                str(manifest_path),
+                "--check-hash",
+                "--registry",
+                str(other_path),
+            ]
+        )
+        == 2
+    )
+
+
+def test_legacy_frozen_cohort_remains_structurally_valid_without_registry_uuid(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+    manifest = {
+        "schema_id": "palette.frozen_cohort_manifest",
+        "schema_version": 1,
+        "manifest_canonicalization": "json_sorted_keys_no_manifest_sha256_v1",
+        "created_utc": "2026-08-16T00:00:00Z",
+        "cohort_id": "legacy",
+        "cohort_name": "Legacy",
+        "cohort_query": {"schema_id": "legacy"},
+        "cohort_query_sha256": canonical_sha256({"schema_id": "legacy"}),
+        "registry": {
+            "query_snapshot_sha256": "a" * 64,
+            "access_mode": "read_only",
+        },
+        "selection_policy": {"include_every_match": True, "limit": None},
+        "member_count": 1,
+        "members": [
+            {
+                "dataset_id": "dataset",
+                "recording_id": "recording",
+                "zarr_path": "/recording.zarr",
+                "zarr_origin": "source",
+                "zarr_use": "analysis",
+                "dataset_status": "active",
+            }
+        ],
+        "selection_summary": {"included_count": 1, "blocked_count": 0},
+    }
+    manifest["manifest_sha256"] = compute_manifest_sha256(manifest)
+
+    assert validate_frozen_cohort(manifest) == []
+    assert validate_frozen_cohort_registry_binding(manifest, registry_path) == []
 
 
 def test_selected_biology_is_and_across_fields_and_or_within_field(

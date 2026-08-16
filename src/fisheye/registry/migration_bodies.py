@@ -9,6 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
+from fisheye.shared.batch_logging import utc_now
+
+from .identity import REGISTRY_IDENTITY_SCHEMA_MANAGED, ensure_registry_identity
 from .stage_catalog import recording_tuning_stage_ids
 
 
@@ -8512,3 +8515,12 @@ class RegistryMigrationMixin:
             },
         )
         self._migration_056_acquisition_video_streams_registry()
+
+    def _migration_071_registry_instance_identity(self) -> None:
+        """Mint the immutable identity of this logical registry instance."""
+
+        ensure_registry_identity(
+            self.conn,
+            identity_provenance=REGISTRY_IDENTITY_SCHEMA_MANAGED,
+            minted_at_utc=utc_now(),
+        )
