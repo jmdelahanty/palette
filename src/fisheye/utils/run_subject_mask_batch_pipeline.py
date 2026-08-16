@@ -603,6 +603,13 @@ def _inference_command(
     source_roi_cache_row_index_path = getattr(args, "source_roi_cache_row_index_path", None)
     if source_roi_cache_row_index_path is not None:
         cmd.extend(["--source-roi-cache-row-index-path", str(source_roi_cache_row_index_path)])
+    expected_work_units_manifest = getattr(
+        args, "expected_work_units_manifest", None
+    )
+    if expected_work_units_manifest is not None:
+        cmd.extend(
+            ["--expected-work-units-manifest", str(expected_work_units_manifest)]
+        )
     for attr_name, flag in (
         ("source_collection_id", "--source-collection-id"),
         ("source_collection_path", "--source-collection-path"),
@@ -1446,6 +1453,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-cache-policy", choices=("never", "auto", "always"), default="auto")
     parser.add_argument("--roi-cache-dir", type=Path)
     parser.add_argument("--roi-cache-manifest", type=Path)
+    parser.add_argument("--expected-work-units-manifest", type=Path)
     parser.add_argument(
         "--source-roi-cache-alias-manifest",
         type=Path,

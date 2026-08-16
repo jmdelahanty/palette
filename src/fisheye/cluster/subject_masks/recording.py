@@ -11,7 +11,71 @@ from fisheye.shared.flat_roi_cache import (
     cleanup_staged_flat_roi_cache,
     stage_flat_roi_cache_manifest,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils import run_subject_mask_batch_pipeline as pipeline
+
+
+def _recording_work_unit_args(manifest_path: Path) -> list[str]:
+    path = manifest_path.expanduser().resolve()
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read recording work-unit manifest: {path}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Recording work-unit manifest must be one JSON object.")
+    units = document.get("units")
+    if (
+        document.get("schema_id") != "palette.subject_mask.expected_work_units"
+        or document.get("schema_version") != 1
+        or not isinstance(units, list)
+        or len(units) != 1
+        or document.get("units_digest") != canonical_json_sha256(units)
+    ):
+        raise ValueError(
+            "Recording inference requires one exact digest-bound work unit."
+        )
+    unit = units[0]
+    if not isinstance(unit, dict):
+        raise ValueError("Recording work unit must be one JSON object.")
+    required = {
+        "work_unit_id",
+        "work_unit_index",
+        "source_clip_id",
+        "source_clip_index",
+        "frame_start",
+        "frame_stop",
+        "row_start",
+        "row_stop",
+    }
+    if set(unit) != required or unit.get("work_unit_index") != 0:
+        raise ValueError("Recording work-unit fields are not exact.")
+    recording_id = str(unit.get("source_clip_id") or "").strip()
+    work_unit_id = str(unit.get("work_unit_id") or "").strip()
+    if (
+        not recording_id
+        or not work_unit_id
+        or unit.get("source_clip_index") != 0
+        or unit.get("frame_start") != 0
+        or unit.get("row_start") != 0
+    ):
+        raise ValueError("Recording work-unit identity or origin is invalid.")
+    return [
+        "--expected-work-units-manifest",
+        str(path),
+        "--source-collection-id",
+        recording_id,
+        "--source-collection-path",
+        str(path),
+        "--source-clip-id",
+        recording_id,
+        "--source-clip-index",
+        "0",
+        "--source-work-unit-id",
+        work_unit_id,
+        "--source-shard-id",
+        work_unit_id,
+    ]
+
 
 def _stage_flat_roi_cache_manifest(
     manifest_path: Path,
@@ -143,6 +207,13 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
                 str(args.roi_cache_manifest),
             ]
         )
+        expected_work_units_manifest = getattr(
+            args, "expected_work_units_manifest", None
+        )
+        if expected_work_units_manifest is not None:
+            command.extend(
+                _recording_work_unit_args(Path(expected_work_units_manifest))
+            )
     else:
         command.extend(
             [
@@ -185,6 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--refined-keypoint-run")
     parser.add_argument("--roi-cache-manifest", type=Path)
+    parser.add_argument("--expected-work-units-manifest", type=Path)
     parser.add_argument("--roi-cache-staging-dir", type=Path)
     parser.add_argument("--device", default="0")
     parser.add_argument("--batch-size", type=int, default=128)

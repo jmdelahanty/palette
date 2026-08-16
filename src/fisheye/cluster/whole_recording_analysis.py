@@ -308,6 +308,7 @@ def _build_subject_mask_inference_job(
     model_label_schema_id: str,
     model_top_k: int,
     handoff_package_dir: Path | None,
+    expected_work_units_manifest: Path,
 ) -> LsfJob:
     target_id = target.target.target_id
     safe_target = safe_component(target_id, default="target", max_length=56)
@@ -346,6 +347,8 @@ def _build_subject_mask_inference_job(
         str(target.cache.manifest_path),
         "--roi-cache-staging-dir",
         scratch_stage,
+        "--expected-work-units-manifest",
+        str(expected_work_units_manifest),
         "--batch-size",
         str(int(batch_size)),
         "--model-coverage-class",
@@ -735,6 +738,7 @@ def build_plan(
             model_label_schema_id=model_label_schema_id,
             model_top_k=model_top_k,
             handoff_package_dir=handoff_package_dir,
+            expected_work_units_manifest=expected_work_units_manifest,
         )
         refinement_job = jobs_by_key[target.refinement_job_key]
         finalization_job = _build_subject_mask_finalization_job(

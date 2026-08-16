@@ -564,6 +564,9 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     assert "--roi-cache-manifest" in inference_command
     assert "--roi-cache-staging-dir" in inference_command
     assert "--raw-worker-run" in inference_command
+    inference_manifest_index = (
+        inference_command.index("--expected-work-units-manifest") + 1
+    )
     cleanup_paths = [
         inference_command[index + 1]
         for index, argument in enumerate(inference_command)
@@ -583,6 +586,7 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     publication_command = jobs["mask_publish:target_0"].command
     manifest_index = publication_command.index("--expected-work-units-manifest") + 1
     expected_manifest = Path(publication_command[manifest_index])
+    assert Path(inference_command[inference_manifest_index]) == expected_manifest
     assert expected_manifest == (
         tmp_path
         / "combined"

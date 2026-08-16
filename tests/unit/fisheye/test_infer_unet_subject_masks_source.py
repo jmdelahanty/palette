@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import sys
 from threading import current_thread
@@ -194,6 +195,121 @@ def test_complete_partition_role_rejects_partial_frame_window_rows() -> None:
             crop_source=source,
             selected_crop_rows=source.source_crop_row_ids,
             total_rois=1,
+            args=args,
+        )
+
+
+def _complete_recording_work_unit_fixture(tmp_path: Path) -> tuple[object, object, object]:
+    crop = _FakeGroup()
+    crop.create_array(
+        "frame_indices",
+        data=np.asarray([0, 0, 2, 3], dtype=np.int64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 2, 2, 3, 4], dtype=np.int64),
+        overwrite=True,
+    )
+    units = [
+        {
+            "work_unit_id": "recording-1:whole_recording",
+            "work_unit_index": 0,
+            "source_clip_id": "recording-1",
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": 4,
+            "row_start": 0,
+            "row_stop": 4,
+        }
+    ]
+    manifest_path = tmp_path / "recording.expected_work_units.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_id": "palette.subject_mask.expected_work_units",
+                "schema_version": 1,
+                "units": units,
+                "units_digest": mod._canonical_document_sha256(units),
+            }
+        ),
+        encoding="utf-8",
+    )
+    pixel_manifest = {
+        "schema": "palette_roi_cache_flat_bin_v1",
+        "layout": "flat_bin_v1",
+        "cache_complete": True,
+        "cache_key": "1" * 64,
+        "array": {
+            "shape": [4, 2, 2],
+            "dtype": "uint8",
+            "order": "C",
+            "sha256": "2" * 64,
+        },
+    }
+    source = SimpleNamespace(
+        pixel_materialization_id=None,
+        frame_indices=np.asarray([0, 0, 2, 3], dtype=np.int64),
+        roi_shape=(2, 2),
+        _roi_images=SimpleNamespace(manifest=pixel_manifest),
+    )
+    args = SimpleNamespace(
+        expected_work_units_manifest=manifest_path,
+        roi_work_package_role=None,
+        source_collection_id="recording-1",
+        source_collection_path=str(manifest_path.resolve()),
+        source_clip_id="recording-1",
+        source_clip_index=0,
+        source_work_unit_id="recording-1:whole_recording",
+        source_shard_id="recording-1:whole_recording",
+    )
+    return crop, source, args
+
+
+def test_complete_recording_work_unit_binds_full_flat_cache(
+    tmp_path: Path,
+) -> None:
+    crop, source, args = _complete_recording_work_unit_fixture(tmp_path)
+
+    attrs = mod._roi_work_package_publication_attrs(
+        crop_group=crop,
+        crop_source=source,
+        selected_crop_rows=None,
+        total_rois=4,
+        args=args,
+    )
+
+    assert attrs["roi_work_package_role"] == "complete_recording_work_unit"
+    assert attrs["canonical_finalization_policy"] == (
+        "collection_shard_finalization_allowed"
+    )
+    contract = attrs["collection_partition_contract"]
+    assert contract["schema_id"] == (
+        "palette.subject_mask.complete_recording_work_unit"
+    )
+    assert contract["payload"]["frame_window"]["end_frame_exclusive"] == 4
+    assert contract["payload"]["crop_rows"] == {
+        "start": 0,
+        "stop": 4,
+        "count": 4,
+        "source_crop_total_rows": 4,
+    }
+
+
+def test_complete_recording_work_unit_rejects_stale_manifest_digest(
+    tmp_path: Path,
+) -> None:
+    crop, source, args = _complete_recording_work_unit_fixture(tmp_path)
+    document = json.loads(args.expected_work_units_manifest.read_text(encoding="utf-8"))
+    document["units"][0]["row_stop"] = 3
+    args.expected_work_units_manifest.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="digest-bound"):
+        mod._roi_work_package_publication_attrs(
+            crop_group=crop,
+            crop_source=source,
+            selected_crop_rows=None,
+            total_rois=4,
             args=args,
         )
 

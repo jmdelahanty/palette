@@ -662,6 +662,7 @@ def test_build_archive_plan_finalization_mode_targets_matching_subject_run(tmp_p
 
 def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_path: Path) -> None:
     manifest = tmp_path / "sample.flat_roi_cache.json"
+    work_units = tmp_path / "recording.expected_work_units.json"
     args = SimpleNamespace(
         registry=tmp_path / "registry.sqlite",
         model_coverage_class="dense_all_components",
@@ -687,6 +688,13 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
         roi_live_gpu_chunk_frames=32,
         roi_cache_dir=None,
         roi_cache_manifest=manifest,
+        expected_work_units_manifest=work_units,
+        source_collection_id="recording-1",
+        source_collection_path=str(work_units),
+        source_clip_id="recording-1",
+        source_clip_index=0,
+        source_work_unit_id="recording-1:whole_recording",
+        source_shard_id="recording-1:whole_recording",
         overwrite=False,
     )
     plan = mod.ArchivePlan(
@@ -706,6 +714,10 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
 
     assert "--roi-cache-manifest" in cmd
     assert cmd[cmd.index("--roi-cache-manifest") + 1] == str(manifest)
+    assert cmd[cmd.index("--expected-work-units-manifest") + 1] == str(work_units)
+    assert cmd[cmd.index("--source-work-unit-id") + 1] == (
+        "recording-1:whole_recording"
+    )
     assert "--roi-cache-expected-archive-path" not in cmd
     assert "--profile-timings" not in cmd
     assert "--model-require-unique" in cmd

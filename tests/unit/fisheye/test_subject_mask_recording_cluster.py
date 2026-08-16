@@ -56,6 +56,7 @@ def _args(tmp_path: Path, *, stage: str) -> SimpleNamespace:
         model_input_size=512,
         model_input_transform="auto",
         roi_cache_manifest=tmp_path / "durable.flat_roi_cache.json",
+        expected_work_units_manifest=None,
         progress_dir=tmp_path / "progress",
         handoff_package_dir=None,
         refined_keypoint_run="refined_keypoints_exact",
@@ -130,6 +131,56 @@ def test_inference_pipeline_has_no_keypoint_dependency(tmp_path: Path) -> None:
     assert command[command.index("--model-input-transform") + 1] == "auto"
     assert command[command.index("--source-roi-cache-alias-manifest") + 1] == str(
         _args(tmp_path, stage="inference").roi_cache_manifest
+    )
+
+
+def test_inference_pipeline_binds_exact_recording_work_unit(tmp_path: Path) -> None:
+    args = _args(tmp_path, stage="inference")
+    units = [
+        {
+            "work_unit_id": "recording-1:whole_recording",
+            "work_unit_index": 0,
+            "source_clip_id": "recording-1",
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": 4,
+            "row_start": 0,
+            "row_stop": 2,
+        }
+    ]
+    manifest = tmp_path / "recording.expected_work_units.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_id": "palette.subject_mask.expected_work_units",
+                "schema_version": 1,
+                "units": units,
+                "units_digest": mod.canonical_json_sha256(units),
+            }
+        ),
+        encoding="utf-8",
+    )
+    args.expected_work_units_manifest = manifest
+
+    command = mod._pipeline_args(
+        args,
+        cache_manifest=tmp_path / "staged.flat_roi_cache.json",
+    )
+
+    assert command[command.index("--expected-work-units-manifest") + 1] == str(
+        manifest.resolve()
+    )
+    assert command[command.index("--source-collection-id") + 1] == "recording-1"
+    assert command[command.index("--source-collection-path") + 1] == str(
+        manifest.resolve()
+    )
+    assert command[command.index("--source-clip-id") + 1] == "recording-1"
+    assert command[command.index("--source-clip-index") + 1] == "0"
+    assert command[command.index("--source-work-unit-id") + 1] == (
+        "recording-1:whole_recording"
+    )
+    assert command[command.index("--source-shard-id") + 1] == (
+        "recording-1:whole_recording"
     )
 
 
