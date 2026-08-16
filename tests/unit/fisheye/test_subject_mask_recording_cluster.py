@@ -40,7 +40,9 @@ def _args(tmp_path: Path, *, stage: str) -> SimpleNamespace:
         registry=tmp_path / "registry.sqlite",
         run_label="combined_canary",
         stage=stage,
-        crop_run="crop_exact",
+        crop_run=None,
+        pixel_crop_run="crop_hybrid_pixels",
+        geometry_crop_run="crop_strict_geometry_v2",
         device="0",
         batch_size=128,
         mask_probs_shard_rois=2048,
@@ -49,6 +51,10 @@ def _args(tmp_path: Path, *, stage: str) -> SimpleNamespace:
         model_component_coverage_key="body+eyes+swim_bladder",
         model_label_schema_id="subject_v1_union",
         model_top_k=5,
+        model_set_id="subject_mask_set_exact",
+        model_run_id="subject_mask_run_exact",
+        model_input_size=512,
+        model_input_transform="auto",
         progress_dir=tmp_path / "progress",
         handoff_package_dir=None,
         refined_keypoint_run="refined_keypoints_exact",
@@ -112,6 +118,15 @@ def test_inference_pipeline_has_no_keypoint_dependency(tmp_path: Path) -> None:
     )
     assert "--require-production-proof" in command
     assert command[command.index("--mask-probs-shard-rois") + 1] == "2048"
+    assert command[command.index("--crop-run") + 1] == "crop_hybrid_pixels"
+    assert command[command.index("--model-set-id") + 1] == (
+        "subject_mask_set_exact"
+    )
+    assert command[command.index("--model-run-id") + 1] == (
+        "subject_mask_run_exact"
+    )
+    assert command[command.index("--model-input-size") + 1] == "512"
+    assert command[command.index("--model-input-transform") + 1] == "auto"
 
 
 def test_finalization_pipeline_binds_exact_keypoints_and_sampled_contours(
@@ -135,3 +150,6 @@ def test_finalization_pipeline_binds_exact_keypoints_and_sampled_contours(
         "subject_mask_shard_runs"
     )
     assert "--require-production-proof" in command
+    assert command[command.index("--crop-run") + 1] == (
+        "crop_strict_geometry_v2"
+    )

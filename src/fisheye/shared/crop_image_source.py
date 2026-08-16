@@ -51,6 +51,11 @@ from fisheye.shared.zarr.crop_consumer import (
     strict_crop_fixed_roi_shape,
     strict_crop_source_frame_shape,
 )
+from fisheye.shared.zarr.crop_manifest import (
+    CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    CROP_RUN_MANIFEST_ATTRIBUTE,
+    validate_crop_run_manifest,
+)
 from fisheye.shared.zarr_run_completion import (
     is_run_complete_in_parent,
     is_run_selector_eligible,
@@ -815,6 +820,8 @@ class CropImageSource:
     source_crop_row_ids: np.ndarray | None = None
     pixel_materialization_id: str | None = None
     pixel_materialization_manifest: str | None = None
+    pixel_source_crop_run_name: str | None = None
+    geometry_crop_rebase: dict[str, Any] | None = None
     _roi_images: object | None = None
     _images_full: object | None = None
     _external_reader: _ExternalFrameReader | None = None
@@ -1363,6 +1370,275 @@ class CropImageSource:
         except Exception:
             package.close()
             raise
+
+    def bind_geometry_crop(
+        self,
+        geometry_crop_run: str,
+        *,
+        zarr_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Rebind authenticated pixels to one exact strict crop-v2 rowset.
+
+        Pixel bytes remain owned by the already-open source (flat cache or work
+        package).  Only the logical crop identity and placement are rebound, and
+        only after an exact instance-keyed comparison proves that every consumed
+        pixel row represents the same observation and crop window.
+        """
+
+        requested = _normalize_run_name(geometry_crop_run)
+        if requested is None:
+            raise ValueError("geometry_crop_run must be one nonempty run name.")
+        if self.geometry_crop_rebase is not None:
+            if requested != self.crop_run_name:
+                raise ValueError(
+                    "CropImageSource is already bound to a different geometry crop."
+                )
+            return dict(self.geometry_crop_rebase)
+        if requested == self.crop_run_name:
+            raise ValueError(
+                "Geometry rebase requires distinct pixel-source and geometry crop runs."
+            )
+
+        source_group = self.crop_group
+        source_run_name = self.crop_run_name
+        crop_parent, target_group, target_run_name = resolve_crop_run(
+            self.root,
+            crop_run=requested,
+            zarr_path=zarr_path,
+        )
+        if not is_run_complete_in_parent(
+            crop_parent,
+            target_group,
+            legacy_default=False,
+        ):
+            raise ValueError(
+                f"Geometry crop {target_run_name!r} is not strictly complete."
+            )
+        manifest = target_group.attrs.get(CROP_RUN_MANIFEST_ATTRIBUTE)
+        if not isinstance(manifest, Mapping):
+            raise ValueError(
+                f"Geometry crop {target_run_name!r} lacks its strict run_manifest."
+            )
+        manifest_errors = validate_crop_run_manifest(manifest)
+        if manifest_errors:
+            raise ValueError(
+                f"Geometry crop {target_run_name!r} has an invalid run_manifest: "
+                + "; ".join(manifest_errors)
+            )
+        if manifest.get("schema_version") != (
+            CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Geometry rebase requires the coordinate-aware crop run manifest v2."
+            )
+        payload = manifest.get("payload")
+        if not isinstance(payload, Mapping) or payload.get("run_id") != target_run_name:
+            raise ValueError(
+                "Geometry crop group name differs from its run_manifest run_id."
+            )
+
+        target_roi_shape = _resolve_roi_shape(
+            target_group,
+            crop_run_name=target_run_name,
+        )
+        if tuple(target_roi_shape) != tuple(self.roi_shape):
+            raise ValueError(
+                "Pixel-source and geometry crop ROI extents differ: "
+                f"{self.roi_shape!r} != {target_roi_shape!r}."
+            )
+
+        source_row_count = int(source_group["frame_indices"].shape[0])
+        if self.source_crop_row_ids is None:
+            source_rows = np.arange(source_row_count, dtype=np.int64)
+        else:
+            source_rows = np.asarray(
+                self.source_crop_row_ids,
+                dtype=np.int64,
+            ).reshape(-1)
+        if source_rows.shape != (self.total_rois,):
+            raise ValueError(
+                "Pixel-source crop-row selection does not match its pixel row count."
+            )
+        if (
+            source_rows.size == 0
+            or int(source_rows.min()) < 0
+            or int(source_rows.max()) >= source_row_count
+            or np.unique(source_rows).size != source_rows.size
+        ):
+            raise ValueError(
+                "Pixel-source crop rows must be one nonempty unique in-range selection."
+            )
+
+        required_target_arrays = {
+            "instance_key": (np.dtype(np.uint64), ()),
+            "frame_indices": (np.dtype(np.int64), ()),
+            "source_acquisition_frame_index": (np.dtype(np.int64), ()),
+            "roi_coordinates_full": (np.dtype(np.int32), (2,)),
+            "source_crop_xywh": (np.dtype(np.float32), (4,)),
+        }
+        target_row_count: int | None = None
+        for name, (expected_dtype, trailing_shape) in required_target_arrays.items():
+            if name not in target_group:
+                raise ValueError(
+                    f"Geometry crop {target_run_name!r} lacks required array {name!r}."
+                )
+            array = target_group[name]
+            shape = tuple(int(value) for value in array.shape)
+            if len(shape) != 1 + len(trailing_shape) or shape[1:] != trailing_shape:
+                raise ValueError(
+                    f"Geometry crop array {name!r} has invalid shape {shape!r}."
+                )
+            if target_row_count is None:
+                target_row_count = shape[0]
+            elif shape[0] != target_row_count:
+                raise ValueError("Geometry crop arrays have inconsistent row counts.")
+            if np.dtype(array.dtype) != expected_dtype:
+                raise ValueError(
+                    f"Geometry crop array {name!r} has dtype {array.dtype}, "
+                    f"expected {expected_dtype}."
+                )
+        assert target_row_count is not None
+
+        if "instance_key" not in source_group:
+            raise ValueError("Pixel-source crop lacks required instance_key identity.")
+        source_keys = np.asarray(
+            source_group["instance_key"][source_rows],
+            dtype=np.uint64,
+        ).reshape(-1)
+        target_keys = np.asarray(
+            target_group["instance_key"][:],
+            dtype=np.uint64,
+        ).reshape(-1)
+        if np.unique(source_keys).size != source_keys.size:
+            raise ValueError("Pixel-source instance_key values are not unique.")
+        if np.unique(target_keys).size != target_keys.size:
+            raise ValueError("Geometry-crop instance_key values are not unique.")
+        target_order = np.argsort(target_keys, kind="stable")
+        sorted_target_keys = target_keys[target_order]
+        positions = np.searchsorted(sorted_target_keys, source_keys)
+        if (
+            np.any(positions >= sorted_target_keys.size)
+            or not np.array_equal(sorted_target_keys[positions], source_keys)
+        ):
+            raise ValueError(
+                "Geometry crop does not contain every consumed pixel-source instance_key."
+            )
+        target_rows = np.asarray(target_order[positions], dtype=np.int64)
+
+        active_frames = np.asarray(self.frame_indices, dtype=np.int64).reshape(-1)
+        source_frames = np.asarray(
+            source_group["frame_indices"][source_rows],
+            dtype=np.int64,
+        ).reshape(-1)
+        active_origins = np.asarray(self.roi_coordinates_full, dtype=np.int32)
+        source_origins = np.asarray(
+            source_group["roi_coordinates_full"][source_rows],
+            dtype=np.int32,
+        )
+        if not np.array_equal(active_frames, source_frames) or not np.array_equal(
+            active_origins,
+            source_origins,
+        ):
+            raise ValueError(
+                "Active pixel materialization rows differ from their source crop binding."
+            )
+
+        exact_arrays = (
+            "frame_indices",
+            "source_acquisition_frame_index",
+            "roi_coordinates_full",
+            "source_refined_row_ids",
+            "source_detect_row_index",
+            "source_clip_indices",
+            "source_clip_local_frame_indices",
+        )
+        compared_arrays: list[str] = []
+        for name in exact_arrays:
+            if name not in source_group or name not in target_group:
+                continue
+            source_values = np.asarray(source_group[name][source_rows])
+            target_values = np.asarray(target_group[name][target_rows])
+            if source_values.shape != target_values.shape or not np.array_equal(
+                source_values,
+                target_values,
+            ):
+                raise ValueError(
+                    f"Geometry crop differs from pixel-source rows for {name!r}."
+                )
+            compared_arrays.append(name)
+
+        if "source_crop_xywh" not in source_group:
+            raise ValueError("Pixel-source crop lacks source_crop_xywh placement.")
+        source_xywh = np.asarray(source_group["source_crop_xywh"][source_rows])
+        if source_xywh.shape != (self.total_rois, 4) or not np.isfinite(
+            source_xywh
+        ).all():
+            raise ValueError("Pixel-source source_crop_xywh is not finite [N,4].")
+        normalized_source_xywh = source_xywh.astype(np.float32, copy=False)
+        target_xywh = np.asarray(target_group["source_crop_xywh"][target_rows])
+        if not np.array_equal(normalized_source_xywh, target_xywh):
+            raise ValueError(
+                "Geometry crop source_crop_xywh differs after strict float32 normalization."
+            )
+
+        target_origins = np.asarray(
+            target_group["roi_coordinates_full"][target_rows],
+            dtype=np.int32,
+        )
+        target_frames = np.asarray(
+            target_group["frame_indices"][target_rows],
+            dtype=np.int64,
+        )
+        if not np.array_equal(target_origins, target_xywh[:, :2].astype(np.int32)):
+            raise ValueError(
+                "Geometry crop ROI origins differ from its strict source_crop_xywh."
+            )
+
+        target_reference = build_crop_run_reference(
+            target_group,
+            run_id=target_run_name,
+        )
+        row_mapping = np.ascontiguousarray(
+            np.column_stack((source_rows, target_rows)).astype("<i8", copy=False)
+        )
+        evidence: dict[str, Any] = {
+            "schema_id": "palette.crop_pixel_geometry_rebase",
+            "schema_version": 1,
+            "operation": "exact_instance_key_subset_rebind_v1",
+            "pixel_source_crop_run": source_run_name,
+            "geometry_crop_run": target_run_name,
+            "geometry_crop_reference": target_reference,
+            "row_count": int(self.total_rois),
+            "row_mapping_sha256": hashlib.sha256(
+                row_mapping.view(np.uint8)
+            ).hexdigest(),
+            "instance_key_sha256": hashlib.sha256(
+                np.ascontiguousarray(source_keys.astype("<u8", copy=False)).view(
+                    np.uint8
+                )
+            ).hexdigest(),
+            "compared_arrays": compared_arrays,
+            "source_crop_xywh_normalization": "finite_values_cast_to_float32_exact_target_match_v1",
+            "source_row_signature_comparison": "intentionally_omitted_different_publication_context",
+            "validation": {
+                "target_strictly_complete": True,
+                "target_coordinate_manifest_v2_valid": True,
+                "instance_keys_unique_and_complete": True,
+                "active_pixel_binding_matches_source": True,
+                "row_identity_and_placement_match": True,
+            },
+        }
+
+        self.pixel_source_crop_run_name = source_run_name
+        self.crop_group = target_group
+        self.crop_run_name = target_run_name
+        self.storage_mode = _resolve_storage_mode(target_group)
+        self.roi_shape = target_roi_shape
+        self.roi_coordinates_full = np.ascontiguousarray(target_origins)
+        self.frame_indices = np.ascontiguousarray(target_frames)
+        self.source_crop_row_ids = np.ascontiguousarray(target_rows)
+        self.geometry_crop_rebase = evidence
+        return dict(evidence)
 
     @property
     def total_rois(self) -> int:

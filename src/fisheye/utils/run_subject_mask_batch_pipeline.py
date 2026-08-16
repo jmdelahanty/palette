@@ -548,6 +548,9 @@ def _inference_command(
         "--roi-live-gpu-chunk-frames",
         str(args.roi_live_gpu_chunk_frames),
     ]
+    geometry_crop_run = getattr(args, "geometry_crop_run", None)
+    if geometry_crop_run is not None:
+        cmd.extend(["--geometry-crop-run", str(geometry_crop_run)])
     if plan.assignment_keypoint_group is not None and plan.assignment_keypoint_run is not None:
         cmd.extend(
             [
@@ -566,6 +569,22 @@ def _inference_command(
         cmd.append("--model-require-unique")
     if args.model_include_non_success:
         cmd.append("--model-include-non-success")
+    model_set_id = getattr(args, "model_set_id", None)
+    model_run_id = getattr(args, "model_run_id", None)
+    if bool(model_set_id) != bool(model_run_id):
+        raise ValueError(
+            "Exact subject-mask model selection requires both --model-set-id "
+            "and --model-run-id."
+        )
+    if model_set_id is not None and model_run_id is not None:
+        cmd.extend(["--model-set-id", str(model_set_id)])
+        cmd.extend(["--model-run-id", str(model_run_id)])
+    model_input_size = getattr(args, "model_input_size", None)
+    if model_input_size is not None:
+        cmd.extend(["--model-input-size", str(int(model_input_size))])
+    model_input_transform = getattr(args, "model_input_transform", None)
+    if model_input_transform is not None:
+        cmd.extend(["--model-input-transform", str(model_input_transform)])
     if args.roi_cache_dir is not None:
         cmd.extend(["--roi-cache-dir", str(args.roi_cache_dir)])
     if args.roi_cache_manifest is not None:
@@ -1385,6 +1404,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicit crop_runs child to use for inference instead of the archive's latest crop run.",
     )
     parser.add_argument(
+        "--geometry-crop-run",
+        help=(
+            "Optional strict crop-v2 geometry authority paired with pixels from "
+            "--crop-run. Valid only for a single selected archive."
+        ),
+    )
+    parser.add_argument(
         "--no-assignment-keypoints",
         action="store_true",
         help="Do not attach an assignment-keypoint run to inference-only raw subject masks.",
@@ -1464,6 +1490,28 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-component-coverage-key", default="body+eyes+swim_bladder")
     parser.add_argument("--model-label-schema-id", default="subject_v1_union")
     parser.add_argument("--model-top-k", type=int, default=5)
+    parser.add_argument(
+        "--model-set-id",
+        help="Require one exact subject-mask registry set id.",
+    )
+    parser.add_argument(
+        "--model-run-id",
+        help="Require one exact subject-mask registry run id.",
+    )
+    parser.add_argument(
+        "--model-input-size",
+        type=int,
+        help=(
+            "Optional square model input extent. For the current zebrafish model, "
+            "pass 512 to zero-pad native 384x384 crops before inference."
+        ),
+    )
+    parser.add_argument(
+        "--model-input-transform",
+        choices=("auto", "identity", "pad_to_size"),
+        default="auto",
+        help="Reversible native-ROI to model-input transform (default: auto).",
+    )
     parser.add_argument("--model-require-unique", action="store_true")
     parser.add_argument("--model-include-non-success", action="store_true")
     parser.add_argument("--metric-level", choices=("cheap", "full"), default="cheap")
@@ -1644,6 +1692,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if bool(args.model_set_id) != bool(args.model_run_id):
+        parser.error(
+            "--model-set-id and --model-run-id must be provided together."
+        )
     args.registry = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     dry_run = not bool(args.apply)
     subject_run = args.subject_run_name or f"subject_masks_unet_registry_{args.run_label}"
@@ -1705,6 +1757,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     if args.crop_run is not None and len(all_plans) > 1:
         print("--crop-run can only be used when exactly one archive is selected.", file=sys.stderr)
+        return 2
+    if args.geometry_crop_run is not None and len(all_plans) > 1:
+        print(
+            "--geometry-crop-run can only be used when exactly one archive is selected.",
+            file=sys.stderr,
+        )
         return 2
     if args.emit_paths:
         for plan in plans:

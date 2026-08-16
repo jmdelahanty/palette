@@ -453,6 +453,161 @@ def test_resolve_crop_run_prefers_latest_any_for_mixed_mode_reader() -> None:
     assert run_name == "crop_geometry"
 
 
+def test_crop_image_source_rebinds_pixels_to_strict_geometry_by_instance_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    crop_parent = root.create_group("crop_runs")
+    source = crop_parent.create_group("crop_hybrid")
+    target = crop_parent.create_group("crop_strict")
+    source.attrs.update(
+        {
+            "crop_storage_mode": "geometry_only",
+            "roi_size": [384, 384],
+        }
+    )
+    target.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "run_manifest": {
+                "schema_version": 2,
+                "payload_digest": "a" * 64,
+                "payload": {"run_id": "crop_strict"},
+            },
+        }
+    )
+    source_keys = np.array([30, 10, 20], dtype=np.uint64)
+    target_keys = np.array([10, 20, 30], dtype=np.uint64)
+    source_frames = np.array([3, 1, 2], dtype=np.int64)
+    target_frames = np.array([1, 2, 3], dtype=np.int64)
+    source_origins = np.array([[30, 31], [10, 11], [20, 21]], dtype=np.int32)
+    target_origins = np.array([[10, 11], [20, 21], [30, 31]], dtype=np.int32)
+    source_xywh = np.column_stack(
+        (
+            source_origins.astype(np.float64),
+            np.full((3, 2), 384.0, dtype=np.float64),
+        )
+    )
+    target_xywh = np.column_stack(
+        (
+            target_origins.astype(np.float32),
+            np.full((3, 2), 384.0, dtype=np.float32),
+        )
+    ).astype(np.float32)
+    for group, keys, frames, origins, xywh in (
+        (source, source_keys, source_frames, source_origins, source_xywh),
+        (target, target_keys, target_frames, target_origins, target_xywh),
+    ):
+        group.create_array("instance_key", data=keys)
+        group.create_array("frame_indices", data=frames)
+        group.create_array("source_acquisition_frame_index", data=frames)
+        group.create_array("roi_coordinates_full", data=origins)
+        group.create_array("source_crop_xywh", data=xywh)
+        group.create_array("source_refined_row_ids", data=frames)
+
+    monkeypatch.setattr(crop_mod, "validate_crop_run_manifest", lambda _value: ())
+    monkeypatch.setattr(
+        crop_mod,
+        "strict_crop_fixed_roi_shape",
+        lambda _group, *, run_id: (384, 384) if run_id == "crop_strict" else None,
+    )
+    monkeypatch.setattr(
+        crop_mod,
+        "build_crop_run_reference",
+        lambda _group, *, run_id: {
+            "schema_id": "palette.crop_geometry.run_reference",
+            "schema_version": 1,
+            "profile": "immutable_run_manifest_v1",
+            "run_id": run_id,
+            "run_manifest_schema_id": "palette.crop_geometry.run_manifest",
+            "run_manifest_schema_version": 2,
+            "run_manifest_digest": "a" * 64,
+            "logical_content_digest": "b" * 64,
+        },
+    )
+    pixels = np.arange(3 * 4, dtype=np.uint8).reshape(3, 2, 2)
+    crop_source = CropImageSource(
+        root=root,
+        crop_group=source,
+        crop_run_name="crop_hybrid",
+        storage_mode="geometry_only",
+        roi_shape=(384, 384),
+        roi_coordinates_full=source_origins,
+        frame_indices=source_frames,
+        frame_source_kind="crop_pixel_work_package",
+        frame_source_path=None,
+        source_crop_row_ids=np.array([0, 1, 2], dtype=np.int64),
+        _roi_images=pixels,
+    )
+
+    evidence = crop_source.bind_geometry_crop("crop_strict")
+
+    assert crop_source.crop_group is target
+    assert crop_source.crop_run_name == "crop_strict"
+    assert crop_source.pixel_source_crop_run_name == "crop_hybrid"
+    np.testing.assert_array_equal(crop_source.source_crop_row_ids, [2, 0, 1])
+    np.testing.assert_array_equal(crop_source.frame_indices, source_frames)
+    np.testing.assert_array_equal(crop_source.roi_coordinates_full, source_origins)
+    np.testing.assert_array_equal(crop_source[:], pixels)
+    assert evidence["validation"]["row_identity_and_placement_match"] is True
+    assert evidence["source_crop_xywh_normalization"].startswith(
+        "finite_values_cast_to_float32"
+    )
+
+
+def test_crop_image_source_geometry_rebase_fails_on_placement_disagreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    crop_parent = root.create_group("crop_runs")
+    source = crop_parent.create_group("crop_hybrid")
+    target = crop_parent.create_group("crop_strict")
+    target.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "run_manifest": {
+                "schema_version": 2,
+                "payload": {"run_id": "crop_strict"},
+            },
+        }
+    )
+    for group, origin in ((source, 10), (target, 11)):
+        group.create_array("instance_key", data=np.array([1], dtype=np.uint64))
+        group.create_array("frame_indices", data=np.array([5], dtype=np.int64))
+        group.create_array(
+            "source_acquisition_frame_index", data=np.array([5], dtype=np.int64)
+        )
+        group.create_array(
+            "roi_coordinates_full",
+            data=np.array([[origin, 20]], dtype=np.int32),
+        )
+        group.create_array(
+            "source_crop_xywh",
+            data=np.array([[origin, 20, 384, 384]], dtype=np.float32),
+        )
+    monkeypatch.setattr(crop_mod, "validate_crop_run_manifest", lambda _value: ())
+    monkeypatch.setattr(
+        crop_mod,
+        "strict_crop_fixed_roi_shape",
+        lambda _group, *, run_id: (384, 384),
+    )
+    crop_source = CropImageSource(
+        root=root,
+        crop_group=source,
+        crop_run_name="crop_hybrid",
+        storage_mode="geometry_only",
+        roi_shape=(384, 384),
+        roi_coordinates_full=np.array([[10, 20]], dtype=np.int32),
+        frame_indices=np.array([5], dtype=np.int64),
+        frame_source_kind="crop_pixel_work_package",
+        frame_source_path=None,
+        _roi_images=np.zeros((1, 384, 384), dtype=np.uint8),
+    )
+
+    with pytest.raises(ValueError, match="roi_coordinates_full"):
+        crop_source.bind_geometry_crop("crop_strict")
+
+
 def test_implicit_crop_resolution_skips_selector_ineligible_pointer_target() -> None:
     root = _make_root()
     crop_parent = root.create_group("crop_runs")

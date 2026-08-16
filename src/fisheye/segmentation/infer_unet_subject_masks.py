@@ -2759,6 +2759,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Explicit crop run providing ROI images (default: latest/auto).",
     )
     parser.add_argument(
+        "--geometry-crop-run",
+        help=(
+            "Optional strict crop-v2 geometry authority for authenticated pixels "
+            "opened from --crop-run. Rows are rebound only after exact instance-key, "
+            "frame, and placement validation."
+        ),
+    )
+    parser.add_argument(
         "--require-training-materialization-binding",
         action="store_true",
         help=(
@@ -3200,6 +3208,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
             console=console,
         )
+    if args.geometry_crop_run is not None:
+        crop_source.bind_geometry_crop(
+            args.geometry_crop_run,
+            zarr_path=zarr_path,
+        )
     boundary = _ACTIVE_SUBJECT_MASK_ATTEMPT.get()
     if boundary is not None:
         boundary.bind_crop_source(crop_source)
@@ -3386,7 +3399,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     crop_group,
                     selected_crop_rows,
                 )
-                if getattr(crop_source, "pixel_materialization_id", None) is not None:
+                if (
+                    getattr(crop_source, "pixel_materialization_id", None) is not None
+                    or getattr(crop_source, "geometry_crop_rebase", None) is not None
+                ):
                     package_selection = _write_package_subject_mask_crop_placement(
                         run_group,
                         crop_group,
@@ -3395,7 +3411,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             else:
                 copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
                 write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
-        if getattr(crop_source, "pixel_materialization_id", None) is not None:
+        if (
+            getattr(crop_source, "pixel_materialization_id", None) is not None
+            or getattr(crop_source, "geometry_crop_rebase", None) is not None
+        ):
             if selected_crop_rows is None:
                 raise ValueError(
                     "Package-backed subject-mask inference lacks selected crop rows."
@@ -3571,6 +3590,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
             "source_roi_live_gpu_chunk_frames": int(
                 crop_source.roi_live_gpu_chunk_frames
+            ),
+            "source_pixel_crop_run": getattr(
+                crop_source, "pixel_source_crop_run_name", None
+            ),
+            "source_geometry_crop_rebase": getattr(
+                crop_source, "geometry_crop_rebase", None
             ),
             "label_schema_id": label_schema_id,
             "mask_labels": list(mask_labels),

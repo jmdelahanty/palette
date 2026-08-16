@@ -650,6 +650,11 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
         model_component_coverage_key="body+eyes+swim_bladder",
         model_label_schema_id="subject_v1_union",
         model_top_k=7,
+        model_set_id="subject_mask_set_exact",
+        model_run_id="subject_mask_run_exact",
+        model_input_size=512,
+        model_input_transform="auto",
+        geometry_crop_run="crop_strict_geometry_v2",
         model_require_unique=True,
         model_include_non_success=True,
         device="0",
@@ -688,6 +693,11 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
     assert "--model-require-unique" in cmd
     assert "--model-include-non-success" in cmd
     assert cmd[cmd.index("--model-top-k") + 1] == "7"
+    assert cmd[cmd.index("--model-set-id") + 1] == "subject_mask_set_exact"
+    assert cmd[cmd.index("--model-run-id") + 1] == "subject_mask_run_exact"
+    assert cmd[cmd.index("--model-input-size") + 1] == "512"
+    assert cmd[cmd.index("--model-input-transform") + 1] == "auto"
+    assert cmd[cmd.index("--geometry-crop-run") + 1] == "crop_strict_geometry_v2"
     assert cmd[cmd.index("--mask-probs-shard-rois") + 1] == "2048"
 
 
