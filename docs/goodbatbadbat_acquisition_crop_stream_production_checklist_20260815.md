@@ -225,11 +225,11 @@ two overlapped the dish rim and one otherwise visible fish was missed.
 
 That decision is deliberately
 `pass_for_successor_384_profile_and_full_recording_canary`. It does not authorize
-a production selector or corpus campaign. The next evidence is a successor
-immutable model-input contract followed by one complete selector-ineligible
-recording through terminal inference, strict candidate finalization, keypoint
-quality, and refinement. Operator confirmation and required CI remain mandatory
-before the 84-recording campaign.
+a production selector or corpus campaign. It required a successor immutable
+model-input contract followed by one complete selector-ineligible recording
+through terminal inference, strict candidate finalization, keypoint quality,
+and refinement. Operator confirmation and required CI remain mandatory before
+the 84-recording campaign.
 
 The immutable successor contract is
 `pose_model_input_contract_v2_goodbatbadbat_384_v1.json`, with file SHA-256
@@ -241,6 +241,61 @@ the exact runtime used by the reviewed LSF canary. The workstation environment
 currently resolves 8.3.214 and therefore fails this profile's runtime check by
 design. A cheap LSF runtime-and-contract preflight must precede the complete
 recording canary; do not add 8.3.214 without separate empirical evidence.
+
+### Complete selector-ineligible 384 x 384 recording canary
+
+The complete arena-1 canary passed on 2026-08-15/16 using L4 inference job
+`153427334` and clean commit
+`32307bffe161082377baa6e0704659ec05d9e101`. The job processed all 151,478
+ordered provider rows: 150,180 poses succeeded and 1,298 remained explicit
+terminal inference misses. Inference throughput was approximately 476 rows per
+second. The sealed terminal receipt digest is
+`46cfa8f2de55b95db96c165806076aeb0daac9d046bc812039ede6556224e08a`.
+
+The canary exposed and closed one contract gap before final publication. A
+generic crop-v2 candidate recenters every 384 x 384 window on the offline
+refined detection, but acquisition-backed rows intentionally use Orange's
+recorded 384 x 384 window and full-frame origin. Strict crop policy v2 now
+supports `verified_explicit_per_row` placement. It binds the signed hybrid
+provider and requires exact ordered instance, refined-row, frame,
+acquisition-frame, origin, and size equality. Existing center-derived policy-v1
+payloads remain unchanged.
+
+The validated strict crop candidate is:
+
+```text
+crop_runs/crop_goodbatbadbat_geometry_384_hybrid_32307bff
+manifest digest: f2be8ce38d4610eefd06c4144f48401ab78e17e2243d812efe532485b84be4b9
+```
+
+It binds hybrid provider record
+`02dd09050ddada64239f12f846bde2c15b2004954d207c7397175cb0023f6d8f`,
+rowset fingerprint
+`414a9fd98bfc87d5cbedf6aee07e34743d6de1b3518f5f3c80abbd472b6d5c9d`,
+and pixel fingerprint
+`88006b24ee596ea5ac695dff8626796351d7b66b958f8a037f555bfcc8427d49`.
+
+The terminal result then finalized into these four immutable candidates:
+
+```text
+keypoints_runs/keypoints_goodbatbadbat_hybrid_pose_384_full_canary_20260815_v4
+keypoint_quality_runs/keypoint_quality_goodbatbadbat_hybrid_pose_384_full_canary_20260815_v4
+refined_keypoints_runs/refined_keypoints_goodbatbadbat_hybrid_pose_384_full_canary_20260815_v4
+analysis/body_frame_runs/body_frame_goodbatbadbat_hybrid_pose_384_full_canary_20260815_v4
+```
+
+Independent direct and consolidated reads found 151,478 rows in every stage,
+identical manifests, exact instance-key coverage against both strict crop-v2
+and the signed provider, 150,180 quality/refinement/body-frame successes, no
+manifest errors, and no selector changes. The reconstructable 22,336,339,968-
+byte NRS flat cache and its 9,774-byte manifest were deleted only after that
+audit; the sealed terminal artifact and all candidates remain.
+
+All writes remain confined to the disposable overlay and durable operations
+receipts. The canonical recording, registry, production selectors, source
+media, and shared `/groups` checkout were not changed. Required CI remains
+unrun, so this branch and its candidates are not merge-ready or
+production-eligible.
 
 ## Current implementation boundary
 
@@ -578,7 +633,7 @@ unrecoverable
   input to an explicit ROI provider manifest.
 - [ ] Inventory the exact pose-model input contract for every selected zebrafish
   keypoint/mask model.
-- [ ] Feed native 384 x 384 input directly when model and stride contracts permit
+- [x] Feed native 384 x 384 input directly when model and stride contracts permit
   it; otherwise use the existing centered `pad_to_size` transform for a larger
   submitted extent and its existing inverse coordinate mapping.
 - [x] Prove selector-ineligible 384 x 384 tensor/runtime execution on a balanced
@@ -595,8 +650,8 @@ unrecoverable
   - full-frame supplemental flat-cache rows.
 - [ ] Group work by provider and decode source rather than switching decoders
   row by row.
-- [ ] Merge model outputs back into canonical crop-run row order.
-- [ ] Require exact `source_crop_row_ids` and `instance_key` coverage in raw
+- [x] Merge model outputs back into canonical crop-run row order.
+- [x] Require exact `source_crop_row_ids` and `instance_key` coverage in raw
   keypoint output.
 - [x] Extend terminal receipts to bind crop run, provider
   manifest, source media, rowset digest, model, and configuration.
@@ -604,9 +659,9 @@ unrecoverable
   block publication.
 - [ ] Record whether each output row used acquisition crop pixels or full-frame
   recovery.
-- [ ] Preserve full-frame keypoint coordinates by projecting through canonical
+- [x] Preserve full-frame keypoint coordinates by projecting through canonical
   crop placement, not through the live detection box.
-- [ ] Run keypoint quality and refinement without changing source crop lineage.
+- [x] Run keypoint quality and refinement without changing source crop lineage.
 - [ ] Only after keypoint parity passes, exercise subject-mask consumers through
   the same crop/provider contract.
 - [ ] Keep training exports dense/materialized and record the provider identity
@@ -710,19 +765,21 @@ Use commit-pinned, selector-ineligible outputs until all required checks pass.
    analysis Zarr.
 3. [ ] Validate direct and consolidated metadata views.
 4. [ ] Compare every imported Zarr ledger value with the producer CSV.
-5. [ ] Build the canonical refined-detection crop rowset and provider routing.
-6. [ ] Measure acquisition-selected versus full-frame-fallback counts and inspect
+5. [x] Build the canonical refined-detection crop rowset and provider routing.
+6. [x] Measure acquisition-selected versus full-frame-fallback counts and inspect
    temporal clusters of fallback.
-7. [ ] Decode a deterministic sample from each provider and verify placement.
+7. [x] Decode a deterministic sample from each provider and verify placement.
 8. [x] Run a bounded, signed, balanced keypoint inference canary at 384 x 384.
 9. [x] Publish and visually review the bounded keypoint evidence, including all
    failures and deterministic samples from both pixel providers.
-10. [ ] Compare keypoint output with the existing flat/full-frame path using a
+10. [x] Run one complete selector-ineligible recording through strict crop-v2,
+    terminal inference, keypoint quality, refinement, and body-frame publication.
+11. [ ] Compare keypoint output with the existing flat/full-frame path using a
    frozen row sample and evidence-derived tolerances.
-11. [ ] Complete Crimson exact-reader and visualization checks.
-12. [ ] Run focused local tests, the optimized required CI shards, and any
+12. [ ] Complete Crimson exact-reader and visualization checks.
+13. [ ] Run focused local tests, the optimized required CI shards, and any
     required cluster canary.
-13. [ ] Only after CI is green, publish a production-eligible selector in a new
+14. [ ] Only after CI is green, publish a production-eligible selector in a new
     commit-pinned deployment.
 
 ## Phase 8: GoodBatBadBat rollout
