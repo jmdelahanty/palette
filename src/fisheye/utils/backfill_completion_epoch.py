@@ -7,14 +7,15 @@ from fisheye.shared.json_safety import write_jsonl_atomic
 import argparse
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Optional
 
 import zarr
 
+from fisheye.shared.zarr.metadata_equivalence import validate_direct_consolidated_subtree
 from fisheye.shared.zarr.stage_arrays import STAGES, StageSpec, validate_run
+from fisheye.shared.zarr_helpers import reconsolidate_zarr_metadata
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_ATTR,
     COMPLETION_EPOCH_STRICT,
@@ -30,6 +31,12 @@ REPORT_SCHEMA_ID = "palette.backfill_completion_epoch_report.v1"
 BLOCKED_PARENT_ROW_SCHEMA_ID = "palette.backfill_completion_epoch_blocked_parent.v1"
 WRITE_FAILED_PARENT_ROW_SCHEMA_ID = "palette.backfill_completion_epoch_write_failed_parent.v1"
 DEPRECATED_COMPLETION_BACKFILL_SCOPES = frozenset({"eye_masks", "refined_eye_masks"})
+MUTABLE_METADATA_LIFECYCLE = "mutable"
+PUBLISHED_IMMUTABLE_METADATA_LIFECYCLE = "published-immutable"
+METADATA_LIFECYCLES = frozenset(
+    {MUTABLE_METADATA_LIFECYCLE, PUBLISHED_IMMUTABLE_METADATA_LIFECYCLE}
+)
+BACKFILL_CONSOLIDATION_POLICY = "completion_epoch_backfill_published_immutable_v1"
 
 
 def _group_keys(group: Any) -> list[str]:
@@ -792,13 +799,75 @@ def _write_report_jsonl_rows(rows: Sequence[Mapping[str, Any]], output_jsonl: st
 _write_jsonl_rows = _write_report_jsonl_rows
 
 
+def _finalize_published_store_metadata(
+    zarr_path: Path,
+    *,
+    parent_reports: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Publish and validate the direct metadata generation after attr writes."""
+
+    write_failed_parent_paths = sorted(
+        str(item["parent_path"])
+        for item in parent_reports
+        if item.get("status") == "write_failed" and item.get("parent_path")
+    )
+    if write_failed_parent_paths:
+        return {
+            "status": "error",
+            "policy": BACKFILL_CONSOLIDATION_POLICY,
+            "error": "parent attr writes failed before metadata publication",
+            "error_type": "ParentWriteFailed",
+            "write_failed_parent_paths": write_failed_parent_paths,
+        }
+    selected_parent_paths = sorted(
+        {
+            str(item["parent_path"])
+            for item in parent_reports
+            if item.get("status") == "stamped" and item.get("parent_path")
+        }
+    )
+    try:
+        consolidation = reconsolidate_zarr_metadata(
+            zarr_path,
+            policy=BACKFILL_CONSOLIDATION_POLICY,
+            fail_on_error=True,
+        )
+        equivalence_receipts = [
+            validate_direct_consolidated_subtree(
+                zarr_path,
+                subtree_path=parent_path,
+            ).to_json()
+            for parent_path in selected_parent_paths
+        ]
+    except Exception as exc:
+        return {
+            "status": "error",
+            "policy": BACKFILL_CONSOLIDATION_POLICY,
+            "validated_parent_paths": selected_parent_paths,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+    return {
+        "status": "ok",
+        "policy": BACKFILL_CONSOLIDATION_POLICY,
+        "validated_parent_paths": selected_parent_paths,
+        "consolidation": consolidation,
+        "metadata_equivalence": equivalence_receipts,
+    }
+
+
 def backfill_completion_epoch(
     zarr_paths: Sequence[str | Path],
     *,
     apply: bool = False,
     stages: Sequence[str] | None = None,
     parent_paths: Sequence[str] | None = None,
+    metadata_lifecycle: str | None = None,
 ) -> dict[str, Any]:
+    if apply and metadata_lifecycle not in METADATA_LIFECYCLES:
+        raise ValueError(
+            "apply requires metadata_lifecycle to be 'mutable' or 'published-immutable'"
+        )
     timestamp_utc = _utc_now()
     selected_stages = _normalize_filter_values(stages)
     selected_parent_paths = _normalize_filter_values(parent_paths)
@@ -834,37 +903,56 @@ def backfill_completion_epoch(
             )
             for parent_path, parent in parents
         ]
-        stores.append(
-            {
-                "zarr_path": str(zarr_path),
-                "status": "ok",
-                "parent_count": len(parent_reports),
-                "blocked_parent_count": sum(1 for item in parent_reports if item.get("status") == "blocked"),
-                "filtered_parent_count": sum(1 for item in parent_reports if item.get("status") == "filtered"),
-                "stamped_parent_count": sum(1 for item in parent_reports if item.get("status") == "stamped"),
-                "would_stamp_parent_count": sum(1 for item in parent_reports if item.get("status") == "would_stamp"),
-                "write_failed_parent_count": sum(
-                    1 for item in parent_reports if item.get("status") == "write_failed"
-                ),
-                "would_mark_child_count": sum(
-                    int(item.get("would_mark_child_count") or 0) for item in parent_reports
-                ),
-                "marked_child_count": sum(int(item.get("marked_child_count") or 0) for item in parent_reports),
-                "ignored_legacy_child_count": sum(
-                    int(item.get("ignored_legacy_child_count") or 0) for item in parent_reports
-                ),
-                "ignored_legacy_parent_count": sum(
-                    1 for item in parent_reports if int(item.get("ignored_legacy_child_count") or 0) > 0
-                ),
-                "parents": parent_reports,
+        store_report: dict[str, Any] = {
+            "zarr_path": str(zarr_path),
+            "status": "ok",
+            "parent_count": len(parent_reports),
+            "blocked_parent_count": sum(1 for item in parent_reports if item.get("status") == "blocked"),
+            "filtered_parent_count": sum(1 for item in parent_reports if item.get("status") == "filtered"),
+            "stamped_parent_count": sum(1 for item in parent_reports if item.get("status") == "stamped"),
+            "would_stamp_parent_count": sum(
+                1 for item in parent_reports if item.get("status") == "would_stamp"
+            ),
+            "write_failed_parent_count": sum(
+                1 for item in parent_reports if item.get("status") == "write_failed"
+            ),
+            "would_mark_child_count": sum(
+                int(item.get("would_mark_child_count") or 0) for item in parent_reports
+            ),
+            "marked_child_count": sum(
+                int(item.get("marked_child_count") or 0) for item in parent_reports
+            ),
+            "ignored_legacy_child_count": sum(
+                int(item.get("ignored_legacy_child_count") or 0) for item in parent_reports
+            ),
+            "ignored_legacy_parent_count": sum(
+                1
+                for item in parent_reports
+                if int(item.get("ignored_legacy_child_count") or 0) > 0
+            ),
+            "parents": parent_reports,
+        }
+        if apply and metadata_lifecycle == PUBLISHED_IMMUTABLE_METADATA_LIFECYCLE:
+            publication = _finalize_published_store_metadata(
+                zarr_path,
+                parent_reports=parent_reports,
+            )
+            store_report["metadata_publication"] = publication
+            if publication["status"] != "ok":
+                store_report["status"] = "metadata_publication_failed"
+        else:
+            store_report["metadata_publication"] = {
+                "status": "not_applicable",
+                "metadata_lifecycle": metadata_lifecycle,
             }
-        )
+        stores.append(store_report)
 
     summary = _build_summary(stores)
     return {
         "schema_id": REPORT_SCHEMA_ID,
         "timestamp_utc": timestamp_utc,
         "apply": bool(apply),
+        "metadata_lifecycle": metadata_lifecycle,
         "filters": {
             "stages": sorted(selected_stages),
             "parent_paths": sorted(selected_parent_paths),
@@ -872,6 +960,9 @@ def backfill_completion_epoch(
         "store_count": len(stores),
         "ok_store_count": sum(1 for item in stores if item.get("status") == "ok"),
         "non_ok_store_count": sum(1 for item in stores if item.get("status") != "ok"),
+        "metadata_publication_failed_store_count": sum(
+            1 for item in stores if item.get("status") == "metadata_publication_failed"
+        ),
         "blocked_parent_count": sum(int(item.get("blocked_parent_count") or 0) for item in stores),
         "filtered_parent_count": sum(int(item.get("filtered_parent_count") or 0) for item in stores),
         "stamped_parent_count": sum(int(item.get("stamped_parent_count") or 0) for item in stores),
@@ -912,10 +1003,14 @@ def _summary_payload(report: Mapping[str, Any]) -> Mapping[str, Any]:
         "schema_id": f"{REPORT_SCHEMA_ID}.summary",
         "timestamp_utc": report["timestamp_utc"],
         "apply": report["apply"],
+        "metadata_lifecycle": report.get("metadata_lifecycle"),
         "filters": report["filters"],
         "store_count": report["store_count"],
         "ok_store_count": report["ok_store_count"],
         "non_ok_store_count": report["non_ok_store_count"],
+        "metadata_publication_failed_store_count": int(
+            report.get("metadata_publication_failed_store_count") or 0
+        ),
         "blocked_parent_count": report["blocked_parent_count"],
         "filtered_parent_count": report["filtered_parent_count"],
         "would_stamp_parent_count": report["would_stamp_parent_count"],
@@ -976,6 +1071,15 @@ def _post_apply_expectation_error(*, apply: bool, post_apply_expected_counts: Ma
     return f"{flags} can only be used with --apply."
 
 
+def _metadata_lifecycle_error(*, apply: bool, metadata_lifecycle: str | None) -> str | None:
+    if not apply or metadata_lifecycle in METADATA_LIFECYCLES:
+        return None
+    return (
+        "--apply requires --metadata-lifecycle mutable or "
+        "--metadata-lifecycle published-immutable."
+    )
+
+
 def _expected_counts_from_namespace(args: argparse.Namespace) -> dict[str, int]:
     candidates = {
         "store_count": args.expect_store_count,
@@ -1002,6 +1106,7 @@ def _observed_count_payload(report: Mapping[str, Any]) -> dict[str, int]:
     keys = (
         "store_count",
         "non_ok_store_count",
+        "metadata_publication_failed_store_count",
         "blocked_parent_count",
         "filtered_parent_count",
         "would_stamp_parent_count",
@@ -1075,6 +1180,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--apply", action="store_true", help="Write completion attrs and parent epochs.")
+    parser.add_argument(
+        "--metadata-lifecycle",
+        choices=sorted(METADATA_LIFECYCLES),
+        help=(
+            "Required with --apply. Mutable stores remain on direct metadata; "
+            "published-immutable stores are reconsolidated and validated as the final step."
+        ),
+    )
     parser.add_argument(
         "--allow-broad-apply",
         action="store_true",
@@ -1178,6 +1291,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if post_apply_usage_error is not None:
         raise SystemExit(post_apply_usage_error)
 
+    metadata_lifecycle_error = _metadata_lifecycle_error(
+        apply=bool(args.apply),
+        metadata_lifecycle=args.metadata_lifecycle,
+    )
+    if metadata_lifecycle_error is not None:
+        raise SystemExit(metadata_lifecycle_error)
+
     zarr_paths = [Path(value) for value in args.zarr_paths]
     if args.recordings_root is not None:
         zarr_paths.extend(_discover_zarrs(args.recordings_root.expanduser()))
@@ -1192,6 +1312,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             apply=False,
             stages=args.stage,
             parent_paths=args.parent_path,
+            metadata_lifecycle=args.metadata_lifecycle,
         )
         preflight_counts = _observed_count_payload(preflight)
         preflight["preflight_counts"] = preflight_counts
@@ -1248,6 +1369,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         apply=bool(args.apply),
         stages=args.stage,
         parent_paths=args.parent_path,
+        metadata_lifecycle=args.metadata_lifecycle,
     )
     if bool(args.apply) and preflight_counts is not None:
         report["preflight_counts"] = preflight_counts
@@ -1277,6 +1399,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "One or more parent groups failed during attr writes. The report is "
             "conservative: affected parents are not reported as stamped, and rerun "
             "is expected to be idempotent after fixing the write failure."
+        )
+        payload = _summary_payload(report) if bool(args.summary_only) else report
+        _write_report_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
+        _write_report_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
+        _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
+        raise SystemExit(str(report["apply_failure_message"]))
+
+    if bool(args.apply) and int(report.get("metadata_publication_failed_store_count") or 0) > 0:
+        report["apply_failed"] = True
+        report["apply_failure_reason"] = "metadata_publication_failed"
+        report["apply_failure_message"] = (
+            "One or more published immutable stores failed final metadata "
+            "consolidation or direct/consolidated equivalence validation."
         )
         payload = _summary_payload(report) if bool(args.summary_only) else report
         _write_report_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)

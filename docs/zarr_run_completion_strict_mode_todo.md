@@ -4,6 +4,22 @@ Status: in progress
 Date: 2026-06-10
 Source: codebase review (docs/diagnostics/codebase_review_2026-06-10.md, Provenance & contracts)
 
+## 2026-08-16 metadata-lifecycle enforcement
+
+- New analysis stores are stamped with root `palette_store_epoch=1`. In those
+  stores, a run parent without `palette_completion_epoch` is an error; absence
+  can no longer be interpreted as completeness.
+- Existing unstamped stores retain explicit legacy compatibility until they are
+  verified and migrated. Accepted unmarked runs are counted once per process
+  and reported together at process exit.
+- Completion backfill apply mode requires `--metadata-lifecycle mutable` or
+  `--metadata-lifecycle published-immutable`. Mutable stores remain on direct
+  metadata. Published immutable stores reconsolidate only after all attr writes
+  and validate direct/consolidated equivalence for every stamped parent.
+- CI ratchets all `zarr.open_group` calls under `src/fisheye`: existing implicit
+  calls are grandfathered, but every new or modified call must select direct or
+  consolidated metadata explicitly.
+
 ## The problem
 
 `is_run_complete` (src/fisheye/shared/zarr_run_completion.py:102-114) answers

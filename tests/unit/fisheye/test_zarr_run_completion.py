@@ -23,6 +23,9 @@ from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_ATTR,
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     COMPLETION_EPOCH_STRICT,
+    MissingCompletionEpochError,
+    PALETTE_STORE_EPOCH_ATTR,
+    PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION,
     RUN_PROVENANCE_ATTR,
     RUN_PROVENANCE_BYPASS_ATTR,
     RUN_COMPLETED_AT_ATTR,
@@ -32,6 +35,7 @@ from fisheye.shared.zarr_run_completion import (
     clear_authoritative_run,
     describe_run_parent,
     effective_legacy_default,
+    effective_legacy_default_from_attrs,
     iter_run_parent_summaries,
     is_run_complete,
     is_run_complete_in_parent,
@@ -381,22 +385,57 @@ def test_parent_epoch_controls_unmarked_child_completion() -> None:
     assert resolve_latest_complete_run_name(parent, legacy_default=True) == "run_001"
 
 
-def test_legacy_parent_warns_once_when_accepting_unmarked_child() -> None:
-    completion_mod._LEGACY_COMPLETION_WARNING_KEYS.clear()
+def test_legacy_parent_counts_unique_accepted_runs_for_process_exit_report() -> None:
+    completion_mod._LEGACY_COMPLETION_ACCEPTANCE_KEYS.clear()
     parent = FakeGroup()
     parent["run_001"] = FakeGroup()
 
+    assert resolve_latest_complete_run_name(parent) == "run_001"
+    assert resolve_latest_complete_run_name(parent) == "run_001"
+    assert completion_mod.legacy_completion_acceptance_count() == 1
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        assert resolve_latest_complete_run_name(parent) == "run_001"
-        assert resolve_latest_complete_run_name(parent) == "run_001"
+        completion_mod._report_legacy_completion_acceptances()
 
-    matching = [
-        warning
-        for warning in caught
-        if "treating unmarked child runs as legacy-complete" in str(warning.message)
-    ]
-    assert len(matching) == 1
+    assert len(caught) == 1
+    assert "Accepted 1 legacy-default Zarr run(s)" in str(caught[0].message)
+    completion_mod._LEGACY_COMPLETION_ACCEPTANCE_KEYS.clear()
+
+
+def test_post_cutover_store_rejects_missing_parent_completion_epoch() -> None:
+    parent = FakeGroup(
+        attrs={PALETTE_STORE_EPOCH_ATTR: PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION}
+    )
+    parent["run_001"] = FakeGroup()
+
+    with pytest.raises(MissingCompletionEpochError, match="Post-cutover Zarr store"):
+        effective_legacy_default(parent)
+    with pytest.raises(MissingCompletionEpochError, match="Post-cutover Zarr store"):
+        resolve_latest_complete_run_name(parent)
+    with pytest.raises(MissingCompletionEpochError, match="Post-cutover Zarr store"):
+        resolve_latest_complete_run_name(parent, legacy_default=True)
+    with pytest.raises(MissingCompletionEpochError, match="Post-cutover Zarr store"):
+        is_run_complete_in_parent(parent, parent["run_001"], legacy_default=True)
+    with pytest.raises(MissingCompletionEpochError, match="Post-cutover Zarr store"):
+        effective_legacy_default_from_attrs(
+            {},
+            store_attrs={
+                PALETTE_STORE_EPOCH_ATTR: PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION,
+            },
+        )
+
+
+def test_post_cutover_store_rejects_existing_unstamped_parent_on_require() -> None:
+    root = FakeGroup(
+        attrs={PALETTE_STORE_EPOCH_ATTR: PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION}
+    )
+    parent = FakeGroup()
+    parent["run_001"] = FakeGroup()
+    root["detect_runs"] = parent
+
+    with pytest.raises(MissingCompletionEpochError, match="Post-cutover Zarr store"):
+        require_runs_parent(root, "detect_runs")
 
 
 def test_strict_parent_rejects_disagreeing_selector_pair() -> None:
@@ -496,6 +535,7 @@ def test_attrs_only_latest_resolver_matches_open_group_strict_selection(
 
 
 def test_attrs_only_latest_resolver_legacy_fallback_skips_ineligible_child() -> None:
+    completion_mod._LEGACY_COMPLETION_ACCEPTANCE_KEYS.clear()
     parent_attrs = {"latest": "candidate"}
     child_attrs = {
         "legacy": {},
@@ -511,6 +551,17 @@ def test_attrs_only_latest_resolver_legacy_fallback_skips_ineligible_child() -> 
         )
         == "legacy"
     )
+    assert (
+        resolve_latest_complete_run_name_from_attrs(
+            parent_attrs=parent_attrs,
+            child_names=child_attrs,
+            child_attrs=lambda name: dict(child_attrs[name]),
+            legacy_default=True,
+        )
+        == "legacy"
+    )
+    assert completion_mod.legacy_completion_acceptance_count() == 1
+    completion_mod._LEGACY_COMPLETION_ACCEPTANCE_KEYS.clear()
 
 
 def test_latest_resolver_skips_incomplete_contract_run() -> None:
@@ -1376,6 +1427,105 @@ def test_backfill_apply_requires_filter_unless_broad_apply_is_explicit() -> None
     )
 
 
+def test_backfill_apply_requires_explicit_metadata_lifecycle() -> None:
+    assert backfill_mod._metadata_lifecycle_error(apply=True, metadata_lifecycle=None) is not None
+    assert (
+        backfill_mod._metadata_lifecycle_error(
+            apply=True,
+            metadata_lifecycle=backfill_mod.MUTABLE_METADATA_LIFECYCLE,
+        )
+        is None
+    )
+    assert (
+        backfill_mod._metadata_lifecycle_error(
+            apply=True,
+            metadata_lifecycle=backfill_mod.PUBLISHED_IMMUTABLE_METADATA_LIFECYCLE,
+        )
+        is None
+    )
+    assert backfill_mod._metadata_lifecycle_error(apply=False, metadata_lifecycle=None) is None
+
+
+def test_published_backfill_reconsolidates_and_validates_stamped_parents(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class _Receipt:
+        def __init__(self, subtree_path: str) -> None:
+            self.subtree_path = subtree_path
+
+        def to_json(self) -> dict[str, object]:
+            return {"subtree_path": self.subtree_path, "node_count": 2}
+
+    def _fake_consolidate(path, *, policy, fail_on_error):  # type: ignore[no-untyped-def]
+        calls.append(("consolidate", str(path)))
+        assert policy == backfill_mod.BACKFILL_CONSOLIDATION_POLICY
+        assert fail_on_error is True
+        return {"status": "ok"}
+
+    def _fake_validate(path, *, subtree_path):  # type: ignore[no-untyped-def]
+        calls.append(("validate", subtree_path))
+        return _Receipt(subtree_path)
+
+    monkeypatch.setattr(backfill_mod, "reconsolidate_zarr_metadata", _fake_consolidate)
+    monkeypatch.setattr(backfill_mod, "validate_direct_consolidated_subtree", _fake_validate)
+
+    report = backfill_mod._finalize_published_store_metadata(
+        tmp_path / "analysis.zarr",
+        parent_reports=[
+            {"parent_path": "detect_runs", "status": "stamped"},
+            {"parent_path": "crop_runs", "status": "filtered"},
+        ],
+    )
+
+    assert report["status"] == "ok"
+    assert report["validated_parent_paths"] == ["detect_runs"]
+    assert calls == [
+        ("consolidate", str(tmp_path / "analysis.zarr")),
+        ("validate", "detect_runs"),
+    ]
+
+
+def test_published_backfill_reports_metadata_publication_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def _fail(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("consolidation failed")
+
+    monkeypatch.setattr(backfill_mod, "reconsolidate_zarr_metadata", _fail)
+
+    report = backfill_mod._finalize_published_store_metadata(
+        tmp_path / "analysis.zarr",
+        parent_reports=[{"parent_path": "detect_runs", "status": "stamped"}],
+    )
+
+    assert report["status"] == "error"
+    assert report["error_type"] == "RuntimeError"
+    assert report["error"] == "consolidation failed"
+
+
+def test_published_backfill_does_not_consolidate_after_parent_write_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def _unexpected(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("consolidation must not run after a parent write failure")
+
+    monkeypatch.setattr(backfill_mod, "reconsolidate_zarr_metadata", _unexpected)
+
+    report = backfill_mod._finalize_published_store_metadata(
+        tmp_path / "analysis.zarr",
+        parent_reports=[{"parent_path": "detect_runs", "status": "write_failed"}],
+    )
+
+    assert report["status"] == "error"
+    assert report["error_type"] == "ParentWriteFailed"
+    assert report["write_failed_parent_paths"] == ["detect_runs"]
+
+
 def test_backfill_post_apply_expectations_require_apply(
     tmp_path: Path,
     monkeypatch,
@@ -1573,6 +1723,8 @@ def test_backfill_main_apply_aborts_on_blocked_preflight_without_mutation(
                 "--stage",
                 "detect",
                 "--apply",
+                "--metadata-lifecycle",
+                "mutable",
                 "--output-json",
                 str(output_json),
                 "--blocked-jsonl",
@@ -1621,6 +1773,8 @@ def test_backfill_main_apply_aborts_on_expectation_drift_without_mutation(
                 "--stage",
                 "detect",
                 "--apply",
+                "--metadata-lifecycle",
+                "mutable",
                 "--expect-would-stamp-parent-count",
                 "4",
                 "--output-json",
@@ -1671,6 +1825,8 @@ def test_backfill_main_apply_aborts_on_non_ok_store_preflight_without_mutation(
                 "--stage",
                 "detect",
                 "--apply",
+                "--metadata-lifecycle",
+                "mutable",
                 "--allow-blocked-apply",
                 "--output-json",
                 str(output_json),
@@ -1714,6 +1870,8 @@ def test_backfill_main_allow_blocked_apply_is_explicit_partial_apply_path(
             "--stage",
             "detect",
             "--apply",
+            "--metadata-lifecycle",
+            "mutable",
             "--allow-blocked-apply",
             "--expect-blocked-parent-count",
             "1",
@@ -1766,6 +1924,8 @@ def test_backfill_main_apply_exits_nonzero_on_write_failure_report(
                 "--stage",
                 "detect",
                 "--apply",
+                "--metadata-lifecycle",
+                "mutable",
                 "--expect-would-stamp-parent-count",
                 "1",
                 "--output-json",
@@ -1831,6 +1991,8 @@ def test_backfill_main_apply_exits_nonzero_on_post_apply_count_drift(
                 "--stage",
                 "detect",
                 "--apply",
+                "--metadata-lifecycle",
+                "mutable",
                 "--expect-would-stamp-parent-count",
                 "2",
                 "--expect-applied-stamped-parent-count",

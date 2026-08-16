@@ -563,8 +563,9 @@ def reconsolidate_zarr_metadata(
     """Refresh Zarr consolidated metadata for a root or subtree.
 
     Consolidation is a finalization/compatibility operation, not the source of
-    correctness for mutable stores. Palette readers and registry validators must
-    still tolerate stale or absent consolidated metadata.
+    correctness for mutable stores. Published immutable artifacts must validate
+    the resulting consolidated generation; stale or absent consolidated metadata
+    is a publication defect rather than a reader fallback condition.
     """
 
     root_path = Path(zarr_path).expanduser().resolve()
