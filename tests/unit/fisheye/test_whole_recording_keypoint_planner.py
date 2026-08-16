@@ -28,6 +28,35 @@ def _make_target(tmp_path: Path, name: str) -> dict[str, str]:
     recording_dir = tmp_path / "recordings" / name
     zarr_path = recording_dir / "zarr" / f"{name}_analysis.zarr"
     zarr_path.mkdir(parents=True, exist_ok=True)
+    crop_path = zarr_path / "crop_runs" / "crop_001"
+    _write_json(
+        crop_path / "zarr.json",
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "palette_run_completion_status": "complete",
+                "run_manifest": {
+                    "schema_id": "palette.crop_geometry.run_manifest",
+                    "schema_version": 2,
+                    "payload": {
+                        "run_id": "crop_001",
+                        "logical_schema": {
+                            "dimensions": {"n_frames": 4, "n_instances": 2}
+                        },
+                    },
+                },
+            },
+        },
+    )
+    _write_json(
+        crop_path / "frame_row_offsets" / "zarr.json",
+        {"zarr_format": 3, "node_type": "array", "shape": [5]},
+    )
+    _write_json(
+        crop_path / "instance_key" / "zarr.json",
+        {"zarr_format": 3, "node_type": "array", "shape": [2]},
+    )
     payload_path = tmp_path / "caches" / f"{name}.bin"
     payload_path.parent.mkdir(parents=True, exist_ok=True)
     total_bytes = 2 * 348 * 348
@@ -551,6 +580,31 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
         != "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__"
         for path in cleanup_paths
     )
+    publication_command = jobs["mask_publish:target_0"].command
+    manifest_index = publication_command.index("--expected-work-units-manifest") + 1
+    expected_manifest = Path(publication_command[manifest_index])
+    assert expected_manifest == (
+        tmp_path
+        / "combined"
+        / "manifests"
+        / "target_0.subject_mask_expected_work_units.json"
+    )
+    analysis_planner.materialize_plan_bundle(plan)
+    expected_document = json.loads(expected_manifest.read_text(encoding="utf-8"))
+    assert expected_document["schema_id"] == "palette.subject_mask.expected_work_units"
+    assert expected_document["schema_version"] == 1
+    assert expected_document["units"] == [
+        {
+            "work_unit_id": "recording-target_0:whole_recording",
+            "work_unit_index": 0,
+            "source_clip_id": "recording-target_0",
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": 4,
+            "row_start": 0,
+            "row_stop": 2,
+        }
+    ]
 
     finalization_command = jobs["mask_finalize:target_0"].command
     assert "finalization" in finalization_command

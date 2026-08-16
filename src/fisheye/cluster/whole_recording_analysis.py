@@ -43,6 +43,7 @@ from fisheye.cluster.whole_recording_analysis_cache_cleanup import (
     DEFAULT_ALLOWED_ROOT as DEFAULT_ROI_CACHE_CLEANUP_ROOT,
 )
 from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 PLAN_SCHEMA = "palette.whole_recording_analysis_bsub_plan.v1"
 
@@ -81,6 +82,8 @@ class PlannedAnalysisTarget:
     keypoint_run: str
     refined_keypoint_run: str
     subject_masks: SubjectMaskRunNames
+    subject_mask_expected_work_units_manifest: Path
+    subject_mask_expected_work_units: Mapping[str, Any]
     keypoint_prediction_job_key: str
     keypoint_refinement_job_key: str
     subject_mask_inference_job_key: str
@@ -102,6 +105,12 @@ class PlannedAnalysisTarget:
             "keypoint_run": self.keypoint_run,
             "refined_keypoint_run": self.refined_keypoint_run,
             "subject_masks": self.subject_masks.to_json(),
+            "subject_mask_expected_work_units_manifest": str(
+                self.subject_mask_expected_work_units_manifest
+            ),
+            "subject_mask_expected_work_units": dict(
+                self.subject_mask_expected_work_units
+            ),
             "jobs": {
                 "keypoint_prediction": self.keypoint_prediction_job_key,
                 "keypoint_refinement": self.keypoint_refinement_job_key,
@@ -158,6 +167,103 @@ def build_subject_mask_run_names(run_label: str) -> SubjectMaskRunNames:
         subject_mask_cache_run=f"subject_mask_cache_{label}",
         subject_mask_bundle_id=f"subject_mask_bundle_{label}",
     )
+
+
+def _whole_recording_expected_work_units(
+    target: keypoints.PlannedWholeRecordingTarget,
+) -> dict[str, object]:
+    """Bind one whole-recording work unit to exact immutable crop dimensions."""
+
+    crop_path = (
+        target.target.analysis_zarr
+        / "crop_runs"
+        / target.cache.crop_run
+    )
+    group_metadata_path = crop_path / "zarr.json"
+    try:
+        group_metadata = json.loads(group_metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Cannot read crop metadata for subject-mask work units: {group_metadata_path}"
+        ) from exc
+    attrs = group_metadata.get("attributes")
+    manifest = attrs.get("run_manifest") if isinstance(attrs, Mapping) else None
+    payload = manifest.get("payload") if isinstance(manifest, Mapping) else None
+    logical_schema = (
+        payload.get("logical_schema") if isinstance(payload, Mapping) else None
+    )
+    dimensions = (
+        logical_schema.get("dimensions")
+        if isinstance(logical_schema, Mapping)
+        else None
+    )
+    if (
+        not isinstance(attrs, Mapping)
+        or attrs.get("palette_run_completion_status") != "complete"
+        or not isinstance(manifest, Mapping)
+        or manifest.get("schema_id") != "palette.crop_geometry.run_manifest"
+        or manifest.get("schema_version") != 2
+        or not isinstance(payload, Mapping)
+        or payload.get("run_id") != target.cache.crop_run
+        or not isinstance(dimensions, Mapping)
+    ):
+        raise ValueError(
+            "Whole-recording subject-mask publication requires one complete, exact "
+            "crop-v2 run manifest."
+        )
+    n_frames = dimensions.get("n_frames")
+    n_instances = dimensions.get("n_instances")
+    if (
+        type(n_frames) is not int
+        or n_frames <= 0
+        or type(n_instances) is not int
+        or n_instances < 0
+        or n_instances != int(target.cache.shape[0])
+    ):
+        raise ValueError(
+            "Crop-v2 dimensions disagree with the authenticated ROI-cache rowset."
+        )
+    array_shapes: dict[str, tuple[int, ...]] = {}
+    for name in ("frame_row_offsets", "instance_key"):
+        array_path = crop_path / name / "zarr.json"
+        try:
+            metadata = json.loads(array_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Cannot read crop array metadata for work units: {array_path}"
+            ) from exc
+        shape = metadata.get("shape")
+        if (
+            not isinstance(shape, list)
+            or not shape
+            or any(type(value) is not int or value < 0 for value in shape)
+        ):
+            raise ValueError(f"Crop array {name!r} has invalid declared shape.")
+        array_shapes[name] = tuple(shape)
+    if array_shapes["frame_row_offsets"] != (n_frames + 1,) or array_shapes[
+        "instance_key"
+    ] != (n_instances,):
+        raise ValueError(
+            "Crop-v2 manifest dimensions disagree with its row/frame identity arrays."
+        )
+    units = [
+        {
+            "work_unit_id": f"{target.target.recording_id}:whole_recording",
+            "work_unit_index": 0,
+            "source_clip_id": target.target.recording_id,
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": n_frames,
+            "row_start": 0,
+            "row_stop": n_instances,
+        }
+    ]
+    return {
+        "schema_id": "palette.subject_mask.expected_work_units",
+        "schema_version": 1,
+        "units": units,
+        "units_digest": canonical_json_sha256(units),
+    }
 
 
 def _refuse_mask_output_collisions(
@@ -397,6 +503,7 @@ def _build_subject_mask_publication_job(
     run_root: Path,
     resources: LsfResources,
     finalization_job: LsfJob,
+    expected_work_units_manifest: Path,
 ) -> LsfJob:
     """Build the one recording-level, selector-ineligible bundle publication."""
 
@@ -446,6 +553,8 @@ def _build_subject_mask_publication_job(
         local_output,
         "--quality-scratch-root",
         quality_scratch,
+        "--expected-work-units-manifest",
+        str(expected_work_units_manifest),
         "--json",
     )
     command = build_runtime_command(
@@ -598,6 +707,15 @@ def build_plan(
 
     for target_index, target in enumerate(keypoint_plan.targets):
         _refuse_mask_output_collisions(target.target.analysis_zarr, mask_names)
+        safe_target = safe_component(
+            target.target.target_id, default="target", max_length=56
+        )
+        expected_work_units_manifest = (
+            run_root
+            / "manifests"
+            / f"{safe_target}.subject_mask_expected_work_units.json"
+        )
+        expected_work_units = _whole_recording_expected_work_units(target)
         inference_job = _build_subject_mask_inference_job(
             workflow_id=run_label,
             target=target,
@@ -635,6 +753,7 @@ def build_plan(
             resources=validation_resources
             or LsfResources(queue="short", ncores=4, mem_gb=32, walltime="2:00"),
             finalization_job=finalization_job,
+            expected_work_units_manifest=expected_work_units_manifest,
         )
         jobs.extend((inference_job, finalization_job, publication_job))
         mask_finalizer_keys.append(finalization_job.job_key)
@@ -679,6 +798,10 @@ def build_plan(
                 keypoint_run=target.run_names.keypoint_run,
                 refined_keypoint_run=target.run_names.refined_keypoint_run,
                 subject_masks=mask_names,
+                subject_mask_expected_work_units_manifest=(
+                    expected_work_units_manifest
+                ),
+                subject_mask_expected_work_units=expected_work_units,
                 keypoint_prediction_job_key=target.prediction_job_key,
                 keypoint_refinement_job_key=target.refinement_job_key,
                 subject_mask_inference_job_key=inference_job.job_key,
@@ -972,9 +1095,20 @@ def materialize_plan_bundle(plan: WholeRecordingAnalysisPlan) -> dict[str, Any]:
         "validation",
         "cleanup",
         "cache_contracts",
+        "manifests",
     ):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
     for target in plan.targets:
+        manifest_path = target.subject_mask_expected_work_units_manifest
+        manifest_document = dict(target.subject_mask_expected_work_units)
+        if manifest_path.exists():
+            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if existing_manifest != manifest_document:
+                raise FileExistsError(
+                    "Run root contains a different subject-mask work-unit manifest: "
+                    f"{manifest_path}"
+                )
+        write_json_snapshot(manifest_path, manifest_document)
         if target.roi_cache_availability != "planned":
             continue
         contract_path = cache_contract_snapshot_path(
