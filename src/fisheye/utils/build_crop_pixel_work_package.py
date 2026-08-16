@@ -61,6 +61,22 @@ def _parser() -> argparse.ArgumentParser:
         help="NumPy file containing source crop row integers.",
     )
     parser.add_argument("--batch-rows", type=int, default=256)
+    parser.add_argument(
+        "--roi-cache-manifest",
+        type=Path,
+        help=(
+            "Optional authenticated flat ROI-cache manifest used as the pixel "
+            "provider while the package remains bound to --crop-run geometry."
+        ),
+    )
+    parser.add_argument(
+        "--roi-cache-expected-archive-path",
+        type=Path,
+        help=(
+            "Optional canonical archive identity expected by a staged/cache "
+            "manifest. Defaults to zarr_path when a cache is supplied."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--apply",
@@ -80,6 +96,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         crop_run=args.crop_run,
         zarr_path=zarr_path,
         roi_cache_policy="never",
+        roi_cache_manifest=args.roi_cache_manifest,
+        roi_cache_expected_archive_path=(
+            args.roi_cache_expected_archive_path or zarr_path
+            if args.roi_cache_manifest is not None
+            else None
+        ),
     )
     try:
         unique = np.unique(rows)
@@ -100,6 +122,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             "selection_in_bounds": in_bounds,
             "selection_canonical_ascending": canonical_order,
             "roi_shape": [int(value) for value in source.roi_shape],
+            "source_roi_read_mode": str(source.roi_read_mode),
+            "source_roi_cache_used": bool(source.roi_cache_used),
             "estimated_pixel_payload_bytes": int(
                 rows.shape[0] * source.roi_shape[0] * source.roi_shape[1]
             ),

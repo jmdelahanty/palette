@@ -34,6 +34,7 @@ from fisheye.registry.maintenance import (
     _backfill_eye_mask_performance,
     _backfill_keypoint_performance,
     _backfill_recording_step_status,
+    _build_recording_step_rows_from_root,
     _backfill_subject_mask_component_quality,
     _backfill_subject_mask_performance,
     _backfill_recording_entities,
@@ -66,6 +67,7 @@ from fisheye.registry.maintenance import (
     _required_canonical_detection_errors,
     _resolve_detect_quality_group,
     _resolve_existing_run_ids,
+    _resolve_active_keypoint_bundle,
     _reconcile_stale_in_progress_runs,
     _normalize_status_values,
     main as maintenance_main,
@@ -78,6 +80,7 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
     CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye._eye_mask_registry_seed import insert_eye_mask_performance
 from tests.unit.fisheye.registry_test_fixtures import registry_from_empty_template
 
@@ -1443,6 +1446,70 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         }
     )
     return root
+
+
+def _add_active_keypoint_bundle_authority(root: _FakeGroup) -> Dict[str, object]:
+    run_specs = {
+        "crop": ("crop_runs", "crop_001"),
+        "raw_keypoints": ("keypoints_runs", "kp_001"),
+        "keypoint_quality": ("keypoint_quality_runs", "kp_quality_001"),
+        "refined_keypoints": ("refined_keypoints_runs", "refined_kp_001"),
+        "body_frame": ("analysis/body_frame_runs", "body_frame_001"),
+    }
+    quality_parent = root.add_group("keypoint_quality_runs")
+    quality_parent.add_group("kp_quality_001")
+    body_parent = root["analysis"].add_group("body_frame_runs")
+    body_parent.add_group("body_frame_001")
+
+    declarations: Dict[str, Dict[str, object]] = {}
+    for role, (parent_path, run_id) in run_specs.items():
+        group = root
+        for part in parent_path.split("/"):
+            group = group[part]
+        run = group[run_id]
+        manifest = {
+            "schema_id": f"pytest.{role}.run_manifest",
+            "schema_version": 1,
+            "payload_digest": canonical_json_sha256(
+                {"role": role, "run_id": run_id}
+            ),
+        }
+        run.attrs.update(
+            {
+                "status": "complete",
+                "palette_run_completion_status": "complete",
+                "production_candidate": True,
+                "stage_selector_eligible": False,
+                "run_manifest": manifest,
+            }
+        )
+        declaration: Dict[str, object] = {
+            "run_id": run_id,
+            "run_path": f"{parent_path}/{run_id}",
+            "manifest_payload_digest": manifest["payload_digest"],
+            "manifest_document_digest": canonical_json_sha256(manifest),
+        }
+        if role != "crop":
+            declaration["role"] = role
+        declarations[role] = declaration
+
+    authority: Dict[str, object] = {
+        "schema_id": "palette.keypoint.bundle_authority",
+        "schema_version": 1,
+        "generation": 1,
+        "base_generation": 0,
+        "policy": "sealed_four_surface_root_authority_then_consolidated_visibility_v1",
+        "activation_plan_payload_digest": "a" * 64,
+        "prior_authority_present": False,
+        "prior_authority_digest": None,
+        "crop": declarations.pop("crop"),
+        "members": declarations,
+        "activated_at_utc": "2026-08-16T00:00:00+00:00",
+        "activation_owner_uuid": "b" * 32,
+    }
+    root.attrs["keypoint_bundle_authority_generation"] = 1
+    root.attrs["keypoint_bundle_authority"] = authority
+    return authority
 
 
 def test_detect_quality_group_prefers_modern_root_family() -> None:
@@ -9218,6 +9285,81 @@ def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preser
     assert str(recording_by_key[("recording_native", "eye_right")]["stage_group"]) == "refined_subject_masks_runs"
 
     registry.close()
+
+
+def test_recording_step_status_uses_atomic_keypoint_bundle_authority(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recordings" / "rec_authority" / "rec_analysis.zarr"
+    root = _create_recording_step_status_zarr(zarr_path)
+    authority = _add_active_keypoint_bundle_authority(root)
+
+    crop_parent = root["crop_runs"]
+    crop_parent.attrs["latest"] = "zz_decoy_crop"
+    crop_parent.add_group(
+        "zz_decoy_crop",
+        attrs={"status": "complete", "palette_run_completion_status": "complete"},
+    )
+    raw_parent = root["keypoints_runs"]
+    raw_parent.attrs["latest"] = "zz_decoy_raw"
+    raw_parent.add_group(
+        "zz_decoy_raw",
+        attrs={"status": "complete", "palette_run_completion_status": "complete"},
+    )
+    refined_parent = root["refined_keypoints_runs"]
+    refined_parent.attrs["latest"] = "zz_decoy_refined"
+    refined_parent.add_group(
+        "zz_decoy_refined",
+        attrs={
+            "status": "complete",
+            "palette_run_completion_status": "complete",
+            "source_keypoints_run": "zz_decoy_raw",
+        },
+    )
+
+    rows = _build_recording_step_rows_from_root(
+        root=root,
+        dataset_id="dataset_authority",
+        recording_id="recording_authority",
+        zarr_use="analysis",
+        zarr_mtime_ns=None,
+        source="pytest",
+    )
+    by_step = {str(row["step_name"]): row for row in rows}
+    expected = {
+        "crop": "crop_001",
+        "keypoints": "kp_001",
+        "refined_keypoints": "refined_kp_001",
+    }
+    for step_name, run_name in expected.items():
+        row = by_step[step_name]
+        assert row["run_name"] == run_name
+        assert row["status"] == "ok"
+        details = json.loads(str(row["details_json"]))
+        assert details["latest_selector"] == "keypoint_bundle_authority"
+        assert details["keypoint_bundle_authority_generation"] == 1
+        assert details["keypoint_bundle_activation_plan_payload_digest"] == (
+            authority["activation_plan_payload_digest"]
+        )
+
+
+def test_keypoint_bundle_authority_fails_closed_for_lease_or_changed_manifest(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recordings" / "rec_authority" / "rec_analysis.zarr"
+    root = _create_recording_step_status_zarr(zarr_path)
+    _add_active_keypoint_bundle_authority(root)
+
+    root.attrs["keypoint_bundle_authority_lease"] = {"owner": "pytest"}
+    with pytest.raises(ValueError, match="activation lease"):
+        _resolve_active_keypoint_bundle(root)
+
+    del root.attrs["keypoint_bundle_authority_lease"]
+    root["keypoints_runs"]["kp_001"].attrs["run_manifest"] = {
+        "payload_digest": "changed"
+    }
+    with pytest.raises(ValueError, match="manifest changed"):
+        _resolve_active_keypoint_bundle(root)
 
 
 def test_backfill_recording_step_status_dry_run_no_write(

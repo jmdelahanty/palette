@@ -82,6 +82,7 @@ class WholeRecordingTarget:
     roi_cache_manifest: Path
     crop_run: str | None
     roi_provider_record_sha256: str | None
+    geometry_crop_run: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -227,6 +228,7 @@ def load_target_manifest(path: Path) -> tuple[WholeRecordingTarget, ...]:
         if not target_id:
             raise ValueError(f"Target {index} has an empty target_id.")
         crop_run_value = str(raw.get("crop_run") or "").strip()
+        geometry_crop_run_value = str(raw.get("geometry_crop_run") or "").strip()
         targets.append(
             WholeRecordingTarget(
                 target_id=target_id,
@@ -250,6 +252,7 @@ def load_target_manifest(path: Path) -> tuple[WholeRecordingTarget, ...]:
                 roi_provider_record_sha256=(
                     str(raw.get("roi_provider_record_sha256") or "").strip() or None
                 ),
+                geometry_crop_run=geometry_crop_run_value or None,
             )
         )
 

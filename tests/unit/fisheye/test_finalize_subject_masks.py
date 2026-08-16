@@ -1206,6 +1206,90 @@ def _stamp_complete_partition_contract(
     )
 
 
+def _stamp_complete_recording_work_unit_contract(
+    root: zarr.Group,
+    run: zarr.Group,
+) -> None:
+    recording_id = "recording-1"
+    work_unit_id = f"{recording_id}:whole_recording"
+    collection = {
+        "source_collection_id": recording_id,
+        "source_collection_path": "/groups/benchmark/recording-work-unit.json",
+        "source_clip_id": recording_id,
+        "source_clip_index": 0,
+        "source_work_unit_id": work_unit_id,
+        "source_shard_id": work_unit_id,
+    }
+    payload = {
+        "role": "complete_recording_work_unit",
+        "coverage_semantics": (
+            "exact_complete_crop_rows_for_recording_frame_window_v1"
+        ),
+        "work_unit_manifest": {
+            "schema_id": "palette.subject_mask.expected_work_units",
+            "schema_version": 1,
+            "units_digest": "1" * 64,
+            "work_unit_index": 0,
+        },
+        "pixel_source": {
+            "schema": "palette_roi_cache_flat_bin_v1",
+            "layout": "flat_bin_v1",
+            "cache_key": "2" * 64,
+            "array_sha256": "3" * 64,
+            "array_shape": [1, 10, 10],
+        },
+        "collection": collection,
+        "frame_window": {
+            "schema_id": "palette.subject_mask.recording_frame_window",
+            "schema_version": 1,
+            "recording_identity": recording_id,
+            "clip_id": recording_id,
+            "actual_start_frame": 0,
+            "end_frame_exclusive": 1,
+            "frame_count": 1,
+        },
+        "crop_rows": {
+            "start": 0,
+            "stop": 1,
+            "count": 1,
+            "source_crop_total_rows": 1,
+        },
+        "validation": {
+            "expected_work_unit_manifest_validated": True,
+            "flat_cache_manifest_validated": True,
+            "row_interval_contiguous": True,
+            "frame_offset_coverage_exact": True,
+            "acquisition_frames_within_window": True,
+        },
+    }
+    run.attrs.update(
+        {
+            "roi_work_package_role": "complete_recording_work_unit",
+            "incremental_materialization_role": "complete_recording_work_unit",
+            "canonical_finalization_policy": "collection_shard_finalization_allowed",
+            **collection,
+            "collection_partition_contract": {
+                "schema_id": "palette.subject_mask.complete_recording_work_unit",
+                "schema_version": 1,
+                "payload": payload,
+                "payload_digest": mod.canonical_json_sha256(payload),
+            },
+        }
+    )
+    run["source_acquisition_frame_index"][:] = np.asarray([0], dtype=np.int64)
+    crop = root[f"crop_runs/{run.attrs['source_crop_run']}"]
+    crop.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 1], dtype=np.int64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([0], dtype=np.int64),
+        overwrite=True,
+    )
+
+
 def test_collection_finalizer_accepts_exact_complete_partition_contract() -> None:
     root = _build_sharded_subject_mask_root()
     run = root["subject_mask_shard_runs/subject_masks_clip_a"]
@@ -1221,6 +1305,27 @@ def test_collection_finalizer_accepts_exact_complete_partition_contract() -> Non
 
     assert len(sources) == 1
     assert sources[0].name == "subject_masks_clip_a"
+
+
+def test_collection_finalizer_accepts_complete_recording_work_unit() -> None:
+    root = _build_sharded_subject_mask_root()
+    run = root["subject_mask_shard_runs/subject_masks_clip_a"]
+    _stamp_complete_recording_work_unit_contract(root, run)
+
+    sources = mod._load_subject_mask_shard_sources(root, ["subject_masks_clip_a"])
+
+    assert len(sources) == 1
+    assert sources[0].name == "subject_masks_clip_a"
+
+
+def test_collection_finalizer_rejects_recording_work_unit_identity_mismatch() -> None:
+    root = _build_sharded_subject_mask_root()
+    run = root["subject_mask_shard_runs/subject_masks_clip_a"]
+    _stamp_complete_recording_work_unit_contract(root, run)
+    run.attrs["source_work_unit_id"] = "recording-1:wrong"
+
+    with pytest.raises(ValueError, match="source_work_unit_id differs"):
+        mod._load_subject_mask_shard_sources(root, ["subject_masks_clip_a"])
 
 
 def test_collection_finalizer_rejects_delta_work_package_rows() -> None:

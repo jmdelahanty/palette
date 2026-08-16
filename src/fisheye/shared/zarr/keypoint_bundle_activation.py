@@ -120,6 +120,155 @@ def _require_run_id(value: object, *, name: str) -> str:
     return result
 
 
+def _decode_authority_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _get_group_path(parent: object, path: str) -> object | None:
+    current = parent
+    for part in [part for part in path.split("/") if part]:
+        try:
+            if part not in current:  # type: ignore[operator]
+                return None
+            current = current[part]  # type: ignore[index]
+        except Exception:
+            return None
+    return current
+
+
+def resolve_active_keypoint_bundle_from_root(
+    root: object,
+) -> dict[str, object] | None:
+    """Resolve one committed root authority without legacy family selectors.
+
+    Registry reconciliation receives an already-open root, including in-memory
+    test roots, so this validator deliberately operates on the group protocol
+    rather than reopening an archive path. Any present-but-invalid authority
+    fails closed.
+    """
+
+    attrs = getattr(root, "attrs", {})
+    if KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR in attrs:
+        raise ValueError(
+            "Keypoint bundle activation lease is present; registry reconciliation "
+            "requires a committed authority generation."
+        )
+    authority = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_ATTR)
+    if authority is None:
+        return None
+    if not isinstance(authority, Mapping):
+        raise ValueError("Keypoint bundle authority must be one object.")
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "generation",
+        "base_generation",
+        "policy",
+        "activation_plan_payload_digest",
+        "prior_authority_present",
+        "prior_authority_digest",
+        "crop",
+        "members",
+        "activated_at_utc",
+        "activation_owner_uuid",
+    }
+    generation = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR)
+    if (
+        set(authority) != expected_fields
+        or authority.get("schema_id") != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_ID
+        or authority.get("schema_version")
+        != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_VERSION
+        or authority.get("policy") != KEYPOINT_BUNDLE_ACTIVATION_POLICY
+        or type(generation) is not int
+        or generation <= 0
+        or authority.get("generation") != generation
+        or type(authority.get("base_generation")) is not int
+        or authority.get("base_generation") != generation - 1
+    ):
+        raise ValueError("Keypoint bundle authority schema or generation is invalid.")
+    members = authority.get("members")
+    crop = authority.get("crop")
+    if not isinstance(members, Mapping) or set(members) != set(_ROLE_SPECS):
+        raise ValueError("Keypoint bundle authority member roles are invalid.")
+    if not isinstance(crop, Mapping):
+        raise ValueError("Keypoint bundle authority crop member is invalid.")
+
+    resolved: dict[str, object] = {
+        "authority": dict(authority),
+        "generation": generation,
+        "activation_plan_payload_digest": authority.get(
+            "activation_plan_payload_digest"
+        ),
+    }
+    declarations: dict[str, Mapping[str, object]] = {"crop": crop}
+    declarations.update(
+        {
+            role: member
+            for role, member in members.items()
+            if isinstance(member, Mapping)
+        }
+    )
+    if set(declarations) != {"crop", *_ROLE_SPECS}:
+        raise ValueError("Keypoint bundle authority member declarations are invalid.")
+    parent_paths = {
+        "crop": "crop_runs",
+        **{role: spec[0] for role, spec in _ROLE_SPECS.items()},
+    }
+    for role, parent_path in parent_paths.items():
+        member = declarations[role]
+        if role != "crop" and member.get("role") != role:
+            raise ValueError(
+                f"Keypoint bundle authority {role} declaration has another role."
+            )
+        run_id = _decode_authority_text(member.get("run_id"))
+        run_path = _decode_authority_text(member.get("run_path"))
+        expected_path = f"{parent_path}/{run_id}" if run_id else None
+        if not run_id or run_path != expected_path:
+            raise ValueError(
+                f"Keypoint bundle authority {role} path does not bind its run ID."
+            )
+        parent = _get_group_path(root, parent_path)
+        group = _get_group_path(root, run_path)
+        if parent is None or group is None:
+            raise ValueError(
+                f"Keypoint bundle authority member is absent: {run_path}."
+            )
+        group_attrs = getattr(group, "attrs", {})
+        if (
+            group_attrs.get("status") != "complete"
+            or group_attrs.get("palette_run_completion_status") != "complete"
+            or group_attrs.get("production_candidate") is not True
+            or group_attrs.get("stage_selector_eligible") is not False
+        ):
+            raise ValueError(
+                f"Keypoint bundle authority member is not sealed: {run_path}."
+            )
+        manifest = group_attrs.get("run_manifest")
+        if (
+            not isinstance(manifest, Mapping)
+            or member.get("manifest_payload_digest")
+            != manifest.get("payload_digest")
+            or member.get("manifest_document_digest")
+            != canonical_json_sha256(manifest)
+        ):
+            raise ValueError(
+                f"Keypoint bundle authority member manifest changed: {run_path}."
+            )
+        resolved[role] = {
+            "run_id": run_id,
+            "run_path": run_path,
+            "parent": parent,
+            "group": group,
+        }
+    return resolved
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     import json
 
@@ -669,5 +818,6 @@ __all__ = [
     "KeypointBundleActivationError",
     "activate_keypoint_bundle_from_plan",
     "build_keypoint_bundle_activation_plan",
+    "resolve_active_keypoint_bundle_from_root",
     "validate_active_keypoint_bundle",
 ]

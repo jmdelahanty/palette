@@ -38,6 +38,9 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_canonical_detection_run_manifest,
 )
+from fisheye.shared.zarr.keypoint_bundle_activation import (
+    resolve_active_keypoint_bundle_from_root as _resolve_active_keypoint_bundle,
+)
 from fisheye.shared.zarr_run_completion import (
     is_run_complete,
     is_run_complete_in_parent,
@@ -5705,8 +5708,27 @@ def _build_recording_step_rows_from_root(
         else None
     )
 
+    active_keypoint_bundle = _resolve_active_keypoint_bundle(root)
+    keypoint_bundle_details: Dict[str, object] = {}
+    if active_keypoint_bundle is not None:
+        keypoint_bundle_details = {
+            "keypoint_bundle_authority_generation": active_keypoint_bundle[
+                "generation"
+            ],
+            "keypoint_bundle_activation_plan_payload_digest": (
+                active_keypoint_bundle["activation_plan_payload_digest"]
+            ),
+        }
+
     crop_parent = root.get("crop_runs")  # type: ignore[attr-defined]
-    crop_run, crop_group, crop_selection = _resolve_latest_group(crop_parent)
+    if active_keypoint_bundle is None:
+        crop_run, crop_group, crop_selection = _resolve_latest_group(crop_parent)
+    else:
+        active_crop = active_keypoint_bundle["crop"]
+        assert isinstance(active_crop, Mapping)
+        crop_run = str(active_crop["run_id"])
+        crop_group = active_crop["group"]
+        crop_selection = "keypoint_bundle_authority"
     crop_status, crop_reason = _step_status_from_presence(
         present=crop_group is not None,
         is_production=is_production,
@@ -5737,7 +5759,16 @@ def _build_recording_step_rows_from_root(
             crop_reason = "run_in_progress"
 
     keypoints_parent = root.get("keypoints_runs")  # type: ignore[attr-defined]
-    keypoints_run, keypoints_group, keypoints_selection = _resolve_latest_group(keypoints_parent)
+    if active_keypoint_bundle is None:
+        keypoints_run, keypoints_group, keypoints_selection = _resolve_latest_group(
+            keypoints_parent
+        )
+    else:
+        active_raw_keypoints = active_keypoint_bundle["raw_keypoints"]
+        assert isinstance(active_raw_keypoints, Mapping)
+        keypoints_run = str(active_raw_keypoints["run_id"])
+        keypoints_group = active_raw_keypoints["group"]
+        keypoints_selection = "keypoint_bundle_authority"
     keypoints_status, keypoints_reason = _step_status_from_presence(
         present=keypoints_group is not None,
         is_production=is_production,
@@ -5748,16 +5779,25 @@ def _build_recording_step_rows_from_root(
     ) if keypoints_group is not None else None
 
     refined_keypoints_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")  # type: ignore[attr-defined]
-    (
-        refined_keypoints_run,
-        refined_keypoints_group,
-        refined_keypoints_selection,
-        refined_keypoints_latest_run,
-        refined_keypoints_latest_source_run,
-    ) = _resolve_refined_keypoints_group(
-        refined_keypoints_parent,
-        source_keypoints_run=keypoints_run,
-    )
+    if active_keypoint_bundle is None:
+        (
+            refined_keypoints_run,
+            refined_keypoints_group,
+            refined_keypoints_selection,
+            refined_keypoints_latest_run,
+            refined_keypoints_latest_source_run,
+        ) = _resolve_refined_keypoints_group(
+            refined_keypoints_parent,
+            source_keypoints_run=keypoints_run,
+        )
+    else:
+        active_refined_keypoints = active_keypoint_bundle["refined_keypoints"]
+        assert isinstance(active_refined_keypoints, Mapping)
+        refined_keypoints_run = str(active_refined_keypoints["run_id"])
+        refined_keypoints_group = active_refined_keypoints["group"]
+        refined_keypoints_selection = "keypoint_bundle_authority"
+        refined_keypoints_latest_run = None
+        refined_keypoints_latest_source_run = keypoints_run
     refined_keypoints_status, refined_keypoints_reason = _step_status_from_presence(
         present=refined_keypoints_group is not None,
         is_production=is_production,
@@ -6279,6 +6319,7 @@ def _build_recording_step_rows_from_root(
 
     refined_keypoints_details: Dict[str, object] = {
         **common_details,
+        **keypoint_bundle_details,
         "reason": refined_keypoints_reason,
         "latest_selector": refined_keypoints_selection,
         "upstream": {"keypoints": keypoints_status},
@@ -6491,6 +6532,7 @@ def _build_recording_step_rows_from_root(
             review_status=crop_review_status,
             details={
                 **common_details,
+                **keypoint_bundle_details,
                 "reason": crop_reason,
                 "latest_selector": crop_selection,
                 "run_state": crop_run_state,
@@ -6511,6 +6553,7 @@ def _build_recording_step_rows_from_root(
             review_status=None,
             details={
                 **common_details,
+                **keypoint_bundle_details,
                 "reason": keypoints_reason,
                 "latest_selector": keypoints_selection,
                 "upstream": {"crop": crop_status},

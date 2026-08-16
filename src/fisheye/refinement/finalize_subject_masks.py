@@ -84,6 +84,7 @@ from ..shared.subject_mask_attempt import (
     build_subject_mask_attempt,
     build_subject_mask_scientific_identity,
     resolve_subject_mask_attempt_lineage,
+    validate_subject_mask_collection_partition_contract,
     validate_subject_mask_scientific_identity,
 )
 from ..shared.zarr.manifest_digest import canonical_json_bytes, canonical_json_sha256
@@ -351,10 +352,139 @@ class _SubjectMaskShardCollection:
 _COLLECTION_WORKER_INDEX_PLAN_SCHEMA = "subject_mask_collection_worker_index_plan_v1"
 _ROI_WORK_PACKAGE_ROLE_DELTA = "delta_replacement_rows"
 _ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION = "complete_collection_partition"
+_ROI_WORK_PACKAGE_ROLE_COMPLETE_RECORDING = "complete_recording_work_unit"
 _COLLECTION_PARTITION_CONTRACT_SCHEMA_ID = (
     "palette.subject_mask.complete_collection_partition"
 )
 _COLLECTION_PARTITION_CONTRACT_SCHEMA_VERSION = 1
+
+
+def _validate_complete_recording_work_unit_partition(
+    root: zarr.Group,
+    group: zarr.Group,
+    *,
+    run_name: str,
+) -> None:
+    """Recheck one whole-recording worker against its contract and crop rows."""
+
+    path = f"{SUBJECT_MASK_SHARD_PARENT}/{run_name}"
+    role = _ROI_WORK_PACKAGE_ROLE_COMPLETE_RECORDING
+    if group.attrs.get("source_crop_pixel_work_package_id") is not None:
+        raise ValueError(
+            f"{path} mixes recording work-unit and crop work-package identities."
+        )
+    if (
+        group.attrs.get("incremental_materialization_role") != role
+        or group.attrs.get("canonical_finalization_policy")
+        != "collection_shard_finalization_allowed"
+    ):
+        raise ValueError(
+            f"{path} has inconsistent complete recording work-unit policy metadata."
+        )
+
+    contract = group.attrs.get("collection_partition_contract")
+    errors = validate_subject_mask_collection_partition_contract(contract)
+    if errors:
+        raise ValueError(
+            f"{path} has an invalid recording work-unit contract: "
+            + "; ".join(errors)
+        )
+    assert isinstance(contract, Mapping)
+    payload = contract["payload"]
+    assert isinstance(payload, Mapping)
+    collection = payload["collection"]
+    frame_window = payload["frame_window"]
+    crop_rows = payload["crop_rows"]
+    pixels = payload["pixel_source"]
+    assert isinstance(collection, Mapping)
+    assert isinstance(frame_window, Mapping)
+    assert isinstance(crop_rows, Mapping)
+    assert isinstance(pixels, Mapping)
+
+    collection_fields = {
+        "source_collection_id",
+        "source_collection_path",
+        "source_clip_id",
+        "source_clip_index",
+        "source_work_unit_id",
+        "source_shard_id",
+    }
+    for field_name in collection_fields:
+        if collection.get(field_name) != group.attrs.get(field_name):
+            raise ValueError(
+                f"{path} recording work-unit {field_name} differs from the run attribute."
+            )
+    if (
+        collection.get("source_work_unit_id")
+        != collection.get("source_shard_id")
+    ):
+        raise ValueError(f"{path} recording work-unit identities disagree.")
+
+    start_frame = int(frame_window["actual_start_frame"])
+    end_frame = int(frame_window["end_frame_exclusive"])
+    row_start = int(crop_rows["start"])
+    row_stop = int(crop_rows["stop"])
+    source_total = int(crop_rows["source_crop_total_rows"])
+    if (
+        start_frame != 0
+        or row_start != 0
+        or row_stop != source_total
+        or int(pixels["array_shape"][0]) != source_total
+    ):
+        raise ValueError(f"{path} is not one complete recording row partition.")
+    if (
+        "source_crop_row_ids" not in group
+        or "source_acquisition_frame_index" not in group
+    ):
+        raise ValueError(f"{path} lacks complete recording row/frame lineage arrays.")
+    source_rows = np.asarray(group["source_crop_row_ids"][:], dtype=np.int64).reshape(
+        -1
+    )
+    expected_rows = np.arange(source_total, dtype=np.int64)
+    source_frames = np.asarray(
+        group["source_acquisition_frame_index"][:], dtype=np.int64
+    ).reshape(-1)
+    if not np.array_equal(source_rows, expected_rows):
+        raise ValueError(f"{path} rows differ from its recording work-unit contract.")
+    if (
+        source_frames.shape != source_rows.shape
+        or np.any(source_frames < start_frame)
+        or np.any(source_frames >= end_frame)
+    ):
+        raise ValueError(f"{path} frames differ from its recording frame window.")
+
+    crop_run = str(group.attrs.get("source_crop_run") or "")
+    crop = root.get(f"crop_runs/{crop_run}") if crop_run else None
+    if (
+        crop is None
+        or "frame_indices" not in crop
+        or "frame_row_offsets" not in crop
+        or "source_acquisition_frame_index" not in crop
+    ):
+        raise ValueError(
+            f"{path} complete recording work unit lacks its authoritative crop frame index."
+        )
+    crop_total = int(crop["frame_indices"].shape[0])
+    offsets = np.asarray(crop["frame_row_offsets"][:], dtype=np.int64).reshape(-1)
+    if (
+        crop_total != source_total
+        or offsets.size != end_frame + 1
+        or offsets[0] != 0
+        or offsets[-1] != crop_total
+        or np.any(offsets[1:] < offsets[:-1])
+        or int(offsets[start_frame]) != row_start
+        or int(offsets[end_frame]) != row_stop
+    ):
+        raise ValueError(
+            f"{path} contract does not match authoritative crop frame_row_offsets."
+        )
+    crop_frames = np.asarray(
+        crop["source_acquisition_frame_index"][source_rows], dtype=np.int64
+    ).reshape(-1)
+    if not np.array_equal(crop_frames, source_frames):
+        raise ValueError(
+            f"{path} frames differ from authoritative crop lineage."
+        )
 
 
 @dataclass(frozen=True)
@@ -752,6 +882,13 @@ def _validate_subject_mask_shard_partition_role(
             "partition. Publish it through the keyed base-plus-delta compactor "
             "instead of the collection shard finalizer."
         )
+    if role == _ROI_WORK_PACKAGE_ROLE_COMPLETE_RECORDING:
+        _validate_complete_recording_work_unit_partition(
+            root,
+            group,
+            run_name=run_name,
+        )
+        return
     if not package_id:
         if role:
             raise ValueError(

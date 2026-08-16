@@ -28,6 +28,35 @@ def _make_target(tmp_path: Path, name: str) -> dict[str, str]:
     recording_dir = tmp_path / "recordings" / name
     zarr_path = recording_dir / "zarr" / f"{name}_analysis.zarr"
     zarr_path.mkdir(parents=True, exist_ok=True)
+    crop_path = zarr_path / "crop_runs" / "crop_001"
+    _write_json(
+        crop_path / "zarr.json",
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "palette_run_completion_status": "complete",
+                "run_manifest": {
+                    "schema_id": "palette.crop_geometry.run_manifest",
+                    "schema_version": 2,
+                    "payload": {
+                        "run_id": "crop_001",
+                        "logical_schema": {
+                            "dimensions": {"n_frames": 4, "n_instances": 2}
+                        },
+                    },
+                },
+            },
+        },
+    )
+    _write_json(
+        crop_path / "frame_row_offsets" / "zarr.json",
+        {"zarr_format": 3, "node_type": "array", "shape": [5]},
+    )
+    _write_json(
+        crop_path / "instance_key" / "zarr.json",
+        {"zarr_format": 3, "node_type": "array", "shape": [2]},
+    )
     payload_path = tmp_path / "caches" / f"{name}.bin"
     payload_path.parent.mkdir(parents=True, exist_ok=True)
     total_bytes = 2 * 348 * 348
@@ -310,6 +339,25 @@ def test_manifest_loader_requires_explicit_count_and_unique_targets(tmp_path: Pa
         planner.load_target_manifest(manifest)
 
 
+def test_manifest_loader_preserves_distinct_mask_geometry_crop(tmp_path: Path) -> None:
+    target = _make_target(tmp_path, "target_a")
+    target["geometry_crop_run"] = "crop_strict_geometry_v2"
+    manifest = tmp_path / "targets.json"
+    _write_json(
+        manifest,
+        {
+            "schema": planner.TARGET_MANIFEST_SCHEMA,
+            "expected_target_count": 1,
+            "targets": [target],
+        },
+    )
+
+    loaded = planner.load_target_manifest(manifest)[0]
+
+    assert loaded.crop_run == "crop_001"
+    assert loaded.geometry_crop_run == "crop_strict_geometry_v2"
+
+
 def test_flat_cache_binding_rejects_small_zebrafish_surface(tmp_path: Path) -> None:
     target = _make_target(tmp_path, "small_cache")
     manifest_path = Path(target["roi_cache_manifest"])
@@ -535,9 +583,72 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     assert "--roi-cache-manifest" in inference_command
     assert "--roi-cache-staging-dir" in inference_command
     assert "--raw-worker-run" in inference_command
+    assert inference_command[inference_command.index("--pixel-crop-run") + 1] == (
+        "crop_001"
+    )
+    assert inference_command[inference_command.index("--geometry-crop-run") + 1] == (
+        "crop_001"
+    )
+    inference_manifest_index = (
+        inference_command.index("--expected-work-units-manifest") + 1
+    )
+    cleanup_paths = [
+        inference_command[index + 1]
+        for index, argument in enumerate(inference_command)
+        if argument == "--cleanup-path"
+    ]
+    assert cleanup_paths == [
+        "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
+        "palette_subject_mask_roi_cache_stage",
+        "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
+        "subject_mask_output_staging",
+    ]
+    assert all(
+        path
+        != "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__"
+        for path in cleanup_paths
+    )
+    publication_command = jobs["mask_publish:target_0"].command
+    manifest_index = publication_command.index("--expected-work-units-manifest") + 1
+    expected_manifest = Path(publication_command[manifest_index])
+    assert Path(inference_command[inference_manifest_index]) == expected_manifest
+    assert expected_manifest == (
+        tmp_path
+        / "combined"
+        / "manifests"
+        / "target_0.subject_mask_expected_work_units.json"
+    )
+    analysis_planner.materialize_plan_bundle(plan)
+    expected_document = json.loads(expected_manifest.read_text(encoding="utf-8"))
+    assert expected_document["schema_id"] == "palette.subject_mask.expected_work_units"
+    assert expected_document["schema_version"] == 1
+    assert expected_document["units"] == [
+        {
+            "work_unit_id": "recording-target_0:whole_recording",
+            "work_unit_index": 0,
+            "source_clip_id": "recording-target_0",
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": 4,
+            "row_start": 0,
+            "row_stop": 2,
+        }
+    ]
 
     finalization_command = jobs["mask_finalize:target_0"].command
     assert "finalization" in finalization_command
+    assert finalization_command[
+        finalization_command.index("--geometry-crop-run") + 1
+    ] == "crop_001"
+    finalization_cleanup_paths = [
+        finalization_command[index + 1]
+        for index, argument in enumerate(finalization_command)
+        if argument == "--cleanup-path"
+    ]
+    assert finalization_cleanup_paths == [
+        "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
+        "subject_mask_output_staging"
+    ]
     exact_index = finalization_command.index("--refined-keypoint-run") + 1
     assert (
         finalization_command[exact_index]
@@ -555,6 +666,9 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
         publication_command
     )
     assert "--activate" not in publication_command
+    assert publication_command[publication_command.index("--crop-run") + 1] == (
+        "crop_001"
+    )
     assert jobs["mask_publish:target_0"].metadata["selector_activation"] is False
 
 

@@ -11,7 +11,71 @@ from fisheye.shared.flat_roi_cache import (
     cleanup_staged_flat_roi_cache,
     stage_flat_roi_cache_manifest,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils import run_subject_mask_batch_pipeline as pipeline
+
+
+def _recording_work_unit_args(manifest_path: Path) -> list[str]:
+    path = manifest_path.expanduser().resolve()
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read recording work-unit manifest: {path}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Recording work-unit manifest must be one JSON object.")
+    units = document.get("units")
+    if (
+        document.get("schema_id") != "palette.subject_mask.expected_work_units"
+        or document.get("schema_version") != 1
+        or not isinstance(units, list)
+        or len(units) != 1
+        or document.get("units_digest") != canonical_json_sha256(units)
+    ):
+        raise ValueError(
+            "Recording inference requires one exact digest-bound work unit."
+        )
+    unit = units[0]
+    if not isinstance(unit, dict):
+        raise ValueError("Recording work unit must be one JSON object.")
+    required = {
+        "work_unit_id",
+        "work_unit_index",
+        "source_clip_id",
+        "source_clip_index",
+        "frame_start",
+        "frame_stop",
+        "row_start",
+        "row_stop",
+    }
+    if set(unit) != required or unit.get("work_unit_index") != 0:
+        raise ValueError("Recording work-unit fields are not exact.")
+    recording_id = str(unit.get("source_clip_id") or "").strip()
+    work_unit_id = str(unit.get("work_unit_id") or "").strip()
+    if (
+        not recording_id
+        or not work_unit_id
+        or unit.get("source_clip_index") != 0
+        or unit.get("frame_start") != 0
+        or unit.get("row_start") != 0
+    ):
+        raise ValueError("Recording work-unit identity or origin is invalid.")
+    return [
+        "--expected-work-units-manifest",
+        str(path),
+        "--source-collection-id",
+        recording_id,
+        "--source-collection-path",
+        str(path),
+        "--source-clip-id",
+        recording_id,
+        "--source-clip-index",
+        "0",
+        "--source-work-unit-id",
+        work_unit_id,
+        "--source-shard-id",
+        work_unit_id,
+    ]
+
 
 def _stage_flat_roi_cache_manifest(
     manifest_path: Path,
@@ -35,6 +99,14 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
         getattr(args, "refined_draft_run", None)
         or f"refined_subject_masks_smart_finalizer_{args.run_label}"
     )
+    legacy_crop_run = getattr(args, "crop_run", None)
+    pixel_crop_run = getattr(args, "pixel_crop_run", None) or legacy_crop_run
+    geometry_crop_run = getattr(args, "geometry_crop_run", None) or legacy_crop_run
+    stage_crop_run = pixel_crop_run if args.stage == "inference" else geometry_crop_run
+    if not stage_crop_run:
+        raise ValueError(
+            f"Subject-mask {args.stage} requires its exact crop authority."
+        )
     command = [
         str(args.analysis_zarr),
         "--apply",
@@ -51,7 +123,7 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
         "--subject-output-parent",
         "subject_mask_shard_runs",
         "--crop-run",
-        args.crop_run,
+        str(stage_crop_run),
         "--device",
         args.device,
         "--batch-size",
@@ -99,15 +171,49 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
         "--no-write-component-contours",
         "--write-sampled-component-contours",
     ]
+    model_set_id = getattr(args, "model_set_id", None)
+    model_run_id = getattr(args, "model_run_id", None)
+    if bool(model_set_id) != bool(model_run_id):
+        raise ValueError(
+            "Exact subject-mask model selection requires both --model-set-id "
+            "and --model-run-id."
+        )
+    if model_set_id is not None and model_run_id is not None:
+        command.extend(["--model-set-id", str(model_set_id)])
+        command.extend(["--model-run-id", str(model_run_id)])
+    model_input_size = getattr(args, "model_input_size", None)
+    if model_input_size is not None:
+        command.extend(["--model-input-size", str(int(model_input_size))])
+    command.extend(
+        [
+            "--model-input-transform",
+            str(getattr(args, "model_input_transform", "auto")),
+        ]
+    )
     if args.progress_dir is not None:
         command.extend(["--progress-dir", str(args.progress_dir)])
     if args.handoff_package_dir is not None:
         command.extend(["--handoff-package-dir", str(args.handoff_package_dir)])
     if args.stage == "inference":
         command.append("--no-assignment-keypoints")
+        if geometry_crop_run != pixel_crop_run:
+            command.extend(["--geometry-crop-run", str(geometry_crop_run)])
         if cache_manifest is None:
             raise ValueError("Inference requires an ROI-cache manifest.")
         command.extend(["--roi-cache-manifest", str(cache_manifest)])
+        command.extend(
+            [
+                "--source-roi-cache-alias-manifest",
+                str(args.roi_cache_manifest),
+            ]
+        )
+        expected_work_units_manifest = getattr(
+            args, "expected_work_units_manifest", None
+        )
+        if expected_work_units_manifest is not None:
+            command.extend(
+                _recording_work_unit_args(Path(expected_work_units_manifest))
+            )
     else:
         command.extend(
             [
@@ -133,9 +239,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-label", required=True)
     parser.add_argument("--raw-worker-run")
     parser.add_argument("--refined-draft-run")
-    parser.add_argument("--crop-run", required=True)
+    parser.add_argument(
+        "--crop-run",
+        help=(
+            "Legacy common crop authority. Prefer --pixel-crop-run plus "
+            "--geometry-crop-run when cached pixels and canonical geometry differ."
+        ),
+    )
+    parser.add_argument(
+        "--pixel-crop-run",
+        help="Exact crop run bound by the inference ROI-cache manifest.",
+    )
+    parser.add_argument(
+        "--geometry-crop-run",
+        help="Exact strict crop-v2 authority used for finalization/publication.",
+    )
     parser.add_argument("--refined-keypoint-run")
     parser.add_argument("--roi-cache-manifest", type=Path)
+    parser.add_argument("--expected-work-units-manifest", type=Path)
     parser.add_argument("--roi-cache-staging-dir", type=Path)
     parser.add_argument("--device", default="0")
     parser.add_argument("--batch-size", type=int, default=128)
@@ -148,6 +269,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-label-schema-id", default="subject_v1_union")
     parser.add_argument("--model-top-k", type=int, default=5)
+    parser.add_argument("--model-set-id")
+    parser.add_argument("--model-run-id")
+    parser.add_argument("--model-input-size", type=int)
+    parser.add_argument(
+        "--model-input-transform",
+        choices=("auto", "identity", "pad_to_size"),
+        default="auto",
+    )
     parser.add_argument("--progress-dir", type=Path)
     parser.add_argument("--handoff-package-dir", type=Path)
     parser.add_argument("--json", action="store_true")
@@ -156,6 +285,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if not (args.pixel_crop_run or args.crop_run):
+        raise ValueError("Inference pixel authority requires --pixel-crop-run.")
+    if not (args.geometry_crop_run or args.crop_run):
+        raise ValueError("Finalization geometry authority requires --geometry-crop-run.")
+    if bool(args.model_set_id) != bool(args.model_run_id):
+        raise ValueError(
+            "--model-set-id and --model-run-id must be provided together."
+        )
     if args.stage == "inference" and args.roi_cache_manifest is None:
         raise ValueError("Inference requires --roi-cache-manifest.")
     if args.stage == "finalization" and not args.refined_keypoint_run:
@@ -180,6 +317,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "status": status,
                         "analysis_zarr": str(args.analysis_zarr),
                         "run_label": args.run_label,
+                        "pixel_crop_run": args.pixel_crop_run or args.crop_run,
+                        "geometry_crop_run": args.geometry_crop_run or args.crop_run,
                         "refined_keypoint_run": args.refined_keypoint_run,
                         "roi_cache_staging": staging_details,
                     },

@@ -277,6 +277,135 @@ def _validate_source_input_binding(value: Any, *, name: str) -> list[str]:
     return errors
 
 
+def _validate_recording_work_unit_contract(value: Mapping[str, Any]) -> list[str]:
+    payload = value.get("payload")
+    if (
+        value.get("schema_id")
+        != "palette.subject_mask.complete_recording_work_unit"
+        or value.get("schema_version") != 1
+        or not isinstance(payload, Mapping)
+        or value.get("payload_digest") != canonical_json_sha256(payload)
+    ):
+        return ["raw recording work-unit contract is unsupported or stale"]
+    expected = {
+        "role",
+        "coverage_semantics",
+        "work_unit_manifest",
+        "pixel_source",
+        "collection",
+        "frame_window",
+        "crop_rows",
+        "validation",
+    }
+    if set(payload) != expected:
+        return ["raw recording work-unit payload fields are not exact"]
+
+    errors: list[str] = []
+    manifest = payload.get("work_unit_manifest")
+    pixels = payload.get("pixel_source")
+    collection = payload.get("collection")
+    window = payload.get("frame_window")
+    rows = payload.get("crop_rows")
+    validation = payload.get("validation")
+    if payload.get("role") != "complete_recording_work_unit":
+        errors.append("raw recording work-unit role is invalid")
+    if (
+        payload.get("coverage_semantics")
+        != "exact_complete_crop_rows_for_recording_frame_window_v1"
+    ):
+        errors.append("raw recording work-unit coverage semantics changed")
+    if (
+        not isinstance(manifest, Mapping)
+        or set(manifest)
+        != {"schema_id", "schema_version", "units_digest", "work_unit_index"}
+        or manifest.get("schema_id")
+        != "palette.subject_mask.expected_work_units"
+        or manifest.get("schema_version") != 1
+        or not _is_sha256(manifest.get("units_digest"))
+        or manifest.get("work_unit_index") != 0
+    ):
+        errors.append("raw recording work-unit manifest binding is invalid")
+    if (
+        not isinstance(pixels, Mapping)
+        or set(pixels)
+        != {"schema", "layout", "cache_key", "array_sha256", "array_shape"}
+        or pixels.get("schema") != "palette_roi_cache_flat_bin_v1"
+        or pixels.get("layout") != "flat_bin_v1"
+        or not _is_sha256(pixels.get("cache_key"))
+        or not _is_sha256(pixels.get("array_sha256"))
+        or not isinstance(pixels.get("array_shape"), list)
+        or len(pixels["array_shape"]) != 3
+        or any(type(item) is not int or item <= 0 for item in pixels["array_shape"])
+    ):
+        errors.append("raw recording work-unit pixel source is invalid")
+    collection_fields = {
+        "source_collection_id",
+        "source_collection_path",
+        "source_clip_id",
+        "source_clip_index",
+        "source_work_unit_id",
+        "source_shard_id",
+    }
+    if not isinstance(collection, Mapping) or set(collection) != collection_fields:
+        errors.append("raw recording work-unit collection identity is invalid")
+    else:
+        for name in collection_fields - {"source_clip_index"}:
+            if not _is_nonempty_string(collection.get(name)):
+                errors.append(f"raw recording work-unit {name} is invalid")
+        if collection.get("source_clip_index") != 0:
+            errors.append("raw recording work-unit source_clip_index is invalid")
+    if (
+        not isinstance(window, Mapping)
+        or set(window)
+        != {
+            "schema_id",
+            "schema_version",
+            "recording_identity",
+            "clip_id",
+            "actual_start_frame",
+            "end_frame_exclusive",
+            "frame_count",
+        }
+        or window.get("schema_id")
+        != "palette.subject_mask.recording_frame_window"
+        or window.get("schema_version") != 1
+        or not _is_nonempty_string(window.get("recording_identity"))
+        or not _is_nonempty_string(window.get("clip_id"))
+        or window.get("actual_start_frame") != 0
+        or type(window.get("end_frame_exclusive")) is not int
+        or window["end_frame_exclusive"] <= 0
+        or window.get("frame_count") != window["end_frame_exclusive"]
+    ):
+        errors.append("raw recording work-unit frame window is invalid")
+    elif isinstance(collection, Mapping) and (
+        window.get("recording_identity") != collection.get("source_collection_id")
+        or window.get("clip_id") != collection.get("source_clip_id")
+    ):
+        errors.append("raw recording work-unit frame identities differ")
+    if (
+        not isinstance(rows, Mapping)
+        or set(rows) != {"start", "stop", "count", "source_crop_total_rows"}
+        or rows.get("start") != 0
+        or type(rows.get("stop")) is not int
+        or rows["stop"] <= 0
+        or rows.get("count") != rows["stop"]
+        or rows.get("source_crop_total_rows") != rows["stop"]
+    ):
+        errors.append("raw recording work-unit crop rows are invalid")
+    elif isinstance(pixels, Mapping) and isinstance(pixels.get("array_shape"), list):
+        if pixels["array_shape"][0] != rows["stop"]:
+            errors.append("raw recording pixel and crop-row counts differ")
+    if validation != {
+        "expected_work_unit_manifest_validated": True,
+        "flat_cache_manifest_validated": True,
+        "row_interval_contiguous": True,
+        "frame_offset_coverage_exact": True,
+        "acquisition_frames_within_window": True,
+    }:
+        errors.append("raw recording work-unit validation claims are invalid")
+    return errors
+
+
 def _validate_collection_partition_contract(value: Any) -> list[str]:
     if value is None:
         return []
@@ -287,6 +416,8 @@ def _validate_collection_partition_contract(value: Any) -> list[str]:
         "payload_digest",
     }:
         return ["raw collection partition contract fields are not exact"]
+    if value.get("schema_id") == "palette.subject_mask.complete_recording_work_unit":
+        return _validate_recording_work_unit_contract(value)
     payload = value.get("payload")
     if (
         value.get("schema_id") != "palette.subject_mask.complete_collection_partition"
@@ -397,6 +528,12 @@ def _validate_collection_partition_contract(value: Any) -> list[str]:
     if validation != expected_validation:
         errors.append("raw collection partition validation claims are invalid")
     return errors
+
+
+def validate_subject_mask_collection_partition_contract(value: Any) -> list[str]:
+    """Validate either supported immutable raw shard partition contract."""
+
+    return _validate_collection_partition_contract(value)
 
 
 def _validate_raw_scientific_payload(payload: Mapping[str, Any]) -> list[str]:

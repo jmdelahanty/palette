@@ -8,6 +8,7 @@ import zarr
 
 from fisheye.shared.subject_mask_attempt import (
     SUBJECT_MASK_SCIENTIFIC_IDENTITY_SCHEMA_VERSION,
+    _validate_collection_partition_contract,
     build_subject_mask_attempt,
     build_subject_mask_scientific_identity,
     resolve_subject_mask_attempt_lineage,
@@ -20,6 +21,7 @@ from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     _recording_common_scientific_authority,
     _validate_refined_worker_source_join,
+    _validate_worker_assignment_keypoint_semantics,
     _normalize_expected_work_units,
     build_recording_assignment_keypoint_collection,
     build_recording_subject_mask_source_receipt,
@@ -48,6 +50,104 @@ def _science(*, pixels_sha256: str = "a" * 64) -> dict[str, object]:
         inference_contract={"label_schema_id": "subject_v1_union"},
         schema_version=1,
     )
+
+
+def _recording_work_unit_contract() -> dict[str, object]:
+    payload = {
+        "role": "complete_recording_work_unit",
+        "coverage_semantics": (
+            "exact_complete_crop_rows_for_recording_frame_window_v1"
+        ),
+        "work_unit_manifest": {
+            "schema_id": "palette.subject_mask.expected_work_units",
+            "schema_version": 1,
+            "units_digest": "1" * 64,
+            "work_unit_index": 0,
+        },
+        "pixel_source": {
+            "schema": "palette_roi_cache_flat_bin_v1",
+            "layout": "flat_bin_v1",
+            "cache_key": "2" * 64,
+            "array_sha256": "3" * 64,
+            "array_shape": [4, 384, 384],
+        },
+        "collection": {
+            "source_collection_id": "recording-1",
+            "source_collection_path": "/operations/recording-1.work-units.json",
+            "source_clip_id": "recording-1",
+            "source_clip_index": 0,
+            "source_work_unit_id": "recording-1:whole_recording",
+            "source_shard_id": "recording-1:whole_recording",
+        },
+        "frame_window": {
+            "schema_id": "palette.subject_mask.recording_frame_window",
+            "schema_version": 1,
+            "recording_identity": "recording-1",
+            "clip_id": "recording-1",
+            "actual_start_frame": 0,
+            "end_frame_exclusive": 5,
+            "frame_count": 5,
+        },
+        "crop_rows": {
+            "start": 0,
+            "stop": 4,
+            "count": 4,
+            "source_crop_total_rows": 4,
+        },
+        "validation": {
+            "expected_work_unit_manifest_validated": True,
+            "flat_cache_manifest_validated": True,
+            "row_interval_contiguous": True,
+            "frame_offset_coverage_exact": True,
+            "acquisition_frames_within_window": True,
+        },
+    }
+    return {
+        "schema_id": "palette.subject_mask.complete_recording_work_unit",
+        "schema_version": 1,
+        "payload": payload,
+        "payload_digest": canonical_json_sha256(payload),
+    }
+
+
+def test_recording_work_unit_contract_is_exact_and_digest_bound() -> None:
+    contract = _recording_work_unit_contract()
+
+    assert _validate_collection_partition_contract(contract) == []
+
+    tampered = deepcopy(contract)
+    tampered["payload"]["crop_rows"]["stop"] = 3
+    assert _validate_collection_partition_contract(tampered) == [
+        "raw recording work-unit contract is unsupported or stale"
+    ]
+
+
+def test_recording_assignment_accepts_exact_full_run_row_identity() -> None:
+    assignment = {
+        "assignment_keypoint_contract": "subject_eyes_union_assignment_keypoints_v1",
+        "assignment_keypoint_role": "eyes_union_lr_assignment",
+        "assignment_keypoint_row_identity_check": "source_crop_row_ids_match",
+        "assignment_keypoint_row_identity": {
+            "row_identity_check": "source_crop_row_ids_match",
+            "rows_checked": 4,
+            "keypoint_has_source_crop_row_ids": True,
+            "mask_has_source_crop_row_ids": True,
+        },
+    }
+
+    _validate_worker_assignment_keypoint_semantics(
+        assignment,
+        start_row=0,
+        stop_row=4,
+    )
+
+    assignment["assignment_keypoint_row_identity"]["rows_checked"] = 3
+    with pytest.raises(ValueError, match="exact assignment row coverage"):
+        _validate_worker_assignment_keypoint_semantics(
+            assignment,
+            start_row=0,
+            stop_row=4,
+        )
 
 
 def test_refined_worker_accepts_only_exact_receipt_bound_legacy_collection_path() -> None:

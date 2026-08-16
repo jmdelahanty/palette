@@ -141,6 +141,10 @@ COLLECTION_PARTITION_CONTRACT_SCHEMA_ID = (
     "palette.subject_mask.complete_collection_partition"
 )
 COLLECTION_PARTITION_CONTRACT_SCHEMA_VERSION = 1
+RECORDING_WORK_UNIT_CONTRACT_SCHEMA_ID = (
+    "palette.subject_mask.complete_recording_work_unit"
+)
+RECORDING_WORK_UNIT_CONTRACT_SCHEMA_VERSION = 1
 MASK_PROBS_WORKING_ARRAY = "_mask_probs_roi_working"
 MASK_PROBS_CANONICAL_ARRAY = "mask_probs_roi"
 MASK_PROBS_SHARDING_SCHEMA = "palette.subject_mask_probability_postpack.v1"
@@ -1509,6 +1513,218 @@ def _require_complete_collection_partition_attrs(
     }
 
 
+def _require_complete_recording_work_unit_attrs(
+    *,
+    crop_group: zarr.Group,
+    crop_source: CropImageSource,
+    selected_crop_rows: np.ndarray | None,
+    total_rois: int,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Prove one flat-cache worker owns one complete recording work unit."""
+
+    manifest_path_value = getattr(args, "expected_work_units_manifest", None)
+    if manifest_path_value is None:
+        raise ValueError("Recording work-unit inference requires its exact manifest.")
+    manifest_path = Path(manifest_path_value).expanduser().resolve()
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Cannot read recording work-unit manifest: {manifest_path}"
+        ) from exc
+    units = document.get("units") if isinstance(document, Mapping) else None
+    if (
+        not isinstance(document, Mapping)
+        or document.get("schema_id")
+        != "palette.subject_mask.expected_work_units"
+        or document.get("schema_version") != 1
+        or not isinstance(units, list)
+        or len(units) != 1
+        or document.get("units_digest") != _canonical_document_sha256(units)
+    ):
+        raise ValueError(
+            "Recording work-unit manifest must be one exact, digest-bound unit."
+        )
+    unit = units[0]
+    required_unit_fields = {
+        "work_unit_id",
+        "work_unit_index",
+        "source_clip_id",
+        "source_clip_index",
+        "frame_start",
+        "frame_stop",
+        "row_start",
+        "row_stop",
+    }
+    if not isinstance(unit, Mapping) or set(unit) != required_unit_fields:
+        raise ValueError("Recording work-unit fields are not exact.")
+
+    required_arguments = {
+        "source_collection_id": getattr(args, "source_collection_id", None),
+        "source_collection_path": getattr(args, "source_collection_path", None),
+        "source_clip_id": getattr(args, "source_clip_id", None),
+        "source_clip_index": getattr(args, "source_clip_index", None),
+        "source_work_unit_id": getattr(args, "source_work_unit_id", None),
+        "source_shard_id": getattr(args, "source_shard_id", None),
+    }
+    missing = [
+        name
+        for name, value in required_arguments.items()
+        if value is None or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        raise ValueError(
+            "Recording work-unit inference requires exact source identities; "
+            f"missing {missing!r}."
+        )
+    if (
+        required_arguments["source_collection_path"] != str(manifest_path)
+        or required_arguments["source_collection_id"]
+        != unit.get("source_clip_id")
+        or required_arguments["source_clip_id"] != unit.get("source_clip_id")
+        or required_arguments["source_clip_index"] != unit.get("source_clip_index")
+        or required_arguments["source_work_unit_id"] != unit.get("work_unit_id")
+        or required_arguments["source_shard_id"] != unit.get("work_unit_id")
+        or unit.get("work_unit_index") != 0
+    ):
+        raise ValueError(
+            "Recording worker source identity differs from its work-unit manifest."
+        )
+
+    crop_row_count = int(crop_group["frame_indices"].shape[0])
+    rows = (
+        np.arange(crop_row_count, dtype=np.int64)
+        if selected_crop_rows is None
+        else np.asarray(selected_crop_rows, dtype=np.int64).reshape(-1)
+    )
+    if (
+        int(total_rois) != crop_row_count
+        or rows.shape != (crop_row_count,)
+        or not np.array_equal(rows, np.arange(crop_row_count, dtype=np.int64))
+    ):
+        raise ValueError(
+            "Recording work-unit inference must cover every crop row exactly once."
+        )
+    if "frame_row_offsets" not in crop_group:
+        raise ValueError(
+            "Recording work-unit inference requires crop frame_row_offsets."
+        )
+    offsets = np.asarray(crop_group["frame_row_offsets"][:], dtype=np.int64).reshape(
+        -1
+    )
+    n_frames = int(offsets.size - 1)
+    if (
+        offsets.ndim != 1
+        or offsets.size < 2
+        or offsets[0] != 0
+        or offsets[-1] != crop_row_count
+        or np.any(offsets[1:] < offsets[:-1])
+        or unit.get("frame_start") != 0
+        or unit.get("frame_stop") != n_frames
+        or unit.get("row_start") != 0
+        or unit.get("row_stop") != crop_row_count
+    ):
+        raise ValueError(
+            "Recording work-unit manifest differs from crop frame/row coverage."
+        )
+    active_frames = np.asarray(crop_source.frame_indices, dtype=np.int64).reshape(-1)
+    if (
+        active_frames.shape != rows.shape
+        or np.any(active_frames < 0)
+        or np.any(active_frames >= n_frames)
+    ):
+        raise ValueError(
+            "Recording work-unit acquisition frames fall outside the recording."
+        )
+
+    pixel_manifest = _source_pixel_manifest(crop_source)
+    array = pixel_manifest.get("array") if isinstance(pixel_manifest, Mapping) else None
+    cache_key = (
+        pixel_manifest.get("cache_key")
+        if isinstance(pixel_manifest, Mapping)
+        else None
+    )
+    array_sha256 = array.get("sha256") if isinstance(array, Mapping) else None
+    array_shape = array.get("shape") if isinstance(array, Mapping) else None
+    if (
+        not isinstance(pixel_manifest, Mapping)
+        or pixel_manifest.get("schema") != "palette_roi_cache_flat_bin_v1"
+        or pixel_manifest.get("layout") != "flat_bin_v1"
+        or pixel_manifest.get("cache_complete") is not True
+        or not isinstance(cache_key, str)
+        or len(cache_key) != 64
+        or any(character not in "0123456789abcdef" for character in cache_key.lower())
+        or not isinstance(array_sha256, str)
+        or len(array_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in array_sha256.lower()
+        )
+        or array_shape
+        != [crop_row_count, int(crop_source.roi_shape[0]), int(crop_source.roi_shape[1])]
+    ):
+        raise ValueError(
+            "Recording work-unit inference requires one complete authenticated flat ROI cache."
+        )
+
+    payload = {
+        "role": "complete_recording_work_unit",
+        "coverage_semantics": (
+            "exact_complete_crop_rows_for_recording_frame_window_v1"
+        ),
+        "work_unit_manifest": {
+            "schema_id": document["schema_id"],
+            "schema_version": document["schema_version"],
+            "units_digest": document["units_digest"],
+            "work_unit_index": 0,
+        },
+        "pixel_source": {
+            "schema": pixel_manifest["schema"],
+            "layout": pixel_manifest["layout"],
+            "cache_key": cache_key,
+            "array_sha256": array_sha256,
+            "array_shape": list(array_shape),
+        },
+        "collection": {
+            "source_collection_id": str(required_arguments["source_collection_id"]),
+            "source_collection_path": str(required_arguments["source_collection_path"]),
+            "source_clip_id": str(required_arguments["source_clip_id"]),
+            "source_clip_index": int(required_arguments["source_clip_index"]),
+            "source_work_unit_id": str(required_arguments["source_work_unit_id"]),
+            "source_shard_id": str(required_arguments["source_shard_id"]),
+        },
+        "frame_window": {
+            "schema_id": "palette.subject_mask.recording_frame_window",
+            "schema_version": 1,
+            "recording_identity": str(required_arguments["source_collection_id"]),
+            "clip_id": str(required_arguments["source_clip_id"]),
+            "actual_start_frame": 0,
+            "end_frame_exclusive": n_frames,
+            "frame_count": n_frames,
+        },
+        "crop_rows": {
+            "start": 0,
+            "stop": crop_row_count,
+            "count": crop_row_count,
+            "source_crop_total_rows": crop_row_count,
+        },
+        "validation": {
+            "expected_work_unit_manifest_validated": True,
+            "flat_cache_manifest_validated": True,
+            "row_interval_contiguous": True,
+            "frame_offset_coverage_exact": True,
+            "acquisition_frames_within_window": True,
+        },
+    }
+    return {
+        "schema_id": RECORDING_WORK_UNIT_CONTRACT_SCHEMA_ID,
+        "schema_version": RECORDING_WORK_UNIT_CONTRACT_SCHEMA_VERSION,
+        "payload": payload,
+        "payload_digest": _canonical_document_sha256(payload),
+    }
+
+
 def _roi_work_package_publication_attrs(
     *,
     crop_group: zarr.Group,
@@ -1517,7 +1733,31 @@ def _roi_work_package_publication_attrs(
     total_rois: int,
     args: argparse.Namespace,
 ) -> dict[str, object]:
+    expected_work_units_manifest = getattr(
+        args, "expected_work_units_manifest", None
+    )
     package_id = getattr(crop_source, "pixel_materialization_id", None)
+    if expected_work_units_manifest is not None:
+        if (
+            package_id is not None
+            or getattr(args, "roi_work_package_role", None) is not None
+        ):
+            raise ValueError(
+                "Recording work-unit and crop work-package bindings are mutually exclusive."
+            )
+        contract = _require_complete_recording_work_unit_attrs(
+            crop_group=crop_group,
+            crop_source=crop_source,
+            selected_crop_rows=selected_crop_rows,
+            total_rois=total_rois,
+            args=args,
+        )
+        return {
+            "roi_work_package_role": "complete_recording_work_unit",
+            "incremental_materialization_role": "complete_recording_work_unit",
+            "canonical_finalization_policy": "collection_shard_finalization_allowed",
+            "collection_partition_contract": contract,
+        }
     if package_id is None:
         if args.roi_work_package_role is not None:
             raise ValueError(
@@ -2759,6 +2999,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Explicit crop run providing ROI images (default: latest/auto).",
     )
     parser.add_argument(
+        "--geometry-crop-run",
+        help=(
+            "Optional strict crop-v2 geometry authority for authenticated pixels "
+            "opened from --crop-run. Rows are rebound only after exact instance-key, "
+            "frame, and placement validation."
+        ),
+    )
+    parser.add_argument(
         "--require-training-materialization-binding",
         action="store_true",
         help=(
@@ -2806,6 +3054,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--source-shard-id", help="Optional shard id for non-clip collection shards."
+    )
+    parser.add_argument(
+        "--expected-work-units-manifest",
+        type=Path,
+        help=(
+            "Exact single-unit recording plan for a complete flat-cache worker. "
+            "Mutually exclusive with --roi-work-package-manifest."
+        ),
     )
     parser.add_argument(
         "--source-roi-cache-alias-manifest",
@@ -3051,6 +3307,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     output_parent = _output_parent_from_args(args)
     canonical_output = output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
+    if args.expected_work_units_manifest is not None and (
+        args.roi_work_package_manifest is not None
+        or args.roi_work_package_role is not None
+    ):
+        raise ValueError(
+            "--expected-work-units-manifest is mutually exclusive with crop "
+            "work-package inference."
+        )
+    if (
+        args.expected_work_units_manifest is not None
+        and not _is_shard_output_parent(output_parent)
+    ):
+        raise ValueError(
+            "Recording work-unit inference may write only to "
+            "subject_mask_shard_runs before recording-level publication."
+        )
+    if (
+        args.expected_work_units_manifest is not None
+        and args.roi_cache_manifest is None
+    ):
+        raise ValueError(
+            "Recording work-unit inference requires --roi-cache-manifest."
+        )
     if args.roi_work_package_manifest is not None and not _is_shard_output_parent(
         output_parent
     ):
@@ -3199,6 +3478,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             roi_cache_manifest=args.roi_cache_manifest,
             roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
             console=console,
+        )
+    if args.geometry_crop_run is not None:
+        crop_source.bind_geometry_crop(
+            args.geometry_crop_run,
+            zarr_path=zarr_path,
         )
     boundary = _ACTIVE_SUBJECT_MASK_ATTEMPT.get()
     if boundary is not None:
@@ -3386,7 +3670,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     crop_group,
                     selected_crop_rows,
                 )
-                if getattr(crop_source, "pixel_materialization_id", None) is not None:
+                if (
+                    getattr(crop_source, "pixel_materialization_id", None) is not None
+                    or getattr(crop_source, "geometry_crop_rebase", None) is not None
+                ):
                     package_selection = _write_package_subject_mask_crop_placement(
                         run_group,
                         crop_group,
@@ -3395,7 +3682,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             else:
                 copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
                 write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
-        if getattr(crop_source, "pixel_materialization_id", None) is not None:
+        if (
+            getattr(crop_source, "pixel_materialization_id", None) is not None
+            or getattr(crop_source, "geometry_crop_rebase", None) is not None
+        ):
             if selected_crop_rows is None:
                 raise ValueError(
                     "Package-backed subject-mask inference lacks selected crop rows."
@@ -3571,6 +3861,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
             "source_roi_live_gpu_chunk_frames": int(
                 crop_source.roi_live_gpu_chunk_frames
+            ),
+            "source_pixel_crop_run": getattr(
+                crop_source, "pixel_source_crop_run_name", None
+            ),
+            "source_geometry_crop_rebase": getattr(
+                crop_source, "geometry_crop_rebase", None
             ),
             "label_schema_id": label_schema_id,
             "mask_labels": list(mask_labels),

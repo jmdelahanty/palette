@@ -31,7 +31,36 @@ from fisheye.segmentation.infer_unet_subject_masks import (
     _validate_package_subject_mask_selection,
     _write_package_subject_mask_crop_placement,
 )
+from fisheye.utils import build_crop_pixel_work_package as build_package_cli
 from tests.unit.fisheye.test_crop_consumer import _strict_crop
+
+
+def test_build_package_cli_accepts_authenticated_flat_cache_provider(
+    tmp_path: Path,
+) -> None:
+    args = build_package_cli._parser().parse_args(
+        [
+            str(tmp_path / "analysis.zarr"),
+            "--crop-run",
+            "crop_hybrid_pixels",
+            "--manifest",
+            str(tmp_path / "package.json"),
+            "--crop-row",
+            "0",
+            "--roi-cache-manifest",
+            str(tmp_path / "authenticated.flat_roi_cache.json"),
+            "--roi-cache-expected-archive-path",
+            str(tmp_path / "canonical_analysis.zarr"),
+        ]
+    )
+
+    assert args.crop_run == "crop_hybrid_pixels"
+    assert args.roi_cache_manifest == (
+        tmp_path / "authenticated.flat_roi_cache.json"
+    )
+    assert args.roi_cache_expected_archive_path == (
+        tmp_path / "canonical_analysis.zarr"
+    )
 
 
 def _crop_root() -> tuple[Any, Any]:
