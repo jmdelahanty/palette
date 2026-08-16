@@ -339,6 +339,25 @@ def test_manifest_loader_requires_explicit_count_and_unique_targets(tmp_path: Pa
         planner.load_target_manifest(manifest)
 
 
+def test_manifest_loader_preserves_distinct_mask_geometry_crop(tmp_path: Path) -> None:
+    target = _make_target(tmp_path, "target_a")
+    target["geometry_crop_run"] = "crop_strict_geometry_v2"
+    manifest = tmp_path / "targets.json"
+    _write_json(
+        manifest,
+        {
+            "schema": planner.TARGET_MANIFEST_SCHEMA,
+            "expected_target_count": 1,
+            "targets": [target],
+        },
+    )
+
+    loaded = planner.load_target_manifest(manifest)[0]
+
+    assert loaded.crop_run == "crop_001"
+    assert loaded.geometry_crop_run == "crop_strict_geometry_v2"
+
+
 def test_flat_cache_binding_rejects_small_zebrafish_surface(tmp_path: Path) -> None:
     target = _make_target(tmp_path, "small_cache")
     manifest_path = Path(target["roi_cache_manifest"])
@@ -564,6 +583,12 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     assert "--roi-cache-manifest" in inference_command
     assert "--roi-cache-staging-dir" in inference_command
     assert "--raw-worker-run" in inference_command
+    assert inference_command[inference_command.index("--pixel-crop-run") + 1] == (
+        "crop_001"
+    )
+    assert inference_command[inference_command.index("--geometry-crop-run") + 1] == (
+        "crop_001"
+    )
     inference_manifest_index = (
         inference_command.index("--expected-work-units-manifest") + 1
     )
@@ -612,6 +637,9 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
 
     finalization_command = jobs["mask_finalize:target_0"].command
     assert "finalization" in finalization_command
+    assert finalization_command[
+        finalization_command.index("--geometry-crop-run") + 1
+    ] == "crop_001"
     finalization_cleanup_paths = [
         finalization_command[index + 1]
         for index, argument in enumerate(finalization_command)
@@ -638,6 +666,9 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
         publication_command
     )
     assert "--activate" not in publication_command
+    assert publication_command[publication_command.index("--crop-run") + 1] == (
+        "crop_001"
+    )
     assert jobs["mask_publish:target_0"].metadata["selector_activation"] is False
 
 

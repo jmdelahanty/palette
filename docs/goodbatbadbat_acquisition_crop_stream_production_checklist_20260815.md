@@ -662,6 +662,12 @@ unrecoverable
 - [x] Preserve full-frame keypoint coordinates by projecting through canonical
   crop placement, not through the live detection box.
 - [x] Run keypoint quality and refinement without changing source crop lineage.
+- [x] Make whole-recording subject-mask targets distinguish the pixel-source
+  `crop_run` from an explicit strict `geometry_crop_run`. A single run may fill
+  both roles only when it is itself the coordinate-aware crop-v2 authority.
+- [x] Bind full-recording raw mask inference and later publication to the same
+  digest-bound expected-work-unit manifest, including exact frame and crop-row
+  coverage. Older raw drafts without that receipt remain unpublishable.
 - [ ] Only after keypoint parity passes, exercise subject-mask consumers through
   the same crop/provider contract.
 - [ ] Keep training exports dense/materialized and record the provider identity
@@ -774,12 +780,15 @@ Use commit-pinned, selector-ineligible outputs until all required checks pass.
    failures and deterministic samples from both pixel providers.
 10. [x] Run one complete selector-ineligible recording through strict crop-v2,
     terminal inference, keypoint quality, refinement, and body-frame publication.
-11. [ ] Compare keypoint output with the existing flat/full-frame path using a
+11. [ ] Run one full-recording subject-mask inference, refinement, quality, and
+    inactive bundle-publication canary with separate pixel and geometry crop
+    authorities plus exact work-unit coverage.
+12. [ ] Compare keypoint output with the existing flat/full-frame path using a
    frozen row sample and evidence-derived tolerances.
-12. [ ] Complete Crimson exact-reader and visualization checks.
-13. [ ] Run focused local tests, the optimized required CI shards, and any
+13. [ ] Complete Crimson exact-reader and visualization checks.
+14. [ ] Run focused local tests, the optimized required CI shards, and any
     required cluster canary.
-14. [ ] Only after CI is green, publish a production-eligible selector in a new
+15. [ ] Only after CI is green, publish a production-eligible selector in a new
     commit-pinned deployment.
 
 ## Phase 8: GoodBatBadBat rollout

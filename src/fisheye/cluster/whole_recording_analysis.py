@@ -73,6 +73,8 @@ class PlannedAnalysisTarget:
     target_id: str
     analysis_zarr: Path
     crop_run: str
+    pixel_crop_run: str
+    geometry_crop_run: str
     roi_cache_manifest: Path
     roi_cache_manifest_sha256: str | None
     roi_cache_payload: Path
@@ -96,6 +98,8 @@ class PlannedAnalysisTarget:
             "target_id": self.target_id,
             "analysis_zarr": str(self.analysis_zarr),
             "crop_run": self.crop_run,
+            "pixel_crop_run": self.pixel_crop_run,
+            "geometry_crop_run": self.geometry_crop_run,
             "roi_cache_manifest": str(self.roi_cache_manifest),
             "roi_cache_manifest_sha256": self.roi_cache_manifest_sha256,
             "roi_cache_payload": str(self.roi_cache_payload),
@@ -169,15 +173,23 @@ def build_subject_mask_run_names(run_label: str) -> SubjectMaskRunNames:
     )
 
 
+def _subject_mask_geometry_crop_run(
+    target: keypoints.PlannedWholeRecordingTarget,
+) -> str:
+    return str(target.target.geometry_crop_run or target.cache.crop_run).strip()
+
+
 def _whole_recording_expected_work_units(
     target: keypoints.PlannedWholeRecordingTarget,
+    *,
+    geometry_crop_run: str,
 ) -> dict[str, object]:
     """Bind one whole-recording work unit to exact immutable crop dimensions."""
 
     crop_path = (
         target.target.analysis_zarr
         / "crop_runs"
-        / target.cache.crop_run
+        / geometry_crop_run
     )
     group_metadata_path = crop_path / "zarr.json"
     try:
@@ -204,7 +216,7 @@ def _whole_recording_expected_work_units(
         or manifest.get("schema_id") != "palette.crop_geometry.run_manifest"
         or manifest.get("schema_version") != 2
         or not isinstance(payload, Mapping)
-        or payload.get("run_id") != target.cache.crop_run
+        or payload.get("run_id") != geometry_crop_run
         or not isinstance(dimensions, Mapping)
     ):
         raise ValueError(
@@ -309,6 +321,7 @@ def _build_subject_mask_inference_job(
     model_top_k: int,
     handoff_package_dir: Path | None,
     expected_work_units_manifest: Path,
+    geometry_crop_run: str,
 ) -> LsfJob:
     target_id = target.target.target_id
     safe_target = safe_component(target_id, default="target", max_length=56)
@@ -341,8 +354,10 @@ def _build_subject_mask_inference_job(
         run_names.subject_mask_run,
         "--refined-draft-run",
         run_names.refined_subject_mask_draft_run,
-        "--crop-run",
+        "--pixel-crop-run",
         target.cache.crop_run,
+        "--geometry-crop-run",
+        geometry_crop_run,
         "--roi-cache-manifest",
         str(target.cache.manifest_path),
         "--roi-cache-staging-dir",
@@ -421,6 +436,7 @@ def _build_subject_mask_finalization_job(
     num_workers: int,
     inference_job: LsfJob,
     refinement_job: LsfJob,
+    geometry_crop_run: str,
 ) -> LsfJob:
     target_id = target.target.target_id
     safe_target = safe_component(target_id, default="target", max_length=56)
@@ -449,8 +465,10 @@ def _build_subject_mask_finalization_job(
         run_names.subject_mask_run,
         "--refined-draft-run",
         run_names.refined_subject_mask_draft_run,
-        "--crop-run",
+        "--pixel-crop-run",
         target.cache.crop_run,
+        "--geometry-crop-run",
+        geometry_crop_run,
         "--refined-keypoint-run",
         target.run_names.refined_keypoint_run,
         "--finalize-num-workers",
@@ -512,6 +530,7 @@ def _build_subject_mask_publication_job(
     resources: LsfResources,
     finalization_job: LsfJob,
     expected_work_units_manifest: Path,
+    geometry_crop_run: str,
 ) -> LsfJob:
     """Build the one recording-level, selector-ineligible bundle publication."""
 
@@ -540,7 +559,7 @@ def _build_subject_mask_publication_job(
         "--draft-zarr",
         str(target.target.analysis_zarr),
         "--crop-run",
-        target.cache.crop_run,
+        geometry_crop_run,
         "--raw-draft-parent",
         "subject_mask_shard_runs",
         "--raw-draft-run",
@@ -715,6 +734,7 @@ def build_plan(
 
     for target_index, target in enumerate(keypoint_plan.targets):
         _refuse_mask_output_collisions(target.target.analysis_zarr, mask_names)
+        geometry_crop_run = _subject_mask_geometry_crop_run(target)
         safe_target = safe_component(
             target.target.target_id, default="target", max_length=56
         )
@@ -723,7 +743,10 @@ def build_plan(
             / "manifests"
             / f"{safe_target}.subject_mask_expected_work_units.json"
         )
-        expected_work_units = _whole_recording_expected_work_units(target)
+        expected_work_units = _whole_recording_expected_work_units(
+            target,
+            geometry_crop_run=geometry_crop_run,
+        )
         inference_job = _build_subject_mask_inference_job(
             workflow_id=run_label,
             target=target,
@@ -739,6 +762,7 @@ def build_plan(
             model_top_k=model_top_k,
             handoff_package_dir=handoff_package_dir,
             expected_work_units_manifest=expected_work_units_manifest,
+            geometry_crop_run=geometry_crop_run,
         )
         refinement_job = jobs_by_key[target.refinement_job_key]
         finalization_job = _build_subject_mask_finalization_job(
@@ -752,6 +776,7 @@ def build_plan(
             num_workers=mask_finalize_num_workers,
             inference_job=inference_job,
             refinement_job=refinement_job,
+            geometry_crop_run=geometry_crop_run,
         )
         publication_job = _build_subject_mask_publication_job(
             workflow_id=run_label,
@@ -763,6 +788,7 @@ def build_plan(
             or LsfResources(queue="short", ncores=4, mem_gb=32, walltime="2:00"),
             finalization_job=finalization_job,
             expected_work_units_manifest=expected_work_units_manifest,
+            geometry_crop_run=geometry_crop_run,
         )
         jobs.extend((inference_job, finalization_job, publication_job))
         mask_finalizer_keys.append(finalization_job.job_key)
@@ -793,6 +819,8 @@ def build_plan(
                 target_id=target.target.target_id,
                 analysis_zarr=target.target.analysis_zarr,
                 crop_run=target.cache.crop_run,
+                pixel_crop_run=target.cache.crop_run,
+                geometry_crop_run=geometry_crop_run,
                 roi_cache_manifest=target.cache.manifest_path,
                 roi_cache_manifest_sha256=target.cache.manifest_sha256,
                 roi_cache_payload=target.cache.payload_path,
