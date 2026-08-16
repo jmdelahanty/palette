@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
+import zarr
 
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
 from fisheye.shared.zarr.chunk_profiles import (
@@ -478,6 +479,18 @@ def publish_acquisition_crop_stream_ledger(
     imported_at_utc: str | None = None,
 ) -> AcquisitionCropLedgerPublication:
     """Publish and pointer-link the complete crop ledger for one recording."""
+
+    try:
+        stream_group = zarr.open_group(
+            store=stream_group.store_path.store,
+            path=str(stream_group.path),
+            mode="r+",
+            use_consolidated=False,
+        )
+    except (AttributeError, TypeError):
+        # In-memory/fake groups used by deterministic unit tests have no Zarr
+        # store path. Their mappings are already the direct authority.
+        pass
 
     crop, metadata_path, video_path, width, height = _validated_contract(
         Path(recording_dir), manifest

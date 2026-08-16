@@ -518,6 +518,32 @@ def test_consolidate_metadata_capture_expected_warnings_reemits_unexpected(
     assert report["unexpected_warning_count"] == 1
 
 
+def test_consolidate_metadata_walks_direct_tree_below_stale_nested_cache(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(archive), mode="w")
+    root.require_group("analysis").require_group("streams").require_group("crop")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        zarr.consolidate_metadata(str(archive), path="analysis/streams/crop")
+        zarr.consolidate_metadata(str(archive), path="analysis")
+        zarr.consolidate_metadata(str(archive))
+
+    direct = zarr.open_group(str(archive), mode="r+", use_consolidated=False)
+    direct_crop = direct["analysis/streams/crop"]
+    direct_crop.require_group("ledger_runs").create_group("crop_ledger_new")
+    stale = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    assert stale["analysis/streams/crop"].get("ledger_runs") is None
+
+    report = consolidate_metadata_capture_expected_warnings(archive)
+
+    consolidated = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    assert "crop_ledger_new" in consolidated["analysis/streams/crop/ledger_runs"]
+    assert report["suppressed_expected_warning_count"] == 0
+    assert report["unexpected_warning_count"] == 0
+
+
 def test_archive_lock_resets_inherited_reentrancy_state_after_fork(
     tmp_path: Path,
 ) -> None:

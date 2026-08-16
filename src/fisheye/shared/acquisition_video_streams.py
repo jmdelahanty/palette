@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import zarr
+
 from fisheye.shared.acquisition_crop_stream_ledger import (
     publish_acquisition_crop_stream_ledger,
 )
@@ -270,6 +272,22 @@ def _put_attrs(group: Any, updates: Mapping[str, Any]) -> None:
     group.attrs.put(attrs)
 
 
+def _reopen_group_direct(group: Any) -> Any:
+    try:
+        return zarr.open_group(
+            store=group.store_path.store,
+            path=str(group.path),
+            mode="r+",
+            use_consolidated=False,
+        )
+    except (AttributeError, TypeError):
+        return group
+
+
+def _require_group_direct(parent: Any, name: str) -> Any:
+    return _reopen_group_direct(parent.require_group(name))
+
+
 def write_acquisition_video_stream_inventory(
     root: Any,
     recording_dir: Path,
@@ -287,12 +305,12 @@ def write_acquisition_video_stream_inventory(
     if inventory is None:
         return None
 
-    analysis = root.require_group("analysis")
-    parent = analysis.require_group("acquisition_video_streams")
-    streams_group = parent.require_group("streams")
+    analysis = _require_group_direct(root, "analysis")
+    parent = _require_group_direct(analysis, "acquisition_video_streams")
+    streams_group = _require_group_direct(parent, "streams")
 
     for stream_key, stream_payload in inventory["streams"].items():
-        stream_group = streams_group.require_group(stream_key)
+        stream_group = _require_group_direct(streams_group, stream_key)
         _put_attrs(stream_group, stream_payload)
         if stream_key == "crop":
             try:

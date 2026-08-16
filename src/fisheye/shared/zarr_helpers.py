@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 import fcntl
+import json
 import os
 from pathlib import Path
 import re
@@ -14,6 +16,8 @@ import warnings
 
 import numpy as np
 import zarr
+from zarr.core.group import AsyncGroup, ConsolidatedMetadata, GroupMetadata
+from zarr.core.sync import sync
 
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_run_completion import (
@@ -443,7 +447,22 @@ def consolidate_metadata_capture_expected_warnings(
     with archive_metadata_publication_lock(zarr_path):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            zarr.consolidate_metadata(str(zarr_path), path=path)
+            target = Path(zarr_path) / normalize_zarr_path(path or "")
+            metadata_path = target / "zarr.json"
+            is_zarr_v3 = False
+            if metadata_path.is_file():
+                try:
+                    is_zarr_v3 = int(
+                        json.loads(metadata_path.read_text(encoding="utf-8")).get(
+                            "zarr_format", 0
+                        )
+                    ) == 3
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    is_zarr_v3 = False
+            if is_zarr_v3:
+                _consolidate_zarr_v3_metadata_from_direct_tree(zarr_path, path=path)
+            else:
+                zarr.consolidate_metadata(str(zarr_path), path=path)
 
     for warning in caught:
         message = str(warning.message)
@@ -460,6 +479,78 @@ def consolidate_metadata_capture_expected_warnings(
         "suppressed_expected_warning_messages": expected_messages,
         "unexpected_warning_count": int(len(unexpected_warnings)),
     }
+
+
+async def _collect_zarr_v3_metadata_from_direct_tree(
+    group: AsyncGroup,
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    """Walk direct metadata without trusting inline metadata at any depth.
+
+    Zarr 3.1.3's built-in reconsolidation bypasses the root inline cache but
+    recursive traversal can still reuse stale inline metadata stored on a
+    descendant group.  Re-entering one level at a time with every group cache
+    removed in memory keeps the store unchanged until the replacement metadata
+    envelope is complete.
+    """
+
+    direct_group = replace(
+        group,
+        metadata=replace(group.metadata, consolidated_metadata=None),
+    )
+    members: dict[str, Any] = {}
+    async for name, node in direct_group.members(
+        max_depth=0,
+        use_consolidated_for_children=False,
+    ):
+        relative_path = f"{prefix}/{name}".strip("/")
+        metadata = node.metadata
+        if isinstance(node, AsyncGroup):
+            metadata = replace(metadata, consolidated_metadata=None)
+            node = replace(node, metadata=metadata)
+        members[relative_path] = metadata
+        if isinstance(node, AsyncGroup):
+            members.update(
+                await _collect_zarr_v3_metadata_from_direct_tree(
+                    node,
+                    prefix=relative_path,
+                )
+            )
+    return members
+
+
+def _consolidate_zarr_v3_metadata_from_direct_tree(
+    zarr_path: str | Path,
+    *,
+    path: str | None,
+) -> None:
+    """Replace a Zarr-v3 inline envelope built entirely from direct metadata."""
+
+    target = Path(zarr_path) / normalize_zarr_path(path or "")
+    group = open_zarr_group_direct(target, mode="r+")
+    async_group = group._async_group
+    members_metadata = sync(
+        _collect_zarr_v3_metadata_from_direct_tree(async_group)
+    )
+    for key, metadata in tuple(members_metadata.items()):
+        if (
+            isinstance(metadata, GroupMetadata)
+            and metadata.consolidated_metadata is None
+        ):
+            members_metadata[key] = replace(
+                metadata,
+                consolidated_metadata=ConsolidatedMetadata(metadata={}),
+            )
+    ConsolidatedMetadata._flat_to_nested(members_metadata)
+    updated = replace(
+        async_group,
+        metadata=replace(
+            async_group.metadata,
+            consolidated_metadata=ConsolidatedMetadata(metadata=members_metadata),
+        ),
+    )
+    sync(updated._save_metadata())
 
 
 def reconsolidate_zarr_metadata(
