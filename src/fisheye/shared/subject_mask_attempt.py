@@ -530,6 +530,12 @@ def _validate_collection_partition_contract(value: Any) -> list[str]:
     return errors
 
 
+def validate_subject_mask_collection_partition_contract(value: Any) -> list[str]:
+    """Validate either supported immutable raw shard partition contract."""
+
+    return _validate_collection_partition_contract(value)
+
+
 def _validate_raw_scientific_payload(payload: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     model = payload.get("model")
