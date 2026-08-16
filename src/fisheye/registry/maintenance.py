@@ -38,6 +38,7 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_canonical_detection_run_manifest,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import (
     is_run_complete,
     is_run_complete_in_parent,
@@ -66,6 +67,20 @@ EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
 )
 
 CLIPPED_DETECT_COLLECTION_SCHEMA = "palette.refined_detect_clip_collection.v1"
+KEYPOINT_BUNDLE_AUTHORITY_ATTR = "keypoint_bundle_authority"
+KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR = "keypoint_bundle_authority_generation"
+KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR = "keypoint_bundle_authority_lease"
+KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_ID = "palette.keypoint.bundle_authority"
+KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_VERSION = 1
+KEYPOINT_BUNDLE_ACTIVATION_POLICY = (
+    "sealed_four_surface_root_authority_then_consolidated_visibility_v1"
+)
+_KEYPOINT_BUNDLE_ROLE_PARENTS = {
+    "raw_keypoints": "keypoints_runs",
+    "keypoint_quality": "keypoint_quality_runs",
+    "refined_keypoints": "refined_keypoints_runs",
+    "body_frame": "analysis/body_frame_runs",
+}
 
 
 def _required_canonical_detection_errors(
@@ -4143,6 +4158,131 @@ def _get_group_path(parent: object, path: str) -> Optional[object]:
     return current
 
 
+def _resolve_active_keypoint_bundle(root: object) -> Optional[Dict[str, object]]:
+    """Resolve one root keypoint authority without consulting legacy selectors.
+
+    The activation transaction leaves member runs selector-ineligible and does
+    not mutate family ``latest`` attributes.  Registry reconciliation must
+    therefore consume the root authority as one atomic four-surface selection.
+    Any present-but-invalid authority fails closed instead of falling back to
+    alphabetical family discovery.
+    """
+
+    attrs = getattr(root, "attrs", {})
+    if KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR in attrs:
+        raise ValueError(
+            "Keypoint bundle activation lease is present; registry reconciliation "
+            "requires a committed authority generation."
+        )
+    authority = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_ATTR)
+    if authority is None:
+        return None
+    if not isinstance(authority, Mapping):
+        raise ValueError("Keypoint bundle authority must be one object.")
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "generation",
+        "base_generation",
+        "policy",
+        "activation_plan_payload_digest",
+        "prior_authority_present",
+        "prior_authority_digest",
+        "crop",
+        "members",
+        "activated_at_utc",
+        "activation_owner_uuid",
+    }
+    generation = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR)
+    if (
+        set(authority) != expected_fields
+        or authority.get("schema_id") != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_ID
+        or authority.get("schema_version")
+        != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_VERSION
+        or authority.get("policy") != KEYPOINT_BUNDLE_ACTIVATION_POLICY
+        or type(generation) is not int
+        or generation <= 0
+        or authority.get("generation") != generation
+        or type(authority.get("base_generation")) is not int
+        or authority.get("base_generation") != generation - 1
+    ):
+        raise ValueError("Keypoint bundle authority schema or generation is invalid.")
+    members = authority.get("members")
+    crop = authority.get("crop")
+    if not isinstance(members, Mapping) or set(members) != set(
+        _KEYPOINT_BUNDLE_ROLE_PARENTS
+    ):
+        raise ValueError("Keypoint bundle authority member roles are invalid.")
+    if not isinstance(crop, Mapping):
+        raise ValueError("Keypoint bundle authority crop member is invalid.")
+
+    resolved: Dict[str, object] = {
+        "authority": dict(authority),
+        "generation": generation,
+        "activation_plan_payload_digest": authority.get(
+            "activation_plan_payload_digest"
+        ),
+    }
+    declarations: Dict[str, Mapping[str, object]] = {"crop": crop}
+    declarations.update(
+        {
+            role: member
+            for role, member in members.items()
+            if isinstance(member, Mapping)
+        }
+    )
+    if set(declarations) != {"crop", *_KEYPOINT_BUNDLE_ROLE_PARENTS}:
+        raise ValueError("Keypoint bundle authority member declarations are invalid.")
+    parent_paths = {"crop": "crop_runs", **_KEYPOINT_BUNDLE_ROLE_PARENTS}
+    for role, parent_path in parent_paths.items():
+        member = declarations[role]
+        if role != "crop" and member.get("role") != role:
+            raise ValueError(
+                f"Keypoint bundle authority {role} declaration has another role."
+            )
+        run_id = _decode_text(member.get("run_id"))
+        run_path = _decode_text(member.get("run_path"))
+        expected_path = f"{parent_path}/{run_id}" if run_id else None
+        if not run_id or run_path != expected_path:
+            raise ValueError(
+                f"Keypoint bundle authority {role} path does not bind its run ID."
+            )
+        parent = _get_group_path(root, parent_path)
+        group = _get_group_path(root, run_path)
+        if parent is None or group is None:
+            raise ValueError(
+                f"Keypoint bundle authority member is absent: {run_path}."
+            )
+        group_attrs = getattr(group, "attrs", {})
+        if (
+            group_attrs.get("status") != "complete"
+            or group_attrs.get("palette_run_completion_status") != "complete"
+            or group_attrs.get("production_candidate") is not True
+            or group_attrs.get("stage_selector_eligible") is not False
+        ):
+            raise ValueError(
+                f"Keypoint bundle authority member is not sealed: {run_path}."
+            )
+        manifest = group_attrs.get("run_manifest")
+        if (
+            not isinstance(manifest, Mapping)
+            or member.get("manifest_payload_digest")
+            != manifest.get("payload_digest")
+            or member.get("manifest_document_digest")
+            != canonical_json_sha256(manifest)
+        ):
+            raise ValueError(
+                f"Keypoint bundle authority member manifest changed: {run_path}."
+            )
+        resolved[role] = {
+            "run_id": run_id,
+            "run_path": run_path,
+            "parent": parent,
+            "group": group,
+        }
+    return resolved
+
+
 def _iter_group_paths(parent: object, *, max_depth: int = 1) -> List[tuple[str, object]]:
     if parent is None or max_depth < 1:
         return []
@@ -5705,8 +5845,27 @@ def _build_recording_step_rows_from_root(
         else None
     )
 
+    active_keypoint_bundle = _resolve_active_keypoint_bundle(root)
+    keypoint_bundle_details: Dict[str, object] = {}
+    if active_keypoint_bundle is not None:
+        keypoint_bundle_details = {
+            "keypoint_bundle_authority_generation": active_keypoint_bundle[
+                "generation"
+            ],
+            "keypoint_bundle_activation_plan_payload_digest": (
+                active_keypoint_bundle["activation_plan_payload_digest"]
+            ),
+        }
+
     crop_parent = root.get("crop_runs")  # type: ignore[attr-defined]
-    crop_run, crop_group, crop_selection = _resolve_latest_group(crop_parent)
+    if active_keypoint_bundle is None:
+        crop_run, crop_group, crop_selection = _resolve_latest_group(crop_parent)
+    else:
+        active_crop = active_keypoint_bundle["crop"]
+        assert isinstance(active_crop, Mapping)
+        crop_run = str(active_crop["run_id"])
+        crop_group = active_crop["group"]
+        crop_selection = "keypoint_bundle_authority"
     crop_status, crop_reason = _step_status_from_presence(
         present=crop_group is not None,
         is_production=is_production,
@@ -5737,7 +5896,16 @@ def _build_recording_step_rows_from_root(
             crop_reason = "run_in_progress"
 
     keypoints_parent = root.get("keypoints_runs")  # type: ignore[attr-defined]
-    keypoints_run, keypoints_group, keypoints_selection = _resolve_latest_group(keypoints_parent)
+    if active_keypoint_bundle is None:
+        keypoints_run, keypoints_group, keypoints_selection = _resolve_latest_group(
+            keypoints_parent
+        )
+    else:
+        active_raw_keypoints = active_keypoint_bundle["raw_keypoints"]
+        assert isinstance(active_raw_keypoints, Mapping)
+        keypoints_run = str(active_raw_keypoints["run_id"])
+        keypoints_group = active_raw_keypoints["group"]
+        keypoints_selection = "keypoint_bundle_authority"
     keypoints_status, keypoints_reason = _step_status_from_presence(
         present=keypoints_group is not None,
         is_production=is_production,
@@ -5748,16 +5916,25 @@ def _build_recording_step_rows_from_root(
     ) if keypoints_group is not None else None
 
     refined_keypoints_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")  # type: ignore[attr-defined]
-    (
-        refined_keypoints_run,
-        refined_keypoints_group,
-        refined_keypoints_selection,
-        refined_keypoints_latest_run,
-        refined_keypoints_latest_source_run,
-    ) = _resolve_refined_keypoints_group(
-        refined_keypoints_parent,
-        source_keypoints_run=keypoints_run,
-    )
+    if active_keypoint_bundle is None:
+        (
+            refined_keypoints_run,
+            refined_keypoints_group,
+            refined_keypoints_selection,
+            refined_keypoints_latest_run,
+            refined_keypoints_latest_source_run,
+        ) = _resolve_refined_keypoints_group(
+            refined_keypoints_parent,
+            source_keypoints_run=keypoints_run,
+        )
+    else:
+        active_refined_keypoints = active_keypoint_bundle["refined_keypoints"]
+        assert isinstance(active_refined_keypoints, Mapping)
+        refined_keypoints_run = str(active_refined_keypoints["run_id"])
+        refined_keypoints_group = active_refined_keypoints["group"]
+        refined_keypoints_selection = "keypoint_bundle_authority"
+        refined_keypoints_latest_run = None
+        refined_keypoints_latest_source_run = keypoints_run
     refined_keypoints_status, refined_keypoints_reason = _step_status_from_presence(
         present=refined_keypoints_group is not None,
         is_production=is_production,
@@ -6279,6 +6456,7 @@ def _build_recording_step_rows_from_root(
 
     refined_keypoints_details: Dict[str, object] = {
         **common_details,
+        **keypoint_bundle_details,
         "reason": refined_keypoints_reason,
         "latest_selector": refined_keypoints_selection,
         "upstream": {"keypoints": keypoints_status},
@@ -6491,6 +6669,7 @@ def _build_recording_step_rows_from_root(
             review_status=crop_review_status,
             details={
                 **common_details,
+                **keypoint_bundle_details,
                 "reason": crop_reason,
                 "latest_selector": crop_selection,
                 "run_state": crop_run_state,
@@ -6511,6 +6690,7 @@ def _build_recording_step_rows_from_root(
             review_status=None,
             details={
                 **common_details,
+                **keypoint_bundle_details,
                 "reason": keypoints_reason,
                 "latest_selector": keypoints_selection,
                 "upstream": {"crop": crop_status},
