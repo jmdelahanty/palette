@@ -25,6 +25,14 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
 ) -> None:
     analysis = tmp_path / "recording_analysis.zarr"
     root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "recording_id": "recording-a",
+            "width": 4512,
+            "height": 4512,
+            "total_frames": 12,
+        }
+    )
     root.create_group("crop_runs").create_group("crop_v2")
     cache_payload = tmp_path / "cache.bin"
     cache_payload.write_bytes(bytes(range(16)))
@@ -93,6 +101,10 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
         assert kwargs["expected_model_stride"] == 16
         assert kwargs["model_input_transform_mode"] == "pad_to_size"
         local = zarr.open_group(str(kwargs["output"]), mode="a", use_consolidated=False)
+        assert local.attrs["recording_id"] == "recording-a"
+        assert local.attrs["width"] == 4512
+        assert local.attrs["height"] == 4512
+        assert local.attrs["total_frames"] == 12
         run = local.require_group("keypoint_shard_runs").create_group(
             kwargs["run_name"]
         )
@@ -206,3 +218,31 @@ def test_terminal_runner_stages_cache_and_never_writes_analysis_output(
     assert not (analysis / "keypoints_runs").exists()
     terminal = zarr.open_group(str(output), mode="r", use_consolidated=True)
     assert terminal["keypoint_terminal_runs/terminal-a/instance_key"][:].tolist() == [7]
+
+
+def test_stage_crop_shell_derives_root_dimensions_from_unstaged_raw_video(
+    tmp_path: Path,
+) -> None:
+    analysis = tmp_path / "recording_analysis.zarr"
+    source = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    raw_video = source.create_group("raw_video")
+    raw_video.create_array(
+        "images_full",
+        data=np.zeros((2, 3, 4), dtype=np.uint8),
+        chunks=(1, 3, 4),
+    )
+    crop = source.create_group("crop_runs").create_group("crop_v2")
+    crop.attrs["sentinel"] = "copied"
+
+    staged_path = mod._stage_crop_shell(  # noqa: SLF001
+        analysis,
+        crop_run="crop_v2",
+        destination=tmp_path / "scratch",
+    )
+
+    staged = zarr.open_group(str(staged_path), mode="r", use_consolidated=False)
+    assert staged.attrs["total_frames"] == 2
+    assert staged.attrs["video_height"] == 3
+    assert staged.attrs["video_width"] == 4
+    assert staged["crop_runs/crop_v2"].attrs["sentinel"] == "copied"
+    assert "raw_video" not in staged

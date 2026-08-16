@@ -7,7 +7,7 @@ artifacts must continue to declare their exact per-run geometry policy.
 from __future__ import annotations
 
 
-DEFAULT_ZEBRAFISH_CROP_SIZE_PX = 348
+DEFAULT_ZEBRAFISH_CROP_SIZE_PX = 384
 DEFAULT_ZEBRAFISH_CROP_SIZE_HW = (
     DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
     DEFAULT_ZEBRAFISH_CROP_SIZE_PX,

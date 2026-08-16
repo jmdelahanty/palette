@@ -17,9 +17,10 @@ def _write_recording_with_inventory(tmp_path: Path) -> Path:
     (recording_dir / "cams" / "Cam2010093_sample.mp4").write_bytes(b"full")
     (crop_dir / "Cam2010093_sample_crop_external.mp4").write_bytes(b"crop")
     (crop_dir / "Cam2010093_sample_crop_meta.csv").write_text(
-        "recording_frame_id,crop_x,crop_y,crop_w,crop_h,has_detection,blank_frame\n"
-        "1,10,20,256,256,true,false\n"
-        "2,10,20,256,256,false,true\n",
+        "recording_frame_id,has_detection,blank_frame,crop_x,crop_y,crop_w,crop_h,"
+        "detection_x,detection_y,detection_w,detection_h,crop_video_frame_index\n"
+        "1,true,false,10,20,256,256,100,120,20,30,0\n"
+        "2,false,true,0,0,0,0,0,0,0,0,1\n",
         encoding="utf-8",
     )
     (crop_dir / "Cam2010093_sample_crop_external_summary.json").write_text(
@@ -137,9 +138,11 @@ def test_scan_zarr_populates_acquisition_crop_video_view(tmp_path: Path) -> None
         ).fetchall()
         crop = registry.conn.execute(
             """
-            SELECT recording_id, crop_stream_available, availability_status,
+            SELECT recording_id, crop_stream_available, crop_stream_consumer_ready,
+                   availability_status,
                    video_pixel_coordinate_space, source_geometry_coordinate_space,
-                   metadata_row_count, frames_encoded, frames_dropped
+                   metadata_row_count, frames_encoded, frames_dropped,
+                   canonical_ledger_status, canonical_ledger_row_count
             FROM recording_crop_video_available_current
             WHERE recording_id = ?;
             """,
@@ -157,9 +160,40 @@ def test_scan_zarr_populates_acquisition_crop_video_view(tmp_path: Path) -> None
     assert int(rows[0]["metadata_row_count"]) == 2
     assert crop is not None
     assert int(crop["crop_stream_available"]) == 1
+    assert int(crop["crop_stream_consumer_ready"]) == 1
     assert crop["availability_status"] == "ok"
     assert crop["video_pixel_coordinate_space"] == "crop_frame_pixels"
     assert crop["source_geometry_coordinate_space"] == "full_frame_pixels"
     assert int(crop["metadata_row_count"]) == 2
     assert int(crop["frames_encoded"]) == 2
     assert int(crop["frames_dropped"]) == 0
+    assert crop["canonical_ledger_status"] == "complete"
+    assert int(crop["canonical_ledger_row_count"]) == 2
+
+
+def test_optional_inventory_warning_does_not_hide_complete_ledger(tmp_path: Path) -> None:
+    zarr_path = _write_recording_with_inventory(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
+    stream = root["analysis/acquisition_video_streams/streams/crop"]
+    stream.attrs["availability_status"] = "warn"
+    stream.attrs["warnings"] = ["summary_json_unreadable"]
+    root["analysis/acquisition_video_streams"].attrs["inventory_status"] = "warn"
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        registry.scan_zarr(zarr_path)
+        crop = registry.conn.execute(
+            """
+            SELECT crop_stream_available, crop_stream_consumer_ready,
+                   availability_status, canonical_ledger_status
+            FROM recording_crop_video_available_current;
+            """
+        ).fetchone()
+    finally:
+        registry.close()
+
+    assert crop is not None
+    assert int(crop["crop_stream_available"]) == 0
+    assert int(crop["crop_stream_consumer_ready"]) == 1
+    assert crop["availability_status"] == "warn"
+    assert crop["canonical_ledger_status"] == "complete"

@@ -15,7 +15,11 @@ import numpy as np
 import zarr
 
 from fisheye.shared.flat_roi_cache import write_pynvvc_luma_roi_payload
-from fisheye.shared.roi_pixel_contract import normalize_pixel_contract
+from fisheye.shared.hybrid_crop_provider import validate_hybrid_crop_signed_identity
+from fisheye.shared.roi_pixel_contract import (
+    SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME,
+    normalize_pixel_contract,
+)
 from fisheye.shared.row_source_signature import (
     ROW_SOURCE_SIGNATURE_ARRAY,
     ROW_SOURCE_SIGNATURE_WIDTH_BYTES,
@@ -307,6 +311,19 @@ def _normalize_target_rows(
 
 
 def _source_binding(crop_group: Any, *, run_id: str) -> dict[str, Any]:
+    source_pixels = str(
+        crop_group.attrs.get("source_pixels")
+        or crop_group.attrs.get("roi_pixel_provider")
+        or ""
+    ).strip()
+    if source_pixels == SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME:
+        provider_digest = str(
+            crop_group.attrs.get("provider_record_sha256") or ""
+        ).strip()
+        validate_hybrid_crop_signed_identity(
+            crop_group,
+            expected_provider_record_sha256=provider_digest,
+        )
     reference = build_crop_run_reference(
         crop_group,
         run_id=run_id,

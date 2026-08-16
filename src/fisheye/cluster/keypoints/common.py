@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+import numpy as np
+
 from fisheye.cluster.lsf import LsfDependency, LsfJob, LsfResources
 from fisheye.cluster.lsf.runtime import (
     RUNTIME_JOB_ID_TOKEN,
@@ -27,6 +29,7 @@ from fisheye.shared.flat_roi_cache import (
     crop_run_name_from_manifest,
     load_flat_roi_cache_manifest,
 )
+from fisheye.shared.hybrid_crop_provider import validate_hybrid_crop_signed_identity
 from fisheye.shared.pose_model_input_contract import PoseModelInputRuntimePlan
 from fisheye.shared.roi_pixel_contract import normalize_pixel_contract
 from fisheye.shared.run_provenance import json_ready
@@ -51,6 +54,105 @@ from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 DEFAULT_ZEBRAFISH_MIN_ROI_SIZE = DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 131_072
 DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 131_072
+
+
+def _provider_array_sha256(value: Any) -> str:
+    array = np.ascontiguousarray(np.asarray(value))
+    digest = hashlib.sha256()
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(json.dumps(list(array.shape), separators=(",", ":")).encode("ascii"))
+    digest.update(memoryview(array).cast("B"))
+    return digest.hexdigest()
+
+
+def validate_crop_run_provider_record(
+    *,
+    analysis_zarr: Path,
+    crop_run: str,
+    expected_record_sha256: str | None,
+) -> Mapping[str, Any] | None:
+    """Validate an immutable mixed-pixel provider record when one is declared.
+
+    Historical crop runs remain valid without this record.  A hybrid
+    acquisition/full-frame run, however, is not planner-eligible unless the
+    caller pins the exact record digest and every recorded rowset digest still
+    matches the live immutable crop run.
+    """
+
+    root = open_zarr_group_direct(analysis_zarr.expanduser().resolve(), mode="r")
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None or crop_run not in crop_parent:
+        raise ValueError(f"crop_runs/{crop_run} is missing.")
+    group = crop_parent[crop_run]
+    source_pixels = str(
+        group.attrs.get("source_pixels") or group.attrs.get("roi_pixel_provider") or ""
+    ).strip()
+    hybrid = source_pixels == "hybrid_acquisition_crop_video_offline_supplement"
+    observed_digest = str(group.attrs.get("provider_record_sha256") or "").strip()
+    record = group.attrs.get("provider_record")
+    if not hybrid and expected_record_sha256 is None and not observed_digest:
+        return None
+    if not expected_record_sha256:
+        raise ValueError(
+            f"Hybrid crop run crop_runs/{crop_run} requires an exact "
+            "roi_provider_record_sha256 in the target manifest."
+        )
+    if observed_digest != str(expected_record_sha256):
+        raise ValueError(
+            f"ROI provider digest mismatch for crop_runs/{crop_run}: "
+            f"observed {observed_digest!r}, expected {expected_record_sha256!r}."
+        )
+    if not isinstance(record, Mapping):
+        raise ValueError(f"crop_runs/{crop_run} lacks its provider_record object.")
+    canonical_digest = hashlib.sha256(
+        json.dumps(
+            json_ready(record), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+    ).hexdigest()
+    if canonical_digest != observed_digest:
+        raise ValueError(f"crop_runs/{crop_run} provider_record digest is invalid.")
+    if record.get("schema_id") != "palette.roi_pixel_provider_record.v1":
+        raise ValueError(f"crop_runs/{crop_run} has an unsupported provider schema.")
+    if str(record.get("crop_run") or "") != crop_run:
+        raise ValueError("ROI provider record binds a different crop run.")
+    row_count = int(group["instance_key"].shape[0])
+    if int(record.get("row_count") or -1) != row_count:
+        raise ValueError("ROI provider record row_count is stale.")
+    array_digests = record.get("rowset_array_sha256")
+    if not isinstance(array_digests, Mapping) or not array_digests:
+        raise ValueError("ROI provider record lacks rowset array digests.")
+    for name, expected_digest in array_digests.items():
+        array_name = str(name)
+        if array_name not in group:
+            raise ValueError(f"ROI provider rowset array {array_name!r} is missing.")
+        observed_array_digest = _provider_array_sha256(group[array_name][:])
+        if observed_array_digest != str(expected_digest):
+            raise ValueError(
+                f"ROI provider rowset array {array_name!r} digest is stale."
+            )
+    signed_identity = validate_hybrid_crop_signed_identity(
+        group,
+        expected_provider_record_sha256=observed_digest,
+    )
+    return {
+        "schema_id": str(record["schema_id"]),
+        "record_sha256": observed_digest,
+        "crop_run": crop_run,
+        "row_count": row_count,
+        "routing_policy_id": record.get("routing_policy_id"),
+        "crop_policy_id": record.get("crop_policy_id"),
+        "acquisition_source_mode": record.get("acquisition_source_mode"),
+        "acquisition_ledger_record_sha256": record.get(
+            "acquisition_ledger_record_sha256"
+        ),
+        "source_row_signature_spec_digest": signed_identity[
+            "source_row_signature_spec_digest"
+        ],
+        "source_pixel_fingerprint": signed_identity["source_pixel_fingerprint"],
+        "source_rowset_fingerprint": signed_identity["source_rowset_fingerprint"],
+        "crop_signature": signed_identity["crop_signature"],
+        "crop_revision": signed_identity["crop_revision"],
+    }
 
 
 def resolve_keypoint_storage(
@@ -887,6 +989,7 @@ def build_prediction_job(
     run_names: KeypointRunNames,
     model: PoseModelBinding,
     cache: FlatRoiCacheBinding,
+    roi_provider_record_sha256: str | None,
     model_input_runtime: PoseModelInputRuntimePlan,
     pose_schema: str,
     batch_size: int,
@@ -976,6 +1079,10 @@ def build_prediction_job(
         "--progress-every-batches",
         str(int(progress_every_batches)),
     ]
+    if roi_provider_record_sha256 is not None:
+        worker.extend(
+            ("--roi-provider-record-sha256", str(roi_provider_record_sha256))
+        )
     command = build_runtime_command(
         worker,
         status_path_template=(
@@ -1014,6 +1121,7 @@ def build_prediction_job(
             "terminal_output": str(terminal_output),
             "model": model.to_json(),
             "cache": cache.to_json(),
+            "roi_provider_record_sha256": roi_provider_record_sha256,
             "model_input_transform": model_input_transform.to_attrs(),
             "model_input_stride": model_input_stride,
             "model_input_runtime": model_input_runtime.to_json(),

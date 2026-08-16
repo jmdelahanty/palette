@@ -10,11 +10,15 @@ from typing import Any, Iterable, TextIO
 
 import zarr
 
+from fisheye.shared.acquisition_crop_stream_ledger import (
+    validate_current_acquisition_crop_stream_ledger,
+)
 from fisheye.shared.acquisition_video_streams import (
     build_acquisition_video_stream_inventory,
     write_acquisition_video_stream_inventory,
 )
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,9 @@ class InventoryBackfillPlan:
     stream_keys: tuple[str, ...] = ()
     crop_stream_available: bool | None = None
     inventory_status: str | None = None
+    crop_ledger_status: str | None = None
+    crop_ledger_run: str | None = None
+    crop_ledger_row_count: int | None = None
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
@@ -101,6 +108,7 @@ def build_plan(manifest_path: Path) -> InventoryBackfillPlan:
         stream_keys=tuple(inventory["stream_keys"]),
         crop_stream_available=bool(inventory["crop_stream_available"]),
         inventory_status=str(inventory["inventory_status"]),
+        crop_ledger_status=("planned" if inventory.get("streams", {}).get("crop") else None),
     )
 
 
@@ -143,6 +151,17 @@ def _apply_plan(plan: InventoryBackfillPlan, *, imported_at_utc: str) -> Invento
             status="skipped",
             reason="no_manifest_video_streams",
         )
+    crop_ledger = inventory.get("streams", {}).get("crop", {}).get("canonical_ledger", {})
+    if crop_ledger:
+        expected_digest = str(crop_ledger["canonical_ledger_record_sha256"])
+        consolidate_metadata_capture_expected_warnings(plan.zarr_path)
+        consolidated = zarr.open_group(
+            str(plan.zarr_path), mode="r", use_consolidated=True
+        )
+        validate_current_acquisition_crop_stream_ledger(
+            consolidated,
+            expected_record_sha256=expected_digest,
+        )
     return InventoryBackfillPlan(
         recording_dir=plan.recording_dir,
         manifest_path=plan.manifest_path,
@@ -152,6 +171,13 @@ def _apply_plan(plan: InventoryBackfillPlan, *, imported_at_utc: str) -> Invento
         stream_keys=tuple(inventory["stream_keys"]),
         crop_stream_available=bool(inventory["crop_stream_available"]),
         inventory_status=str(inventory["inventory_status"]),
+        crop_ledger_status=(str(crop_ledger.get("canonical_ledger_status")) if crop_ledger else None),
+        crop_ledger_run=(str(crop_ledger.get("canonical_ledger_run")) if crop_ledger else None),
+        crop_ledger_row_count=(
+            int(crop_ledger["canonical_ledger_row_count"])
+            if crop_ledger.get("canonical_ledger_row_count") is not None
+            else None
+        ),
     )
 
 
@@ -180,10 +206,16 @@ def _print_summary(plans: list[InventoryBackfillPlan], *, applied: bool) -> None
             if plan.crop_stream_available is not None
             else ""
         )
+        ledger = (
+            f" crop_ledger_status={plan.crop_ledger_status}"
+            f" crop_ledger_rows={plan.crop_ledger_row_count}"
+            if plan.crop_ledger_status is not None
+            else ""
+        )
         print(
             f"{plan.status}: {plan.recording_dir.name}"
             f" streams={plan.stream_count} keys={','.join(plan.stream_keys)}"
-            f" inventory_status={plan.inventory_status}{crop}{suffix}"
+            f" inventory_status={plan.inventory_status}{crop}{ledger}{suffix}"
         )
     label = "applied" if applied else "dry_run"
     print(f"Summary ({label}):")
@@ -194,8 +226,9 @@ def _print_summary(plans: list[InventoryBackfillPlan], *, applied: bool) -> None
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Backfill analysis/acquisition_video_streams from recording_manifest.json "
-            "video_streams payloads. Dry-run by default."
+            "Backfill analysis/acquisition_video_streams inventory and the complete "
+            "canonical acquisition crop ledger from recording_manifest.json. "
+            "Dry-run by default."
         )
     )
     parser.add_argument(
@@ -211,7 +244,11 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Only include recordings whose path contains this string. May be repeated.",
     )
-    parser.add_argument("--apply", action="store_true", help="Write inventory attrs into each analysis zarr.")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write inventory attrs and a pointer-last immutable crop ledger into each analysis zarr.",
+    )
     parser.add_argument("--output-jsonl", type=Path, help="Optional JSONL report path.")
 
     args = parser.parse_args(argv)

@@ -9,6 +9,7 @@ It deliberately does not update a selector, registry, or production default.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import re
 import shutil
@@ -19,6 +20,9 @@ import uuid
 import numpy as np
 import zarr
 
+from fisheye.shared.hybrid_crop_provider import (
+    validate_hybrid_crop_signed_identity,
+)
 from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
@@ -35,8 +39,12 @@ from fisheye.shared.zarr.crop_pixel_authority import (
     bind_refined_crop_source_pixel_authority,
 )
 from fisheye.shared.zarr.crop_schema import (
+    CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_ID,
+    CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_VERSION,
     CROP_GEOMETRY_SCHEMA_V1,
     CropGeometryPolicy,
+    CropPlacementMode,
+    CropSizeMode,
 )
 from fisheye.shared.zarr.crop_shadow import (
     CropGeometryShadowPublication,
@@ -149,6 +157,121 @@ def _require_node_local_scratch(path: Path) -> Path:
     } or str(resolved).startswith(("/groups/", "/nrs/")):
         raise ValueError("Crop publication scratch must be a bounded node-local path.")
     return resolved
+
+
+def _bind_explicit_origin_provider(
+    *,
+    archive: Path,
+    provider_run_id: str,
+    source: BoundRefinedDetectionCropSource,
+    base_policy: CropGeometryPolicy,
+) -> tuple[np.ndarray, CropGeometryPolicy, dict[str, Any]]:
+    """Bind exact verified per-row origins from one signed hybrid provider."""
+
+    run_id = _require_run_id(provider_run_id)
+    if base_policy.placement_mode is not CropPlacementMode.REFINED_DETECTION_CENTERED:
+        raise ValueError(
+            "The crop publisher owns explicit-origin policy construction; callers "
+            "must supply the ordinary detection-centered base policy."
+        )
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    try:
+        provider = root[f"crop_runs/{run_id}"]
+    except KeyError as exc:
+        raise FileNotFoundError(
+            f"Explicit crop-origin provider not found: crop_runs/{run_id}"
+        ) from exc
+    if (
+        provider.attrs.get("stage_selector_eligible") is not False
+        or str(provider.attrs.get("status") or "") not in {"complete", "completed"}
+    ):
+        raise ValueError(
+            "Explicit crop-origin provider must be complete and selector-ineligible."
+        )
+    provider_record_sha256 = str(
+        provider.attrs.get("provider_record_sha256") or ""
+    )
+    signed = validate_hybrid_crop_signed_identity(
+        provider,
+        expected_provider_record_sha256=provider_record_sha256,
+    )
+    if (
+        provider.attrs.get("source_refined_run_id") != source.run_id
+        or provider.attrs.get("source_refined_manifest_digest")
+        != source.manifest.get("payload_digest")
+    ):
+        raise ValueError(
+            "Explicit crop-origin provider binds a different refined snapshot."
+        )
+
+    comparisons = (
+        ("instance_key", "instances/instance_key"),
+        ("source_refined_row_ids", "instances/refined_row_ids"),
+        ("frame_indices", "instances/frame_indices"),
+        (
+            "source_acquisition_frame_index",
+            "instances/source_acquisition_frame_index",
+        ),
+    )
+    mismatched = [
+        provider_path
+        for provider_path, source_path in comparisons
+        if provider_path not in provider
+        or not np.array_equal(
+            np.asarray(provider[provider_path][...]),
+            np.asarray(source.arrays[source_path][...]),
+        )
+    ]
+    if mismatched:
+        raise ValueError(
+            "Explicit crop-origin provider differs from the refined rowset at: "
+            + ", ".join(mismatched)
+        )
+    if "roi_coordinates_full" not in provider or "roi_sizes_full" not in provider:
+        raise ValueError("Explicit crop-origin provider lacks ROI geometry arrays.")
+    origins = np.asarray(provider["roi_coordinates_full"][...])
+    sizes = np.asarray(provider["roi_sizes_full"][...])
+    expected_shape = (source.dimensions.n_instances, 2)
+    if origins.dtype != np.dtype(np.int32) or origins.shape != expected_shape:
+        raise ValueError(
+            "Explicit crop-origin provider origins must have exact int32 [N,2] "
+            "shape."
+        )
+    if sizes.dtype != np.dtype(np.int32) or sizes.shape != expected_shape:
+        raise ValueError(
+            "Explicit crop-origin provider sizes must have exact int32 [N,2] shape."
+        )
+    if base_policy.size_mode is CropSizeMode.FIXED_PER_RUN and not np.all(
+        sizes
+        == np.asarray(base_policy.fixed_size_wh, dtype=np.int32).reshape(1, 2)
+    ):
+        raise ValueError(
+            "Explicit crop-origin provider sizes differ from fixed crop policy."
+        )
+
+    authority = {
+        "schema_id": CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_ID,
+        "schema_version": CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_VERSION,
+        "authority_kind": "signed_hybrid_crop_provider",
+        "run_id": run_id,
+        "provider_record_sha256": signed["provider_record_sha256"],
+        "source_rowset_fingerprint": signed["source_rowset_fingerprint"],
+        "source_pixel_fingerprint": signed["source_pixel_fingerprint"],
+        "source_row_signature_spec_digest": signed[
+            "source_row_signature_spec_digest"
+        ],
+    }
+    policy = replace(
+        base_policy,
+        placement_mode=CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW,
+        placement_authority=authority,
+    )
+    return np.array(origins, copy=True, order="C"), policy, {
+        **authority,
+        "row_count": int(signed["row_count"]),
+        "ordered_refined_coverage_exact": True,
+        "roi_sizes_match_policy": True,
+    }
 
 
 def _crop_arrays(run: Any) -> dict[str, Any]:
@@ -371,6 +494,7 @@ def publish_crop_geometry_production_candidate(
     registered_gate_requirement: str = "off",
     registered_gate_run: str | None = None,
     registered_gate_validator: Callable[..., dict[str, Any]] | None = None,
+    geometry_origin_provider_run_id: str | None = None,
 ) -> dict[str, object]:
     """Publish a complete crop candidate without activating production state."""
 
@@ -465,6 +589,7 @@ def publish_crop_geometry_production_candidate(
                     dtype=np.uint64,
                 ),
                 require_comparison_bound_selection=True,
+                allow_selector_ineligible_source=explicit_refined_source,
             )
             current_gate.pop("inside", None)
             mismatched = [
@@ -482,6 +607,24 @@ def publish_crop_geometry_production_candidate(
         expected_camera_identity=camera_identity,
     )
     pixels.assert_verified()
+    origin_provider_run = str(geometry_origin_provider_run_id or "").strip()
+    if origin_provider_run:
+        explicit_origins, effective_policy, origin_binding = (
+            _bind_explicit_origin_provider(
+                archive=archive,
+                provider_run_id=origin_provider_run,
+                source=source,
+                base_policy=policy,
+            )
+        )
+    else:
+        if policy.placement_mode is not CropPlacementMode.REFINED_DETECTION_CENTERED:
+            raise ValueError(
+                "Explicit crop placement requires geometry_origin_provider_run_id."
+            )
+        explicit_origins = None
+        effective_policy = policy
+        origin_binding = None
     root_before = open_zarr_root(archive, mode="r")
     root_attrs_before = dict(root_before.attrs)
     crop_parent_before = root_before.get("crop_runs")
@@ -489,9 +632,14 @@ def publish_crop_geometry_production_candidate(
         {} if crop_parent_before is None else dict(crop_parent_before.attrs)
     )
     expected_crop_parent_attrs = dict(crop_parent_attrs_before)
-    expected_crop_parent_attrs.setdefault(
-        COMPLETION_EPOCH_ATTR, COMPLETION_EPOCH_STRICT
+    crop_parent_has_children = bool(
+        crop_parent_before is not None
+        and tuple(crop_parent_before.group_keys())
     )
+    if not crop_parent_has_children:
+        expected_crop_parent_attrs.setdefault(
+            COMPLETION_EPOCH_ATTR, COMPLETION_EPOCH_STRICT
+        )
 
     session = scratch / f"palette_crop_candidate_{uuid.uuid4().hex}"
     local_root = session / ".palette_benchmarks" / "production_candidate"
@@ -501,9 +649,10 @@ def publish_crop_geometry_production_candidate(
     try:
         prepared = prepare_crop_geometry_from_refined_source(
             source,
-            policy=policy,
+            policy=effective_policy,
             pixel_authority=pixels.pixel_authority,
             roi_sizes_full=roi_sizes_full,
+            roi_coordinates_full=explicit_origins,
         )
         local_archive = local_root / "crop.zarr"
         publication = publish_selector_ineligible_crop_geometry_snapshot(
@@ -547,6 +696,23 @@ def publish_crop_geometry_production_candidate(
             expected_camera_identity=camera_identity,
             explicit_refined_source=explicit_refined_source,
         )
+        if origin_provider_run:
+            current_origins, current_policy, current_origin_binding = (
+                _bind_explicit_origin_provider(
+                    archive=archive,
+                    provider_run_id=origin_provider_run,
+                    source=current_source,
+                    base_policy=policy,
+                )
+            )
+            if (
+                current_policy != effective_policy
+                or current_origin_binding != origin_binding
+                or not np.array_equal(current_origins, explicit_origins)
+            ):
+                raise RuntimeError(
+                    "Explicit crop-origin provider changed before archive import."
+                )
         current_prepared = PreparedCropGeometrySnapshot(
             dimensions=prepared.dimensions,
             policy=prepared.policy,
@@ -608,6 +774,7 @@ def publish_crop_geometry_production_candidate(
                 "registered_gate_run": (
                     None if gate_evidence is None else gate_evidence.get("gate_run")
                 ),
+                "geometry_origin_provider": origin_binding,
             },
         )
         imported = True
@@ -619,6 +786,23 @@ def publish_crop_geometry_production_candidate(
             expected_camera_identity=camera_identity,
             explicit_refined_source=explicit_refined_source,
         )
+        if origin_provider_run:
+            final_origins, final_policy, final_origin_binding = (
+                _bind_explicit_origin_provider(
+                    archive=archive,
+                    provider_run_id=origin_provider_run,
+                    source=current_source,
+                    base_policy=policy,
+                )
+            )
+            if (
+                final_policy != effective_policy
+                or final_origin_binding != origin_binding
+                or not np.array_equal(final_origins, explicit_origins)
+            ):
+                raise RuntimeError(
+                    "Explicit crop-origin provider changed during publication."
+                )
         final_prepared = PreparedCropGeometrySnapshot(
             dimensions=prepared.dimensions,
             policy=prepared.policy,
@@ -678,6 +862,7 @@ def publish_crop_geometry_production_candidate(
             ),
             "source_pixel_authority_digest": pixels.binding_document_digest,
             "source_video_path": str(pixels.source_video_path),
+            "geometry_origin_binding": origin_binding,
             "storage_profile_id": profile.profile_id,
             "selector_eligible": False,
             "selector_activation": "deferred_separate_reviewed_change",

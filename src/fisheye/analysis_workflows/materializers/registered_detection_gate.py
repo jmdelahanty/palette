@@ -42,8 +42,10 @@ from fisheye.shared.selector_activation import (
     activate_selector_eligible_run,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     canonical_detection_dimensions_from_manifest,
     require_active_coordinate_canonical_detection,
+    validate_canonical_detection_run_manifest,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -91,6 +93,7 @@ class RegisteredDetectionGatePlan:
     inner_rows: int
     shard_rows: int
     run_provenance: Mapping[str, Any]
+    allow_selector_ineligible_source: bool = False
 
 
 def _canonical_copy(value: Any) -> Any:
@@ -228,21 +231,54 @@ def _selection_snapshot(root: Any, selection_run: str) -> dict[str, Any]:
     }
 
 
-def _source_snapshot(root: Any, source_group_path: str) -> dict[str, Any]:
+def _source_snapshot(
+    root: Any,
+    source_group_path: str,
+    *,
+    allow_selector_ineligible_source: bool = False,
+) -> dict[str, Any]:
     path = _safe_group_path(source_group_path)
-    try:
-        active_manifest = require_active_coordinate_canonical_detection(
-            root,
-            group_path=path,
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"Detection source {path!r} is not the active canonical-v3 authority: {exc}"
-        ) from exc
     try:
         group = _group_at(root, path)
     except KeyError as exc:
         raise ValueError(f"Detection source is missing: {path}") from exc
+    if allow_selector_ineligible_source:
+        active_manifest = group.attrs.get("run_manifest")
+        if not isinstance(active_manifest, Mapping):
+            raise ValueError(
+                f"Detection source {path!r} lacks its canonical-v3 manifest."
+            )
+        errors = validate_canonical_detection_run_manifest(active_manifest)
+        if errors:
+            raise ValueError(
+                f"Detection source {path!r} canonical manifest is invalid: "
+                + "; ".join(errors)
+            )
+        payload = active_manifest["payload"]
+        if (
+            active_manifest.get("schema_version")
+            != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            or payload.get("run_id") != path.split("/")[-1]
+            or payload.get("publication", {}).get("stage_selector_eligible")
+            is not False
+            or group.attrs.get("stage_selector_eligible") is not False
+            or group.attrs.get("production_candidate") is not True
+        ):
+            raise ValueError(
+                f"Detection source {path!r} is not an exact selector-ineligible "
+                "canonical-v3 production candidate."
+            )
+    else:
+        try:
+            active_manifest = require_active_coordinate_canonical_detection(
+                root,
+                group_path=path,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Detection source {path!r} is not the active canonical-v3 "
+                f"authority: {exc}"
+            ) from exc
     attrs = dict(group.attrs)
     if attrs.get("palette_run_completion_status") != "complete":
         raise ValueError(
@@ -330,10 +366,17 @@ def build_registered_detection_gate_plan(
     output_run: str | None = None,
     inner_rows: int = DEFAULT_INNER_ROWS,
     shard_rows: int = DEFAULT_SHARD_ROWS,
+    allow_selector_ineligible_source: bool = False,
 ) -> RegisteredDetectionGatePlan:
+    if type(allow_selector_ineligible_source) is not bool:
+        raise TypeError("allow_selector_ineligible_source must be an exact bool.")
     archive = Path(source_zarr).expanduser().resolve()
     root = open_zarr_root(archive, mode="r")
-    source = _source_snapshot(root, source_group_path)
+    source = _source_snapshot(
+        root,
+        source_group_path,
+        allow_selector_ineligible_source=allow_selector_ineligible_source,
+    )
     selection = _selection_snapshot(root, selection_run)
     if (
         source["width_px"] != selection["width_px"]
@@ -397,6 +440,7 @@ def build_registered_detection_gate_plan(
         inner_rows=int(inner_rows),
         shard_rows=outer,
         run_provenance=provenance,
+        allow_selector_ineligible_source=allow_selector_ineligible_source,
     )
 
 
@@ -478,7 +522,11 @@ def _run_attrs(plan: RegisteredDetectionGatePlan) -> dict[str, Any]:
 
 def _materialize_local_gate(plan: RegisteredDetectionGatePlan, path: Path) -> None:
     root = open_zarr_root(plan.source_zarr, mode="r")
-    source = _source_snapshot(root, plan.source_group_path)
+    source = _source_snapshot(
+        root,
+        plan.source_group_path,
+        allow_selector_ineligible_source=plan.allow_selector_ineligible_source,
+    )
     selection = _selection_snapshot(root, plan.selection_run)
     if (
         source["source_signature"] != plan.source_signature
@@ -639,7 +687,13 @@ def validate_registered_detection_gate_run(
             if np.any(reasons[inside]) or np.any(~np.any(reasons[~inside], axis=1)):
                 errors.append("gate rejection reasons disagree with inside flags")
             source_root = open_zarr_root(expected_plan.source_zarr, mode="r")
-            source = _source_snapshot(source_root, expected_plan.source_group_path)
+            source = _source_snapshot(
+                source_root,
+                expected_plan.source_group_path,
+                allow_selector_ineligible_source=(
+                    expected_plan.allow_selector_ineligible_source
+                ),
+            )
             selected = _selection_snapshot(source_root, expected_plan.selection_run)
             if source["source_signature"] != expected_plan.source_signature:
                 errors.append("source detection signature changed")
@@ -670,7 +724,11 @@ def validate_registered_detection_gate_run(
 
 def _revalidate_sources(plan: RegisteredDetectionGatePlan) -> dict[str, Any]:
     root = open_zarr_root(plan.source_zarr, mode="r")
-    source = _source_snapshot(root, plan.source_group_path)
+    source = _source_snapshot(
+        root,
+        plan.source_group_path,
+        allow_selector_ineligible_source=plan.allow_selector_ineligible_source,
+    )
     selection = _selection_snapshot(root, plan.selection_run)
     if source["source_signature"] != plan.source_signature:
         raise RuntimeError("Detection source changed during gate publication.")
@@ -693,6 +751,7 @@ def validate_registered_detection_gate_consumption(
     gate_run: str,
     expected_instance_keys: np.ndarray,
     require_comparison_bound_selection: bool = False,
+    allow_selector_ineligible_source: bool = False,
 ) -> dict[str, Any]:
     """Validate and load one exact gate for fail-closed refinement consumption."""
 
@@ -715,6 +774,7 @@ def validate_registered_detection_gate_consumption(
         output_run=run_name,
         inner_rows=int(attrs.get("row_chunk_rows") or 0),
         shard_rows=int(attrs.get("row_shard_rows") or 0),
+        allow_selector_ineligible_source=allow_selector_ineligible_source,
     )
     comparison = plan.selection_record["decision"].get("comparison_binding")
     if require_comparison_bound_selection and (

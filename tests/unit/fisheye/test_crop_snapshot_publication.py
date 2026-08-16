@@ -58,6 +58,78 @@ def _wire_authorities(monkeypatch, source, pixels: _BoundPixels) -> list[Path]:
     return calls
 
 
+def test_signed_hybrid_provider_can_supply_exact_explicit_origins(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = _refined_source(tmp_path)
+    root = zarr.open_group(
+        str(source.archive_path), mode="a", use_consolidated=False
+    )
+    provider = root.require_group("crop_runs").create_group("hybrid_provider")
+    provider.attrs.update(
+        {
+            "status": "completed",
+            "stage_selector_eligible": False,
+            "provider_record_sha256": "a" * 64,
+            "source_refined_run_id": source.run_id,
+            "source_refined_manifest_digest": source.manifest["payload_digest"],
+        }
+    )
+    source_paths = {
+        "instance_key": "instances/instance_key",
+        "source_refined_row_ids": "instances/refined_row_ids",
+        "frame_indices": "instances/frame_indices",
+        "source_acquisition_frame_index": (
+            "instances/source_acquisition_frame_index"
+        ),
+    }
+    for provider_path, source_path in source_paths.items():
+        provider.create_array(
+            provider_path,
+            data=np.asarray(source.arrays[source_path][...]),
+        )
+    origins = np.asarray(
+        [[14, 10], [67, 11], [46, 51], [20, 55]],
+        dtype=np.int32,
+    )
+    provider.create_array("roi_coordinates_full", data=origins)
+    provider.create_array("roi_sizes_full", data=np.full((4, 2), 8, np.int32))
+    signed = {
+        "provider_record_sha256": "a" * 64,
+        "row_count": 4,
+        "source_row_signature_spec_digest": "b" * 64,
+        "source_pixel_fingerprint": "c" * 64,
+        "source_rowset_fingerprint": "d" * 64,
+    }
+    monkeypatch.setattr(
+        module,
+        "validate_hybrid_crop_signed_identity",
+        lambda *_args, **_kwargs: signed,
+    )
+
+    observed_origins, policy, binding = module._bind_explicit_origin_provider(
+        archive=source.archive_path,
+        provider_run_id="hybrid_provider",
+        source=source,
+        base_policy=_policy(),
+    )
+
+    np.testing.assert_array_equal(observed_origins, origins)
+    assert policy.payload["schema_version"] == 2
+    assert policy.placement_authority["run_id"] == "hybrid_provider"
+    assert binding["ordered_refined_coverage_exact"] is True
+
+    provider["instance_key"][0] = np.uint64(999)
+    with pytest.raises(ValueError, match="differs from the refined rowset"):
+        module._bind_explicit_origin_provider(
+            archive=source.archive_path,
+            provider_run_id="hybrid_provider",
+            source=source,
+            base_policy=_policy(),
+        )
+
+
 def test_required_candidate_binds_exact_finalized_gated_refined_authority(
     monkeypatch,
     tmp_path: Path,
@@ -100,7 +172,8 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
         source_video_path=tmp_path / "camera.mp4",
     )
     _wire_authorities(monkeypatch, source, pixels)
-    gate_validator = lambda *_args, **_kwargs: {
+    def gate_validator(*_args, **_kwargs):
+        return {
             "inside": np.ones(
                 source.dimensions.n_source_detections,
                 dtype=np.bool_,
@@ -129,6 +202,7 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
     root = zarr.open_group(
         str(source.archive_path), mode="r", use_consolidated=False
     )
+    assert root["crop_runs"].attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
     crop = root["crop_runs"]["crop_required"]
     assert crop.attrs["source_registered_detection_gate"] == gate_evidence
 
@@ -144,6 +218,7 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
     archive = source.archive_path
     root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
     crop_family = root.create_group("crop_runs")
+    crop_family.create_group("existing_crop")
     crop_family.attrs.update(
         {
             "latest": "existing_crop",
@@ -202,7 +277,6 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
         assert dict(family.attrs) == {
             "latest": "existing_crop",
             "purpose_selectors": {"inspection": "existing_crop"},
-            COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
         }
         run = family["crop_candidate_v2"]
         assert run.attrs["status"] == "complete"

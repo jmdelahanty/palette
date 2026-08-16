@@ -13,6 +13,7 @@ from fisheye.training.training_crop_materialization_publication import (
     create_training_crop_artifact,
     enrich_sampled_training_dataset,
 )
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -63,8 +64,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--roi-size",
         type=int,
-        default=348,
-        help="Square sampled-images-full crop extent in pixels (default: 348).",
+        default=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
+        help=(
+            "Square sampled-images-full crop extent in pixels "
+            f"(default: {DEFAULT_ZEBRAFISH_CROP_SIZE_PX})."
+        ),
     )
     parser.add_argument("--recording-dir", type=Path)
     parser.add_argument("--crop-video-path", type=Path)

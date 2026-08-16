@@ -25,6 +25,14 @@ This plan complements:
 - `docs/acquisition_crop_pose_training_workflow.md`
 - `docs/keypoint_pixel_contract_registry_todo.md`
 
+For current GoodBatBadBat production work, use
+`docs/goodbatbadbat_acquisition_crop_stream_production_checklist_20260815.md`.
+That checklist adds the missing import-first raw acquisition layer and keeps
+offline refined detections authoritative while routing eligible rows to
+acquisition crop pixels. Future crop-only retention is separately governed by
+`docs/crop_only_recording_storage_profile.md` and is not implied by this ROI
+provider plan.
+
 ## Current State
 
 ### Already Implemented

@@ -1,0 +1,258 @@
+{
+  "digest_algorithm": "sha256_canonical_json_v1",
+  "payload": {
+    "evidence": {
+      "training_args": {
+        "relative_path": "args.yaml",
+        "sha256": "60f85f403ab16245de9947080eb8600b57da582bc5348af4c963e6a4bdc4d796"
+      },
+      "training_manifest": {
+        "relative_path": "inputs/pose_all_registry_reviewed_v2_keypoints_20260520_v001.manifest.json",
+        "sha256": "5cfe9cefdeb5adde2eb35e26e469c1898cd31b007274b259272a42a6c1cdc317"
+      },
+      "training_report": {
+        "relative_path": "20260520-234952_pose_training_report.yaml",
+        "sha256": "8aede160164355cd65b3db12f058283e9e88479ee466aaa2cbf553b38b3e7b0e"
+      }
+    },
+    "model": {
+      "run_id": "pose_all_registry_reviewed_v2_kpt5_warm_v2_20260520_retry2",
+      "set_id": "pose_all_registry_reviewed_v2_keypoints_20260520_v001",
+      "weights": {
+        "relative_path": "weights/best.pt",
+        "sha256": "cce63d534a8f1491db1e2c71cb9236768c445722013dc39faeaf62a9d0a9a377"
+      }
+    },
+    "runtime_profiles": [
+      {
+        "classification": "empirically_rejected_scale_matched_resize",
+        "evidence": {
+          "artifact_path": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/batman_training_canary_20260806_v1/2026-07-21T19-38-32Z_arena_2_Batman_reviewed_inference_candidates_v2.zarr",
+          "decision": "rejected_for_candidate_inference",
+          "evidence_id": "batman_reviewed_input_comparison_v1",
+          "receipt_sha256": "c900247af3e2cc92be8a1c7367d30ffda8b0448b0dcad5ba1db79c8d909c54e4",
+          "successful_rows": 0,
+          "total_rows": 181
+        },
+        "input_mode": "numpy-list",
+        "model_stride": 32,
+        "native_shape_hw": [
+          348,
+          348
+        ],
+        "native_to_submitted": {
+          "padding_mode": "constant",
+          "padding_value_uint8": 0,
+          "policy": "center_pad_to_submitted_shape"
+        },
+        "network_shape_hw": [
+          256,
+          256
+        ],
+        "profile_id": "batman_348_numpy_512_to_256_v1",
+        "result_coordinates": "ultralytics_results_original_submitted_pixel_coordinates",
+        "status": "rejected",
+        "submitted_shape_hw": [
+          512,
+          512
+        ],
+        "submitted_to_network": {
+          "adapter": "ultralytics_numpy_list_predict_v1",
+          "imgsz_hw": [
+            256,
+            256
+          ],
+          "letterbox_interpolation": "opencv_inter_linear",
+          "letterbox_padding_value_uint8": 114,
+          "luma_channel_policy": "uint8_luma_repeated_bgr_then_equivalent_rgb",
+          "normalization": "uint8_divide_255_to_float",
+          "preprocessing_probe": {
+            "input_pattern": "uint8_luma_mod_251_x3_y5_repeated_three_channels",
+            "model_stride": 32,
+            "network_shape_hw": [
+              256,
+              256
+            ],
+            "output_dtype": "float32_little_endian",
+            "output_sha256": "d141f8e12a791d6b4b0c99ae3dfc24c6d6c11b63f9739df755d1d7bbe4b1d35a",
+            "output_shape_nchw": [
+              1,
+              3,
+              256,
+              256
+            ],
+            "schema_id": "palette.pose_preprocessing_probe",
+            "schema_version": 1,
+            "source_shape_hw": [
+              512,
+              512
+            ]
+          },
+          "rect": false,
+          "runtime_ultralytics_versions": [
+            "8.3.169",
+            "8.3.214"
+          ]
+        }
+      },
+      {
+        "classification": "empirically_accepted_native_scale_stride_pad",
+        "evidence": {
+          "artifact_path": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/batman_training_canary_20260806_v1/2026-07-21T19-38-32Z_arena_2_Batman_reviewed_inference_candidates_v2.zarr",
+          "decision": "accepted_for_selector_ineligible_candidate_inference",
+          "evidence_id": "batman_reviewed_input_comparison_v1",
+          "receipt_sha256": "c900247af3e2cc92be8a1c7367d30ffda8b0448b0dcad5ba1db79c8d909c54e4",
+          "successful_rows": 136,
+          "total_rows": 181
+        },
+        "input_mode": "tensor",
+        "model_stride": 32,
+        "native_shape_hw": [
+          348,
+          348
+        ],
+        "native_to_submitted": {
+          "padding_mode": "constant",
+          "padding_value_uint8": 0,
+          "policy": "center_pad_to_submitted_shape"
+        },
+        "network_shape_hw": [
+          352,
+          352
+        ],
+        "profile_id": "batman_348_tensor_pad_352_v1",
+        "result_coordinates": "ultralytics_results_original_submitted_pixel_coordinates",
+        "status": "accepted",
+        "submitted_shape_hw": [
+          352,
+          352
+        ],
+        "submitted_to_network": {
+          "adapter": "palette_prepared_tensor_predict_v1",
+          "imgsz_hw": [
+            352,
+            352
+          ],
+          "luma_channel_policy": "uint8_luma_repeated_three_channels",
+          "normalization": "uint8_divide_255_to_float32",
+          "preprocessing_probe": {
+            "input_pattern": "uint8_luma_mod_251_x3_y5_repeated_three_channels",
+            "model_stride": 32,
+            "native_shape_hw": [
+              348,
+              348
+            ],
+            "output_dtype": "float32_little_endian",
+            "output_sha256": "fa4e596f0ff6d32280cc33f3a9a9b5f3811275de949a75bc25f9daa227b96dd4",
+            "output_shape_nchw": [
+              1,
+              3,
+              352,
+              352
+            ],
+            "schema_id": "palette.pose_tensor_preprocessing_probe",
+            "schema_version": 1,
+            "submitted_shape_hw": [
+              352,
+              352
+            ]
+          },
+          "runtime_ultralytics_versions": [
+            "8.3.169",
+            "8.3.214"
+          ],
+          "ultralytics_spatial_preprocessing": "bypassed_prepared_tensor"
+        }
+      },
+      {
+        "classification": "empirically_accepted_native_identity_stride_aligned",
+        "evidence": {
+          "artifact_path": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/goodbatbadbat_hybrid_pose_384_canary_20260815_v1",
+          "decision": "accepted_for_selector_ineligible_candidate_inference",
+          "evidence_id": "goodbatbadbat_hybrid_crop_pose_384_visual_review_v1",
+          "receipt_sha256": "fbfd4020e8cd4bb75818e63698b4cbd4cca4a8a51d3c2eea373cac5c95a9f27e",
+          "successful_rows": 253,
+          "total_rows": 256
+        },
+        "input_mode": "tensor",
+        "model_stride": 32,
+        "native_shape_hw": [
+          384,
+          384
+        ],
+        "native_to_submitted": {
+          "padding_mode": "constant",
+          "padding_value_uint8": 0,
+          "policy": "identity"
+        },
+        "network_shape_hw": [
+          384,
+          384
+        ],
+        "profile_id": "goodbatbadbat_384_tensor_identity_v1",
+        "result_coordinates": "ultralytics_results_original_submitted_pixel_coordinates",
+        "status": "accepted",
+        "submitted_shape_hw": [
+          384,
+          384
+        ],
+        "submitted_to_network": {
+          "adapter": "palette_prepared_tensor_predict_v1",
+          "imgsz_hw": [
+            384,
+            384
+          ],
+          "luma_channel_policy": "uint8_luma_repeated_three_channels",
+          "normalization": "uint8_divide_255_to_float32",
+          "preprocessing_probe": {
+            "input_pattern": "uint8_luma_mod_251_x3_y5_repeated_three_channels",
+            "model_stride": 32,
+            "native_shape_hw": [
+              384,
+              384
+            ],
+            "output_dtype": "float32_little_endian",
+            "output_sha256": "18e2aaa5844efb79ecfa470548a6972b2725387a339f4ea574748392e6ef46a9",
+            "output_shape_nchw": [
+              1,
+              3,
+              384,
+              384
+            ],
+            "schema_id": "palette.pose_tensor_preprocessing_probe",
+            "schema_version": 1,
+            "submitted_shape_hw": [
+              384,
+              384
+            ]
+          },
+          "runtime_ultralytics_versions": [
+            "8.3.169"
+          ],
+          "ultralytics_spatial_preprocessing": "bypassed_prepared_tensor"
+        }
+      }
+    ],
+    "status": "complete",
+    "training_input": {
+      "input_format": "gray",
+      "model_stride": 32,
+      "network_shape_hw": [
+        256,
+        256
+      ],
+      "roi_pixel_contract_name": "orange_mono_pynvvc_luma_uint8_v1",
+      "source_roi_shape_hw": [
+        512,
+        512
+      ],
+      "training_multi_scale": false,
+      "training_rect": false,
+      "training_semantics": "augmented_training_pipeline_with_deterministic_validation_imgsz_reference",
+      "ultralytics_version": "8.3.214"
+    }
+  },
+  "payload_digest": "cd2b6050ef24cbcaf70cb5c73a4812225077739c5639ba202d701d6e4ca568ef",
+  "schema_id": "palette.pose_model_input_contract",
+  "schema_version": 2
+}

@@ -99,9 +99,9 @@ def _make_redscare_like_recording(tmp_path: Path) -> tuple[Path, Path, Path]:
         "\n".join(
             [
                 "recording_frame_id,crop_video_frame_index,local_frame_id,has_detection,blank_frame,crop_x,crop_y,crop_w,crop_h",
-                "1,0,10,1,0,100,200,348,348",
-                "2,1,11,0,1,100,200,348,348",
-                "3,2,12,1,0,100,200,0,348",
+                "1,0,10,1,0,100,200,384,384",
+                "2,1,11,0,1,100,200,384,384",
+                "3,2,12,1,0,100,200,0,384",
             ]
         )
         + "\n",
@@ -115,8 +115,8 @@ def _make_redscare_like_recording(tmp_path: Path) -> tuple[Path, Path, Path]:
                         "crop": {
                             "video": "derived/external_crop_recorder/Cam2010093_crop_external.mp4",
                             "metadata": "derived/external_crop_recorder/Cam2010093_crop_meta.csv",
-                            "width": 348,
-                            "height": 348,
+                            "width": 384,
+                            "height": 384,
                         }
                     }
                 }
@@ -158,8 +158,8 @@ def test_readiness_report_pairs_analysis_training_and_counts_crop_meta(tmp_path:
     assert row["analysis_crop_runs_run_count"] == 0
     assert row["training_crop_runs_run_count"] == 1
     assert row["training_review_surfaces_present"] is True
-    assert row["crop_width"] == 348
-    assert row["crop_height"] == 348
+    assert row["crop_width"] == 384
+    assert row["crop_height"] == 384
     assert row["crop_video_meets_min_size"] is True
     assert row["crop_meta_rows"] == 3
     assert row["crop_meta_has_detection_rows"] == 2

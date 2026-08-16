@@ -19,6 +19,13 @@ The presence of the crop stream means "this artifact exists and can be used by
 eligible consumers." It does not mean keypoints, subject masks, crops, training
 exports, or review tools used that stream.
 
+The productionization follow-on for complete per-frame Zarr import and current
+GoodBatBadBat hybrid pixel routing is documented in
+[`goodbatbadbat_acquisition_crop_stream_production_checklist_20260815.md`](goodbatbadbat_acquisition_crop_stream_production_checklist_20260815.md).
+Future recordings that intentionally retain crop pixels without continuous
+full-frame video are a separate storage profile governed by
+[`crop_only_recording_storage_profile.md`](crop_only_recording_storage_profile.md).
+
 ## Availability Surface
 
 Recording import/backfill mirrors acquisition media inventory into:
@@ -33,9 +40,11 @@ That surface describes file paths, stream-level sidecars, row counts,
 availability status, crop metadata location, frame clock, dimensions, codec, and
 other stream facts when available.
 
-Future work may also mirror per-frame crop metadata arrays from the crop-meta
-CSV into the analysis zarr. Those arrays should still be treated as acquisition
-media metadata, not as proof that any model stage consumed crop-video pixels.
+Palette mirrors every crop-meta CSV row into a digest-bound immutable ledger at
+`analysis/acquisition_video_streams/streams/crop/ledger_runs/<run>`. The crop
+stream's `canonical_ledger_*` attrs are written pointer-last after validation.
+These arrays are acquisition media metadata, not proof that any model stage
+consumed crop-video pixels.
 
 ## Orange External Crop Metadata Contract
 

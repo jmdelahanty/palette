@@ -266,6 +266,16 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "explicit_acquisition_batch_identity",
         "_migration_067_explicit_acquisition_batch_identity",
     ),
+    (
+        68,
+        "acquisition_crop_stream_ledger_registry",
+        "_migration_068_acquisition_crop_stream_ledger_registry",
+    ),
+    (
+        69,
+        "crop_pixel_routing_registry",
+        "_migration_069_crop_pixel_routing_registry",
+    ),
 )
 
 

@@ -182,7 +182,10 @@ def _extract_crop_quality_rows(
             or _decode_attr(crop_group.attrs.get("timestamp_utc"))
         )
         source_detect_run = _decode_attr(crop_group.attrs.get("source_detect_run"))
-        source_refined_run = _decode_attr(crop_group.attrs.get("source_refined_run"))
+        source_refined_run = _decode_attr(
+            crop_group.attrs.get("source_refined_run")
+            or crop_group.attrs.get("source_refined_detect_run")
+        )
         detection_source_type = _decode_attr(crop_group.attrs.get("detection_source_type"))
         detection_source_path = _normalize_path_text(crop_group.attrs.get("detection_source_path"))
         crop_storage_mode = _infer_crop_storage_mode(crop_group)
@@ -192,6 +195,24 @@ def _extract_crop_quality_rows(
             or _decode_attr(roi_pixel_contract.get("image_representation") if roi_pixel_contract else None)
         )
         roi_pixel_contract_json = _canonical_json_text(roi_pixel_contract) if roi_pixel_contract else None
+        crop_schema_id = _decode_attr(crop_group.attrs.get("schema_id"))
+        source_pixels = _decode_attr(
+            crop_group.attrs.get("source_pixels")
+            or crop_group.attrs.get("roi_pixel_provider")
+        )
+        provider_record_sha256 = _decode_attr(
+            crop_group.attrs.get("provider_record_sha256")
+        )
+        routing_policy_id = _decode_attr(
+            crop_group.attrs.get("source_pixel_routing_policy")
+        )
+        crop_policy_id = _decode_attr(crop_group.attrs.get("crop_policy_id"))
+        source_acquisition_mode = _decode_attr(
+            crop_group.attrs.get("source_acquisition_mode")
+        )
+        source_acquisition_ledger_record_sha256 = _decode_attr(
+            crop_group.attrs.get("source_acquisition_crop_ledger_record_sha256")
+        )
 
         total_rois = _as_int(summary.get("total_rois_cropped"))
         if total_rois is None and "roi_images" in crop_group:
@@ -239,6 +260,25 @@ def _extract_crop_quality_rows(
             n_interpolated = 0
         if n_real is None and total_rois is not None:
             n_real = max(int(total_rois) - int(n_interpolated), 0)
+        acquisition_video_rows = _as_int(summary.get("acquisition_video_rows_reused"))
+        full_frame_recovery_rows = _as_int(summary.get("supplemental_rows_materialized"))
+        routing_count_complete = bool(
+            total_rois is not None
+            and acquisition_video_rows is not None
+            and full_frame_recovery_rows is not None
+            and int(acquisition_video_rows) + int(full_frame_recovery_rows)
+            == int(total_rois)
+        )
+        crop_pixel_routing_ready = int(
+            crop_schema_id == "palette.hybrid_acquisition_offline_crop_run.v3"
+            and source_pixels
+            == "hybrid_acquisition_crop_video_offline_supplement"
+            and isinstance(provider_record_sha256, str)
+            and len(provider_record_sha256) == 64
+            and bool(routing_policy_id)
+            and bool(crop_policy_id)
+            and routing_count_complete
+        )
 
         includes_interpolated_attr = crop_group.attrs.get("includes_interpolated")
         if includes_interpolated_attr is None:
@@ -267,6 +307,18 @@ def _extract_crop_quality_rows(
                 "roi_image_representation": roi_image_representation,
                 "roi_pixel_contract_name": roi_pixel_contract_name,
                 "roi_pixel_contract_json": roi_pixel_contract_json,
+                "crop_schema_id": crop_schema_id,
+                "source_pixels": source_pixels,
+                "provider_record_sha256": provider_record_sha256,
+                "routing_policy_id": routing_policy_id,
+                "crop_policy_id": crop_policy_id,
+                "source_acquisition_mode": source_acquisition_mode,
+                "source_acquisition_ledger_record_sha256": (
+                    source_acquisition_ledger_record_sha256
+                ),
+                "acquisition_video_rows": acquisition_video_rows,
+                "full_frame_recovery_rows": full_frame_recovery_rows,
+                "crop_pixel_routing_ready": crop_pixel_routing_ready,
                 "total_rois": total_rois,
                 "frames_with_crops": frames_with_crops,
                 "total_frames": total_frames,

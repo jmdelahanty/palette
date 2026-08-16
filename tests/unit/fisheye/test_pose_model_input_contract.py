@@ -346,3 +346,56 @@ def test_checked_in_batman_v2_contract_is_reproducible() -> None:
     )
 
     assert rebuilt == current
+
+
+def test_checked_in_goodbatbadbat_384_successor_is_reproducible() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    directory = (
+        repository / "docs" / "diagnostics" / "batman_keypoint_v2_candidate_20260805"
+    )
+    historical = json.loads(
+        (directory / "pose_model_input_contract.json").read_text(encoding="utf-8")
+    )
+    current = json.loads(
+        (directory / "pose_model_input_contract_v2.json").read_text(encoding="utf-8")
+    )
+    successor = json.loads(
+        (
+            directory
+            / "pose_model_input_contract_v2_goodbatbadbat_384_v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    profile = build_empirical_pose_runtime_profile(
+        profile_id="goodbatbadbat_384_tensor_identity_v1",
+        status="accepted",
+        classification="empirically_accepted_native_identity_stride_aligned",
+        native_shape_hw=(384, 384),
+        submitted_shape_hw=(384, 384),
+        network_shape_hw=(384, 384),
+        model_stride=32,
+        input_mode="tensor",
+        runtime_ultralytics_versions=("8.3.169",),
+        evidence_id="goodbatbadbat_hybrid_crop_pose_384_visual_review_v1",
+        evidence_artifact_path=(
+            "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
+            "training/goodbatbadbat_hybrid_pose_384_canary_20260815_v1"
+        ),
+        evidence_receipt_sha256=(
+            "fbfd4020e8cd4bb75818e63698b4cbd4cca4a8a51d3c2eea373cac5c95a9f27e"
+        ),
+        evidence_total_rows=256,
+        evidence_successful_rows=253,
+    )
+    rebuilt = build_pose_model_input_contract_v2(
+        historical_contract=historical,
+        runtime_profiles=tuple(current["payload"]["runtime_profiles"])
+        + (profile,),
+    )
+
+    assert rebuilt == successor
+    assert successor["payload_digest"] == (
+        "cd2b6050ef24cbcaf70cb5c73a4812225077739c5639ba202d701d6e4ca568ef"
+    )
+    assert successor["payload"]["runtime_profiles"][-1]["native_to_submitted"][
+        "policy"
+    ] == "identity"

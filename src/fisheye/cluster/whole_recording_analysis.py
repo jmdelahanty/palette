@@ -42,6 +42,7 @@ from fisheye.cluster.lsf.runtime import (
 from fisheye.cluster.whole_recording_analysis_cache_cleanup import (
     DEFAULT_ALLOWED_ROOT as DEFAULT_ROI_CACHE_CLEANUP_ROOT,
 )
+from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 
 PLAN_SCHEMA = "palette.whole_recording_analysis_bsub_plan.v1"
 
@@ -1168,7 +1169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 crop_run=target.crop_run,
                 manifest_path=target.roi_cache_manifest,
                 producer_job_key=producer_job_key,
-                min_roi_size=348,
+                min_roi_size=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
             )
             provisional_targets.append(
                 PlannedFlatRoiCacheTarget(
@@ -1237,7 +1238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_run_id=args.model_run_id,
         model_input_contract_path=args.model_input_contract,
         pose_schema=args.pose_schema,
-        min_roi_size=348,
+        min_roi_size=DEFAULT_ZEBRAFISH_CROP_SIZE_PX,
         batch_size=args.batch_size_kp,
         device=args.device,
         input_mode="model-contract",

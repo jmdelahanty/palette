@@ -51,6 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="off",
     )
     parser.add_argument("--registered-gate-run")
+    parser.add_argument(
+        "--geometry-origin-provider-run",
+        help=(
+            "Exact signed hybrid crop run whose verified per-row integer origins "
+            "become the strict crop geometry."
+        ),
+    )
     parser.add_argument("--scratch-root", type=Path, required=True)
     parser.add_argument(
         "--copy-backend",
@@ -83,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             registered_gate_requirement=args.registered_gate_requirement,
             registered_gate_run=args.registered_gate_run,
             registered_gate_validator=validate_registered_detection_gate_consumption,
+            geometry_origin_provider_run_id=args.geometry_origin_provider_run,
         )
     except Exception as exc:
         result = {

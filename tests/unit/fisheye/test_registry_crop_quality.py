@@ -108,6 +108,34 @@ def _create_cropless_archive(path: Path, *, session_uuid: str) -> None:
     raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
 
 
+def _create_hybrid_provider_archive(path: Path, *, session_uuid: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = session_uuid
+    run = root.create_group("crop_runs").create_group("crop_hybrid_v3")
+    run.attrs.update(
+        {
+            "schema_id": "palette.hybrid_acquisition_offline_crop_run.v3",
+            "created_at_utc": "2026-08-15T12:00:00+00:00",
+            "source_pixels": "hybrid_acquisition_crop_video_offline_supplement",
+            "source_pixel_routing_policy": "goodbatbadbat_crop_pixel_routing_v1",
+            "crop_policy_id": "zebrafish_crop_384_v1",
+            "source_acquisition_mode": "canonical_ledger",
+            "source_acquisition_crop_ledger_record_sha256": "a" * 64,
+            "provider_record_sha256": "b" * 64,
+            "source_refined_detect_run": "refined_v1",
+            "summary_statistics": {
+                "total_frames": 4,
+                "reviewed_refined_rows": 4,
+                "acquisition_video_rows_reused": 3,
+                "supplemental_rows_materialized": 1,
+            },
+        }
+    )
+    run.create_array("bbox_norm_coords", data=np.zeros((4, 4), dtype=np.float32))
+    run.create_array("frame_counts", data=np.ones(4, dtype=np.int32))
+
+
 def test_schema_has_crop_quality_table_views_and_indexes(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
 
@@ -241,6 +269,43 @@ def test_register_from_root_handles_archive_without_crop_runs(tmp_path: Path) ->
     ).fetchone()
     assert count is not None
     assert int(count["n"]) == 0
+    registry.close()
+
+
+def test_registry_exposes_hybrid_crop_pixel_routing_readiness(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = (
+        tmp_path / "recordings" / "rec_hybrid" / "zarr" / "rec_hybrid_analysis.zarr"
+    )
+    _create_hybrid_provider_archive(zarr_path, session_uuid="rec_hybrid_uuid")
+
+    dataset_id = registry.register_from_root(
+        zarr.open_group(str(zarr_path), mode="r"), zarr_path
+    )
+    row = registry.conn.execute(
+        """
+        SELECT crop_schema_id, source_pixels, provider_record_sha256,
+               routing_policy_id, crop_policy_id, source_acquisition_mode,
+               source_acquisition_ledger_record_sha256,
+               acquisition_video_rows, full_frame_recovery_rows,
+               crop_pixel_routing_ready, source_refined_run
+        FROM crop_quality_current
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+
+    assert row is not None
+    assert row["crop_schema_id"] == "palette.hybrid_acquisition_offline_crop_run.v3"
+    assert row["provider_record_sha256"] == "b" * 64
+    assert row["routing_policy_id"] == "goodbatbadbat_crop_pixel_routing_v1"
+    assert row["crop_policy_id"] == "zebrafish_crop_384_v1"
+    assert row["source_acquisition_mode"] == "canonical_ledger"
+    assert row["source_acquisition_ledger_record_sha256"] == "a" * 64
+    assert int(row["acquisition_video_rows"]) == 3
+    assert int(row["full_frame_recovery_rows"]) == 1
+    assert int(row["crop_pixel_routing_ready"]) == 1
+    assert row["source_refined_run"] == "refined_v1"
     registry.close()
 
 

@@ -11,8 +11,11 @@ from fisheye.shared.zarr.crop_schema import (
     CropGeometryPolicy,
     CropGeometrySchemaError,
     CropPaddingMode,
+    CropPlacementMode,
     CropSizeMode,
+    crop_geometry_policy_from_manifest,
     derive_crop_placement_geometry,
+    derive_explicit_crop_placement_geometry,
     derive_frame_row_offsets,
 )
 from fisheye.shared.zarr.detection_schema import (
@@ -95,6 +98,19 @@ def _valid_arrays(
         "source_crop_xywh": source_crop,
         "bbox_roi_xyxy": bbox_roi,
         "source_row_signature": np.arange(6 * 32, dtype=np.uint8).reshape(6, 32),
+    }
+
+
+def _explicit_authority() -> dict[str, object]:
+    return {
+        "schema_id": "palette.crop_geometry.explicit_origin_authority",
+        "schema_version": 1,
+        "authority_kind": "signed_hybrid_crop_provider",
+        "run_id": "crop_hybrid_signed",
+        "provider_record_sha256": "a" * 64,
+        "source_rowset_fingerprint": "b" * 64,
+        "source_pixel_fingerprint": "c" * 64,
+        "source_row_signature_spec_digest": "d" * 64,
     }
 
 
@@ -200,6 +216,45 @@ def test_policy_identity_changes_without_changing_detection_identity() -> None:
     assert json.loads(json.dumps(manifest)) == manifest
     assert manifest["payload_digest_algorithm"] == "sha256_canonical_json_v1"
     assert "instance_key" not in manifest["payload"]
+
+
+def test_verified_explicit_origins_are_versioned_and_not_recentered() -> None:
+    policy = CropGeometryPolicy(
+        purpose="subject_analysis",
+        size_mode=CropSizeMode.FIXED_PER_RUN,
+        fixed_size_wh=(64, 48),
+        placement_mode=CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW,
+        placement_authority=_explicit_authority(),
+    )
+    arrays = _valid_arrays()
+    origins = arrays["roi_coordinates_full"].copy()
+    origins[:, 0] += np.asarray([2, -3, 4, -5, 6, -7], dtype=np.int32)
+    coordinates, source_crop, bbox_roi = derive_explicit_crop_placement_geometry(
+        origins,
+        arrays["bbox_img_xyxy"],
+        arrays["roi_sizes_full"],
+    )
+    arrays["roi_coordinates_full"] = coordinates
+    arrays["source_crop_xywh"] = source_crop
+    arrays["bbox_roi_xyxy"] = bbox_roi
+
+    CROP_GEOMETRY_SCHEMA_V1.require(
+        arrays,
+        dimensions=_dimensions(),
+        policy=policy,
+    )
+    manifest = policy.as_manifest()
+    assert manifest["payload"]["schema_version"] == 2
+    assert crop_geometry_policy_from_manifest(manifest) == policy
+
+    arrays["source_crop_xywh"] = arrays["source_crop_xywh"].copy()
+    arrays["source_crop_xywh"][0, 0] += np.float32(1)
+    issues = CROP_GEOMETRY_SCHEMA_V1.validate(
+        arrays,
+        dimensions=_dimensions(),
+        policy=policy,
+    )
+    assert "source_crop_projection_mismatch" in _codes(issues)
 
 
 def test_contained_padding_mode_rejects_edge_crossing_crops() -> None:

@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fisheye.shared.acquisition_crop_stream_ledger import (
+    publish_acquisition_crop_stream_ledger,
+)
+
 
 ACQUISITION_VIDEO_STREAMS_SCHEMA_ID = "palette.acquisition_video_streams.v1"
 ACQUISITION_VIDEO_STREAMS_GROUP = "analysis/acquisition_video_streams"
@@ -290,6 +294,26 @@ def write_acquisition_video_stream_inventory(
     for stream_key, stream_payload in inventory["streams"].items():
         stream_group = streams_group.require_group(stream_key)
         _put_attrs(stream_group, stream_payload)
+        if stream_key == "crop":
+            try:
+                publication = publish_acquisition_crop_stream_ledger(
+                    stream_group,
+                    recording_dir,
+                    manifest,
+                    imported_at_utc=str(inventory["imported_at_utc"]),
+                )
+            except Exception as exc:
+                _put_attrs(
+                    stream_group,
+                    {
+                        "canonical_ledger_status": "failed",
+                        "canonical_ledger_failure": str(exc),
+                    },
+                )
+                raise
+            ledger_attrs = publication.attrs()
+            stream_payload["canonical_ledger"] = ledger_attrs
+            _put_attrs(stream_group, ledger_attrs)
 
     _put_attrs(parent, inventory)
     _put_attrs(
@@ -299,6 +323,13 @@ def write_acquisition_video_stream_inventory(
             "acquisition_video_streams_path": ACQUISITION_VIDEO_STREAMS_GROUP,
             "acquisition_video_stream_count": inventory["stream_count"],
             "acquisition_crop_video_available": inventory["crop_stream_available"],
+            "acquisition_crop_ledger_available": bool(
+                inventory.get("streams", {})
+                .get("crop", {})
+                .get("canonical_ledger", {})
+                .get("canonical_ledger_status")
+                == "complete"
+            ),
             "acquisition_video_stream_inventory_status": inventory["inventory_status"],
         },
     )

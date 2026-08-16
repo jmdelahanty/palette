@@ -6,6 +6,17 @@ last_verified: 2026-07-24
 purpose: Decide where raw acquisition video, derived crops, proxies, and analysis products live across PRFS / NRS / Nearline.
 -->
 
+## Relationship to future crop-only retention
+
+The current recommendation in this proposal remains to archive the continuous
+full-frame master and the lossless acquisition crop as separate irreplaceable
+sources. A future recording may use the separately certified
+[`crop_only_certified`](crop_only_recording_storage_profile.md) profile only
+after full/crop comparison, downstream parity, independent dish-geometry audit,
+archive verification, and an explicit retention decision. That future profile
+does not authorize deletion of current recordings and does not silently
+supersede this tiering recommendation.
+
 ## The immediate problem
 
 `/groups/johnson` is **65 TB, 94% full, 4.0 TB free.**

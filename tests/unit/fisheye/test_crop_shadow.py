@@ -14,6 +14,7 @@ from fisheye.shared.zarr.crop_manifest import (
 from fisheye.shared.zarr.crop_schema import (
     CropGeometryPolicy,
     CropPaddingMode,
+    CropPlacementMode,
     CropSizeMode,
 )
 from fisheye.shared.zarr.crop_shadow import (
@@ -147,6 +148,26 @@ def _policy() -> CropGeometryPolicy:
     )
 
 
+def _explicit_policy() -> CropGeometryPolicy:
+    return CropGeometryPolicy(
+        purpose="subject_analysis",
+        size_mode=CropSizeMode.FIXED_PER_RUN,
+        fixed_size_wh=(8, 8),
+        padding_mode=CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME,
+        placement_mode=CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW,
+        placement_authority={
+            "schema_id": "palette.crop_geometry.explicit_origin_authority",
+            "schema_version": 1,
+            "authority_kind": "signed_hybrid_crop_provider",
+            "run_id": "crop_hybrid_signed",
+            "provider_record_sha256": "a" * 64,
+            "source_rowset_fingerprint": "b" * 64,
+            "source_pixel_fingerprint": "c" * 64,
+            "source_row_signature_spec_digest": "d" * 64,
+        },
+    )
+
+
 def test_real_shadow_is_geometry_only_consolidated_and_selector_ineligible(
     tmp_path: Path,
 ) -> None:
@@ -242,6 +263,37 @@ def test_variable_size_preparation_preserves_refined_rows_without_pixels(
     )
     assert "roi_images" not in prepared.arrays
     assert prepared.arrays["frame_indices"].dtype == np.dtype(np.int64)
+
+
+def test_explicit_origin_preparation_preserves_verified_provider_windows(
+    tmp_path: Path,
+) -> None:
+    source = _refined_source(tmp_path)
+    origins = np.asarray(
+        [[14, 10], [67, 11], [46, 51], [20, 55]],
+        dtype=np.int32,
+    )
+
+    prepared = prepare_crop_geometry_from_refined_source(
+        source,
+        policy=_explicit_policy(),
+        pixel_authority=_pixel(),
+        roi_coordinates_full=origins,
+    )
+
+    np.testing.assert_array_equal(prepared.arrays["roi_coordinates_full"], origins)
+    np.testing.assert_array_equal(
+        prepared.arrays["source_crop_xywh"][:, :2],
+        origins.astype(np.float32),
+    )
+    assert prepared.policy.payload["schema_version"] == 2
+
+    with pytest.raises(ValueError, match="requires roi_coordinates_full"):
+        prepare_crop_geometry_from_refined_source(
+            source,
+            policy=_explicit_policy(),
+            pixel_authority=_pixel(),
+        )
 
 
 def test_shadow_validation_detects_post_publication_geometry_tampering(

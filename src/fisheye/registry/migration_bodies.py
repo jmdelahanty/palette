@@ -1994,6 +1994,16 @@ class RegistryMigrationMixin:
                 roi_image_representation TEXT,
                 roi_pixel_contract_name TEXT,
                 roi_pixel_contract_json TEXT,
+                crop_schema_id TEXT,
+                source_pixels TEXT,
+                provider_record_sha256 TEXT,
+                routing_policy_id TEXT,
+                crop_policy_id TEXT,
+                source_acquisition_mode TEXT,
+                source_acquisition_ledger_record_sha256 TEXT,
+                acquisition_video_rows INTEGER,
+                full_frame_recovery_rows INTEGER,
+                crop_pixel_routing_ready INTEGER,
                 total_rois INTEGER,
                 frames_with_crops INTEGER,
                 total_frames INTEGER,
@@ -2028,6 +2038,16 @@ class RegistryMigrationMixin:
                 "roi_image_representation": "TEXT",
                 "roi_pixel_contract_name": "TEXT",
                 "roi_pixel_contract_json": "TEXT",
+                "crop_schema_id": "TEXT",
+                "source_pixels": "TEXT",
+                "provider_record_sha256": "TEXT",
+                "routing_policy_id": "TEXT",
+                "crop_policy_id": "TEXT",
+                "source_acquisition_mode": "TEXT",
+                "source_acquisition_ledger_record_sha256": "TEXT",
+                "acquisition_video_rows": "INTEGER",
+                "full_frame_recovery_rows": "INTEGER",
+                "crop_pixel_routing_ready": "INTEGER",
                 "total_rois": "INTEGER",
                 "frames_with_crops": "INTEGER",
                 "total_frames": "INTEGER",
@@ -2088,6 +2108,16 @@ class RegistryMigrationMixin:
                 roi_image_representation,
                 roi_pixel_contract_name,
                 roi_pixel_contract_json,
+                crop_schema_id,
+                source_pixels,
+                provider_record_sha256,
+                routing_policy_id,
+                crop_policy_id,
+                source_acquisition_mode,
+                source_acquisition_ledger_record_sha256,
+                acquisition_video_rows,
+                full_frame_recovery_rows,
+                crop_pixel_routing_ready,
                 total_rois,
                 frames_with_crops,
                 total_frames,
@@ -2153,6 +2183,16 @@ class RegistryMigrationMixin:
                 roi_image_representation,
                 roi_pixel_contract_name,
                 roi_pixel_contract_json,
+                crop_schema_id,
+                source_pixels,
+                provider_record_sha256,
+                routing_policy_id,
+                crop_policy_id,
+                source_acquisition_mode,
+                source_acquisition_ledger_record_sha256,
+                acquisition_video_rows,
+                full_frame_recovery_rows,
+                crop_pixel_routing_ready,
                 total_rois,
                 frames_with_crops,
                 total_frames,
@@ -2242,6 +2282,16 @@ class RegistryMigrationMixin:
                 frame_clock_metadata_row_count INTEGER,
                 frames_encoded INTEGER,
                 frames_dropped INTEGER,
+                canonical_ledger_status TEXT,
+                canonical_ledger_run TEXT,
+                canonical_ledger_path TEXT,
+                canonical_ledger_record_sha256 TEXT,
+                canonical_ledger_source_metadata_sha256 TEXT,
+                canonical_ledger_source_video_fingerprint TEXT,
+                canonical_ledger_row_count INTEGER,
+                canonical_ledger_detected_row_count INTEGER,
+                canonical_ledger_blank_row_count INTEGER,
+                canonical_ledger_imported_at_utc TEXT,
                 contract_json TEXT,
                 files_json TEXT,
                 summary_json TEXT,
@@ -2306,6 +2356,16 @@ class RegistryMigrationMixin:
                 avs.frame_clock_metadata_row_count,
                 avs.frames_encoded,
                 avs.frames_dropped,
+                avs.canonical_ledger_status,
+                avs.canonical_ledger_run,
+                avs.canonical_ledger_path,
+                avs.canonical_ledger_record_sha256,
+                avs.canonical_ledger_source_metadata_sha256,
+                avs.canonical_ledger_source_video_fingerprint,
+                avs.canonical_ledger_row_count,
+                avs.canonical_ledger_detected_row_count,
+                avs.canonical_ledger_blank_row_count,
+                avs.canonical_ledger_imported_at_utc,
                 avs.contract_json,
                 avs.files_json,
                 avs.summary_json,
@@ -2374,6 +2434,16 @@ class RegistryMigrationMixin:
                 frame_clock_metadata_row_count,
                 frames_encoded,
                 frames_dropped,
+                canonical_ledger_status,
+                canonical_ledger_run,
+                canonical_ledger_path,
+                canonical_ledger_record_sha256,
+                canonical_ledger_source_metadata_sha256,
+                canonical_ledger_source_video_fingerprint,
+                canonical_ledger_row_count,
+                canonical_ledger_detected_row_count,
+                canonical_ledger_blank_row_count,
+                canonical_ledger_imported_at_utc,
                 contract_json,
                 files_json,
                 summary_json,
@@ -2401,6 +2471,18 @@ class RegistryMigrationMixin:
                     THEN 1
                     ELSE 0
                 END AS crop_stream_available,
+                CASE
+                    WHEN output_kind = 'crop'
+                     AND availability_status <> 'missing_required_file'
+                     AND COALESCE(video_exists, 0) = 1
+                     AND COALESCE(metadata_exists, 0) = 1
+                     AND canonical_ledger_status = 'complete'
+                     AND canonical_ledger_record_sha256 IS NOT NULL
+                     AND canonical_ledger_row_count = frame_count
+                     AND canonical_ledger_row_count = metadata_row_count
+                    THEN 1
+                    ELSE 0
+                END AS crop_stream_consumer_ready,
                 availability_status,
                 inventory_status,
                 video_path,
@@ -2419,6 +2501,16 @@ class RegistryMigrationMixin:
                 metadata_row_count,
                 frames_encoded,
                 frames_dropped,
+                canonical_ledger_status,
+                canonical_ledger_run,
+                canonical_ledger_path,
+                canonical_ledger_record_sha256,
+                canonical_ledger_source_metadata_sha256,
+                canonical_ledger_source_video_fingerprint,
+                canonical_ledger_row_count,
+                canonical_ledger_detected_row_count,
+                canonical_ledger_blank_row_count,
+                canonical_ledger_imported_at_utc,
                 updated_utc
             FROM recording_acquisition_video_streams_current
             WHERE output_kind = 'crop';
@@ -8365,3 +8457,28 @@ class RegistryMigrationMixin:
         self._ensure_acquisition_batch_tables()
         self._migration_034_dataset_context_current_view()
         self._migration_035_recording_step_status_latest_dataset_context_current()
+
+    def _migration_068_acquisition_crop_stream_ledger_registry(self) -> None:
+        """Expose canonical crop-ledger publication and consumer readiness."""
+
+        self._ensure_columns(
+            "acquisition_video_streams",
+            {
+                "canonical_ledger_status": "TEXT",
+                "canonical_ledger_run": "TEXT",
+                "canonical_ledger_path": "TEXT",
+                "canonical_ledger_record_sha256": "TEXT",
+                "canonical_ledger_source_metadata_sha256": "TEXT",
+                "canonical_ledger_source_video_fingerprint": "TEXT",
+                "canonical_ledger_row_count": "INTEGER",
+                "canonical_ledger_detected_row_count": "INTEGER",
+                "canonical_ledger_blank_row_count": "INTEGER",
+                "canonical_ledger_imported_at_utc": "TEXT",
+            },
+        )
+        self._migration_056_acquisition_video_streams_registry()
+
+    def _migration_069_crop_pixel_routing_registry(self) -> None:
+        """Expose immutable hybrid-provider routing readiness separately from media."""
+
+        self._migration_014_crop_quality_registry()

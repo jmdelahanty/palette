@@ -188,7 +188,7 @@ def test_plan_flat_roi_cache_binding_reads_only_live_crop_contract(
             "frame_indices": SimpleNamespace(shape=(7,)),
         },
         attrs={
-            "roi_size": [348, 348],
+            "roi_size": [384, 384],
             "crop_signature": {"source": "video-a"},
             "crop_revision": "revision-001",
         },
@@ -215,8 +215,8 @@ def test_plan_flat_roi_cache_binding_reads_only_live_crop_contract(
     assert binding.availability == "planned"
     assert binding.manifest_sha256 is None
     assert binding.payload_path == manifest.resolve().with_suffix(".bin")
-    assert binding.shape == (7, 348, 348)
-    assert binding.total_bytes == 7 * 348 * 348
+    assert binding.shape == (7, 384, 384)
+    assert binding.total_bytes == 7 * 384 * 384
     assert binding.source_kind == "unknown"
     assert not binding.nvdec_bundle_eligible
 
