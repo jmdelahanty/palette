@@ -215,6 +215,10 @@ def _build_subject_mask_inference_job(
         f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
         "palette_subject_mask_roi_cache_stage"
     )
+    output_staging = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "subject_mask_output_staging"
+    )
     worker: list[str] = [
         str(repo / "scripts" / "py"),
         "-m",
@@ -264,7 +268,7 @@ def _build_subject_mask_inference_job(
         job_key=job_key,
         stage="subject_mask_inference",
         cwd=repo,
-        cleanup_path_templates=(scratch_stage,),
+        cleanup_path_templates=(scratch_stage, output_staging),
         expected_output_templates=(
             str(
                 target.target.analysis_zarr

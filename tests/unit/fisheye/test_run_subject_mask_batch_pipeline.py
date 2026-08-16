@@ -81,6 +81,24 @@ def test_default_output_staging_root_falls_back_when_user_scratch_missing(
     )
 
 
+def test_default_output_staging_root_treats_lsf_index_zero_as_non_array(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER", "palette_test_user_without_scratch")
+    monkeypatch.setenv("LSB_JOBID", "12345")
+    monkeypatch.setenv("LSB_JOBINDEX", "0")
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    assert mod._default_output_staging_root() == (  # noqa: SLF001
+        tmp_path
+        / "palette"
+        / "palette_test_user_without_scratch"
+        / "12345"
+        / "subject_mask_output_staging"
+    )
+
+
 def test_safe_artifact_filename_hashes_long_names() -> None:
     filename = mod._safe_artifact_filename(
         ("recording_analysis", "subject_masks_" + ("very_long_" * 40)),

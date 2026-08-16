@@ -535,6 +535,22 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     assert "--roi-cache-manifest" in inference_command
     assert "--roi-cache-staging-dir" in inference_command
     assert "--raw-worker-run" in inference_command
+    cleanup_paths = [
+        inference_command[index + 1]
+        for index, argument in enumerate(inference_command)
+        if argument == "--cleanup-path"
+    ]
+    assert cleanup_paths == [
+        "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
+        "palette_subject_mask_roi_cache_stage",
+        "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
+        "subject_mask_output_staging",
+    ]
+    assert all(
+        path
+        != "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__"
+        for path in cleanup_paths
+    )
 
     finalization_command = jobs["mask_finalize:target_0"].command
     assert "finalization" in finalization_command

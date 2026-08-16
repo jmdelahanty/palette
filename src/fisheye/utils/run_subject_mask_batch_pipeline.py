@@ -807,7 +807,10 @@ def _default_output_staging_root() -> Path:
         base = user_scratch / str(job_id)
     else:
         base = Path(os.environ.get("TMPDIR") or "/tmp") / "palette" / str(user) / str(job_id)
-    if job_index:
+    # LSF reports index ``0`` for ordinary, non-array jobs.  Keep that case at
+    # the job root so runtime cleanup and output staging use the same scratch
+    # layout; only positive array indices receive an array-specific child.
+    if job_index not in {None, "", "0"}:
         base = base / f"array_{job_index}"
     return base / "subject_mask_output_staging"
 
