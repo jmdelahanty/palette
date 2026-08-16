@@ -38,7 +38,9 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_canonical_detection_run_manifest,
 )
-from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.keypoint_bundle_activation import (
+    resolve_active_keypoint_bundle_from_root as _resolve_active_keypoint_bundle,
+)
 from fisheye.shared.zarr_run_completion import (
     is_run_complete,
     is_run_complete_in_parent,
@@ -67,20 +69,6 @@ EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
 )
 
 CLIPPED_DETECT_COLLECTION_SCHEMA = "palette.refined_detect_clip_collection.v1"
-KEYPOINT_BUNDLE_AUTHORITY_ATTR = "keypoint_bundle_authority"
-KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR = "keypoint_bundle_authority_generation"
-KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR = "keypoint_bundle_authority_lease"
-KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_ID = "palette.keypoint.bundle_authority"
-KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_VERSION = 1
-KEYPOINT_BUNDLE_ACTIVATION_POLICY = (
-    "sealed_four_surface_root_authority_then_consolidated_visibility_v1"
-)
-_KEYPOINT_BUNDLE_ROLE_PARENTS = {
-    "raw_keypoints": "keypoints_runs",
-    "keypoint_quality": "keypoint_quality_runs",
-    "refined_keypoints": "refined_keypoints_runs",
-    "body_frame": "analysis/body_frame_runs",
-}
 
 
 def _required_canonical_detection_errors(
@@ -4156,131 +4144,6 @@ def _get_group_path(parent: object, path: str) -> Optional[object]:
         except Exception:
             return None
     return current
-
-
-def _resolve_active_keypoint_bundle(root: object) -> Optional[Dict[str, object]]:
-    """Resolve one root keypoint authority without consulting legacy selectors.
-
-    The activation transaction leaves member runs selector-ineligible and does
-    not mutate family ``latest`` attributes.  Registry reconciliation must
-    therefore consume the root authority as one atomic four-surface selection.
-    Any present-but-invalid authority fails closed instead of falling back to
-    alphabetical family discovery.
-    """
-
-    attrs = getattr(root, "attrs", {})
-    if KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR in attrs:
-        raise ValueError(
-            "Keypoint bundle activation lease is present; registry reconciliation "
-            "requires a committed authority generation."
-        )
-    authority = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_ATTR)
-    if authority is None:
-        return None
-    if not isinstance(authority, Mapping):
-        raise ValueError("Keypoint bundle authority must be one object.")
-    expected_fields = {
-        "schema_id",
-        "schema_version",
-        "generation",
-        "base_generation",
-        "policy",
-        "activation_plan_payload_digest",
-        "prior_authority_present",
-        "prior_authority_digest",
-        "crop",
-        "members",
-        "activated_at_utc",
-        "activation_owner_uuid",
-    }
-    generation = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR)
-    if (
-        set(authority) != expected_fields
-        or authority.get("schema_id") != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_ID
-        or authority.get("schema_version")
-        != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_VERSION
-        or authority.get("policy") != KEYPOINT_BUNDLE_ACTIVATION_POLICY
-        or type(generation) is not int
-        or generation <= 0
-        or authority.get("generation") != generation
-        or type(authority.get("base_generation")) is not int
-        or authority.get("base_generation") != generation - 1
-    ):
-        raise ValueError("Keypoint bundle authority schema or generation is invalid.")
-    members = authority.get("members")
-    crop = authority.get("crop")
-    if not isinstance(members, Mapping) or set(members) != set(
-        _KEYPOINT_BUNDLE_ROLE_PARENTS
-    ):
-        raise ValueError("Keypoint bundle authority member roles are invalid.")
-    if not isinstance(crop, Mapping):
-        raise ValueError("Keypoint bundle authority crop member is invalid.")
-
-    resolved: Dict[str, object] = {
-        "authority": dict(authority),
-        "generation": generation,
-        "activation_plan_payload_digest": authority.get(
-            "activation_plan_payload_digest"
-        ),
-    }
-    declarations: Dict[str, Mapping[str, object]] = {"crop": crop}
-    declarations.update(
-        {
-            role: member
-            for role, member in members.items()
-            if isinstance(member, Mapping)
-        }
-    )
-    if set(declarations) != {"crop", *_KEYPOINT_BUNDLE_ROLE_PARENTS}:
-        raise ValueError("Keypoint bundle authority member declarations are invalid.")
-    parent_paths = {"crop": "crop_runs", **_KEYPOINT_BUNDLE_ROLE_PARENTS}
-    for role, parent_path in parent_paths.items():
-        member = declarations[role]
-        if role != "crop" and member.get("role") != role:
-            raise ValueError(
-                f"Keypoint bundle authority {role} declaration has another role."
-            )
-        run_id = _decode_text(member.get("run_id"))
-        run_path = _decode_text(member.get("run_path"))
-        expected_path = f"{parent_path}/{run_id}" if run_id else None
-        if not run_id or run_path != expected_path:
-            raise ValueError(
-                f"Keypoint bundle authority {role} path does not bind its run ID."
-            )
-        parent = _get_group_path(root, parent_path)
-        group = _get_group_path(root, run_path)
-        if parent is None or group is None:
-            raise ValueError(
-                f"Keypoint bundle authority member is absent: {run_path}."
-            )
-        group_attrs = getattr(group, "attrs", {})
-        if (
-            group_attrs.get("status") != "complete"
-            or group_attrs.get("palette_run_completion_status") != "complete"
-            or group_attrs.get("production_candidate") is not True
-            or group_attrs.get("stage_selector_eligible") is not False
-        ):
-            raise ValueError(
-                f"Keypoint bundle authority member is not sealed: {run_path}."
-            )
-        manifest = group_attrs.get("run_manifest")
-        if (
-            not isinstance(manifest, Mapping)
-            or member.get("manifest_payload_digest")
-            != manifest.get("payload_digest")
-            or member.get("manifest_document_digest")
-            != canonical_json_sha256(manifest)
-        ):
-            raise ValueError(
-                f"Keypoint bundle authority member manifest changed: {run_path}."
-            )
-        resolved[role] = {
-            "run_id": run_id,
-            "run_path": run_path,
-            "parent": parent,
-            "group": group,
-        }
-    return resolved
 
 
 def _iter_group_paths(parent: object, *, max_depth: int = 1) -> List[tuple[str, object]]:
