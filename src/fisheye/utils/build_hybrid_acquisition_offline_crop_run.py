@@ -1592,7 +1592,9 @@ def build_hybrid_acquisition_offline_crop_run(
             root,
             expected_record_sha256=acquisition_ledger_record_sha256,
         )
-        crop_parent = require_runs_parent(root, "crop_runs")
+        crop_parent = root.get("crop_runs")
+        if crop_parent is None and apply:
+            crop_parent = require_runs_parent(root, "crop_runs")
         acquisition_crop_video_path = _ledger_crop_video_path(acquisition_group)
         roi_shape = _ledger_roi_shape(acquisition_group)
     else:
@@ -1767,6 +1769,9 @@ def build_hybrid_acquisition_offline_crop_run(
     }
     if not apply:
         return plan
+
+    if crop_parent is None:
+        raise RuntimeError("Apply mode failed to initialize crop_runs.")
 
     if resolved_run_name in crop_parent:
         if not overwrite:
