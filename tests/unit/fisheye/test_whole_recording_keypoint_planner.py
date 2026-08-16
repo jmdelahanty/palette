@@ -608,6 +608,15 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
 
     finalization_command = jobs["mask_finalize:target_0"].command
     assert "finalization" in finalization_command
+    finalization_cleanup_paths = [
+        finalization_command[index + 1]
+        for index, argument in enumerate(finalization_command)
+        if argument == "--cleanup-path"
+    ]
+    assert finalization_cleanup_paths == [
+        "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
+        "subject_mask_output_staging"
+    ]
     exact_index = finalization_command.index("--refined-keypoint-run") + 1
     assert (
         finalization_command[exact_index]

@@ -427,6 +427,10 @@ def _build_subject_mask_finalization_job(
         default="subject_mask_finalization",
         max_length=120,
     )
+    output_staging = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "subject_mask_output_staging"
+    )
     worker = (
         str(repo / "scripts" / "py"),
         "-m",
@@ -464,6 +468,7 @@ def _build_subject_mask_finalization_job(
         job_key=job_key,
         stage="subject_mask_finalization",
         cwd=repo,
+        cleanup_path_templates=(output_staging,),
         expected_output_templates=(
             str(
                 target.target.analysis_zarr
