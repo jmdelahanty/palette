@@ -465,6 +465,7 @@ def publish_crop_geometry_production_candidate(
                     dtype=np.uint64,
                 ),
                 require_comparison_bound_selection=True,
+                allow_selector_ineligible_source=explicit_refined_source,
             )
             current_gate.pop("inside", None)
             mismatched = [

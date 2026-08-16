@@ -245,6 +245,63 @@ def test_gate_publishes_keyed_sharded_decisions_without_mutating_raw_detection(
         )
 
 
+def test_gate_can_revalidate_explicit_selector_ineligible_source_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive, candidate_run = _archive_with_candidate(tmp_path)
+    selected = _publish_selection(archive, candidate_run, tmp_path)
+    source_path = _write_detection_source(archive)
+    root = open_zarr_root(archive, mode="a")
+    source = root[source_path]
+    source.attrs.update(
+        {
+            "stage_selector_eligible": False,
+            "production_candidate": True,
+            "run_manifest": {
+                "schema_version": 3,
+                "payload_digest": "f" * 64,
+                "payload": {
+                    "run_id": "detect_test",
+                    "publication": {"stage_selector_eligible": False},
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(gate, "validate_canonical_detection_run_manifest", lambda _: ())
+    monkeypatch.setattr(
+        gate,
+        "require_active_coordinate_canonical_detection",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            ValueError("candidate is intentionally not selected")
+        ),
+    )
+
+    plan = gate.build_registered_detection_gate_plan(
+        archive,
+        source_group_path=source_path,
+        selection_run=selected.selection_id,
+        inner_rows=2,
+        shard_rows=4,
+        allow_selector_ineligible_source=True,
+    )
+    gate.publish_registered_detection_gate(
+        plan,
+        scratch_root=tmp_path / "candidate_gate_scratch",
+    )
+    consumed = gate.validate_registered_detection_gate_consumption(
+        archive,
+        source_group_path=source_path,
+        gate_run=plan.output_run,
+        expected_instance_keys=np.asarray([10, 20, 30], dtype=np.uint64),
+        allow_selector_ineligible_source=True,
+    )
+
+    assert plan.allow_selector_ineligible_source is True
+    assert consumed["source_detection_group_path"] == source_path
+    np.testing.assert_array_equal(consumed["inside"], [True, True, False])
+
+
 def test_gate_fails_closed_on_duplicate_modern_identity(tmp_path: Path) -> None:
     archive, candidate_run = _archive_with_candidate(tmp_path)
     selected = _publish_selection(archive, candidate_run, tmp_path)
