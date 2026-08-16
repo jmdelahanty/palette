@@ -882,6 +882,65 @@ def validate_recording_subject_mask_assembly_identity(
     return canonical
 
 
+def _validate_worker_assignment_keypoint_semantics(
+    assignment: Mapping[str, Any],
+    *,
+    start_row: int,
+    stop_row: int,
+) -> None:
+    """Accept exact full-run equality or an explicit collection-row subset."""
+
+    if (
+        assignment.get("assignment_keypoint_contract")
+        != "subject_eyes_union_assignment_keypoints_v1"
+        or assignment.get("assignment_keypoint_role") != "eyes_union_lr_assignment"
+    ):
+        raise ValueError("Worker assignment keypoint semantics changed.")
+    identity_mode = assignment.get("assignment_keypoint_row_identity_check")
+    row_identity = assignment.get("assignment_keypoint_row_identity")
+    common_fields = {
+        "row_identity_check",
+        "rows_checked",
+        "keypoint_has_source_crop_row_ids",
+        "mask_has_source_crop_row_ids",
+    }
+    if not isinstance(row_identity, Mapping):
+        raise ValueError("Worker assignment keypoint row identity is invalid.")
+    if identity_mode == "source_crop_row_ids_match":
+        if set(row_identity) != common_fields:
+            raise ValueError("Worker exact assignment row identity is invalid.")
+        if (
+            row_identity.get("row_identity_check") != identity_mode
+            or row_identity.get("keypoint_has_source_crop_row_ids") is not True
+            or row_identity.get("mask_has_source_crop_row_ids") is not True
+            or row_identity.get("rows_checked") != stop_row - start_row
+        ):
+            raise ValueError("Worker exact assignment row coverage changed.")
+        return
+    if identity_mode != "source_crop_row_ids_subset":
+        raise ValueError("Worker assignment keypoint semantics changed.")
+    subset_fields = common_fields | {
+        "keypoint_rows_available",
+        "keypoint_rows_selected",
+        "keypoint_selection_min_row",
+        "keypoint_selection_max_row",
+    }
+    if set(row_identity) != subset_fields:
+        raise ValueError("Worker assignment keypoint row identity is invalid.")
+    if (
+        row_identity.get("row_identity_check") != identity_mode
+        or row_identity.get("keypoint_has_source_crop_row_ids") is not True
+        or row_identity.get("mask_has_source_crop_row_ids") is not True
+        or row_identity.get("rows_checked") != stop_row - start_row
+        or row_identity.get("keypoint_rows_selected") != stop_row - start_row
+        or row_identity.get("keypoint_selection_min_row") != start_row
+        or row_identity.get("keypoint_selection_max_row") != stop_row - 1
+        or type(row_identity.get("keypoint_rows_available")) is not int
+        or row_identity["keypoint_rows_available"] < stop_row
+    ):
+        raise ValueError("Worker assignment keypoint row coverage changed.")
+
+
 def build_recording_assignment_keypoint_collection(
     producer_evidence: Mapping[str, Any],
     *,
@@ -959,38 +1018,11 @@ def build_recording_assignment_keypoint_collection(
             or not selection.strip()
         ):
             raise ValueError("Worker assignment keypoint path fields are invalid.")
-        if (
-            assignment.get("assignment_keypoint_contract")
-            != "subject_eyes_union_assignment_keypoints_v1"
-            or assignment.get("assignment_keypoint_role") != "eyes_union_lr_assignment"
-            or assignment.get("assignment_keypoint_row_identity_check")
-            != "source_crop_row_ids_subset"
-        ):
-            raise ValueError("Worker assignment keypoint semantics changed.")
-        row_identity = assignment.get("assignment_keypoint_row_identity")
-        if not isinstance(row_identity, Mapping) or set(row_identity) != {
-            "row_identity_check",
-            "rows_checked",
-            "keypoint_has_source_crop_row_ids",
-            "mask_has_source_crop_row_ids",
-            "keypoint_rows_available",
-            "keypoint_rows_selected",
-            "keypoint_selection_min_row",
-            "keypoint_selection_max_row",
-        }:
-            raise ValueError("Worker assignment keypoint row identity is invalid.")
-        if (
-            row_identity.get("row_identity_check") != "source_crop_row_ids_subset"
-            or row_identity.get("keypoint_has_source_crop_row_ids") is not True
-            or row_identity.get("mask_has_source_crop_row_ids") is not True
-            or row_identity.get("rows_checked") != stop - start
-            or row_identity.get("keypoint_rows_selected") != stop - start
-            or row_identity.get("keypoint_selection_min_row") != start
-            or row_identity.get("keypoint_selection_max_row") != stop - 1
-            or type(row_identity.get("keypoint_rows_available")) is not int
-            or row_identity["keypoint_rows_available"] < stop
-        ):
-            raise ValueError("Worker assignment keypoint row coverage changed.")
+        _validate_worker_assignment_keypoint_semantics(
+            assignment,
+            start_row=start,
+            stop_row=stop,
+        )
         if coordinate_fields <= fields:
             if (
                 assignment.get("assignment_keypoint_coordinate_contract")
