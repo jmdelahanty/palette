@@ -490,9 +490,14 @@ def publish_crop_geometry_production_candidate(
         {} if crop_parent_before is None else dict(crop_parent_before.attrs)
     )
     expected_crop_parent_attrs = dict(crop_parent_attrs_before)
-    expected_crop_parent_attrs.setdefault(
-        COMPLETION_EPOCH_ATTR, COMPLETION_EPOCH_STRICT
+    crop_parent_has_children = bool(
+        crop_parent_before is not None
+        and tuple(crop_parent_before.group_keys())
     )
+    if not crop_parent_has_children:
+        expected_crop_parent_attrs.setdefault(
+            COMPLETION_EPOCH_ATTR, COMPLETION_EPOCH_STRICT
+        )
 
     session = scratch / f"palette_crop_candidate_{uuid.uuid4().hex}"
     local_root = session / ".palette_benchmarks" / "production_candidate"

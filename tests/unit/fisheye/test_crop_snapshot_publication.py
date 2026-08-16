@@ -100,7 +100,8 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
         source_video_path=tmp_path / "camera.mp4",
     )
     _wire_authorities(monkeypatch, source, pixels)
-    gate_validator = lambda *_args, **_kwargs: {
+    def gate_validator(*_args, **_kwargs):
+        return {
             "inside": np.ones(
                 source.dimensions.n_source_detections,
                 dtype=np.bool_,
@@ -129,6 +130,7 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
     root = zarr.open_group(
         str(source.archive_path), mode="r", use_consolidated=False
     )
+    assert root["crop_runs"].attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
     crop = root["crop_runs"]["crop_required"]
     assert crop.attrs["source_registered_detection_gate"] == gate_evidence
 
@@ -144,6 +146,7 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
     archive = source.archive_path
     root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
     crop_family = root.create_group("crop_runs")
+    crop_family.create_group("existing_crop")
     crop_family.attrs.update(
         {
             "latest": "existing_crop",
@@ -202,7 +205,6 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
         assert dict(family.attrs) == {
             "latest": "existing_crop",
             "purpose_selectors": {"inspection": "existing_crop"},
-            COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
         }
         run = family["crop_candidate_v2"]
         assert run.attrs["status"] == "complete"
