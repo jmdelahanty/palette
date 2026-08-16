@@ -449,14 +449,14 @@ def test_build_plan_materialized_compares_against_validated_latest_materialized(
     crop_parent.attrs["latest_any"] = "crop_geometry"
 
     policy = mod.ordinary_crop_geometry_policy_from_parameters(
-        {"roi_sz": [348, 348], "padding_mode": "zero_outside_source_frame"}
+        {"roi_sz": [384, 384], "padding_mode": "zero_outside_source_frame"}
     )
     crop_materialized = crop_parent.create_group("crop_materialized")
     crop_materialized.attrs.update(
         {
             "detection_source_path": "detect_runs/detect_001",
             "detection_source_type": "detect",
-            "roi_size": [348, 348],
+            "roi_size": [384, 384],
             "crop_geometry_policy_digest": policy.payload_digest,
             "crop_storage_mode": "materialized",
             "status": "completed",
@@ -516,7 +516,7 @@ def test_build_plan_replaces_canonical_run_without_explicit_padding_policy(
         {
             "detection_source_path": "detect_runs/detect_001",
             "detection_source_type": "detect",
-            "roi_size": [348, 348],
+            "roi_size": [384, 384],
             "crop_storage_mode": "materialized",
             "status": "completed",
             "coordinate_contract": "canonical_v2",
