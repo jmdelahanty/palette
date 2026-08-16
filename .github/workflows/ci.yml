@@ -143,6 +143,13 @@ jobs:
         run: |
           python -c "import pathlib, fisheye, fisheye.analysis, fisheye.pose; path = pathlib.Path(fisheye.__file__).resolve(); assert 'site-packages' in path.parts, path; print(fisheye.__version__, path)"
 
+      - name: Load installed runtime contracts
+        working-directory: /tmp
+        run: |
+          python -c "from fisheye.shared.pose_schema import schema_from_package; assert schema_from_package('traditional_v1').name == 'traditional_v1'"
+          python -c "from fisheye.pose.heuristics import heuristic_profile_from_package; assert heuristic_profile_from_package('traditional_pose', 'traditional_v1').profile_name == 'traditional_pose_traditional_v1'"
+          python -c "from fisheye.pose.metric_schema import metric_schema_from_package; assert metric_schema_from_package('traditional_v2').schema_name == 'traditional_v2_derived_metrics'"
+
       - name: Smoke installed palette entrypoint
         working-directory: /tmp
         run: |

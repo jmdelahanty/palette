@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from fisheye.shared.runtime_config import runtime_config_dirs
+
 
 RUNTIME_COORD_DIMS = 2
 _KEYPOINT_LABEL_ALIASES = {
@@ -576,15 +578,10 @@ def load_schema(schema_path: Path) -> PoseSchema:
 
 
 def schema_from_package(name: str, base_dir: Optional[Path] = None) -> PoseSchema:
-    module_path = Path(__file__).resolve()
-    if len(module_path.parents) < 4:
-        raise RuntimeError("Unexpected package layout; unable to resolve 'configs/fisheye/pose_schemas'.")
-    default_dir = module_path.parents[3] / "configs" / "fisheye" / "pose_schemas"
-
-    search_dirs = []
+    search_dirs: list[Path] = []
     if base_dir is not None:
         search_dirs.append(Path(base_dir))
-    search_dirs.append(default_dir)
+    search_dirs.extend(runtime_config_dirs("pose_schemas"))
 
     tried_paths = []
     for directory in search_dirs:

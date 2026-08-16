@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from fisheye.shared.runtime_config import runtime_config_dirs
+
 
 @dataclass(frozen=True)
 class LabelRequirements:
@@ -179,17 +181,10 @@ def heuristic_profile_from_package(
     pose_schema_name: str,
     base_dir: Optional[Path] = None,
 ) -> PoseHeuristicProfile:
-    module_path = Path(__file__).resolve()
-    if len(module_path.parents) < 4:
-        raise RuntimeError(
-            "Unexpected package layout; unable to resolve 'configs/fisheye/pose_heuristics'."
-        )
-    default_dir = module_path.parents[3] / "configs" / "fisheye" / "pose_heuristics"
-
     search_dirs: list[Path] = []
     if base_dir is not None:
         search_dirs.append(Path(base_dir))
-    search_dirs.append(default_dir)
+    search_dirs.extend(runtime_config_dirs("pose_heuristics"))
 
     tried_paths: list[Path] = []
     for directory in search_dirs:

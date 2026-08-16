@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 import zarr
 
 from .schema import resolve_skeleton_identity_from_attrs
+from fisheye.shared.runtime_config import runtime_config_dirs
 
 
 @dataclass(frozen=True)
@@ -75,15 +76,10 @@ def load_metric_schema(schema_path: Path) -> KeypointMetricSchema:
 
 
 def metric_schema_from_package(name: str, base_dir: Optional[Path] = None) -> KeypointMetricSchema:
-    module_path = Path(__file__).resolve()
-    if len(module_path.parents) < 4:
-        raise RuntimeError("Unexpected package layout; unable to resolve 'configs/fisheye/keypoint_metric_schemas'.")
-    default_dir = module_path.parents[3] / "configs" / "fisheye" / "keypoint_metric_schemas"
-
-    search_dirs = []
+    search_dirs: list[Path] = []
     if base_dir is not None:
         search_dirs.append(Path(base_dir))
-    search_dirs.append(default_dir)
+    search_dirs.extend(runtime_config_dirs("keypoint_metric_schemas"))
 
     tried: list[Path] = []
     for directory in search_dirs:
