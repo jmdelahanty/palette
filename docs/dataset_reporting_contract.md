@@ -1,6 +1,8 @@
 # Dataset Reporting Contract
 <!-- contract-meta
-status: implemented-foundation
+version: 1
+status: draft
+implementation: partial
 last_updated: 2026-07-11
 -->
 

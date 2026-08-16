@@ -13,6 +13,7 @@ from typing import Any
 
 META_PATTERN = re.compile(r"<!--\s*contract-meta\s*\n(.*?)\n-->", re.DOTALL)
 VALID_STATUSES = {"active", "draft", "superseded"}
+VALID_IMPLEMENTATIONS = {"implemented", "partial", "specified-only"}
 
 
 @dataclass
@@ -39,14 +40,19 @@ def _parse_meta_block(text: str) -> dict[str, str] | None:
     return payload
 
 
-def _collect_issues(path: Path, max_age_days: int) -> list[Issue]:
+def _collect_issues(
+    path: Path,
+    max_age_days: int,
+    *,
+    today: date | None = None,
+) -> list[Issue]:
     text = path.read_text(encoding="utf-8")
     meta = _parse_meta_block(text)
     if meta is None:
-        return [Issue(path=str(path), code="missing_meta", message="missing <!-- contract-meta ... --> block")]
+        return []
 
     issues: list[Issue] = []
-    for key in ("version", "status", "last_verified"):
+    for key in ("version", "status", "implementation"):
         if key not in meta:
             issues.append(Issue(path=str(path), code="missing_field", message=f"missing required field: {key}"))
 
@@ -60,7 +66,28 @@ def _collect_issues(path: Path, max_age_days: int) -> list[Issue]:
             )
         )
 
+    implementation = meta.get("implementation")
+    if implementation is not None and implementation not in VALID_IMPLEMENTATIONS:
+        issues.append(
+            Issue(
+                path=str(path),
+                code="invalid_implementation",
+                message=(
+                    f"invalid implementation '{implementation}', expected one of "
+                    f"{sorted(VALID_IMPLEMENTATIONS)}"
+                ),
+            )
+        )
+
     last_verified = meta.get("last_verified")
+    if status == "active" and not last_verified:
+        issues.append(
+            Issue(
+                path=str(path),
+                code="missing_field",
+                message="active contract is missing required field: last_verified",
+            )
+        )
     if last_verified:
         try:
             verified_date = date.fromisoformat(last_verified)
@@ -73,8 +100,9 @@ def _collect_issues(path: Path, max_age_days: int) -> list[Issue]:
                 )
             )
         else:
-            age_days = (date.today() - verified_date).days
-            if age_days > max_age_days:
+            reference_date = today or date.today()
+            age_days = (reference_date - verified_date).days
+            if status == "active" and age_days > max_age_days:
                 issues.append(
                     Issue(
                         path=str(path),
@@ -93,20 +121,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     contract_paths = sorted(Path("docs").glob("*contract*.md"))
+    managed_paths = [
+        path
+        for path in contract_paths
+        if _parse_meta_block(path.read_text(encoding="utf-8")) is not None
+    ]
     issues: list[Issue] = []
-    for path in contract_paths:
+    for path in managed_paths:
         issues.extend(_collect_issues(path, args.max_age_days))
 
     if args.json:
         payload: dict[str, Any] = {
             "checked": len(contract_paths),
+            "managed": len(managed_paths),
+            "unmanaged": len(contract_paths) - len(managed_paths),
             "max_age_days": int(args.max_age_days),
             "ok": len(issues) == 0,
             "issues": [asdict(issue) for issue in issues],
         }
         print(json.dumps(payload, sort_keys=True))
     else:
-        print(f"Checked {len(contract_paths)} contract file(s).")
+        print(
+            f"Checked {len(managed_paths)} managed contract file(s); "
+            f"ignored {len(contract_paths) - len(managed_paths)} without contract-meta."
+        )
         if not issues:
             print("All contract metadata headers are present and fresh.")
         else:

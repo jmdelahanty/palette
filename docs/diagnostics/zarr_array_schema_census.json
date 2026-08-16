@@ -2160,7 +2160,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-aa29221a2fb168e8"
+            "schema-writer-792a566fe7d7acae"
           ],
           "shape": "(int(row_count), metric_count)"
         },
@@ -2185,7 +2185,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-d20aa51c322d067f"
+            "schema-writer-dd956b74de1fa2c6"
           ],
           "shape": "(int(row_count), metric_count)"
         },
@@ -2210,7 +2210,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-8fb1352e99c6cea4"
+            "schema-writer-9d1353a97619c5b9"
           ],
           "shape": "(int(row_count), metric_count)"
         },
@@ -36457,8 +36457,8 @@
       "dtype_expression": "'f4'",
       "dynamic_name": false,
       "file": "src/fisheye/pose/metric_schema.py",
-      "line": 219,
-      "occurrence_id": "schema-writer-d20aa51c322d067f",
+      "line": 215,
+      "occurrence_id": "schema-writer-dd956b74de1fa2c6",
       "path_pattern": "<run_group>/derived_metric_values",
       "required": null,
       "shape_expression": "(int(row_count), metric_count)",
@@ -36470,7 +36470,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9b21377ba1d112f8"
+      "writer_site_id": "writer-558e2d3a336f6f7a"
     },
     {
       "access_pattern": "unclassified",
@@ -36491,8 +36491,8 @@
       "dtype_expression": "'f4'",
       "dynamic_name": false,
       "file": "src/fisheye/pose/metric_schema.py",
-      "line": 227,
-      "occurrence_id": "schema-writer-8fb1352e99c6cea4",
+      "line": 223,
+      "occurrence_id": "schema-writer-9d1353a97619c5b9",
       "path_pattern": "<run_group>/derived_metric_values_norm",
       "required": null,
       "shape_expression": "(int(row_count), metric_count)",
@@ -36504,7 +36504,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-6c09f392d1db2d34"
+      "writer_site_id": "writer-277d13b65807644f"
     },
     {
       "access_pattern": "unclassified",
@@ -36525,8 +36525,8 @@
       "dtype_expression": "'bool'",
       "dynamic_name": false,
       "file": "src/fisheye/pose/metric_schema.py",
-      "line": 235,
-      "occurrence_id": "schema-writer-aa29221a2fb168e8",
+      "line": 231,
+      "occurrence_id": "schema-writer-792a566fe7d7acae",
       "path_pattern": "<run_group>/derived_metric_valid",
       "required": null,
       "shape_expression": "(int(row_count), metric_count)",
@@ -36538,7 +36538,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-c0003073a387daa2"
+      "writer_site_id": "writer-974de01a8175a3ad"
     },
     {
       "access_pattern": "unclassified",
@@ -74375,7 +74375,7 @@
     "parsed_writer_candidate_module_count": 213,
     "reader_required_array_declaration_count": 95,
     "resolved_writer_leaf_name_count": 628,
-    "scanned_python_module_count": 1465,
+    "scanned_python_module_count": 1466,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

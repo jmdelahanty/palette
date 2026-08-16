@@ -1,7 +1,9 @@
 # Composite Crop Storage Contract
 
 <!-- contract-meta
-status: implemented-canary
+version: 1
+status: draft
+implementation: partial
 schema: palette.composite_crop v1
 last_updated: 2026-07-18
 owner: jeremy

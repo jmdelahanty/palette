@@ -1,7 +1,9 @@
 # Keypoint Heading Computation Contract
 
 <!-- contract-meta
+version: 1
 status: active
+implementation: implemented
 last_verified: 2026-07-29
 -->
 

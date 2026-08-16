@@ -1,7 +1,9 @@
 # Analysis-to-Training Promotion Contract
 
 <!-- contract-meta
-status: active
+version: 1
+status: draft
+implementation: partial
 last_updated: 2026-05-20
 scope: detect bbox promotion from analysis zarr to per-recording training zarr
 -->

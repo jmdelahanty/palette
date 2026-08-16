@@ -1,7 +1,8 @@
 # Crimson Detection Bounding-Box Read Contract
 <!-- contract-meta
 version: 7
-status: future-normal
+status: draft
+implementation: specified-only
 last_verified: 2026-07-19
 -->
 

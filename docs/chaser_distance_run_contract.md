@@ -1,6 +1,8 @@
 # Chaser Distance Run Contract
 <!-- contract-meta
+version: 1
 status: draft
+implementation: specified-only
 last_updated: 2026-06-17
 -->
 

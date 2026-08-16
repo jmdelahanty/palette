@@ -1,7 +1,8 @@
 # Derived Metrics Schema Contract
 <!-- contract-meta
 version: 1
-status: legacy-compatibility
+status: superseded
+implementation: implemented
 last_verified: 2026-08-03
 -->
 

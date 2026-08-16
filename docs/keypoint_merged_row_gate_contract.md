@@ -1,7 +1,8 @@
 # Keypoint Merged Row-Gate Contract
 <!-- contract-meta
 version: 1
-status: active
+status: draft
+implementation: implemented
 last_verified: 2026-02-27
 -->
 

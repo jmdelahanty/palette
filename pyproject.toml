@@ -79,6 +79,22 @@ where = ["src"]
 [tool.setuptools.package-data]
 fisheye = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.html", "**/*.css", "**/*.js"]
 
+[tool.setuptools.data-files]
+"share/palette/configs/fisheye" = [
+  "configs/fisheye/*.txt",
+  "configs/fisheye/*.yaml",
+  "configs/fisheye/*.yml",
+]
+"share/palette/configs/fisheye/keypoint_metric_schemas" = [
+  "configs/fisheye/keypoint_metric_schemas/*.json",
+]
+"share/palette/configs/fisheye/pose_heuristics/traditional_pose" = [
+  "configs/fisheye/pose_heuristics/traditional_pose/*.json",
+]
+"share/palette/configs/fisheye/pose_schemas" = [
+  "configs/fisheye/pose_schemas/*.json",
+]
+
 [tool.black]
 # Keep formatter grammar aligned with scripts/py and the supported runtime.
 # Revisit this together with requires-python and environment.yml during a
