@@ -1,7 +1,8 @@
 # Bout Classification Runs Contract
 <!-- contract-meta
 version: 2
-status: implemented
+status: active
+implementation: implemented
 last_verified: 2026-08-03
 -->
 

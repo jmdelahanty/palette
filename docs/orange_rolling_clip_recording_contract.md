@@ -1,6 +1,8 @@
 # Orange Rolling Clip Recording Contract
 <!-- contract-meta
-status: design
+version: 1
+status: draft
+implementation: specified-only
 last_verified: 2026-05-16
 purpose: Capture Orange's rolling-clip recording layout and the Palette import/indexing shape needed to process long recordings as clip-local units.
 -->

@@ -3,6 +3,7 @@
 <!-- contract-meta
 version: 2
 status: active
+implementation: implemented
 last_verified: 2026-07-20
 -->
 

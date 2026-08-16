@@ -1,6 +1,8 @@
 # Clipped Recording Consumer Mapping Contract
 <!-- contract-meta
-status: design_contract
+version: 1
+status: draft
+implementation: specified-only
 last_verified: 2026-05-16
 purpose: Define how clipped-recording frame mappings affect Palette readers, training consumers, and future Crimson integration.
 -->

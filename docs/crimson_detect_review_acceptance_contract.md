@@ -1,7 +1,8 @@
 # Crimson Detect Review Acceptance Contract
 <!-- contract-meta
 version: 2
-status: active
+status: draft
+implementation: implemented
 last_verified: 2026-04-15
 -->
 

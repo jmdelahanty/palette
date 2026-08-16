@@ -1,7 +1,9 @@
 # Refined Detect Row Identity Contract
 
 <!-- contract-meta
-status: active
+version: 1
+status: draft
+implementation: implemented
 last_updated: 2026-04-24
 -->
 

@@ -1,7 +1,8 @@
 # Provenance Contract (v1)
 <!-- contract-meta
 version: 1
-status: active
+status: draft
+implementation: partial
 last_verified: 2026-05-20
 -->
 

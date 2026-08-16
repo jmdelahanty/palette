@@ -1,7 +1,8 @@
 # Pose Heuristic Profile Contract
 <!-- contract-meta
 version: 1
-status: active
+status: draft
+implementation: implemented
 last_verified: 2026-04-17
 -->
 

@@ -1,7 +1,9 @@
 # Keypoint, Body-Frame, And QC Storage Contract v2
 
 <!-- contract-meta
-status: logical-contract-foundation-implemented
+version: 2
+status: draft
+implementation: partial
 schema: palette.stage.keypoint_observations v2
 date: 2026-07-29
 owner: jeremy

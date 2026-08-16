@@ -1,6 +1,8 @@
 # Video Pixel And Model Input Contract
 <!-- contract-meta
-status: current
+version: 1
+status: active
+implementation: implemented
 last_verified: 2026-07-19
 purpose: Clarify the difference between persisted video/crop pixels and model-input tensors, especially PyNvVideoCodec luma versus NV12-to-RGB detection preprocessing.
 -->

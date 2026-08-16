@@ -1,7 +1,9 @@
 # Crop Pixel Work-Package Contract
 
 <!-- contract-meta
-status: implemented-cluster-canary
+version: 1
+status: draft
+implementation: partial
 schema: palette.crop_pixel_work_package v1
 last_updated: 2026-07-29
 owner: jeremy

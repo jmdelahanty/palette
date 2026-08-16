@@ -1,7 +1,9 @@
 # Instance, Track, And Subject Identity Contract
 
 <!-- contract-meta
-status: active
+version: 1
+status: draft
+implementation: partial
 created: 2026-07-09
 owner: jeremy
 supersedes-current-state-sections: docs/instance_identity_and_tracking_review.md,

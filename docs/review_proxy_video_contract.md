@@ -1,6 +1,8 @@
 # Review Proxy Video Contract
 <!-- contract-meta
+version: 1
 status: active
+implementation: implemented
 last_verified: 2026-05-28
 purpose: Define derived browser-review proxy videos for Palette video-backed detection review.
 -->
@@ -205,4 +207,3 @@ frontend. The proxy MP4 is only the media source for display.
 - Proxy dimensions match manifest `proxy_width` and `proxy_height`.
 - The reviewer renders boxes by scaling source/normalized coordinates to proxy
   media dimensions.
-

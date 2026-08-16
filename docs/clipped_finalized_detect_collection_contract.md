@@ -1,6 +1,8 @@
 # Clipped Finalized Detect Collection Contract
 <!-- contract-meta
+version: 1
 status: active
+implementation: implemented
 last_verified: 2026-05-28
 purpose: Define how consumers resolve finalized clipped refined-detect collections to parent frames, clip-local video frames, and refined detection rows.
 -->
