@@ -40,6 +40,27 @@ def _render_column_table(columns: list[Any]) -> list[str]:
     return lines
 
 
+def _render_view_column_table(columns: list[Any]) -> list[str]:
+    """Render only the schema information SQLite actually declares for views.
+
+    ``PRAGMA table_info`` synthesizes type affinities for view expressions, and
+    those inferred values change between SQLite releases.  A view declaration
+    guarantees its column names and SQL definition, not those inferred types.
+    """
+    lines = [
+        "| Column | Type | Nullable | PK | Default |",
+        "|---|---|---|---|---|",
+    ]
+    for col in columns:
+        name = str(col["name"])
+        not_null = bool(col["notnull"])
+        pk = bool(col["pk"])
+        nullable = "no" if (not_null or pk) else "yes"
+        default = str(col["dflt_value"]) if col["dflt_value"] is not None else ""
+        lines.append(f"| `{name}` | `` | {nullable} | {_yes_no(pk)} | `{default}` |")
+    return lines
+
+
 def _generate_markdown(registry: Registry) -> str:
     conn = registry.conn
     objects = list(
@@ -151,7 +172,12 @@ def _generate_markdown(registry: Registry) -> str:
         lines.append("")
         lines.append("#### Columns")
         lines.append("")
-        lines.extend(_render_column_table(view_columns[view_name]))
+        lines.append(
+            "SQLite-inferred view affinities are intentionally omitted because they "
+            "vary across SQLite releases."
+        )
+        lines.append("")
+        lines.extend(_render_view_column_table(view_columns[view_name]))
         lines.append("")
         lines.append("#### Definition")
         lines.append("")
