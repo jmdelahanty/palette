@@ -2266,6 +2266,10 @@ class RegistryMigrationMixin:
                 container TEXT,
                 encoded_format TEXT,
                 pixel_source_format TEXT,
+                color_range TEXT,
+                color_space TEXT,
+                color_transfer TEXT,
+                color_primaries TEXT,
                 video_pixel_coordinate_space TEXT,
                 source_geometry_coordinate_space TEXT,
                 blank_frame_policy TEXT,
@@ -2340,6 +2344,10 @@ class RegistryMigrationMixin:
                 avs.container,
                 avs.encoded_format,
                 avs.pixel_source_format,
+                avs.color_range,
+                avs.color_space,
+                avs.color_transfer,
+                avs.color_primaries,
                 avs.video_pixel_coordinate_space,
                 avs.source_geometry_coordinate_space,
                 avs.blank_frame_policy,
@@ -2418,6 +2426,10 @@ class RegistryMigrationMixin:
                 container,
                 encoded_format,
                 pixel_source_format,
+                color_range,
+                color_space,
+                color_transfer,
+                color_primaries,
                 video_pixel_coordinate_space,
                 source_geometry_coordinate_space,
                 blank_frame_policy,
@@ -2494,6 +2506,10 @@ class RegistryMigrationMixin:
                 codec,
                 encoded_format,
                 pixel_source_format,
+                color_range,
+                color_space,
+                color_transfer,
+                color_primaries,
                 video_pixel_coordinate_space,
                 source_geometry_coordinate_space,
                 blank_frame_policy,
@@ -8482,3 +8498,17 @@ class RegistryMigrationMixin:
         """Expose immutable hybrid-provider routing readiness separately from media."""
 
         self._migration_014_crop_quality_registry()
+
+    def _migration_070_acquisition_video_stream_colorimetry(self) -> None:
+        """Expose producer/ffprobe video colorimetry as queryable stream facts."""
+
+        self._ensure_columns(
+            "acquisition_video_streams",
+            {
+                "color_range": "TEXT",
+                "color_space": "TEXT",
+                "color_transfer": "TEXT",
+                "color_primaries": "TEXT",
+            },
+        )
+        self._migration_056_acquisition_video_streams_registry()

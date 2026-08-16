@@ -19,6 +19,7 @@ import zarr
 from fisheye.shared.acquisition_crop_stream_ledger import (
     publish_acquisition_crop_stream_ledger,
 )
+from fisheye.shared.import_video_metadata import probe_video_colorimetry_attrs
 
 
 ACQUISITION_VIDEO_STREAMS_SCHEMA_ID = "palette.acquisition_video_streams.v1"
@@ -49,6 +50,13 @@ _SUMMARY_KEYS = (
     "container",
     "encoded_format",
     "pixel_source_format",
+)
+
+_COLORIMETRY_FIELDS = (
+    "color_range",
+    "color_space",
+    "color_transfer",
+    "color_primaries",
 )
 
 
@@ -180,6 +188,39 @@ def _stream_inventory(
     stream: Mapping[str, Any],
 ) -> dict[str, Any]:
     files, derived, warnings = _file_availability(recording_dir, stream)
+    contract = _json_safe(dict(stream))
+    video_path = _resolve_relative(recording_dir, stream.get("video"))
+    colorimetry_observation: dict[str, Any] | None = None
+    if video_path is not None and video_path.is_file():
+        probed = probe_video_colorimetry_attrs(video_path)
+        observed = {
+            field: str(probed[f"video_{field}"])
+            for field in _COLORIMETRY_FIELDS
+            if probed.get(f"video_{field}") not in (None, "")
+        }
+        if observed:
+            declared = {
+                field: str(contract[field])
+                for field in _COLORIMETRY_FIELDS
+                if contract.get(field) not in (None, "")
+            }
+            mismatches = {
+                field: {"declared": declared[field], "observed": value}
+                for field, value in observed.items()
+                if field in declared and declared[field] != value
+            }
+            warnings.extend(
+                f"{field}_manifest_ffprobe_mismatch" for field in mismatches
+            )
+            contract.update(observed)
+            colorimetry_observation = {
+                "schema_id": "palette.acquisition_video_colorimetry_observation.v1",
+                "authority": "ffprobe_stream",
+                "video_path": str(video_path),
+                "observed": observed,
+                "manifest_declared": declared,
+                "mismatches": mismatches,
+            }
     required_missing: list[str] = []
     if not files.get("video", {}).get("exists"):
         required_missing.append("video")
@@ -205,8 +246,10 @@ def _stream_inventory(
         "required_missing": required_missing,
         "warnings": sorted(set(warnings)),
         "files": files,
-        "contract": _json_safe(dict(stream)),
+        "contract": contract,
     }
+    if colorimetry_observation is not None:
+        payload["colorimetry_observation"] = colorimetry_observation
     payload.update(derived)
     return payload
 

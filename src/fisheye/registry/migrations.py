@@ -276,6 +276,11 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "crop_pixel_routing_registry",
         "_migration_069_crop_pixel_routing_registry",
     ),
+    (
+        70,
+        "acquisition_video_stream_colorimetry",
+        "_migration_070_acquisition_video_stream_colorimetry",
+    ),
 )
 
 

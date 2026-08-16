@@ -6849,8 +6849,8 @@
             "schema-required-493e7d755873454e",
             "schema-required-5cdb4ae9d7609421",
             "schema-writer-202bff858f113e46",
+            "schema-writer-36e83bc6de3cfd9b",
             "schema-writer-6ebc3cc49b499fb6",
-            "schema-writer-a47ec36cb16741b7",
             "schema-writer-abd50f97e68618df",
             "schema-writer-ac49645e5afb8100",
             "schema-writer-d3ae9466fc328f07",
@@ -7274,7 +7274,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-6e815d33be61dd32"
+            "schema-writer-b5369d4be44fe490"
           ],
           "shape": "shape(clipped_mapping['source_clip_indices'])"
         }
@@ -7303,7 +7303,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-2ab19b1d542cfdb1"
+            "schema-writer-b6d623388dc20898"
           ],
           "shape": "shape(clipped_mapping['source_clip_local_frame_indices'])"
         }
@@ -7452,7 +7452,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-a78560dd7ad5e0fb"
+            "schema-writer-e2138f30e5ea31cd"
           ],
           "shape": "shape(sorted((row_by_key[key] for key in requested_instance_keys)))"
         },
@@ -7807,7 +7807,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-c3288d6e30159072"
+            "schema-writer-22ff258b23f723c1"
           ],
           "shape": "shape(source_frame_indices)"
         }
@@ -72752,8 +72752,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/regenerate_training_crops_pynvvc.py",
-      "line": 1045,
-      "occurrence_id": "schema-writer-a78560dd7ad5e0fb",
+      "line": 1253,
+      "occurrence_id": "schema-writer-e2138f30e5ea31cd",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<resolved_target_crop>/source_crop_row_ids",
       "required": null,
       "shape_expression": "shape(sorted((row_by_key[key] for key in requested_instance_keys)))",
@@ -72765,7 +72765,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-e7347599b6917921"
+      "writer_site_id": "writer-de3dbba5b8a2c3ff"
     },
     {
       "access_pattern": "windowed",
@@ -72786,8 +72786,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/regenerate_training_crops_pynvvc.py",
-      "line": 1051,
-      "occurrence_id": "schema-writer-c3288d6e30159072",
+      "line": 1259,
+      "occurrence_id": "schema-writer-22ff258b23f723c1",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<resolved_target_crop>/source_frame_indices",
       "required": null,
       "shape_expression": "shape(source_frame_indices)",
@@ -72799,7 +72799,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ea10a892ff2f6233"
+      "writer_site_id": "writer-6d07763498266bf3"
     },
     {
       "access_pattern": "windowed",
@@ -72820,8 +72820,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/regenerate_training_crops_pynvvc.py",
-      "line": 1058,
-      "occurrence_id": "schema-writer-2ab19b1d542cfdb1",
+      "line": 1266,
+      "occurrence_id": "schema-writer-b6d623388dc20898",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<resolved_target_crop>/source_clip_local_frame_indices",
       "required": null,
       "shape_expression": "shape(clipped_mapping['source_clip_local_frame_indices'])",
@@ -72833,7 +72833,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-2a4103b7fd9405c6"
+      "writer_site_id": "writer-54c8f8f8a9eb031b"
     },
     {
       "access_pattern": "windowed",
@@ -72854,8 +72854,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/regenerate_training_crops_pynvvc.py",
-      "line": 1064,
-      "occurrence_id": "schema-writer-6e815d33be61dd32",
+      "line": 1272,
+      "occurrence_id": "schema-writer-b5369d4be44fe490",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<resolved_target_crop>/source_clip_indices",
       "required": null,
       "shape_expression": "shape(clipped_mapping['source_clip_indices'])",
@@ -72867,7 +72867,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-e42b00fa06666e2d"
+      "writer_site_id": "writer-fd8b267b0aad51d6"
     },
     {
       "access_pattern": "per_row",
@@ -72888,8 +72888,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/regenerate_training_crops_pynvvc.py",
-      "line": 1070,
-      "occurrence_id": "schema-writer-a47ec36cb16741b7",
+      "line": 1278,
+      "occurrence_id": "schema-writer-36e83bc6de3cfd9b",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<resolved_target_crop>/roi_images",
       "required": null,
       "shape_expression": null,
@@ -72901,7 +72901,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-55d74ce0e7aa0fba"
+      "writer_site_id": "writer-b8394f77d09e04fd"
     },
     {
       "access_pattern": "unclassified",
@@ -74375,7 +74375,7 @@
     "parsed_writer_candidate_module_count": 213,
     "reader_required_array_declaration_count": 95,
     "resolved_writer_leaf_name_count": 628,
-    "scanned_python_module_count": 1464,
+    "scanned_python_module_count": 1465,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
