@@ -76,6 +76,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_failed,
     mark_run_started,
+    require_runs_parent,
 )
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
@@ -1591,7 +1592,7 @@ def build_hybrid_acquisition_offline_crop_run(
             root,
             expected_record_sha256=acquisition_ledger_record_sha256,
         )
-        crop_parent = root.require_group("crop_runs")
+        crop_parent = require_runs_parent(root, "crop_runs")
         acquisition_crop_video_path = _ledger_crop_video_path(acquisition_group)
         roi_shape = _ledger_roi_shape(acquisition_group)
     else:
