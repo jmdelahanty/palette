@@ -55,6 +55,7 @@ def _args(tmp_path: Path, *, stage: str) -> SimpleNamespace:
         model_run_id="subject_mask_run_exact",
         model_input_size=512,
         model_input_transform="auto",
+        roi_cache_manifest=tmp_path / "durable.flat_roi_cache.json",
         progress_dir=tmp_path / "progress",
         handoff_package_dir=None,
         refined_keypoint_run="refined_keypoints_exact",
@@ -127,6 +128,9 @@ def test_inference_pipeline_has_no_keypoint_dependency(tmp_path: Path) -> None:
     )
     assert command[command.index("--model-input-size") + 1] == "512"
     assert command[command.index("--model-input-transform") + 1] == "auto"
+    assert command[command.index("--source-roi-cache-alias-manifest") + 1] == str(
+        _args(tmp_path, stage="inference").roi_cache_manifest
+    )
 
 
 def test_finalization_pipeline_binds_exact_keypoints_and_sampled_contours(

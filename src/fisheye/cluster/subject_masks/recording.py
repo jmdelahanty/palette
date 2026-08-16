@@ -137,6 +137,12 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
         if cache_manifest is None:
             raise ValueError("Inference requires an ROI-cache manifest.")
         command.extend(["--roi-cache-manifest", str(cache_manifest)])
+        command.extend(
+            [
+                "--source-roi-cache-alias-manifest",
+                str(args.roi_cache_manifest),
+            ]
+        )
     else:
         command.extend(
             [
