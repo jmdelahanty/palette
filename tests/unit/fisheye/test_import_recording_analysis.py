@@ -186,6 +186,38 @@ def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> No
     assert fake_root.attrs.get("recording_subtype") == "free"
     assert fake_root.attrs.get("behavior_mode") == "free"
     assert fake_root.attrs.get("artifact_schema_id") == "recording_analysis_v1"
+    assert fake_root.attrs.get(mod.PALETTE_STORE_EPOCH_ATTR) == (
+        mod.PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION
+    )
+
+
+def test_ensure_analysis_archive_does_not_reclassify_existing_legacy_store(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    class _FakeGroup:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs()
+
+    fake_root = _FakeGroup()
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    zarr_path = tmp_path / "rec" / "zarr" / "rec_analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=None,
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=zarr_path,
+    )
+
+    mod.ensure_analysis_archive(plan)
+
+    assert mod.PALETTE_STORE_EPOCH_ATTR not in fake_root.attrs
 
 
 def test_ensure_analysis_archive_marks_recording_only_context(monkeypatch, tmp_path: Path) -> None:

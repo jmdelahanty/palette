@@ -42,7 +42,11 @@ from fisheye.shared.subject_metadata import (
     publish_subject_metadata,
     read_h5_subject_metadata,
 )
-from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
+from fisheye.shared.zarr_run_completion import (
+    PALETTE_STORE_EPOCH_ATTR,
+    PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION,
+    resolve_latest_complete_run_name,
+)
 
 
 @dataclass
@@ -196,9 +200,17 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
 
 def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, object]]:
     plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
-    mode = "a" if plan.zarr_path.exists() else "w"
-    root = zarr.open_group(str(plan.zarr_path), mode=mode, zarr_format=3)
+    archive_exists = plan.zarr_path.exists()
+    mode = "a" if archive_exists else "w"
+    root = zarr.open_group(
+        str(plan.zarr_path),
+        mode=mode,
+        zarr_format=3,
+        use_consolidated=False,
+    )
     attrs = dict(root.attrs)
+    if not archive_exists:
+        attrs[PALETTE_STORE_EPOCH_ATTR] = PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION
     recording_id = plan.recording_dir.name
     manifest = _load_recording_manifest(plan.recording_dir)
     attrs["zarr_purpose"] = "analysis"

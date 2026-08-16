@@ -9,9 +9,13 @@ for read compatibility until the backfill tool verifies and stamps them.
 
 from __future__ import annotations
 
+import atexit
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional
 import warnings
+
+import zarr
+from zarr.abc.store import Store
 
 from fisheye.shared.run_provenance import CLI_RUN_PROVENANCE_ATTR
 from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR
@@ -31,13 +35,19 @@ AUTHORITATIVE_RUN_PROVENANCE_ATTR = "authoritative_run_provenance"
 COMPLETION_EPOCH_ATTR = "palette_completion_epoch"
 COMPLETION_EPOCH_STRICT = 1
 COMPLETION_EPOCH_REQUIRE_PROVENANCE = 2
+PALETTE_STORE_EPOCH_ATTR = "palette_store_epoch"
+PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION = 1
 RUN_PROVENANCE_BYPASS_ATTR = "run_provenance_enforcement_bypass"
 
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_COMPLETE = "complete"
 RUN_STATUS_FAILED = "failed"
 
-_LEGACY_COMPLETION_WARNING_KEYS: set[str] = set()
+_LEGACY_COMPLETION_ACCEPTANCE_KEYS: set[str] = set()
+
+
+class MissingCompletionEpochError(RuntimeError):
+    """A post-cutover store contains a run parent without a completion epoch."""
 
 
 def utc_now_iso() -> str:
@@ -53,18 +63,60 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
 
 
+def _store_epoch_from_attrs(attrs: Mapping[str, Any]) -> Optional[int]:
+    return _coerce_int(attrs.get(PALETTE_STORE_EPOCH_ATTR))
+
+
+def _store_epoch_for_group(group: Any) -> Optional[int]:
+    """Resolve the root store epoch through direct metadata."""
+
+    attrs = getattr(group, "attrs", {})
+    mirrored = _store_epoch_from_attrs(attrs)
+    if mirrored is not None:
+        return mirrored
+    store = getattr(group, "store", None)
+    if not isinstance(store, Store):
+        return None
+    root = zarr.open_group(store=store, mode="r", path="", use_consolidated=False)
+    return _store_epoch_from_attrs(getattr(root, "attrs", {}))
+
+
+def _effective_legacy_default(
+    parent_attrs: Mapping[str, Any],
+    *,
+    store_epoch: Optional[int],
+) -> bool:
+    epoch = _coerce_int(parent_attrs.get(COMPLETION_EPOCH_ATTR))
+    if epoch is not None:
+        return epoch < COMPLETION_EPOCH_STRICT
+    if store_epoch is not None and store_epoch >= PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION:
+        raise MissingCompletionEpochError(
+            "Post-cutover Zarr store has a run parent without "
+            f"{COMPLETION_EPOCH_ATTR!r}; refusing legacy-default completion."
+        )
+    return True
+
+
 def effective_legacy_default(parent_group: Any) -> bool:
     """Return whether unmarked child runs remain legacy-complete for a parent."""
 
-    epoch = _coerce_int(getattr(parent_group, "attrs", {}).get(COMPLETION_EPOCH_ATTR))
-    return not (epoch is not None and epoch >= COMPLETION_EPOCH_STRICT)
+    return _effective_legacy_default(
+        getattr(parent_group, "attrs", {}),
+        store_epoch=_store_epoch_for_group(parent_group),
+    )
 
 
-def effective_legacy_default_from_attrs(parent_attrs: Mapping[str, Any]) -> bool:
+def effective_legacy_default_from_attrs(
+    parent_attrs: Mapping[str, Any],
+    *,
+    store_attrs: Mapping[str, Any] | None = None,
+) -> bool:
     """Return legacy completion policy for a metadata-only parent view."""
 
-    epoch = _coerce_int(parent_attrs.get(COMPLETION_EPOCH_ATTR))
-    return not (epoch is not None and epoch >= COMPLETION_EPOCH_STRICT)
+    return _effective_legacy_default(
+        parent_attrs,
+        store_epoch=_store_epoch_from_attrs(store_attrs or parent_attrs),
+    )
 
 
 def requires_completion_provenance(parent_group: Any) -> bool:
@@ -110,6 +162,11 @@ def require_runs_parent(
             if completion_epoch is not None
             else COMPLETION_EPOCH_REQUIRE_PROVENANCE
         )
+        store_epoch = _store_epoch_for_group(root)
+        if store_epoch is not None:
+            attrs[PALETTE_STORE_EPOCH_ATTR] = store_epoch
+    elif attrs.get(COMPLETION_EPOCH_ATTR) is None:
+        _effective_legacy_default(attrs, store_epoch=_store_epoch_for_group(root))
     return parent
 
 
@@ -292,26 +349,49 @@ def _is_unmarked_legacy_run(run_group: Any) -> bool:
     return attrs.get(RUN_COMPLETION_STATUS_ATTR) is None and not has_run_completion_contract(run_group)
 
 
-def _parent_warning_key(parent_group: Any) -> str:
+def _group_identity_key(group: Any) -> str:
     for attr in ("store_path", "path", "name"):
-        value = getattr(parent_group, attr, None)
+        value = getattr(group, attr, None)
         if value not in (None, ""):
             return f"{attr}:{value}"
-    return f"id:{id(parent_group)}"
+    return f"id:{id(group)}"
 
 
-def _warn_legacy_completion_acceptance(parent_group: Any) -> None:
-    key = _parent_warning_key(parent_group)
-    if key in _LEGACY_COMPLETION_WARNING_KEYS:
+def _record_legacy_completion_acceptance(parent_group: Any, run_group: Any) -> None:
+    key = f"{_group_identity_key(parent_group)}|{_group_identity_key(run_group)}"
+    _LEGACY_COMPLETION_ACCEPTANCE_KEYS.add(key)
+
+
+def _record_legacy_completion_acceptance_from_attrs(
+    parent_attrs: Mapping[str, Any],
+    run_attrs: Mapping[str, Any],
+    *,
+    run_name: str | None = None,
+) -> None:
+    run_key = f"name:{run_name}" if run_name is not None else f"attrs:{id(run_attrs)}"
+    _LEGACY_COMPLETION_ACCEPTANCE_KEYS.add(f"attrs:{id(parent_attrs)}|{run_key}")
+
+
+def legacy_completion_acceptance_count() -> int:
+    """Return unique legacy-default runs accepted by this process."""
+
+    return len(_LEGACY_COMPLETION_ACCEPTANCE_KEYS)
+
+
+def _report_legacy_completion_acceptances() -> None:
+    count = legacy_completion_acceptance_count()
+    if count == 0:
         return
-    _LEGACY_COMPLETION_WARNING_KEYS.add(key)
     warnings.warn(
-        "Zarr run parent has no strict completion epoch; treating unmarked "
-        "child runs as legacy-complete for compatibility. Backfill completion "
-        "markers and stamp palette_completion_epoch to make this fail-closed.",
+        f"Accepted {count} legacy-default Zarr run(s) in this process. "
+        "Backfill completion markers and stamp parent completion epochs to "
+        "remove this compatibility path.",
         RuntimeWarning,
-        stacklevel=3,
+        stacklevel=1,
     )
+
+
+atexit.register(_report_legacy_completion_acceptances)
 
 
 def is_run_complete(run_group: Any, *, legacy_default: bool = True) -> bool:
@@ -337,13 +417,10 @@ def is_run_complete_in_parent(
 ) -> bool:
     """Return run completion using parent-scoped strictness metadata."""
 
-    effective_default = (
-        effective_legacy_default(parent_group)
-        if legacy_default is None
-        else bool(legacy_default)
-    )
+    parent_default = effective_legacy_default(parent_group)
+    effective_default = parent_default if legacy_default is None else bool(legacy_default)
     if effective_default and _is_unmarked_legacy_run(run_group):
-        _warn_legacy_completion_acceptance(parent_group)
+        _record_legacy_completion_acceptance(parent_group, run_group)
     return is_run_complete(run_group, legacy_default=effective_default)
 
 
@@ -371,19 +448,20 @@ def is_run_complete_in_parent_attrs(
     run_attrs: Mapping[str, Any],
     *,
     legacy_default: bool | None = None,
+    record_legacy_acceptance: bool = True,
+    store_attrs: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return completion from metadata-only parent and child attribute views."""
 
-    effective_default = (
-        effective_legacy_default_from_attrs(parent_attrs)
-        if legacy_default is None
-        else bool(legacy_default)
-    )
+    parent_default = effective_legacy_default_from_attrs(parent_attrs, store_attrs=store_attrs)
+    effective_default = parent_default if legacy_default is None else bool(legacy_default)
     status = run_attrs.get(RUN_COMPLETION_STATUS_ATTR)
     has_contract = (
         run_attrs.get(RUN_COMPLETION_CONTRACT_ATTR) == RUN_COMPLETION_CONTRACT
     )
     if status is None and not has_contract:
+        if effective_default and record_legacy_acceptance:
+            _record_legacy_completion_acceptance_from_attrs(parent_attrs, run_attrs)
         return effective_default
     return str(status).lower() == RUN_STATUS_COMPLETE
 
@@ -445,11 +523,8 @@ def resolve_latest_complete_run_name(
     ``legacy_default`` while performing a controlled legacy read.
     """
 
-    allow_legacy_group_scan = (
-        effective_legacy_default(parent_group)
-        if legacy_default is None
-        else bool(legacy_default)
-    )
+    parent_default = effective_legacy_default(parent_group)
+    allow_legacy_group_scan = parent_default if legacy_default is None else bool(legacy_default)
 
     def child_attrs(name: str) -> Mapping[str, Any] | None:
         child = _get_child(parent_group, name)
@@ -464,11 +539,12 @@ def resolve_latest_complete_run_name(
         child_attrs=child_attrs,
         latest_attr=latest_attr,
         legacy_default=legacy_default,
+        record_legacy_acceptance=False,
     )
     if allow_legacy_group_scan and result is not None:
         child = _get_child(parent_group, result)
         if child is not None and _is_unmarked_legacy_run(child):
-            _warn_legacy_completion_acceptance(parent_group)
+            _record_legacy_completion_acceptance(parent_group, child)
     return result
 
 
@@ -479,6 +555,8 @@ def resolve_latest_complete_run_name_from_attrs(
     child_attrs: Callable[[str], Mapping[str, Any] | None],
     latest_attr: str = "latest",
     legacy_default: bool | None = None,
+    record_legacy_acceptance: bool = True,
+    store_attrs: Mapping[str, Any] | None = None,
 ) -> Optional[str]:
     """Resolve the canonical run from metadata-only parent/child state.
 
@@ -488,11 +566,8 @@ def resolve_latest_complete_run_name_from_attrs(
     activation, and every selected child must be both complete and eligible.
     """
 
-    allow_legacy_group_scan = (
-        effective_legacy_default_from_attrs(parent_attrs)
-        if legacy_default is None
-        else bool(legacy_default)
-    )
+    parent_default = effective_legacy_default_from_attrs(parent_attrs, store_attrs=store_attrs)
+    allow_legacy_group_scan = parent_default if legacy_default is None else bool(legacy_default)
 
     def selectable(name: str, *, legacy: bool) -> bool:
         attrs = child_attrs(name)
@@ -503,8 +578,21 @@ def resolve_latest_complete_run_name_from_attrs(
                 parent_attrs,
                 attrs,
                 legacy_default=legacy,
+                record_legacy_acceptance=False,
+                store_attrs=store_attrs,
             )
         )
+
+    def accepted_legacy(name: str) -> str:
+        if record_legacy_acceptance:
+            attrs = child_attrs(name)
+            if attrs is not None:
+                _record_legacy_completion_acceptance_from_attrs(
+                    parent_attrs,
+                    attrs,
+                    run_name=name,
+                )
+        return name
 
     if not allow_legacy_group_scan:
         latest = _normalize_name(parent_attrs.get(latest_attr))
@@ -518,11 +606,11 @@ def resolve_latest_complete_run_name_from_attrs(
     for attr in (latest_attr, RUN_LATEST_COMPLETE_ATTR):
         candidate = _normalize_name(parent_attrs.get(attr))
         if candidate is not None and selectable(candidate, legacy=True):
-            return candidate
+            return accepted_legacy(candidate)
 
     for name in reversed(sorted(str(name) for name in child_names)):
         if selectable(name, legacy=True):
-            return name
+            return accepted_legacy(name)
     return None
 
 

@@ -297,7 +297,7 @@ outputs cannot be presented as registered confirmatory evidence.
 
 ## Wave 2 — Enforcement gates (fail-open → fail-closed)
 
-**W2.1 — Close the consolidated-metadata split-brain.**
+**W2.1 — Close the consolidated-metadata split-brain. [IMPLEMENTED]**
 Three parts:
 (a) `utils/backfill_completion_epoch.py` opens with `use_consolidated=False` (:813)
 and never reconsolidates — stamping the epoch is what CREATES the stale cache that

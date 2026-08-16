@@ -72,6 +72,24 @@ jobs:
           python scripts/check_file_size_ratchet.py
           git diff --exit-code -- scripts/file_size_ratchet_baseline.json
 
+  zarr-open-mode-ratchet:
+    name: zarr open metadata modes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Reject new implicit Zarr metadata modes
+        run: |
+          python scripts/check_zarr_open_group_modes.py
+          git diff --exit-code -- scripts/zarr_open_group_mode_ratchet_baseline.json
+
   observed-metadata-literals:
     name: observed metadata literals
     runs-on: ubuntu-latest
