@@ -503,6 +503,15 @@ selected_live_detection_confidence
   refined instances and the derived crop rowset.
 - [x] Preserve `source_refined_row_ids`, frame indices, acquisition-frame
   indices, full-frame ROI placement, bbox geometry, and crop-policy identity.
+- [x] Extend strict crop policy identity without changing existing v1 bytes:
+  refined-centered runs retain policy v1, while acquisition/hybrid runs use
+  policy v2 with `verified_explicit_per_row` origins bound to the exact signed
+  provider record, rowset fingerprint, pixel fingerprint, and row-signature
+  specification digest.
+- [x] Require the explicit-origin provider to have identical ordered instance,
+  refined-row, frame, acquisition-frame, and 384 x 384 size coverage before its
+  recorded origins can enter crop-v2. Revalidate that authority before and
+  after atomic publication.
 
 ### Acquisition-video eligibility
 
@@ -680,6 +689,10 @@ subject_mask_provider_consumption
 - [ ] Keypoint outputs carry exact crop row and instance identity.
 - [ ] Full-frame keypoint projection is correct for acquisition and fallback
   rows.
+- [x] Strict crop-v2 publication preserves signed acquisition/hybrid per-row
+  origins instead of silently recentering them on the offline detection.
+- [x] Existing center-derived crop-v2 manifests round-trip byte-for-byte through
+  the unchanged policy-v1 parser and writer.
 - [ ] Keypoint finalization rejects stale or incomplete provider evidence.
 - [ ] Subject-mask consumers cannot bypass the selected crop/provider manifest.
 - [ ] Crimson can read crop geometry and derived outputs without parsing Orange

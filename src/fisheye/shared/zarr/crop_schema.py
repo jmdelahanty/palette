@@ -48,6 +48,11 @@ CROP_GEOMETRY_SCHEMA_VERSION = 1
 CROP_GEOMETRY_LAYOUT = "geometry_only_sparse_rows_with_frame_row_offsets_v1"
 CROP_GEOMETRY_POLICY_SCHEMA_ID = "palette.crop_geometry_policy"
 CROP_GEOMETRY_POLICY_SCHEMA_VERSION = 1
+CROP_GEOMETRY_EXPLICIT_ORIGIN_POLICY_SCHEMA_VERSION = 2
+CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_ID = (
+    "palette.crop_geometry.explicit_origin_authority"
+)
+CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_VERSION = 1
 
 _PURPOSE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -66,6 +71,55 @@ class CropPaddingMode(str, Enum):
     ZERO_OUTSIDE_SOURCE_FRAME = "zero_outside_source_frame"
 
 
+class CropPlacementMode(str, Enum):
+    """Authority used to freeze each crop window's integer top-left."""
+
+    REFINED_DETECTION_CENTERED = "refined_detection_centered"
+    VERIFIED_EXPLICIT_PER_ROW = "verified_explicit_per_row"
+
+
+_EXPLICIT_ORIGIN_AUTHORITY_FIELDS = {
+    "schema_id",
+    "schema_version",
+    "authority_kind",
+    "run_id",
+    "provider_record_sha256",
+    "source_rowset_fingerprint",
+    "source_pixel_fingerprint",
+    "source_row_signature_spec_digest",
+}
+
+
+def _normalize_explicit_origin_authority(
+    value: Mapping[str, Any],
+) -> dict[str, object]:
+    authority = dict(value)
+    if set(authority) != _EXPLICIT_ORIGIN_AUTHORITY_FIELDS:
+        raise ValueError("Explicit crop-origin authority has an unexpected field set.")
+    if (
+        authority.get("schema_id") != CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_ID
+        or authority.get("schema_version")
+        != CROP_EXPLICIT_ORIGIN_AUTHORITY_SCHEMA_VERSION
+        or authority.get("authority_kind") != "signed_hybrid_crop_provider"
+    ):
+        raise ValueError("Explicit crop-origin authority header mismatch.")
+    run_id = str(authority.get("run_id") or "").strip()
+    if not run_id or "/" in run_id:
+        raise ValueError("Explicit crop-origin authority run_id is invalid.")
+    authority["run_id"] = run_id
+    for name in (
+        "provider_record_sha256",
+        "source_rowset_fingerprint",
+        "source_pixel_fingerprint",
+        "source_row_signature_spec_digest",
+    ):
+        digest = str(authority.get(name) or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"Explicit crop-origin authority {name} is invalid.")
+        authority[name] = digest
+    return authority
+
+
 @dataclass(frozen=True)
 class CropGeometryPolicy:
     """Versioned placement and size policy, independent of detection identity."""
@@ -74,6 +128,8 @@ class CropGeometryPolicy:
     size_mode: CropSizeMode
     fixed_size_wh: tuple[int, int] | None = None
     padding_mode: CropPaddingMode = CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME
+    placement_mode: CropPlacementMode = CropPlacementMode.REFINED_DETECTION_CENTERED
+    placement_authority: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         purpose = str(self.purpose).strip()
@@ -84,6 +140,7 @@ class CropGeometryPolicy:
         object.__setattr__(self, "purpose", purpose)
         object.__setattr__(self, "size_mode", CropSizeMode(self.size_mode))
         object.__setattr__(self, "padding_mode", CropPaddingMode(self.padding_mode))
+        object.__setattr__(self, "placement_mode", CropPlacementMode(self.placement_mode))
 
         size = self.fixed_size_wh
         if self.size_mode is CropSizeMode.FIXED_PER_RUN:
@@ -100,9 +157,46 @@ class CropGeometryPolicy:
                 "variable_per_row derives sizes from roi_sizes_full and cannot "
                 "declare fixed_size_wh."
             )
+        if self.placement_mode is CropPlacementMode.REFINED_DETECTION_CENTERED:
+            if self.placement_authority is not None:
+                raise ValueError(
+                    "Detection-centered crop placement cannot declare an explicit "
+                    "origin authority."
+                )
+        else:
+            if not isinstance(self.placement_authority, Mapping):
+                raise ValueError(
+                    "Verified explicit crop placement requires an origin authority."
+                )
+            object.__setattr__(
+                self,
+                "placement_authority",
+                _normalize_explicit_origin_authority(self.placement_authority),
+            )
 
     @property
     def payload(self) -> dict[str, object]:
+        if self.placement_mode is CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW:
+            return {
+                "schema_id": CROP_GEOMETRY_POLICY_SCHEMA_ID,
+                "schema_version": (
+                    CROP_GEOMETRY_EXPLICIT_ORIGIN_POLICY_SCHEMA_VERSION
+                ),
+                "purpose": self.purpose,
+                "placement": {
+                    "center_source": "persisted_centers_img_xy_for_subject_geometry",
+                    "center_rounding": "not_applicable_to_explicit_origin",
+                    "top_left_rule": "verified_persisted_integer_xy_per_row",
+                    "size_mode": self.size_mode.value,
+                    "fixed_size_wh": (
+                        None
+                        if self.fixed_size_wh is None
+                        else list(self.fixed_size_wh)
+                    ),
+                    "padding_mode": self.padding_mode.value,
+                    "origin_authority": dict(self.placement_authority or {}),
+                },
+            }
         return {
             "schema_id": CROP_GEOMETRY_POLICY_SCHEMA_ID,
             "schema_version": CROP_GEOMETRY_POLICY_SCHEMA_VERSION,
@@ -153,30 +247,52 @@ def crop_geometry_policy_from_manifest(
         raise ValueError("Crop policy payload digest mismatch.")
     if set(payload) != {"schema_id", "schema_version", "purpose", "placement"}:
         raise ValueError("Crop policy payload has an unexpected field set.")
-    if (
-        payload.get("schema_id") != CROP_GEOMETRY_POLICY_SCHEMA_ID
-        or payload.get("schema_version") != CROP_GEOMETRY_POLICY_SCHEMA_VERSION
-    ):
+    schema_version = payload.get("schema_version")
+    if payload.get("schema_id") != CROP_GEOMETRY_POLICY_SCHEMA_ID or schema_version not in {
+        CROP_GEOMETRY_POLICY_SCHEMA_VERSION,
+        CROP_GEOMETRY_EXPLICIT_ORIGIN_POLICY_SCHEMA_VERSION,
+    }:
         raise ValueError("Crop policy schema identity mismatch.")
     placement = payload.get("placement")
-    if not isinstance(placement, Mapping) or set(placement) != {
+    expected_placement_fields = {
         "center_source",
         "center_rounding",
         "top_left_rule",
         "size_mode",
         "fixed_size_wh",
         "padding_mode",
-    }:
+    }
+    if schema_version == CROP_GEOMETRY_EXPLICIT_ORIGIN_POLICY_SCHEMA_VERSION:
+        expected_placement_fields.add("origin_authority")
+    if not isinstance(placement, Mapping) or set(placement) != expected_placement_fields:
         raise ValueError("Crop policy placement has an unexpected field set.")
-    if placement.get("center_source") != "persisted_centers_img_xy":
-        raise ValueError("Crop policy center source mismatch.")
-    if placement.get("center_rounding") != "numpy_round_ties_to_even_v1":
-        raise ValueError("Crop policy center rounding mismatch.")
-    if (
-        placement.get("top_left_rule")
-        != "rounded_center_minus_floor_size_over_two"
-    ):
-        raise ValueError("Crop policy top-left rule mismatch.")
+    if schema_version == CROP_GEOMETRY_POLICY_SCHEMA_VERSION:
+        if placement.get("center_source") != "persisted_centers_img_xy":
+            raise ValueError("Crop policy center source mismatch.")
+        if placement.get("center_rounding") != "numpy_round_ties_to_even_v1":
+            raise ValueError("Crop policy center rounding mismatch.")
+        if (
+            placement.get("top_left_rule")
+            != "rounded_center_minus_floor_size_over_two"
+        ):
+            raise ValueError("Crop policy top-left rule mismatch.")
+        placement_mode = CropPlacementMode.REFINED_DETECTION_CENTERED
+        placement_authority = None
+    else:
+        if (
+            placement.get("center_source")
+            != "persisted_centers_img_xy_for_subject_geometry"
+            or placement.get("center_rounding")
+            != "not_applicable_to_explicit_origin"
+            or placement.get("top_left_rule")
+            != "verified_persisted_integer_xy_per_row"
+        ):
+            raise ValueError("Explicit crop policy placement rule mismatch.")
+        placement_mode = CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW
+        authority = placement.get("origin_authority")
+        if not isinstance(authority, Mapping):
+            raise TypeError("Explicit crop policy origin authority must be an object.")
+        placement_authority = _normalize_explicit_origin_authority(authority)
     raw_size = placement.get("fixed_size_wh")
     fixed_size = None
     if raw_size is not None:
@@ -190,6 +306,8 @@ def crop_geometry_policy_from_manifest(
         size_mode=placement.get("size_mode"),
         fixed_size_wh=fixed_size,
         padding_mode=placement.get("padding_mode"),
+        placement_mode=placement_mode,
+        placement_authority=placement_authority,
     )
     if dict(value) != policy.as_manifest():
         raise ValueError("Crop policy is not in canonical persisted form.")
@@ -373,6 +491,45 @@ def derive_crop_placement_geometry(
     bbox_roi = np.asarray(bbox_img - offsets, dtype=np.float32)
     return (
         np.array(top_left, copy=True, order="C"),
+        np.array(source_crop, copy=True, order="C"),
+        np.array(bbox_roi, copy=True, order="C"),
+    )
+
+
+def derive_explicit_crop_placement_geometry(
+    roi_coordinates_full: np.ndarray,
+    bbox_img_xyxy: np.ndarray,
+    roi_sizes_full: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project verified integer per-row origins into the crop geometry arrays."""
+
+    coordinates = np.asarray(roi_coordinates_full)
+    bbox_img = np.asarray(bbox_img_xyxy)
+    sizes = np.asarray(roi_sizes_full)
+    if coordinates.dtype != np.dtype(np.int32) or coordinates.ndim != 2 or coordinates.shape[1:] != (2,):
+        raise ValueError(
+            "roi_coordinates_full must have exact int32 shape (N, 2)."
+        )
+    if bbox_img.dtype != np.dtype(np.float32) or bbox_img.shape != (
+        coordinates.shape[0],
+        4,
+    ):
+        raise ValueError("bbox_img_xyxy must have exact float32 shape (N, 4).")
+    if sizes.dtype != np.dtype(np.int32) or sizes.shape != coordinates.shape:
+        raise ValueError("roi_sizes_full must have exact int32 shape (N, 2).")
+    if not np.isfinite(bbox_img).all() or np.any(sizes <= 0):
+        raise ValueError("Explicit crop placement requires finite boxes and positive sizes.")
+    source_crop = np.column_stack((coordinates, sizes)).astype(
+        np.float32,
+        copy=False,
+    )
+    offsets = np.column_stack((coordinates, coordinates)).astype(
+        np.float32,
+        copy=False,
+    )
+    bbox_roi = np.asarray(bbox_img - offsets, dtype=np.float32)
+    return (
+        np.array(coordinates, copy=True, order="C"),
         np.array(source_crop, copy=True, order="C"),
         np.array(bbox_roi, copy=True, order="C"),
     )
@@ -675,9 +832,18 @@ class CropGeometrySchema:
             and bbox_roi is not None
         ):
             try:
-                expected_coordinates, expected_crop, expected_bbox_roi = (
-                    derive_crop_placement_geometry(centers, bbox_img, sizes)
-                )
+                if policy.placement_mode is CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW:
+                    expected_coordinates, expected_crop, expected_bbox_roi = (
+                        derive_explicit_crop_placement_geometry(
+                            coordinates,
+                            bbox_img,
+                            sizes,
+                        )
+                    )
+                else:
+                    expected_coordinates, expected_crop, expected_bbox_roi = (
+                        derive_crop_placement_geometry(centers, bbox_img, sizes)
+                    )
             except ValueError as exc:
                 issues.append(
                     _issue(
@@ -692,7 +858,7 @@ class CropGeometrySchema:
                         _issue(
                             "crop_origin_mismatch",
                             "roi_coordinates_full",
-                            "Top-left must exactly follow the versioned center rule.",
+                            "Top-left must exactly follow the versioned placement rule.",
                         )
                     )
                 if not np.array_equal(source_crop, expected_crop):
@@ -795,6 +961,7 @@ __all__ = [
     "CROP_GEOMETRY_LAYOUT",
     "CROP_GEOMETRY_POLICY_SCHEMA_ID",
     "CROP_GEOMETRY_POLICY_SCHEMA_VERSION",
+    "CROP_GEOMETRY_EXPLICIT_ORIGIN_POLICY_SCHEMA_VERSION",
     "CROP_GEOMETRY_SCHEMA_ID",
     "CROP_GEOMETRY_SCHEMA_V1",
     "CROP_GEOMETRY_SCHEMA_VERSION",
@@ -804,9 +971,11 @@ __all__ = [
     "CropGeometrySchema",
     "CropGeometrySchemaError",
     "CropPaddingMode",
+    "CropPlacementMode",
     "CropSchemaIssue",
     "CropSizeMode",
     "crop_geometry_policy_from_manifest",
     "derive_crop_placement_geometry",
+    "derive_explicit_crop_placement_geometry",
     "derive_frame_row_offsets",
 ]

@@ -29,8 +29,10 @@ from fisheye.shared.zarr.crop_schema import (
     CROP_GEOMETRY_SCHEMA_V1,
     CropDimensions,
     CropGeometryPolicy,
+    CropPlacementMode,
     CropSizeMode,
     derive_crop_placement_geometry,
+    derive_explicit_crop_placement_geometry,
 )
 from fisheye.shared.zarr.crop_storage import (
     CropGeometryStoragePlanSet,
@@ -136,6 +138,7 @@ def prepare_crop_geometry_from_refined_source(
     policy: CropGeometryPolicy,
     pixel_authority: CropPixelAuthority,
     roi_sizes_full: np.ndarray | None = None,
+    roi_coordinates_full: np.ndarray | None = None,
 ) -> PreparedCropGeometrySnapshot:
     """Copy exact refined rows and derive policy-owned crop geometry/signatures."""
 
@@ -194,11 +197,28 @@ def prepare_crop_geometry_from_refined_source(
         copy=True,
         order="C",
     )
-    coordinates, source_crop, bbox_roi = derive_crop_placement_geometry(
-        centers,
-        bbox_img,
-        sizes,
-    )
+    if policy.placement_mode is CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW:
+        if roi_coordinates_full is None:
+            raise ValueError(
+                "Verified explicit crop placement requires roi_coordinates_full."
+            )
+        coordinates, source_crop, bbox_roi = (
+            derive_explicit_crop_placement_geometry(
+                np.asarray(roi_coordinates_full),
+                bbox_img,
+                sizes,
+            )
+        )
+    else:
+        if roi_coordinates_full is not None:
+            raise ValueError(
+                "Detection-centered crop placement forbids explicit ROI origins."
+            )
+        coordinates, source_crop, bbox_roi = derive_crop_placement_geometry(
+            centers,
+            bbox_img,
+            sizes,
+        )
     frame_indices = np.asarray(
         _values(source_arrays["instances/frame_indices"]),
         dtype=np.int64,

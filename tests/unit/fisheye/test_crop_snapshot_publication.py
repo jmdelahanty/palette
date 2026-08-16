@@ -58,6 +58,78 @@ def _wire_authorities(monkeypatch, source, pixels: _BoundPixels) -> list[Path]:
     return calls
 
 
+def test_signed_hybrid_provider_can_supply_exact_explicit_origins(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = _refined_source(tmp_path)
+    root = zarr.open_group(
+        str(source.archive_path), mode="a", use_consolidated=False
+    )
+    provider = root.require_group("crop_runs").create_group("hybrid_provider")
+    provider.attrs.update(
+        {
+            "status": "completed",
+            "stage_selector_eligible": False,
+            "provider_record_sha256": "a" * 64,
+            "source_refined_run_id": source.run_id,
+            "source_refined_manifest_digest": source.manifest["payload_digest"],
+        }
+    )
+    source_paths = {
+        "instance_key": "instances/instance_key",
+        "source_refined_row_ids": "instances/refined_row_ids",
+        "frame_indices": "instances/frame_indices",
+        "source_acquisition_frame_index": (
+            "instances/source_acquisition_frame_index"
+        ),
+    }
+    for provider_path, source_path in source_paths.items():
+        provider.create_array(
+            provider_path,
+            data=np.asarray(source.arrays[source_path][...]),
+        )
+    origins = np.asarray(
+        [[14, 10], [67, 11], [46, 51], [20, 55]],
+        dtype=np.int32,
+    )
+    provider.create_array("roi_coordinates_full", data=origins)
+    provider.create_array("roi_sizes_full", data=np.full((4, 2), 8, np.int32))
+    signed = {
+        "provider_record_sha256": "a" * 64,
+        "row_count": 4,
+        "source_row_signature_spec_digest": "b" * 64,
+        "source_pixel_fingerprint": "c" * 64,
+        "source_rowset_fingerprint": "d" * 64,
+    }
+    monkeypatch.setattr(
+        module,
+        "validate_hybrid_crop_signed_identity",
+        lambda *_args, **_kwargs: signed,
+    )
+
+    observed_origins, policy, binding = module._bind_explicit_origin_provider(
+        archive=source.archive_path,
+        provider_run_id="hybrid_provider",
+        source=source,
+        base_policy=_policy(),
+    )
+
+    np.testing.assert_array_equal(observed_origins, origins)
+    assert policy.payload["schema_version"] == 2
+    assert policy.placement_authority["run_id"] == "hybrid_provider"
+    assert binding["ordered_refined_coverage_exact"] is True
+
+    provider["instance_key"][0] = np.uint64(999)
+    with pytest.raises(ValueError, match="differs from the refined rowset"):
+        module._bind_explicit_origin_provider(
+            archive=source.archive_path,
+            provider_run_id="hybrid_provider",
+            source=source,
+            base_policy=_policy(),
+        )
+
+
 def test_required_candidate_binds_exact_finalized_gated_refined_authority(
     monkeypatch,
     tmp_path: Path,
