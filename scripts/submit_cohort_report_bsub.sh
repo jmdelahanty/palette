@@ -103,7 +103,7 @@ fi
 
 SCRIPT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHONPATH="$SCRIPT_REPO/src" "$SCRIPT_REPO/scripts/py" -m fisheye.cohorts \
-  validate "$COHORT_MANIFEST" --check-hash >/dev/null
+  validate "$COHORT_MANIFEST" --check-hash --registry "$REGISTRY" >/dev/null
 
 if [[ -z "$LOG_DIR" ]]; then LOG_DIR="${OUTPUT_ROOT}/logs/lsf"; fi
 RUN_DIR="${LOG_DIR}/cohort_report_${EXPORT_RUN_ID}_${REPORT_ID}"
@@ -152,7 +152,8 @@ if [[ "\${ACTUAL_COMMIT}" != "\${EXPECTED_COMMIT}" ]]; then
     "\${EXPECTED_COMMIT}" "\${ACTUAL_COMMIT}" >&2
   exit 2
 fi
-scripts/py -m fisheye.cohorts validate "\${COHORT_MANIFEST}" --check-hash
+scripts/py -m fisheye.cohorts validate "\${COHORT_MANIFEST}" --check-hash \
+  --registry "\${REGISTRY}"
 EXPORT_MANIFEST="\${OUTPUT_ROOT}/v1/manifests/export_run_id=\${EXPORT_RUN_ID}.json"
 if [[ ! -f "\${EXPORT_MANIFEST}" ]]; then
   printf 'Analytics export manifest is unavailable after dependencies completed: %s\n' \

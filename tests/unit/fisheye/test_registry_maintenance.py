@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import sys
 from typing import Dict, Optional
+from uuid import UUID
 
 import numpy as np
 import pytest
@@ -22,6 +23,12 @@ from fisheye.registry.db import (
     Registry,
     _extract_subject_mask_component_quality_rows,
     _extract_subject_mask_performance_rows,
+)
+from fisheye.registry.identity import (
+    REGISTRY_IDENTITY_LEGACY_BOOTSTRAP_UNVERIFIED,
+    REGISTRY_IDENTITY_SCHEMA_MANAGED,
+    RegistryIdentityError,
+    read_registry_identity,
 )
 from fisheye.registry.maintenance import (
     _backfill_keypoint_profiles,
@@ -11282,6 +11289,25 @@ def test_registry_schema_version_initialized(tmp_path: Path) -> None:
     pragma_row = registry.conn.execute("PRAGMA user_version;").fetchone()
     assert pragma_row is not None
     assert int(pragma_row[0]) == latest_version
+    identity = read_registry_identity(registry.conn)
+    assert str(UUID(identity.registry_uuid)) == identity.registry_uuid
+    assert identity.identity_provenance == REGISTRY_IDENTITY_SCHEMA_MANAGED
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        registry.conn.execute(
+            "UPDATE registry_identity SET registry_uuid = ? WHERE singleton_id = 1",
+            (str(UUID(int=0)),),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        registry.conn.execute("DELETE FROM registry_identity WHERE singleton_id = 1")
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        registry.conn.execute(
+            """
+            INSERT OR REPLACE INTO registry_identity (
+                singleton_id, registry_uuid, identity_provenance, minted_at_utc
+            ) VALUES (1, ?, 'schema_managed', '2026-08-16T00:00:00Z')
+            """,
+            (str(UUID(int=0)),),
+        )
     registry.close()
 
 
@@ -11299,7 +11325,54 @@ def test_registry_schema_version_bootstrap_for_existing_registry(tmp_path: Path)
     row = reopened.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()
     assert row is not None
     assert int(row["version"]) == latest_version
+    bootstrap_row = reopened.conn.execute(
+        "SELECT name FROM schema_version WHERE version = ?", (latest_version,)
+    ).fetchone()
+    assert bootstrap_row is not None
+    assert bootstrap_row["name"] == REGISTRY_IDENTITY_LEGACY_BOOTSTRAP_UNVERIFIED
     reopened.close()
+
+
+def test_unversioned_legacy_registry_mints_unverified_identity(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE datasets (dataset_id TEXT PRIMARY KEY)")
+
+    registry = Registry(path)
+    identity = read_registry_identity(registry.conn)
+    assert str(UUID(identity.registry_uuid)) == identity.registry_uuid
+    assert identity.identity_provenance == (
+        REGISTRY_IDENTITY_LEGACY_BOOTSTRAP_UNVERIFIED
+    )
+    registry.close()
+
+
+def test_sqlite_backup_preserves_logical_registry_identity(tmp_path: Path) -> None:
+    source = Registry(tmp_path / "source.sqlite")
+    source_identity = read_registry_identity(source.conn)
+    with sqlite3.connect(tmp_path / "backup.sqlite") as backup_conn:
+        source.conn.backup(backup_conn)
+    source.close()
+
+    backup = Registry(tmp_path / "backup.sqlite")
+    assert read_registry_identity(backup.conn) == source_identity
+    backup.close()
+
+    unrelated = Registry(tmp_path / "unrelated.sqlite")
+    assert read_registry_identity(unrelated.conn).registry_uuid != (
+        source_identity.registry_uuid
+    )
+    unrelated.close()
+
+
+def test_current_registry_missing_identity_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "registry.sqlite"
+    Registry(path).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE registry_identity")
+
+    with pytest.raises(RegistryIdentityError, match="missing or invalid"):
+        Registry(path)
 
 
 def test_subject_mask_registry_semantics_columns_migrate_existing_registry(tmp_path: Path) -> None:

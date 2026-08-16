@@ -63,9 +63,12 @@ PYTHONPATH=src scripts/py -m fisheye.cohorts freeze \
 ```
 
 The frozen `palette.frozen_cohort_manifest` contains the normalized query and
-its SHA-256, a hash of every registry row consulted, exact dataset/recording/Zarr
-membership, protocol context, subject context, prerequisite statuses, and its
-own canonical manifest hash. Freezing refuses blockers and an empty result.
+its SHA-256, the immutable registry UUID, a hash of every registry row consulted,
+exact dataset/recording/Zarr membership, protocol context, subject context,
+prerequisite statuses, and its own canonical manifest hash. Freezing refuses
+blockers and an empty result. New v2 manifests fail before submission when the
+supplied registry UUID differs from the frozen identity. Historical v1 manifests
+remain readable but do not claim this identity guarantee.
 
 The coverage report distinguishes normalized values from scalar legacy
 provenance candidates. Legacy candidates are diagnostic only; they are not used

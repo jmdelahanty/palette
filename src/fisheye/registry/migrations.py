@@ -281,6 +281,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "acquisition_video_stream_colorimetry",
         "_migration_070_acquisition_video_stream_colorimetry",
     ),
+    (71, "registry_instance_identity", "_migration_071_registry_instance_identity"),
 )
 
 

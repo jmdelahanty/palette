@@ -173,6 +173,18 @@ Source provenance should remain auditable after derived cleanup.
 
 See `docs/registry_repair_playbook.md`.
 
+## Registry Identity
+
+Migration 71 mints one immutable `registry_identity.registry_uuid` for the logical
+registry. Cohort manifests bind this UUID and consumers compare it before using a
+registry. A SQLite backup made after migration 71 intentionally preserves the UUID:
+it is a replica of the same logical registry, not a newly minted registry. An
+unversioned database first opened through the legacy bootstrap path is labeled
+`legacy_bootstrap_unverified` rather than being presented as migration-verified.
+
+The canonical live registry is:
+`/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`.
+
 ## Scheduled Backups
 
 Palette owns its registry backup script:

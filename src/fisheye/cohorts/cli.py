@@ -14,6 +14,7 @@ from fisheye.cohorts.registry import (
     coverage_report,
     freeze_cohort,
     validate_frozen_cohort,
+    validate_frozen_cohort_registry_binding,
 )
 from fisheye.cohorts.spec import CohortSpecError, load_cohort_spec
 
@@ -50,6 +51,11 @@ def _parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate")
     validate.add_argument("manifest", type=Path)
     validate.add_argument("--check-hash", action="store_true")
+    validate.add_argument(
+        "--registry",
+        type=Path,
+        help="Also require the manifest's registry UUID to match this registry.",
+    )
     zarrs = subparsers.add_parser("zarr-list")
     zarrs.add_argument("manifest", type=Path)
     return parser
@@ -72,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "validate":
             payload = json.loads(args.manifest.read_text(encoding="utf-8"))
             errors = validate_frozen_cohort(payload, check_hash=bool(args.check_hash))
+            if not errors and args.registry is not None:
+                errors.extend(
+                    validate_frozen_cohort_registry_binding(payload, args.registry)
+                )
             if errors:
                 raise CohortSelectionError(
                     "invalid frozen cohort: " + "; ".join(errors)

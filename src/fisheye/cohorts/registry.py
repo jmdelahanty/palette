@@ -9,14 +9,21 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any, Callable, Mapping, Sequence
+from uuid import UUID
 
 from fisheye.cohorts.spec import CohortSpec, canonical_json_bytes, canonical_sha256
+from fisheye.registry.identity import (
+    REGISTRY_IDENTITY_PROVENANCES,
+    RegistryIdentityError,
+    read_registry_identity,
+)
 
 
 PLAN_SCHEMA_ID = "palette.cohort_selection_plan"
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_ID = "palette.frozen_cohort_manifest"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
+LEGACY_MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_CANONICALIZATION = "json_sorted_keys_no_manifest_sha256_v1"
 
 
@@ -450,6 +457,12 @@ def build_cohort_plan(registry_path: str | Path, spec: CohortSpec) -> dict[str, 
             "SELECT MAX(version) FROM schema_version"
         ).fetchone()
         schema_version = schema_version_row[0] if schema_version_row else None
+        try:
+            registry_identity = read_registry_identity(conn)
+        except RegistryIdentityError as exc:
+            raise CohortSelectionError(
+                f"registry identity is unavailable or invalid: {exc}"
+            ) from exc
     finally:
         conn.close()
 
@@ -498,6 +511,9 @@ def build_cohort_plan(registry_path: str | Path, spec: CohortSpec) -> dict[str, 
             "path": str(registry),
             "sqlite_user_version": user_version,
             "schema_version": schema_version,
+            "registry_uuid": registry_identity.registry_uuid,
+            "identity_provenance": registry_identity.identity_provenance,
+            "identity_minted_at_utc": registry_identity.minted_at_utc,
             "query_snapshot_sha256": canonical_sha256(snapshot_payload),
             "access_mode": "read_only",
         },
@@ -545,6 +561,14 @@ def _is_sha256_hex(value: str) -> bool:
     )
 
 
+def _is_canonical_uuid(value: object) -> bool:
+    raw = str(value or "").strip()
+    try:
+        return raw == str(UUID(raw))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def validate_frozen_cohort(
     manifest: Mapping[str, Any], *, check_hash: bool = True
 ) -> list[str]:
@@ -553,8 +577,15 @@ def validate_frozen_cohort(
     errors: list[str] = []
     if manifest.get("schema_id") != MANIFEST_SCHEMA_ID:
         errors.append(f"schema_id must be {MANIFEST_SCHEMA_ID!r}")
-    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
-        errors.append(f"schema_version must be {MANIFEST_SCHEMA_VERSION}")
+    manifest_schema_version = manifest.get("schema_version")
+    if manifest_schema_version not in {
+        LEGACY_MANIFEST_SCHEMA_VERSION,
+        MANIFEST_SCHEMA_VERSION,
+    }:
+        errors.append(
+            "schema_version must be "
+            f"{LEGACY_MANIFEST_SCHEMA_VERSION} or {MANIFEST_SCHEMA_VERSION}"
+        )
     if manifest.get("manifest_canonicalization") != MANIFEST_CANONICALIZATION:
         errors.append(
             f"manifest_canonicalization must be {MANIFEST_CANONICALIZATION!r}"
@@ -576,6 +607,16 @@ def validate_frozen_cohort(
             errors.append("registry.query_snapshot_sha256 must be a SHA-256 hex value")
         if registry.get("access_mode") != "read_only":
             errors.append("registry.access_mode must be 'read_only'")
+        if manifest_schema_version == MANIFEST_SCHEMA_VERSION:
+            if not _is_canonical_uuid(registry.get("registry_uuid")):
+                errors.append("registry.registry_uuid must be a canonical UUID")
+            if (
+                registry.get("identity_provenance")
+                not in REGISTRY_IDENTITY_PROVENANCES
+            ):
+                errors.append("registry.identity_provenance is unsupported")
+            if not str(registry.get("identity_minted_at_utc") or "").strip():
+                errors.append("registry.identity_minted_at_utc is required")
     policy = manifest.get("selection_policy")
     if not isinstance(policy, Mapping):
         errors.append("selection_policy must be a mapping")
@@ -625,6 +666,34 @@ def validate_frozen_cohort(
     ):
         errors.append("manifest_sha256 mismatch")
     return errors
+
+
+def validate_frozen_cohort_registry_binding(
+    manifest: Mapping[str, Any], registry_path: str | Path
+) -> list[str]:
+    """Return errors when a v2 manifest is checked against another registry."""
+
+    if manifest.get("schema_version") == LEGACY_MANIFEST_SCHEMA_VERSION:
+        return []
+    registry_record = manifest.get("registry")
+    if not isinstance(registry_record, Mapping):
+        return ["registry must be a mapping"]
+    expected_uuid = str(registry_record.get("registry_uuid") or "").strip()
+    registry = Path(registry_path).expanduser().resolve()
+    try:
+        conn = _connect_readonly(registry)
+        try:
+            actual_identity = read_registry_identity(conn)
+        finally:
+            conn.close()
+    except (FileNotFoundError, RegistryIdentityError, sqlite3.DatabaseError) as exc:
+        return [f"registry identity could not be verified: {exc}"]
+    if actual_identity.registry_uuid != expected_uuid:
+        return [
+            "registry UUID mismatch: "
+            f"manifest={expected_uuid!r}, actual={actual_identity.registry_uuid!r}"
+        ]
+    return []
 
 
 def freeze_cohort(plan: Mapping[str, Any]) -> dict[str, Any]:

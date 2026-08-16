@@ -33,7 +33,7 @@ pip install datasette
 From the repo root:
 
 ```bash
-datasette --immutable /nvme1/palette_registry.sqlite \
+datasette --immutable /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --metadata docs/registry_browser/datasette-metadata.yaml \
   --plugins-dir docs/registry_browser/plugins \
   --static registry-static:docs/registry_browser/static \
