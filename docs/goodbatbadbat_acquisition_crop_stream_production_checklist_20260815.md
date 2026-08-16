@@ -780,9 +780,41 @@ Use commit-pinned, selector-ineligible outputs until all required checks pass.
    failures and deterministic samples from both pixel providers.
 10. [x] Run one complete selector-ineligible recording through strict crop-v2,
     terminal inference, keypoint quality, refinement, and body-frame publication.
-11. [ ] Run one full-recording subject-mask inference, refinement, quality, and
+11. [x] Run one full-recording subject-mask inference, refinement, quality, and
     inactive bundle-publication canary with separate pixel and geometry crop
     authorities plus exact work-unit coverage.
+    - Recording:
+      `2026-08-10T17-20-55Z_arena_1_goodbatbadbat`; 151,478 crop rows over
+      152,035 recording frames.
+    - GPU inference job `153427833` completed from the authenticated hybrid
+      384-pixel cache while binding strict crop-v2 geometry and the exact
+      `palette.subject_mask.complete_recording_work_unit` manifest
+      (`units_digest=abf158dc6efca965eba85349adfff29c78fe7f197f928bcb24d99ff926361da7`).
+      The model transform was an exact 384-to-512 center pad of 64 pixels on
+      every side; no resize was applied.
+    - CPU refinement retry job `153427866` completed after commit `0f432660`
+      taught the existing refinement reader to validate the complete-recording
+      work-unit contract. It retained all 151,478 rows: 148,361 assigned,
+      1,717 assigned-needs-review, and 1,400 explicit failures.
+    - Inactive publication retry job `153427898` completed after commit
+      `fca0908f` made the bundle reader accept the worker's exact full-run
+      `source_crop_row_ids_match` identity mode without reinterpreting it as
+      clip-subset identity. The job took 57 minutes 57 seconds; quality and
+      derived contour-cache construction were the CPU long tail.
+    - Canonical raw, refined, quality, presentation-cache, and bundle successors
+      are complete and visible in direct and consolidated metadata. The dense
+      refined authority is physically present as
+      `uint8[151478, 4, 384, 384]` in 336 outer payload shards.
+    - `validate_subject_mask_bundle_candidate` returned `status=valid` with
+      bundle manifest digest
+      `530cf79d6bc460ad1c165795e0f327247efe91f2f044a971624f2601cafca361`.
+      Every member and the bundle remain selector-ineligible, activation is
+      deferred, and no root subject-mask authority, generation, or lease was
+      created.
+    - This canary is experimental evidence only. Required CI for commits
+      `ccbab195`, `0f432660`, and `fca0908f` remains unrun; do not activate the
+      bundle or launch the corpus campaign until the final branch commit has
+      passed every required check.
 12. [ ] Compare keypoint output with the existing flat/full-frame path using a
    frozen row sample and evidence-derived tolerances.
 13. [ ] Complete Crimson exact-reader and visualization checks.
