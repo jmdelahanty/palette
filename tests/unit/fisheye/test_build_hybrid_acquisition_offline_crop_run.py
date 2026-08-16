@@ -622,6 +622,29 @@ def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
         )
 
 
+def test_canonical_ledger_dry_run_does_not_create_crop_parent(
+    tmp_path: Path,
+) -> None:
+    zarr_path, source_video, ledger_digest = _make_canonical_ledger_source_archive(
+        tmp_path
+    )
+    before = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert "crop_runs" not in before
+
+    report = build_hybrid_acquisition_offline_crop_run(
+        zarr_path,
+        acquisition_ledger_record_sha256=ledger_digest,
+        refined_detect_run="refined_detect_ledger",
+        run_name="crop_hybrid_ledger_dry_run",
+        source_video_path=source_video,
+        apply=False,
+    )
+
+    assert report["status"] == "dry_run"
+    after = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert "crop_runs" not in after
+
+
 def test_production_route_refuses_legacy_crop_run_without_explicit_mode(
     tmp_path: Path,
 ) -> None:
