@@ -156,6 +156,13 @@ def _source_evidence(source: Any) -> dict[str, Any]:
         }
     if type(source) is BoundKeypointPositionSource:
         return {
+            "authority_mode": getattr(source, "authority_mode", "canonical_selector"),
+            "keypoint_bundle_authority": getattr(
+                source, "keypoint_bundle_authority", None
+            ),
+            "keypoint_bundle_authority_sha256": getattr(
+                source, "keypoint_bundle_authority_digest", None
+            ),
             "anatomy_source_binding": source.source_binding_record,
             "anatomy_source_binding_sha256": source.source_binding_digest,
             "run_manifest_sha256": source.run_manifest_digest,
@@ -166,6 +173,8 @@ def _source_evidence(source: Any) -> dict[str, Any]:
             "pose_schema_binding_sha256": source.pose_schema_binding_digest,
         }
     return {
+        "authority_mode": getattr(source, "authority_mode", "family_selector"),
+        "bundle_run_path": getattr(source, "bundle_run_path", None),
         "anatomy_source_binding": source.source_binding_record,
         "anatomy_source_binding_sha256": source.source_binding_digest,
         "source_payload_sha256": source.source_payload_digest,

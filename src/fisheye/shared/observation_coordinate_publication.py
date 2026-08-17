@@ -4293,6 +4293,25 @@ def load_persisted_detection_observation_geometry(
     )
 
 
+@proof_verification_operation
+def load_persisted_ineligible_detection_observation_geometry(
+    root_node: Any,
+    rowset_path: str,
+) -> BoundDetectionObservationGeometry:
+    """Load one complete detection candidate that remains selector-ineligible.
+
+    This value-level loader does not authorize scientific consumption by
+    itself.  A caller must separately prove the exact immutable candidate or
+    bundle authority that permits the named ineligible rowset.
+    """
+
+    return _load_persisted_detection_observation_geometry(
+        root_node,
+        rowset_path,
+        require_selector_eligible=False,
+    )
+
+
 def _load_persisted_collection_proxy_successor_geometry(
     root_node: Any,
     rowset_path: str,
@@ -4805,6 +4824,7 @@ __all__ = [
     "load_persisted_crop_observation_geometry",
     "load_persisted_collection_proxy_successor_geometry",
     "load_persisted_detection_observation_geometry",
+    "load_persisted_ineligible_detection_observation_geometry",
     "load_persisted_ordinary_crop_observation_geometry",
     "load_persisted_sampled_training_detection_geometry",
     "load_persisted_source_camera_position_surface",

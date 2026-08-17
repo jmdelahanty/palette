@@ -1,10 +1,11 @@
 """Strict source adapter for subject-position keypoints.
 
 This module is deliberately narrower than the keypoint publication writers.  It
-consumes one explicitly named, current canonical keypoint coordinate run and
-binds its source-camera landmark arrays to the anatomy-profile expression
-interface.  It never resolves a historical run, an active production-bundle
-member, or another measurement modality as a fallback.
+consumes one explicitly named keypoint coordinate run and binds its source-camera
+landmark arrays to the anatomy-profile expression interface.  The default mode
+requires the current canonical selector.  An explicitly named canary mode may
+bind one sealed raw-keypoint member from the root bundle authority; it never
+falls back between those authorities or to another measurement modality.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -30,6 +32,8 @@ from fisheye.shared.keypoint_coordinate_publication import (
     BoundKeypointCoordinateContext,
     BoundKeypointCoordinateSurfaces,
     load_persisted_keypoint_coordinate_surfaces,
+    load_persisted_ineligible_keypoint_coordinate_surfaces,
+    require_bound_ineligible_keypoint_coordinate_surfaces,
     require_bound_keypoint_coordinate_surfaces,
 )
 from fisheye.shared.pixel_frame_authority import (
@@ -44,7 +48,19 @@ from fisheye.shared.zarr.keypoint_manifest import (
     KEYPOINT_RUN_MANIFEST_ATTRIBUTE,
     keypoint_metadata_declarations_digest,
     keypoint_skeleton_digest,
+    keypoint_skeleton_document,
     validate_keypoint_run_manifest,
+)
+from fisheye.shared.zarr.keypoint_bundle_activation import (
+    KEYPOINT_BUNDLE_AUTHORITY_ATTR,
+    KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR,
+    KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR,
+    KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_ID,
+    KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_VERSION,
+    resolve_active_keypoint_bundle_from_root,
+)
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    ATOMIC_PUBLICATION_OWNER_ATTR,
 )
 from fisheye.shared.zarr.keypoint_publication import (
     keypoint_metadata_declaration_maps,
@@ -59,6 +75,7 @@ from fisheye.shared.zarr.metadata_equivalence import (
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
+from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
@@ -74,7 +91,17 @@ from fisheye.shared.coordinate_surface_contract import (
 
 SOURCE_MODALITY = "keypoint"
 SOURCE_KIND = "canonical_keypoint_coordinate_selector"
+SEALED_BUNDLE_SOURCE_KIND = "sealed_keypoint_bundle_member_canary"
 CANONICAL_COORDINATE_CONTRACT = "canonical_v2"
+KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR = "canonical_selector"
+KEYPOINT_AUTHORITY_MODE_SEALED_BUNDLE_CANARY = "sealed_keypoint_bundle_canary_v1"
+SEALED_BUNDLE_PRODUCTION_SELECTOR_ACTIVATION = (
+    "deferred_separate_reviewed_change"
+)
+_PUBLICATION_OWNER_UUID = re.compile(r"^[0-9a-f]{32}$")
+_SELECTOR_ALIAS_NAMES = frozenset(
+    {"latest", "latest_complete", "latest_pending", "authoritative_run"}
+)
 
 _BOUND_SOURCE_SEAL = object()
 _REQUIRED_SOURCE_CROP_ARRAYS = (
@@ -97,6 +124,7 @@ class KeypointPositionSourcePolicy:
 
     anatomy_profile: AnatomyProfile | Mapping[str, Any]
     binding_id: str
+    authority_mode: str = KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR
 
 
 @dataclass(frozen=True, init=False)
@@ -128,6 +156,9 @@ class BoundKeypointPositionSource:
     run_manifest_digest: str
     logical_content_digest: str
     metadata_declarations_digest: str
+    authority_mode: str
+    keypoint_bundle_authority: Mapping[str, Any] | None
+    keypoint_bundle_authority_digest: str | None
     _analysis_zarr: str | Path | Any = field(repr=False, compare=False)
     _anatomy_profile: AnatomyProfile = field(repr=False, compare=False)
     _binding_id: str = field(repr=False, compare=False)
@@ -258,6 +289,208 @@ def _require_current_selector(
         )
 
 
+def _validate_bundle_authority_direct_consolidated(
+    analysis_zarr: str | Path | Any,
+    *,
+    authority: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Require the root authority to agree in direct and consolidated metadata."""
+
+    if not isinstance(analysis_zarr, (str, Path)):
+        raise KeypointPositionSourceError(
+            "Sealed keypoint bundle authority requires the analysis Zarr path "
+            "for direct/consolidated root validation."
+        )
+    archive = Path(analysis_zarr).expanduser().resolve()
+    try:
+        direct_root = open_zarr_root(
+            archive,
+            mode="r",
+            use_consolidated=False,
+        )
+        consolidated_root = open_zarr_root(
+            archive,
+            mode="r",
+            use_consolidated=True,
+        )
+    except Exception as exc:
+        raise KeypointPositionSourceError(
+            f"Unable to open direct/consolidated root authority: {exc}."
+        ) from exc
+    direct_attrs = getattr(direct_root, "attrs", {})
+    consolidated_attrs = getattr(consolidated_root, "attrs", {})
+    for name in (
+        KEYPOINT_BUNDLE_AUTHORITY_ATTR,
+        KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR,
+        KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR,
+    ):
+        if (
+            (name in direct_attrs) != (name in consolidated_attrs)
+            or direct_attrs.get(name) != consolidated_attrs.get(name)
+        ):
+            raise KeypointPositionSourceError(
+                "Direct and consolidated root keypoint bundle authority state differs."
+            )
+    direct_authority = direct_attrs.get(KEYPOINT_BUNDLE_AUTHORITY_ATTR)
+    consolidated_authority = consolidated_attrs.get(KEYPOINT_BUNDLE_AUTHORITY_ATTR)
+    if direct_authority != consolidated_authority:
+        raise KeypointPositionSourceError(
+            "Direct and consolidated root keypoint_bundle_authority differ."
+        )
+    if KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR in direct_attrs:
+        raise KeypointPositionSourceError(
+            "The root keypoint bundle authority is still under an activation lease."
+        )
+    if direct_authority != dict(authority):
+        raise KeypointPositionSourceError(
+            "Root keypoint_bundle_authority differs from the opened authority."
+        )
+    return dict(direct_authority)
+
+
+def _require_sealed_bundle_authority(
+    root: Any,
+    analysis_zarr: str | Path | Any,
+    *,
+    run: Any,
+    parent: Any,
+    run_path: str,
+    run_id: str,
+    manifest: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], str]:
+    """Bind one raw keypoint member from the committed root bundle authority."""
+
+    if run_id in _SELECTOR_ALIAS_NAMES:
+        raise KeypointPositionSourceError(
+            "Sealed keypoint bundle canaries require a concrete run ID; selector "
+            "aliases are forbidden."
+        )
+    try:
+        resolved = resolve_active_keypoint_bundle_from_root(root)
+    except Exception as exc:
+        raise KeypointPositionSourceError(
+            f"Sealed keypoint bundle authority is invalid: {exc}."
+        ) from exc
+    if not isinstance(resolved, Mapping):
+        raise KeypointPositionSourceError(
+            "The root has no committed keypoint bundle authority."
+        )
+    authority = resolved.get("authority")
+    if not isinstance(authority, Mapping):
+        raise KeypointPositionSourceError(
+            "The root keypoint bundle authority is not one object."
+        )
+    if (
+        authority.get("schema_id") != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_ID
+        or authority.get("schema_version")
+        != KEYPOINT_BUNDLE_AUTHORITY_SCHEMA_VERSION
+    ):
+        raise KeypointPositionSourceError(
+            "The root keypoint bundle authority schema or version is unsupported."
+        )
+    persisted_authority = _validate_bundle_authority_direct_consolidated(
+        analysis_zarr,
+        authority=authority,
+    )
+    if persisted_authority != dict(authority):
+        raise KeypointPositionSourceError(
+            "The persisted root keypoint bundle authority changed during binding."
+        )
+
+    members = authority.get("members")
+    raw_member = members.get("raw_keypoints") if isinstance(members, Mapping) else None
+    expected_member_fields = {
+        "role",
+        "run_id",
+        "run_path",
+        "publication_owner_uuid",
+        "manifest_payload_digest",
+        "manifest_document_digest",
+        "logical_content_digest",
+    }
+    if not isinstance(raw_member, Mapping) or set(raw_member) != expected_member_fields:
+        raise KeypointPositionSourceError(
+            "The root keypoint bundle raw_keypoints member is malformed."
+        )
+    if (
+        raw_member.get("role") != "raw_keypoints"
+        or raw_member.get("run_id") != run_id
+        or raw_member.get("run_path") != run_path
+        or run_path != f"keypoints_runs/{run_id}"
+    ):
+        raise KeypointPositionSourceError(
+            "The root authority does not name the exact requested raw keypoint run."
+        )
+
+    logical_content = payload.get("logical_content")
+    logical_digest = (
+        logical_content.get("digest")
+        if isinstance(logical_content, Mapping)
+        else None
+    )
+    manifest_payload_digest = manifest.get("payload_digest")
+    manifest_document_digest = canonical_json_sha256(manifest)
+    if (
+        raw_member.get("manifest_payload_digest") != manifest_payload_digest
+        or raw_member.get("manifest_document_digest") != manifest_document_digest
+        or raw_member.get("logical_content_digest") != logical_digest
+    ):
+        raise KeypointPositionSourceError(
+            "The root raw keypoint member does not bind the exact manifest or "
+            "logical-content digest."
+        )
+
+    attrs = getattr(run, "attrs", {})
+    if (
+        attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT
+        or attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or attrs.get("status") != RUN_STATUS_COMPLETE
+        or attrs.get("palette_run_completion_status") != RUN_STATUS_COMPLETE
+        or attrs.get("stage_selector_eligible") is not False
+        or attrs.get("production_candidate") is not True
+        or attrs.get("production_selector_activation")
+        != SEALED_BUNDLE_PRODUCTION_SELECTOR_ACTIVATION
+    ):
+        raise KeypointPositionSourceError(
+            "The raw keypoint bundle member is not a sealed selector-ineligible "
+            "production candidate."
+        )
+    owner = attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR)
+    if (
+        type(owner) is not str
+        or _PUBLICATION_OWNER_UUID.fullmatch(owner) is None
+        or raw_member.get("publication_owner_uuid") != owner
+    ):
+        raise KeypointPositionSourceError(
+            "The raw keypoint bundle member publication owner is invalid or stale."
+        )
+    try:
+        complete = is_run_complete_in_parent(parent, run)
+    except Exception as exc:
+        raise KeypointPositionSourceError(
+            f"Unable to validate raw keypoint bundle completion: {exc}."
+        ) from exc
+    if complete is not True:
+        raise KeypointPositionSourceError(
+            "The raw keypoint bundle member is not complete under its parent policy."
+        )
+
+    parent_attrs = getattr(parent, "attrs", {})
+    root_attrs = getattr(root, "attrs", {})
+    selector_refs = (
+        parent_attrs.get("latest"),
+        parent_attrs.get("latest_complete"),
+        parent_attrs.get("latest_pending"),
+        parent_attrs.get("authoritative_run"),
+    )
+    if run_id in selector_refs or root_attrs.get("current_keypoint_group_path") == run_path:
+        raise KeypointPositionSourceError(
+            "The sealed raw keypoint member is referenced by a family selector."
+        )
+    return _readonly_mapping(authority), canonical_json_sha256(authority)
+
+
 def _manifest_and_payload(run: Any, *, run_id: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     manifest = getattr(run, "attrs", {}).get(KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
     if not isinstance(manifest, Mapping):
@@ -378,24 +611,68 @@ def _resolve_anatomy_binding(
     return profile, binding
 
 
+def _require_authority_mode(value: Any) -> str:
+    if value not in {
+        KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR,
+        KEYPOINT_AUTHORITY_MODE_SEALED_BUNDLE_CANARY,
+    }:
+        raise KeypointPositionSourceError(
+            "Unsupported keypoint position authority mode; use the canonical "
+            "selector or the explicit sealed-bundle canary mode."
+        )
+    return str(value)
+
+
 def _bind_source_schema(
     binding: Mapping[str, Any],
     pose_binding: Mapping[str, Any],
 ) -> tuple[str, str, tuple[str, ...], dict[str, int]]:
     source_schema = binding.get("source_schema")
     pose_schema = pose_binding.get("pose_schema")
-    package = source_schema.get("package_payload") if isinstance(source_schema, Mapping) else None
-    if not isinstance(source_schema, Mapping) or not isinstance(package, Mapping):
+    if not isinstance(source_schema, Mapping):
         raise KeypointPositionSourceError(
-            "Keypoint AnatomyProfile binding lacks an exact pose-schema package."
+            "Keypoint AnatomyProfile binding lacks exact skeleton authority."
         )
     if not isinstance(pose_schema, Mapping):
         raise KeypointPositionSourceError("Keypoint run lacks its bound pose schema.")
-    for field_name in ("skeleton_id", "kpt_shape", "keypoint_labels", "nodes", "edges"):
-        if pose_schema.get(field_name) != package.get(field_name):
+    authority = source_schema.get("authority")
+    if authority == "pose_schema_package":
+        expected_schema = source_schema.get("package_payload")
+        if not isinstance(expected_schema, Mapping):
             raise KeypointPositionSourceError(
-                f"Anatomy source binding disagrees with pose schema field {field_name!r}."
+                "Keypoint AnatomyProfile binding lacks an exact pose-schema package."
             )
+        for field_name in (
+            "skeleton_id",
+            "kpt_shape",
+            "keypoint_labels",
+            "nodes",
+            "edges",
+        ):
+            if pose_schema.get(field_name) != expected_schema.get(field_name):
+                raise KeypointPositionSourceError(
+                    "Anatomy source binding disagrees with pose schema field "
+                    f"{field_name!r}."
+                )
+    elif authority == "keypoint_skeleton_semantics":
+        expected_document = source_schema.get("skeleton_document")
+        actual_document = keypoint_skeleton_document(pose_binding)
+        if actual_document != expected_document:
+            raise KeypointPositionSourceError(
+                "Anatomy source binding disagrees with the exact keypoint skeleton "
+                "semantics document."
+            )
+        if keypoint_skeleton_digest(pose_binding) != source_schema.get(
+            "skeleton_sha256"
+        ):
+            raise KeypointPositionSourceError(
+                "Anatomy source binding disagrees with the exact keypoint skeleton "
+                "semantics digest."
+            )
+    else:
+        raise KeypointPositionSourceError(
+            "Keypoint AnatomyProfile binding uses unsupported skeleton authority."
+        )
     labels = tuple(str(item) for item in pose_schema["keypoint_labels"])
     role_to_index: dict[str, int] = {}
     for item in binding["role_bindings"]:
@@ -488,18 +765,33 @@ def load_bound_keypoint_position_source(
     normalized_path, run_id = _canonical_run_path(run_path)
     if not isinstance(policy, KeypointPositionSourcePolicy):
         raise KeypointPositionSourceError("A strict keypoint source policy is required.")
+    authority_mode = _require_authority_mode(policy.authority_mode)
     profile, binding = _resolve_anatomy_binding(policy)
     root = _open_root(analysis_zarr)
     parent = _require_group(root, "keypoints_runs", label="keypoint parent")
     run = _require_group(root, normalized_path, label="keypoint run")
-    _require_current_selector(
-        root,
-        parent,
-        run,
-        run_path=normalized_path,
-        run_id=run_id,
-    )
+    authority_record: Mapping[str, Any] | None = None
+    authority_digest: str | None = None
+    if authority_mode == KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR:
+        _require_current_selector(
+            root,
+            parent,
+            run,
+            run_path=normalized_path,
+            run_id=run_id,
+        )
     manifest, payload = _manifest_and_payload(run, run_id=run_id)
+    if authority_mode == KEYPOINT_AUTHORITY_MODE_SEALED_BUNDLE_CANARY:
+        authority_record, authority_digest = _require_sealed_bundle_authority(
+            root,
+            analysis_zarr,
+            run=run,
+            parent=parent,
+            run_path=normalized_path,
+            run_id=run_id,
+            manifest=manifest,
+            payload=payload,
+        )
     metadata_digest = _validate_published_metadata(
         analysis_zarr,
         run_path=normalized_path,
@@ -531,9 +823,16 @@ def load_bound_keypoint_position_source(
         for name in KEYPOINT_SCHEMA_V2.binding_paths
     }
     dimensions = _dimensions(payload)
-    surfaces = require_bound_keypoint_coordinate_surfaces(
-        load_persisted_keypoint_coordinate_surfaces(root, normalized_path)
-    )
+    if authority_mode == KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR:
+        surfaces = require_bound_keypoint_coordinate_surfaces(
+            load_persisted_keypoint_coordinate_surfaces(root, normalized_path)
+        )
+    else:
+        surfaces = require_bound_ineligible_keypoint_coordinate_surfaces(
+            load_persisted_ineligible_keypoint_coordinate_surfaces(
+                root, normalized_path
+            )
+        )
     coordinate_descriptor, source_camera_frame = _validate_source_camera_surface(surfaces)
     keypoints_img = _read_array(
         coordinate_descriptor.coordinate_node,
@@ -583,7 +882,11 @@ def load_bound_keypoint_position_source(
     logical_content = payload["logical_content"]
     source = BoundKeypointPositionSource(
         source_modality=SOURCE_MODALITY,
-        source_kind=SOURCE_KIND,
+        source_kind=(
+            SOURCE_KIND
+            if authority_mode == KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR
+            else SEALED_BUNDLE_SOURCE_KIND
+        ),
         run_path=normalized_path,
         run_id=run_id,
         row_identity=row_identity,
@@ -607,6 +910,9 @@ def load_bound_keypoint_position_source(
         run_manifest_digest=canonical_json_sha256(manifest),
         logical_content_digest=str(logical_content["digest"]),
         metadata_declarations_digest=metadata_digest,
+        authority_mode=authority_mode,
+        keypoint_bundle_authority=authority_record,
+        keypoint_bundle_authority_digest=authority_digest,
         _analysis_zarr=analysis_zarr,
         _anatomy_profile=profile,
         _binding_id=policy.binding_id,
@@ -635,6 +941,7 @@ def revalidate_bound_keypoint_position_source(
         policy=KeypointPositionSourcePolicy(
             anatomy_profile=source._anatomy_profile,
             binding_id=source._binding_id,
+            authority_mode=source.authority_mode,
         ),
     )
     for name in (
@@ -647,6 +954,9 @@ def revalidate_bound_keypoint_position_source(
         "run_manifest_digest",
         "logical_content_digest",
         "metadata_declarations_digest",
+        "authority_mode",
+        "keypoint_bundle_authority",
+        "keypoint_bundle_authority_digest",
     ):
         if getattr(current, name) != getattr(source, name):
             raise KeypointPositionSourceError(
@@ -684,6 +994,10 @@ __all__ = [
     "BoundKeypointPositionSource",
     "KeypointPositionSourceError",
     "KeypointPositionSourcePolicy",
+    "KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR",
+    "KEYPOINT_AUTHORITY_MODE_SEALED_BUNDLE_CANARY",
+    "SEALED_BUNDLE_PRODUCTION_SELECTOR_ACTIVATION",
+    "SEALED_BUNDLE_SOURCE_KIND",
     "SOURCE_KIND",
     "SOURCE_MODALITY",
     "load_bound_keypoint_position_source",

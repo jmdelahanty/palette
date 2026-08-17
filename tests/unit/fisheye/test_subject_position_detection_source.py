@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,7 @@ from fisheye.shared.subject_position_expression import (
     DETECTION_BBOX_CENTROID_ESTIMATOR_ID,
     evaluate_estimator_profile,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 _DIGEST_A = "a" * 64
@@ -104,6 +106,23 @@ class _Geometry:
     temporal_authority: _Authority
 
 
+class _Group:
+    def __init__(self, children=None, *, attrs=None):
+        self._children = dict(children or {})
+        self.attrs = dict(attrs or {})
+
+    def __getitem__(self, key):
+        return self._children[key]
+
+
+def _plain_json(value):
+    if isinstance(value, Mapping):
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_json(item) for item in value]
+    return value
+
+
 def _manifest() -> dict[str, object]:
     return {
         "schema_version": 3,
@@ -122,10 +141,39 @@ def _manifest() -> dict[str, object]:
     }
 
 
+def _selector_ineligible_manifest() -> dict[str, object]:
+    manifest = _manifest()
+    payload = manifest["payload"]
+    assert isinstance(payload, dict)
+    payload["run_id"] = "candidate_v3"
+    publication = payload["publication"]
+    assert isinstance(publication, dict)
+    publication["stage_selector_eligible"] = False
+    return manifest
+
+
+def _selector_ineligible_root(manifest: dict[str, object]) -> _Group:
+    run = _Group(
+        attrs={
+            "status": "complete",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "immutable_snapshot": True,
+            "production_candidate": True,
+            "production_selector_activation": (
+                detection_source.DETECTION_POSITION_CANARY_PRODUCTION_SELECTOR_ACTIVATION
+            ),
+            "run_manifest": manifest,
+        }
+    )
+    return _Group({"detect_runs": _Group({"candidate_v3": run})})
+
+
 def _fixture(
     *,
     keys: np.ndarray | None = None,
     descriptor: _Descriptor | None = None,
+    run_path: str = "detect_runs/canonical_v1",
 ) -> tuple[object, _Geometry, dict[str, np.ndarray]]:
     keys = np.asarray(
         np.array([101, 202], dtype="<u8") if keys is None else keys,
@@ -134,9 +182,9 @@ def _fixture(
     frames = np.array([4, 9], dtype="<i8")
     bbox = np.array([[0.0, 0.0, 2.0, 4.0], [1.0, 1.0, 3.0, 5.0]], dtype="<f4")
     identity = _Identity(
-        rowset_path="detect_runs/canonical_v1",
-        key_array_path="detect_runs/canonical_v1/instance_key",
-        record_ref="/detect_runs/canonical_v1@row_identity_contract",
+        rowset_path=run_path,
+        key_array_path=f"{run_path}/instance_key",
+        record_ref=f"/{run_path}@row_identity_contract",
         record_sha256=_DIGEST_A,
         contract=_IdentityContract(
             key_array=_IdentityKey(
@@ -155,9 +203,9 @@ def _fixture(
             ),
             bbox_source_camera_frame=bbox_frame,
         ),
-        bbox_projection=_Authority("/detect_runs/canonical_v1@bbox_projection", _DIGEST_A),
+        bbox_projection=_Authority(f"/{run_path}@bbox_projection", _DIGEST_A),
         temporal_authority=_Authority(
-            "/detect_runs/canonical_v1@source_row_temporal_authority", _DIGEST_B
+            f"/{run_path}@source_row_temporal_authority", _DIGEST_B
         ),
     )
     values = {
@@ -181,6 +229,11 @@ def _install(monkeypatch, geometry: _Geometry, values: dict[str, np.ndarray]):
     monkeypatch.setattr(
         detection_source,
         "load_persisted_detection_observation_geometry",
+        lambda root, path: geometry,
+    )
+    monkeypatch.setattr(
+        detection_source,
+        "load_persisted_ineligible_detection_observation_geometry",
         lambda root, path: geometry,
     )
     monkeypatch.setattr(
@@ -210,6 +263,141 @@ def test_caller_cannot_override_canonical_detection_validity(monkeypatch):
             "detect_runs/canonical_v1",
             upstream_validity={"values": np.array([True, True], dtype=bool)},
         )
+
+
+def test_explicit_selector_ineligible_candidate_is_accepted_as_canary_only(
+    monkeypatch,
+):
+    root = _selector_ineligible_root(_selector_ineligible_manifest())
+    root_node, geometry, values = _fixture(run_path="detect_runs/candidate_v3")
+    _install(monkeypatch, geometry, values)
+    monkeypatch.setattr(
+        detection_source,
+        "validate_canonical_detection_run_manifest",
+        lambda manifest: (),
+    )
+    monkeypatch.setattr(
+        detection_source,
+        "load_persisted_detection_observation_geometry",
+        lambda root, path: (_ for _ in ()).throw(
+            AssertionError("eligible geometry loader used for canary")
+        ),
+    )
+
+    source = detection_source.load_persisted_selector_ineligible_detection_position_source(
+        root,
+        "detect_runs/candidate_v3",
+    )
+
+    assert source.authority_policy == (
+        detection_source.DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID
+    )
+    authority = source.source_binding_record["authority"]
+    assert authority["policy_id"] == (
+        detection_source.DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID
+    )
+    assert authority["evidence"]["run_path"] == "detect_runs/candidate_v3"
+    assert authority["evidence"]["selector_state"]["resolved_by"] == (
+        "explicit_run_path_only"
+    )
+    assert authority["evidence_sha256"] == canonical_json_sha256(
+        _plain_json(authority["evidence"])
+    )
+    assert source.source_binding_digest == canonical_json_sha256(
+        _plain_json(source.source_binding_record)
+    )
+    # The active path still asks its existing active-selector authority for the
+    # same exact run and therefore rejects this candidate.
+    with pytest.raises(ValueError, match="active authority"):
+        monkeypatch.setattr(
+            detection_source,
+            "require_active_coordinate_canonical_detection",
+            lambda root, group_path: (_ for _ in ()).throw(
+                ValueError("active authority rejects selector-ineligible candidate")
+            ),
+        )
+        detection_source.load_persisted_detection_position_source(
+            root,
+            "detect_runs/candidate_v3",
+        )
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "message"),
+    [
+        ("stage_selector_eligible", True, "selector ineligible"),
+        ("production_candidate", False, "production-candidate"),
+        (
+            "production_selector_activation",
+            "deferred_separate_reviewed_change",
+            "activation marker",
+        ),
+    ],
+)
+def test_selector_ineligible_candidate_rejects_wrong_publication_markers(
+    monkeypatch,
+    attribute,
+    value,
+    message,
+):
+    manifest = _selector_ineligible_manifest()
+    root = _selector_ineligible_root(manifest)
+    root["detect_runs"]["candidate_v3"].attrs[attribute] = value
+    _root_node, geometry, values = _fixture(run_path="detect_runs/candidate_v3")
+    _install(monkeypatch, geometry, values)
+    monkeypatch.setattr(
+        detection_source,
+        "validate_canonical_detection_run_manifest",
+        lambda manifest: (),
+    )
+
+    with pytest.raises(detection_source.DetectionPositionSourceError, match=message):
+        detection_source.load_persisted_selector_ineligible_detection_position_source(
+            root,
+            "detect_runs/candidate_v3",
+        )
+
+
+def test_selector_ineligible_candidate_rejects_invalid_manifest(monkeypatch):
+    root = _selector_ineligible_root(_selector_ineligible_manifest())
+    _root_node, geometry, values = _fixture(run_path="detect_runs/candidate_v3")
+    _install(monkeypatch, geometry, values)
+    monkeypatch.setattr(
+        detection_source,
+        "validate_canonical_detection_run_manifest",
+        lambda manifest: ("payload_digest mismatch",),
+    )
+
+    with pytest.raises(
+        detection_source.DetectionPositionSourceError,
+        match="manifest is invalid",
+    ):
+        detection_source.load_persisted_selector_ineligible_detection_position_source(
+            root,
+            "detect_runs/candidate_v3",
+        )
+
+
+def test_selector_ineligible_candidate_revalidation_rechecks_policy_and_evidence(
+    monkeypatch,
+):
+    root = _selector_ineligible_root(_selector_ineligible_manifest())
+    _root_node, geometry, values = _fixture(run_path="detect_runs/candidate_v3")
+    _install(monkeypatch, geometry, values)
+    monkeypatch.setattr(
+        detection_source,
+        "validate_canonical_detection_run_manifest",
+        lambda manifest: (),
+    )
+    source = detection_source.load_persisted_selector_ineligible_detection_position_source(
+        root,
+        "detect_runs/candidate_v3",
+    )
+    assert source.revalidate() is source
+
+    root["detect_runs"]["candidate_v3"].attrs["production_candidate"] = False
+    with pytest.raises(detection_source.DetectionPositionSourceError, match="production-candidate"):
+        source.revalidate()
 
 
 def test_schema_invalid_detection_row_fails_closed(monkeypatch):

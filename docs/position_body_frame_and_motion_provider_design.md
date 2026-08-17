@@ -130,6 +130,13 @@ labeled left and right eyes. String equality between labels in two schemas is
 not a semantic join; consumers validate the profile identity, source-schema
 identity, explicit role bindings, and their digests.
 
+Keypoint source identity may be supplied either by an exact packaged pose
+schema or by the model-independent skeleton-semantics document already sealed
+inside a validated model-schema binding. The latter includes ordered labels,
+nodes, directed ordered edges, runtime shape, and heading semantics. It does
+not normalize edge direction or discard the original model-schema binding;
+both exact digests remain in downstream provenance.
+
 The estimator profile selects the shared recipe plus an exact source modality
 and validity policy. The materialized run binds the anatomy profile, source
 schema, role bindings, estimator, and source arrays. This lets keypoint and mask
@@ -551,12 +558,17 @@ source identity, canonical coordinate descriptor, and required directed
 transform. Equal row counts, matching label strings, and caller assertions are
 not sufficient.
 
-The initial Phase 2 source-currentness policy is deliberately narrow. A
-position adapter consumes one explicitly named run only when that run is the
-current, complete, selector-eligible canonical coordinate publication for its
-source family. Keypoint production-bundle members that remain
-selector-ineligible are a different authority and are not an implicit fallback.
-Supporting those members later requires a separately named adapter and policy.
+Phase 2 keeps two source-authority modes separate. The default position adapter
+mode consumes one explicitly named run only when that run is the current,
+complete, selector-eligible canonical coordinate publication for its source
+family. The canary-only production-member mode consumes one explicitly named,
+complete, selector-ineligible run only when an immutable producer authority
+binds that exact member and manifest: the detection candidate's persisted
+publication record, the root keypoint-bundle authority, or an explicitly named
+subject-mask bundle. The production-member mode never resolves a selector,
+never promotes the source, and is not an implicit fallback from the default
+mode. Its distinct authority record and digest remain in the position-run
+lineage.
 
 The four initial estimator profiles are detection bounding-box centroid,
 keypoint anatomical-triad equal mean, subject-mask anatomical-component-triad
@@ -589,6 +601,9 @@ success and failure reasons.
 - [x] Add a subject-mask source adapter that validates component-label and
       availability authority, exact `centroid_xy`/`centroid_valid` surfaces,
       row identity, derivation records, and source-camera coordinate binding.
+- [x] Add explicit canary-only adapters for sealed selector-ineligible
+      detection candidates, keypoint-bundle members, and subject-mask-bundle
+      members without weakening selector-current source policies.
 - [x] Validate direct and consolidated metadata before completion.
 - [x] Preserve sources and publish retries as new immutable attempts.
 
@@ -735,6 +750,34 @@ Metric-specific occupancy, motion, and heading offers remain pending.
 
 ### Phase 5: canaries, migration, and activation
 
+#### GoodBatBadBat authority preflight (2026-08-17)
+
+The first reviewed-recording preflight used
+`2026-08-10T17-20-55Z_arena_2_goodbatbadbat`. It performed no Zarr writes and
+hashed the root plus every relevant source `zarr.json` before and after; all
+hashes were unchanged. The source runs are complete immutable,
+selector-ineligible production candidates or sealed bundle members. The
+explicit production-member adapters validate those authorities without
+altering selectors or eligibility, then fail closed at these older coordinate
+publication boundaries:
+
+- the detection v3 successor has a valid run manifest but does not declare the
+  complete `canonical_v2` observation-coordinate publication;
+- the five-point keypoint run has exact `pose_skel_traditional_v2` semantics,
+  now represented by a separately digested anatomy binding, but its complete
+  keypoint coordinate context also predates `canonical_v2`; and
+- the refined subject-mask member predates the modern unguessable coordinate
+  publication owner and complete refined-mask coordinate context.
+
+These are source-publication migration gaps, not numeric provider failures.
+They require new immutable, selector-ineligible coordinate successors (and
+new bundle successors where applicable). Readers must not infer the missing
+authority from array shape, an atomic writer owner, or a newer manifest. The
+existing detection, keypoint, refined-mask, bundle, and selector artifacts
+remain unchanged.
+
+- [ ] Publish selector-ineligible canonical coordinate successors for this
+      recording without changing any source selector.
 - [ ] Materialize all initial providers for one reviewed zebrafish recording.
 - [ ] Compare offsets, valid coverage, speed, occupancy, and bout sensitivity
       without selecting a production default.

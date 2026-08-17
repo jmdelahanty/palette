@@ -157,6 +157,45 @@ def test_zebrafish_profile_has_strict_roles_recipes_and_valid_bindings() -> None
         "keypoint",
         "subject_mask",
     }
+    keypoint_binding_v2 = profile.binding(
+        "zebrafish_larva_keypoint_traditional_v2_v1"
+    )
+    assert keypoint_binding_v2["profile_id"] == "zebrafish_larva_anatomy.v1"
+    assert (
+        keypoint_binding_v2["source_schema"]["authority"]
+        == "keypoint_skeleton_semantics"
+    )
+    assert keypoint_binding_v2["source_schema"]["skeleton_sha256"] == (
+        "6eeb4bece23774d3c75e76664a414ea93e84d4f6102293f6cce6f065793954ef"
+    )
+    assert source_schema_sha256(keypoint_binding_v2["source_schema"]) == (
+        keypoint_binding_v2["source_schema"]["skeleton_sha256"]
+    )
+    assert keypoint_binding_v2["source_schema"]["skeleton_document"][
+        "skeleton_id"
+    ] == "pose_skel_traditional_v2"
+    assert keypoint_binding_v2["source_schema"]["skeleton_document"]["edges"] == [
+        [0, 1],
+        [0, 2],
+        [1, 2],
+        [1, 3],
+        [2, 3],
+        [0, 4],
+    ]
+    assert keypoint_binding_v2["source_local_compatibility"] == {
+        "kind": "inline_pose_heading",
+        "metadata_path": "metadata.heading_computation",
+        "authority": "source_schema",
+    }
+    assert {
+        item["role_id"]: item["source_label"]
+        for item in keypoint_binding_v2["role_bindings"]
+    } == {
+        "swim_bladder": "swim_bladder",
+        "eye_left": "eye_left",
+        "eye_right": "eye_right",
+    }
+
     keypoint_binding = profile.binding(
         "zebrafish_larva_keypoint_traditional_v3_v1"
     )
@@ -172,6 +211,7 @@ def test_zebrafish_profile_has_strict_roles_recipes_and_valid_bindings() -> None
     mask_binding = profile.binding("zebrafish_larva_subject_mask_lr_v1")
     assert mask_binding["profile_id"] == "zebrafish_larva_anatomy.v1"
     assert "subject_body_centroid" in mask_binding["advertised_recipe_ids"]
+    assert "subject_body_centroid" not in keypoint_binding_v2["advertised_recipe_ids"]
     assert "subject_body_centroid" not in keypoint_binding["advertised_recipe_ids"]
 
 
