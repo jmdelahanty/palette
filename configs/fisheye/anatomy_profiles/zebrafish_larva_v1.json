@@ -1,0 +1,211 @@
+{
+  "schema_id": "palette.anatomy_profile",
+  "schema_version": 1,
+  "profile_id": "zebrafish_larva_anatomy.v1",
+  "profile_version": 1,
+  "digest_algorithm": "sha256_canonical_json_v1",
+  "description": "Shared modality-neutral anatomy roles and recipes for zebrafish larvae.",
+  "roles": [
+    {
+      "role_id": "swim_bladder",
+      "description": "Semantic center of the swim bladder landmark or component."
+    },
+    {
+      "role_id": "eye_left",
+      "description": "Semantic center of the larva's left eye."
+    },
+    {
+      "role_id": "eye_right",
+      "description": "Semantic center of the larva's right eye."
+    },
+    {
+      "role_id": "subject_body",
+      "description": "Projected whole-subject body component."
+    }
+  ],
+  "recipes": [
+    {
+      "recipe_id": "head_triad_equal_mean",
+      "kind": "point",
+      "required_roles": ["swim_bladder", "eye_left", "eye_right"],
+      "expression": {
+        "op": "mean_points",
+        "weighting": "equal_per_point",
+        "points": [
+          {"op": "role_point", "role_id": "swim_bladder"},
+          {"op": "role_point", "role_id": "eye_left"},
+          {"op": "role_point", "role_id": "eye_right"}
+        ]
+      },
+      "description": "Equal mean of swim bladder and both eye centers."
+    },
+    {
+      "recipe_id": "eye_pair_midpoint",
+      "kind": "point",
+      "required_roles": ["eye_left", "eye_right"],
+      "expression": {
+        "op": "midpoint",
+        "points": [
+          {"op": "role_point", "role_id": "eye_left"},
+          {"op": "role_point", "role_id": "eye_right"}
+        ]
+      },
+      "description": "Midpoint of the two independently labeled eye centers."
+    },
+    {
+      "recipe_id": "anterior_axis",
+      "kind": "axis",
+      "required_roles": ["swim_bladder", "eye_left", "eye_right"],
+      "expression": {
+        "op": "axis",
+        "from": {"op": "role_point", "role_id": "swim_bladder"},
+        "to": {
+          "op": "midpoint",
+          "points": [
+            {"op": "role_point", "role_id": "eye_left"},
+            {"op": "role_point", "role_id": "eye_right"}
+          ]
+        }
+      },
+      "description": "Forward axis from swim bladder toward the eye-pair midpoint."
+    }
+  ],
+  "source_bindings": [
+    {
+      "schema_id": "palette.anatomy_source_role_binding",
+      "schema_version": 1,
+      "binding_id": "zebrafish_larva_keypoint_traditional_v3_v1",
+      "profile_id": "zebrafish_larva_anatomy.v1",
+      "profile_version": 1,
+      "source_schema": {
+        "authority": "pose_schema_package",
+        "modality": "keypoint",
+        "package_name": "traditional_v3",
+        "package_payload": {
+          "name": "traditional_v3",
+          "skeleton_id": "pose_skel_traditional_v3",
+          "kpt_shape": [10, 2],
+          "keypoint_labels": [
+            "swim_bladder",
+            "eye_left",
+            "eye_right",
+            "snout_tip",
+            "tail_tip",
+            "mid_tail",
+            "right_pectoral_fin_insertion",
+            "right_pectoral_fin_tip",
+            "left_pectoral_fin_insertion",
+            "left_pectoral_fin_tip"
+          ],
+          "nodes": [
+            {"id": 0, "name": "swim_bladder"},
+            {"id": 1, "name": "eye_left"},
+            {"id": 2, "name": "eye_right"},
+            {"id": 3, "name": "snout_tip"},
+            {"id": 4, "name": "tail_tip"},
+            {"id": 5, "name": "mid_tail"},
+            {"id": 6, "name": "right_pectoral_fin_insertion"},
+            {"id": 7, "name": "right_pectoral_fin_tip"},
+            {"id": 8, "name": "left_pectoral_fin_insertion"},
+            {"id": 9, "name": "left_pectoral_fin_tip"}
+          ],
+          "edges": [
+            [0, 1],
+            [0, 2],
+            [1, 2],
+            [3, 1],
+            [3, 2],
+            [0, 5],
+            [5, 4],
+            [2, 6],
+            [0, 6],
+            [6, 7],
+            [1, 8],
+            [0, 8],
+            [8, 9]
+          ],
+          "metadata": {
+            "units": "pixels",
+            "coordinate_system": "roi",
+            "version": 3,
+            "skeleton_id": "pose_skel_traditional_v3",
+            "migration_from": "traditional_v2",
+            "notes": "Ordered as traditional_v2 first, then mid_tail and pectoral fin insertion/tip landmarks so traditional_v2 indices are preserved. The tail axis is routed through mid_tail instead of the direct traditional_v2 swim_bladder-to-tail_tip edge.",
+            "heading_computation": {
+              "version": 1,
+              "enabled": true,
+              "origin": {
+                "op": "midpoint",
+                "labels": ["eye_left", "eye_right"]
+              },
+              "direction_from": {
+                "op": "keypoint",
+                "label": "swim_bladder"
+              },
+              "direction_to": {
+                "op": "midpoint",
+                "labels": ["eye_left", "eye_right"]
+              },
+              "dependent_keypoints": [
+                "swim_bladder",
+                "eye_left",
+                "eye_right"
+              ]
+            }
+          },
+          "source": "configs/fisheye/pose_schemas/traditional_v3.json"
+        },
+        "package_sha256": "9e25eda2327ad5963831dd32fea3ac1d2e3261ae3b1875229f5fd7502d433cd9"
+      },
+      "role_bindings": [
+        {"role_id": "swim_bladder", "source_label": "swim_bladder"},
+        {"role_id": "eye_left", "source_label": "eye_left"},
+        {"role_id": "eye_right", "source_label": "eye_right"}
+      ],
+      "advertised_recipe_ids": [
+        "head_triad_equal_mean",
+        "eye_pair_midpoint",
+        "anterior_axis"
+      ],
+      "source_local_compatibility": {
+        "kind": "inline_pose_heading",
+        "metadata_path": "metadata.heading_computation",
+        "authority": "source_schema"
+      },
+      "binding_sha256": "9522454c95564738ee7f77b2347cd0403351643d88de6ca4ad621e653a9e3827"
+    },
+    {
+      "schema_id": "palette.anatomy_source_role_binding",
+      "schema_version": 1,
+      "binding_id": "zebrafish_larva_subject_mask_lr_v1",
+      "profile_id": "zebrafish_larva_anatomy.v1",
+      "profile_version": 1,
+      "source_schema": {
+        "authority": "declared_schema",
+        "schema_id": "subject_v1_lr",
+        "schema_version": 1,
+        "modality": "subject_mask",
+        "labels": [
+          "subject_body",
+          "eye_left",
+          "eye_right",
+          "swim_bladder"
+        ],
+        "schema_sha256": "4a13424080bb0d8e08280c7edddac7426de3e77d6b2133b8ebd01f57c364d358"
+      },
+      "role_bindings": [
+        {"role_id": "subject_body", "source_label": "subject_body"},
+        {"role_id": "swim_bladder", "source_label": "swim_bladder"},
+        {"role_id": "eye_left", "source_label": "eye_left"},
+        {"role_id": "eye_right", "source_label": "eye_right"}
+      ],
+      "advertised_recipe_ids": [
+        "head_triad_equal_mean",
+        "eye_pair_midpoint",
+        "anterior_axis"
+      ],
+      "binding_sha256": "9500ae712916503315bcb338690fedd521c28e9ea93237c779e3718686cf36aa"
+    }
+  ],
+  "profile_sha256": "035a62b34f4d096c012f454ba33b6b8b2c540326d128305b655d18ecd3a711b2"
+}
