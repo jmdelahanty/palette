@@ -49430,7 +49430,7 @@
       "enclosing_symbol": "fisheye.shared.zarr.subject_mask_core_publication:publish_selector_ineligible_subject_mask_core_snapshot",
       "file": "src/fisheye/shared/zarr/subject_mask_core_publication.py",
       "filters_expression": null,
-      "line": 2209,
+      "line": 2284,
       "parent_path_pattern": "<group>",
       "path_pattern": "<group>/<leaf>",
       "receiver_expression": null,
@@ -49438,7 +49438,7 @@
       "shape_expression": null,
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-77bc1f6df4ae367c",
+      "site_id": "writer-e93790f087a185e9",
       "status": "current",
       "status_basis": "module name identifies publication/finalization",
       "surface_class": "publication",
@@ -68611,7 +68611,7 @@
     "parsed_writer_candidate_module_count": 215,
     "reader_required_array_declaration_count": 95,
     "resolved_writer_leaf_name_count": 628,
-    "scanned_python_module_count": 1493,
+    "scanned_python_module_count": 1499,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -68647,7 +68647,7 @@
     "writer_wrapper_call_site_count": 974
   },
   "wrapper_analysis": {
-    "function_definition_count": 5580,
+    "function_definition_count": 5581,
     "writer_function_count": 226,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
