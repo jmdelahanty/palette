@@ -78,6 +78,12 @@ their producing contracts.
     authoritative continuous source-camera positions are published as exact
     float32, validity is explicit bool, failure state uses compact uint16
     controlled codes, and invalid positions use canonical paired float32 NaNs.
+18. Version 1 motion keeps its declared nominal-FPS arithmetic. Scientific
+    readiness late-binds that arithmetic to the exact recording, canonical
+    `source_video_metadata.v2`, and selected acquisition frame-clock digest in
+    the same archive. It does not copy camera timestamps or publish a second
+    timestamp-delta array. A future variable-delta computation requires a new
+    versioned motion policy and evidence that nominal timing is inadequate.
 
 ## Relationship to Existing Heading and Body-Frame Contracts
 
@@ -662,15 +668,47 @@ physical array as its float32 pixel peer multiplied by the bound
 selector-ineligible canary exception and records that omission in the immutable
 computation manifest.
 
-The Phase 4A reader now exposes one additional limitation precisely. Existing
-provider-motion runs preserve exact acquisition-frame indices and compute
-`time_seconds` from a caller-supplied FPS, but the computation manifest does
-not bind that FPS or time axis to a live recording frame-clock authority.
-Those runs remain valid Phase 3 compatibility inputs and retain all independent
-validity arrays, but they are not authoritative-timing inputs for Phase 4
-science. A later producer change must carry recording identity and revalidated
-frame-clock evidence through position, body-frame, and motion publication; the
-reader must verify that source before a provider-bound offer can be `ready`.
+Existing provider-motion runs preserve exact acquisition-frame indices and
+compute `time_seconds` from a caller-supplied FPS. The Phase 4 binding layer now
+late-binds an existing immutable run to the recording authority without
+rewriting it. The strict loader requires canonical `source_video_metadata.v2`,
+the exact selected acquisition frame-clock record and array digests, matching
+recording/camera/frame-count/FPS metadata, the complete zero-based acquisition
+frame domain, source indices within that domain, and direct/consolidated
+metadata equality. A provider-motion run additionally has to declare the same
+FPS as the recording authority. The resulting authority digest is shared by
+position, body-frame, motion, and temporal-selection identities; an offer is
+not `ready` when any required identity is missing it or the digests disagree.
+
+This is intentionally a read-time, no-write bridge. It validates the existing
+clock publication and array digests, but neither copies camera or system
+timestamp values into provider runs nor changes the numerical values of
+existing motion products. A legacy archive without an acquisition frame clock
+remains explicit `legacy_missing`/`blocked_temporal_authority`; no nominal
+clock is guessed.
+
+#### Nominal-timebase evidence decision (2026-08-17)
+
+A read-only audit covered all 84 canonical GoodBatBadBat analysis Zarrs and
+14,202,392 acquisition frames. Camera timestamps were present and valid for
+100% of frames; every adjacent delta was strictly positive, with no duplicate
+or decreasing timestamps. At the declared 100 FPS, the nominal interval is
+10,000,000 ns. The median recording p99 absolute deviation from nominal was
+25 ns, the maximum recording p99 was 25 ns, and full-recording span drift was
+between -26 ns and +26 ns.
+
+After implementation, the strict no-write authority loader also bound all 84
+canonical archives successfully (`84 discovered`, `84 bound`, `0 failed`),
+including direct/consolidated equality and existing clock payload-digest
+validation.
+
+That evidence does not justify a second timestamp-derived motion product or
+additional copied delta arrays. Version 1 therefore retains
+`frame_index_difference / nominal_fps`, while exact acquisition-clock lineage
+is required for scientific readiness. Revisit variable-delta motion only if a
+future bounded audit finds meaningful non-monotonicity, missing coverage,
+jitter, or accumulated drift, and introduce it as a separately identified
+policy rather than changing version 1 in place.
 
 ### Phase 4: composable stimulus analytics
 
@@ -681,9 +719,12 @@ default.
 
 The shared Phase 4A foundation is implemented by
 `provider_analysis_offers`, `provider_analysis_bindings`,
+`provider_recording_timing_authority`,
 `provider_track_motion_source_handle`, and `resolved_epoch_selection`.
 Metric-specific occupancy, motion, and heading offers remain pending.
 
+- [x] Late-bind provider and temporal identities to one exact recording,
+      source-video metadata record, and acquisition frame-clock authority.
 - [ ] Add provider requirements to occupancy, trajectory, speed,
       acceleration, heading, and angular-speed offers.
 - [ ] Include provider IDs and digests in metric, contrast, and plot recipes.
@@ -715,6 +756,8 @@ Metric-specific occupancy, motion, and heading offers remain pending.
 - Speed can be recomputed from different positions without changing its
   algorithm or stimulus-selection contract.
 - Angular outputs can independently select a compatible body frame.
+- A scientifically ready offer binds every provider and its temporal selection
+  to the same exact recording/timebase authority digest.
 - Existing detection-centroid tracks remain unchanged and readable.
 - No provider is selected through an undocumented fallback order.
 - Composable offers expose provider identity and readiness.

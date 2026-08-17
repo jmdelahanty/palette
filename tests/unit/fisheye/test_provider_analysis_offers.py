@@ -45,7 +45,7 @@ def _body_frame_provider() -> ProviderIdentity:
         manifest_sha256="d" * 64,
         decoded_content_sha256="e" * 64,
         coordinate_authority_sha256="f" * 64,
-        timing_authority_sha256="8" * 64,
+        timing_authority_sha256="9" * 64,
         validity_array_names=("axis_valid", "heading_valid"),
     )
 
@@ -57,6 +57,7 @@ def _temporal_selection() -> TemporalSelectionIdentity:
         recording_id="recording-001",
         source_timeline_sha256="2" * 64,
         resolved_sha256="1" * 64,
+        timing_authority_sha256="9" * 64,
     )
 
 

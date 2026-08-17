@@ -387,14 +387,24 @@ activating a selector:
   recording identity blocks before missing timing, known cross-recording
   composition fails, and only exact recording/timing authority can become
   `ready`.
+- `provider_recording_timing_authority` revalidates the canonical recording,
+  source-video metadata, selected acquisition frame clock, complete frame
+  domain, and direct/consolidated metadata before minting one shared digest.
+  Existing immutable position, body-frame, and provider-motion runs can bind
+  that digest at read time when their source indices and declared FPS agree;
+  no source run is rewritten.
 
-Current Phase 2/3 publications remain readable, but they do not yet preserve a
-complete provider-side recording and frame-clock authority through to these
-offers. In particular, the provider-motion computation records a caller FPS
-without a live bound source-clock record. It is therefore classified as
-`compatibility_caller_fps_only` and cannot satisfy strict Phase 4 timing. A
-digest-bound JSON timing claim is also insufficient until it is revalidated
-against the source clock in the same archive.
+The numerical policy remains
+`nominal_fps_bound_to_acquisition_frame_domain.v1`. A 2026-08-17 read-only
+audit of all 84 canonical GoodBatBadBat archives (14,202,392 frames) found
+100% valid, strictly increasing camera timestamps, no duplicate/decreasing
+deltas, a maximum recording p99 interval error of 25 ns from the 10,000,000 ns
+nominal interval, and full-recording span drift within +/-26 ns. That evidence
+does not justify copying timestamp/delta arrays or introducing variable-delta
+motion. Missing acquisition-clock authority remains an explicit legacy block,
+and any future variable-delta policy must be a new versioned computation. The
+implemented no-write authority loader subsequently bound all 84 archives with
+zero failures.
 
 ## Composition Safety Rules
 
@@ -428,6 +438,8 @@ against the source clock in the same archive.
 - [ ] Define a capability registry for generic metrics and protocol providers.
 - [x] Define typed position-provider and body-frame-provider requirements so
       generic metrics do not hardcode detection centroids or keypoint headings.
+- [x] Bind provider and temporal-selection identities to one exact validated
+      recording/source-video/acquisition-clock authority digest.
 - [ ] Bind every position-, speed-, heading-, and angular-motion offer to exact
       provider identities and digests.
 

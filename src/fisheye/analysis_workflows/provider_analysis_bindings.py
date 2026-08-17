@@ -8,6 +8,7 @@ readiness instead of inventing a default.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping
 
 from fisheye.analysis_workflows.body_frame_source_handle import (
@@ -28,6 +29,11 @@ from fisheye.analysis_workflows.provider_analysis_offers import (
 from fisheye.analysis_workflows.provider_track_motion_source_handle import (
     ProviderTrackMotionSourceHandle,
     require_provider_track_motion_source_handle,
+)
+from fisheye.analysis_workflows.provider_recording_timing_authority import (
+    ProviderRecordingTimingAuthority,
+    ProviderRecordingTimingAuthorityError,
+    load_provider_recording_timing_authority,
 )
 from fisheye.analysis_workflows.resolved_epoch_selection import (
     ResolvedEpochSelection,
@@ -51,6 +57,19 @@ def _mapping(value: object, *, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _recording_timing_authority(
+    analysis_zarr_path: str | Path,
+) -> ProviderRecordingTimingAuthority | None:
+    try:
+        return load_provider_recording_timing_authority(
+            analysis_zarr_path,
+            required=False,
+            use_consolidated=True,
+        )
+    except ProviderRecordingTimingAuthorityError as exc:
+        raise ProviderAnalysisOfferError(str(exc)) from exc
+
+
 def position_provider_identity(
     value: SubjectPositionSourceHandle,
 ) -> ProviderIdentity:
@@ -68,19 +87,23 @@ def position_provider_identity(
         raise ProviderAnalysisOfferError(
             f"Unsupported subject-position modality: {modality!r}."
         )
+    timing = _recording_timing_authority(current.analysis_zarr_path)
+    if timing is not None:
+        timing.validate_source_frame_indices(
+            current.source_acquisition_frame_index[:],
+            name="subject-position source_acquisition_frame_index",
+        )
     return ProviderIdentity(
         role=ProviderRole.POSITION,
         kind=_POSITION_KIND_BY_MODALITY[str(modality)],
         modality=f"{modality}.v1",
         provider_id=str(current.estimator_record["estimator_id"]),
         run_path=current.run_path,
-        # Phase 2 does not yet expose a live-verified recording clock binding.
-        # A nested JSON pointer is evidence to inspect, not timing authority.
-        recording_id=None,
+        recording_id=None if timing is None else timing.recording_id,
         manifest_sha256=current.manifest_sha256,
         decoded_content_sha256=current.decoded_content_sha256,
         coordinate_authority_sha256=current.coordinate_sha256,
-        timing_authority_sha256=None,
+        timing_authority_sha256=None if timing is None else timing.sha256,
         validity_array_names=("valid",),
     )
 
@@ -98,17 +121,23 @@ def body_frame_provider_identity(value: BodyFrameSourceHandle) -> ProviderIdenti
         raise ProviderAnalysisOfferError(
             "Body-frame source changed after its offer input was sealed."
         )
+    timing = _recording_timing_authority(current.analysis_zarr_path)
+    if timing is not None:
+        timing.validate_source_frame_indices(
+            current.arrays["frame_indices"],
+            name="body-frame frame_indices",
+        )
     return ProviderIdentity(
         role=ProviderRole.BODY_FRAME,
         kind=ProviderKind.KEYPOINT,
         modality="keypoint_body_frame.v1",
         provider_id=current.recipe_id,
         run_path=current.run_path,
-        recording_id=None,
+        recording_id=None if timing is None else timing.recording_id,
         manifest_sha256=str(current.run_manifest["payload_digest"]),
         decoded_content_sha256=current.verification_digest,
         coordinate_authority_sha256=current.recipe_digest,
-        timing_authority_sha256=None,
+        timing_authority_sha256=None if timing is None else timing.sha256,
         validity_array_names=("axis_valid",),
     )
 
@@ -127,25 +156,36 @@ def provider_motion_identity(
         source.get("position_source"),
         name="provider-motion position source",
     )
-    temporal = current.temporal_authority_record
-    recording_id = None
-    if isinstance(temporal, Mapping) and type(temporal.get("recording_id")) is str:
-        recording_id = str(temporal["recording_id"])
+    timing = _recording_timing_authority(current.analysis_zarr_path)
+    if timing is not None:
+        timing.validate_source_frame_indices(
+            current.source_acquisition_frame_index,
+            name="provider-motion source_acquisition_frame_index",
+        )
+        parameters = _mapping(
+            current.computation_record.get("parameters"),
+            name="provider-motion computation parameters",
+        )
+        fps = parameters.get("fps")
+        if (
+            isinstance(fps, bool)
+            or not isinstance(fps, (int, float))
+            or float(fps) != timing.nominal_fps
+        ):
+            raise ProviderAnalysisOfferError(
+                "Provider-motion FPS differs from the recording timing authority."
+            )
     return ProviderIdentity(
         role=ProviderRole.MOTION,
         kind=ProviderKind.TRACK_MOTION,
         modality="track_motion.v1",
         provider_id=str(current.computation_record["computation_id"]),
         run_path=current.run_path,
-        recording_id=recording_id,
+        recording_id=None if timing is None else timing.recording_id,
         manifest_sha256=current.provider_manifest_sha256,
         decoded_content_sha256=current.verification_digest,
         coordinate_authority_sha256=str(position["coordinate_sha256"]),
-        timing_authority_sha256=(
-            current.temporal_authority_sha256
-            if current.timing_is_authoritative
-            else None
-        ),
+        timing_authority_sha256=None if timing is None else timing.sha256,
         validity_array_names=(
             "position_source_valid",
             "body_frame_source_valid",
@@ -177,6 +217,7 @@ def temporal_selection_identity(
         recording_id=recording_id,
         source_timeline_sha256=value.source_timeline_digest,
         resolved_sha256=value.selection_digest,
+        timing_authority_sha256=value.recording_timing_authority_sha256,
     )
 
 
@@ -204,6 +245,25 @@ def build_provider_analysis_offer(
         raise ProviderAnalysisOfferError(
             "Provider and temporal selection recording identities disagree."
         )
+    known_timing_authorities = {
+        provider.timing_authority_sha256
+        for provider in (
+            provider_requirements.position,
+            provider_requirements.body_frame,
+            provider_requirements.motion,
+        )
+        if provider is not None and provider.timing_authority_sha256 is not None
+    }
+    if len(known_timing_authorities) > 1:
+        raise ProviderAnalysisOfferError("Provider timing authority digests disagree.")
+    if (
+        temporal_selection.timing_authority_sha256 is not None
+        and known_timing_authorities
+        and temporal_selection.timing_authority_sha256 not in known_timing_authorities
+    ):
+        raise ProviderAnalysisOfferError(
+            "Provider and temporal selection timing authority digests disagree."
+        )
     providers = tuple(
         provider
         for provider in (
@@ -215,7 +275,9 @@ def build_provider_analysis_offer(
     )
     if any(provider.recording_id is None for provider in providers):
         readiness = ScientificReadiness.BLOCKED_RECORDING_AUTHORITY
-    elif any(provider.timing_authority_sha256 is None for provider in providers):
+    elif temporal_selection.timing_authority_sha256 is None or any(
+        provider.timing_authority_sha256 is None for provider in providers
+    ):
         readiness = ScientificReadiness.BLOCKED_TEMPORAL_AUTHORITY
     else:
         readiness = ScientificReadiness.READY

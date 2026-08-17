@@ -16,6 +16,9 @@ from fisheye.analysis_workflows.resolved_epoch_selection import (
     ResolvedEpochSelectionError,
     resolve_exact_stimulus_epoch_selection,
 )
+from tests.unit.fisheye.test_provider_recording_timing_authority import (
+    _install_clock_authority,
+)
 
 pytest_plugins = ("tests.unit.fisheye.test_stimulus_epoch_consumer",)
 
@@ -93,6 +96,36 @@ def test_selection_digest_is_stable_and_bound_to_canonical_record(
     assert first.selection_record["selection_sha256"] == first.selection_digest
     assert first.to_record(include_digest=False) == second.to_record(
         include_digest=False
+    )
+
+
+def test_selection_late_binds_exact_recording_timing_authority(
+    tmp_path: Path,
+    published_candidate: Path,
+) -> None:
+    archive = _copy_candidate(
+        published_candidate,
+        tmp_path / "timing-bound-selection.zarr",
+    )
+    _install_clock_authority(
+        archive,
+        tmp_path,
+        frame_count=30,
+        fps=10.0,
+        recording_id="recording_1",
+    )
+
+    selection = resolve_exact_stimulus_epoch_selection(
+        archive,
+        run_name="candidate",
+    )
+
+    assert selection.recording_timing_authority_status == "bound"
+    assert selection.recording_timing_authority_sha256 is not None
+    assert selection.recording_timing_authority is not None
+    assert (
+        selection.selection_record["recording_timing_authority"]["sha256"]
+        == selection.recording_timing_authority_sha256
     )
 
 

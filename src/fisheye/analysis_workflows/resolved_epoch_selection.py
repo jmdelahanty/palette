@@ -34,6 +34,9 @@ from fisheye.analysis.stimulus_epoch_schema import (
     stimulus_epoch_logical_content_sha256,
     stimulus_group_logical_fingerprint,
 )
+from fisheye.analysis_workflows.provider_recording_timing_authority import (
+    load_provider_recording_timing_authority,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 RESOLVED_EPOCH_SELECTION_SCHEMA_ID = "palette.resolved_epoch_selection.v1"
@@ -336,6 +339,9 @@ class ResolvedEpochSelection:
     native_frame_count: int
     fps: float
     timing_authority: Mapping[str, Any] = field(repr=False)
+    recording_timing_authority: Mapping[str, Any] | None = field(repr=False)
+    recording_timing_authority_sha256: str | None
+    recording_timing_authority_status: str
     intervals: tuple[AtomicStimulusEpochInterval, ...]
     _seal: object = field(repr=False, compare=False)
 
@@ -345,7 +351,11 @@ class ResolvedEpochSelection:
                 "Resolved selections must be created by the exact v2 adapter."
             )
         for name, value in values.items():
-            if name in {"source_timeline_identity", "timing_authority"}:
+            if name in {
+                "source_timeline_identity",
+                "timing_authority",
+                "recording_timing_authority",
+            }:
                 value = _freeze(value)
             elif name == "intervals":
                 value = tuple(value)
@@ -371,6 +381,11 @@ class ResolvedEpochSelection:
             "source_timeline": _thaw(self.source_timeline_identity),
             "source_timeline_digest": self.source_timeline_digest,
             "timing": _thaw(self.timing_authority),
+            "recording_timing_authority": {
+                "status": self.recording_timing_authority_status,
+                "record": _thaw(self.recording_timing_authority),
+                "sha256": self.recording_timing_authority_sha256,
+            },
             "native_frame_count": self.native_frame_count,
             "fps": self.fps,
             "frame_interval_convention": HALF_OPEN_FRAME_INTERVAL_CONVENTION,
@@ -592,6 +607,27 @@ def resolve_exact_stimulus_epoch_selection(
                     "Expected source timeline digest is stale."
                 )
         native_frame_count, fps = _validate_exact_timing(snapshot, run_group)
+        recording_timing = load_provider_recording_timing_authority(
+            archive,
+            required=False,
+            use_consolidated=True,
+        )
+        if recording_timing is not None:
+            if (
+                recording_timing.recording_id
+                != source_timeline_identity["recording_id"]
+            ):
+                raise ResolvedEpochSelectionError(
+                    "Stimulus epoch and recording timing identities disagree."
+                )
+            if recording_timing.frame_count != native_frame_count:
+                raise ResolvedEpochSelectionError(
+                    "Stimulus epoch and recording timing frame counts disagree."
+                )
+            if recording_timing.nominal_fps != fps:
+                raise ResolvedEpochSelectionError(
+                    "Stimulus epoch and recording timing nominal FPS values disagree."
+                )
         intervals = _build_intervals(
             snapshot,
             run_path=snapshot.run_path,
@@ -625,6 +661,15 @@ def resolve_exact_stimulus_epoch_selection(
             native_frame_count=native_frame_count,
             fps=fps,
             timing_authority=timing_authority,
+            recording_timing_authority=(
+                None if recording_timing is None else _thaw(recording_timing.record)
+            ),
+            recording_timing_authority_sha256=(
+                None if recording_timing is None else recording_timing.sha256
+            ),
+            recording_timing_authority_status=(
+                "legacy_missing" if recording_timing is None else "bound"
+            ),
             intervals=intervals,
         )
         selection.assert_verified()

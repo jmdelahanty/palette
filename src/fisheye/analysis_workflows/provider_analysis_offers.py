@@ -509,6 +509,7 @@ class TemporalSelectionIdentity:
     recording_id: str
     source_timeline_sha256: str
     resolved_sha256: str
+    timing_authority_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _require_versioned_id(self.selection_id, name="temporal selection_id")
@@ -518,6 +519,11 @@ class TemporalSelectionIdentity:
         _require_recording_id(self.recording_id)
         _require_sha256(self.source_timeline_sha256, name="source_timeline_sha256")
         _require_sha256(self.resolved_sha256, name="resolved_sha256")
+        _require_sha256(
+            self.timing_authority_sha256,
+            name="timing_authority_sha256",
+            allow_none=True,
+        )
 
     @property
     def record(self) -> dict[str, Any]:
@@ -529,6 +535,7 @@ class TemporalSelectionIdentity:
             "recording_id": self.recording_id,
             "source_timeline_sha256": self.source_timeline_sha256,
             "resolved_sha256": self.resolved_sha256,
+            "timing_authority_sha256": self.timing_authority_sha256,
         }
 
     @property
@@ -555,6 +562,7 @@ class TemporalSelectionIdentity:
                 "recording_id",
                 "source_timeline_sha256",
                 "resolved_sha256",
+                "timing_authority_sha256",
             },
             name="temporal selection record",
         )
@@ -570,6 +578,7 @@ class TemporalSelectionIdentity:
             recording_id=record["recording_id"],
             source_timeline_sha256=record["source_timeline_sha256"],
             resolved_sha256=record["resolved_sha256"],
+            timing_authority_sha256=record["timing_authority_sha256"],
         )
 
     @classmethod
@@ -628,6 +637,11 @@ class AnalysisOffer:
             ),
         )
         if self.scientific_readiness is ScientificReadiness.READY:
+            if self.temporal_selection.timing_authority_sha256 is None:
+                raise ProviderAnalysisOfferError(
+                    "A ready offer must bind its temporal selection to an exact "
+                    "timing authority digest."
+                )
             for role in ("position", "body_frame", "motion"):
                 provider = getattr(self.provider_requirements, role)
                 if provider is None:
@@ -641,6 +655,14 @@ class AnalysisOffer:
                     raise ProviderAnalysisOfferError(
                         "A ready offer must bind every provider to an exact timing "
                         "authority digest."
+                    )
+                if (
+                    provider.timing_authority_sha256
+                    != self.temporal_selection.timing_authority_sha256
+                ):
+                    raise ProviderAnalysisOfferError(
+                        "A ready offer must bind every provider and temporal "
+                        "selection to the same timing authority digest."
                     )
 
     @property
