@@ -4544,6 +4544,28 @@ def load_persisted_refined_subject_mask_coordinate_surfaces(
     )
 
 
+@proof_verification_operation
+def load_persisted_ineligible_refined_subject_mask_coordinate_surfaces(
+    root: Any,
+    run_path: str,
+    *,
+    expected_publication_owner: str | None = None,
+) -> BoundRefinedSubjectMaskCoordinateSurfaces:
+    """Load complete refined-mask surfaces that remain selector-ineligible.
+
+    This verifies the coordinate publication only.  Consumers must separately
+    prove the exact immutable subject-mask bundle that authorizes the member.
+    """
+
+    return _load_refined_subject_mask_coordinate_surfaces(
+        root,
+        run_path,
+        require_complete=True,
+        expected_selector_eligible=False,
+        expected_publication_owner=expected_publication_owner,
+    )
+
+
 def require_bound_refined_subject_mask_coordinate_surfaces(
     value: BoundRefinedSubjectMaskCoordinateSurfaces,
 ) -> BoundRefinedSubjectMaskCoordinateSurfaces:
@@ -4890,6 +4912,7 @@ __all__ = [
     "_load_completed_ineligible_refined_subject_mask_coordinate_surfaces",
     "capture_refined_subject_mask_coordinate_publication_checkpoint",
     "load_persisted_refined_subject_mask_coordinate_surfaces",
+    "load_persisted_ineligible_refined_subject_mask_coordinate_surfaces",
     "prepare_refined_subject_mask_coordinate_context",
     "publish_refined_subject_mask_coordinate_surfaces",
     "require_bound_refined_subject_mask_coordinate_surfaces",

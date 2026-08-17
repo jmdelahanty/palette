@@ -84,6 +84,84 @@
     {
       "schema_id": "palette.anatomy_source_role_binding",
       "schema_version": 1,
+      "binding_id": "zebrafish_larva_keypoint_traditional_v2_v1",
+      "profile_id": "zebrafish_larva_anatomy.v1",
+      "profile_version": 1,
+      "source_schema": {
+        "authority": "keypoint_skeleton_semantics",
+        "modality": "keypoint",
+        "skeleton_document": {
+          "schema_id": "palette.keypoint.skeleton_semantics",
+          "schema_version": 1,
+          "skeleton_id": "pose_skel_traditional_v2",
+          "kpt_shape": [5, 2],
+          "keypoint_labels": [
+            "swim_bladder",
+            "eye_left",
+            "eye_right",
+            "snout_tip",
+            "tail_tip"
+          ],
+          "nodes": [
+            {"id": 0, "name": "swim_bladder"},
+            {"id": 1, "name": "eye_left"},
+            {"id": 2, "name": "eye_right"},
+            {"id": 3, "name": "snout_tip"},
+            {"id": 4, "name": "tail_tip"}
+          ],
+          "edges": [
+            [0, 1],
+            [0, 2],
+            [1, 2],
+            [1, 3],
+            [2, 3],
+            [0, 4]
+          ],
+          "heading_computation": {
+            "version": 1,
+            "enabled": true,
+            "origin": {
+              "op": "midpoint",
+              "labels": ["eye_left", "eye_right"]
+            },
+            "direction_from": {
+              "op": "keypoint",
+              "label": "swim_bladder"
+            },
+            "direction_to": {
+              "op": "midpoint",
+              "labels": ["eye_left", "eye_right"]
+            },
+            "dependent_keypoints": [
+              "swim_bladder",
+              "eye_left",
+              "eye_right"
+            ]
+          },
+          "heading_computation_source": "authoritative_ordered_labels_controlled_policy_v1"
+        },
+        "skeleton_sha256": "6eeb4bece23774d3c75e76664a414ea93e84d4f6102293f6cce6f065793954ef"
+      },
+      "role_bindings": [
+        {"role_id": "swim_bladder", "source_label": "swim_bladder"},
+        {"role_id": "eye_left", "source_label": "eye_left"},
+        {"role_id": "eye_right", "source_label": "eye_right"}
+      ],
+      "advertised_recipe_ids": [
+        "head_triad_equal_mean",
+        "eye_pair_midpoint",
+        "anterior_axis"
+      ],
+      "source_local_compatibility": {
+        "kind": "inline_pose_heading",
+        "metadata_path": "metadata.heading_computation",
+        "authority": "source_schema"
+      },
+      "binding_sha256": "43d70becbd33c78ae30a0d4319392d0d6019ccb879fc992a7a971d2a8017ddf8"
+    },
+    {
+      "schema_id": "palette.anatomy_source_role_binding",
+      "schema_version": 1,
       "binding_id": "zebrafish_larva_keypoint_traditional_v3_v1",
       "profile_id": "zebrafish_larva_anatomy.v1",
       "profile_version": 1,
@@ -218,5 +296,5 @@
       "binding_sha256": "6c7f26ef736a3956d88d54c288eeecba17a5a4cf810372e93d409366f7f02f70"
     }
   ],
-  "profile_sha256": "ef833e0835f6ec1b8c24b7b66b4ec941d7ed543c965d17110e68efc05c743976"
+  "profile_sha256": "4d871f6686cf6777b257e9d3cb1ef743b6ea8593a068186ed406bc28d725187d"
 }

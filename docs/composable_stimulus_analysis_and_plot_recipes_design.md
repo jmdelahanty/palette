@@ -1,7 +1,7 @@
 # Composable Stimulus Analysis and Plot Recipe Design
 <!-- contract-meta
 status: accepted-design
-last_updated: 2026-08-14
+last_updated: 2026-08-17
 -->
 
 Purpose: define how Palette should expose generic analyses for every compatible
@@ -369,6 +369,43 @@ then verify the selected recording's Zarr catalog before presenting it.
 - The existing registry step-status key cannot represent many analysis runs,
   plots, or per-composition memberships.
 
+### Phase 4A foundation status (2026-08-17)
+
+The first shared contract layer is implemented without publishing a metric or
+activating a selector:
+
+- `provider_analysis_offers` defines immutable provider identities,
+  independent position/body-frame/motion requirements, exact temporal
+  selection identities, and selector-ineligible analysis offers.
+- `provider_track_motion_source_handle` strictly reads the flat
+  `analysis/track_kinematics_runs/provider/<run>` layout while preserving
+  independent source, sample, transition, and reason-code arrays.
+- `resolved_epoch_selection` adapts one explicit maintained stimulus-epoch v2
+  run into digest-bound half-open intervals. Chronological non-overlap is
+  required; legitimate gaps are preserved rather than filled.
+- `provider_analysis_bindings` derives readiness from verified inputs. Missing
+  recording identity blocks before missing timing, known cross-recording
+  composition fails, and only exact recording/timing authority can become
+  `ready`.
+- `provider_recording_timing_authority` revalidates the canonical recording,
+  source-video metadata, selected acquisition frame clock, complete frame
+  domain, and direct/consolidated metadata before minting one shared digest.
+  Existing immutable position, body-frame, and provider-motion runs can bind
+  that digest at read time when their source indices and declared FPS agree;
+  no source run is rewritten.
+
+The numerical policy remains
+`nominal_fps_bound_to_acquisition_frame_domain.v1`. A 2026-08-17 read-only
+audit of all 84 canonical GoodBatBadBat archives (14,202,392 frames) found
+100% valid, strictly increasing camera timestamps, no duplicate/decreasing
+deltas, a maximum recording p99 interval error of 25 ns from the 10,000,000 ns
+nominal interval, and full-recording span drift within +/-26 ns. That evidence
+does not justify copying timestamp/delta arrays or introducing variable-delta
+motion. Missing acquisition-clock authority remains an explicit legacy block,
+and any future variable-delta policy must be a new versioned computation. The
+implemented no-write authority loader subsequently bound all 84 archives with
+zero failures.
+
 ## Composition Safety Rules
 
 1. Combine intervals only from the same recording timeline and exact stimulus
@@ -397,10 +434,12 @@ then verify the selected recording's Zarr catalog before presenting it.
 - [ ] Implement a pure selection compiler for exact step refs, trimming,
       union, intersection, difference, occurrence handling, and canonical
       digests.
-- [ ] Add a compatibility adapter from existing stimulus epoch windows.
+- [x] Add a compatibility adapter from existing stimulus epoch windows.
 - [ ] Define a capability registry for generic metrics and protocol providers.
-- [ ] Define typed position-provider and body-frame-provider requirements so
+- [x] Define typed position-provider and body-frame-provider requirements so
       generic metrics do not hardcode detection centroids or keypoint headings.
+- [x] Bind provider and temporal-selection identities to one exact validated
+      recording/source-video/acquisition-clock authority digest.
 - [ ] Bind every position-, speed-, heading-, and angular-motion offer to exact
       provider identities and digests.
 

@@ -4,7 +4,7 @@
 version: 1
 status: draft
 implementation: partial
-last_updated: 2026-08-16
+last_updated: 2026-08-17
 -->
 
 Purpose: define how Palette should materialize and select subject position,
@@ -78,6 +78,12 @@ their producing contracts.
     authoritative continuous source-camera positions are published as exact
     float32, validity is explicit bool, failure state uses compact uint16
     controlled codes, and invalid positions use canonical paired float32 NaNs.
+18. Version 1 motion keeps its declared nominal-FPS arithmetic. Scientific
+    readiness late-binds that arithmetic to the exact recording, canonical
+    `source_video_metadata.v2`, and selected acquisition frame-clock digest in
+    the same archive. It does not copy camera timestamps or publish a second
+    timestamp-delta array. A future variable-delta computation requires a new
+    versioned motion policy and evidence that nominal timing is inadequate.
 
 ## Relationship to Existing Heading and Body-Frame Contracts
 
@@ -123,6 +129,13 @@ only `eyes_union` cannot advertise support for a recipe requiring independently
 labeled left and right eyes. String equality between labels in two schemas is
 not a semantic join; consumers validate the profile identity, source-schema
 identity, explicit role bindings, and their digests.
+
+Keypoint source identity may be supplied either by an exact packaged pose
+schema or by the model-independent skeleton-semantics document already sealed
+inside a validated model-schema binding. The latter includes ordered labels,
+nodes, directed ordered edges, runtime shape, and heading semantics. It does
+not normalize edge direction or discard the original model-schema binding;
+both exact digests remain in downstream provenance.
 
 The estimator profile selects the shared recipe plus an exact source modality
 and validity policy. The materialized run binds the anatomy profile, source
@@ -545,12 +558,17 @@ source identity, canonical coordinate descriptor, and required directed
 transform. Equal row counts, matching label strings, and caller assertions are
 not sufficient.
 
-The initial Phase 2 source-currentness policy is deliberately narrow. A
-position adapter consumes one explicitly named run only when that run is the
-current, complete, selector-eligible canonical coordinate publication for its
-source family. Keypoint production-bundle members that remain
-selector-ineligible are a different authority and are not an implicit fallback.
-Supporting those members later requires a separately named adapter and policy.
+Phase 2 keeps two source-authority modes separate. The default position adapter
+mode consumes one explicitly named run only when that run is the current,
+complete, selector-eligible canonical coordinate publication for its source
+family. The canary-only production-member mode consumes one explicitly named,
+complete, selector-ineligible run only when an immutable producer authority
+binds that exact member and manifest: the detection candidate's persisted
+publication record, the root keypoint-bundle authority, or an explicitly named
+subject-mask bundle. The production-member mode never resolves a selector,
+never promotes the source, and is not an implicit fallback from the default
+mode. Its distinct authority record and digest remain in the position-run
+lineage.
 
 The four initial estimator profiles are detection bounding-box centroid,
 keypoint anatomical-triad equal mean, subject-mask anatomical-component-triad
@@ -583,6 +601,9 @@ success and failure reasons.
 - [x] Add a subject-mask source adapter that validates component-label and
       availability authority, exact `centroid_xy`/`centroid_valid` surfaces,
       row identity, derivation records, and source-camera coordinate binding.
+- [x] Add explicit canary-only adapters for sealed selector-ineligible
+      detection candidates, keypoint-bundle members, and subject-mask-bundle
+      members without weakening selector-current source policies.
 - [x] Validate direct and consolidated metadata before completion.
 - [x] Preserve sources and publish retries as new immutable attempts.
 
@@ -604,21 +625,121 @@ the subject-mask binding. No pixel-union operation or estimator was added.
 
 ### Phase 3: body-frame and motion integration
 
-- [ ] Define typed position-source and body-frame-source handles.
-- [ ] Check row identity, time, coordinates, transforms, completion, and
+- [x] Define typed position-source and keypoint-body-frame-source handles.
+- [x] Add an exact content manifest to newly written tracking runs and make
+      keyed tracking identity explicit.
+- [x] Define a typed tracking-run handle that rejects selector lookup,
+      keyless legacy rows, stale manifests, post-seal mutation, stale
+      consolidation, and cross-archive composition.
+- [x] Check row identity, time, coordinates, transforms, completion, and
       staleness before composition.
-- [ ] Generalize track-motion authority to consume one explicit position and
+- [x] Generalize track-motion authority to consume one explicit position and
       one explicit body-frame/heading source.
-- [ ] Validate the traditional-v3 inline heading declaration against the
+- [x] Validate the traditional-v3 inline heading declaration against the
       shared `anterior_axis` semantics before exposing a compatibility adapter.
-- [ ] Keep linear and angular motion lineage independent.
-- [ ] Preserve detection-centroid/keypoint-heading behavior as an explicit
+- [x] Keep linear and angular motion lineage independent.
+- [x] Preserve detection-centroid/keypoint-heading behavior as an explicit
       compatibility profile.
-- [ ] Refuse implicit fallback and same-length-only joins.
-- [ ] Publish successors instead of mutating existing track runs.
+- [x] Refuse implicit fallback and same-length-only joins.
+- [x] Publish selector-ineligible successors instead of mutating existing track
+      runs.
+
+Phase 3 deliberately does not infer heading from the outline of a full-body
+mask. PCA, ellipse, centerline, spline, or another subject-body shape
+orientation estimator remains deferred and requires a separate controlled
+recipe, polarity policy, validity contract, and canary evidence.
+
+The narrower `mask_component_axis` calculation is distinct from full-body
+shape orientation: it uses only the explicitly labeled `eye_left`,
+`eye_right`, and `swim_bladder` component centroids. Its array-level producer
+and source validation are implemented, but the current immutable
+`body_frame_runs` manifest and reader are keypoint-source-specific. Therefore
+the component-mask adapter remains non-publishing in this phase; it must gain
+a genuinely mask-aware manifest and typed reader before it can feed motion
+publication. It must not be published by relabeling mask rows as keypoint
+rows.
+
+The new provider-motion publication is a selector-ineligible canary surface.
+It now accepts only a loader-minted tracking-run handle; callers can no longer
+supply a path, digest, key array, or track-ID array independently. Newly
+written tracking runs carry an exact decoded-content manifest and explicit
+selector eligibility. The handle reopens and re-hashes the named run during
+composition, motion preparation, run planning, and immediately before atomic
+publication. It also proves that tracking and the position/body-frame
+authority belong to the same archive. Keyless or manifestless historical
+tracking remains available through the legacy compatibility reader but cannot
+become modern provider-motion authority without an immutable keyed successor.
+
+This closes the Phase 3 tracking-authority implementation blocker. Production
+activation remains blocked by required CI and Phase 5 canary/promotion
+evidence, not by another implicit tracking input surface.
+
+Provider-motion successors require the archive's typed source-camera physical
+authority by default. The authority's source-camera frame digest must equal the
+position provider's frame digest. A calibrated run publishes exact paired
+`px`/`mm`, `px/s`/`mm/s`, and `px/s^2`/`mm/s^2` arrays and validates each
+physical array as its float32 pixel peer multiplied by the bound
+`mm_per_pixel`. Pixel-only publication is permitted only through an explicit
+selector-ineligible canary exception and records that omission in the immutable
+computation manifest.
+
+Existing provider-motion runs preserve exact acquisition-frame indices and
+compute `time_seconds` from a caller-supplied FPS. The Phase 4 binding layer now
+late-binds an existing immutable run to the recording authority without
+rewriting it. The strict loader requires canonical `source_video_metadata.v2`,
+the exact selected acquisition frame-clock record and array digests, matching
+recording/camera/frame-count/FPS metadata, the complete zero-based acquisition
+frame domain, source indices within that domain, and direct/consolidated
+metadata equality. A provider-motion run additionally has to declare the same
+FPS as the recording authority. The resulting authority digest is shared by
+position, body-frame, motion, and temporal-selection identities; an offer is
+not `ready` when any required identity is missing it or the digests disagree.
+
+This is intentionally a read-time, no-write bridge. It validates the existing
+clock publication and array digests, but neither copies camera or system
+timestamp values into provider runs nor changes the numerical values of
+existing motion products. A legacy archive without an acquisition frame clock
+remains explicit `legacy_missing`/`blocked_temporal_authority`; no nominal
+clock is guessed.
+
+#### Nominal-timebase evidence decision (2026-08-17)
+
+A read-only audit covered all 84 canonical GoodBatBadBat analysis Zarrs and
+14,202,392 acquisition frames. Camera timestamps were present and valid for
+100% of frames; every adjacent delta was strictly positive, with no duplicate
+or decreasing timestamps. At the declared 100 FPS, the nominal interval is
+10,000,000 ns. The median recording p99 absolute deviation from nominal was
+25 ns, the maximum recording p99 was 25 ns, and full-recording span drift was
+between -26 ns and +26 ns.
+
+After implementation, the strict no-write authority loader also bound all 84
+canonical archives successfully (`84 discovered`, `84 bound`, `0 failed`),
+including direct/consolidated equality and existing clock payload-digest
+validation.
+
+That evidence does not justify a second timestamp-derived motion product or
+additional copied delta arrays. Version 1 therefore retains
+`frame_index_difference / nominal_fps`, while exact acquisition-clock lineage
+is required for scientific readiness. Revisit variable-delta motion only if a
+future bounded audit finds meaningful non-monotonicity, missing coverage,
+jitter, or accumulated drift, and introduce it as a separately identified
+policy rather than changing version 1 in place.
 
 ### Phase 4: composable stimulus analytics
 
+Phase 4 may now build on the explicit provider-motion authority. Its first
+implementations must remain selector-ineligible offers and must not imply that
+one position or body-frame provider has been promoted as the scientific
+default.
+
+The shared Phase 4A foundation is implemented by
+`provider_analysis_offers`, `provider_analysis_bindings`,
+`provider_recording_timing_authority`,
+`provider_track_motion_source_handle`, and `resolved_epoch_selection`.
+Metric-specific occupancy, motion, and heading offers remain pending.
+
+- [x] Late-bind provider and temporal identities to one exact recording,
+      source-video metadata record, and acquisition frame-clock authority.
 - [ ] Add provider requirements to occupancy, trajectory, speed,
       acceleration, heading, and angular-speed offers.
 - [ ] Include provider IDs and digests in metric, contrast, and plot recipes.
@@ -629,6 +750,34 @@ the subject-mask binding. No pixel-union operation or estimator was added.
 
 ### Phase 5: canaries, migration, and activation
 
+#### GoodBatBadBat authority preflight (2026-08-17)
+
+The first reviewed-recording preflight used
+`2026-08-10T17-20-55Z_arena_2_goodbatbadbat`. It performed no Zarr writes and
+hashed the root plus every relevant source `zarr.json` before and after; all
+hashes were unchanged. The source runs are complete immutable,
+selector-ineligible production candidates or sealed bundle members. The
+explicit production-member adapters validate those authorities without
+altering selectors or eligibility, then fail closed at these older coordinate
+publication boundaries:
+
+- the detection v3 successor has a valid run manifest but does not declare the
+  complete `canonical_v2` observation-coordinate publication;
+- the five-point keypoint run has exact `pose_skel_traditional_v2` semantics,
+  now represented by a separately digested anatomy binding, but its complete
+  keypoint coordinate context also predates `canonical_v2`; and
+- the refined subject-mask member predates the modern unguessable coordinate
+  publication owner and complete refined-mask coordinate context.
+
+These are source-publication migration gaps, not numeric provider failures.
+They require new immutable, selector-ineligible coordinate successors (and
+new bundle successors where applicable). Readers must not infer the missing
+authority from array shape, an atomic writer owner, or a newer manifest. The
+existing detection, keypoint, refined-mask, bundle, and selector artifacts
+remain unchanged.
+
+- [ ] Publish selector-ineligible canonical coordinate successors for this
+      recording without changing any source selector.
 - [ ] Materialize all initial providers for one reviewed zebrafish recording.
 - [ ] Compare offsets, valid coverage, speed, occupancy, and bout sensitivity
       without selecting a production default.
@@ -650,6 +799,8 @@ the subject-mask binding. No pixel-union operation or estimator was added.
 - Speed can be recomputed from different positions without changing its
   algorithm or stimulus-selection contract.
 - Angular outputs can independently select a compatible body frame.
+- A scientifically ready offer binds every provider and its temporal selection
+  to the same exact recording/timebase authority digest.
 - Existing detection-centroid tracks remain unchanged and readable.
 - No provider is selected through an undocumented fallback order.
 - Composable offers expose provider identity and readiness.

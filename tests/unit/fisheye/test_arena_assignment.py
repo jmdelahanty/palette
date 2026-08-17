@@ -46,6 +46,9 @@ class _FakeGroup(dict):
     def group_keys(self) -> list[str]:
         return [key for key, value in self.items() if isinstance(value, _FakeGroup)]
 
+    def array_keys(self) -> list[str]:
+        return [key for key, value in self.items() if isinstance(value, _FakeArray)]
+
     def get(self, key: str, default=None):
         return super().get(key, default)
 

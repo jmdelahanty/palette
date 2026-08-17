@@ -34,7 +34,19 @@ from fisheye.shared.subject_mask_coordinate_publication import (
     load_persisted_subject_mask_coordinate_surfaces,
 )
 from fisheye.shared.refined_subject_mask_coordinate_publication import (
+    load_persisted_ineligible_refined_subject_mask_coordinate_surfaces,
     load_persisted_refined_subject_mask_coordinate_surfaces,
+)
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_FAMILY,
+    SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID,
+    SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE,
+    SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR,
+    validate_subject_mask_bundle_manifest,
+)
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
+    validate_subject_mask_core_run_manifest,
 )
 from fisheye.shared.subject_position_expression import (
     ComponentSourceBinding,
@@ -46,11 +58,38 @@ from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+)
 
 
 RAW_SUBJECT_MASK_SOURCE_KIND = "raw"
 REFINED_SUBJECT_MASK_SOURCE_KIND = "refined"
 SUBJECT_MASK_SOURCE_MODALITY = "subject_mask"
+
+# Family selectors are the production authority.  The bundle-member mode is
+# deliberately a separately named, opt-in canary authority for imported
+# selector-ineligible bundles whose family selectors are intentionally absent.
+SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR = "family_selector"
+SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY = (
+    "explicit_bundle_member_canary_v1"
+)
+SUBJECT_MASK_AUTHORITY_MODE_FAMILY_SELECTOR = (
+    SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR
+)
+SUBJECT_MASK_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY = (
+    SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+)
+_BUNDLE_MEMBER_CANARY_SCHEMA_VERSION = 3
+_FAMILY_SELECTOR_NAMES = (
+    "latest",
+    "latest_complete",
+    "latest_pending",
+    "authoritative_run",
+)
+_SELECTOR_ALIASES = frozenset(_FAMILY_SELECTOR_NAMES)
 
 _SOURCE_CONFIG: dict[str, str] = {
     RAW_SUBJECT_MASK_SOURCE_KIND: "subject_mask_runs",
@@ -174,6 +213,213 @@ def _selector_evidence(root: Any, family: str, run_name: str) -> dict[str, Any]:
     }
 
 
+def _validated_manifest(
+    manifest: Any,
+    *,
+    label: str,
+    validator: Any,
+) -> Mapping[str, Any]:
+    if not isinstance(manifest, Mapping):
+        _fail(f"{label} manifest is absent or not an object.")
+    try:
+        errors = tuple(validator(manifest))
+    except Exception as exc:
+        raise SubjectMaskPositionSourceError(
+            f"{label} manifest validation failed."
+        ) from exc
+    if errors:
+        _fail(f"Invalid {label} manifest: {'; '.join(str(error) for error in errors)}")
+    return manifest
+
+
+def _bundle_member_reference(
+    *,
+    role: str,
+    family: str,
+    run_id: str,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = manifest.get("payload")
+    logical_content = (
+        payload.get("logical_content") if isinstance(payload, Mapping) else None
+    )
+    if not isinstance(logical_content, Mapping):
+        _fail("Selected refined subject-mask manifest lacks logical content.")
+    logical_digest = logical_content.get("digest")
+    if not isinstance(logical_digest, str) or not logical_digest:
+        _fail("Selected refined subject-mask manifest lacks a logical content digest.")
+    try:
+        document_digest = canonical_json_sha256(manifest)
+    except (TypeError, ValueError) as exc:
+        raise SubjectMaskPositionSourceError(
+            "Selected refined subject-mask manifest is not strict JSON."
+        ) from exc
+    payload_digest = manifest.get("payload_digest")
+    if not isinstance(payload_digest, str) or not payload_digest:
+        _fail("Selected refined subject-mask manifest lacks a payload digest.")
+    return {
+        "role": role,
+        "family": family,
+        "run_id": run_id,
+        "run_path": f"{family}/{run_id}",
+        "manifest_schema_id": manifest.get("schema_id"),
+        "manifest_schema_version": manifest.get("schema_version"),
+        "manifest_payload_digest": payload_digest,
+        "manifest_document_digest": document_digest,
+        "logical_content_digest": logical_digest,
+    }
+
+
+def _bundle_member_authority_evidence(
+    archive_path: Path,
+    direct_root: Any,
+    consolidated_root: Any,
+    *,
+    bundle_run_path: str,
+    refined_run_path: str,
+) -> dict[str, Any]:
+    """Validate one explicit refined member of an inactive bundle-v3 canary."""
+
+    validate_direct_consolidated_subtree(
+        archive_path,
+        subtree_path=bundle_run_path,
+    )
+    bundle_id = _run_name(bundle_run_path, SUBJECT_MASK_BUNDLE_FAMILY)
+    refined_run_id = _run_name(refined_run_path, _SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND])
+    if bundle_id in _SELECTOR_ALIASES or refined_run_id in _SELECTOR_ALIASES:
+        _fail("Bundle-member authority requires concrete run paths, not selectors.")
+    direct_bundle = _node(direct_root, bundle_run_path)
+    consolidated_bundle = _node(consolidated_root, bundle_run_path)
+    direct_bundle_attrs = _attrs(direct_bundle, path=bundle_run_path)
+    consolidated_bundle_attrs = _attrs(
+        consolidated_bundle, path=bundle_run_path
+    )
+    if direct_bundle_attrs != consolidated_bundle_attrs:
+        _fail("Direct and consolidated bundle authority declarations disagree.")
+    bundle_attrs = direct_bundle_attrs
+    if (
+        bundle_attrs.get("status") != RUN_STATUS_COMPLETE
+        or bundle_attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+    ):
+        _fail("Subject-mask bundle is not complete.")
+    if bundle_attrs.get("stage_selector_eligible") is not False:
+        _fail("Subject-mask bundle is not false selector-eligible.")
+    if bundle_attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR) is not False:
+        _fail("Subject-mask bundle is not false bundle-selector-eligible.")
+
+    direct_bundle_manifest = bundle_attrs.get(SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE)
+    consolidated_bundle_manifest = consolidated_bundle_attrs.get(
+        SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE
+    )
+    if direct_bundle_manifest != consolidated_bundle_manifest:
+        _fail("Direct and consolidated bundle manifests disagree.")
+    bundle_manifest = _validated_manifest(
+        direct_bundle_manifest,
+        label="subject-mask bundle",
+        validator=validate_subject_mask_bundle_manifest,
+    )
+    if bundle_manifest.get("schema_id") != SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID:
+        _fail("Subject-mask bundle manifest schema id is not authoritative.")
+    if bundle_manifest.get("schema_version") != _BUNDLE_MEMBER_CANARY_SCHEMA_VERSION:
+        _fail("Canary bundle-member authority requires bundle manifest schema v3.")
+    try:
+        if bundle_manifest.get("payload_digest") != canonical_json_sha256(
+            bundle_manifest["payload"]
+        ):
+            _fail("Subject-mask bundle manifest payload digest changed.")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SubjectMaskPositionSourceError(
+            "Subject-mask bundle manifest digest cannot be verified."
+        ) from exc
+    payload = bundle_manifest.get("payload")
+    if not isinstance(payload, Mapping):
+        _fail("Subject-mask bundle manifest payload is absent.")
+    publication = payload.get("publication")
+    if not isinstance(publication, Mapping) or publication.get("activation_state") != "deferred":
+        _fail("Canary bundle-member authority requires activation_state='deferred'.")
+    if payload.get("bundle_id") != bundle_id:
+        _fail("Subject-mask bundle manifest bundle_id differs from bundle_run_path.")
+    recording_identity = str(direct_root.attrs.get("recording_id") or "").strip()
+    if recording_identity and payload.get("recording_identity") != recording_identity:
+        _fail("Subject-mask bundle recording identity changed.")
+
+    members = payload.get("members")
+    if not isinstance(members, Mapping) or not isinstance(members.get("refined"), Mapping):
+        _fail("Subject-mask bundle has no exact refined member reference.")
+    member = dict(members["refined"])
+    expected_path = f"{_SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND]}/{refined_run_id}"
+    if member.get("run_path") != expected_path or member.get("run_path") != refined_run_path:
+        _fail("Bundle refined member does not select the requested refined run.")
+    if member.get("family") != _SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND]:
+        _fail("Bundle refined member has the wrong source family.")
+    if member.get("run_id") != refined_run_id:
+        _fail("Bundle refined member has the wrong run_id.")
+
+    direct_parent = _node(
+        direct_root, _SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND]
+    )
+    consolidated_parent = _node(
+        consolidated_root, _SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND]
+    )
+    direct_parent_attrs = _attrs(
+        direct_parent, path=_SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND]
+    )
+    consolidated_parent_attrs = _attrs(
+        consolidated_parent, path=_SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND]
+    )
+    if direct_parent_attrs != consolidated_parent_attrs:
+        _fail("Direct and consolidated refined-family authority declarations disagree.")
+    selector_refs = {
+        name: direct_parent_attrs.get(name) for name in _FAMILY_SELECTOR_NAMES
+    }
+    if any(value == refined_run_id for value in selector_refs.values()):
+        _fail("Bundle-member authority cannot select its run through latest/fallback.")
+
+    direct_run = _node(direct_root, refined_run_path)
+    consolidated_run = _node(consolidated_root, refined_run_path)
+    direct_run_attrs = _attrs(direct_run, path=refined_run_path)
+    consolidated_run_attrs = _attrs(consolidated_run, path=refined_run_path)
+    if direct_run_attrs != consolidated_run_attrs:
+        _fail("Direct and consolidated refined-run authority declarations disagree.")
+    if (
+        direct_run_attrs.get("status") != RUN_STATUS_COMPLETE
+        or direct_run_attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+    ):
+        _fail("Selected refined subject-mask run is not complete.")
+    if direct_run_attrs.get("stage_selector_eligible") is not False:
+        _fail("Selected refined subject-mask run is not false selector-eligible.")
+    direct_manifest = direct_run_attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+    consolidated_manifest = consolidated_run_attrs.get(
+        SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE
+    )
+    if direct_manifest != consolidated_manifest:
+        _fail("Direct and consolidated refined-run manifests disagree.")
+    refined_manifest = _validated_manifest(
+        direct_manifest,
+        label="selected refined subject-mask run",
+        validator=validate_subject_mask_core_run_manifest,
+    )
+    expected_member = _bundle_member_reference(
+        role="refined",
+        family=_SOURCE_CONFIG[REFINED_SUBJECT_MASK_SOURCE_KIND],
+        run_id=refined_run_id,
+        manifest=refined_manifest,
+    )
+    if member != expected_member:
+        _fail("Bundle refined member authority does not match the selected run manifest.")
+    return {
+        "authority_mode": SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY,
+        "bundle_run_path": bundle_run_path,
+        "bundle_id": bundle_id,
+        "bundle_manifest_schema_id": bundle_manifest["schema_id"],
+        "bundle_manifest_schema_version": bundle_manifest["schema_version"],
+        "bundle_manifest_payload_digest": bundle_manifest["payload_digest"],
+        "bundle_manifest_document_digest": canonical_json_sha256(bundle_manifest),
+        "bundle_member": expected_member,
+        "bundle_publication": dict(publication),
+    }
+
+
 def _profile(value: AnatomyProfile | Mapping[str, Any] | str | Path) -> AnatomyProfile:
     if isinstance(value, AnatomyProfile):
         return value
@@ -182,10 +428,14 @@ def _profile(value: AnatomyProfile | Mapping[str, Any] | str | Path) -> AnatomyP
     return AnatomyProfile.from_mapping(value)
 
 
-def _surface_loader(source_kind: str) -> Any:
+def _surface_loader(source_kind: str, *, authority_mode: str) -> Any:
     if source_kind == RAW_SUBJECT_MASK_SOURCE_KIND:
         return load_persisted_subject_mask_coordinate_surfaces
     if source_kind == REFINED_SUBJECT_MASK_SOURCE_KIND:
+        if authority_mode == (
+            SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+        ):
+            return load_persisted_ineligible_refined_subject_mask_coordinate_surfaces
         return load_persisted_refined_subject_mask_coordinate_surfaces
     _fail(f"Unsupported subject-mask source_kind {source_kind!r}.")
 
@@ -312,17 +562,42 @@ def _read_bound_source(
     profile: AnatomyProfile,
     binding_id: str,
     required_role_ids: Sequence[str] | None,
+    authority_mode: str,
+    bundle_run_path: str | None,
 ) -> "BoundSubjectMaskPositionSource":
     try:
         family = _SOURCE_CONFIG[source_kind]
     except KeyError:
         _fail(f"Unsupported subject-mask source_kind {source_kind!r}.")
-    loader = _surface_loader(source_kind)
+    loader = _surface_loader(source_kind, authority_mode=authority_mode)
     run_name = _run_name(run_path, family)
-    direct_selector = _selector_evidence(direct_root, family, run_name)
-    consolidated_selector = _selector_evidence(consolidated_root, family, run_name)
-    if direct_selector != consolidated_selector:
-        _fail("Direct and consolidated family selectors disagree.")
+    if authority_mode == SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR:
+        direct_selector = _selector_evidence(direct_root, family, run_name)
+        consolidated_selector = _selector_evidence(consolidated_root, family, run_name)
+        if direct_selector != consolidated_selector:
+            _fail("Direct and consolidated family selectors disagree.")
+        authority_evidence = {
+            "authority_mode": authority_mode,
+            "bundle_run_path": None,
+            "family_selector_direct": direct_selector,
+            "family_selector_consolidated": consolidated_selector,
+        }
+    elif authority_mode == (
+        SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+    ):
+        if source_kind != REFINED_SUBJECT_MASK_SOURCE_KIND:
+            _fail("Bundle-member canary authority is only valid for refined masks.")
+        if bundle_run_path is None:
+            _fail("Bundle-member canary authority requires bundle_run_path.")
+        authority_evidence = _bundle_member_authority_evidence(
+            archive_path,
+            direct_root,
+            consolidated_root,
+            bundle_run_path=bundle_run_path,
+            refined_run_path=run_path,
+        )
+    else:
+        _fail(f"Unsupported subject-mask authority_mode {authority_mode!r}.")
     try:
         direct_surfaces = loader(direct_root, run_path)
         consolidated_surfaces = loader(consolidated_root, run_path)
@@ -406,15 +681,28 @@ def _read_bound_source(
             "consolidated_mode": "consolidated",
             "direct_consolidated_subtree": run_path,
         },
-        "family_selector_direct": direct_selector,
-        "family_selector_consolidated": consolidated_selector,
+        "authority": authority_evidence,
         "surface_direct": direct_surface_digest,
         "surface_consolidated": consolidated_surface_digest,
     }
+    if authority_mode == SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR:
+        evidence.update(
+            {
+                "family_selector_direct": authority_evidence[
+                    "family_selector_direct"
+                ],
+                "family_selector_consolidated": authority_evidence[
+                    "family_selector_consolidated"
+                ],
+            }
+        )
     source_payload = {
+        "authority_mode": authority_mode,
+        "bundle_run_path": bundle_run_path,
+        "authority_evidence": authority_evidence,
         "source_kind": source_kind,
         "run_path": run_path,
-        "authority_evidence": _evidence_digest(evidence),
+        "authority_evidence_digest": _evidence_digest(evidence),
         "row_identity": getattr(row_identity, "record_sha256", None),
         "instance_key": _array_digest(instance_key),
         "source_acquisition_frame_index": _array_digest(source_frame),
@@ -427,6 +715,8 @@ def _read_bound_source(
         source_modality=SUBJECT_MASK_SOURCE_MODALITY,
         source_kind=source_kind,
         run_path=run_path,
+        authority_mode=authority_mode,
+        bundle_run_path=bundle_run_path,
         row_identity=row_identity,
         instance_key=instance_key,
         source_acquisition_frame_index=source_frame,
@@ -458,6 +748,8 @@ class BoundSubjectMaskPositionSource:
     source_modality: str
     source_kind: str
     run_path: str
+    authority_mode: str
+    bundle_run_path: str | None
     row_identity: Any = field(repr=False, compare=False)
     instance_key: np.ndarray = field(repr=False, compare=False)
     source_acquisition_frame_index: np.ndarray = field(repr=False, compare=False)
@@ -483,6 +775,11 @@ class BoundSubjectMaskPositionSource:
     def __init__(self, *, _seal: object | None = None, **values: Any) -> None:
         if _seal is not _BOUND_SOURCE_SEAL:
             _fail("Subject-mask position sources cannot be constructed directly.")
+        values.setdefault(
+            "authority_mode",
+            SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR,
+        )
+        values.setdefault("bundle_run_path", None)
         for name, value in values.items():
             if name in {"role_mapping", "source_binding_record", "direct_consolidated_evidence"}:
                 value = _freeze(value)
@@ -509,7 +806,13 @@ class BoundSubjectMaskPositionSource:
             anatomy_profile=self._anatomy_profile_payload,
             binding_id=self._binding_id,
             required_role_ids=self._required_role_ids,
+            authority_mode=self.authority_mode,
+            bundle_run_path=self.bundle_run_path,
         )
+        if current.authority_mode != self.authority_mode:
+            _fail("Bound subject-mask authority mode changed after it was sealed.")
+        if current.bundle_run_path != self.bundle_run_path:
+            _fail("Bound subject-mask bundle_run_path changed after it was sealed.")
         if current.source_payload_digest != self.source_payload_digest:
             _fail("Bound subject-mask position source changed after it was sealed.")
         if current.source_binding_digest != self.source_binding_digest:
@@ -543,13 +846,18 @@ def load_subject_mask_position_source(
     anatomy_profile: AnatomyProfile | Mapping[str, Any] | str | Path,
     binding_id: str,
     required_role_ids: Sequence[str] | None = None,
+    authority_mode: str = SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR,
+    bundle_run_path: str | None = None,
 ) -> BoundSubjectMaskPositionSource:
     """Load one explicitly named, current, complete subject-mask source.
 
     ``run_path`` is mandatory and is never resolved from a ``latest`` selector.
     The selected family must itself point at that exact run in both direct and
-    consolidated metadata.  Raw and refined source kinds are intentionally
-    separate and never substitute for one another.
+    consolidated metadata by default.  ``explicit_bundle_member_canary_v1`` is
+    the only alternate authority and requires an explicit bundle path; it is
+    limited to a complete, inactive refined member of a bundle-v3 manifest.
+    Raw and refined source kinds are intentionally separate and never substitute
+    for one another.
     """
 
     if not run_path:
@@ -558,6 +866,19 @@ def load_subject_mask_position_source(
         _fail("analysis_zarr must be the path to the canonical analysis Zarr.")
     archive_path = Path(analysis_zarr).expanduser().resolve()
     profile = _profile(anatomy_profile)
+    if authority_mode == SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR:
+        if bundle_run_path is not None:
+            _fail("bundle_run_path is only valid with explicit bundle-member canary authority.")
+    elif authority_mode == (
+        SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+    ):
+        if not bundle_run_path:
+            _fail("Bundle-member canary authority requires an explicit bundle_run_path.")
+        if source_kind != REFINED_SUBJECT_MASK_SOURCE_KIND:
+            _fail("Bundle-member canary authority is only valid for refined masks.")
+        _run_name(bundle_run_path, SUBJECT_MASK_BUNDLE_FAMILY)
+    else:
+        _fail(f"Unsupported subject-mask authority_mode {authority_mode!r}.")
     direct_root = open_zarr_root(archive_path, mode="r", use_consolidated=False)
     consolidated_root = open_zarr_root(archive_path, mode="r", use_consolidated=True)
     if source_kind not in _SOURCE_CONFIG:
@@ -572,6 +893,8 @@ def load_subject_mask_position_source(
         profile=profile,
         binding_id=binding_id,
         required_role_ids=required_role_ids,
+        authority_mode=authority_mode,
+        bundle_run_path=bundle_run_path,
     )
 
 
@@ -593,6 +916,8 @@ def load_subject_mask_position_source_for_estimator(
     anatomy_profile: AnatomyProfile | Mapping[str, Any] | str | Path,
     binding_id: str,
     estimator_id: str,
+    authority_mode: str = SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR,
+    bundle_run_path: str | None = None,
 ) -> BoundSubjectMaskPositionSource:
     """Bind only the anatomy roles required by one registered mask estimator."""
 
@@ -607,6 +932,8 @@ def load_subject_mask_position_source_for_estimator(
         anatomy_profile=anatomy_profile,
         binding_id=binding_id,
         required_role_ids=required_roles,
+        authority_mode=authority_mode,
+        bundle_run_path=bundle_run_path,
     )
 
 
@@ -615,6 +942,10 @@ __all__ = [
     "RAW_SUBJECT_MASK_SOURCE_KIND",
     "REFINED_SUBJECT_MASK_SOURCE_KIND",
     "SUBJECT_MASK_SOURCE_MODALITY",
+    "SUBJECT_MASK_AUTHORITY_MODE_FAMILY_SELECTOR",
+    "SUBJECT_MASK_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY",
+    "SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR",
+    "SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY",
     "SubjectMaskPositionSourceError",
     "load_subject_mask_position_source",
     "load_subject_mask_position_source_for_estimator",

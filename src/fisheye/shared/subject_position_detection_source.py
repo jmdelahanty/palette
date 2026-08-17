@@ -34,6 +34,7 @@ from fisheye.shared.coordinate_surface_contract import (
 from fisheye.shared.observation_coordinate_publication import (
     detection_observation_geometry_values,
     load_persisted_detection_observation_geometry,
+    load_persisted_ineligible_detection_observation_geometry,
     require_bound_detection_observation_geometry,
 )
 from fisheye.shared.subject_position_expression import (
@@ -42,6 +43,7 @@ from fisheye.shared.subject_position_expression import (
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    validate_canonical_detection_run_manifest,
     require_active_coordinate_canonical_detection,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -60,6 +62,15 @@ DETECTION_POSITION_SOURCE_KIND_VALUES = frozenset(
 )
 DETECTION_POSITION_VALIDITY_POLICY_ID = (
     "canonical_detection_schema_v1_all_rows_valid.v1"
+)
+DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID = (
+    "active_selector_coordinate_canonical_detection.v1"
+)
+DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID = (
+    "sealed_selector_ineligible_coordinate_canonical_detection_candidate.v1"
+)
+DETECTION_POSITION_CANARY_PRODUCTION_SELECTOR_ACTIVATION = (
+    "deferred"
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BOUND_DETECTION_POSITION_SOURCE_SEAL = object()
@@ -121,6 +132,14 @@ def _require_exact_run_path(run_path: Any) -> str:
     return path
 
 
+def _require_canary_run_path(run_path: Any) -> str:
+    path = _require_exact_run_path(run_path)
+    run_id = path.rsplit("/", 1)[1]
+    if run_id in {"latest", "latest_complete", "latest_pending", "authoritative_run"}:
+        _fail("Canary detection authority never resolves selector aliases.")
+    return path
+
+
 def _authority_record(value: Any, *, name: str) -> dict[str, str]:
     record_ref = _required_text(getattr(value, "record_ref", None), name=f"{name}.record_ref")
     record_sha256 = _required_sha256(
@@ -133,6 +152,7 @@ def _require_manifest_binding(
     manifest: Mapping[str, Any],
     *,
     run_path: str,
+    expected_selector_eligible: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     if not isinstance(manifest, Mapping):
         _fail("The active detection authority did not return a manifest mapping.")
@@ -153,7 +173,7 @@ def _require_manifest_binding(
         _fail("Canonical detection publication evidence is missing.")
     expected_publication = {
         "completion_status": "complete",
-        "stage_selector_eligible": True,
+        "stage_selector_eligible": expected_selector_eligible,
         "metadata_state": "direct_and_consolidated_validated",
     }
     for name, expected in expected_publication.items():
@@ -177,6 +197,114 @@ def _require_manifest_binding(
         "logical_content_digest": logical_content_digest,
         "publication": copy.deepcopy(dict(publication)),
     }
+
+
+def _require_selector_ineligible_candidate(
+    root: Any,
+    *,
+    run_path: str,
+) -> tuple[Mapping[str, Any], dict[str, Any]]:
+    """Require one explicitly named, sealed production-candidate run.
+
+    This is deliberately separate from ``require_active_coordinate_canonical_detection``.
+    It is a canary-only read authority: it never consults or resolves a selector and
+    cannot turn an ineligible candidate into active production authority.
+    """
+
+    path = _require_canary_run_path(run_path)
+    run_id = path.rsplit("/", 1)[1]
+    try:
+        family = root["detect_runs"]
+        run = family[run_id]
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(f"Sealed canary detection run is missing: {path}")
+        raise AssertionError("unreachable") from exc
+
+    attrs = run.attrs
+    if attrs.get("status") != "complete":
+        _fail("Sealed canary detection run is not complete.")
+    if attrs.get("palette_run_completion_status") != "complete":
+        _fail("Sealed canary detection run lacks complete run-completion evidence.")
+    if attrs.get("stage_selector_eligible") is not False:
+        _fail("Sealed canary detection run must remain selector ineligible.")
+    if attrs.get("immutable_snapshot") is not True:
+        _fail("Sealed canary detection run is not an immutable snapshot.")
+    if attrs.get("production_candidate") is not True:
+        _fail("Sealed canary detection run lacks the production-candidate marker.")
+    if attrs.get("production_selector_activation") != (
+        DETECTION_POSITION_CANARY_PRODUCTION_SELECTOR_ACTIVATION
+    ):
+        _fail("Sealed canary detection run has an invalid production activation marker.")
+
+    # A selector-ineligible candidate must not be smuggled into any selector, and
+    # no selector is ever used to find this run.  Missing selector attributes are
+    # acceptable; a reference to this candidate is not.
+    selector_refs = {
+        name: family.attrs.get(name)
+        for name in ("latest", "latest_complete", "latest_pending", "authoritative_run")
+    }
+    if any(value == run_id for value in selector_refs.values()):
+        _fail("Sealed canary detection run is referenced by a selector.")
+
+    manifest = attrs.get("run_manifest")
+    if not isinstance(manifest, Mapping):
+        _fail("Sealed canary detection run lacks its manifest.")
+    try:
+        errors = validate_canonical_detection_run_manifest(manifest)
+    except Exception as exc:
+        _fail(f"Canonical detection manifest validation failed: {exc}")
+    if errors:
+        _fail("Canonical detection manifest is invalid: " + "; ".join(errors))
+    if manifest.get("schema_version") != (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        _fail("Sealed canary detection manifest is not canonical v3.")
+    payload = manifest.get("payload")
+    if not isinstance(payload, Mapping) or payload.get("run_id") != run_id:
+        _fail("Sealed canary detection manifest run id differs from the selected run.")
+    publication = payload.get("publication")
+    if not isinstance(publication, Mapping):  # validator normally catches this
+        _fail("Sealed canary detection publication evidence is missing.")
+    if publication.get("completion_status") != "complete":
+        _fail("Sealed canary detection publication is not complete.")
+    if publication.get("stage_selector_eligible") is not False:
+        _fail("Sealed canary detection publication must remain selector ineligible.")
+
+    manifest_digest = _required_sha256(
+        manifest.get("payload_digest"),
+        name="canonical detection manifest.payload_digest",
+    )
+    authority_evidence: dict[str, Any] = {
+        "policy_id": DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID,
+        "policy_version": 1,
+        "run_path": path,
+        "run_completion": {
+            "status": attrs.get("status"),
+            "palette_run_completion_status": attrs.get(
+                "palette_run_completion_status"
+            ),
+        },
+        "selector_state": {
+            "stage_selector_eligible": attrs.get("stage_selector_eligible"),
+            "resolved_by": "explicit_run_path_only",
+            "selector_references": selector_refs,
+        },
+        "production_candidate": {
+            "production_candidate": attrs.get("production_candidate"),
+            "production_selector_activation": attrs.get(
+                "production_selector_activation"
+            ),
+        },
+        "manifest": {
+            "schema_version": manifest.get("schema_version"),
+            "run_id": payload.get("run_id"),
+            "payload_digest": manifest_digest,
+            "publication_stage_selector_eligible": publication.get(
+                "stage_selector_eligible"
+            ),
+        },
+    }
+    return manifest, authority_evidence
 
 
 def _require_bbox_descriptor(geometry: Any) -> None:
@@ -259,14 +387,38 @@ def _build_source(
     run_path: str,
     *,
     direct_consolidated_evidence: Mapping[str, Any] | None = None,
+    authority_policy: str = DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID,
 ) -> "BoundDetectionPositionSource":
-    selected_manifest = require_active_coordinate_canonical_detection(
-        root_node, group_path=run_path
-    )
+    if authority_policy == DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID:
+        selected_manifest = require_active_coordinate_canonical_detection(
+            root_node, group_path=run_path
+        )
+        authority_evidence: dict[str, Any] = {
+            "policy_id": DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID,
+            "policy_version": 1,
+            "run_path": run_path,
+            "resolved_by": "active_selector_exact_run_path",
+        }
+        expected_selector_eligible = True
+    elif authority_policy == DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID:
+        selected_manifest, authority_evidence = _require_selector_ineligible_candidate(
+            root_node,
+            run_path=run_path,
+        )
+        expected_selector_eligible = False
+    else:
+        _fail(f"Unsupported detection position authority policy: {authority_policy!r}.")
     source_kind, manifest_evidence = _require_manifest_binding(
-        selected_manifest, run_path=run_path
+        selected_manifest,
+        run_path=run_path,
+        expected_selector_eligible=expected_selector_eligible,
     )
-    geometry = load_persisted_detection_observation_geometry(root_node, run_path)
+    geometry_loader = (
+        load_persisted_detection_observation_geometry
+        if authority_policy == DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID
+        else load_persisted_ineligible_detection_observation_geometry
+    )
+    geometry = geometry_loader(root_node, run_path)
     geometry = require_bound_detection_observation_geometry(geometry)
     if geometry.row_identity.rowset_path != run_path:
         _fail("Detection geometry row identity is bound to another run.")
@@ -311,6 +463,11 @@ def _build_source(
         "source_modality": "detection",
         "source_kind": source_kind,
         "run_path": run_path,
+        "authority": {
+            "policy_id": authority_policy,
+            "evidence": copy.deepcopy(authority_evidence),
+            "evidence_sha256": canonical_json_sha256(authority_evidence),
+        },
         "row_axis": "observation_instance",
         "row_identity": {
             "record_ref": geometry.row_identity.record_ref,
@@ -382,6 +539,7 @@ def _build_source(
         source_modality="detection",
         source_kind=source_kind,
         run_path=run_path,
+        authority_policy=authority_policy,
         row_identity=geometry.row_identity,
         instance_key=instance_key,
         source_acquisition_frame_index=acquisition_frames,
@@ -409,6 +567,7 @@ class BoundDetectionPositionSource:
     source_modality: str
     source_kind: str
     run_path: str
+    authority_policy: str
     row_identity: Any = field(repr=False)
     instance_key: np.ndarray
     source_acquisition_frame_index: np.ndarray
@@ -428,6 +587,10 @@ class BoundDetectionPositionSource:
     def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
         if _verification_seal is not _BOUND_DETECTION_POSITION_SOURCE_SEAL:
             _fail("Detection position sources must be built by the strict adapter.")
+        values.setdefault(
+            "authority_policy",
+            DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID,
+        )
         for name, value in values.items():
             object.__setattr__(self, name, value)
         object.__setattr__(self, "_seal", _verification_seal)
@@ -465,7 +628,78 @@ def load_persisted_detection_position_source(
     Another detection or refinement run is never tried.
     """
 
-    path = _require_exact_run_path(run_path)
+    return _load_persisted_detection_position_source(
+        analysis_zarr,
+        run_path,
+        authority_policy=DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID,
+        path_validator=_require_exact_run_path,
+    )
+
+
+def load_persisted_selector_ineligible_detection_position_source(
+    analysis_zarr: str | Path | Any,
+    run_path: str,
+) -> BoundDetectionPositionSource:
+    """Bind one exact sealed v3 production candidate for a canary only.
+
+    This authority is intentionally not a fallback for the active source.  The
+    caller must name the run explicitly, and the candidate must remain complete,
+    immutable, production-marked, and selector-ineligible.  It never resolves a
+    family ``latest`` pointer.
+    """
+
+    return _load_persisted_detection_position_source(
+        analysis_zarr,
+        run_path,
+        authority_policy=DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID,
+        path_validator=_require_canary_run_path,
+    )
+
+
+bind_detection_position_source = load_persisted_detection_position_source
+bind_selector_ineligible_detection_position_source = (
+    load_persisted_selector_ineligible_detection_position_source
+)
+
+
+def require_bound_detection_position_source(
+    value: BoundDetectionPositionSource,
+) -> BoundDetectionPositionSource:
+    """Reopen all exact authorities and reject stale bound source state."""
+
+    if (
+        type(value) is not BoundDetectionPositionSource
+        or value._seal is not _BOUND_DETECTION_POSITION_SOURCE_SEAL
+    ):
+        _fail("A sealed BoundDetectionPositionSource is required.")
+    if value.authority_policy == DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID:
+        loader = load_persisted_detection_position_source
+    elif value.authority_policy == DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID:
+        loader = load_persisted_selector_ineligible_detection_position_source
+    else:
+        _fail(f"Unsupported detection position authority policy: {value.authority_policy!r}.")
+    current = (
+        loader(value._analysis_zarr, value.run_path)
+        if value._analysis_zarr is not None
+        else _build_source(
+            value._root_node,
+            value.run_path,
+            authority_policy=value.authority_policy,
+        )
+    )
+    if current.source_binding_digest != value.source_binding_digest:
+        _fail("Detection position source changed after binding.")
+    return value
+
+
+def _load_persisted_detection_position_source(
+    analysis_zarr: str | Path | Any,
+    run_path: str,
+    *,
+    authority_policy: str,
+    path_validator: Any,
+) -> BoundDetectionPositionSource:
+    path = path_validator(run_path)
     if isinstance(analysis_zarr, (str, Path)):
         archive = Path(analysis_zarr).expanduser().resolve()
         if not archive.is_dir():
@@ -488,52 +722,37 @@ def load_persisted_detection_position_source(
             direct_root,
             path,
             direct_consolidated_evidence=receipt,
+            authority_policy=authority_policy,
         )
         consolidated = _build_source(
             consolidated_root,
             path,
             direct_consolidated_evidence=receipt,
+            authority_policy=authority_policy,
         )
         if direct.source_binding_digest != consolidated.source_binding_digest:
             _fail("Direct and consolidated canonical detection evidence disagrees.")
         object.__setattr__(direct, "_analysis_zarr", archive)
         return direct
-    return _build_source(analysis_zarr, path)
-
-
-bind_detection_position_source = load_persisted_detection_position_source
-
-
-def require_bound_detection_position_source(
-    value: BoundDetectionPositionSource,
-) -> BoundDetectionPositionSource:
-    """Reopen all exact authorities and reject stale bound source state."""
-
-    if (
-        type(value) is not BoundDetectionPositionSource
-        or value._seal is not _BOUND_DETECTION_POSITION_SOURCE_SEAL
-    ):
-        _fail("A sealed BoundDetectionPositionSource is required.")
-    current = (
-        load_persisted_detection_position_source(
-            value._analysis_zarr,
-            value.run_path,
-        )
-        if value._analysis_zarr is not None
-        else _build_source(value._root_node, value.run_path)
+    return _build_source(
+        analysis_zarr,
+        path,
+        authority_policy=authority_policy,
     )
-    if current.source_binding_digest != value.source_binding_digest:
-        _fail("Detection position source changed after binding.")
-    return value
 
 
 __all__ = [
     "BoundDetectionPositionSource",
+    "DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID",
+    "DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID",
+    "DETECTION_POSITION_CANARY_PRODUCTION_SELECTOR_ACTIVATION",
     "DETECTION_POSITION_SOURCE_SCHEMA_ID",
     "DETECTION_POSITION_SOURCE_SCHEMA_VERSION",
     "DETECTION_POSITION_VALIDITY_POLICY_ID",
     "DetectionPositionSourceError",
     "bind_detection_position_source",
+    "bind_selector_ineligible_detection_position_source",
     "load_persisted_detection_position_source",
+    "load_persisted_selector_ineligible_detection_position_source",
     "require_bound_detection_position_source",
 ]

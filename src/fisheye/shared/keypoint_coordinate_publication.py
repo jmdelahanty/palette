@@ -2905,6 +2905,25 @@ def load_persisted_keypoint_coordinate_surfaces(
     )
 
 
+def load_persisted_ineligible_keypoint_coordinate_surfaces(
+    root_node: Any,
+    run_path: str,
+) -> BoundKeypointCoordinateSurfaces:
+    """Load complete keypoint surfaces that remain selector-ineligible.
+
+    This verifies the coordinate publication only.  Consumers must separately
+    prove an exact immutable bundle authority before treating the named member
+    as an analysis input.
+    """
+
+    return _load_persisted_keypoint_coordinate_surfaces(
+        root_node,
+        run_path,
+        require_complete=True,
+        expected_selector_eligible=False,
+    )
+
+
 def _load_completed_ineligible_keypoint_coordinate_surfaces(
     root_node: Any,
     run_path: str,
@@ -3159,6 +3178,25 @@ def require_bound_keypoint_coordinate_surfaces(value: Any) -> BoundKeypointCoord
     return value
 
 
+def require_bound_ineligible_keypoint_coordinate_surfaces(
+    value: Any,
+) -> BoundKeypointCoordinateSurfaces:
+    """Revalidate one sealed coordinate graph that remains selector-ineligible."""
+
+    if (
+        type(value) is not BoundKeypointCoordinateSurfaces
+        or value._seal is not _BOUND_SURFACES_SEAL
+    ):
+        _fail("A sealed ineligible keypoint coordinate graph is required.")
+    current = load_persisted_ineligible_keypoint_coordinate_surfaces(
+        value.context._root,
+        value.context.run_path,
+    )
+    if current.derivation.record_sha256 != value.derivation.record_sha256:
+        _fail("Ineligible keypoint coordinate surfaces changed after binding.")
+    return value
+
+
 __all__ = [
     "KEYPOINT_ARRAY_NAMES",
     "KEYPOINT_COORDINATE_CONTEXT_ATTR",
@@ -3177,6 +3215,7 @@ __all__ = [
     "derive_keypoint_coordinate_batch",
     "load_persisted_keypoint_coordinate_context",
     "load_persisted_keypoint_coordinate_surfaces",
+    "load_persisted_ineligible_keypoint_coordinate_surfaces",
     "load_persisted_keypoint_crop_source",
     "model_input_batch_to_roi",
     "model_input_bbox_batch_to_roi",
@@ -3185,6 +3224,7 @@ __all__ = [
     "revalidate_keypoint_coordinate_batch_context",
     "require_bound_keypoint_coordinate_context",
     "require_bound_keypoint_coordinate_surfaces",
+    "require_bound_ineligible_keypoint_coordinate_surfaces",
     "require_bound_keypoint_crop_source",
     "require_direct_keypoint_crop_pixel_source",
     "rollback_keypoint_coordinate_publication",

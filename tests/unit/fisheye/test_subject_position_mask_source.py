@@ -122,6 +122,108 @@ def _patch(monkeypatch, *, source_kind="raw", labels=None, available=None):
     return chain
 
 
+def _bundle_manifest(refined_manifest):
+    member = {
+        "role": "refined",
+        "family": "refined_subject_masks_runs",
+        "run_id": "run-a",
+        "run_path": "refined_subject_masks_runs/run-a",
+        "manifest_schema_id": refined_manifest["schema_id"],
+        "manifest_schema_version": refined_manifest["schema_version"],
+        "manifest_payload_digest": refined_manifest["payload_digest"],
+        "manifest_document_digest": subject_source.canonical_json_sha256(
+            refined_manifest
+        ),
+        "logical_content_digest": refined_manifest["payload"]["logical_content"][
+            "digest"
+        ],
+    }
+    payload = {
+        "bundle_id": "bundle-a",
+        "recording_identity": "recording-a",
+        "publication": {"activation_state": "deferred"},
+        "members": {"refined": member},
+    }
+    return {
+        "schema_id": "palette.subject_mask.bundle_manifest",
+        "schema_version": 3,
+        "digest_algorithm": "sha256_canonical_json_v1",
+        "payload_digest": subject_source.canonical_json_sha256(payload),
+        "payload": payload,
+    }
+
+
+def _patch_bundle(monkeypatch, *, bundle_version=3):
+    direct, surfaces, chain = _fake_source(source_kind="refined")
+    consolidated, _, _ = _fake_source(source_kind="refined")
+    refined_payload = {
+        "run_id": "run-a",
+        "logical_content": {"digest": "logical-refined"},
+    }
+    refined_manifest = {
+        "schema_id": "palette.subject_mask_core.run_manifest",
+        "schema_version": 5,
+        "digest_algorithm": "sha256_canonical_json_v1",
+        "payload_digest": subject_source.canonical_json_sha256(refined_payload),
+        "payload": refined_payload,
+    }
+    bundle_manifest = _bundle_manifest(refined_manifest)
+    bundle_manifest["schema_version"] = bundle_version
+    refined_attrs = {
+        "status": "complete",
+        "palette_run_completion_status": "complete",
+        "stage_selector_eligible": False,
+        "run_manifest": refined_manifest,
+    }
+    bundle_attrs = {
+        "status": "complete",
+        "palette_run_completion_status": "complete",
+        "stage_selector_eligible": False,
+        "subject_mask_bundle_selector_eligible": False,
+        "run_manifest": bundle_manifest,
+    }
+    for root in (direct, consolidated):
+        root.attrs["recording_id"] = "recording-a"
+        root.children["refined_subject_masks_runs"] = _Group(attrs={})
+        root.children["subject_mask_bundle_runs"] = _Group(attrs={})
+        root.children["refined_subject_masks_runs/run-a"] = _Group(
+            attrs=dict(refined_attrs)
+        )
+        root.children["subject_mask_bundle_runs/bundle-a"] = _Group(
+            attrs=dict(bundle_attrs)
+        )
+    monkeypatch.setattr(
+        subject_source,
+        "open_zarr_root",
+        lambda *args, **kwargs: direct
+        if not kwargs.get("use_consolidated")
+        else consolidated,
+    )
+    monkeypatch.setattr(
+        subject_source,
+        "validate_direct_consolidated_subtree",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        subject_source,
+        "validate_subject_mask_bundle_manifest",
+        lambda manifest: (),
+    )
+    monkeypatch.setattr(
+        subject_source,
+        "validate_subject_mask_core_run_manifest",
+        lambda manifest: (),
+    )
+    monkeypatch.setattr(
+        subject_source,
+        "load_persisted_ineligible_refined_subject_mask_coordinate_surfaces",
+        lambda root, path: surfaces,
+    )
+    monkeypatch.setattr(subject_source, "require_bound_directed_transform_chain", lambda value: value)
+    monkeypatch.setattr(subject_source, "apply_bound_directed_transform_chain", _row_varying_projection)
+    return direct, consolidated, chain, bundle_manifest, refined_manifest
+
+
 def _loader_name(source_kind):
     return (
         "load_persisted_subject_mask_coordinate_surfaces"
@@ -210,6 +312,115 @@ def test_stale_family_selector_fails_closed(monkeypatch):
             source_kind="raw",
             anatomy_profile=_profile(),
             binding_id=BINDING_ID,
+        )
+
+
+def test_explicit_bundle_member_canary_uses_ineligible_loader_and_binds_authority(
+    monkeypatch,
+):
+    _patch_bundle(monkeypatch)
+    monkeypatch.setattr(
+        subject_source,
+        "load_persisted_refined_subject_mask_coordinate_surfaces",
+        lambda *args, **kwargs: pytest.fail(
+            "bundle-member authority must not use the family-selector loader"
+        ),
+    )
+    bound = subject_source.load_subject_mask_position_source(
+        "/tmp/fake.zarr",
+        run_path="refined_subject_masks_runs/run-a",
+        source_kind=subject_source.REFINED_SUBJECT_MASK_SOURCE_KIND,
+        anatomy_profile=_profile(),
+        binding_id=BINDING_ID,
+        authority_mode=(
+            subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+        ),
+        bundle_run_path="subject_mask_bundle_runs/bundle-a",
+    )
+    assert bound.authority_mode == (
+        subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+    )
+    assert bound.bundle_run_path == "subject_mask_bundle_runs/bundle-a"
+    assert bound.direct_consolidated_evidence["authority"]["bundle_id"] == "bundle-a"
+    assert bound.source_payload_digest
+    assert bound.revalidate().source_payload_digest == bound.source_payload_digest
+
+
+def test_bundle_member_canary_requires_explicit_bundle_path(monkeypatch):
+    _patch_bundle(monkeypatch)
+    with pytest.raises(
+        subject_source.SubjectMaskPositionSourceError,
+        match="requires an explicit bundle_run_path",
+    ):
+        subject_source.load_subject_mask_position_source(
+            "/tmp/fake.zarr",
+            run_path="refined_subject_masks_runs/run-a",
+            source_kind=subject_source.REFINED_SUBJECT_MASK_SOURCE_KIND,
+            anatomy_profile=_profile(),
+            binding_id=BINDING_ID,
+            authority_mode=(
+                subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+            ),
+        )
+
+
+def test_default_family_selector_mode_does_not_fallback_to_bundle_member(
+    monkeypatch,
+):
+    _patch_bundle(monkeypatch)
+    with pytest.raises(
+        subject_source.SubjectMaskPositionSourceError,
+        match="Family selector .* missing",
+    ):
+        subject_source.load_subject_mask_position_source(
+            "/tmp/fake.zarr",
+            run_path="refined_subject_masks_runs/run-a",
+            source_kind=subject_source.REFINED_SUBJECT_MASK_SOURCE_KIND,
+            anatomy_profile=_profile(),
+            binding_id=BINDING_ID,
+        )
+
+
+def test_bundle_member_canary_rejects_direct_consolidated_authority_divergence(
+    monkeypatch,
+):
+    direct, _consolidated, _chain, _bundle_manifest, _refined_manifest = _patch_bundle(
+        monkeypatch
+    )
+    direct.children["subject_mask_bundle_runs/bundle-a"].attrs["status"] = "changed"
+    with pytest.raises(
+        subject_source.SubjectMaskPositionSourceError,
+        match="Direct and consolidated bundle authority",
+    ):
+        subject_source.load_subject_mask_position_source(
+            "/tmp/fake.zarr",
+            run_path="refined_subject_masks_runs/run-a",
+            source_kind=subject_source.REFINED_SUBJECT_MASK_SOURCE_KIND,
+            anatomy_profile=_profile(),
+            binding_id=BINDING_ID,
+            authority_mode=(
+                subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+            ),
+            bundle_run_path="subject_mask_bundle_runs/bundle-a",
+        )
+
+
+def test_bundle_member_canary_requires_schema_v3(monkeypatch):
+    _patch_bundle(monkeypatch, bundle_version=4)
+    with pytest.raises(
+        subject_source.SubjectMaskPositionSourceError,
+        match="requires bundle manifest schema v3",
+    ):
+        subject_source.load_subject_mask_position_source(
+            "/tmp/fake.zarr",
+            run_path="refined_subject_masks_runs/run-a",
+            source_kind=subject_source.REFINED_SUBJECT_MASK_SOURCE_KIND,
+            anatomy_profile=_profile(),
+            binding_id=BINDING_ID,
+            authority_mode=(
+                subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+            ),
+            bundle_run_path="subject_mask_bundle_runs/bundle-a",
         )
 
 

@@ -8,6 +8,7 @@ import zarr
 from rich.console import Console
 
 from ..shared.run_provenance import build_run_provenance_from_stage_record
+from ..shared.json_safety import json_attr_safe
 from ..shared.rowset_fingerprint import (
     RowsetFingerprint,
     assert_rowset_fingerprint_matches,
@@ -20,6 +21,12 @@ from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, no
 from ..shared.system_metadata import get_environment_info
 from .api import TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA, build_tracking
 from .contracts import TrackingObservations, TrackingResult
+from .run_manifest import (
+    TRACKING_RUN_MANIFEST_ATTR,
+    TRACKING_RUN_MANIFEST_DIGEST_ATTR,
+    build_tracking_run_manifest,
+    tracking_run_manifest_digest,
+)
 
 
 UNASSIGNED_TRACK_ID = -1
@@ -380,6 +387,12 @@ def write_tracking_run(
             source_rowset_fingerprint_reader(),
         )
     if tracking_parent is not None:
+        run_group.attrs["stage_selector_eligible"] = True
+        manifest = build_tracking_run_manifest(run_group, run_name=run_name)
+        run_group.attrs[TRACKING_RUN_MANIFEST_ATTR] = json_attr_safe(manifest)
+        run_group.attrs[TRACKING_RUN_MANIFEST_DIGEST_ATTR] = (
+            tracking_run_manifest_digest(manifest)
+        )
         mark_run_complete(
             run_group,
             parent_group=tracking_parent,

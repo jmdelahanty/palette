@@ -12,6 +12,11 @@ from fisheye.tracking.single_subject_per_arena import (
     write_single_subject_per_arena_tracking_run,
 )
 from fisheye.shared.rowset_fingerprint import build_rowset_fingerprint
+from fisheye.tracking.run_manifest import (
+    TRACKING_RUN_MANIFEST_ATTR,
+    TRACKING_RUN_MANIFEST_DIGEST_ATTR,
+    tracking_run_manifest_digest,
+)
 
 
 class _FakeArray:
@@ -43,6 +48,9 @@ class _FakeGroup(dict):
 
     def group_keys(self) -> list[str]:
         return [key for key, value in self.items() if isinstance(value, _FakeGroup)]
+
+    def array_keys(self) -> list[str]:
+        return [key for key, value in self.items() if isinstance(value, _FakeArray)]
 
     def get(self, key: str, default=None):
         return super().get(key, default)
@@ -242,6 +250,10 @@ def test_tracking_run_persists_modern_identity_and_rowset_fingerprint() -> None:
     assert run_group.attrs["source_rowset_fingerprint"] == expected_fingerprint.fingerprint
     assert run_group.attrs["source_rowset_edit_revision"] == 6
     assert summary["source_rowset_fingerprint_status"] == "complete"
+    assert run_group.attrs["stage_selector_eligible"] is True
+    assert run_group.attrs[TRACKING_RUN_MANIFEST_DIGEST_ATTR] == (
+        tracking_run_manifest_digest(run_group.attrs[TRACKING_RUN_MANIFEST_ATTR])
+    )
 
 
 def test_load_tracking_ids_joins_by_instance_key_when_consumer_rows_reorder() -> None:

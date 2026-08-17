@@ -17,7 +17,10 @@ import re
 from types import MappingProxyType
 from typing import Any
 
-from fisheye.shared.pose_schema import schema_payload_from_package
+from fisheye.shared.pose_schema import (
+    normalize_ordered_skeleton_edges,
+    schema_payload_from_package,
+)
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_sha256,
@@ -37,6 +40,8 @@ SUPPORTED_POINT_OPERATIONS = (
     "bbox_centroid",
 )
 SUPPORTED_AXIS_OPERATIONS = ("axis",)
+KEYPOINT_SKELETON_SEMANTICS_SCHEMA_ID = "palette.keypoint.skeleton_semantics"
+KEYPOINT_SKELETON_SEMANTICS_SCHEMA_VERSION = 1
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -297,6 +302,95 @@ def _source_labels(value: object, *, path: str) -> list[str]:
     return labels_text
 
 
+def _canonical_keypoint_skeleton_semantics(
+    value: Mapping[str, Any],
+    *,
+    path: str,
+) -> dict[str, Any]:
+    document = dict(value)
+    _exact_keys(
+        document,
+        required={
+            "schema_id",
+            "schema_version",
+            "skeleton_id",
+            "kpt_shape",
+            "keypoint_labels",
+            "nodes",
+            "edges",
+            "heading_computation",
+            "heading_computation_source",
+        },
+        optional=set(),
+        path=path,
+    )
+    if document["schema_id"] != KEYPOINT_SKELETON_SEMANTICS_SCHEMA_ID:
+        _fail(
+            f"{path}.schema_id",
+            f"expected {KEYPOINT_SKELETON_SEMANTICS_SCHEMA_ID!r}",
+        )
+    if document["schema_version"] != KEYPOINT_SKELETON_SEMANTICS_SCHEMA_VERSION:
+        _fail(
+            f"{path}.schema_version",
+            f"expected {KEYPOINT_SKELETON_SEMANTICS_SCHEMA_VERSION}",
+        )
+    skeleton_id = _text(
+        document["skeleton_id"], path=f"{path}.skeleton_id", identifier=True
+    )
+    shape = _sequence(document["kpt_shape"], path=f"{path}.kpt_shape")
+    if (
+        len(shape) != 2
+        or type(shape[0]) is not int
+        or shape[0] <= 0
+        or type(shape[1]) is not int
+        or shape[1] != 2
+    ):
+        _fail(f"{path}.kpt_shape", "expected exact positive [K, 2] shape")
+    labels = _source_labels(
+        document["keypoint_labels"], path=f"{path}.keypoint_labels"
+    )
+    if len(labels) != shape[0]:
+        _fail(
+            f"{path}.keypoint_labels",
+            "cardinality does not match kpt_shape",
+        )
+    nodes = _sequence(document["nodes"], path=f"{path}.nodes")
+    expected_nodes = [
+        {"id": index, "name": label} for index, label in enumerate(labels)
+    ]
+    if nodes != expected_nodes:
+        _fail(f"{path}.nodes", "must exactly enumerate the ordered labels")
+    try:
+        normalize_ordered_skeleton_edges(
+            document["edges"],
+            n_keypoints=shape[0],
+            field=f"{path}.edges",
+        )
+    except ValueError as exc:
+        _fail(f"{path}.edges", str(exc))
+    heading = _mapping(
+        document["heading_computation"],
+        path=f"{path}.heading_computation",
+    )
+    heading_source = _text(
+        document["heading_computation_source"],
+        path=f"{path}.heading_computation_source",
+    )
+    return _canonicalize_json_value(
+        {
+            "schema_id": KEYPOINT_SKELETON_SEMANTICS_SCHEMA_ID,
+            "schema_version": KEYPOINT_SKELETON_SEMANTICS_SCHEMA_VERSION,
+            "skeleton_id": skeleton_id,
+            "kpt_shape": shape,
+            "keypoint_labels": labels,
+            "nodes": nodes,
+            "edges": document["edges"],
+            "heading_computation": heading,
+            "heading_computation_source": heading_source,
+        }
+    )
+
+
 def _canonical_source_schema(
     value: Mapping[str, Any],
     *,
@@ -373,6 +467,49 @@ def _canonical_source_schema(
                 "package_name": package_name,
                 "package_payload": package_payload,
                 "package_sha256": actual_package_digest,
+            }
+        )
+
+    if authority == "keypoint_skeleton_semantics":
+        _exact_keys(
+            source_schema,
+            required={
+                "authority",
+                "modality",
+                "skeleton_document",
+                "skeleton_sha256",
+            },
+            optional=set(),
+            path=path,
+        )
+        if source_schema["modality"] != "keypoint":
+            _fail(
+                f"{path}.modality",
+                "keypoint skeleton authority requires keypoint modality",
+            )
+        skeleton_document = _canonical_keypoint_skeleton_semantics(
+            _mapping(
+                source_schema["skeleton_document"],
+                path=f"{path}.skeleton_document",
+            ),
+            path=f"{path}.skeleton_document",
+        )
+        expected_digest = canonical_json_sha256(skeleton_document)
+        actual_digest = _sha256(
+            source_schema["skeleton_sha256"],
+            path=f"{path}.skeleton_sha256",
+        )
+        if actual_digest != expected_digest:
+            _fail(
+                f"{path}.skeleton_sha256",
+                "stale canonical skeleton-semantics document digest",
+            )
+        return _canonicalize_json_value(
+            {
+                "authority": authority,
+                "modality": "keypoint",
+                "skeleton_document": skeleton_document,
+                "skeleton_sha256": actual_digest,
             }
         )
 
@@ -472,6 +609,10 @@ def _canonical_source_binding(
     )
     if source_schema["authority"] == "pose_schema_package":
         source_labels = set(source_schema["package_payload"]["keypoint_labels"])
+    elif source_schema["authority"] == "keypoint_skeleton_semantics":
+        source_labels = set(
+            source_schema["skeleton_document"]["keypoint_labels"]
+        )
     else:
         source_labels = set(source_schema["labels"])
     role_bindings = _sequence(binding["role_bindings"], path=f"{path}.role_bindings")
@@ -870,6 +1011,11 @@ def source_schema_sha256(value: Mapping[str, Any]) -> str:
     if source_schema.get("authority") == "pose_schema_package":
         payload = _mapping(source_schema.get("package_payload"), path="$.package_payload")
         return canonical_json_sha256(_canonicalize_json_value(payload))
+    if source_schema.get("authority") == "keypoint_skeleton_semantics":
+        document = _mapping(
+            source_schema.get("skeleton_document"), path="$.skeleton_document"
+        )
+        return canonical_json_sha256(_canonicalize_json_value(document))
     source_schema.pop("schema_sha256", None)
     return canonical_json_sha256(_canonicalize_json_value(source_schema))
 
@@ -932,6 +1078,8 @@ __all__ = [
     "AnatomyProfileError",
     "AnatomyRecipe",
     "AnatomyRole",
+    "KEYPOINT_SKELETON_SEMANTICS_SCHEMA_ID",
+    "KEYPOINT_SKELETON_SEMANTICS_SCHEMA_VERSION",
     "SOURCE_BINDING_SCHEMA_ID",
     "SOURCE_BINDING_SCHEMA_VERSION",
     "SUPPORTED_MODALITIES",
