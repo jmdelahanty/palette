@@ -37,6 +37,10 @@ from fisheye.shared.zarr.coordinate_successor_files import (
     copy_metadata_and_link_payload,
     metadata_tree_sha256,
 )
+from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+    bind_historical_geometry_only_crop_source,
+    historical_geometry_only_crop_loader,
+)
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
 )
@@ -359,6 +363,29 @@ def inspect_subject_mask_coordinate_successor_source(
     if "components" not in evidence:
         raise ValueError("Refined evidence run lacks component provenance groups.")
     inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
+    crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
+        "crop"
+    ]
+    historical_crop = bind_historical_geometry_only_crop_source(
+        analysis_zarr=archive,
+        root=root,
+        crop_reference=crop_reference,
+        source_manifest=raw_manifest,
+        source_arrays={
+            "source_crop_row_ids": root[
+                f"{_RAW_FAMILY}/{raw_id}/source_crop_row_ids"
+            ],
+            "instance_key": root[f"{_RAW_FAMILY}/{raw_id}/instance_key"],
+            "source_acquisition_frame_index": root[
+                f"{_RAW_FAMILY}/{raw_id}/source_acquisition_frame_index"
+            ],
+            "source_crop_xywh": root[
+                f"{_RAW_FAMILY}/{raw_id}/source_crop_xywh"
+            ],
+        },
+        source_run_path=f"{_RAW_FAMILY}/{raw_id}",
+        model_input_transform=inference["model_input_transform"],
+    )
     return json_attr_safe(
         {
             "schema_id": "palette.subject_mask_coordinate_successor.source_inspection",
@@ -378,6 +405,7 @@ def inspect_subject_mask_coordinate_successor_source(
             "source_refined_metadata_tree_sha256": metadata_tree_sha256(paths["refined"]),
             "source_evidence_metadata_tree_sha256": metadata_tree_sha256(paths["evidence"]),
             "producer_run_path": inference["producer_run_path"],
+            "historical_crop_adapter": historical_crop.as_record(),
             "model_artifact": inference["model_artifact"],
             "selectors_before": _selector_snapshot(root),
             "selector_eligible": False,
@@ -532,7 +560,25 @@ def publish_subject_mask_coordinate_successors(
             refined_manifest=refined_manifest,
         )
         inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
-
+        crop_reference = raw_manifest["payload"]["coordinate_dependencies"][
+            "document"
+        ]["crop"]
+        historical_crop = bind_historical_geometry_only_crop_source(
+            analysis_zarr=archive,
+            root=root,
+            crop_reference=crop_reference,
+            source_manifest=raw_manifest,
+            source_arrays={
+                "source_crop_row_ids": raw_source["source_crop_row_ids"],
+                "instance_key": raw_source["instance_key"],
+                "source_acquisition_frame_index": raw_source[
+                    "source_acquisition_frame_index"
+                ],
+                "source_crop_xywh": raw_source["source_crop_xywh"],
+            },
+            source_run_path=f"{_RAW_FAMILY}/{raw_id}",
+            model_input_transform=inference["model_input_transform"],
+        )
         try:
             receipts["raw_copy"] = copy_metadata_and_link_payload(
                 raw_source_fs, raw_target_fs
@@ -551,27 +597,32 @@ def publish_subject_mask_coordinate_successors(
                     "subject_mask_model_artifact": inference["model_artifact"],
                     "mask_labels": _labels(raw_manifest),
                     "provenance": inference["provenance"],
+                    "coordinate_successor_historical_crop_adapter": historical_crop.as_record(),
+                    "coordinate_successor_historical_crop_adapter_sha256": canonical_json_sha256(
+                        historical_crop.as_record()
+                    ),
                 }
             )
             mark_run_started(raw_run, run_name=raw_target_id, stage="subject_masks")
             crop_path = raw_manifest["payload"]["coordinate_dependencies"]["document"][
                 "crop"
             ]["run_path"]
-            prepare_subject_mask_coordinate_context(
-                root,
-                f"{_RAW_FAMILY}/{raw_target_id}",
-                expected_publication_owner=raw_owner,
-                crop_path=crop_path,
-                mask_labels=_labels(raw_manifest),
-                model_input_transform=inference["model_input_transform"],
-                model_artifact=inference["model_artifact"],
-                mask_probability_threshold=inference["mask_probability_threshold"],
-            )
-            raw_surfaces = publish_subject_mask_coordinate_surfaces(
-                root,
-                f"{_RAW_FAMILY}/{raw_target_id}",
-                expected_publication_owner=raw_owner,
-            )
+            with historical_geometry_only_crop_loader(historical_crop):
+                prepare_subject_mask_coordinate_context(
+                    root,
+                    f"{_RAW_FAMILY}/{raw_target_id}",
+                    expected_publication_owner=raw_owner,
+                    crop_path=crop_path,
+                    mask_labels=_labels(raw_manifest),
+                    model_input_transform=inference["model_input_transform"],
+                    model_artifact=inference["model_artifact"],
+                    mask_probability_threshold=inference["mask_probability_threshold"],
+                )
+                raw_surfaces = publish_subject_mask_coordinate_surfaces(
+                    root,
+                    f"{_RAW_FAMILY}/{raw_target_id}",
+                    expected_publication_owner=raw_owner,
+                )
             raw_authority = build_coordinate_successor_authority(
                 kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
                 source_family=_RAW_FAMILY,
@@ -621,11 +672,12 @@ def publish_subject_mask_coordinate_successors(
             )
             if raw_errors:
                 raise RuntimeError("Raw mask successor validation failed: " + "; ".join(raw_errors))
-            raw_loaded = load_persisted_ineligible_subject_mask_coordinate_surfaces(
-                open_zarr_root(archive, mode="r"),
-                f"{_RAW_FAMILY}/{raw_target_id}",
-                expected_publication_owner=raw_owner,
-            )
+            with historical_geometry_only_crop_loader(historical_crop):
+                raw_loaded = load_persisted_ineligible_subject_mask_coordinate_surfaces(
+                    open_zarr_root(archive, mode="r"),
+                    f"{_RAW_FAMILY}/{raw_target_id}",
+                    expected_publication_owner=raw_owner,
+                )
             del raw_loaded
 
             receipts["refined_copy"] = copy_metadata_and_link_payload(
@@ -804,6 +856,7 @@ def publish_subject_mask_coordinate_successors(
             "source_refined_run_path": f"{_REFINED_FAMILY}/{refined_id}",
             "raw_successor_run_path": f"{_RAW_FAMILY}/{raw_target_id}",
             "refined_successor_run_path": f"{_REFINED_FAMILY}/{refined_target_id}",
+            "historical_crop_adapter": initial["historical_crop_adapter"],
             "copy": receipts,
             "coordinate_contract": "canonical_v2",
             "selector_eligible": False,

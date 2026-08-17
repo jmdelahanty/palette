@@ -60,6 +60,10 @@ from fisheye.shared.zarr.keypoint_publication_mode import (
 )
 from fisheye.shared.zarr.keypoint_schema import KEYPOINT_SCHEMA_V2, KeypointDimensions
 from fisheye.shared.zarr.keypoint_storage import plan_keypoint_storage
+from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+    bind_historical_geometry_only_crop_source,
+    historical_geometry_only_crop_loader,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 from fisheye.shared.zarr_helpers import (
@@ -280,6 +284,22 @@ def inspect_keypoint_coordinate_successor_source(
     if not isinstance(transform_value, Mapping):
         raise ValueError("Raw keypoint preprocessing lacks model_input_transform.")
     transform = model_input_transform_from_attrs(dict(transform_value))
+    historical_crop = bind_historical_geometry_only_crop_source(
+        analysis_zarr=archive,
+        root=root,
+        crop_reference=payload["source_crop_snapshot"],
+        source_manifest=manifest,
+        source_arrays={
+            "source_crop_row_ids": source["source_crop_row_ids"],
+            "instance_key": source["instance_key"],
+            "source_acquisition_frame_index": source[
+                "source_acquisition_frame_index"
+            ],
+            "source_crop_row_signature": source["source_crop_row_signature"],
+        },
+        source_run_path=f"keypoints_runs/{source_id}",
+        model_input_transform=transform,
+    )
     artifact = _model_artifact(
         keypoint_model_path,
         pose_binding=payload["pose_model_schema_binding"],
@@ -301,6 +321,7 @@ def inspect_keypoint_coordinate_successor_source(
             "source_metadata_tree_sha256": metadata_tree_sha256(source_path),
             "source_authority_digest": canonical_json_sha256(authority),
             "source_crop_path": crop["run_path"],
+            "historical_crop_adapter": historical_crop.as_record(),
             "preprocessing_input_mode": _submitted_input_mode(preprocessing),
             "model_input_transform": transform.to_attrs(),
             "model_artifact": artifact,
@@ -388,6 +409,29 @@ def publish_keypoint_coordinate_successor(
             run_path=f"keypoints_runs/{source_id}",
             source_manifest=source_manifest,
         )
+        payload = source_manifest["payload"]
+        preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
+        transform = model_input_transform_from_attrs(
+            dict(preprocessing.document["model_input_transform"])
+        )
+        historical_crop = bind_historical_geometry_only_crop_source(
+            analysis_zarr=archive,
+            root=root,
+            crop_reference=source_manifest["payload"]["source_crop_snapshot"],
+            source_manifest=source_manifest,
+            source_arrays={
+                "source_crop_row_ids": source["source_crop_row_ids"],
+                "instance_key": source["instance_key"],
+                "source_acquisition_frame_index": source[
+                    "source_acquisition_frame_index"
+                ],
+                "source_crop_row_signature": source[
+                    "source_crop_row_signature"
+                ],
+            },
+            source_run_path=f"keypoints_runs/{source_id}",
+            model_input_transform=transform,
+        )
         try:
             copy_receipt = copy_metadata_and_link_payload(source_path, target_path)
             run = root[f"keypoints_runs/{successor_id}"]
@@ -413,6 +457,10 @@ def publish_keypoint_coordinate_successor(
                     "coordinate_contract": "coordinate_successor_preparing",
                     "coordinate_successor_policy": KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_POLICY,
                     "coordinate_successor_source_run_path": f"keypoints_runs/{source_id}",
+                    "coordinate_successor_historical_crop_adapter": historical_crop.as_record(),
+                    "coordinate_successor_historical_crop_adapter_sha256": canonical_json_sha256(
+                        historical_crop.as_record()
+                    ),
                     ATOMIC_PUBLICATION_OWNER_ATTR: owner,
                     KEYPOINT_PUBLICATION_OWNER_ATTR: owner,
                 }
@@ -429,17 +477,18 @@ def publish_keypoint_coordinate_successor(
                 keypoint_model_path,
                 pose_binding=payload["pose_model_schema_binding"],
             )
-            prepare_keypoint_coordinate_context(
-                root,
-                f"keypoints_runs/{successor_id}",
-                crop_path=str(payload["source_crop_snapshot"]["run_path"]),
-                model_input_transform=transform,
-                preprocessing_input_mode=_submitted_input_mode(preprocessing),
-                model_artifact=artifact,
-            )
-            surfaces = publish_keypoint_coordinate_surfaces(
-                root, f"keypoints_runs/{successor_id}"
-            )
+            with historical_geometry_only_crop_loader(historical_crop):
+                prepare_keypoint_coordinate_context(
+                    root,
+                    f"keypoints_runs/{successor_id}",
+                    crop_path=str(payload["source_crop_snapshot"]["run_path"]),
+                    model_input_transform=transform,
+                    preprocessing_input_mode=_submitted_input_mode(preprocessing),
+                    model_artifact=artifact,
+                )
+                surfaces = publish_keypoint_coordinate_surfaces(
+                    root, f"keypoints_runs/{successor_id}"
+                )
             authority = build_coordinate_successor_authority(
                 kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,
                 source_family="keypoints_runs",
@@ -482,11 +531,12 @@ def publish_keypoint_coordinate_successor(
             if _selector_snapshot(published) != initial["selectors_before"]:
                 raise RuntimeError("Keypoint selectors changed during successor publication.")
             published_run = published[f"keypoints_runs/{successor_id}"]
-            published_surfaces = require_bound_ineligible_keypoint_coordinate_surfaces(
-                load_persisted_ineligible_keypoint_coordinate_surfaces(
-                    published, f"keypoints_runs/{successor_id}"
+            with historical_geometry_only_crop_loader(historical_crop):
+                published_surfaces = require_bound_ineligible_keypoint_coordinate_surfaces(
+                    load_persisted_ineligible_keypoint_coordinate_surfaces(
+                        published, f"keypoints_runs/{successor_id}"
+                    )
                 )
-            )
             load_coordinate_successor_authority(
                 published_run,
                 expected_kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,
@@ -539,6 +589,7 @@ def publish_keypoint_coordinate_successor(
             "successor_run_path": f"keypoints_runs/{successor_id}",
             "source_manifest_digest": initial["source_manifest_digest"],
             "source_metadata_tree_sha256": initial["source_metadata_tree_sha256"],
+            "historical_crop_adapter": initial["historical_crop_adapter"],
             "copy": copy_receipt,
             "coordinate_contract": "canonical_v2",
             "selector_eligible": False,
