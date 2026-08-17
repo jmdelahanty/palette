@@ -8,6 +8,13 @@ Purpose: define how Palette should expose generic analyses for every compatible
 stimulus step, add protocol-specific analyses without forking the generic
 system, and compose exact stimulus states into comparisons and figures.
 
+Generic position, heading, speed, and angular-motion metrics must also bind an
+explicit observation provider. The provider architecture and migration plan are
+defined in
+[`position_body_frame_and_motion_provider_design.md`](position_body_frame_and_motion_provider_design.md).
+Its exact logical array and dtype requirements are defined in
+[`subject_position_storage_contract_v1.md`](subject_position_storage_contract_v1.md).
+
 This document records the design direction accepted during the 2026-08-14
 GoodBatBadBat positional-occupancy campaign. It is an implementation plan, not
 an implemented persistence contract. Existing immutable runs remain unchanged.
@@ -33,6 +40,12 @@ an implemented persistence contract. Existing immutable runs remain unchanged.
    authority for its flat, contiguous, non-overlapping windows. Composable
    selections require a new versioned surface rather than changing v2 in
    place.
+9. Position and body frame are separately selected scientific surfaces.
+   Occupancy, trajectory, and linear motion bind one exact position provider;
+   heading and angular motion bind one exact body-frame/heading provider.
+10. Detection-centroid, keypoint-derived, and mask-derived position methods
+    are distinct offers. Analyses record the selected provider and cannot
+    silently fall back between them.
 
 ## Conceptual Model
 
@@ -93,6 +106,7 @@ A metric request binds one resolved frame set to a versioned computation. A
 spatial occupancy product must declare at least:
 
 - sample unit, such as every detection row or one selected detection per frame;
+- exact position-provider ID, run, estimator digest, and validity policy;
 - exposure denominator and missing-detection policy;
 - coordinate frame and spatial grid;
 - smoothing and scientific normalization;
@@ -330,6 +344,12 @@ then verify the selected recording's Zarr catalog before presenting it.
   cannot represent non-contiguous sets or overlapping annotations.
 - Current profile resolution is centered on `pre_event`, `training_event`, and
   `post_event` aliases instead of arbitrary canonical step selections.
+- Current occupancy, trajectory, and speed consumers generally assume
+  detection/crop centroids instead of resolving one explicit position-provider
+  contract.
+- Current track kinematics can combine detection/crop positions with keypoint
+  heading, but those source families are tightly coded rather than selected as
+  independent typed position and body-frame providers.
 - `detection_occupancy_runs` imports detection parsing and heatmap computation
   from `plot_detection_epoch_heatmaps`; scientific computation should move to
   a metric module consumed by both writer and renderer.
@@ -379,6 +399,10 @@ then verify the selected recording's Zarr catalog before presenting it.
       digests.
 - [ ] Add a compatibility adapter from existing stimulus epoch windows.
 - [ ] Define a capability registry for generic metrics and protocol providers.
+- [ ] Define typed position-provider and body-frame-provider requirements so
+      generic metrics do not hardcode detection centroids or keypoint headings.
+- [ ] Bind every position-, speed-, heading-, and angular-motion offer to exact
+      provider identities and digests.
 
 ### Phase 2: scientific products
 
