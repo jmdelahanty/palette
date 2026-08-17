@@ -53,6 +53,16 @@
       "description": "Midpoint of the two independently labeled eye centers."
     },
     {
+      "recipe_id": "subject_body_centroid",
+      "kind": "point",
+      "required_roles": ["subject_body"],
+      "expression": {
+        "op": "role_point",
+        "role_id": "subject_body"
+      },
+      "description": "Centroid of the projected whole-subject body component."
+    },
+    {
       "recipe_id": "anterior_axis",
       "kind": "axis",
       "required_roles": ["swim_bladder", "eye_left", "eye_right"],
@@ -202,10 +212,11 @@
       "advertised_recipe_ids": [
         "head_triad_equal_mean",
         "eye_pair_midpoint",
+        "subject_body_centroid",
         "anterior_axis"
       ],
-      "binding_sha256": "9500ae712916503315bcb338690fedd521c28e9ea93237c779e3718686cf36aa"
+      "binding_sha256": "6c7f26ef736a3956d88d54c288eeecba17a5a4cf810372e93d409366f7f02f70"
     }
   ],
-  "profile_sha256": "035a62b34f4d096c012f454ba33b6b8b2c540326d128305b655d18ecd3a711b2"
+  "profile_sha256": "ef833e0835f6ec1b8c24b7b66b4ec941d7ed543c965d17110e68efc05c743976"
 }

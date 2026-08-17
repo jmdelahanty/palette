@@ -264,12 +264,15 @@ Version 1 estimator validity is:
 - whole-body mask centroid: the bound `subject_body` component is available
   and the row has a valid, nonempty mask with a finite centroid.
 
-Phase 1 consumes upstream authoritative refined/quality validity and binds its
-exact policy identity and digest. It does not apply another guessed numeric
-confidence threshold. A future raw-source estimator must reference an explicit
-versioned threshold policy; there is no implicit default. No estimator computes
-a partial mean, renormalizes remaining anchors, falls back across modalities,
-or interpolates at the observation-position stage.
+Position evaluation consumes each source's exact authoritative validity and
+binds its policy identity and digest. Canonical detection rows bind the
+canonical-detection schema-v1 invariant that every published row is a finite,
+positive-area, in-extent observation. Keypoints and masks bind their persisted
+validity surfaces. The position layer does not apply another guessed numeric
+confidence threshold. A future raw source with a threshold decision must
+reference an explicit versioned policy; there is no implicit default. No
+estimator computes a partial mean, renormalizes remaining anchors, falls back
+across modalities, or interpolates at the observation-position stage.
 
 ## Proposed Materialized Position Surface
 
@@ -542,20 +545,62 @@ source identity, canonical coordinate descriptor, and required directed
 transform. Equal row counts, matching label strings, and caller assertions are
 not sufficient.
 
+The initial Phase 2 source-currentness policy is deliberately narrow. A
+position adapter consumes one explicitly named run only when that run is the
+current, complete, selector-eligible canonical coordinate publication for its
+source family. Keypoint production-bundle members that remain
+selector-ineligible are a different authority and are not an implicit fallback.
+Supporting those members later requires a separately named adapter and policy.
+
+The four initial estimator profiles are detection bounding-box centroid,
+keypoint anatomical-triad equal mean, subject-mask anatomical-component-triad
+equal mean, and subject-body-mask centroid. A pixelwise mask-union centroid is
+not one of these four. Its operands, overlap semantics, threshold authority,
+and validity policy must be defined in a new versioned estimator before it can
+be materialized.
+
+Subject-mask adapters consume the producer's validated `centroid_xy` and
+`centroid_valid` surfaces and apply their exact bound ROI-to-source-camera
+transform. They do not reopen masks and independently recompute centroids in
+the position layer.
+
+All Phase 2 publications bind
+`subject_position_canary_no_default.v1`. This policy permits only an explicitly
+named provider, has no default or fallback, requires later promotion evidence,
+and requires the materialized run to remain selector-ineligible. It is
+independent of the estimator validity policy that determines row-level
+success and failure reasons.
+
 ### Phase 2: immutable position publication
 
-- [ ] Implement selector-ineligible position-run planning and publication.
-- [ ] Add the four initial estimator profiles.
-- [ ] Bind exact row identity, acquisition frames, coordinate descriptors,
+- [x] Implement selector-ineligible position-run planning and publication.
+- [x] Add the four initial estimator profiles.
+- [x] Bind exact row identity, acquisition frames, coordinate descriptors,
       source arrays, semantic schemas, and manifests.
-- [ ] Add a keypoint source adapter that validates the persisted canonical
+- [x] Add a keypoint source adapter that validates the persisted canonical
       skeleton identity and projects ROI keypoints through the exact row-wise
       crop transform into source-camera coordinates.
-- [ ] Add a subject-mask source adapter that validates component-label and
+- [x] Add a subject-mask source adapter that validates component-label and
       availability authority, exact `centroid_xy`/`centroid_valid` surfaces,
       row identity, derivation records, and source-camera coordinate binding.
-- [ ] Validate direct and consolidated metadata before completion.
-- [ ] Preserve sources and publish retries as new immutable attempts.
+- [x] Validate direct and consolidated metadata before completion.
+- [x] Preserve sources and publish retries as new immutable attempts.
+
+Phase 2 is implemented by the strict detection, keypoint, and subject-mask
+source adapters in `fisheye.shared.subject_position_*_source`, the sealed
+source-to-evaluator bridge in `subject_position_preparation`, and the generic
+publisher in
+`fisheye.analysis_workflows.materializers.subject_position`. The publisher
+writes the canonical descriptor on `position_xy`, binds every source and
+policy record in the immutable manifest, publishes through a hidden atomic
+attempt, refreshes consolidated metadata only after final validation, and
+leaves all selectors unchanged. The subject-mask adapter has estimator-specific
+entry points so the anatomical-triad provider does not require an unrelated
+whole-body channel and the whole-body provider does not require eye or swim
+bladder channels.
+
+`subject_body_centroid` is now an explicit anatomy recipe advertised only by
+the subject-mask binding. No pixel-union operation or estimator was added.
 
 ### Phase 3: body-frame and motion integration
 

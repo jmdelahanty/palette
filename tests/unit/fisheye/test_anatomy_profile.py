@@ -150,6 +150,7 @@ def test_zebrafish_profile_has_strict_roles_recipes_and_valid_bindings() -> None
     assert {recipe.recipe_id for recipe in profile.recipes} == {
         "head_triad_equal_mean",
         "eye_pair_midpoint",
+        "subject_body_centroid",
         "anterior_axis",
     }
     assert {binding["source_schema"]["modality"] for binding in profile.source_bindings} == {
@@ -168,9 +169,10 @@ def test_zebrafish_profile_has_strict_roles_recipes_and_valid_bindings() -> None
         "metadata_path": "metadata.heading_computation",
         "authority": "source_schema",
     }
-    assert profile.binding("zebrafish_larva_subject_mask_lr_v1")[
-        "profile_id"
-    ] == "zebrafish_larva_anatomy.v1"
+    mask_binding = profile.binding("zebrafish_larva_subject_mask_lr_v1")
+    assert mask_binding["profile_id"] == "zebrafish_larva_anatomy.v1"
+    assert "subject_body_centroid" in mask_binding["advertised_recipe_ids"]
+    assert "subject_body_centroid" not in keypoint_binding["advertised_recipe_ids"]
 
 
 def test_keypoint_binding_rejects_wrong_pose_schema_package_bytes(
