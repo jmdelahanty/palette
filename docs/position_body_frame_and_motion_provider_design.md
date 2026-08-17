@@ -662,12 +662,27 @@ physical array as its float32 pixel peer multiplied by the bound
 selector-ineligible canary exception and records that omission in the immutable
 computation manifest.
 
+The Phase 4A reader now exposes one additional limitation precisely. Existing
+provider-motion runs preserve exact acquisition-frame indices and compute
+`time_seconds` from a caller-supplied FPS, but the computation manifest does
+not bind that FPS or time axis to a live recording frame-clock authority.
+Those runs remain valid Phase 3 compatibility inputs and retain all independent
+validity arrays, but they are not authoritative-timing inputs for Phase 4
+science. A later producer change must carry recording identity and revalidated
+frame-clock evidence through position, body-frame, and motion publication; the
+reader must verify that source before a provider-bound offer can be `ready`.
+
 ### Phase 4: composable stimulus analytics
 
 Phase 4 may now build on the explicit provider-motion authority. Its first
 implementations must remain selector-ineligible offers and must not imply that
 one position or body-frame provider has been promoted as the scientific
 default.
+
+The shared Phase 4A foundation is implemented by
+`provider_analysis_offers`, `provider_analysis_bindings`,
+`provider_track_motion_source_handle`, and `resolved_epoch_selection`.
+Metric-specific occupancy, motion, and heading offers remain pending.
 
 - [ ] Add provider requirements to occupancy, trajectory, speed,
       acceleration, heading, and angular-speed offers.

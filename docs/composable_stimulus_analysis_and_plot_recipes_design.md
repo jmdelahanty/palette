@@ -1,7 +1,7 @@
 # Composable Stimulus Analysis and Plot Recipe Design
 <!-- contract-meta
 status: accepted-design
-last_updated: 2026-08-14
+last_updated: 2026-08-17
 -->
 
 Purpose: define how Palette should expose generic analyses for every compatible
@@ -369,6 +369,33 @@ then verify the selected recording's Zarr catalog before presenting it.
 - The existing registry step-status key cannot represent many analysis runs,
   plots, or per-composition memberships.
 
+### Phase 4A foundation status (2026-08-17)
+
+The first shared contract layer is implemented without publishing a metric or
+activating a selector:
+
+- `provider_analysis_offers` defines immutable provider identities,
+  independent position/body-frame/motion requirements, exact temporal
+  selection identities, and selector-ineligible analysis offers.
+- `provider_track_motion_source_handle` strictly reads the flat
+  `analysis/track_kinematics_runs/provider/<run>` layout while preserving
+  independent source, sample, transition, and reason-code arrays.
+- `resolved_epoch_selection` adapts one explicit maintained stimulus-epoch v2
+  run into digest-bound half-open intervals. Chronological non-overlap is
+  required; legitimate gaps are preserved rather than filled.
+- `provider_analysis_bindings` derives readiness from verified inputs. Missing
+  recording identity blocks before missing timing, known cross-recording
+  composition fails, and only exact recording/timing authority can become
+  `ready`.
+
+Current Phase 2/3 publications remain readable, but they do not yet preserve a
+complete provider-side recording and frame-clock authority through to these
+offers. In particular, the provider-motion computation records a caller FPS
+without a live bound source-clock record. It is therefore classified as
+`compatibility_caller_fps_only` and cannot satisfy strict Phase 4 timing. A
+digest-bound JSON timing claim is also insufficient until it is revalidated
+against the source clock in the same archive.
+
 ## Composition Safety Rules
 
 1. Combine intervals only from the same recording timeline and exact stimulus
@@ -397,9 +424,9 @@ then verify the selected recording's Zarr catalog before presenting it.
 - [ ] Implement a pure selection compiler for exact step refs, trimming,
       union, intersection, difference, occurrence handling, and canonical
       digests.
-- [ ] Add a compatibility adapter from existing stimulus epoch windows.
+- [x] Add a compatibility adapter from existing stimulus epoch windows.
 - [ ] Define a capability registry for generic metrics and protocol providers.
-- [ ] Define typed position-provider and body-frame-provider requirements so
+- [x] Define typed position-provider and body-frame-provider requirements so
       generic metrics do not hardcode detection centroids or keypoint headings.
 - [ ] Bind every position-, speed-, heading-, and angular-motion offer to exact
       provider identities and digests.
