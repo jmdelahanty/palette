@@ -9,7 +9,7 @@ lineage separate in the run manifest.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 import json
 import math
 from pathlib import Path
@@ -30,6 +30,10 @@ from fisheye.analysis.track_kinematics import (
 )
 from fisheye.analysis_workflows.position_body_frame_motion import (
     BoundTrackedProviderMotionInput,
+)
+from fisheye.analysis_workflows.tracking_source_handle import (
+    TrackingSourceHandle,
+    require_tracking_source_handle,
 )
 from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
@@ -514,6 +518,9 @@ class PreparedProviderTrackMotion:
     source_authority_sha256: str
     tracked_input_record: Mapping[str, Any]
     tracked_input_sha256: str
+    tracking_source: TrackingSourceHandle = dataclass_field(
+        repr=False, compare=False
+    )
     physical_authority_record: Mapping[str, Any] | None
     physical_authority_sha256: str | None
     computation_record: Mapping[str, Any]
@@ -549,6 +556,25 @@ def _load_provider_physical_authority(
             "provider's camera-frame authority."
         )
     return physical
+
+
+def _validate_prepared_tracking_binding(
+    prepared: PreparedProviderTrackMotion,
+) -> None:
+    tracking = require_tracking_source_handle(prepared.tracking_source)
+    record = prepared.tracked_input_record
+    tracking_record = record.get("tracking_source")
+    expected = {
+        "run_path": tracking.run_path,
+        "manifest_sha256": tracking.manifest_sha256,
+        "verification_digest": tracking.verification_digest,
+        "instance_key_sha256": sha256_array(tracking.instance_key),
+        "track_ids_sha256": sha256_array(tracking.track_ids),
+    }
+    if not isinstance(tracking_record, Mapping) or dict(tracking_record) != expected:
+        raise ProviderTrackMotionError(
+            "Prepared motion tracking authority differs from its live sealed run."
+        )
 
 
 def _physical_authority_record(
@@ -743,6 +769,7 @@ def prepare_provider_track_motion(
         source_authority_sha256=tracked.source_authority.authority_sha256,
         tracked_input_record=_freeze(_thaw(tracked.authority_record)),
         tracked_input_sha256=tracked.authority_sha256,
+        tracking_source=tracked.tracking_source,
         physical_authority_record=(
             _freeze(physical_record) if physical_record is not None else None
         ),
@@ -952,9 +979,14 @@ def plan_provider_track_motion_run(
 ) -> ProviderTrackMotionRunPlan:
     if not isinstance(prepared, PreparedProviderTrackMotion):
         raise TypeError("prepared must be PreparedProviderTrackMotion.")
+    _validate_prepared_tracking_binding(prepared)
     _validate_arrays(prepared.arrays)
     _validate_prepared_physical_binding(prepared)
     source = Path(source_zarr).expanduser().resolve()
+    if prepared.tracking_source.analysis_zarr_path != source:
+        raise ProviderTrackMotionError(
+            "Tracking authority and provider-motion destination must be the same archive."
+        )
     scratch = Path(scratch_root).expanduser().resolve()
     if not source.is_dir():
         raise FileNotFoundError(f"Authoritative analysis Zarr does not exist: {source}")
@@ -1433,6 +1465,7 @@ def validate_provider_track_motion_run(
 
 
 def _materialize_local(plan: ProviderTrackMotionRunPlan) -> dict[str, Any]:
+    _validate_prepared_tracking_binding(plan.prepared)
     if plan.local_zarr.exists():
         raise FileExistsError(
             f"Local provider-motion Zarr already exists: {plan.local_zarr}"
@@ -1495,6 +1528,7 @@ def publish_provider_track_motion_run(
     """Publish a complete provider successor without changing selectors."""
 
     local = _materialize_local(plan)
+    _validate_prepared_tracking_binding(plan.prepared)
     acceptance: dict[str, Any] = {}
 
     def validate(path: Path) -> Mapping[str, Any]:
@@ -1516,6 +1550,7 @@ def publish_provider_track_motion_run(
         )
 
     def complete(_root: Any, _parent: Any, run: Any) -> None:
+        _validate_prepared_tracking_binding(plan.prepared)
         mark_run_complete(
             run,
             parent_group=None,

@@ -26,6 +26,9 @@ from fisheye.analysis_workflows.position_body_frame_motion import (
 from fisheye.analysis_workflows.subject_position_source_handle import (
     load_subject_position_source_handle,
 )
+from fisheye.analysis_workflows.tracking_source_handle import (
+    load_tracking_source_handle,
+)
 from fisheye.shared.coordinate_descriptor import (
     CanonicalFrameRecord,
     DigestBoundCoordinateRecordRef,
@@ -47,6 +50,9 @@ from fisheye.shared.subject_position_storage import (
 )
 from fisheye.shared.subject_position_types import POSITION_FAILURE_REASON_CODES
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.tracking.single_subject_per_arena import (
+    write_single_subject_per_arena_tracking_run,
+)
 from fisheye.shared.traditional_heading_compatibility import (
     load_traditional_v3_heading_compatibility,
 )
@@ -157,6 +163,58 @@ def _handles(tmp_path, **body_frame_options):  # type: ignore[no-untyped-def]
     return position, body_frame
 
 
+def _tracking_handle(
+    source,
+    *,
+    keys: np.ndarray | None = None,
+    arena_ids: np.ndarray | None = None,
+):  # type: ignore[no-untyped-def]
+    ordered_keys = (
+        np.asarray(keys, dtype=np.uint64)
+        if keys is not None
+        else source.instance_key[[2, 0, 1]]
+    )
+    arenas = (
+        np.asarray(arena_ids, dtype=np.int32)
+        if arena_ids is not None
+        else np.asarray([8, 7, 7], dtype=np.int32)
+    )
+    source_rows = {
+        int(key): row for row, key in enumerate(source.instance_key.tolist())
+    }
+    if all(int(key) in source_rows for key in ordered_keys):
+        frames = np.asarray(
+            [
+                source.source_acquisition_frame_index[source_rows[int(key)]]
+                for key in ordered_keys
+            ],
+            dtype=np.int64,
+        )
+    else:
+        frames = np.arange(ordered_keys.shape[0], dtype=np.int64)
+    root = zarr.open_group(
+        str(source.analysis_zarr_path),
+        mode="r+",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    run_name, _run, _summary = write_single_subject_per_arena_tracking_run(
+        root=root,
+        arena_ids=arenas,
+        frame_indices=frames,
+        source_detect_run="detect_fixture",
+        source_arena_assignment_run="arena_assignment_fixture",
+        source_rowset_path="refined_detect_runs/refined_fixture/instances",
+        instance_key=ordered_keys,
+    )
+    return load_tracking_source_handle(
+        source.analysis_zarr_path,
+        f"tracking_runs/{run_name}",
+        expected_selector_eligible=True,
+        use_consolidated=False,
+    )
+
+
 def test_composes_exact_position_and_body_frame_lineage(tmp_path) -> None:
     position, body_frame = _handles(tmp_path)
 
@@ -199,44 +257,36 @@ def test_tracking_join_reorders_by_identity_and_builds_independent_motion(
 ) -> None:
     position, body_frame = _handles(tmp_path)
     authority = compose_position_body_frame_motion_authority(position, body_frame)
-    tracking_keys = authority.instance_key[[2, 0, 1]]
-    tracking_track_ids = np.asarray([8, 7, 7], dtype=np.int64)
+    tracking = _tracking_handle(authority)
 
-    tracked = bind_position_body_frame_to_tracking(
-        authority,
-        tracking_run_path="tracking_runs/tracking_fixture_001",
-        tracking_manifest_sha256="f" * 64,
-        tracking_instance_key=tracking_keys,
-        tracking_track_ids=tracking_track_ids,
-    )
+    tracked = bind_position_body_frame_to_tracking(authority, tracking)
 
     assert tracked.tracking_row_alignment_mode == "exact_instance_key_set_reorder_v1"
-    assert tracked.track_ids.tolist() == [7, 7, 8]
+    assert tracked.track_ids.tolist() == [0, 0, 1]
     tracks, _summaries = tracked.build_track_datasets(
         fps=10.0,
         smooth_seconds=0.0,
         pixel_to_mm=None,
     )
-    assert set(tracks) == {7, 8}
-    assert tracks[7]["sample_validity_profile"] == (
+    assert set(tracks) == {0, 1}
+    assert tracks[0]["sample_validity_profile"] == (
         "explicit_position_body_frame_independent_validity.v1"
     )
-    assert tracks[7]["linear_sample_valid"].all()
-    assert tracks[7]["angular_sample_valid"].all()
+    assert tracks[0]["linear_sample_valid"].all()
+    assert tracks[0]["angular_sample_valid"].all()
 
 
 def test_tracking_join_rejects_equal_length_different_identity(tmp_path) -> None:
     position, body_frame = _handles(tmp_path)
     authority = compose_position_body_frame_motion_authority(position, body_frame)
 
+    tracking = _tracking_handle(
+        authority,
+        keys=np.asarray([101, 102, 999], dtype=np.uint64),
+        arena_ids=np.asarray([0, 0, 0], dtype=np.int32),
+    )
     with pytest.raises(PositionBodyFrameMotionError, match="different rowsets"):
-        bind_position_body_frame_to_tracking(
-            authority,
-            tracking_run_path="tracking_runs/tracking_fixture_001",
-            tracking_manifest_sha256="f" * 64,
-            tracking_instance_key=np.asarray([101, 102, 999], dtype=np.uint64),
-            tracking_track_ids=np.asarray([0, 0, 0], dtype=np.int64),
-        )
+        bind_position_body_frame_to_tracking(authority, tracking)
 
 
 def test_traditional_v3_compatibility_profile_requires_and_binds_receipt(

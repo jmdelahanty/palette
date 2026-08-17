@@ -19,19 +19,19 @@ from fisheye.analysis_workflows.position_body_frame_motion import (
     bind_position_body_frame_to_tracking,
     compose_position_body_frame_motion_authority,
 )
-from tests.unit.fisheye.test_position_body_frame_motion import _handles
+from fisheye.analysis_workflows.tracking_source_handle import (
+    TrackingSourceHandleError,
+)
+from tests.unit.fisheye.test_position_body_frame_motion import (
+    _handles,
+    _tracking_handle,
+)
 
 
 def _tracked(tmp_path):  # type: ignore[no-untyped-def]
     position, body_frame = _handles(tmp_path)
     source = compose_position_body_frame_motion_authority(position, body_frame)
-    return bind_position_body_frame_to_tracking(
-        source,
-        tracking_run_path="tracking_runs/tracking_fixture_001",
-        tracking_manifest_sha256="f" * 64,
-        tracking_instance_key=source.instance_key[[2, 0, 1]],
-        tracking_track_ids=np.asarray([8, 7, 7], dtype=np.int64),
-    )
+    return bind_position_body_frame_to_tracking(source, _tracking_handle(source))
 
 
 def _install_fake_physical_authority(monkeypatch, *, mm_per_pixel: float = 0.25):
@@ -83,7 +83,7 @@ def test_prepared_provider_motion_keeps_lineages_and_validity_independent(
     )
 
     arrays = prepared.arrays
-    assert arrays["track_ids"].tolist() == [7, 8]
+    assert arrays["track_ids"].tolist() == [0, 1]
     assert arrays["track_row_offsets"].tolist() == [0, 2, 3]
     assert arrays["source_provider_row_index"].tolist() == [0, 1, 2]
     assert arrays["source_tracking_row_index"].tolist() == [1, 2, 0]
@@ -185,3 +185,32 @@ def test_physical_authority_is_required_by_default(tmp_path) -> None:
             fps=10.0,
             smooth_seconds=0.0,
         )
+
+
+def test_publication_reopens_tracking_authority_and_fails_before_write(
+    tmp_path,
+) -> None:
+    tracked = _tracked(tmp_path)
+    prepared = prepare_provider_track_motion(
+        tracked,
+        fps=10.0,
+        smooth_seconds=0.0,
+        allow_pixel_only=True,
+    )
+    archive = tracked.source_authority.analysis_zarr_path
+    plan = plan_provider_track_motion_run(
+        archive,
+        prepared,
+        run_name="provider_motion_tracking_stale",
+        scratch_root=tmp_path / "provider_motion_tracking_stale_scratch",
+    )
+    root = zarr.open_group(
+        str(archive), mode="r+", zarr_format=3, use_consolidated=False
+    )
+    root[f"{tracked.tracking_run_path}/track_ids"][0] = np.int32(99)
+
+    with pytest.raises(TrackingSourceHandleError, match="manifest"):
+        publish_provider_track_motion_run(plan, keep_scratch=True)
+
+    assert not plan.local_zarr.exists()
+    assert not plan.target_run_path.exists()

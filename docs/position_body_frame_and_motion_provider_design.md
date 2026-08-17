@@ -605,6 +605,11 @@ the subject-mask binding. No pixel-union operation or estimator was added.
 ### Phase 3: body-frame and motion integration
 
 - [x] Define typed position-source and keypoint-body-frame-source handles.
+- [x] Add an exact content manifest to newly written tracking runs and make
+      keyed tracking identity explicit.
+- [x] Define a typed tracking-run handle that rejects selector lookup,
+      keyless legacy rows, stale manifests, post-seal mutation, stale
+      consolidation, and cross-archive composition.
 - [x] Check row identity, time, coordinates, transforms, completion, and
       staleness before composition.
 - [x] Generalize track-motion authority to consume one explicit position and
@@ -634,10 +639,19 @@ publication. It must not be published by relabeling mask rows as keypoint
 rows.
 
 The new provider-motion publication is a selector-ineligible canary surface.
-It binds exact tracking row content and a caller-supplied tracking manifest
-digest, but production activation remains blocked until a typed tracking-run
-handle reopens and validates that tracking authority immediately before
-publication.
+It now accepts only a loader-minted tracking-run handle; callers can no longer
+supply a path, digest, key array, or track-ID array independently. Newly
+written tracking runs carry an exact decoded-content manifest and explicit
+selector eligibility. The handle reopens and re-hashes the named run during
+composition, motion preparation, run planning, and immediately before atomic
+publication. It also proves that tracking and the position/body-frame
+authority belong to the same archive. Keyless or manifestless historical
+tracking remains available through the legacy compatibility reader but cannot
+become modern provider-motion authority without an immutable keyed successor.
+
+This closes the Phase 3 tracking-authority implementation blocker. Production
+activation remains blocked by required CI and Phase 5 canary/promotion
+evidence, not by another implicit tracking input surface.
 
 Provider-motion successors require the archive's typed source-camera physical
 authority by default. The authority's source-camera frame digest must equal the
@@ -649,6 +663,11 @@ selector-ineligible canary exception and records that omission in the immutable
 computation manifest.
 
 ### Phase 4: composable stimulus analytics
+
+Phase 4 may now build on the explicit provider-motion authority. Its first
+implementations must remain selector-ineligible offers and must not imply that
+one position or body-frame provider has been promoted as the scientific
+default.
 
 - [ ] Add provider requirements to occupancy, trajectory, speed,
       acceleration, heading, and angular-speed offers.

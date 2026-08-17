@@ -31,6 +31,10 @@ from fisheye.analysis_workflows.subject_position_source_handle import (
     load_subject_position_source_handle,
     require_subject_position_source_handle,
 )
+from fisheye.analysis_workflows.tracking_source_handle import (
+    TrackingSourceHandle,
+    require_tracking_source_handle,
+)
 from fisheye.shared.subject_position_expression import (
     DETECTION_BBOX_CENTROID_ESTIMATOR_ID,
 )
@@ -47,7 +51,7 @@ POSITION_BODY_FRAME_AUTHORITY_SCHEMA_VERSION = 1
 TRACKED_PROVIDER_MOTION_INPUT_SCHEMA_ID = (
     "palette.tracked_position_body_frame_motion_input"
 )
-TRACKED_PROVIDER_MOTION_INPUT_SCHEMA_VERSION = 1
+TRACKED_PROVIDER_MOTION_INPUT_SCHEMA_VERSION = 2
 
 EXPLICIT_POSITION_BODY_FRAME_PROFILE_ID = "explicit_position_body_frame.v1"
 DETECTION_CENTROID_TRADITIONAL_V3_COMPATIBILITY_PROFILE_ID = (
@@ -508,6 +512,7 @@ class BoundTrackedProviderMotionInput:
     """Exact tracking projection of one position/body-frame authority."""
 
     source_authority: PositionBodyFrameMotionAuthority
+    tracking_source: TrackingSourceHandle = field(repr=False, compare=False)
     tracking_run_path: str
     tracking_manifest_sha256: str
     tracking_row_alignment_mode: str
@@ -536,6 +541,7 @@ class BoundTrackedProviderMotionInput:
         """Reject a stale or caller-constructed tracking projection."""
 
         self.source_authority.assert_verified()
+        require_tracking_source_handle(self.tracking_source)
         if self._seal is not _TRACKED_INPUT_SEAL:
             raise PositionBodyFrameMotionError(
                 "Tracked provider input verification seal is absent."
@@ -631,40 +637,22 @@ class BoundTrackedProviderMotionInput:
 
 def bind_position_body_frame_to_tracking(
     source_authority: PositionBodyFrameMotionAuthority,
-    *,
-    tracking_run_path: str,
-    tracking_manifest_sha256: str,
-    tracking_instance_key: np.ndarray,
-    tracking_track_ids: np.ndarray,
+    tracking_source: TrackingSourceHandle,
 ) -> BoundTrackedProviderMotionInput:
     """Join one explicit tracking rowset by exact instance-key identity."""
 
     if type(source_authority) is not PositionBodyFrameMotionAuthority:
         raise PositionBodyFrameMotionError(
             "A verified PositionBodyFrameMotionAuthority is required."
-        )
-    source_authority.assert_verified()
-    if (
-        not isinstance(tracking_run_path, str)
-        or not tracking_run_path.startswith("tracking_runs/")
-        or tracking_run_path.count("/") != 1
-        or tracking_run_path.endswith("/")
-    ):
-        raise PositionBodyFrameMotionError(
-            "tracking_run_path must name one explicit tracking_runs/<run>."
-        )
-    tracking_digest = _require_sha256(
-        tracking_manifest_sha256, name="tracking_manifest_sha256"
     )
-    tracking_keys = _readonly(tracking_instance_key)
-    raw_track_ids = _readonly(tracking_track_ids)
-    if (
-        raw_track_ids.dtype != np.dtype("int64")
-        or raw_track_ids.shape != tracking_keys.shape
-    ):
+    source_authority.assert_verified()
+    tracking = require_tracking_source_handle(tracking_source)
+    if tracking.analysis_zarr_path != source_authority.analysis_zarr_path:
         raise PositionBodyFrameMotionError(
-            "tracking_track_ids must be exact int64[N] aligned to tracking_instance_key."
+            "Tracking and provider authorities must belong to the same analysis archive."
         )
+    tracking_keys = tracking.instance_key
+    raw_track_ids = tracking.track_ids
     tracking_rows, alignment_mode = _exact_key_join(
         source_authority.instance_key,
         tracking_keys,
@@ -678,8 +666,9 @@ def bind_position_body_frame_to_tracking(
             "schema_version": TRACKED_PROVIDER_MOTION_INPUT_SCHEMA_VERSION,
             "source_authority_sha256": source_authority.authority_sha256,
             "tracking_source": {
-                "run_path": tracking_run_path,
-                "manifest_sha256": tracking_digest,
+                "run_path": tracking.run_path,
+                "manifest_sha256": tracking.manifest_sha256,
+                "verification_digest": tracking.verification_digest,
                 "instance_key_sha256": sha256_array(tracking_keys),
                 "track_ids_sha256": sha256_array(raw_track_ids),
             },
@@ -701,8 +690,9 @@ def bind_position_body_frame_to_tracking(
     )
     return BoundTrackedProviderMotionInput(
         source_authority=source_authority,
-        tracking_run_path=tracking_run_path,
-        tracking_manifest_sha256=tracking_digest,
+        tracking_source=tracking,
+        tracking_run_path=tracking.run_path,
+        tracking_manifest_sha256=tracking.manifest_sha256,
         tracking_row_alignment_mode=alignment_mode,
         tracking_row_index=tracking_rows,
         track_ids=aligned_track_ids,
