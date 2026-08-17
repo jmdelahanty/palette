@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from fisheye.analysis_workflows.materializers.subject_position import (
+from fisheye.shared.subject_position_prepared_input import (
     SubjectPositionPreparedInput,
 )
 from fisheye.shared.coordinate_descriptor import (
