@@ -2856,6 +2856,24 @@ def load_persisted_subject_mask_coordinate_surfaces(
 
 
 @proof_verification_operation
+def load_persisted_ineligible_subject_mask_coordinate_surfaces(
+    root_node: Any,
+    run_path: str,
+    *,
+    expected_publication_owner: str | None = None,
+) -> BoundSubjectMaskCoordinateSurfaces:
+    """Load a complete raw coordinate successor that remains ineligible."""
+
+    return _load_subject_mask_coordinate_surfaces(
+        root_node,
+        run_path,
+        require_complete=True,
+        expected_selector_eligible=False,
+        expected_publication_owner=expected_publication_owner,
+    )
+
+
+@proof_verification_operation
 def _load_completed_ineligible_subject_mask_coordinate_surfaces(
     root_node: Any,
     run_path: str,
@@ -3066,6 +3084,7 @@ __all__ = [
     "_load_completed_ineligible_subject_mask_coordinate_surfaces",
     "capture_subject_mask_coordinate_publication_checkpoint",
     "load_persisted_subject_mask_coordinate_surfaces",
+    "load_persisted_ineligible_subject_mask_coordinate_surfaces",
     "load_persisted_subject_mask_crop_source",
     "prepare_subject_mask_coordinate_context",
     "publish_subject_mask_coordinate_surfaces",

@@ -346,6 +346,88 @@ def test_explicit_bundle_member_canary_uses_ineligible_loader_and_binds_authorit
     assert bound.revalidate().source_payload_digest == bound.source_payload_digest
 
 
+def test_coordinate_successor_canary_uses_ineligible_refined_loader(monkeypatch):
+    _patch(monkeypatch, source_kind="refined")
+    regular_loader = (
+        subject_source.load_persisted_refined_subject_mask_coordinate_surfaces
+    )
+    monkeypatch.setattr(
+        subject_source,
+        "load_persisted_ineligible_refined_subject_mask_coordinate_surfaces",
+        regular_loader,
+    )
+    monkeypatch.setattr(
+        subject_source,
+        "load_persisted_refined_subject_mask_coordinate_surfaces",
+        lambda *args, **kwargs: pytest.fail(
+            "coordinate-successor mode used the eligible refined loader"
+        ),
+    )
+    evidence = {
+        "authority_mode": (
+            subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+        ),
+        "coordinate_successor_authority_digest": "8" * 64,
+    }
+    monkeypatch.setattr(
+        subject_source,
+        "_coordinate_successor_authority_evidence",
+        lambda *args, **kwargs: evidence,
+    )
+
+    bound = subject_source.load_subject_mask_position_source(
+        "/tmp/fake.zarr",
+        run_path="refined_subject_masks_runs/run-a",
+        source_kind=subject_source.REFINED_SUBJECT_MASK_SOURCE_KIND,
+        anatomy_profile=_profile(),
+        binding_id=BINDING_ID,
+        authority_mode=(
+            subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+        ),
+    )
+
+    assert bound.authority_mode == (
+        subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+    )
+    assert bound.bundle_run_path is None
+    assert bound.direct_consolidated_evidence["authority"] == evidence
+
+
+def test_coordinate_successor_canary_rejects_raw_masks_and_bundle_argument(
+    monkeypatch,
+):
+    _patch(monkeypatch)
+    with pytest.raises(
+        subject_source.SubjectMaskPositionSourceError,
+        match="only valid for refined masks",
+    ):
+        subject_source.load_subject_mask_position_source(
+            "/tmp/fake.zarr",
+            run_path="subject_mask_runs/run-a",
+            source_kind=subject_source.RAW_SUBJECT_MASK_SOURCE_KIND,
+            anatomy_profile=_profile(),
+            binding_id=BINDING_ID,
+            authority_mode=(
+                subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+            ),
+        )
+    with pytest.raises(
+        subject_source.SubjectMaskPositionSourceError,
+        match="bundle_run_path is forbidden",
+    ):
+        subject_source.load_subject_mask_position_source(
+            "/tmp/fake.zarr",
+            run_path="refined_subject_masks_runs/run-a",
+            source_kind=subject_source.REFINED_SUBJECT_MASK_SOURCE_KIND,
+            anatomy_profile=_profile(),
+            binding_id=BINDING_ID,
+            authority_mode=(
+                subject_source.SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+            ),
+            bundle_run_path="subject_mask_bundle_runs/bundle-a",
+        )
+
+
 def test_bundle_member_canary_requires_explicit_bundle_path(monkeypatch):
     _patch_bundle(monkeypatch)
     with pytest.raises(

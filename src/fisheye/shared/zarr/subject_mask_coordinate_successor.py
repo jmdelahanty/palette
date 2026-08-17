@@ -1,0 +1,824 @@
+"""Publish raw/refined subject-mask coordinate successors without inference."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+from pathlib import Path
+import re
+from typing import Any, Mapping
+from uuid import uuid4
+
+import zarr
+
+from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.model_input_transform import model_input_transform_from_attrs
+from fisheye.shared.refined_subject_mask_coordinate_publication import (
+    REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
+    load_persisted_ineligible_refined_subject_mask_coordinate_surfaces,
+    prepare_refined_subject_mask_coordinate_context,
+    publish_refined_subject_mask_coordinate_surfaces,
+)
+from fisheye.shared.subject_mask_coordinate_publication import (
+    SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
+    load_persisted_ineligible_subject_mask_coordinate_surfaces,
+    prepare_subject_mask_coordinate_context,
+    publish_subject_mask_coordinate_surfaces,
+)
+from fisheye.shared.zarr.benchmark_runtime import utc_now
+from fisheye.shared.zarr.coordinate_successor_authority import (
+    REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    build_coordinate_successor_authority,
+    load_coordinate_successor_authority,
+    stamp_coordinate_successor_authority,
+)
+from fisheye.shared.zarr.coordinate_successor_files import (
+    copy_metadata_and_link_payload,
+    metadata_tree_sha256,
+)
+from fisheye.shared.zarr.manifest_digest import (
+    canonical_json_sha256,
+)
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_FAMILY,
+    SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE,
+    SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR,
+    validate_subject_mask_bundle_manifest,
+)
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
+    build_subject_mask_coordinate_successor_manifest,
+    subject_mask_core_metadata_declaration_maps,
+    validate_persisted_subject_mask_core_publication,
+    validate_subject_mask_core_run_manifest,
+)
+from fisheye.shared.zarr.keypoint_publication_mode import (
+    ATOMIC_PUBLICATION_OWNER_ATTR,
+)
+from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    consolidate_metadata_capture_expected_warnings,
+)
+from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETED_AT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
+)
+
+
+SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_ID = (
+    "palette.subject_mask_coordinate_successor.production_publication"
+)
+SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_VERSION = 1
+SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_POLICY = (
+    "sealed_bundle_members_hardlink_payload_canonical_v2_metadata_pair_v1"
+)
+SELECTOR_ACTIVATION_DEFERRED = "deferred_separate_reviewed_change"
+
+_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SELECTORS = ("latest", "latest_complete", "latest_pending", "authoritative_run")
+_RAW_FAMILY = "subject_mask_runs"
+_REFINED_FAMILY = "refined_subject_masks_runs"
+
+
+def _require_run_id(value: object, *, label: str) -> str:
+    result = str(value or "").strip()
+    if not _RUN_ID.fullmatch(result):
+        raise ValueError(f"{label} must be one safe nonempty run ID.")
+    return result
+
+
+def _selector_snapshot(root: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for family in (_RAW_FAMILY, _REFINED_FAMILY, SUBJECT_MASK_BUNDLE_FAMILY):
+        parent = root[family]
+        result[family] = {
+            name: {"present": name in parent.attrs, "value": parent.attrs.get(name)}
+            for name in _SELECTORS
+        }
+    authority = root.attrs.get("subject_mask_authority")
+    result["root_subject_mask_authority_digest"] = (
+        canonical_json_sha256(authority) if isinstance(authority, Mapping) else None
+    )
+    return result
+
+
+def _manifest_member(
+    *, role: str, family: str, run_id: str, manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    logical = manifest.get("payload", {}).get("logical_content", {})
+    return {
+        "role": role,
+        "family": family,
+        "run_id": run_id,
+        "run_path": f"{family}/{run_id}",
+        "manifest_schema_id": manifest.get("schema_id"),
+        "manifest_schema_version": manifest.get("schema_version"),
+        "manifest_payload_digest": manifest.get("payload_digest"),
+        "manifest_document_digest": canonical_json_sha256(manifest),
+        "logical_content_digest": logical.get("digest"),
+    }
+
+
+def _bundle_authority(
+    archive: Path,
+    root: Any,
+    *,
+    bundle_run_id: str,
+    raw_run_id: str,
+    raw_manifest: Mapping[str, Any],
+    refined_run_id: str,
+    refined_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    bundle_path = f"{SUBJECT_MASK_BUNDLE_FAMILY}/{bundle_run_id}"
+    validate_direct_consolidated_subtree(archive, subtree_path=bundle_path)
+    bundle = root[bundle_path]
+    if (
+        bundle.attrs.get("status") != RUN_STATUS_COMPLETE
+        or bundle.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or bundle.attrs.get("stage_selector_eligible") is not False
+        or bundle.attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR) is not False
+    ):
+        raise ValueError("Subject-mask source bundle is not complete and inactive.")
+    manifest = bundle.attrs.get(SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest, Mapping):
+        raise ValueError("Subject-mask source bundle manifest is absent.")
+    errors = validate_subject_mask_bundle_manifest(manifest)
+    if errors:
+        raise ValueError("Subject-mask source bundle is invalid: " + "; ".join(errors))
+    if manifest.get("schema_version") != 3:
+        raise ValueError("Coordinate successor requires the reviewed bundle-v3 source.")
+    payload = manifest["payload"]
+    if payload.get("bundle_id") != bundle_run_id:
+        raise ValueError("Subject-mask bundle ID differs from its exact path.")
+    publication = payload.get("publication")
+    if not isinstance(publication, Mapping) or publication.get("activation_state") != "deferred":
+        raise ValueError("Subject-mask source bundle is not activation-deferred.")
+    members = payload.get("members")
+    if not isinstance(members, Mapping):
+        raise ValueError("Subject-mask source bundle members are absent.")
+    expected_raw = _manifest_member(
+        role="raw",
+        family=_RAW_FAMILY,
+        run_id=raw_run_id,
+        manifest=raw_manifest,
+    )
+    expected_refined = _manifest_member(
+        role="refined",
+        family=_REFINED_FAMILY,
+        run_id=refined_run_id,
+        manifest=refined_manifest,
+    )
+    if members.get("raw") != expected_raw or members.get("refined") != expected_refined:
+        raise ValueError("Subject-mask bundle does not bind the exact raw/refined source pair.")
+    return copy.deepcopy(dict(manifest))
+
+
+def _source_manifest(run: Any, *, run_id: str, kind: str) -> dict[str, Any]:
+    manifest = run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest, Mapping):
+        raise ValueError(f"Subject-mask source {run_id!r} lacks a run manifest.")
+    errors = validate_subject_mask_core_run_manifest(manifest)
+    if errors:
+        raise ValueError(f"Subject-mask source {run_id!r} is invalid: " + "; ".join(errors))
+    payload = manifest["payload"]
+    if payload.get("run_id") != run_id or payload.get("kind") != kind:
+        raise ValueError("Subject-mask source manifest binds another run or kind.")
+    if (
+        run.attrs.get("status") != RUN_STATUS_COMPLETE
+        or run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or run.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError("Subject-mask source is not complete and selector-ineligible.")
+    return copy.deepcopy(dict(manifest))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(8 * 1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _model_artifact(path: Path, *, expected_sha256: str) -> dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Subject-mask model artifact not found: {resolved}")
+    if _SHA256.fullmatch(str(expected_sha256 or "")) is None:
+        raise ValueError("Subject-mask source lacks one exact model SHA-256.")
+    actual = _sha256_file(resolved)
+    if actual != expected_sha256:
+        raise ValueError("Subject-mask model bytes differ from source inference authority.")
+    stat = resolved.stat()
+    return {
+        "role": "subject_mask_unet_checkpoint",
+        "path": str(resolved),
+        "fingerprint_scheme": "content_v1",
+        "sha256": actual,
+        "size_bytes": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "source": "direct_scientific_commit_rehash",
+    }
+
+
+def _labels(manifest: Mapping[str, Any]) -> list[str]:
+    labels = manifest["payload"]["logical_schema"]["components"]["labels"]
+    if not isinstance(labels, list) or not labels:
+        raise ValueError("Subject-mask core lacks ordered component labels.")
+    return [str(item) for item in labels]
+
+
+def _raw_inference_inputs(root: Any, raw_manifest: Mapping[str, Any], model_path: Path) -> dict[str, Any]:
+    payload = raw_manifest["payload"]
+    source_path = str(payload["source"]["run_path"])
+    producer = root[source_path]
+    transform_attrs = producer.attrs.get("model_input_transform")
+    transform = model_input_transform_from_attrs(dict(transform_attrs))
+    prior_artifact = producer.attrs.get("subject_mask_model_artifact")
+    if not isinstance(prior_artifact, Mapping):
+        provenance = producer.attrs.get("run_provenance")
+        artifacts = (
+            provenance.get("input_artifacts")
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        matches = [
+            item
+            for item in artifacts or ()
+            if isinstance(item, Mapping)
+            and item.get("role") == "subject_mask_unet_checkpoint"
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "Raw subject-mask producer lacks one exact model artifact authority."
+            )
+        prior_artifact = matches[0]
+    artifact = _model_artifact(model_path, expected_sha256=str(prior_artifact.get("sha256") or ""))
+    threshold = producer.attrs.get("mask_probability_threshold")
+    if type(threshold) is not float:
+        threshold = payload["logical_schema"].get("threshold")
+    if type(threshold) is not float:
+        raise ValueError("Raw subject-mask source lacks an exact probability threshold.")
+    provenance = producer.attrs.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("Raw subject-mask producer lacks exact stage provenance.")
+    return {
+        "producer_run_path": source_path,
+        "model_input_transform": transform,
+        "model_artifact": artifact,
+        "mask_probability_threshold": threshold,
+        "provenance": copy.deepcopy(dict(provenance)),
+    }
+
+
+def inspect_subject_mask_coordinate_successor_source(
+    *,
+    analysis_zarr: Path,
+    source_raw_run_id: str,
+    source_refined_run_id: str,
+    source_bundle_run_id: str,
+    refined_evidence_run_path: str,
+    raw_successor_run_id: str,
+    refined_successor_run_id: str,
+    subject_mask_model_path: Path,
+) -> dict[str, Any]:
+    """Validate the exact immutable pair and its retained refinement evidence."""
+
+    archive = analysis_zarr.expanduser().resolve()
+    if not archive.is_dir():
+        raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
+    raw_id = _require_run_id(source_raw_run_id, label="source_raw_run_id")
+    refined_id = _require_run_id(source_refined_run_id, label="source_refined_run_id")
+    bundle_id = _require_run_id(source_bundle_run_id, label="source_bundle_run_id")
+    raw_target_id = _require_run_id(raw_successor_run_id, label="raw_successor_run_id")
+    refined_target_id = _require_run_id(
+        refined_successor_run_id, label="refined_successor_run_id"
+    )
+    if raw_id == raw_target_id or refined_id == refined_target_id:
+        raise ValueError("Subject-mask successors cannot replace their source runs.")
+    evidence_parts = str(refined_evidence_run_path).strip("/").split("/")
+    if len(evidence_parts) != 2 or not evidence_parts[0].endswith("_runs"):
+        raise ValueError("refined_evidence_run_path must name one exact runs-family child.")
+    paths = {
+        "raw": archive / _RAW_FAMILY / raw_id,
+        "refined": archive / _REFINED_FAMILY / refined_id,
+        "evidence": archive / refined_evidence_run_path,
+        "raw_target": archive / _RAW_FAMILY / raw_target_id,
+        "refined_target": archive / _REFINED_FAMILY / refined_target_id,
+    }
+    for name in ("raw", "refined", "evidence"):
+        if not paths[name].is_dir():
+            raise FileNotFoundError(f"Subject-mask {name} source not found: {paths[name]}")
+    for name in ("raw_target", "refined_target"):
+        if paths[name].exists():
+            raise FileExistsError(f"Immutable subject-mask target exists: {paths[name]}")
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    raw_manifest = _source_manifest(
+        root[f"{_RAW_FAMILY}/{raw_id}"], run_id=raw_id, kind="raw_probability_uint8"
+    )
+    refined_manifest = _source_manifest(
+        root[f"{_REFINED_FAMILY}/{refined_id}"],
+        run_id=refined_id,
+        kind="refined_dense_core",
+    )
+    for family, run_id in (
+        (_RAW_FAMILY, raw_id),
+        (_REFINED_FAMILY, refined_id),
+    ):
+        source_errors = validate_persisted_subject_mask_core_publication(
+            archive,
+            family=family,
+            run_id=run_id,
+        )
+        if source_errors:
+            raise ValueError(
+                f"Subject-mask source {family}/{run_id} is invalid: "
+                + "; ".join(source_errors)
+            )
+    bundle_manifest = _bundle_authority(
+        archive,
+        root,
+        bundle_run_id=bundle_id,
+        raw_run_id=raw_id,
+        raw_manifest=raw_manifest,
+        refined_run_id=refined_id,
+        refined_manifest=refined_manifest,
+    )
+    evidence = root[str(refined_evidence_run_path).strip("/")]
+    if "components" not in evidence:
+        raise ValueError("Refined evidence run lacks component provenance groups.")
+    inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
+    return json_attr_safe(
+        {
+            "schema_id": "palette.subject_mask_coordinate_successor.source_inspection",
+            "schema_version": 1,
+            "status": "ready",
+            "analysis_zarr": str(archive),
+            "source_raw_run_id": raw_id,
+            "source_refined_run_id": refined_id,
+            "source_bundle_run_id": bundle_id,
+            "refined_evidence_run_path": str(refined_evidence_run_path).strip("/"),
+            "raw_successor_run_id": raw_target_id,
+            "refined_successor_run_id": refined_target_id,
+            "source_raw_manifest_digest": canonical_json_sha256(raw_manifest),
+            "source_refined_manifest_digest": canonical_json_sha256(refined_manifest),
+            "source_bundle_manifest_digest": canonical_json_sha256(bundle_manifest),
+            "source_raw_metadata_tree_sha256": metadata_tree_sha256(paths["raw"]),
+            "source_refined_metadata_tree_sha256": metadata_tree_sha256(paths["refined"]),
+            "source_evidence_metadata_tree_sha256": metadata_tree_sha256(paths["evidence"]),
+            "producer_run_path": inference["producer_run_path"],
+            "model_artifact": inference["model_artifact"],
+            "selectors_before": _selector_snapshot(root),
+            "selector_eligible": False,
+            "selector_activation": SELECTOR_ACTIVATION_DEFERRED,
+            "registry_updated": False,
+        }
+    )
+
+
+def _clear_successor_attrs(run: Any, *, source_run_path: str, owner_attr: str) -> str:
+    attrs = dict(run.attrs)
+    for name in (
+        SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
+        "coordinate_successor_authority",
+        "coordinate_successor_authority_sha256",
+        RUN_COMPLETED_AT_ATTR,
+        "palette_run_failed_at_utc",
+        "palette_run_error",
+    ):
+        attrs.pop(name, None)
+    owner = uuid4().hex
+    attrs.update(
+        {
+            "status": "running",
+            "stage_selector_eligible": False,
+            "production_candidate": True,
+            "production_selector_activation": SELECTOR_ACTIVATION_DEFERRED,
+            "coordinate_contract": "coordinate_successor_preparing",
+            "coordinate_successor_policy": SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_POLICY,
+            "coordinate_successor_source_run_path": source_run_path,
+            ATOMIC_PUBLICATION_OWNER_ATTR: owner,
+            owner_attr: owner,
+        }
+    )
+    run.attrs.put(attrs)
+    return owner
+
+
+def _record_pointers(values: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    return {
+        name: {
+            "record_ref": value.record_ref,
+            "record_sha256": value.record_sha256,
+        }
+        for name, value in values.items()
+    }
+
+
+def _rebase_component_provenance(
+    run: Any,
+    *,
+    labels: list[str],
+    raw_successor_path: str,
+) -> None:
+    for label in labels:
+        provenance = run[f"components/{label}/provenance"]
+        attrs = dict(provenance.attrs)
+        surface = str(attrs.get("source_surface_path") or "")
+        surface_name = surface.rsplit("/", 1)[-1]
+        if surface_name not in {"mask_probs_roi", "masks_roi"}:
+            raise ValueError(f"Refined component {label!r} has an invalid source surface.")
+        rebased = f"{raw_successor_path}/{surface_name}"
+        attrs["source_surface_path"] = rebased
+        if "source_probability_path" in attrs:
+            attrs["source_probability_path"] = rebased
+        provenance.attrs.put(attrs)
+
+
+def _refined_dependencies(
+    source_manifest: Mapping[str, Any],
+    raw_successor_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    dependencies = copy.deepcopy(source_manifest["payload"]["coordinate_dependencies"])
+    document = dependencies["document"]
+    document["raw_core"] = {
+        "run_id": raw_successor_manifest["payload"]["run_id"],
+        "manifest_payload_digest": raw_successor_manifest["payload_digest"],
+        "coordinate_catalog_digest": raw_successor_manifest["payload"][
+            "coordinate_contract"
+        ]["digest"],
+    }
+    dependencies["digest"] = canonical_json_sha256(document)
+    return dependencies
+
+
+def publish_subject_mask_coordinate_successors(
+    *,
+    analysis_zarr: Path,
+    source_raw_run_id: str,
+    source_refined_run_id: str,
+    source_bundle_run_id: str,
+    refined_evidence_run_path: str,
+    raw_successor_run_id: str,
+    refined_successor_run_id: str,
+    subject_mask_model_path: Path,
+) -> dict[str, Any]:
+    """Publish one ordered raw/refined selector-ineligible successor pair."""
+
+    initial = inspect_subject_mask_coordinate_successor_source(
+        analysis_zarr=analysis_zarr,
+        source_raw_run_id=source_raw_run_id,
+        source_refined_run_id=source_refined_run_id,
+        source_bundle_run_id=source_bundle_run_id,
+        refined_evidence_run_path=refined_evidence_run_path,
+        raw_successor_run_id=raw_successor_run_id,
+        refined_successor_run_id=refined_successor_run_id,
+        subject_mask_model_path=subject_mask_model_path,
+    )
+    archive = Path(initial["analysis_zarr"])
+    raw_id = str(initial["source_raw_run_id"])
+    refined_id = str(initial["source_refined_run_id"])
+    bundle_id = str(initial["source_bundle_run_id"])
+    raw_target_id = str(initial["raw_successor_run_id"])
+    refined_target_id = str(initial["refined_successor_run_id"])
+    evidence_path = str(initial["refined_evidence_run_path"])
+    raw_source_fs = archive / _RAW_FAMILY / raw_id
+    refined_source_fs = archive / _REFINED_FAMILY / refined_id
+    evidence_fs = archive / evidence_path
+    raw_target_fs = archive / _RAW_FAMILY / raw_target_id
+    refined_target_fs = archive / _REFINED_FAMILY / refined_target_id
+    receipts: dict[str, Any] = {}
+
+    with archive_metadata_publication_lock(archive):
+        checked = inspect_subject_mask_coordinate_successor_source(
+            analysis_zarr=archive,
+            source_raw_run_id=raw_id,
+            source_refined_run_id=refined_id,
+            source_bundle_run_id=bundle_id,
+            refined_evidence_run_path=evidence_path,
+            raw_successor_run_id=raw_target_id,
+            refined_successor_run_id=refined_target_id,
+            subject_mask_model_path=subject_mask_model_path,
+        )
+        if checked["selectors_before"] != initial["selectors_before"]:
+            raise RuntimeError("Subject-mask selectors changed after planning.")
+        root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
+        raw_source = root[f"{_RAW_FAMILY}/{raw_id}"]
+        refined_source = root[f"{_REFINED_FAMILY}/{refined_id}"]
+        raw_manifest = _source_manifest(
+            raw_source, run_id=raw_id, kind="raw_probability_uint8"
+        )
+        refined_manifest = _source_manifest(
+            refined_source, run_id=refined_id, kind="refined_dense_core"
+        )
+        bundle_manifest = _bundle_authority(
+            archive,
+            root,
+            bundle_run_id=bundle_id,
+            raw_run_id=raw_id,
+            raw_manifest=raw_manifest,
+            refined_run_id=refined_id,
+            refined_manifest=refined_manifest,
+        )
+        inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
+
+        try:
+            receipts["raw_copy"] = copy_metadata_and_link_payload(
+                raw_source_fs, raw_target_fs
+            )
+            raw_run = root[f"{_RAW_FAMILY}/{raw_target_id}"]
+            raw_owner = _clear_successor_attrs(
+                raw_run,
+                source_run_path=f"{_RAW_FAMILY}/{raw_id}",
+                owner_attr=SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
+            )
+            raw_run.attrs.update(
+                {
+                    "model_input_transform": inference["model_input_transform"].to_attrs(),
+                    "mask_probability_threshold": inference["mask_probability_threshold"],
+                    "source_checkpoint": inference["model_artifact"]["path"],
+                    "subject_mask_model_artifact": inference["model_artifact"],
+                    "mask_labels": _labels(raw_manifest),
+                    "provenance": inference["provenance"],
+                }
+            )
+            mark_run_started(raw_run, run_name=raw_target_id, stage="subject_masks")
+            crop_path = raw_manifest["payload"]["coordinate_dependencies"]["document"][
+                "crop"
+            ]["run_path"]
+            prepare_subject_mask_coordinate_context(
+                root,
+                f"{_RAW_FAMILY}/{raw_target_id}",
+                expected_publication_owner=raw_owner,
+                crop_path=crop_path,
+                mask_labels=_labels(raw_manifest),
+                model_input_transform=inference["model_input_transform"],
+                model_artifact=inference["model_artifact"],
+                mask_probability_threshold=inference["mask_probability_threshold"],
+            )
+            raw_surfaces = publish_subject_mask_coordinate_surfaces(
+                root,
+                f"{_RAW_FAMILY}/{raw_target_id}",
+                expected_publication_owner=raw_owner,
+            )
+            raw_authority = build_coordinate_successor_authority(
+                kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+                source_family=_RAW_FAMILY,
+                source_run_path=f"{_RAW_FAMILY}/{raw_id}",
+                source_manifest=raw_manifest,
+                source_authority_kind="inactive_subject_mask_bundle_v3",
+                source_authority=bundle_manifest,
+                successor_family=_RAW_FAMILY,
+                successor_run_path=f"{_RAW_FAMILY}/{raw_target_id}",
+                payload_equivalence={
+                    "policy": "same_filesystem_hardlink_payload_exact_logical_digest_v1",
+                    "source_logical_content_digest": raw_manifest["payload"][
+                        "logical_content"
+                    ]["digest"],
+                    **receipts["raw_copy"],
+                },
+                coordinate_records=_record_pointers(
+                    {
+                        "context": raw_surfaces.context.context_record,
+                        "row_identity": raw_surfaces.context.row_identity,
+                        "temporal_authority": raw_surfaces.context.temporal_authority,
+                        "surface_inventory": raw_surfaces.inventory,
+                        "derivation": raw_surfaces.derivation,
+                    }
+                ),
+            )
+            stamp_coordinate_successor_authority(raw_run, raw_authority)
+            raw_run.attrs["status"] = RUN_STATUS_COMPLETE
+            mark_run_complete(raw_run, run_name=raw_target_id)
+            consolidate_metadata_capture_expected_warnings(archive)
+            direct, consolidated = subject_mask_core_metadata_declaration_maps(
+                archive,
+                family=_RAW_FAMILY,
+                run_id=raw_target_id,
+                manifest=raw_manifest,
+            )
+            raw_successor_manifest = build_subject_mask_coordinate_successor_manifest(
+                raw_manifest,
+                run_id=raw_target_id,
+                direct_metadata_declarations=direct,
+                consolidated_metadata_declarations=consolidated,
+            )
+            raw_run.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE] = raw_successor_manifest
+            consolidate_metadata_capture_expected_warnings(archive)
+            raw_errors = validate_persisted_subject_mask_core_publication(
+                archive, family=_RAW_FAMILY, run_id=raw_target_id
+            )
+            if raw_errors:
+                raise RuntimeError("Raw mask successor validation failed: " + "; ".join(raw_errors))
+            raw_loaded = load_persisted_ineligible_subject_mask_coordinate_surfaces(
+                open_zarr_root(archive, mode="r"),
+                f"{_RAW_FAMILY}/{raw_target_id}",
+                expected_publication_owner=raw_owner,
+            )
+            del raw_loaded
+
+            receipts["refined_copy"] = copy_metadata_and_link_payload(
+                refined_source_fs, refined_target_fs
+            )
+            refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]
+            refined_owner = _clear_successor_attrs(
+                refined_run,
+                source_run_path=f"{_REFINED_FAMILY}/{refined_id}",
+                owner_attr=REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
+            )
+            if "components" in refined_run:
+                raise ValueError("Refined immutable core unexpectedly already has components.")
+            receipts["component_evidence_copy"] = copy_metadata_and_link_payload(
+                evidence_fs / "components", refined_target_fs / "components"
+            )
+            draft = root[evidence_path]
+            required_attrs = (
+                "provenance",
+                "method",
+                "refinement_semantics",
+                "finalization_semantics",
+                "label_schema_id",
+                "mask_labels",
+            )
+            missing = [name for name in required_attrs if name not in draft.attrs]
+            if missing:
+                raise ValueError(f"Refined evidence is missing required attrs {missing!r}.")
+            refined_run.attrs.update({name: copy.deepcopy(draft.attrs[name]) for name in required_attrs})
+            refined_run.attrs["source_subject_mask_run"] = raw_target_id
+            refined_run.attrs.pop("assignment_keypoint_coordinate_contract", None)
+            _rebase_component_provenance(
+                refined_run,
+                labels=_labels(refined_manifest),
+                raw_successor_path=f"{_RAW_FAMILY}/{raw_target_id}",
+            )
+            mark_run_started(
+                refined_run, run_name=refined_target_id, stage="refined_subject_masks"
+            )
+            prepare_refined_subject_mask_coordinate_context(
+                root,
+                f"{_REFINED_FAMILY}/{refined_target_id}",
+                expected_publication_owner=refined_owner,
+                source_subject_mask_path=f"{_RAW_FAMILY}/{raw_target_id}",
+                mask_labels=_labels(refined_manifest),
+                assignment_keypoint_surfaces=None,
+                source_selector_eligible=False,
+            )
+            refined_surfaces = publish_refined_subject_mask_coordinate_surfaces(
+                root,
+                f"{_REFINED_FAMILY}/{refined_target_id}",
+                expected_publication_owner=refined_owner,
+            )
+            refined_authority = build_coordinate_successor_authority(
+                kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+                source_family=_REFINED_FAMILY,
+                source_run_path=f"{_REFINED_FAMILY}/{refined_id}",
+                source_manifest=refined_manifest,
+                source_authority_kind="inactive_subject_mask_bundle_v3_plus_raw_successor",
+                source_authority={
+                    "bundle_manifest": bundle_manifest,
+                    "raw_successor_authority": raw_authority,
+                },
+                successor_family=_REFINED_FAMILY,
+                successor_run_path=f"{_REFINED_FAMILY}/{refined_target_id}",
+                payload_equivalence={
+                    "policy": "same_filesystem_hardlink_payload_exact_logical_digest_v1",
+                    "source_logical_content_digest": refined_manifest["payload"][
+                        "logical_content"
+                    ]["digest"],
+                    **receipts["refined_copy"],
+                    "component_evidence_source_run_path": evidence_path,
+                },
+                coordinate_records=_record_pointers(
+                    {
+                        "context": refined_surfaces.context.context_record,
+                        "row_identity": refined_surfaces.context.row_identity,
+                        "temporal_authority": refined_surfaces.context.temporal_authority,
+                        "source_authority": refined_surfaces.context.source_authority,
+                        "refinement_authority": refined_surfaces.context.refinement_authority,
+                        "surface_inventory": refined_surfaces.inventory,
+                        "component_qc_inventory": refined_surfaces.component_qc_inventory,
+                        "measurement_authority": refined_surfaces.measurement_authority,
+                        "scientific_manifest": refined_surfaces.scientific_manifest,
+                    }
+                ),
+            )
+            stamp_coordinate_successor_authority(refined_run, refined_authority)
+            refined_run.attrs["status"] = RUN_STATUS_COMPLETE
+            mark_run_complete(refined_run, run_name=refined_target_id)
+            consolidate_metadata_capture_expected_warnings(archive)
+            direct, consolidated = subject_mask_core_metadata_declaration_maps(
+                archive,
+                family=_REFINED_FAMILY,
+                run_id=refined_target_id,
+                manifest=refined_manifest,
+            )
+            refined_successor_manifest = build_subject_mask_coordinate_successor_manifest(
+                refined_manifest,
+                run_id=refined_target_id,
+                direct_metadata_declarations=direct,
+                consolidated_metadata_declarations=consolidated,
+                coordinate_dependencies=_refined_dependencies(
+                    refined_manifest, raw_successor_manifest
+                ),
+            )
+            refined_run.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE] = (
+                refined_successor_manifest
+            )
+            consolidate_metadata_capture_expected_warnings(archive)
+
+            final_root = open_zarr_root(archive, mode="r")
+            if _selector_snapshot(final_root) != initial["selectors_before"]:
+                raise RuntimeError("Subject-mask selectors changed during publication.")
+            refined_errors = validate_persisted_subject_mask_core_publication(
+                archive, family=_REFINED_FAMILY, run_id=refined_target_id
+            )
+            if refined_errors:
+                raise RuntimeError(
+                    "Refined mask successor validation failed: "
+                    + "; ".join(refined_errors)
+                )
+            load_persisted_ineligible_refined_subject_mask_coordinate_surfaces(
+                final_root,
+                f"{_REFINED_FAMILY}/{refined_target_id}",
+                expected_publication_owner=refined_owner,
+            )
+            load_coordinate_successor_authority(
+                final_root[f"{_RAW_FAMILY}/{raw_target_id}"],
+                expected_kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+                expected_successor_run_path=f"{_RAW_FAMILY}/{raw_target_id}",
+            )
+            load_coordinate_successor_authority(
+                final_root[f"{_REFINED_FAMILY}/{refined_target_id}"],
+                expected_kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+                expected_successor_run_path=f"{_REFINED_FAMILY}/{refined_target_id}",
+            )
+            for path, expected in (
+                (raw_source_fs, initial["source_raw_metadata_tree_sha256"]),
+                (refined_source_fs, initial["source_refined_metadata_tree_sha256"]),
+                (evidence_fs, initial["source_evidence_metadata_tree_sha256"]),
+            ):
+                if metadata_tree_sha256(path) != expected:
+                    raise RuntimeError(f"Immutable source metadata changed at {path}.")
+        except BaseException as exc:
+            for family, run_id, path in (
+                (_REFINED_FAMILY, refined_target_id, refined_target_fs),
+                (_RAW_FAMILY, raw_target_id, raw_target_fs),
+            ):
+                if not path.exists():
+                    continue
+                try:
+                    failed_root = zarr.open_group(
+                        str(archive), mode="a", use_consolidated=False
+                    )
+                    failed = failed_root[f"{family}/{run_id}"]
+                    failed.attrs["status"] = "failed"
+                    failed.attrs["stage_selector_eligible"] = False
+                    mark_run_failed(failed, run_name=run_id, error=str(exc))
+                except BaseException:
+                    pass
+            try:
+                consolidate_metadata_capture_expected_warnings(archive)
+            except BaseException:
+                pass
+            raise
+
+    return json_attr_safe(
+        {
+            "schema_id": SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_ID,
+            "schema_version": SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_VERSION,
+            "status": "complete",
+            "published_at_utc": utc_now(),
+            "analysis_zarr": str(archive),
+            "source_raw_run_path": f"{_RAW_FAMILY}/{raw_id}",
+            "source_refined_run_path": f"{_REFINED_FAMILY}/{refined_id}",
+            "raw_successor_run_path": f"{_RAW_FAMILY}/{raw_target_id}",
+            "refined_successor_run_path": f"{_REFINED_FAMILY}/{refined_target_id}",
+            "copy": receipts,
+            "coordinate_contract": "canonical_v2",
+            "selector_eligible": False,
+            "selectors_before": initial["selectors_before"],
+            "selectors_after": initial["selectors_before"],
+            "selector_activation": SELECTOR_ACTIVATION_DEFERRED,
+            "registry_updated": False,
+        }
+    )
+
+
+__all__ = [
+    "SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_POLICY",
+    "SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_ID",
+    "SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_VERSION",
+    "inspect_subject_mask_coordinate_successor_source",
+    "publish_subject_mask_coordinate_successors",
+]

@@ -35,11 +35,13 @@ from fisheye.shared.zarr.crop_storage import plan_crop_geometry_storage
 from fisheye.shared.zarr.detection_schema import derive_canonical_detection_geometry
 from fisheye.shared.zarr.keypoint_manifest import (
     KeypointPreprocessingReference,
+    build_keypoint_coordinate_successor_manifest,
     keypoint_crop_source_from_manifest,
     keypoint_skeleton_digest,
     validate_keypoint_run_manifest,
 )
 from fisheye.shared.zarr.keypoint_publication import (
+    keypoint_metadata_declaration_maps,
     prepare_raw_keypoint_v2_from_yolo_arrays,
     prepare_raw_keypoint_v2_snapshot,
     publish_selector_ineligible_keypoint_snapshot,
@@ -291,6 +293,25 @@ def test_raw_keypoint_storage_and_manifest_round_trip(tmp_path: object) -> None:
     run = family["yolo_keypoints_v2_canary"]
     assert run.attrs["stage_selector_eligible"] is False
     assert set(run.array_keys()) == set(KEYPOINT_SCHEMA_V2.binding_paths)
+
+    direct, consolidated = keypoint_metadata_declaration_maps(
+        publication.output_path,
+        run_id=publication.run_id,
+        plans=publication.plans,
+    )
+    successor = build_keypoint_coordinate_successor_manifest(
+        publication.manifest,
+        run_id="yolo_keypoints_v2_coordinate_successor",
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+    )
+    assert validate_keypoint_run_manifest(successor) == ()
+    assert successor["payload"]["run_id"] == (
+        "yolo_keypoints_v2_coordinate_successor"
+    )
+    assert successor["payload"]["logical_content"] == (
+        publication.manifest["payload"]["logical_content"]
+    )
 
 
 def test_legacy_yolo_payload_prepares_exact_v2_without_embedded_qc_or_heading() -> None:

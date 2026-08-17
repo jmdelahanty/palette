@@ -425,6 +425,83 @@ def test_sealed_bundle_canary_uses_root_authority_and_ineligible_surfaces(
     assert len(revalidation_calls) == 1
 
 
+def test_coordinate_successor_canary_uses_explicit_ineligible_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, profile, arrays, _ = _fixture(monkeypatch)
+    surfaces = _fake_surfaces(arrays)
+    authority = {
+        "schema_id": "palette.coordinate_successor_authority",
+        "schema_version": 1,
+    }
+    monkeypatch.setattr(
+        source_mod,
+        "_require_coordinate_successor_authority",
+        lambda *args, **kwargs: (authority, "7" * 64),
+    )
+    monkeypatch.setattr(
+        source_mod,
+        "load_persisted_ineligible_keypoint_coordinate_surfaces",
+        lambda root, path: surfaces,
+    )
+    monkeypatch.setattr(
+        source_mod,
+        "require_bound_ineligible_keypoint_coordinate_surfaces",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        source_mod,
+        "load_persisted_keypoint_coordinate_surfaces",
+        lambda *args, **kwargs: pytest.fail(
+            "coordinate-successor mode used the eligible coordinate loader"
+        ),
+    )
+
+    source = load_bound_keypoint_position_source(
+        root,
+        run_path=_RUN_PATH,
+        policy=KeypointPositionSourcePolicy(
+            profile,
+            _BINDING_ID,
+            authority_mode=(
+                source_mod.KEYPOINT_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+            ),
+        ),
+    )
+
+    assert source.source_kind == source_mod.COORDINATE_SUCCESSOR_SOURCE_KIND
+    assert source.coordinate_successor_authority == authority
+    assert source.coordinate_successor_authority_digest == "7" * 64
+    assert source.keypoint_bundle_authority is None
+
+
+def test_coordinate_successor_canary_does_not_fallback_when_authority_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, profile, _arrays_value, _ = _fixture(monkeypatch)
+
+    def reject(*args, **kwargs):
+        raise KeypointPositionSourceError("synthetic stale successor")
+
+    monkeypatch.setattr(
+        source_mod,
+        "_require_coordinate_successor_authority",
+        reject,
+    )
+    with pytest.raises(KeypointPositionSourceError, match="stale successor"):
+        load_bound_keypoint_position_source(
+            root,
+            run_path=_RUN_PATH,
+            policy=KeypointPositionSourcePolicy(
+                profile,
+                _BINDING_ID,
+                authority_mode=(
+                    source_mod.KEYPOINT_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+                ),
+            ),
+        )
+
+
 def test_root_bundle_authority_compares_two_open_metadata_views(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

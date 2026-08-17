@@ -48,6 +48,12 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
     validate_subject_mask_core_run_manifest,
 )
+from fisheye.shared.zarr.coordinate_successor_authority import (
+    REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    CoordinateSuccessorAuthorityError,
+    load_coordinate_successor_authority,
+)
 from fisheye.shared.subject_position_expression import (
     ComponentSourceBinding,
     MASK_COMPONENT_ANATOMICAL_TRIAD_MEAN_ESTIMATOR_ID,
@@ -76,11 +82,17 @@ SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR = "family_selector"
 SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY = (
     "explicit_bundle_member_canary_v1"
 )
+SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY = (
+    "coordinate_successor_canary_v1"
+)
 SUBJECT_MASK_AUTHORITY_MODE_FAMILY_SELECTOR = (
     SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR
 )
 SUBJECT_MASK_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY = (
     SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+)
+SUBJECT_MASK_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY = (
+    SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
 )
 _BUNDLE_MEMBER_CANARY_SCHEMA_VERSION = 3
 _FAMILY_SELECTOR_NAMES = (
@@ -434,10 +446,139 @@ def _surface_loader(source_kind: str, *, authority_mode: str) -> Any:
     if source_kind == REFINED_SUBJECT_MASK_SOURCE_KIND:
         if authority_mode == (
             SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY
+        ) or authority_mode == (
+            SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
         ):
             return load_persisted_ineligible_refined_subject_mask_coordinate_surfaces
         return load_persisted_refined_subject_mask_coordinate_surfaces
     _fail(f"Unsupported subject-mask source_kind {source_kind!r}.")
+
+
+def _coordinate_successor_authority_evidence(
+    archive_path: Path,
+    direct_root: Any,
+    consolidated_root: Any,
+    *,
+    refined_run_path: str,
+) -> dict[str, Any]:
+    """Validate a refined successor and every retained source authority."""
+
+    direct_run = _node(direct_root, refined_run_path)
+    consolidated_run = _node(consolidated_root, refined_run_path)
+    try:
+        direct_authority = load_coordinate_successor_authority(
+            direct_run,
+            expected_kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=refined_run_path,
+        )
+        consolidated_authority = load_coordinate_successor_authority(
+            consolidated_run,
+            expected_kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=refined_run_path,
+        )
+    except CoordinateSuccessorAuthorityError as exc:
+        raise SubjectMaskPositionSourceError(
+            f"Refined coordinate-successor authority is invalid: {exc}."
+        ) from exc
+    if direct_authority != consolidated_authority:
+        _fail("Direct and consolidated coordinate-successor authorities disagree.")
+    authority_payload = direct_authority["payload"]
+    source_binding = authority_payload["source"]
+    source_run_path = source_binding["run_path"]
+    source_run = _node(direct_root, source_run_path)
+    source_manifest = _validated_manifest(
+        _attrs(source_run, path=source_run_path).get(
+            SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE
+        ),
+        label="coordinate-successor refined source",
+        validator=validate_subject_mask_core_run_manifest,
+    )
+    source_logical = source_manifest["payload"]["logical_content"]
+    if (
+        source_manifest.get("payload_digest")
+        != source_binding.get("manifest_payload_digest")
+        or canonical_json_sha256(source_manifest)
+        != source_binding.get("manifest_document_digest")
+        or source_logical.get("digest")
+        != source_binding.get("logical_content_digest")
+    ):
+        _fail("Refined coordinate-successor source manifest changed.")
+    successor_manifest = _validated_manifest(
+        _attrs(direct_run, path=refined_run_path).get(
+            SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE
+        ),
+        label="refined coordinate successor",
+        validator=validate_subject_mask_core_run_manifest,
+    )
+    if (
+        successor_manifest["payload"]["logical_content"]["digest"]
+        != source_logical.get("digest")
+    ):
+        _fail("Refined coordinate successor changed the logical mask payload.")
+
+    source_authority = authority_payload["source_authority"]
+    source_record = source_authority.get("record")
+    if (
+        not isinstance(source_record, Mapping)
+        or canonical_json_sha256(source_record)
+        != source_authority.get("record_sha256")
+    ):
+        _fail("Refined coordinate-successor source authority is malformed.")
+    bundle_manifest = source_record.get("bundle_manifest")
+    raw_successor_authority = source_record.get("raw_successor_authority")
+    if not isinstance(bundle_manifest, Mapping) or not isinstance(
+        raw_successor_authority, Mapping
+    ):
+        _fail("Refined successor lacks its bundle/raw source authority chain.")
+    bundle_payload = bundle_manifest.get("payload")
+    bundle_id = bundle_payload.get("bundle_id") if isinstance(bundle_payload, Mapping) else None
+    if not isinstance(bundle_id, str) or not bundle_id:
+        _fail("Refined successor source bundle ID is absent.")
+    bundle_run_path = f"{SUBJECT_MASK_BUNDLE_FAMILY}/{bundle_id}"
+    bundle_evidence = _bundle_member_authority_evidence(
+        archive_path,
+        direct_root,
+        consolidated_root,
+        bundle_run_path=bundle_run_path,
+        refined_run_path=source_run_path,
+    )
+    live_bundle = _node(direct_root, bundle_run_path).attrs.get(
+        SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE
+    )
+    if live_bundle != bundle_manifest:
+        _fail("Refined coordinate-successor bundle authority changed.")
+
+    raw_payload = raw_successor_authority.get("payload")
+    raw_target = raw_payload.get("successor") if isinstance(raw_payload, Mapping) else None
+    raw_run_path = raw_target.get("run_path") if isinstance(raw_target, Mapping) else None
+    if not isinstance(raw_run_path, str):
+        _fail("Refined successor lacks an exact raw successor path.")
+    try:
+        live_raw_authority = load_coordinate_successor_authority(
+            _node(direct_root, raw_run_path),
+            expected_kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=raw_run_path,
+        )
+    except CoordinateSuccessorAuthorityError as exc:
+        raise SubjectMaskPositionSourceError(
+            f"Raw coordinate-successor dependency is invalid: {exc}."
+        ) from exc
+    if live_raw_authority != raw_successor_authority:
+        _fail("Refined coordinate successor binds a stale raw successor authority.")
+    if direct_run.attrs.get("source_subject_mask_run") != raw_run_path.split("/", 1)[1]:
+        _fail("Refined coordinate successor names another raw source run.")
+    return {
+        "authority_mode": SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY,
+        "coordinate_successor_authority": direct_authority,
+        "coordinate_successor_authority_digest": canonical_json_sha256(
+            direct_authority
+        ),
+        "source_bundle": bundle_evidence,
+        "raw_successor_run_path": raw_run_path,
+        "raw_successor_authority_digest": canonical_json_sha256(
+            live_raw_authority
+        ),
+    }
 
 
 def _validated_binding(
@@ -594,6 +735,19 @@ def _read_bound_source(
             direct_root,
             consolidated_root,
             bundle_run_path=bundle_run_path,
+            refined_run_path=run_path,
+        )
+    elif authority_mode == (
+        SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+    ):
+        if source_kind != REFINED_SUBJECT_MASK_SOURCE_KIND:
+            _fail("Coordinate-successor canary authority is only valid for refined masks.")
+        if bundle_run_path is not None:
+            _fail("Coordinate-successor authority is self-contained; bundle_run_path is forbidden.")
+        authority_evidence = _coordinate_successor_authority_evidence(
+            archive_path,
+            direct_root,
+            consolidated_root,
             refined_run_path=run_path,
         )
     else:
@@ -877,6 +1031,13 @@ def load_subject_mask_position_source(
         if source_kind != REFINED_SUBJECT_MASK_SOURCE_KIND:
             _fail("Bundle-member canary authority is only valid for refined masks.")
         _run_name(bundle_run_path, SUBJECT_MASK_BUNDLE_FAMILY)
+    elif authority_mode == (
+        SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+    ):
+        if bundle_run_path is not None:
+            _fail("bundle_run_path is forbidden for coordinate-successor authority.")
+        if source_kind != REFINED_SUBJECT_MASK_SOURCE_KIND:
+            _fail("Coordinate-successor canary authority is only valid for refined masks.")
     else:
         _fail(f"Unsupported subject-mask authority_mode {authority_mode!r}.")
     direct_root = open_zarr_root(archive_path, mode="r", use_consolidated=False)
@@ -944,8 +1105,10 @@ __all__ = [
     "SUBJECT_MASK_SOURCE_MODALITY",
     "SUBJECT_MASK_AUTHORITY_MODE_FAMILY_SELECTOR",
     "SUBJECT_MASK_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY",
+    "SUBJECT_MASK_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY",
     "SUBJECT_MASK_POSITION_AUTHORITY_MODE_FAMILY_SELECTOR",
     "SUBJECT_MASK_POSITION_AUTHORITY_MODE_EXPLICIT_BUNDLE_MEMBER_CANARY",
+    "SUBJECT_MASK_POSITION_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY",
     "SubjectMaskPositionSourceError",
     "load_subject_mask_position_source",
     "load_subject_mask_position_source_for_estimator",

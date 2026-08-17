@@ -108,6 +108,7 @@ from fisheye.shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_COORDINATE_DERIVATION_ATTR,
     SUBJECT_MASK_SURFACE_INVENTORY_ATTR,
     _load_subject_mask_coordinate_context,
+    load_persisted_ineligible_subject_mask_coordinate_surfaces,
     load_persisted_subject_mask_coordinate_surfaces,
 )
 from fisheye.shared.transform_authority import (
@@ -807,7 +808,12 @@ def _labels(value: Sequence[str]) -> tuple[str, ...]:
     return labels
 
 
-def _source_metadata_context(root: Any, source_path: str) -> Any:
+def _source_metadata_context(
+    root: Any,
+    source_path: str,
+    *,
+    selector_eligible: bool = True,
+) -> Any:
     """Load exact raw coordinate metadata without scanning its large payload."""
 
     try:
@@ -815,7 +821,7 @@ def _source_metadata_context(root: Any, source_path: str) -> Any:
             root,
             source_path,
             require_complete=True,
-            expected_selector_eligible=True,
+            expected_selector_eligible=selector_eligible,
         )
     except Exception as exc:
         raise RefinedSubjectMaskCoordinatePublicationError(
@@ -1544,8 +1550,9 @@ def _context_record(
     edge_chain: BoundDirectedTransformChain,
     selection: Mapping[str, Any],
     owner: str,
+    source_selector_eligible: bool = True,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "schema_id": REFINED_SUBJECT_MASK_COORDINATE_CONTEXT_SCHEMA_ID,
         "schema_version": REFINED_SUBJECT_MASK_SCHEMA_VERSION,
         "run_path": run_path,
@@ -1610,6 +1617,9 @@ def _context_record(
             "compact_cache_policy": "derived_non_authoritative",
         },
     }
+    if source_selector_eligible is not True:
+        record["source_selector_eligible"] = False
+    return record
 
 
 @dataclass(frozen=True, init=False)
@@ -1659,6 +1669,7 @@ def prepare_refined_subject_mask_coordinate_context(
     source_subject_mask_path: str,
     mask_labels: Sequence[str],
     assignment_keypoint_surfaces: BoundKeypointCoordinateSurfaces | None = None,
+    source_selector_eligible: bool = True,
 ) -> BoundRefinedSubjectMaskCoordinateContext:
     """Bind one running refined child to its exact raw coordinate authority."""
 
@@ -1680,7 +1691,13 @@ def prepare_refined_subject_mask_coordinate_context(
         prefix="subject_mask_runs/",
         label="raw subject-mask source",
     )
-    source = _source_metadata_context(root, source_path)
+    if type(source_selector_eligible) is not bool:
+        _fail("source_selector_eligible must be one exact boolean.")
+    source = _source_metadata_context(
+        root,
+        source_path,
+        selector_eligible=source_selector_eligible,
+    )
     expected_source_name = source_path.split("/", 1)[1]
     if run.attrs.get("source_subject_mask_run") != expected_source_name:
         _fail(
@@ -1898,6 +1915,7 @@ def prepare_refined_subject_mask_coordinate_context(
             edge_chain=edge_chain,
             selection=selection,
             owner=owner,
+            source_selector_eligible=source_selector_eligible,
         )
         authorize()
         context_bound = stamp_and_bind_persisted_coordinate_record(
@@ -1984,7 +2002,14 @@ def _load_refined_subject_mask_coordinate_context(
         attr_name=REFINED_SUBJECT_MASK_COORDINATE_CONTEXT_ATTR,
     )
     source_path = context.record.get("source_subject_mask_path")
-    source = _source_metadata_context(root, source_path)
+    source_selector_eligible = context.record.get("source_selector_eligible", True)
+    if type(source_selector_eligible) is not bool:
+        _fail("Persisted refined raw-source eligibility policy is malformed.")
+    source = _source_metadata_context(
+        root,
+        source_path,
+        selector_eligible=source_selector_eligible,
+    )
     if run.attrs.get("source_subject_mask_run") != source_path.split("/", 1)[1]:
         _fail("Refined source run attr changed after coordinate publication.")
     selection = _validate_exact_source_selection(source, run)
@@ -2199,6 +2224,7 @@ def _load_refined_subject_mask_coordinate_context(
         edge_chain=edge_chain,
         selection=selection,
         owner=owner,
+        source_selector_eligible=source_selector_eligible,
     )
     if context.record != expected_context:
         _fail("Persisted refined coordinate context differs from live exact evidence.")
@@ -4412,10 +4438,14 @@ def _load_refined_subject_mask_coordinate_surfaces(
     # large scan; complete-reader preflight performs it exactly once.
     if require_complete:
         try:
-            raw = load_persisted_subject_mask_coordinate_surfaces(
-                root,
-                context.source.run_path,
+            raw_loader = (
+                load_persisted_subject_mask_coordinate_surfaces
+                if context.context_record.record.get(
+                    "source_selector_eligible", True
+                )
+                else load_persisted_ineligible_subject_mask_coordinate_surfaces
             )
+            raw = raw_loader(root, context.source.run_path)
         except Exception as exc:
             raise RefinedSubjectMaskCoordinatePublicationError(
                 f"Selected raw subject-mask payload is stale or invalid: {exc}"

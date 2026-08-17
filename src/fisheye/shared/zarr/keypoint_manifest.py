@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import json
 import re
@@ -526,6 +527,56 @@ def build_keypoint_run_manifest(
     return envelope
 
 
+def build_keypoint_coordinate_successor_manifest(
+    source_manifest: Mapping[str, Any],
+    *,
+    run_id: str,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+) -> dict[str, object]:
+    """Rebind one byte-identical keypoint payload to new coordinate metadata.
+
+    A coordinate successor preserves every logical array and scientific input
+    from a previously validated immutable run.  Only the child run identity and
+    the metadata-declaration digest may change.  The normal publication
+    validator must still be run against the successor arrays before the result
+    is accepted.
+    """
+
+    errors = validate_keypoint_run_manifest(source_manifest)
+    if errors:
+        raise ValueError(
+            "Keypoint coordinate-successor source manifest is invalid: "
+            + "; ".join(errors)
+        )
+    successor = copy.deepcopy(dict(source_manifest))
+    payload = successor.get("payload")
+    if not isinstance(payload, dict):  # pragma: no cover - validated above
+        raise ValueError("Keypoint source manifest payload is absent.")
+    publication = payload.get("publication")
+    if not isinstance(publication, dict):  # pragma: no cover - validated above
+        raise ValueError("Keypoint source publication record is absent.")
+    payload["run_id"] = _require_run_id(run_id)
+    publication["stage_selector_eligible"] = False
+    publication["keypoint_authority"] = False
+    publication["metadata_state"] = "direct_and_consolidated_validated"
+    publication["metadata_declarations_digest"] = (
+        keypoint_metadata_declarations_digest(
+            direct_metadata_declarations,
+            consolidated_by_path=consolidated_metadata_declarations,
+        )
+    )
+    successor["payload_digest"] = canonical_json_sha256(payload)
+    canonical_json_bytes(successor)
+    successor_errors = validate_keypoint_run_manifest(successor)
+    if successor_errors:
+        raise ValueError(
+            "Keypoint coordinate-successor manifest is invalid: "
+            + "; ".join(successor_errors)
+        )
+    return successor
+
+
 def _parse_manifest(manifest: Mapping[str, Any]):  # type: ignore[no-untyped-def]
     errors: list[str] = []
     if set(manifest) != {
@@ -858,6 +909,7 @@ __all__ = [
     "KEYPOINT_SKELETON_SEMANTICS_SCHEMA_ID",
     "KeypointCropSourceReference",
     "KeypointPreprocessingReference",
+    "build_keypoint_coordinate_successor_manifest",
     "build_keypoint_run_manifest",
     "keypoint_crop_source_from_manifest",
     "keypoint_logical_content_document",

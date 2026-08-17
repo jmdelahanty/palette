@@ -131,6 +131,46 @@ class ModelInputTransform:
         return out
 
 
+def model_input_transform_from_attrs(value: Any) -> ModelInputTransform:
+    """Reconstruct one exact persisted transform without heuristic defaults."""
+
+    expected = {
+        "name",
+        "native_shape_hw",
+        "model_shape_hw",
+        "pad_top",
+        "pad_bottom",
+        "pad_left",
+        "pad_right",
+        "coordinate_mapping",
+    }
+    if type(value) is not dict or set(value) != expected:
+        raise ValueError("Persisted model-input transform field set is not exact.")
+    native = value.get("native_shape_hw")
+    model = value.get("model_shape_hw")
+    if (
+        type(native) is not list
+        or len(native) != 2
+        or any(type(item) is not int for item in native)
+        or type(model) is not list
+        or len(model) != 2
+        or any(type(item) is not int for item in model)
+        or any(
+            type(value.get(name)) is not int
+            for name in ("pad_top", "pad_bottom", "pad_left", "pad_right")
+        )
+    ):
+        raise ValueError("Persisted model-input transform dimensions are malformed.")
+    result = resolve_model_input_transform(
+        (native[0], native[1]),
+        mode=value["name"],
+        model_hw=(model[0], model[1]),
+    )
+    if result.to_attrs() != value:
+        raise ValueError("Persisted model-input transform is not self-consistent.")
+    return result
+
+
 def resolve_model_input_transform(
     native_hw: tuple[int, int],
     *,
