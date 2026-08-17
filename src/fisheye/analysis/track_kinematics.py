@@ -190,6 +190,45 @@ SAMPLE_REASON_CODES = {
     str(SAMPLE_REASON_MANUAL_REJECT): "manual_reject",
 }
 
+TRACK_SAMPLE_VALIDITY_COMPATIBILITY_PROFILE = (
+    "detection_centroid_keypoint_heading_compatibility.v1"
+)
+TRACK_SAMPLE_VALIDITY_INDEPENDENT_PROFILE = (
+    "explicit_position_body_frame_independent_validity.v1"
+)
+TRACK_SAMPLE_VALIDITY_PROFILES = frozenset(
+    {
+        TRACK_SAMPLE_VALIDITY_COMPATIBILITY_PROFILE,
+        TRACK_SAMPLE_VALIDITY_INDEPENDENT_PROFILE,
+    }
+)
+
+LINEAR_SAMPLE_REASON_OK = 0
+LINEAR_SAMPLE_REASON_UNASSIGNED = 1
+LINEAR_SAMPLE_REASON_SOURCE_UNOBSERVED = 2
+LINEAR_SAMPLE_REASON_POSITION_INVALID = 3
+LINEAR_SAMPLE_REASON_POSITION_NONFINITE = 4
+
+LINEAR_SAMPLE_REASON_CODES = {
+    str(LINEAR_SAMPLE_REASON_OK): "ok",
+    str(LINEAR_SAMPLE_REASON_UNASSIGNED): "unassigned",
+    str(LINEAR_SAMPLE_REASON_SOURCE_UNOBSERVED): "source_unobserved",
+    str(LINEAR_SAMPLE_REASON_POSITION_INVALID): "position_invalid",
+    str(LINEAR_SAMPLE_REASON_POSITION_NONFINITE): "position_nonfinite",
+}
+
+ANGULAR_SAMPLE_REASON_OK = 0
+ANGULAR_SAMPLE_REASON_UNASSIGNED = 1
+ANGULAR_SAMPLE_REASON_HEADING_INVALID = 2
+ANGULAR_SAMPLE_REASON_HEADING_NONFINITE = 3
+
+ANGULAR_SAMPLE_REASON_CODES = {
+    str(ANGULAR_SAMPLE_REASON_OK): "ok",
+    str(ANGULAR_SAMPLE_REASON_UNASSIGNED): "unassigned",
+    str(ANGULAR_SAMPLE_REASON_HEADING_INVALID): "heading_invalid",
+    str(ANGULAR_SAMPLE_REASON_HEADING_NONFINITE): "heading_nonfinite",
+}
+
 _UNKNOWN_SOURCE_VALUES = {"", "unknown", "none", "null"}
 
 KEYPOINT_USABILITY_DATASET_CANDIDATES = (
@@ -3069,25 +3108,79 @@ def _build_sample_validity_arrays(
     headings_deg: np.ndarray,
     keypoint_success: np.ndarray,
     detection_source: Optional[np.ndarray],
+    position_valid: Optional[np.ndarray] = None,
+    heading_valid: Optional[np.ndarray] = None,
+    validity_profile: str = TRACK_SAMPLE_VALIDITY_COMPATIBILITY_PROFILE,
 ) -> Dict[str, np.ndarray]:
-    """Project upstream row/source/keypoint state into track-aligned validity arrays."""
+    """Project explicit linear and angular source state into track validity.
+
+    The compatibility profile preserves the historical joint ``sample_valid``
+    semantics.  The independent profile requires separate upstream position
+    and body-frame validity arrays so an unusable heading cannot invalidate an
+    otherwise usable linear position sample.
+    """
 
     n_rows = int(positions_px.shape[0])
+    if validity_profile not in TRACK_SAMPLE_VALIDITY_PROFILES:
+        raise ValueError(
+            f"Unsupported track sample validity profile {validity_profile!r}."
+        )
+    for name, values in (
+        ("position_valid", position_valid),
+        ("heading_valid", heading_valid),
+    ):
+        if values is None:
+            continue
+        candidate = np.asarray(values)
+        if candidate.dtype != np.dtype(bool) or candidate.shape != (n_rows,):
+            raise ValueError(f"{name} must be one exact row-aligned bool array.")
+    if validity_profile == TRACK_SAMPLE_VALIDITY_INDEPENDENT_PROFILE:
+        if position_valid is None or heading_valid is None:
+            raise ValueError(
+                "Independent position/body-frame validity requires both exact "
+                "position_valid and heading_valid arrays."
+            )
+    elif position_valid is not None or heading_valid is not None:
+        raise ValueError(
+            "Explicit position/body-frame validity arrays require the independent "
+            "validity profile."
+        )
+
     sample_observed = np.full(n_rows, track_id >= 0, dtype=bool)
     position_finite = np.all(np.isfinite(positions_px), axis=1)
-    heading_usable = np.asarray(keypoint_success, dtype=bool) & np.isfinite(headings_deg)
-    keypoint_usable = heading_usable.copy()
+    heading_finite = np.isfinite(headings_deg)
+    upstream_keypoint_usable = np.asarray(keypoint_success, dtype=bool)
     if detection_source is None:
         source_observed = np.ones(n_rows, dtype=bool)
     else:
         source_observed = np.asarray(detection_source, dtype=np.int8) == 0
 
-    sample_valid = (
-        sample_observed
-        & source_observed
-        & keypoint_usable
-        & position_finite
+    if validity_profile == TRACK_SAMPLE_VALIDITY_INDEPENDENT_PROFILE:
+        assert position_valid is not None
+        assert heading_valid is not None
+        upstream_position_valid = np.asarray(position_valid, dtype=bool)
+        upstream_heading_valid = np.asarray(heading_valid, dtype=bool)
+        position_usable = upstream_position_valid & position_finite
+        heading_usable = upstream_heading_valid & heading_finite
+        # The compatibility-named array remains a transparent alias of the
+        # exact angular source validity for successor datasets.  New lineage
+        # records identify it as a compatibility surface, not keypoint
+        # authority.
+        keypoint_usable = heading_usable.copy()
+    else:
+        upstream_position_valid = position_finite.copy()
+        upstream_heading_valid = upstream_keypoint_usable.copy()
+        position_usable = position_finite.copy()
+        heading_usable = upstream_keypoint_usable & heading_finite
+        keypoint_usable = heading_usable.copy()
+
+    linear_sample_valid = (
+        sample_observed & source_observed & position_usable
     )
+    angular_sample_valid = sample_observed & heading_usable
+    if validity_profile == TRACK_SAMPLE_VALIDITY_COMPATIBILITY_PROFILE:
+        angular_sample_valid &= source_observed
+    sample_valid = linear_sample_valid & angular_sample_valid
 
     reason = np.full(n_rows, SAMPLE_REASON_OK, dtype=np.int16)
     reason[~position_finite] = SAMPLE_REASON_POSITION_NAN
@@ -3099,14 +3192,31 @@ def _build_sample_validity_arrays(
     reason[~sample_observed] = SAMPLE_REASON_UNASSIGNED
     reason[sample_valid] = SAMPLE_REASON_OK
 
+    linear_reason = np.full(n_rows, LINEAR_SAMPLE_REASON_OK, dtype=np.uint16)
+    linear_reason[~position_finite] = LINEAR_SAMPLE_REASON_POSITION_NONFINITE
+    linear_reason[~upstream_position_valid] = LINEAR_SAMPLE_REASON_POSITION_INVALID
+    linear_reason[~source_observed] = LINEAR_SAMPLE_REASON_SOURCE_UNOBSERVED
+    linear_reason[~sample_observed] = LINEAR_SAMPLE_REASON_UNASSIGNED
+    linear_reason[linear_sample_valid] = LINEAR_SAMPLE_REASON_OK
+
+    angular_reason = np.full(n_rows, ANGULAR_SAMPLE_REASON_OK, dtype=np.uint16)
+    angular_reason[~heading_finite] = ANGULAR_SAMPLE_REASON_HEADING_NONFINITE
+    angular_reason[~upstream_heading_valid] = ANGULAR_SAMPLE_REASON_HEADING_INVALID
+    angular_reason[~sample_observed] = ANGULAR_SAMPLE_REASON_UNASSIGNED
+    angular_reason[angular_sample_valid] = ANGULAR_SAMPLE_REASON_OK
+
     return {
         "sample_observed": sample_observed,
         "sample_valid": sample_valid,
+        "linear_sample_valid": linear_sample_valid,
+        "angular_sample_valid": angular_sample_valid,
         "source_observed": source_observed,
         "keypoint_usable": keypoint_usable,
         "position_finite": position_finite,
         "heading_usable": heading_usable,
         "sample_reason_code": reason,
+        "linear_sample_reason_code": linear_reason,
+        "angular_sample_reason_code": angular_reason,
     }
 
 
@@ -3432,6 +3542,9 @@ def build_track_datasets(
     savgol_polyorder: int = 3,
     source_row_index: Optional[np.ndarray] = None,
     source_temporal_authority: Any = None,
+    position_valid: Optional[np.ndarray] = None,
+    heading_valid: Optional[np.ndarray] = None,
+    validity_profile: str = TRACK_SAMPLE_VALIDITY_COMPATIBILITY_PROFILE,
 ) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, float]]]:
     """Assemble per-track data arrays and summary statistics.
 
@@ -3441,6 +3554,22 @@ def build_track_datasets(
 
     source_row_indices = None
     source_instance_rows = None
+    row_count = int(np.asarray(track_ids).shape[0])
+    normalized_position_valid = None
+    normalized_heading_valid = None
+    for name, raw in (
+        ("position_valid", position_valid),
+        ("heading_valid", heading_valid),
+    ):
+        if raw is None:
+            continue
+        values = np.asarray(raw)
+        if values.dtype != np.dtype(bool) or values.shape != (row_count,):
+            raise ValueError(f"{name} must be one exact row-aligned bool array.")
+        if name == "position_valid":
+            normalized_position_valid = values
+        else:
+            normalized_heading_valid = values
     if source_row_index is not None:
         raw_source_rows = np.asarray(source_row_index)
         if (
@@ -3509,6 +3638,16 @@ def build_track_datasets(
             if detection_source is not None
             else np.zeros(mask.sum(), dtype=np.int8)
         )
+        position_valid_track = (
+            normalized_position_valid[mask]
+            if normalized_position_valid is not None
+            else None
+        )
+        heading_valid_track = (
+            normalized_heading_valid[mask]
+            if normalized_heading_valid is not None
+            else None
+        )
         source_instance_track = (
             source_instance_rows[mask]
             if source_instance_rows is not None
@@ -3525,6 +3664,9 @@ def build_track_datasets(
             headings_deg=headings_track,
             keypoint_success=kp_success_track,
             detection_source=det_source_track if detection_source is not None else None,
+            position_valid=position_valid_track,
+            heading_valid=heading_valid_track,
+            validity_profile=validity_profile,
         )
 
         order = np.argsort(track_frames, kind="stable")
@@ -3533,6 +3675,10 @@ def build_track_datasets(
         headings_track = headings_track[order]
         kp_success_track = kp_success_track[order]
         det_source_track = det_source_track[order]
+        if position_valid_track is not None:
+            position_valid_track = position_valid_track[order]
+        if heading_valid_track is not None:
+            heading_valid_track = heading_valid_track[order]
         if source_instance_track is not None:
             source_instance_track = source_instance_track[order]
         if source_rows_track is not None:
@@ -3659,7 +3805,7 @@ def build_track_datasets(
                 headings_track,
                 delta_seconds_full,
                 transition_valid=transition_valid,
-                sample_valid=sample_validity["sample_valid"],
+                sample_valid=sample_validity["angular_sample_valid"],
             )
         )
         delta_heading_smoothed_degrees, angular_velocity_smoothed_deg_s, angular_speed_smoothed_deg_s = (
@@ -3667,7 +3813,7 @@ def build_track_datasets(
                 smoothed_heading_deg,
                 delta_seconds_full,
                 transition_valid=transition_valid,
-                sample_valid=sample_validity["sample_valid"],
+                sample_valid=sample_validity["angular_sample_valid"],
             )
         )
         angular_velocity_deg_s = angular_velocity_raw_deg_s
@@ -3679,7 +3825,11 @@ def build_track_datasets(
         heading_per_second_rad = np.full(unique_seconds.size, np.nan, dtype=np.float64)
         heading_per_second_resultant = np.zeros(unique_seconds.size, dtype=np.float32)
         for idx, sec in enumerate(unique_seconds):
-            mask_sec = (seconds_per_frame == sec) & heading_valid
+            mask_sec = (
+                (seconds_per_frame == sec)
+                & heading_valid
+                & sample_validity["angular_sample_valid"]
+            )
             valid_angles = heading_rad[mask_sec]
             if valid_angles.size:
                 mean_vector = np.mean(np.exp(1j * valid_angles))
@@ -3751,11 +3901,24 @@ def build_track_datasets(
             "detection_source": det_source_track.astype(np.int8),
             "sample_observed": _boolean(sample_validity["sample_observed"]),
             "sample_valid": _boolean(sample_validity["sample_valid"]),
+            "linear_sample_valid": _boolean(
+                sample_validity["linear_sample_valid"]
+            ),
+            "angular_sample_valid": _boolean(
+                sample_validity["angular_sample_valid"]
+            ),
             "source_observed": _boolean(sample_validity["source_observed"]),
             "keypoint_usable": _boolean(sample_validity["keypoint_usable"]),
             "position_finite": _boolean(sample_validity["position_finite"]),
             "heading_usable": _boolean(sample_validity["heading_usable"]),
             "sample_reason_code": sample_validity["sample_reason_code"].astype(np.int16),
+            "linear_sample_reason_code": sample_validity[
+                "linear_sample_reason_code"
+            ].astype(np.uint16),
+            "angular_sample_reason_code": sample_validity[
+                "angular_sample_reason_code"
+            ].astype(np.uint16),
+            "sample_validity_profile": validity_profile,
             "delta_frames": delta_frames.astype(np.int32),
             "delta_seconds": _float32(delta_seconds),
             "transition_valid": _boolean(transition_valid),

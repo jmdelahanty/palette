@@ -4,7 +4,7 @@
 version: 1
 status: draft
 implementation: partial
-last_updated: 2026-08-16
+last_updated: 2026-08-17
 -->
 
 Purpose: define how Palette should materialize and select subject position,
@@ -604,18 +604,49 @@ the subject-mask binding. No pixel-union operation or estimator was added.
 
 ### Phase 3: body-frame and motion integration
 
-- [ ] Define typed position-source and body-frame-source handles.
-- [ ] Check row identity, time, coordinates, transforms, completion, and
+- [x] Define typed position-source and keypoint-body-frame-source handles.
+- [x] Check row identity, time, coordinates, transforms, completion, and
       staleness before composition.
-- [ ] Generalize track-motion authority to consume one explicit position and
+- [x] Generalize track-motion authority to consume one explicit position and
       one explicit body-frame/heading source.
-- [ ] Validate the traditional-v3 inline heading declaration against the
+- [x] Validate the traditional-v3 inline heading declaration against the
       shared `anterior_axis` semantics before exposing a compatibility adapter.
-- [ ] Keep linear and angular motion lineage independent.
-- [ ] Preserve detection-centroid/keypoint-heading behavior as an explicit
+- [x] Keep linear and angular motion lineage independent.
+- [x] Preserve detection-centroid/keypoint-heading behavior as an explicit
       compatibility profile.
-- [ ] Refuse implicit fallback and same-length-only joins.
-- [ ] Publish successors instead of mutating existing track runs.
+- [x] Refuse implicit fallback and same-length-only joins.
+- [x] Publish selector-ineligible successors instead of mutating existing track
+      runs.
+
+Phase 3 deliberately does not infer heading from the outline of a full-body
+mask. PCA, ellipse, centerline, spline, or another subject-body shape
+orientation estimator remains deferred and requires a separate controlled
+recipe, polarity policy, validity contract, and canary evidence.
+
+The narrower `mask_component_axis` calculation is distinct from full-body
+shape orientation: it uses only the explicitly labeled `eye_left`,
+`eye_right`, and `swim_bladder` component centroids. Its array-level producer
+and source validation are implemented, but the current immutable
+`body_frame_runs` manifest and reader are keypoint-source-specific. Therefore
+the component-mask adapter remains non-publishing in this phase; it must gain
+a genuinely mask-aware manifest and typed reader before it can feed motion
+publication. It must not be published by relabeling mask rows as keypoint
+rows.
+
+The new provider-motion publication is a selector-ineligible canary surface.
+It binds exact tracking row content and a caller-supplied tracking manifest
+digest, but production activation remains blocked until a typed tracking-run
+handle reopens and validates that tracking authority immediately before
+publication.
+
+Provider-motion successors require the archive's typed source-camera physical
+authority by default. The authority's source-camera frame digest must equal the
+position provider's frame digest. A calibrated run publishes exact paired
+`px`/`mm`, `px/s`/`mm/s`, and `px/s^2`/`mm/s^2` arrays and validates each
+physical array as its float32 pixel peer multiplied by the bound
+`mm_per_pixel`. Pixel-only publication is permitted only through an explicit
+selector-ineligible canary exception and records that omission in the immutable
+computation manifest.
 
 ### Phase 4: composable stimulus analytics
 
