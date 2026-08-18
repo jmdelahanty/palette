@@ -204,6 +204,100 @@ def test_subject_mask_successor_rejects_schema_dtype_encoding_disagreement(
         )
 
 
+def test_subject_mask_successor_binds_refined_fresh_cache_state_to_core_source() -> None:
+    evidence_path = "refined_subject_masks_runs/refined_worker_draft"
+    evidence = _Node(path=evidence_path)
+    evidence.attrs.update(
+        {
+            subject_mask_successor.RUN_COMPLETION_STATUS_ATTR: "complete",
+            "stage_selector_eligible": False,
+            "derived_mask_caches_stale": False,
+            "metrics_stale": False,
+            "contours_stale": False,
+            "masks_roi_materialized": True,
+            "mask_storage_authority": "masks_roi",
+            "editable_mask_surface": "masks_roi",
+            "mask_bitpacked_materialized": False,
+            "mask_rle_materialized": False,
+        }
+    )
+    manifest = {
+        "payload_digest": "a" * 64,
+        "payload": {
+            "source": {
+                "run_path": evidence_path,
+                "validation_receipt": {
+                    "schema_id": "palette.subject_mask.source_validation_receipt",
+                    "schema_version": 2,
+                    "payload_digest": "b" * 64,
+                },
+            }
+        },
+    }
+
+    record = subject_mask_successor._refined_cache_state_normalization(
+        evidence,
+        source_manifest=manifest,
+        evidence_run_path=evidence_path,
+    )
+
+    assert record["resolved_run_attrs"]["derived_mask_caches_stale"] is False
+    assert record["resolved_run_attrs"]["metrics_stale"] is False
+    assert record["resolved_run_attrs"]["contours_stale"] is False
+    assert record["evidence"]["worker_draft_run_path"] == evidence_path
+
+
+@pytest.mark.parametrize(
+    ("attr_name", "replacement"),
+    [
+        ("derived_mask_caches_stale", True),
+        ("metrics_stale", 0),
+        ("mask_storage_authority", "legacy_cache"),
+    ],
+)
+def test_subject_mask_successor_rejects_nonfresh_or_inexact_refined_cache_state(
+    attr_name: str,
+    replacement: object,
+) -> None:
+    evidence_path = "refined_subject_masks_runs/refined_worker_draft"
+    evidence = _Node(path=evidence_path)
+    evidence.attrs.update(
+        {
+            subject_mask_successor.RUN_COMPLETION_STATUS_ATTR: "complete",
+            "stage_selector_eligible": False,
+            "derived_mask_caches_stale": False,
+            "metrics_stale": False,
+            "contours_stale": False,
+            "masks_roi_materialized": True,
+            "mask_storage_authority": "masks_roi",
+            "editable_mask_surface": "masks_roi",
+            "mask_bitpacked_materialized": False,
+            "mask_rle_materialized": False,
+        }
+    )
+    evidence.attrs[attr_name] = replacement
+    manifest = {
+        "payload_digest": "a" * 64,
+        "payload": {
+            "source": {
+                "run_path": evidence_path,
+                "validation_receipt": {
+                    "schema_id": "palette.subject_mask.source_validation_receipt",
+                    "schema_version": 2,
+                    "payload_digest": "b" * 64,
+                },
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="cache evidence"):
+        subject_mask_successor._refined_cache_state_normalization(
+            evidence,
+            source_manifest=manifest,
+            evidence_run_path=evidence_path,
+        )
+
+
 def test_subject_mask_successor_record_pointers_accept_bound_and_persisted_records() -> (
     None
 ):

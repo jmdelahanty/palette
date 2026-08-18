@@ -5590,6 +5590,16 @@ def _load_refined_subject_mask_coordinate_surfaces_impl(
         ):
             _fail("Selected raw subject-mask authority changed after refinement.")
         if SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE in context._run_group.attrs:
+            for attr_name in (
+                "derived_mask_caches_stale",
+                "metrics_stale",
+                "contours_stale",
+            ):
+                if context._run_group.attrs.get(attr_name) is not False:
+                    _fail(
+                        "Receipt-backed refined loading requires explicit fresh "
+                        f"{attr_name}=False."
+                    )
             receipt, authority = _load_refined_coordinate_receipt_authority(
                 root,
                 context.run_path,

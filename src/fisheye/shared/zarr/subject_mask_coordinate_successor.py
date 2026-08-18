@@ -106,6 +106,9 @@ _REFINED_FAMILY = "refined_subject_masks_runs"
 _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR = (
     "coordinate_successor_historical_semantic_normalization"
 )
+_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR = (
+    "coordinate_successor_historical_refined_cache_state_normalization"
+)
 _RAW_COORDINATE_VALIDATION_RECORD_NAMES = (
     "context",
     "derivation",
@@ -485,6 +488,75 @@ def _raw_semantic_normalization(
     )
 
 
+def _refined_cache_state_normalization(
+    evidence: Any,
+    *,
+    source_manifest: Mapping[str, Any],
+    evidence_run_path: str,
+) -> dict[str, Any]:
+    """Bind legacy fresh-cache flags to the core's exact validated source draft."""
+
+    payload = source_manifest.get("payload")
+    source = payload.get("source") if isinstance(payload, Mapping) else None
+    if not isinstance(source, Mapping) or source.get("run_path") != evidence_run_path:
+        raise ValueError(
+            "Refined core manifest does not bind the supplied worker-draft evidence."
+        )
+    validation = source.get("validation_receipt")
+    if not isinstance(validation, Mapping):
+        raise ValueError(
+            "Refined core manifest lacks its worker-draft validation receipt."
+        )
+    if (
+        evidence.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or evidence.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Refined worker-draft cache evidence is not complete and selector-ineligible."
+        )
+    resolved_attrs = {
+        "derived_mask_caches_stale": False,
+        "metrics_stale": False,
+        "contours_stale": False,
+        "masks_roi_materialized": True,
+        "mask_storage_authority": "masks_roi",
+        "editable_mask_surface": "masks_roi",
+        "mask_bitpacked_materialized": False,
+        "mask_rle_materialized": False,
+    }
+    for name, expected in resolved_attrs.items():
+        actual = evidence.attrs.get(name)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError(
+                f"Refined worker-draft cache evidence {name!r} differs from "
+                f"the required exact value {expected!r}."
+            )
+    return json_attr_safe(
+        {
+            "schema_id": (
+                "palette.subject_mask_coordinate_successor."
+                "historical_refined_cache_state_normalization"
+            ),
+            "schema_version": 1,
+            "policy": (
+                "core_manifest_bound_validated_worker_draft_fresh_cache_state_v1"
+            ),
+            "evidence": {
+                "source_refined_manifest_payload_digest": source_manifest[
+                    "payload_digest"
+                ],
+                "source_refined_manifest_document_digest": canonical_json_sha256(
+                    source_manifest
+                ),
+                "worker_draft_run_path": evidence_run_path,
+                "worker_draft_validation_receipt": copy.deepcopy(dict(validation)),
+                "worker_draft_cache_state": resolved_attrs,
+            },
+            "resolved_run_attrs": resolved_attrs,
+        }
+    )
+
+
 def _raw_inference_inputs(
     root: Any, raw_manifest: Mapping[str, Any], model_path: Path
 ) -> dict[str, Any]:
@@ -617,6 +689,11 @@ def inspect_subject_mask_coordinate_successor_source(
     evidence = root[str(refined_evidence_run_path).strip("/")]
     if "components" not in evidence:
         raise ValueError("Refined evidence run lacks component provenance groups.")
+    refined_cache_state_normalization = _refined_cache_state_normalization(
+        evidence,
+        source_manifest=refined_manifest,
+        evidence_run_path=str(refined_evidence_run_path).strip("/"),
+    )
     inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
     raw_semantic_normalization = _raw_semantic_normalization(
         root[f"{_RAW_FAMILY}/{raw_id}"],
@@ -666,6 +743,9 @@ def inspect_subject_mask_coordinate_successor_source(
             ),
             "producer_run_path": inference["producer_run_path"],
             "raw_semantic_normalization": raw_semantic_normalization,
+            "refined_cache_state_normalization": (
+                refined_cache_state_normalization
+            ),
             "historical_crop_adapter": historical_crop.as_record(),
             "model_artifact": inference["model_artifact"],
             "selectors_before": _selector_snapshot(root),
@@ -682,8 +762,12 @@ def _clear_successor_attrs(run: Any, *, source_run_path: str, owner_attr: str) -
         SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
         "coordinate_successor_authority",
         "coordinate_successor_authority_sha256",
+        SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE,
+        f"{SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE}_sha256",
         _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR,
         f"{_HISTORICAL_SEMANTIC_NORMALIZATION_ATTR}_sha256",
+        _HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR,
+        f"{_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR}_sha256",
         RUN_COMPLETED_AT_ATTR,
         "palette_run_failed_at_utc",
         "palette_run_error",
@@ -875,6 +959,19 @@ def publish_subject_mask_coordinate_successors(
         if raw_semantic_normalization != checked["raw_semantic_normalization"]:
             raise RuntimeError(
                 "Subject-mask semantic normalization changed between dry-run and apply."
+            )
+        evidence = root[evidence_path]
+        refined_cache_state_normalization = _refined_cache_state_normalization(
+            evidence,
+            source_manifest=refined_manifest,
+            evidence_run_path=evidence_path,
+        )
+        if (
+            refined_cache_state_normalization
+            != checked["refined_cache_state_normalization"]
+        ):
+            raise RuntimeError(
+                "Refined cache-state normalization changed between dry-run and apply."
             )
         crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
             "crop"
@@ -1116,7 +1213,19 @@ def publish_subject_mask_coordinate_successors(
                     f"Refined evidence is missing required attrs {missing!r}."
                 )
             refined_run.attrs.update(
-                {name: copy.deepcopy(draft.attrs[name]) for name in required_attrs}
+                {
+                    **{
+                        name: copy.deepcopy(draft.attrs[name])
+                        for name in required_attrs
+                    },
+                    **refined_cache_state_normalization["resolved_run_attrs"],
+                    _HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR: (
+                        refined_cache_state_normalization
+                    ),
+                    f"{_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR}_sha256": (
+                        canonical_json_sha256(refined_cache_state_normalization)
+                    ),
+                }
             )
             refined_run.attrs["source_subject_mask_run"] = raw_target_id
             refined_run.attrs.pop("assignment_keypoint_coordinate_contract", None)
@@ -1145,6 +1254,10 @@ def publish_subject_mask_coordinate_successors(
             )
             root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
             refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]
+            refined_cache_state_record = bind_persisted_run_attribute_record(
+                refined_run,
+                attr_name=_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR,
+            )
             refined_coordinate_records = _record_pointers(
                 {
                     "context": refined_surfaces.context.context_record,
@@ -1213,6 +1326,9 @@ def publish_subject_mask_coordinate_successors(
                     "component_evidence_payload_equivalence": receipts[
                         "component_evidence_payload_equivalence"
                     ],
+                    "historical_refined_cache_state_normalization": (
+                        refined_cache_state_record
+                    ),
                 },
                 coordinate_records=refined_authority_records,
             )

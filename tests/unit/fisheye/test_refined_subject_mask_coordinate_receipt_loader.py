@@ -146,6 +146,42 @@ def test_valid_receipt_loader_does_not_index_dense_or_optional_arrays(
 
 
 @pytest.mark.parametrize(
+    "attr_name",
+    ("derived_mask_caches_stale", "metrics_stale", "contours_stale"),
+)
+def test_receipt_loader_rejects_stale_derived_state_before_dense_read(
+    monkeypatch: pytest.MonkeyPatch,
+    attr_name: str,
+) -> None:
+    root, run, _raw, loaded = _published(monkeypatch)
+    context = module._load_refined_subject_mask_coordinate_context(
+        root,
+        run.path,
+        require_complete=True,
+        expected_selector_eligible=True,
+    )
+    receipt = _receipt(loaded)
+    run.attrs[SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE] = receipt
+    run.attrs[attr_name] = True
+    monkeypatch.setattr(
+        module,
+        "_load_refined_subject_mask_coordinate_context",
+        lambda *_args, **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        module,
+        "_array",
+        lambda *_args, **_kwargs: pytest.fail("dense read"),
+    )
+
+    with pytest.raises(
+        module.RefinedSubjectMaskCoordinatePublicationError,
+        match=f"fresh {attr_name}=False",
+    ):
+        load_persisted_refined_subject_mask_coordinate_surfaces(root, run.path)
+
+
+@pytest.mark.parametrize(
     ("mutation", "message"),
     [
         (
