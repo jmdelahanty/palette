@@ -319,6 +319,38 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _stdout_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep terminal output useful while the result JSON retains full receipts."""
+
+    if result.get("status") != "complete":
+        return dict(result)
+    positions = result.get("positions")
+    comparison = result.get("comparison")
+    if not isinstance(positions, Mapping) or not isinstance(comparison, Mapping):
+        return dict(result)
+    return {
+        "schema_id": result.get("schema_id"),
+        "schema_version": result.get("schema_version"),
+        "status": result.get("status"),
+        "recording_id": result.get("recording_id"),
+        "selector_eligible": result.get("selector_eligible"),
+        "selection": result.get("selection"),
+        "promotion": result.get("promotion"),
+        "positions": {
+            str(provider_id): {
+                key: record.get(key)
+                for key in ("status", "run_path", "manifest_sha256")
+            }
+            for provider_id, record in positions.items()
+            if isinstance(record, Mapping)
+        },
+        "comparison": {
+            key: comparison.get(key)
+            for key in ("run_path", "manifest_sha256", "summary")
+        },
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     task = load_task(args.task_json)
@@ -337,7 +369,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = materialize_task(task, scratch_root=args.scratch_root)
     if args.result_json is not None:
         write_json_atomic(args.result_json.expanduser().resolve(), result)
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(_stdout_result(result), indent=2, sort_keys=True))
     return 0
 
 
