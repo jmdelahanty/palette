@@ -1098,6 +1098,9 @@ def historical_geometry_only_crop_loader(
     """
 
     from fisheye.shared import keypoint_coordinate_publication as keypoint_publication
+    from fisheye.shared import (
+        refined_subject_mask_coordinate_publication as refined_mask_publication,
+    )
     from fisheye.shared import subject_mask_coordinate_publication as mask_publication
 
     def load(root: Any, crop_path: str) -> Any:
@@ -1133,6 +1136,14 @@ def historical_geometry_only_crop_loader(
                 "CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR",
             )
         }
+        old_refined_mask_attrs = {
+            name: getattr(refined_mask_publication, name)
+            for name in (
+                "CROP_PLACEMENT_OWNERSHIP_ATTR",
+                "CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR",
+                "CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR",
+            )
+        }
         keypoint_publication.load_persisted_keypoint_crop_source = load
         mask_publication.load_persisted_subject_mask_crop_source = load
         keypoint_publication.CROP_PLACEMENT_OWNERSHIP_ATTR = (
@@ -1150,6 +1161,15 @@ def historical_geometry_only_crop_loader(
         mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR = (
             CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR
         )
+        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR
+        )
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR
+        )
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR
+        )
         try:
             yield
         finally:
@@ -1159,6 +1179,8 @@ def historical_geometry_only_crop_loader(
                 setattr(keypoint_publication, name, value)
             for name, value in old_mask_attrs.items():
                 setattr(mask_publication, name, value)
+            for name, value in old_refined_mask_attrs.items():
+                setattr(refined_mask_publication, name, value)
 
 
 __all__ = [

@@ -662,7 +662,7 @@ def test_historical_geometry_only_adapter_proves_keypoint_source_and_records_no_
     assert record["padded_crop_lineage"]["max_padding_ltrb"] == [0, 0, 289, 290]
 
 
-def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_paths(
+def test_historical_geometry_only_adapter_is_shared_by_all_coordinate_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _historical_crop_fixture(tmp_path)
@@ -677,6 +677,9 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
         model_input_transform=fixture["transform"],
     )
     from fisheye.shared import keypoint_coordinate_publication as keypoint_publication
+    from fisheye.shared import (
+        refined_subject_mask_coordinate_publication as refined_mask_publication,
+    )
     from fisheye.shared import subject_mask_coordinate_publication as mask_publication
 
     original_keypoint_loader = keypoint_publication.load_persisted_keypoint_crop_source
@@ -689,6 +692,11 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
         mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
         mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
         mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    )
+    original_refined_mask_attrs = (
+        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     )
     with historical_crop.historical_geometry_only_crop_loader(binding):
         assert (
@@ -719,6 +727,15 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
             CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
             CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
         )
+        assert (
+            refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+            refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+            refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        ) == (
+            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+            CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
+            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
+        )
         with pytest.raises(historical_crop.HistoricalGeometryOnlyCropAdapterError):
             keypoint_publication.load_persisted_keypoint_crop_source(
                 object(), binding.crop_path
@@ -739,6 +756,11 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
         mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
         mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     ) == original_mask_attrs
+    assert (
+        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    ) == original_refined_mask_attrs
     with pytest.raises(RuntimeError, match="restore"):
         with historical_crop.historical_geometry_only_crop_loader(binding):
             raise RuntimeError("restore")
@@ -749,6 +771,11 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
     assert (
         mask_publication.load_persisted_subject_mask_crop_source is original_mask_loader
     )
+    assert (
+        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    ) == original_refined_mask_attrs
 
 
 def test_ordinary_keypoint_crop_loader_still_rejects_geometry_only_layout(
