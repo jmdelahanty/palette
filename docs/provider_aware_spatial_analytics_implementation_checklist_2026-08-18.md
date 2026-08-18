@@ -3,7 +3,7 @@
 <!-- contract-meta
 status: accepted-implementation-checklist
 decision_date: 2026-08-18
-implementation: pure-foundation
+implementation: selector-ineligible-materializers-and-cross-stage-adapter
 promotion_status: selector-ineligible-only
 -->
 
@@ -24,10 +24,12 @@ and visualization runs remain unchanged. New publications are immutable
 successors or new run families. No production selector, registry authority, or
 provider default may change during this checklist's canary phases.
 
-## Implementation checkpoint: pure foundation (2026-08-18)
+## Implementation checkpoint: selector-ineligible materializers and cross-stage adapter (2026-08-18)
 
-The first implementation pass is complete as pure in-memory code. It does not
-yet load or publish Zarr runs:
+The current implementation checkpoint extends the pure foundation with
+immutable, selector-ineligible Zarr materializers and an exact published-run
+cross-stage adapter. It remains a development checkpoint, not a production
+rollout:
 
 - `analysis_workflows.composable_stimulus_selection` implements authority-bound
   atomic step/annotation references, exact member/union/intersection/difference
@@ -48,14 +50,65 @@ yet load or publish Zarr runs:
   contrasts. It requires exact digested estimator, track-policy, coordinate,
   transform, geometry, timing, grid, selection, occurrence, and source-manifest
   identities and rejects cross-provider ordinary contrasts.
-- The four new focused suites pass together (`69 passed`). The maintained
-  provider-offer/binding and epoch-selection baseline passed before integration
-  (`47 passed`).
+- `analysis_workflows.materializers.composable_stimulus_selection` publishes
+  exact named selection runs with immutable arrays, manifests, direct versus
+  consolidated validation, and unchanged parent selector state.
+- `analysis_workflows.materializers.provider_spatial_trajectory` publishes
+  unsmoothed selector-ineligible trajectories with exact row lineage,
+  `track_sample_policy_id`, source-camera extent validity, and separate reason
+  and coverage states.
+- `analysis_workflows.materializers.provider_occupancy_v2` publishes the
+  provider-neutral per-occurrence and pooled occupancy arrays with shared
+  storage declarations, exact source bindings, conservation checks, and final
+  consolidated visibility validation.
+- `analysis_workflows.materializers.provider_occupancy_contrast` consumes the
+  actual occupancy-v2 source manifest and publishes strict pooled differences
+  with exact source-arm references.
+- `analysis_workflows.provider_spatial_pipeline` reads exact published,
+  complete, selector-ineligible selection and trajectory runs, validates their
+  manifests, arrays, direct/consolidated equivalence, and recomputes the
+  occupancy result from the complete selection denominator. Its E2E tests cover
+  distinct selection/trajectory/occupancy lineages through contrast publication,
+  tampered source arrays, stale consolidated metadata, and mismatched results.
 
-Still open are the exact Zarr source adapters, immutable materializers and
-manifests, a frozen GoodBatBadBat millimetre grid profile, real recording
-canary publication, cohort products, plot recipes, Marimo discovery, registry
-projection, required CI, and any provider promotion.
+The complete new focused suite passes (`106 passed`). The maintained
+provider-offer, binding, and resolved-epoch baseline also passes (`47 passed`,
+with three existing Zarr-v3 consolidated-metadata warnings). Both suites ran
+outside the Codex sandbox as required by `AGENTS.md`. Static compile, Ruff, and
+`git diff --check` validation also pass.
+
+Still open are the canonical stimulus and detection/keypoint source adapters,
+real published source handles for those providers, a frozen GoodBatBadBat
+millimetre grid profile, real recording canary publication, physical
+`ArrayContract` migration for selection/trajectory/contrast, cohort products,
+plot recipes, Marimo discovery, registry projection, required CI, and any
+provider promotion. No production data, selector, registry authority, or
+provider default has been written or changed, and this checkpoint is not
+merge-ready.
+
+### Read-only canary coordinate preflight
+
+The canonical arena-2 canary currently selects reviewed Palette geometry
+`arena_geometry_selection_06b5cd2c35c04917004e` with selection-record digest
+`06b5cd2c35c04917004e52a897b3bae60cbbcfa8f2f97a2b80735826e0677026`.
+Its reviewed circle is centred at
+`(2286.7729648010045, 2307.6434917690376)` native-camera pixels with radius
+`2152.594087583115` pixels. The exact source-camera physical authority records
+`mm_per_pixel = 0.019016605362130807` and digest
+`47758cca2a336a848300b92ebc77d953e74d417b0634915ada7421b63a401d69`.
+
+Existing provider-motion `positions_mm` retain the source-camera physical
+origin; they are not an arena-centred coordinate frame. The canary adapter
+must therefore bind the reviewed geometry and apply an explicit translation
+from source-camera pixels to arena-centred millimetres. It must preserve +X
+right and +Y down and must not apply a presentation reflection or heuristic
+Y flip.
+
+The transform authority is available, but the cohort grid remains open. The
+nominal 80 mm dish and the older 64-camera-pixel heatmap bins provide useful
+evidence (64 pixels are about 1.22 mm for this camera), but neither justifies
+silently hardcoding an `[-40, 40] mm` extent or a 1 mm bin width. Freeze the
+grid profile explicitly before canary publication.
 
 ## Accepted first-slice decisions
 
@@ -97,30 +150,30 @@ projection, required CI, and any provider promotion.
 
 ### Selection and frame-set contract
 
-- [ ] Name and version the immutable selection-expression and resolved-frame-
+- [x] Name and version the immutable selection-expression and resolved-frame-
       set schemas without changing `stimulus_epoch_runs` v2.
-- [ ] Bind every selection to one exact recording, stimulus run, acquisition
+- [x] Bind every selection to one exact recording, stimulus run, acquisition
       frame domain, source-video metadata record, acquisition-clock authority,
       and source metadata digest.
-- [ ] Support exact atomic-step references and exact interval-annotation
+- [x] Support exact atomic-step references and exact interval-annotation
       references. Persist predicate text only together with its concrete
       resolved members.
-- [ ] Support the narrow v1 expression vocabulary: exact member,
+- [x] Support the narrow v1 expression vocabulary: exact member,
       `union`, `intersection`, and `difference`.
-- [ ] Represent all intervals as ordered, de-duplicated, half-open acquisition
+- [x] Represent all intervals as ordered, de-duplicated, half-open acquisition
       frame intervals `[start_frame, end_frame)`.
-- [ ] Define overlap behavior explicitly: a resolved frame contributes at most
+- [x] Define overlap behavior explicitly: a resolved frame contributes at most
       once to a pooled metric while all source-membership evidence is retained.
-- [ ] Support `keep_occurrences` and `pool_intervals` as distinct aggregation
+- [x] Support `keep_occurrences` and `pool_intervals` as distinct aggregation
       policies. Preserve occurrence identity in either case.
-- [ ] Support directional leading and trailing trims. For the existing
+- [x] Support directional leading and trailing trims. For the existing
       nominal-frame-clock v1 policy, remove `ceil(seconds * fps)` frames and
       persist requested seconds, effective frame count, and rounding policy.
-- [ ] Reject negative trims, trims that invert an interval, incompatible
+- [x] Reject negative trims, trims that invert an interval, incompatible
       timelines, unresolved predicates, and unsupported expression operators.
-- [ ] Make roles such as `baseline`, `treatment`, and `control` explicit saved
+- [x] Make roles such as `baseline`, `treatment`, and `control` explicit saved
       metadata. Never infer them from step mode, order, or display label.
-- [ ] Canonicalize and digest the requested expression independently from the
+- [x] Canonicalize and digest the requested expression independently from the
       resolved frame set so stale stimulus resolution is detectable.
 
 ### Provider-track binding contract
@@ -131,15 +184,17 @@ projection, required CI, and any provider promotion.
       projection.
 - [ ] Require exact `track_sample_key`, acquisition frame, subject/track
       identity, coordinate descriptor, provider ID, estimator digest, source
-      manifest, and recording-timing authority.
-- [ ] Require uniqueness of `(subject_track_identity, acquisition_frame)` for
+      manifest, and recording-timing authority from a canonical published
+      detection or keypoint source handle. The current materializers record
+      these identities but still receive provider rows as an in-memory object.
+- [x] Require uniqueness of `(subject_track_identity, acquisition_frame)` for
       the first single-subject profile.
-- [ ] Preserve provider-present, provider-valid, in-selection, transform-valid,
+- [x] Preserve provider-present, provider-valid, in-selection, transform-valid,
       and in-grid states separately.
 - [ ] Publish or bind selector-ineligible track successors for both detection
       and keypoint position. Do not reuse a body-frame source as position
       evidence.
-- [ ] Reject implicit provider fallback, selector lookup, same-length joins,
+- [x] Reject implicit provider fallback, selector lookup, same-length joins,
       reordered keys, duplicate keys, stale manifests, and cross-recording
       composition.
 
@@ -149,19 +204,19 @@ projection, required CI, and any provider promotion.
       writing a canary. Record exact x/y edges as float64 arrays.
 - [ ] Choose the fixed grid extent and bin width from declared arena geometry
       and bounded canary evidence, not the observed position minima/maxima.
-- [ ] Define bin membership as left-closed/right-open, with the final outer
+- [x] Define bin membership as left-closed/right-open, with the final outer
       edge inclusive. Persist the edge policy.
-- [ ] Record the selected arena geometry, physical scale, camera-to-arena
+- [x] Record the selected arena geometry, physical scale, camera-to-arena
       transform, coordinate descriptor, and every authority digest used to
       project source positions.
-- [ ] Record out-of-grid finite samples separately. Do not clip them into edge
+- [x] Record out-of-grid finite samples separately. Do not clip them into edge
       bins or silently expand the grid.
 - [ ] Give any camera-pixel diagnostic grid a different policy ID and prevent
       it from entering millimetre-grid cohort contrasts.
 
 ## Phase 1: pure composable selection compiler
 
-- [ ] Implement pure schema models, canonical JSON, and digest helpers for
+- [x] Implement pure schema models, canonical JSON, and digest helpers for
       atomic references, annotations, expressions, resolved intervals, source
       memberships, occurrences, and assigned roles.
 - [ ] Generalize `resolved_epoch_selection` through the new compiler while
@@ -169,44 +224,58 @@ projection, required CI, and any provider promotion.
       runs.
 - [ ] Resolve exact canonical stimulus steps rather than relying only on
       `pre_event`, `training_event`, and `post_event` aliases.
-- [ ] Make compilation deterministic under equivalent input mapping order.
-- [ ] Persist both requested and resolved selection representations.
+- [ ] Migrate the selection materializer's array declarations to the shared
+      physical `ArrayContract` authority; its current manifest is immutable
+      and content-digested but remains a local declaration surface.
+- [x] Make compilation deterministic under equivalent input mapping order.
+- [x] Persist both requested and resolved selection representations.
+- [x] Materialize immutable named selection runs with content manifests,
+      direct/consolidated validation, and permanently selector-ineligible
+      publication semantics.
 - [ ] Add a mixed `SOLID_BLACK -> CHASER_PRESENTATION -> SOLID_BLACK` fixture
       with distinct `black_before`, `chaser`, `black_after`, and `all_black`
       compositions.
-- [ ] Prove that the two black steps remain separate occurrences unless a
+- [x] Prove that the two black steps remain separate occurrences unless a
       saved expression explicitly pools them.
-- [ ] Add tests for boundaries, gaps, trims, empty results, overlap,
+- [x] Add tests for boundaries, gaps, trims, empty results, overlap,
       de-duplication, set algebra, role preservation, and stale-source
       rejection.
 
 ## Phase 2: generic trajectory product
 
-- [ ] Define one versioned selector-ineligible trajectory schema over the
+- [x] Define one versioned selector-ineligible trajectory schema over the
       `track_sample` row axis.
-- [ ] Materialize exact source track-sample indices/keys, acquisition frames,
+- [x] Materialize exact source track-sample indices/keys, acquisition frames,
       occurrence and selection membership, provider position, arena-mm
       position, and validity/reason evidence.
-- [ ] Keep trajectory position unsmoothed in v1. Any smoothed trajectory is a
+- [x] Keep trajectory position unsmoothed in this profile. Any smoothed trajectory is a
       separately identified derived method.
-- [ ] Preserve selected expected-frame count, source-row count, valid-position
+- [x] Preserve selected expected-frame count, source-row count, valid-position
       count, transform-valid count, in-grid count, and missing/invalid counts.
-- [ ] Bind exact position-provider, track projection, selection, timing,
-      geometry, transform, and software identities in a content manifest.
+- [x] Bind declared position-provider, track-sample policy, selection, timing,
+      geometry, transform, and software identities in the immutable trajectory
+      content manifest, including `track_sample_policy_id`, source-row digest,
+      and source-camera extent validity.
+- [ ] Bind those identities to actual canonical detection/keypoint source
+      handles and published source manifests; the current trajectory API still
+      accepts provider rows as an in-memory input.
+- [ ] Migrate trajectory arrays to the shared physical `ArrayContract`
+      authority; occupancy-v2 has this declaration surface, but selection and
+      trajectory do not yet share it.
 - [ ] Publish one detection-position and one keypoint-position trajectory for
       the same GoodBatBadBat selections without selecting a winner.
-- [ ] Validate source preservation and direct/consolidated metadata equality.
+- [x] Validate source preservation and direct/consolidated metadata equality.
 
 ## Phase 3: provider-aware occupancy v2
 
-- [ ] Move scientific histogram computation out of
+- [x] Move scientific histogram computation out of
       `visualization/plot_detection_epoch_heatmaps.py` into a provider-neutral
       analysis module. Keep existing occupancy-v1 readers and runs unchanged.
-- [ ] Define a new provider-neutral run family and schema; do not label it
+- [x] Define a new provider-neutral run family and schema; do not label it
       `detection_occupancy` when it accepts other position providers.
-- [ ] Consume only an exact validated trajectory/track-sample input and exact
+- [x] Consume only an exact validated trajectory/track-sample input and exact
       resolved frame set.
-- [ ] Materialize, per occurrence and pooled selection:
+- [x] Materialize, per occurrence and pooled selection:
       - raw bin counts;
       - valid in-grid sample count;
       - occupancy fraction of valid in-grid samples;
@@ -215,41 +284,47 @@ projection, required CI, and any provider promotion.
       - provider-present and provider-valid counts;
       - transform-invalid and out-of-grid counts; and
       - exact x/y grid edges.
-- [ ] Exclude invalid or non-finite provider positions from spatial bins and
+- [x] Exclude invalid or non-finite provider positions from spatial bins and
       the occupancy-fraction denominator, while reporting their coverage
       against all expected selected frames.
-- [ ] Do not interpolate missing positions, substitute another provider, clip
+- [x] Do not interpolate missing positions, substitute another provider, clip
       finite out-of-grid points, or normalize each panel by its maximum.
-- [ ] Require count conservation:
+- [x] Require count conservation:
       `sum(bin_counts) == valid_in_grid_sample_count`.
-- [ ] Require fraction conservation within floating tolerance when the
+- [x] Require fraction conservation within floating tolerance when the
       denominator is nonzero; define all-zero/NaN behavior for an empty valid
       selection explicitly.
-- [ ] Bind every position, tracking, selection, geometry, transform, timing,
-      grid, validity, and configuration source by exact path and digest.
+- [x] Bind every declared position, tracking, selection, geometry, transform,
+      timing, grid, validity, and configuration source by exact path/digest in
+      the occupancy-v2 source-binding manifest and cross-stage adapter.
+- [ ] Connect those exact bindings to canonical stimulus and detection/keypoint
+      source adapters rather than fixture/in-memory provider inputs.
 - [ ] Publish detection and keypoint occupancy canaries for identical saved
       `black_before`, `chaser`, and `black_after` selections and the same
       millimetre grid.
 
 ## Phase 4: strict recording-level occupancy contrasts
 
-- [ ] Implement a narrow v1 contrast algebra with `difference` as the first
+- [x] Implement a narrow v1 contrast algebra with `difference` as the first
       operation: `treatment occupancy_fraction - baseline occupancy_fraction`.
-- [ ] Require named arms and preserve every contributing selection, role,
+- [x] Require named arms and preserve every contributing selection, role,
       occurrence, source step, and source occupancy manifest.
-- [ ] Require both arms to agree on provider run and estimator, track-sample
+- [x] Require both arms to agree on provider run and estimator, track-sample
       policy, coordinate frame, transform, geometry, grid edges, denominator,
       normalization, recording, subject, and timing authority.
-- [ ] Reject ordinary scientific contrasts between detection and keypoint
+- [x] Reject ordinary scientific contrasts between detection and keypoint
       providers. Cross-provider sensitivity belongs in an explicitly labeled
       comparison product.
 - [ ] Publish `chaser - black_before` and `black_after - black_before` canary
       contrasts separately for detection and keypoint position.
-- [ ] Store result arrays and exact references; do not overwrite, average, or
+- [x] Store result arrays and exact references; do not overwrite, average, or
       duplicate the immutable source occupancy runs.
-- [ ] Test rejection for mismatched provider, source run, grid, extent,
+- [x] Test rejection for mismatched provider, source run, grid, extent,
       coordinate frame, geometry, sample unit, denominator, overlap policy,
       timing, and stale lineage.
+- [ ] Migrate contrast arrays to the shared physical `ArrayContract` authority;
+      the current contrast materializer preserves exact source references but
+      does not yet provide that shared declaration surface.
 
 ## Phase 5: cohort products
 
@@ -342,13 +417,17 @@ This checklist's canary uses only detection and keypoint position.
 
 ## Production and integration gates
 
-- [ ] Add focused pure/in-memory tests before real-Zarr integration tests.
-- [ ] Run real-Zarr and Marimo checks outside the Codex sandbox according to
-      `AGENTS.md`.
-- [ ] Preserve existing occupancy-v1, GoodCopBadCop compatibility, chaser, and
-      provider-canary tests.
-- [ ] Validate immutable retries, manifest tampering, stale lineage, direct vs
-      consolidated reads, and final consolidated visibility.
+- [x] Add focused pure/in-memory and materializer/adapter tests before real
+      recording integration tests.
+- [x] Run the new real-Zarr materializer and cross-stage tests outside the
+      Codex sandbox according to `AGENTS.md`. Marimo checks remain open because
+      Marimo discovery and plot recipes are not implemented in this slice.
+- [x] Preserve and rerun the maintained provider-offer, binding, and
+      resolved-epoch baseline. Broader occupancy-v1, GoodCopBadCop, chaser, and
+      provider-canary CI coverage remains required before integration.
+- [x] Validate immutable retries, manifest tampering, stale lineage, direct vs
+      consolidated reads, and final consolidated visibility in the focused
+      materializer/adapter suites.
 - [ ] Update the storage-contract catalog, analysis-offer capability registry,
       recording-local discovery, and registry projection only after the
       scientific run contracts are stable.

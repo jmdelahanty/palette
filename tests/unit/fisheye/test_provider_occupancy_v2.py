@@ -260,6 +260,7 @@ def test_expected_frame_denominator_includes_selected_frames_missing_provider_ro
         authorities=TrajectoryAuthorityIdentities(
             recording_id="recording-001",
             provider_id="detection_bbox_centroid.v1",
+            track_sample_policy_id="observation_to_track.single_subject.v1",
             estimator_id="detector-run-001",
             source_id="track-source-001",
             timing_authority_id="camera-clock.v1",
@@ -291,6 +292,7 @@ def test_expected_frame_denominator_includes_selected_frames_missing_provider_ro
             target_coordinate_authority_id="arena-mm.v1",
             matrix=np.eye(3),
             grid_extent_mm=(0.0, 2.0, 0.0, 2.0),
+            source_camera_extent_px=(0.0, 2.0, 0.0, 2.0),
         ),
     )
     result = calculate_provider_occupancy_v2(
@@ -352,6 +354,7 @@ def test_compiled_overlap_is_counted_once_pooled_and_in_each_occurrence() -> Non
         authorities=TrajectoryAuthorityIdentities(
             recording_id="recording-001",
             provider_id="detection_bbox_centroid.v1",
+            track_sample_policy_id="observation_to_track.single_subject.v1",
             estimator_id="detector-run-001",
             source_id="track-source-001",
             timing_authority_id="camera-clock.v1",
@@ -375,6 +378,7 @@ def test_compiled_overlap_is_counted_once_pooled_and_in_each_occurrence() -> Non
             target_coordinate_authority_id="arena-mm.v1",
             matrix=np.eye(3),
             grid_extent_mm=(0.0, 1.0, 0.0, 1.0),
+            source_camera_extent_px=(0.0, 1.0, 0.0, 1.0),
         ),
     )
     result = calculate_provider_occupancy_v2(

@@ -24,13 +24,14 @@ import numpy as np
 
 
 PROVIDER_SPATIAL_TRAJECTORY_SCHEMA_ID = "palette.provider_spatial_trajectory"
-PROVIDER_SPATIAL_TRAJECTORY_SCHEMA_VERSION = 1
+PROVIDER_SPATIAL_TRAJECTORY_SCHEMA_VERSION = 2
 TRACK_SAMPLE_INPUT_SCHEMA_ID = "palette.provider_track_samples"
 TRACK_SAMPLE_INPUT_SCHEMA_VERSION = 1
 SELECTED_FRAME_MEMBERSHIP_SCHEMA_ID = "palette.selected_frame_membership"
-SELECTED_FRAME_MEMBERSHIP_SCHEMA_VERSION = 1
+SELECTED_FRAME_MEMBERSHIP_SCHEMA_VERSION = 2
 CAMERA_TO_ARENA_MM_TRANSFORM_SCHEMA_ID = "palette.camera_to_arena_mm_transform"
-CAMERA_TO_ARENA_MM_TRANSFORM_SCHEMA_VERSION = 1
+CAMERA_TO_ARENA_MM_TRANSFORM_SCHEMA_VERSION = 2
+SOURCE_CAMERA_EXTENT_POLICY_ID = "half_open_source_camera_extent_px_v1"
 
 _MUTABLE_ID_ALIASES = frozenset(
     {
@@ -55,6 +56,7 @@ _REASON_CODES = frozenset(
         "provider_missing",
         "provider_invalid",
         "source_position_nonfinite",
+        "source_position_out_of_extent",
         "transform_invalid",
         "out_of_grid",
     }
@@ -322,6 +324,7 @@ class TrajectoryAuthorityIdentities:
 
     recording_id: str
     provider_id: str
+    track_sample_policy_id: str
     estimator_id: str
     source_id: str
     timing_authority_id: str
@@ -333,6 +336,7 @@ class TrajectoryAuthorityIdentities:
         for name in (
             "recording_id",
             "provider_id",
+            "track_sample_policy_id",
             "estimator_id",
             "source_id",
             "timing_authority_id",
@@ -346,6 +350,7 @@ class TrajectoryAuthorityIdentities:
         return {
             "recording_id": self.recording_id,
             "provider_id": self.provider_id,
+            "track_sample_policy_id": self.track_sample_policy_id,
             "estimator_id": self.estimator_id,
             "source_id": self.source_id,
             "timing_authority_id": self.timing_authority_id,
@@ -359,9 +364,10 @@ class TrajectoryAuthorityIdentities:
 class SelectedFrameMembership:
     """One exact, already-resolved acquisition-frame membership input.
 
-    V1 has one membership row per acquisition frame.  If an upstream
-    selection expression retains overlapping occurrences, it must first
-    materialize a deterministic occurrence policy before using this structure.
+    The contract has one row per selected acquisition frame. A row may retain several
+    aligned membership keys, occurrence identities, and roles when source
+    intervals overlap; pooled consumers still count that acquisition frame
+    only once.
     """
 
     recording_id: str
@@ -396,17 +402,12 @@ class SelectedFrameMembership:
         if np.unique(frames).size != expected:
             raise ProviderSpatialTrajectoryError(
                 "Selection contains duplicate acquisition frames. Resolve overlap "
-                "before preparing a v1 trajectory."
+                "before preparing a trajectory."
             )
         if expected and not np.all(np.diff(frames) > 0):
             raise ProviderSpatialTrajectoryError(
                 "Selection acquisition frames are reordered; they must be strictly "
                 "increasing."
-            )
-        flattened_keys = tuple(value for row in membership_keys for value in row)
-        if len(set(flattened_keys)) != len(flattened_keys):
-            raise ProviderSpatialTrajectoryError(
-                "Selection membership keys are duplicated across frame membership rows."
             )
         for index, (keys, occurrences, role_values) in enumerate(
             zip(membership_keys, occurrence_ids, roles, strict=True)
@@ -576,7 +577,13 @@ class ProviderTrackSamples:
 
 @dataclass(frozen=True)
 class SourceCameraToArenaMMTransform:
-    """One explicit 3x3 source-camera to arena-mm homogeneous transform."""
+    """One explicit 3x3 source-camera to arena-mm homogeneous transform.
+
+    ``source_camera_extent_px`` is authoritative for the source camera pixel
+    frame. Its policy is half-open: ``x_min <= x < x_max`` and
+    ``y_min <= y < y_max``. Preparation fails closed when the extent is
+    absent; it is not inferred from the transform or source rows.
+    """
 
     source_coordinate_authority_id: str
     target_coordinate_authority_id: str
@@ -629,6 +636,7 @@ class SourceCameraToArenaMMTransform:
             "target_coordinate_authority_id": self.target_coordinate_authority_id,
             "matrix": self.matrix.tolist(),
             "grid_extent_mm": list(self.grid_extent_mm),
+            "source_camera_extent_policy": SOURCE_CAMERA_EXTENT_POLICY_ID,
             "source_camera_extent_px": (
                 None
                 if self.source_camera_extent_px is None
@@ -652,21 +660,25 @@ class TrajectoryCounts:
     provider_present_rows: int
     provider_valid_rows: int
     valid_position_rows: int
+    source_extent_valid_rows: int
     transform_valid_rows: int
     in_grid_rows: int
     missing_provider_rows: int
     invalid_provider_rows: int
     nonfinite_position_rows: int
+    source_position_out_of_extent_rows: int
     transform_invalid_rows: int
     out_of_grid_rows: int
     selected_provider_present_rows: int
     selected_provider_valid_rows: int
     selected_valid_position_rows: int
+    selected_source_extent_valid_rows: int
     selected_transform_valid_rows: int
     selected_in_grid_rows: int
     selected_missing_provider_rows: int
     selected_invalid_provider_rows: int
     selected_nonfinite_position_rows: int
+    selected_source_position_out_of_extent_rows: int
     selected_transform_invalid_rows: int
     selected_out_of_grid_rows: int
 
@@ -694,6 +706,7 @@ class ProviderSpatialTrajectory:
     provider_present: np.ndarray
     provider_valid: np.ndarray
     source_position_valid: np.ndarray
+    source_extent_valid: np.ndarray
     in_selection: np.ndarray
     transform_valid: np.ndarray
     in_grid: np.ndarray
@@ -717,6 +730,7 @@ class ProviderSpatialTrajectory:
             "provider_present",
             "provider_valid",
             "source_position_valid",
+            "source_extent_valid",
             "in_selection",
             "transform_valid",
             "in_grid",
@@ -754,6 +768,7 @@ class ProviderSpatialTrajectory:
             "state_fields": [
                 "provider_present",
                 "provider_valid",
+                "source_extent_valid",
                 "in_selection",
                 "transform_valid",
                 "in_grid",
@@ -807,6 +822,7 @@ def _reason_counts(
                     "provider_missing",
                     "provider_invalid",
                     "source_position_nonfinite",
+                    "source_position_out_of_extent",
                     "transform_invalid",
                     "out_of_grid",
                 }
@@ -841,6 +857,11 @@ def prepare_provider_spatial_trajectory(
         raise ProviderSpatialTrajectoryError("selection must be an exact membership record.")
     if type(transform) is not SourceCameraToArenaMMTransform:
         raise ProviderSpatialTrajectoryError("transform must be an exact transform record.")
+    if transform.source_camera_extent_px is None:
+        raise ProviderSpatialTrajectoryError(
+            "source_camera_extent_px is required for the camera-pixel transform "
+            "path; source extent policy fails closed when absent."
+        )
     _validate_authority_binding(
         authorities=authorities,
         selection=selection,
@@ -879,18 +900,26 @@ def prepare_provider_spatial_trajectory(
 
     source_position_finite = np.all(np.isfinite(rows.source_position_xy), axis=1)
     source_position_valid = rows.provider_present & rows.provider_valid & source_position_finite
+    source_xmin, source_xmax, source_ymin, source_ymax = transform.source_camera_extent_px
+    source_extent_valid = source_position_finite & (
+        (rows.source_position_xy[:, 0] >= source_xmin)
+        & (rows.source_position_xy[:, 0] < source_xmax)
+        & (rows.source_position_xy[:, 1] >= source_ymin)
+        & (rows.source_position_xy[:, 1] < source_ymax)
+    )
     arena_position = np.full((source_count, 2), np.nan, dtype=np.float64)
     transform_valid = np.zeros(source_count, dtype=bool)
-    if np.any(source_position_valid):
+    transform_input_valid = source_position_valid & source_extent_valid
+    if np.any(transform_input_valid):
         source_homogeneous = np.column_stack(
-            (rows.source_position_xy[source_position_valid], np.ones(int(np.count_nonzero(source_position_valid))))
+            (rows.source_position_xy[transform_input_valid], np.ones(int(np.count_nonzero(transform_input_valid))))
         )
         transformed_homogeneous = source_homogeneous @ transform.matrix.T
         weights = transformed_homogeneous[:, 2]
         finite_weights = np.isfinite(weights) & (np.abs(weights) > 1e-15)
         finite_xy = np.all(np.isfinite(transformed_homogeneous[:, :2]), axis=1)
         local_valid = finite_weights & finite_xy
-        valid_indices = np.flatnonzero(source_position_valid)
+        valid_indices = np.flatnonzero(transform_input_valid)
         if np.any(local_valid):
             arena_position[valid_indices[local_valid]] = (
                 transformed_homogeneous[local_valid, :2]
@@ -901,6 +930,7 @@ def prepare_provider_spatial_trajectory(
     arena_position = _read_only_array(arena_position, dtype=np.dtype(np.float64))
     source_position_finite = _read_only_array(source_position_finite, dtype=np.dtype(bool))
     source_position_valid = _read_only_array(source_position_valid, dtype=np.dtype(bool))
+    source_extent_valid = _read_only_array(source_extent_valid, dtype=np.dtype(bool))
 
     xmin, xmax, ymin, ymax = transform.grid_extent_mm
     in_grid_values = np.zeros(source_count, dtype=bool)
@@ -926,6 +956,8 @@ def prepare_provider_spatial_trajectory(
             row_reasons.append("provider_invalid")
         elif not source_position_finite[index]:
             row_reasons.append("source_position_nonfinite")
+        elif not source_extent_valid[index]:
+            row_reasons.append("source_position_out_of_extent")
         elif not transform_valid[index]:
             row_reasons.append("transform_invalid")
         elif not in_grid[index]:
@@ -947,7 +979,8 @@ def prepare_provider_spatial_trajectory(
     missing_provider = ~rows.provider_present
     invalid_provider = rows.provider_present & ~rows.provider_valid
     nonfinite_position = rows.provider_present & rows.provider_valid & ~source_position_finite
-    transform_invalid = source_position_valid & ~transform_valid
+    out_of_source_extent = source_position_valid & ~source_extent_valid
+    transform_invalid = source_position_valid & source_extent_valid & ~transform_valid
     out_of_grid = transform_valid & ~in_grid
 
     def count(mask: np.ndarray) -> int:
@@ -961,21 +994,25 @@ def prepare_provider_spatial_trajectory(
         provider_present_rows=count(rows.provider_present),
         provider_valid_rows=count(rows.provider_valid),
         valid_position_rows=count(source_position_valid),
+        source_extent_valid_rows=count(source_extent_valid),
         transform_valid_rows=count(transform_valid),
         in_grid_rows=count(in_grid),
         missing_provider_rows=count(missing_provider),
         invalid_provider_rows=count(invalid_provider),
         nonfinite_position_rows=count(nonfinite_position),
+        source_position_out_of_extent_rows=count(out_of_source_extent),
         transform_invalid_rows=count(transform_invalid),
         out_of_grid_rows=count(out_of_grid),
         selected_provider_present_rows=count(selected & rows.provider_present),
         selected_provider_valid_rows=count(selected & rows.provider_valid),
         selected_valid_position_rows=count(selected & source_position_valid),
+        selected_source_extent_valid_rows=count(selected & source_extent_valid),
         selected_transform_valid_rows=count(selected & transform_valid),
         selected_in_grid_rows=count(selected & in_grid),
         selected_missing_provider_rows=count(selected & missing_provider),
         selected_invalid_provider_rows=count(selected & invalid_provider),
         selected_nonfinite_position_rows=count(selected & nonfinite_position),
+        selected_source_position_out_of_extent_rows=count(selected & out_of_source_extent),
         selected_transform_invalid_rows=count(selected & transform_invalid),
         selected_out_of_grid_rows=count(selected & out_of_grid),
     )
@@ -994,6 +1031,7 @@ def prepare_provider_spatial_trajectory(
         "arena_position_xy": arena_position.tolist(),
         "in_selection": in_selection.tolist(),
         "transform_valid": transform_valid.tolist(),
+        "source_extent_valid": source_extent_valid.tolist(),
         "in_grid": in_grid.tolist(),
         "reason_codes": [list(value) for value in reasons],
     }
@@ -1012,6 +1050,7 @@ def prepare_provider_spatial_trajectory(
         provider_present=rows.provider_present,
         provider_valid=rows.provider_valid,
         source_position_valid=source_position_valid,
+        source_extent_valid=source_extent_valid,
         in_selection=in_selection,
         transform_valid=transform_valid,
         in_grid=in_grid,
@@ -1065,7 +1104,7 @@ def selected_frame_membership_from_compiled_selection(
             frames.append(frame)
             membership_keys.append(
                 tuple(
-                    f"membership:{digest}:{frame}"
+                    f"membership:{digest}"
                     for digest in membership_digests
                 )
             )
@@ -1085,6 +1124,7 @@ def selected_frame_membership_from_compiled_selection(
 __all__ = [
     "CAMERA_TO_ARENA_MM_TRANSFORM_SCHEMA_ID",
     "CAMERA_TO_ARENA_MM_TRANSFORM_SCHEMA_VERSION",
+    "SOURCE_CAMERA_EXTENT_POLICY_ID",
     "ProviderSpatialTrajectory",
     "ProviderSpatialTrajectoryError",
     "ProviderTrackSamples",

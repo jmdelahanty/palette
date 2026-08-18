@@ -3,6 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from fisheye.analysis_workflows.composable_stimulus_selection import (
+    RoleMetadata,
+    SelectionSpec,
+    TimelineAuthority,
+    compile_selection,
+    member,
+    stimulus_step_reference,
+    union,
+)
 from fisheye.analysis.provider_spatial_trajectory import (
     ProviderSpatialTrajectoryError,
     ProviderTrackSamples,
@@ -11,6 +20,7 @@ from fisheye.analysis.provider_spatial_trajectory import (
     TrajectoryAuthorityIdentities,
     prepare_provider_spatial_trajectory,
     prepare_provider_track_sample_trajectory,
+    selected_frame_membership_from_compiled_selection,
 )
 
 
@@ -18,6 +28,7 @@ def _authorities() -> TrajectoryAuthorityIdentities:
     return TrajectoryAuthorityIdentities(
         recording_id="recording-001",
         provider_id="detection_bbox_centroid.v1",
+        track_sample_policy_id="observation_to_track.single_subject.v1",
         estimator_id="detector-run-001",
         source_id="raw-track-source-001",
         timing_authority_id="camera-clock.v1",
@@ -43,6 +54,12 @@ def _transform(
     *,
     matrix: object | None = None,
     grid_extent_mm: tuple[float, float, float, float] = (0.0, 100.0, 0.0, 100.0),
+    source_camera_extent_px: tuple[float, float, float, float] | None = (
+        0.0,
+        200.0,
+        0.0,
+        200.0,
+    ),
 ) -> SourceCameraToArenaMMTransform:
     return SourceCameraToArenaMMTransform(
         source_coordinate_authority_id="camera-native-pixels.v2",
@@ -53,6 +70,7 @@ def _transform(
             else matrix
         ),
         grid_extent_mm=grid_extent_mm,
+        source_camera_extent_px=source_camera_extent_px,
     )
 
 
@@ -91,6 +109,7 @@ def test_preparation_preserves_rows_and_separates_all_states() -> None:
     np.testing.assert_array_equal(result.provider_present, [True, False, True, True])
     np.testing.assert_array_equal(result.provider_valid, [True, False, False, True])
     np.testing.assert_array_equal(result.source_position_valid, [True, False, False, True])
+    np.testing.assert_array_equal(result.source_extent_valid, [True, False, True, True])
     np.testing.assert_array_equal(result.transform_valid, [True, False, False, True])
     np.testing.assert_array_equal(result.in_grid, [True, False, False, False])
     np.testing.assert_allclose(result.arena_position_xy[0], [12.0, 24.0])
@@ -130,6 +149,146 @@ def test_preparation_preserves_rows_and_separates_all_states() -> None:
     assert result.selected_reason_counts["out_of_grid"] == 0
     assert result.selected_reason_counts["provider_missing"] == 1
     assert result.selected_reason_counts["provider_invalid"] == 1
+
+
+def test_membership_identity_repeats_across_frames_but_not_within_a_row() -> None:
+    selection = SelectedFrameMembership(
+        recording_id="recording-001",
+        timeline_authority_id="recording-timeline.v1",
+        selection_authority_id="selection-canary.v1",
+        acquisition_frames=[2, 3],
+        membership_keys=[["membership:source-membership-digest"]] * 2,
+        occurrence_ids=[["occurrence-1"]] * 2,
+        roles=[["treatment"]] * 2,
+    )
+    assert selection.membership_keys == (
+        ("membership:source-membership-digest",),
+        ("membership:source-membership-digest",),
+    )
+    with pytest.raises(ProviderSpatialTrajectoryError, match="duplicate identities"):
+        SelectedFrameMembership(
+            recording_id="recording-001",
+            timeline_authority_id="recording-timeline.v1",
+            selection_authority_id="selection-canary.v1",
+            acquisition_frames=[2],
+            membership_keys=[["member-a", "member-a"]],
+            occurrence_ids=[["occurrence-1", "occurrence-1"]],
+            roles=[["treatment", "treatment"]],
+        )
+
+
+def test_compiled_overlap_keeps_stable_memberships_and_unique_pooled_frames() -> None:
+    authority = TimelineAuthority(
+        recording_id="recording-001",
+        timeline_id="recording-timeline.v1",
+        stimulus_authority_id="stimulus-run.v1",
+        stimulus_authority_sha256="a" * 64,
+        acquisition_frame_domain="camera_acquisition_frame_index",
+        acquisition_frame_count=5,
+        source_video_metadata_ref="source-video-metadata.v1",
+        source_video_metadata_sha256="b" * 64,
+        acquisition_clock_authority_ref="camera-clock.v1",
+        acquisition_clock_authority_sha256="c" * 64,
+        source_metadata_sha256="d" * 64,
+    )
+    first = stimulus_step_reference(
+        reference_id="step-a",
+        label="A",
+        start_frame=0,
+        end_frame=3,
+        authority=authority,
+        occurrence_id="occurrence-a",
+    )
+    second = stimulus_step_reference(
+        reference_id="step-b",
+        label="B",
+        start_frame=2,
+        end_frame=5,
+        authority=authority,
+        occurrence_id="occurrence-b",
+    )
+    compiled = compile_selection(
+        SelectionSpec(
+            selection_id="overlap-selection.v1",
+            expression=union(
+                member(first, role=RoleMetadata("baseline")),
+                member(second, role=RoleMetadata("treatment")),
+            ),
+            aggregation_policy="keep_occurrences",
+        )
+    )
+
+    selection = selected_frame_membership_from_compiled_selection(compiled)
+
+    assert selection.acquisition_frames.tolist() == [0, 1, 2, 3, 4]
+    assert len(set(selection.acquisition_frames.tolist())) == 5
+    first_key = selection.membership_keys[0][0]
+    second_key = selection.membership_keys[2][1]
+    assert first_key == selection.membership_keys[1][0]
+    assert first_key == selection.membership_keys[2][0]
+    assert second_key == selection.membership_keys[2][1]
+    assert second_key == selection.membership_keys[3][0]
+    assert all(key.startswith("membership:") and key.count(":") == 1
+               for row in selection.membership_keys for key in row)
+
+
+def test_source_camera_extent_is_half_open_and_blocks_transform() -> None:
+    rows = ProviderTrackSamples(
+        track_sample_key=[[1, frame] for frame in range(5)],
+        acquisition_frame=list(range(5)),
+        subject_identity=["fish-1"] * 5,
+        track_identity=["track-1"] * 5,
+        source_position_xy=[
+            [99.999, 50.0],
+            [100.0, 50.0],
+            [50.0, 100.0],
+            [50.0, 99.999],
+            [150.0, 50.0],
+        ],
+        provider_present=[True] * 5,
+        provider_valid=[True] * 5,
+        provider_reason_code=["ok"] * 5,
+    )
+    selection = SelectedFrameMembership(
+        recording_id="recording-001",
+        timeline_authority_id="recording-timeline.v1",
+        selection_authority_id="selection-canary.v1",
+        acquisition_frames=list(range(5)),
+        membership_keys=[["member"]] * 5,
+        occurrence_ids=[["occurrence"]] * 5,
+        roles=[["treatment"]] * 5,
+    )
+    result = prepare_provider_spatial_trajectory(
+        authorities=_authorities(),
+        rows=rows,
+        selection=selection,
+        transform=_transform(
+            matrix=np.eye(3),
+            grid_extent_mm=(0.0, 200.0, 0.0, 200.0),
+            source_camera_extent_px=(0.0, 100.0, 0.0, 100.0),
+        ),
+    )
+
+    np.testing.assert_array_equal(result.source_extent_valid, [True, False, False, True, False])
+    np.testing.assert_array_equal(result.transform_valid, [True, False, False, True, False])
+    np.testing.assert_array_equal(result.in_grid, [True, False, False, True, False])
+    assert result.reason_codes[1] == ("source_position_out_of_extent",)
+    assert result.reason_codes[2] == ("source_position_out_of_extent",)
+    assert result.reason_codes[4] == ("source_position_out_of_extent",)
+    assert result.counts.source_extent_valid_rows == 2
+    assert result.counts.source_position_out_of_extent_rows == 3
+    assert result.counts.transform_invalid_rows == 0
+    assert np.isnan(result.arena_position_xy[[1, 2, 4]]).all()
+
+
+def test_missing_source_camera_extent_fails_closed() -> None:
+    with pytest.raises(ProviderSpatialTrajectoryError, match="source_camera_extent_px"):
+        prepare_provider_spatial_trajectory(
+            authorities=_authorities(),
+            rows=_rows(),
+            selection=_selection(),
+            transform=_transform(source_camera_extent_px=None),
+        )
 
 
 def test_selection_is_a_frame_lookup_not_a_same_length_join() -> None:
@@ -277,6 +436,7 @@ def test_authority_selection_and_transform_mismatches_fail_closed() -> None:
         TrajectoryAuthorityIdentities(
             recording_id="recording-001",
             provider_id="latest",
+            track_sample_policy_id="observation_to_track.single_subject.v1",
             estimator_id="estimator-1",
             source_id="source-1",
             timing_authority_id="timing-1",
@@ -294,6 +454,7 @@ def test_authority_selection_and_transform_mismatches_fail_closed() -> None:
                 target_coordinate_authority_id="arena-mm.v1",
                 matrix=np.eye(3),
                 grid_extent_mm=(0.0, 100.0, 0.0, 100.0),
+                source_camera_extent_px=(0.0, 200.0, 0.0, 200.0),
             ),
         )
 
@@ -330,6 +491,10 @@ def test_result_is_read_only_and_record_is_digest_bound() -> None:
     assert record["row_axis"] == "track_samples"
     assert record["smoothing"] == "none"
     assert record["fallback"] == "none"
+    assert (
+        record["authorities"]["track_sample_policy_id"]
+        == "observation_to_track.single_subject.v1"
+    )
     assert record["selection"]["sha256"] == _selection().sha256
     assert record["transform"]["sha256"] == _transform().sha256
     assert len(result.trajectory_sha256) == 64
