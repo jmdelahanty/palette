@@ -204,6 +204,34 @@ def test_subject_mask_successor_rejects_schema_dtype_encoding_disagreement(
         )
 
 
+def test_subject_mask_successor_record_pointers_accept_bound_and_persisted_records() -> (
+    None
+):
+    pointers = subject_mask_successor._record_pointers(
+        {
+            "bound": SimpleNamespace(
+                record_ref="/subject_mask_runs/run@bound",
+                record_sha256="a" * 64,
+            ),
+            "persisted": {
+                "record_ref": "/subject_mask_runs/run@persisted",
+                "record_sha256": "b" * 64,
+            },
+        }
+    )
+
+    assert pointers == {
+        "bound": {
+            "record_ref": "/subject_mask_runs/run@bound",
+            "record_sha256": "a" * 64,
+        },
+        "persisted": {
+            "record_ref": "/subject_mask_runs/run@persisted",
+            "record_sha256": "b" * 64,
+        },
+    }
+
+
 def _historical_crop_fixture(tmp_path: Path):
     n_frames = 5
     n_instances = 4

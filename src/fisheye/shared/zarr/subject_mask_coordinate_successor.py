@@ -591,13 +591,23 @@ def _clear_successor_attrs(run: Any, *, source_run_path: str, owner_attr: str) -
 
 
 def _record_pointers(values: Mapping[str, Any]) -> dict[str, dict[str, str]]:
-    return {
-        name: {
-            "record_ref": value.record_ref,
-            "record_sha256": value.record_sha256,
+    result: dict[str, dict[str, str]] = {}
+    for name, value in values.items():
+        if isinstance(value, Mapping):
+            record_ref = value.get("record_ref")
+            record_sha256 = value.get("record_sha256")
+        else:
+            record_ref = getattr(value, "record_ref", None)
+            record_sha256 = getattr(value, "record_sha256", None)
+        if not isinstance(record_ref, str) or not isinstance(record_sha256, str):
+            raise ValueError(
+                f"Subject-mask coordinate record {name!r} lacks one exact pointer."
+            )
+        result[name] = {
+            "record_ref": record_ref,
+            "record_sha256": record_sha256,
         }
-        for name, value in values.items()
-    }
+    return result
 
 
 def _rebase_component_provenance(
@@ -790,10 +800,13 @@ def publish_subject_mask_coordinate_successors(
                     f"{_RAW_FAMILY}/{raw_target_id}",
                     expected_publication_owner=raw_owner,
                 )
-            # The coordinate publisher reloads and verifies the target. Keep
-            # writing through that live group so an older Zarr metadata cache
-            # cannot restore pre-publication attrs on a later update.
-            raw_run = raw_surfaces.context._run_group
+            # The subject-mask publisher's bound context is the pre-stamping
+            # context snapshot. Reopen the exact subgroup after publication so
+            # an older Zarr metadata cache cannot restore pre-publication attrs
+            # on a later update.
+            raw_run = zarr.open_group(
+                str(raw_target_fs), mode="a", use_consolidated=False
+            )
             raw_run.attrs["coordinate_successor_padded_crop_lineage"] = {
                 "source_crop_adapter": historical_crop.as_record(),
                 "placement_ownership": bind_persisted_padded_placement_record(raw_run),
@@ -930,7 +943,9 @@ def publish_subject_mask_coordinate_successors(
                 f"{_REFINED_FAMILY}/{refined_target_id}",
                 expected_publication_owner=refined_owner,
             )
-            refined_run = refined_surfaces.context._run_group
+            refined_run = zarr.open_group(
+                str(refined_target_fs), mode="a", use_consolidated=False
+            )
             refined_authority = build_coordinate_successor_authority(
                 kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
                 source_family=_REFINED_FAMILY,
