@@ -32,6 +32,7 @@ from fisheye.shared.keypoint_coordinate_publication import (
     require_bound_ineligible_keypoint_coordinate_surfaces,
 )
 from fisheye.shared.model_input_transform import model_input_transform_from_attrs
+from fisheye.shared.pose_model_schema_binding import pose_schema_from_model_binding
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.coordinate_successor_authority import (
     KEYPOINT_COORDINATE_SUCCESSOR_KIND,
@@ -223,6 +224,54 @@ def _submitted_input_mode(preprocessing: Any) -> str:
             "Keypoint preprocessing lacks an exact submitted model input mode."
         )
     return str(value)
+
+
+def _keypoint_semantic_attrs(
+    payload: Mapping[str, Any],
+    *,
+    model_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recover exact writer attrs from the digest-bound manifest authority."""
+
+    model_sha256 = model_artifact.get("sha256")
+    pose_schema, pose_schema_attrs, validated_binding = pose_schema_from_model_binding(
+        payload["pose_model_schema_binding"],
+        expected_model_sha256=str(model_sha256 or ""),
+    )
+    if validated_binding != payload["pose_model_schema_binding"]:
+        raise ValueError(
+            "Validated keypoint model-schema binding differs from the immutable source manifest."
+        )
+    labels = list(pose_schema.node_names)
+    dimensions = payload["logical_schema"]["dimensions"]
+    if (
+        not labels
+        or len(labels) != int(dimensions["n_keypoints"])
+        or pose_schema_attrs.get("keypoint_labels") != labels
+        or pose_schema_attrs.get("kpt_shape") != [len(labels), 2]
+    ):
+        raise ValueError(
+            "Keypoint pose schema differs from the immutable logical dimensions."
+        )
+    model_kpt_shape = pose_schema_attrs.get("metadata", {}).get("model_kpt_shape")
+    if (
+        type(model_kpt_shape) is not list
+        or len(model_kpt_shape) != 2
+        or any(type(value) is not int for value in model_kpt_shape)
+        or model_kpt_shape[0] != len(labels)
+        or model_kpt_shape[1] <= 0
+    ):
+        raise ValueError(
+            "Keypoint model-schema binding lacks an exact compatible model_kpt_shape."
+        )
+    return {
+        "keypoint_labels": labels,
+        "keypoint_confidence_labels": list(labels),
+        "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
+        "kpt_shape": [len(labels), 2],
+        "model_kpt_shape": copy.deepcopy(model_kpt_shape),
+        "pose_schema": copy.deepcopy(pose_schema_attrs),
+    }
 
 
 @dataclass(frozen=True)
@@ -573,6 +622,7 @@ def inspect_keypoint_coordinate_successor_source(
         keypoint_model_path,
         pose_binding=payload["pose_model_schema_binding"],
     )
+    semantic_attrs = _keypoint_semantic_attrs(payload, model_artifact=artifact)
     auxiliary_plan = _plan_keypoint_auxiliaries(
         source_run=source,
         source_manifest=manifest,
@@ -600,6 +650,7 @@ def inspect_keypoint_coordinate_successor_source(
             "preprocessing_input_mode": _submitted_input_mode(preprocessing),
             "model_input_transform": transform.to_attrs(),
             "model_artifact": artifact,
+            "keypoint_semantic_attrs": semantic_attrs,
             "selectors_before": _selector_snapshot(root),
             "selector_eligible": False,
             "selector_activation": SELECTOR_ACTIVATION_DEFERRED,
@@ -763,6 +814,15 @@ def publish_keypoint_coordinate_successor(
         transform = model_input_transform_from_attrs(
             dict(preprocessing.document["model_input_transform"])
         )
+        artifact = _model_artifact(
+            keypoint_model_path,
+            pose_binding=payload["pose_model_schema_binding"],
+        )
+        semantic_attrs = _keypoint_semantic_attrs(payload, model_artifact=artifact)
+        if semantic_attrs != checked["keypoint_semantic_attrs"]:
+            raise RuntimeError(
+                "Keypoint semantic attrs changed between dry-run and apply."
+            )
         historical_crop = bind_historical_geometry_only_crop_source(
             analysis_zarr=archive,
             root=root,
@@ -821,6 +881,7 @@ def publish_keypoint_coordinate_successor(
                     "coordinate_successor_historical_crop_adapter_sha256": canonical_json_sha256(
                         historical_crop.as_record()
                     ),
+                    **semantic_attrs,
                     ATOMIC_PUBLICATION_OWNER_ATTR: owner,
                     KEYPOINT_PUBLICATION_OWNER_ATTR: owner,
                 }
@@ -858,10 +919,6 @@ def publish_keypoint_coordinate_successor(
             )
             transform = model_input_transform_from_attrs(
                 dict(preprocessing.document["model_input_transform"])
-            )
-            artifact = _model_artifact(
-                keypoint_model_path,
-                pose_binding=payload["pose_model_schema_binding"],
             )
             with historical_geometry_only_crop_loader(historical_crop):
                 prepare_keypoint_coordinate_context(

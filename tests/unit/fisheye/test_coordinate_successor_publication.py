@@ -991,6 +991,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         model_height=384,
         model_width=384,
     )
+    model_artifact = _keypoint_artifact(keypoint_labels=("swim_bladder",))
     source_manifest = {
         "schema_id": "palette.keypoint.run_manifest",
         "schema_version": 1,
@@ -1010,7 +1011,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
             "storage_plan": {"storage_profile": PUBLISHED_HTTP_V1.as_manifest()},
             "preprocessing": {},
             "source_crop_snapshot": {"run_path": "crop_runs/crop"},
-            "pose_model_schema_binding": {},
+            "pose_model_schema_binding": model_artifact["pose_schema_binding"],
         },
     }
     source.attrs.update(
@@ -1083,6 +1084,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
     def fake_prepare(target_root, target_path, **_kwargs):
         target = target_root[target_path]
         assert "source_crop_xywh" in target
+        assert target.attrs["keypoint_labels"] == ["swim_bladder"]
         assert CROP_PLACEMENT_PADDED_PROVENANCE_ATTR in target["source_crop_xywh"].attrs
         if prepare_mismatch:
             raise ValueError("synthetic padded placement mismatch")
@@ -1141,6 +1143,9 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
             "selectors_before": selectors,
             "historical_crop_adapter": binding.as_record(),
             "auxiliary_materialization": auxiliary_plan.as_record(),
+            "keypoint_semantic_attrs": keypoint_successor._keypoint_semantic_attrs(
+                source_manifest["payload"], model_artifact=model_artifact
+            ),
         },
     )
     monkeypatch.setattr(
@@ -1159,7 +1164,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
     monkeypatch.setattr(
         keypoint_successor,
         "_model_artifact",
-        lambda *_args, **_kwargs: {"sha256": "7" * 64},
+        lambda *_args, **_kwargs: model_artifact,
     )
     monkeypatch.setattr(
         keypoint_successor,
