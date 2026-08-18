@@ -325,13 +325,52 @@ def _validate_contract_identity(
     authoritative_path = _normalize_contract_path(
         _required_text(contract, "authoritative_path")
     )
-    expected_tail = (
-        f"/{source_run}/tracks/id_{contract_track_id}/{expected_leaf}"
+    source_scope = str(
+        run_attrs.get("source_track_kinematics_scope") or "offline"
     )
-    if not f"/{authoritative_path}".endswith(expected_tail):
+    if source_scope == "provider":
+        expected_run_path = (
+            f"analysis/track_kinematics_runs/provider/{source_run}"
+        )
+        expected_path = f"{expected_run_path}/{expected_leaf}"
+        authority = run_attrs.get("source_track_motion_authority")
+        if not isinstance(authority, Mapping):
+            raise SwimBoutFrameAxisError(
+                "Provider frame-axis lineage lacks its motion read authority."
+            )
+        if (
+            authority.get("schema_id")
+            != "palette.provider_track_motion_read_authority"
+            or authority.get("schema_version") != 1
+            or authority.get("run_ref") != f"/{expected_run_path}"
+            or authority.get("track_ref") != f"/{expected_run_path}"
+            or authority.get("track_id") != contract_track_id
+            or authority.get("track_row_start") != 0
+            or authority.get("track_row_stop") != frame_count
+            or authority.get("motion_manifest_sha256")
+            != contract.get("source_track_motion_manifest_sha256")
+        ):
+            raise SwimBoutFrameAxisError(
+                "Provider frame-axis authority does not bind the complete selected "
+                "track rowset."
+            )
+        if authoritative_path != expected_path:
+            raise SwimBoutFrameAxisError(
+                "Provider frame-axis authoritative_path disagrees with the exact "
+                "manifest-bound provider run."
+            )
+    elif source_scope in {"offline", "online"}:
+        expected_tail = (
+            f"/{source_run}/tracks/id_{contract_track_id}/{expected_leaf}"
+        )
+        if not f"/{authoritative_path}".endswith(expected_tail):
+            raise SwimBoutFrameAxisError(
+                "Frame-axis authoritative_path disagrees with the declared source run "
+                "or track id."
+            )
+    else:
         raise SwimBoutFrameAxisError(
-            "Frame-axis authoritative_path disagrees with the declared source run "
-            "or track id."
+            f"Unsupported source_track_kinematics_scope {source_scope!r}."
         )
 
 
