@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -45,7 +46,14 @@ from fisheye.utils.export_provider_epoch_behavior_cohort import (
 
 
 PLOT_SCHEMA_ID = "palette.provider_epoch_behavior_cohort_plots"
-PLOT_SCHEMA_VERSION = 1
+PLOT_SCHEMA_VERSION = 2
+ANALYSIS_UNIT_DECISION_SCHEMA_ID = "palette.provider_epoch_analysis_unit_decision"
+ANALYSIS_UNIT_DECISION_SCHEMA_VERSION = 1
+DEFAULT_ANALYSIS_UNIT_MODE = "subject_id"
+RECORDING_ANALYSIS_UNIT_MODE = "recording"
+RECORDING_ANALYSIS_UNIT_POLICY_ID = (
+    "operator_asserted_recording_unit_for_duplicate_acquisition_uuid_incident_v1"
+)
 EXPECTED_EPOCH_LABELS = ("pre_event", "training_event", "post_event")
 EXPECTED_EPOCH_IDS = (0, 1, 2)
 EXPECTED_EPOCH_IDENTITIES = tuple(zip(EXPECTED_EPOCH_IDS, EXPECTED_EPOCH_LABELS))
@@ -53,6 +61,11 @@ PLOT_METRICS = {
     "bout_rate_per_min": ("Bout rate", "Bout rate (events min$^{-1}$)"),
     "mean_speed_mm_s": ("Mean speed", "Mean speed (mm s$^{-1}$)"),
     "mean_bout_duration_s": ("Mean bout duration", "Mean bout duration (s)"),
+}
+DISTRIBUTION_METRICS = {
+    "bout_duration_s": ("Bout duration", "Bout duration (s)"),
+    "bout_path_length_mm": ("Bout path length", "Bout path length (mm)"),
+    "mean_bout_speed_mm_s": ("Mean bout speed", "Mean bout speed (mm s$^{-1}$)"),
 }
 NEUTRAL_EPOCH_COLORS = {
     "pre_event": "#6B7280",
@@ -64,6 +77,18 @@ _PREFIX_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 class ProviderEpochBehaviorPlotError(ValueError):
     """Raised when an exact cohort cannot be plotted safely."""
+
+
+@dataclass(frozen=True)
+class AnalysisUnitContext:
+    """Explicit grouping authority for grouped and distribution plots."""
+
+    mode: str
+    label: str
+    decision: Mapping[str, Any] | None = None
+    decision_path: str | None = None
+    decision_sha256: str | None = None
+    policy_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +145,21 @@ class ValidatedCohort:
     @property
     def n_subjects(self) -> int:
         return len({unit.subject_id for unit in self.units if unit.subject_id is not None})
+
+
+@dataclass(frozen=True)
+class BoutDistributionData:
+    """Validated descriptive distributions derived from exact bout rows."""
+
+    pooled_values_by_metric_epoch: Mapping[str, tuple[np.ndarray, ...]]
+    analysis_unit_values_by_metric_epoch: Mapping[str, tuple[np.ndarray, ...]]
+    metrics: Mapping[str, Mapping[str, Any]]
+
+    @property
+    def subject_values_by_metric_epoch(self) -> Mapping[str, tuple[np.ndarray, ...]]:
+        """Compatibility alias for the original subject-mode helper name."""
+
+        return self.analysis_unit_values_by_metric_epoch
 
 
 def _pyarrow() -> tuple[Any, Any]:
@@ -191,6 +231,226 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ProviderEpochBehaviorPlotError("Cohort publication manifest must be a JSON object.")
     return payload
+
+
+def _require_sha256(value: object, *, label: str) -> str:
+    text = _as_text(value, label=label)
+    assert text is not None
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise ProviderEpochBehaviorPlotError(f"{label} must be a lowercase SHA-256.")
+    return text
+
+
+def _validate_analysis_unit_decision(
+    data: ValidatedCohort,
+    *,
+    mode: str,
+    decision_path: Path | None,
+) -> AnalysisUnitContext:
+    if mode == DEFAULT_ANALYSIS_UNIT_MODE:
+        if decision_path is not None:
+            raise ProviderEpochBehaviorPlotError(
+                "analysis_unit_decision is only accepted in recording analysis-unit mode."
+            )
+        return AnalysisUnitContext(mode=mode, label="unique subject_id")
+    if mode != RECORDING_ANALYSIS_UNIT_MODE:
+        raise ProviderEpochBehaviorPlotError(
+            "analysis_unit_mode must be 'subject_id' or 'recording'."
+        )
+    if decision_path is None:
+        raise ProviderEpochBehaviorPlotError(
+            "recording analysis-unit mode requires an immutable analysis-unit decision JSON."
+        )
+
+    path = decision_path.expanduser().resolve()
+    if not path.is_file():
+        raise ProviderEpochBehaviorPlotError(
+            f"The recording analysis-unit decision JSON does not exist: {path}"
+        )
+    decision = _read_json(path)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "decision_id",
+        "cohort_id",
+        "source_manifest_sha256",
+        "source_manifest_payload_sha256",
+        "analysis_unit",
+        "policy_id",
+        "operator_assertion",
+        "operator_identity",
+        "reviewed_at_utc",
+        "canonical_subject_identity_corrected",
+        "reason_code",
+        "recording_count",
+        "duplicate_source_subject_id_count",
+        "affected_recording_count",
+        "collisions",
+        "decision_payload_sha256",
+    }
+    optional_decision_fields = {"source_manifest_file_sha256"}
+    decision_fields = set(decision)
+    if decision_fields != expected_fields and decision_fields != (expected_fields | optional_decision_fields):
+        raise ProviderEpochBehaviorPlotError(
+            "The recording analysis-unit decision has an unexpected field set."
+        )
+    if decision["schema_id"] != "palette.cohort_analysis_unit_decision":
+        raise ProviderEpochBehaviorPlotError("The analysis-unit decision schema_id is invalid.")
+    if decision["schema_version"] != 1:
+        raise ProviderEpochBehaviorPlotError("The analysis-unit decision schema_version is invalid.")
+    for field_name in ("decision_id", "operator_identity"):
+        _as_text(decision[field_name], label=field_name)
+    if decision["cohort_id"] != data.cohort_id:
+        raise ProviderEpochBehaviorPlotError(
+            "The analysis-unit decision cohort_id does not match the publication cohort."
+        )
+    if decision["analysis_unit"] != "recording_id":
+        raise ProviderEpochBehaviorPlotError("The analysis-unit decision must select recording_id.")
+    if decision["policy_id"] != "operator_asserted_distinct_animal_per_recording_v1":
+        raise ProviderEpochBehaviorPlotError("The analysis-unit decision policy_id is invalid.")
+    if decision["operator_assertion"] != "each_recording_contains_a_distinct_animal":
+        raise ProviderEpochBehaviorPlotError("The distinct-animal operator assertion is required.")
+    if decision["canonical_subject_identity_corrected"] is not False:
+        raise ProviderEpochBehaviorPlotError(
+            "Recording mode must not claim canonical subject identity correction."
+        )
+    if decision["reason_code"] != "acquisition_subject_id_reuse":
+        raise ProviderEpochBehaviorPlotError("The analysis-unit decision reason_code is invalid.")
+    reviewed_at = _as_text(decision["reviewed_at_utc"], label="reviewed_at_utc")
+    assert reviewed_at is not None
+    if not reviewed_at.endswith("Z"):
+        raise ProviderEpochBehaviorPlotError("reviewed_at_utc must be a UTC timestamp ending in Z.")
+    try:
+        datetime.fromisoformat(reviewed_at[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ProviderEpochBehaviorPlotError("reviewed_at_utc must be an ISO-8601 UTC timestamp.") from exc
+
+    input_manifest_path_value = data.manifest.get("input_manifest_path")
+    input_manifest_sha256 = _require_sha256(
+        data.manifest.get("input_manifest_sha256"),
+        label="publication input_manifest_sha256",
+    )
+    if input_manifest_path_value is None:
+        raise ProviderEpochBehaviorPlotError(
+            "The publication manifest does not bind its frozen input manifest path."
+        )
+    input_manifest_path = Path(_as_text(input_manifest_path_value, label="input_manifest_path") or "").expanduser().resolve()
+    if not input_manifest_path.is_file():
+        raise ProviderEpochBehaviorPlotError(
+            "The publication input manifest is missing."
+        )
+    input_manifest = _read_json(input_manifest_path)
+    if canonical_json_sha256(input_manifest) != input_manifest_sha256:
+        raise ProviderEpochBehaviorPlotError(
+            "The canonical input manifest identity does not match publication input_manifest_sha256."
+        )
+    if "source_manifest_file_sha256" in decision:
+        source_manifest_file_sha256 = _require_sha256(
+            decision["source_manifest_file_sha256"],
+            label="source_manifest_file_sha256",
+        )
+        if sha256_file(input_manifest_path) != source_manifest_file_sha256:
+            raise ProviderEpochBehaviorPlotError(
+                "source_manifest_file_sha256 does not match the raw input manifest file."
+            )
+    input_payload_digest = _require_sha256(
+        input_manifest.get("manifest_payload_sha256"),
+        label="input manifest manifest_payload_sha256",
+    )
+    unsigned_input_manifest = {
+        key: value for key, value in input_manifest.items() if key != "manifest_payload_sha256"
+    }
+    if canonical_json_sha256(unsigned_input_manifest) != input_payload_digest:
+        raise ProviderEpochBehaviorPlotError("The frozen input manifest payload digest is invalid.")
+    if decision["source_manifest_sha256"] != input_manifest_sha256:
+        raise ProviderEpochBehaviorPlotError(
+            "source_manifest_sha256 does not match publication input_manifest_sha256."
+        )
+    if decision["source_manifest_payload_sha256"] != input_payload_digest:
+        raise ProviderEpochBehaviorPlotError(
+            "source_manifest_payload_sha256 does not match the frozen input manifest payload."
+        )
+
+    recording_count = data.n_recording_animal_sessions
+    if decision["recording_count"] != recording_count:
+        raise ProviderEpochBehaviorPlotError("The decision recording_count does not match the cohort.")
+    entries = input_manifest.get("entries")
+    if not isinstance(entries, list) or len(entries) != recording_count:
+        raise ProviderEpochBehaviorPlotError("The frozen input manifest entry count does not match the cohort.")
+    source_subject_by_recording: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise ProviderEpochBehaviorPlotError("The frozen input manifest contains an invalid entry.")
+        recording_id = _as_text(entry.get("recording_id"), label="input recording_id")
+        subject_id = _as_text(entry.get("subject_id"), label="input subject_id")
+        assert recording_id is not None and subject_id is not None
+        if recording_id in source_subject_by_recording:
+            raise ProviderEpochBehaviorPlotError("The frozen input manifest repeats a recording_id.")
+        source_subject_by_recording[recording_id] = subject_id
+    cohort_recordings = {unit.recording_id for unit in data.units}
+    if set(source_subject_by_recording) != cohort_recordings:
+        raise ProviderEpochBehaviorPlotError(
+            "The frozen input manifest recording IDs do not match the published cohort."
+        )
+    expected_collisions = {
+        subject_id: sorted(
+            recording_id
+            for recording_id, source_subject_id in source_subject_by_recording.items()
+            if source_subject_id == subject_id
+        )
+        for subject_id in sorted(set(source_subject_by_recording.values()))
+    }
+    expected_collisions = {
+        subject_id: recording_ids
+        for subject_id, recording_ids in expected_collisions.items()
+        if len(recording_ids) >= 2
+    }
+    if decision["duplicate_source_subject_id_count"] != len(expected_collisions):
+        raise ProviderEpochBehaviorPlotError("The duplicate source-subject count does not match the cohort.")
+    affected_recordings = sum(len(recording_ids) for recording_ids in expected_collisions.values())
+    if decision["affected_recording_count"] != affected_recordings:
+        raise ProviderEpochBehaviorPlotError("The affected recording count does not match the collision groups.")
+    collisions = decision["collisions"]
+    if not isinstance(collisions, list):
+        raise ProviderEpochBehaviorPlotError("The analysis-unit decision collisions field must be a list.")
+    observed_collisions: dict[str, list[str]] = {}
+    for collision in collisions:
+        if not isinstance(collision, Mapping) or set(collision) != {"source_subject_id", "recording_ids"}:
+            raise ProviderEpochBehaviorPlotError("Each collision must contain source_subject_id and recording_ids.")
+        source_subject_id = _as_text(collision["source_subject_id"], label="collision source_subject_id")
+        recording_ids = collision["recording_ids"]
+        assert source_subject_id is not None
+        if not isinstance(recording_ids, list) or len(recording_ids) < 2:
+            raise ProviderEpochBehaviorPlotError("Each collision must contain at least two recordings.")
+        if any(not isinstance(recording_id, str) or not recording_id.strip() for recording_id in recording_ids):
+            raise ProviderEpochBehaviorPlotError("Collision recording_ids must be non-empty strings.")
+        if len(set(recording_ids)) != len(recording_ids):
+            raise ProviderEpochBehaviorPlotError("Collision recording_ids must not contain duplicates.")
+        observed_collisions[source_subject_id] = sorted(recording_ids)
+    if observed_collisions != expected_collisions:
+        raise ProviderEpochBehaviorPlotError("The collision list is not the exact collision inventory for the cohort.")
+
+    if decision["duplicate_source_subject_id_count"] != 8 or decision["affected_recording_count"] != 16:
+        raise ProviderEpochBehaviorPlotError(
+            "This incident decision must document 8 reused source subject IDs affecting 16 recordings."
+        )
+    decision_payload_sha256 = _require_sha256(
+        decision.get("decision_payload_sha256"),
+        label="decision_payload_sha256",
+    )
+    unsigned_decision = {
+        key: value for key, value in decision.items() if key != "decision_payload_sha256"
+    }
+    if canonical_json_sha256(unsigned_decision) != decision_payload_sha256:
+        raise ProviderEpochBehaviorPlotError("The analysis-unit decision payload digest is invalid.")
+    return AnalysisUnitContext(
+        mode=mode,
+        label="recording×animal unit",
+        decision=decision,
+        decision_path=str(path),
+        decision_sha256=sha256_file(path),
+        policy_id=str(decision["policy_id"]),
+    )
 
 
 def _validate_publication_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -546,8 +806,27 @@ def _finite_stats(values: Sequence[float | None]) -> tuple[float | None, float |
     return mean, sem, count
 
 
-def _subject_level_matrix(data: ValidatedCohort, metric: str) -> np.ndarray:
-    """Aggregate repeated recording sessions to one row per subject first."""
+def _subject_level_matrix(
+    data: ValidatedCohort,
+    metric: str,
+    *,
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
+) -> np.ndarray:
+    """Return one row per selected analysis unit for the existing summary plots."""
+
+    if analysis_unit_mode == RECORDING_ANALYSIS_UNIT_MODE:
+        return np.asarray(
+            [
+                [
+                    np.nan if value is None else float(value)
+                    for value in unit.values_by_metric[metric]
+                ]
+                for unit in data.units
+            ],
+            dtype=np.float64,
+        )
+    if analysis_unit_mode != DEFAULT_ANALYSIS_UNIT_MODE:
+        raise ProviderEpochBehaviorPlotError("Unknown analysis-unit mode.")
 
     if any(unit.subject_id is None for unit in data.units):
         raise ProviderEpochBehaviorPlotError(
@@ -570,6 +849,157 @@ def _subject_level_matrix(data: ValidatedCohort, metric: str) -> np.ndarray:
             row.append(float(np.mean(values)) if values else np.nan)
         subject_rows.append(row)
     return np.asarray(subject_rows, dtype=np.float64)
+
+
+def _positive_observation(value: object) -> tuple[float | None, str | None]:
+    """Return one strictly positive finite metric value or an audit reason."""
+
+    if value is None:
+        return None, "missing"
+    if isinstance(value, np.generic):
+        value = value.item()
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None, "non_numeric"
+    if not np.isfinite(number):
+        return None, "nonfinite"
+    if number < 0:
+        return None, "negative"
+    if number == 0:
+        return None, "zero_or_nonpositive"
+    return number, None
+
+
+def _distribution_observation(row: Mapping[str, Any], metric: str) -> tuple[float | None, str | None]:
+    if metric in {"bout_duration_s", "bout_path_length_mm"}:
+        return _positive_observation(row.get(metric))
+    if metric != "mean_bout_speed_mm_s":
+        raise ProviderEpochBehaviorPlotError(f"Unknown bout distribution metric: {metric}")
+
+    duration, duration_reason = _positive_observation(row.get("bout_duration_s"))
+    if duration is None:
+        return None, f"duration_{duration_reason}"
+    path_length, path_reason = _positive_observation(row.get("bout_path_length_mm"))
+    if path_length is None:
+        return None, f"path_length_{path_reason}"
+    return path_length / duration, None
+
+
+def _empty_epoch_arrays() -> list[list[float]]:
+    return [[] for _ in EXPECTED_EPOCH_IDS]
+
+
+def _distribution_data(
+    data: ValidatedCohort,
+    *,
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
+) -> BoutDistributionData:
+    """Compute pooled and subject-balanced values without clipping inputs.
+
+    Duration and path length are considered plot-valid only when strictly
+    positive and finite.  This makes the positive-domain contract explicit for
+    the logarithmic pooled ECDF.  Zero, negative, missing, nonnumeric, and
+    nonfinite values are retained in the audit counts and omitted from the
+    corresponding metric; they are never replaced or clipped.  Mean bout
+    speed additionally requires positive duration and positive path length.
+    """
+
+    if analysis_unit_mode not in {DEFAULT_ANALYSIS_UNIT_MODE, RECORDING_ANALYSIS_UNIT_MODE}:
+        raise ProviderEpochBehaviorPlotError("Unknown analysis-unit mode.")
+    rows = _table_rows(data.bouts_table)
+    pooled_values: dict[str, list[list[float]]] = {
+        metric: _empty_epoch_arrays() for metric in DISTRIBUTION_METRICS
+    }
+    session_values: dict[str, dict[tuple[str, int, int], list[float]]] = {
+        metric: {} for metric in DISTRIBUTION_METRICS
+    }
+    metric_audit: dict[str, dict[str, Any]] = {}
+    for metric in DISTRIBUTION_METRICS:
+        metric_audit[metric] = {
+            "total_bout_count_by_epoch": [0, 0, 0],
+            "valid_bout_count_by_epoch": [0, 0, 0],
+            "dropped_bout_count_by_epoch": [0, 0, 0],
+            "dropped_reason_counts_by_epoch": [dict() for _ in EXPECTED_EPOCH_IDS],
+        }
+
+    for row in rows:
+        epoch_id = _as_int(row.get("epoch_id"), label="epoch_id")
+        recording_id = _as_text(row.get("recording_id"), label="recording_id")
+        assert recording_id is not None
+        track_id = _as_int(row.get("track_id"), label="track_id")
+        subject_key = (recording_id, track_id, epoch_id)
+        for metric in DISTRIBUTION_METRICS:
+            audit = metric_audit[metric]
+            audit["total_bout_count_by_epoch"][epoch_id] += 1
+            value, reason = _distribution_observation(row, metric)
+            if value is None:
+                audit["dropped_bout_count_by_epoch"][epoch_id] += 1
+                reasons = audit["dropped_reason_counts_by_epoch"][epoch_id]
+                assert isinstance(reasons, dict)
+                assert reason is not None
+                reasons[reason] = int(reasons.get(reason, 0)) + 1
+                continue
+            pooled_values[metric][epoch_id].append(value)
+            audit["valid_bout_count_by_epoch"][epoch_id] += 1
+            session_values[metric].setdefault(subject_key, []).append(value)
+
+    subject_by_unit = {
+        (unit.recording_id, unit.track_id): unit.subject_id for unit in data.units
+    }
+    subject_values: dict[str, tuple[np.ndarray, ...]] = {}
+    for metric in DISTRIBUTION_METRICS:
+        medians_by_analysis_unit_epoch: dict[str, list[list[float]]] = {}
+        valid_session_counts = [0, 0, 0]
+        for (recording_id, track_id, epoch_id), values in sorted(session_values[metric].items()):
+            subject_id = subject_by_unit[(recording_id, track_id)]
+            if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE and subject_id is None:
+                raise ProviderEpochBehaviorPlotError(
+                    "Subject-balanced distributions require subject_id for every session."
+                )
+            median = float(np.median(np.asarray(values, dtype=np.float64)))
+            analysis_unit_id = (
+                subject_id
+                if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE
+                else f"{recording_id}::track-{track_id}"
+            )
+            assert analysis_unit_id is not None
+            medians_by_analysis_unit_epoch.setdefault(analysis_unit_id, _empty_epoch_arrays())[epoch_id].append(median)
+            valid_session_counts[epoch_id] += 1
+        subject_arrays: list[np.ndarray] = []
+        valid_analysis_unit_counts: list[int] = []
+        for epoch_id in EXPECTED_EPOCH_IDS:
+            values = [
+                float(np.mean(medians_by_analysis_unit_epoch[analysis_unit_id][epoch_id]))
+                for analysis_unit_id in sorted(medians_by_analysis_unit_epoch)
+                if medians_by_analysis_unit_epoch[analysis_unit_id][epoch_id]
+            ]
+            subject_arrays.append(np.asarray(values, dtype=np.float64))
+            valid_analysis_unit_counts.append(len(values))
+        subject_values[metric] = tuple(subject_arrays)
+        metric_audit[metric]["valid_analysis_unit_median_count_by_epoch"] = valid_session_counts
+        metric_audit[metric]["valid_analysis_unit_count_by_epoch"] = valid_analysis_unit_counts
+        # Retain the original subject-mode receipt vocabulary for valid
+        # subject-grouped cohorts; recording mode uses the explicit
+        # analysis-unit fields above instead.
+        metric_audit[metric]["valid_session_median_count_by_epoch"] = valid_session_counts
+        metric_audit[metric]["valid_subject_count_by_epoch"] = (
+            valid_analysis_unit_counts
+            if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE
+            else None
+        )
+        metric_audit[metric]["dropped_session_median_count_by_epoch"] = [
+            data.n_recording_animal_sessions - count for count in valid_session_counts
+        ]
+
+    return BoutDistributionData(
+        pooled_values_by_metric_epoch={
+            metric: tuple(np.asarray(values, dtype=np.float64) for values in epoch_values)
+            for metric, epoch_values in pooled_values.items()
+        },
+        analysis_unit_values_by_metric_epoch=subject_values,
+        metrics=metric_audit,
+    )
 
 
 def _configure_axis(ax: Any, *, ylabel: str) -> None:
@@ -596,9 +1026,10 @@ def _render_grouped_metric(
     plt: Any,
     title: str,
     ylabel: str,
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
 ) -> dict[str, Any]:
     fig, ax = plt.subplots(figsize=(8.2, 5.2), dpi=160)
-    matrix = _subject_level_matrix(data, metric)
+    matrix = _subject_level_matrix(data, metric, analysis_unit_mode=analysis_unit_mode)
     finite_all = matrix[np.isfinite(matrix)]
     if finite_all.size:
         low = float(np.min(finite_all))
@@ -651,7 +1082,10 @@ def _render_grouped_metric(
     plt.close(fig)
     return {
         "metric": metric,
-        "finite_subject_counts_by_epoch": counts,
+        "finite_subject_counts_by_epoch": counts
+        if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE
+        else None,
+        "finite_analysis_unit_counts_by_epoch": counts,
         "mean_by_epoch": means,
         "sem_by_epoch": sems,
         "uncertainty": "standard_error_of_mean",
@@ -664,13 +1098,15 @@ def _render_grouped_speed_duration(
     path: Path,
     *,
     plt: Any,
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
 ) -> dict[str, Any]:
     fig, axes = plt.subplots(1, len(metrics), figsize=(7.0 * len(metrics), 5.2), squeeze=False, dpi=160)
+    estimate_label = "unique subjects" if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE else "recording×animal units"
     stats: dict[str, Any] = {}
     for axis, metric in zip(axes[0], metrics):
-        # Render into the supplied axis using one row per subject, after
-        # equal-weight averaging of that subject's repeated sessions.
-        matrix = _subject_level_matrix(data, metric)
+        # Render one row per selected analysis unit. Subject mode first
+        # equal-weights repeated sessions within subject.
+        matrix = _subject_level_matrix(data, metric, analysis_unit_mode=analysis_unit_mode)
         finite_all = matrix[np.isfinite(matrix)]
         low = float(np.min(finite_all)) if finite_all.size else 0.0
         high = float(np.max(finite_all)) if finite_all.size else 1.0
@@ -697,7 +1133,10 @@ def _render_grouped_speed_duration(
         axis.set_title(PLOT_METRICS[metric][0])
         stats[metric] = {
             "metric": metric,
-            "finite_subject_counts_by_epoch": counts,
+            "finite_subject_counts_by_epoch": counts
+            if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE
+            else None,
+            "finite_analysis_unit_counts_by_epoch": counts,
             "mean_by_epoch": means,
             "sem_by_epoch": sems,
             "uncertainty": "standard_error_of_mean",
@@ -711,7 +1150,8 @@ def _render_grouped_speed_duration(
         for metric in metrics
     ):
         axes[0][0].legend(frameon=False, loc="best")
-    fig.tight_layout()
+    fig.suptitle(f"Linear bout metrics across {estimate_label}", y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(path, format=path.suffix.lstrip("."), dpi=160, metadata={"Date": None})
     plt.close(fig)
     return stats
@@ -748,13 +1188,15 @@ def _save_grouped_metric_formats(
     output_dir: Path,
     prefix: str,
     plt: Any,
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
 ) -> tuple[list[Path], dict[str, Any]]:
     generated: list[Path] = []
     stats: dict[str, Any] | None = None
     for extension in ("png", "svg"):
         path = output_dir / f"{prefix}.grouped_{metric}.{extension}"
         # The renderer closes its figure; recomputing stats is deterministic.
-        stats = _render_grouped_metric(data, metric, path, plt=plt, title=f"{PLOT_METRICS[metric][0]} across unique subjects", ylabel=PLOT_METRICS[metric][1])
+        estimate_label = "unique subjects" if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE else "recording×animal units"
+        stats = _render_grouped_metric(data, metric, path, plt=plt, title=f"{PLOT_METRICS[metric][0]} across {estimate_label}", ylabel=PLOT_METRICS[metric][1], analysis_unit_mode=analysis_unit_mode)
         generated.append(path)
     assert stats is not None
     return generated, stats
@@ -766,15 +1208,173 @@ def _save_speed_duration_formats(
     output_dir: Path,
     prefix: str,
     plt: Any,
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
 ) -> tuple[list[Path], dict[str, Any]]:
     generated: list[Path] = []
     stats: dict[str, Any] | None = None
     for extension in ("png", "svg"):
         path = output_dir / f"{prefix}.grouped_speed_duration.{extension}"
-        stats = _render_grouped_speed_duration(data, metrics, path, plt=plt)
+        stats = _render_grouped_speed_duration(data, metrics, path, plt=plt, analysis_unit_mode=analysis_unit_mode)
         generated.append(path)
     assert stats is not None
     return generated, stats
+
+
+def _render_pooled_bout_ecdf(
+    distributions: BoutDistributionData,
+    path: Path,
+    *,
+    plt: Any,
+) -> None:
+    fig, axes = plt.subplots(
+        1,
+        len(DISTRIBUTION_METRICS),
+        figsize=(7.0 * len(DISTRIBUTION_METRICS), 5.6),
+        squeeze=False,
+        dpi=160,
+    )
+    for axis, metric in zip(axes[0], DISTRIBUTION_METRICS):
+        for epoch_id, epoch_label in enumerate(EXPECTED_EPOCH_LABELS):
+            values = np.sort(distributions.pooled_values_by_metric_epoch[metric][epoch_id])
+            if values.size == 0:
+                continue
+            axis.step(
+                values,
+                np.arange(1, values.size + 1, dtype=np.float64) / values.size,
+                where="post",
+                color=NEUTRAL_EPOCH_COLORS[epoch_label],
+                linewidth=2.0,
+                label=f"{epoch_label.replace('_', ' ')} (n={values.size:,})",
+            )
+        axis.set_xscale("log")
+        axis.set_xlabel(f"{DISTRIBUTION_METRICS[metric][1]}; logarithmic x-axis")
+        axis.set_ylabel("Empirical cumulative probability")
+        axis.set_title(DISTRIBUTION_METRICS[metric][0])
+        axis.set_ylim(0.0, 1.02)
+        axis.grid(color="#D1D5DB", alpha=0.65, linewidth=0.7)
+        axis.set_axisbelow(True)
+        handles, labels = axis.get_legend_handles_labels()
+        if handles:
+            axis.legend(handles, labels, frameon=False, loc="lower right", fontsize=8)
+    fig.suptitle("Pooled bout distributions: descriptive ECDFs", y=0.99)
+    fig.text(
+        0.5,
+        0.01,
+        "Pooled bouts are descriptive only; bouts within an animal are not independent. No inferential uncertainty is shown.",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="#374151",
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 0.94))
+    fig.savefig(path, format=path.suffix.lstrip("."), dpi=160, metadata={"Date": None})
+    plt.close(fig)
+
+
+def _render_subject_balanced_distributions(
+    distributions: BoutDistributionData,
+    path: Path,
+    *,
+    plt: Any,
+    title: str = "Subject-balanced bout distributions: one value per unique subject and epoch",
+    note: str = "Each session contributes its median bout value; repeated sessions are averaged with equal weight within subject. Linear axes; no clipping.",
+    unit_label: str = "subjects",
+) -> None:
+    fig, axes = plt.subplots(
+        1,
+        len(DISTRIBUTION_METRICS),
+        figsize=(7.0 * len(DISTRIBUTION_METRICS), 5.8),
+        squeeze=False,
+        dpi=160,
+    )
+    for axis, metric in zip(axes[0], DISTRIBUTION_METRICS):
+        values_by_epoch = distributions.analysis_unit_values_by_metric_epoch[metric]
+        finite_values = np.concatenate([values for values in values_by_epoch if values.size]) if any(
+            values.size for values in values_by_epoch
+        ) else np.asarray([], dtype=np.float64)
+        low = float(np.min(finite_values)) if finite_values.size else 0.0
+        high = float(np.max(finite_values)) if finite_values.size else 1.0
+        for epoch_id, values in enumerate(values_by_epoch):
+            if values.size:
+                box = axis.boxplot(
+                    [values],
+                    positions=[epoch_id],
+                    widths=0.34,
+                    patch_artist=True,
+                    showfliers=False,
+                    medianprops={"color": "#111827", "linewidth": 1.6},
+                    whiskerprops={"color": "#4B5563", "linewidth": 1.0},
+                    capprops={"color": "#4B5563", "linewidth": 1.0},
+                    boxprops={"color": "#4B5563", "linewidth": 1.0},
+                )
+                for patch in box["boxes"]:
+                    patch.set_facecolor(NEUTRAL_EPOCH_COLORS[EXPECTED_EPOCH_LABELS[epoch_id]])
+                    patch.set_alpha(0.55)
+                jitter = np.linspace(-0.12, 0.12, values.size) if values.size > 1 else np.zeros(1)
+                axis.scatter(
+                    np.full(values.size, epoch_id, dtype=np.float64) + jitter,
+                    values,
+                    s=15,
+                    color="#1F2937",
+                    alpha=0.72,
+                    linewidths=0.25,
+                    edgecolors="white",
+                    zorder=3,
+                )
+        axis.set_xticks(np.arange(len(EXPECTED_EPOCH_LABELS)))
+        axis.set_xticklabels(
+            [
+                f"Pre-event\nn={values_by_epoch[0].size:,} {unit_label}",
+                f"Training event\nn={values_by_epoch[1].size:,} {unit_label}",
+                f"Post-event\nn={values_by_epoch[2].size:,} {unit_label}",
+            ]
+        )
+        axis.set_xlabel("Stimulus epoch")
+        axis.set_ylabel(DISTRIBUTION_METRICS[metric][1])
+        axis.set_title(DISTRIBUTION_METRICS[metric][0])
+        axis.grid(axis="y", color="#D1D5DB", alpha=0.65, linewidth=0.7)
+        axis.set_axisbelow(True)
+        _draw_epoch_band(axis, y_min=low, y_max=high)
+    fig.suptitle(title, y=0.99)
+    fig.text(
+        0.5,
+        0.01,
+        note,
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="#374151",
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 0.94))
+    fig.savefig(path, format=path.suffix.lstrip("."), dpi=160, metadata={"Date": None})
+    plt.close(fig)
+
+
+def _save_distribution_formats(
+    distributions: BoutDistributionData,
+    output_dir: Path,
+    prefix: str,
+    plt: Any,
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
+) -> list[Path]:
+    generated: list[Path] = []
+    for extension in ("png", "svg"):
+        ecdf_path = output_dir / f"{prefix}.pooled_bout_ecdf.{extension}"
+        subject_path = output_dir / f"{prefix}.subject_balanced_bout_distributions.{extension}"
+        _render_pooled_bout_ecdf(distributions, ecdf_path, plt=plt)
+        if analysis_unit_mode == RECORDING_ANALYSIS_UNIT_MODE:
+            _render_subject_balanced_distributions(
+                distributions,
+                subject_path,
+                plt=plt,
+                title="Recording-balanced bout distributions: one value per recording×animal unit and epoch",
+                note="Each recording×animal unit contributes one median bout value per epoch. Linear axes; no clipping.",
+                unit_label="recording×animal units",
+            )
+        else:
+            _render_subject_balanced_distributions(distributions, subject_path, plt=plt)
+        generated.extend((ecdf_path, subject_path))
+    return generated
 
 
 def render_provider_epoch_behavior_cohort(
@@ -782,12 +1382,19 @@ def render_provider_epoch_behavior_cohort(
     *,
     output_dir: Path,
     prefix: str = "provider_epoch_behavior_cohort",
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
+    analysis_unit_decision_path: Path | None = None,
 ) -> dict[str, Any]:
     """Render deterministic figures and a receipt from a validated cohort."""
 
     if not isinstance(prefix, str) or not _PREFIX_RE.fullmatch(prefix):
         raise ProviderEpochBehaviorPlotError("prefix must be one safe portable filename component.")
-    if any(unit.subject_id is None for unit in data.units):
+    analysis_units = _validate_analysis_unit_decision(
+        data,
+        mode=analysis_unit_mode,
+        decision_path=analysis_unit_decision_path,
+    )
+    if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE and any(unit.subject_id is None for unit in data.units):
         raise ProviderEpochBehaviorPlotError(
             "Grouped animal-level plots require subject_id for every recording session."
         )
@@ -801,6 +1408,10 @@ def render_provider_epoch_behavior_cohort(
         output_dir / f"{prefix}.individual_bout_rate.svg",
         output_dir / f"{prefix}.grouped_bout_rate.png",
         output_dir / f"{prefix}.grouped_bout_rate.svg",
+        output_dir / f"{prefix}.pooled_bout_ecdf.png",
+        output_dir / f"{prefix}.pooled_bout_ecdf.svg",
+        output_dir / f"{prefix}.subject_balanced_bout_distributions.png",
+        output_dir / f"{prefix}.subject_balanced_bout_distributions.svg",
         output_dir / f"{prefix}.receipt.json",
     ]
     if metric_names:
@@ -815,24 +1426,48 @@ def render_provider_epoch_behavior_cohort(
         raise FileExistsError(f"Refusing to overwrite existing plot artifacts: {existing[0]}")
 
     plt = _matplotlib()
+    distributions = _distribution_data(data, analysis_unit_mode=analysis_unit_mode)
     generated: list[Path] = []
     plot_stats: dict[str, Any] = {}
     generated.extend(_save_individual_formats(data, output_dir, prefix, plt))
-    grouped_paths, bout_stats = _save_grouped_metric_formats(data, "bout_rate_per_min", output_dir, prefix, plt)
+    grouped_paths, bout_stats = _save_grouped_metric_formats(
+        data,
+        "bout_rate_per_min",
+        output_dir,
+        prefix,
+        plt,
+        analysis_unit_mode=analysis_unit_mode,
+    )
     generated.extend(grouped_paths)
     plot_stats["bout_rate_per_min"] = bout_stats
     if metric_names:
-        metric_paths, metric_stats = _save_speed_duration_formats(data, metric_names, output_dir, prefix, plt)
+        metric_paths, metric_stats = _save_speed_duration_formats(
+            data,
+            metric_names,
+            output_dir,
+            prefix,
+            plt,
+            analysis_unit_mode=analysis_unit_mode,
+        )
         generated.extend(metric_paths)
         plot_stats.update(metric_stats)
+    generated.extend(
+        _save_distribution_formats(
+            distributions,
+            output_dir,
+            prefix,
+            plt,
+            analysis_unit_mode=analysis_unit_mode,
+        )
+    )
 
     source_manifest_sha256 = _canonical_sha256(data.manifest)
     session_counts_by_subject: dict[str, int] = {}
     for unit in data.units:
-        assert unit.subject_id is not None
-        session_counts_by_subject[unit.subject_id] = (
-            session_counts_by_subject.get(unit.subject_id, 0) + 1
-        )
+        if unit.subject_id is not None:
+            session_counts_by_subject[unit.subject_id] = (
+                session_counts_by_subject.get(unit.subject_id, 0) + 1
+            )
     unsigned_receipt: dict[str, Any] = {
         "schema_id": PLOT_SCHEMA_ID,
         "schema_version": PLOT_SCHEMA_VERSION,
@@ -851,14 +1486,77 @@ def render_provider_epoch_behavior_cohort(
         "recording_animal_unit_count": data.n_recording_animal_sessions,
         "missing_subject_id_unit_count": sum(unit.subject_id is None for unit in data.units),
         "unit_identity": "recording_id_subject_id_track_id",
-        "grouping_unit": "subject_id",
-        "repeated_session_aggregation": "arithmetic_mean_within_subject_id_epoch",
-        "session_weighting": "equal",
+        "analysis_unit_mode": analysis_units.mode,
+        "analysis_unit_label": analysis_units.label,
+        "analysis_unit_count": data.n_recording_animal_sessions,
+        "source_subject_id_count": data.n_subjects,
+        "grouping_unit": "subject_id" if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE else "recording_id",
+        "repeated_session_aggregation": (
+            "arithmetic_mean_within_subject_id_epoch"
+            if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE
+            else "not_applicable_recording_id_is_analysis_unit"
+        ),
+        "session_weighting": (
+            "equal"
+            if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE
+            else "not_applicable_one_recording_unit_per_recording"
+        ),
         "session_counts_by_subject": dict(sorted(session_counts_by_subject.items())),
-        "grouped_estimate_level": "unique_subject_id",
+        "grouped_estimate_level": (
+            "unique_subject_id" if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE else "recording_id"
+        ),
         "uncertainty": "standard_error_of_mean",
         "epoch_colors": dict(NEUTRAL_EPOCH_COLORS),
         "metrics": plot_stats,
+        "distribution_metrics": dict(distributions.metrics),
+        "analysis_unit_decision": (
+            None
+            if analysis_units.decision is None
+            else {
+                "path": analysis_units.decision_path,
+                "sha256": analysis_units.decision_sha256,
+                "payload": dict(analysis_units.decision),
+            }
+        ),
+        "analysis_unit_policy_id": analysis_units.policy_id,
+        "canonical_subject_identity_corrected": (
+            None
+            if analysis_units.decision is None
+            else analysis_units.decision["canonical_subject_identity_corrected"]
+        ),
+        "duplicate_source_subject_id_count": (
+            None
+            if analysis_units.decision is None
+            else analysis_units.decision["duplicate_source_subject_id_count"]
+        ),
+        "affected_recording_count": (
+            None
+            if analysis_units.decision is None
+            else analysis_units.decision["affected_recording_count"]
+        ),
+        "distribution_figures": {
+            "pooled_bout_ecdf": {
+                "files": [
+                    f"{prefix}.pooled_bout_ecdf.png",
+                    f"{prefix}.pooled_bout_ecdf.svg",
+                ],
+                "semantics": "pooled_bouts_descriptive_only_nonindependent_within_subject",
+                "uncertainty": "none_inferential_uncertainty_not_shown",
+                "x_scale": "log10",
+                "x_scale_label": "logarithmic x-axis",
+                "clipping": "none",
+            },
+            "subject_balanced_bout_distributions": {
+                "files": [
+                    f"{prefix}.subject_balanced_bout_distributions.png",
+                    f"{prefix}.subject_balanced_bout_distributions.svg",
+                ],
+                "semantics": "one_session_median_then_equal_weighted_subject_value",
+                "uncertainty": "none_inferential_uncertainty_not_shown",
+                "y_scale": "linear",
+                "clipping": "none",
+            },
+        },
         "figures": [
             {
                 "path": path.name,
@@ -875,8 +1573,20 @@ def render_provider_epoch_behavior_cohort(
             "Epoch colors are neutral presentation colors and do not encode behavioral class or stimulus color.",
             "Group uncertainty is the standard error of the mean across unique subjects with finite metric values after within-subject session averaging.",
             "The linear_only source disposition excludes heading metrics; these figures report linear motion and bout metrics only.",
+            "Pooled bout ECDFs retain every valid positive finite bout value and are descriptive only; bouts within animals are not independent and no inferential uncertainty is shown.",
+            "Subject-balanced distributions take the median across valid bouts within each recording/session×epoch, then average repeated session medians with equal weight within subject×epoch.",
+            "Duration and path-length values that are zero, negative, missing, nonnumeric, or nonfinite are counted by reason and omitted from the positive-domain distributions; no values are clipped or substituted.",
+            "Mean bout speed is bout_path_length_mm / bout_duration_s only when both inputs are finite and strictly positive.",
         ],
     }
+    if analysis_unit_mode == RECORDING_ANALYSIS_UNIT_MODE:
+        unsigned_receipt["scientific_notes"].extend(
+            [
+                "Recording analysis-unit mode is an operator-asserted grouping workaround for reused acquisition subject IDs; it is not a canonical subject identity correction.",
+                "The decision asserts that each recording contains a distinct animal; MetaZebrobot remains responsible for minting and verifying canonical replacement biological UUIDs.",
+                "Recording-balanced distributions contain one median per recording×animal unit×epoch; no repeated-session averaging is performed.",
+            ]
+        )
     receipt = {
         **unsigned_receipt,
         "receipt_payload_sha256": _canonical_sha256(unsigned_receipt),
@@ -894,6 +1604,8 @@ def plot_provider_epoch_behavior_cohort_tables(
     output_dir: Path,
     source_tables: Mapping[str, Mapping[str, Any]] | None = None,
     prefix: str = "provider_epoch_behavior_cohort",
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
+    analysis_unit_decision_path: Path | None = None,
 ) -> dict[str, Any]:
     """Plot exact in-memory tables after validating the publication manifest."""
 
@@ -903,7 +1615,13 @@ def plot_provider_epoch_behavior_cohort_tables(
         manifest=manifest,
         source_tables=source_tables,
     )
-    return render_provider_epoch_behavior_cohort(data, output_dir=output_dir, prefix=prefix)
+    return render_provider_epoch_behavior_cohort(
+        data,
+        output_dir=output_dir,
+        prefix=prefix,
+        analysis_unit_mode=analysis_unit_mode,
+        analysis_unit_decision_path=analysis_unit_decision_path,
+    )
 
 
 def plot_provider_epoch_behavior_cohort_parquet(
@@ -913,6 +1631,8 @@ def plot_provider_epoch_behavior_cohort_parquet(
     manifest_path: Path,
     output_dir: Path,
     prefix: str = "provider_epoch_behavior_cohort",
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
+    analysis_unit_decision_path: Path | None = None,
 ) -> dict[str, Any]:
     """Plot the exact two Parquet parts named by one publication manifest."""
 
@@ -921,7 +1641,13 @@ def plot_provider_epoch_behavior_cohort_parquet(
         fish_parquet=fish_parquet,
         manifest_path=manifest_path,
     )
-    return render_provider_epoch_behavior_cohort(data, output_dir=output_dir, prefix=prefix)
+    return render_provider_epoch_behavior_cohort(
+        data,
+        output_dir=output_dir,
+        prefix=prefix,
+        analysis_unit_mode=analysis_unit_mode,
+        analysis_unit_decision_path=analysis_unit_decision_path,
+    )
 
 
 def plot_provider_epoch_behavior_cohort(
@@ -930,11 +1656,19 @@ def plot_provider_epoch_behavior_cohort(
     output_dir: Path,
     manifest_path: Path | None = None,
     prefix: str = "provider_epoch_behavior_cohort",
+    analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
+    analysis_unit_decision_path: Path | None = None,
 ) -> dict[str, Any]:
     """Plot one exact immutable cohort generation selected by its manifest."""
 
     data = _load_exact_source(generation_root=generation_root, manifest_path=manifest_path)
-    return render_provider_epoch_behavior_cohort(data, output_dir=output_dir, prefix=prefix)
+    return render_provider_epoch_behavior_cohort(
+        data,
+        output_dir=output_dir,
+        prefix=prefix,
+        analysis_unit_mode=analysis_unit_mode,
+        analysis_unit_decision_path=analysis_unit_decision_path,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -946,6 +1680,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, help="Required with explicit Parquet paths; optional for a generation root.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--prefix", default="provider_epoch_behavior_cohort")
+    parser.add_argument(
+        "--analysis-unit-mode",
+        choices=(DEFAULT_ANALYSIS_UNIT_MODE, RECORDING_ANALYSIS_UNIT_MODE),
+        default=DEFAULT_ANALYSIS_UNIT_MODE,
+        help="Grouping authority for grouped plots; recording mode requires --analysis-unit-decision.",
+    )
+    parser.add_argument(
+        "--analysis-unit-decision",
+        type=Path,
+        help="Immutable decision JSON required for recording analysis-unit mode.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -958,6 +1703,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output_dir,
             manifest_path=args.manifest,
             prefix=args.prefix,
+            analysis_unit_mode=args.analysis_unit_mode,
+            analysis_unit_decision_path=args.analysis_unit_decision,
         )
     else:
         if args.fish_parquet is None or args.manifest is None:
@@ -968,6 +1715,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest_path=args.manifest,
             output_dir=args.output_dir,
             prefix=args.prefix,
+            analysis_unit_mode=args.analysis_unit_mode,
+            analysis_unit_decision_path=args.analysis_unit_decision,
         )
     print(json.dumps(result, indent=None if args.json else 2, sort_keys=True))
     return 0
