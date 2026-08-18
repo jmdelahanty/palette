@@ -55,7 +55,11 @@ def _frame() -> SimpleNamespace:
     return SimpleNamespace(
         record_ref="/coordinate_frames/source_camera@pixel_frame_authority",
         record_sha256="b" * 64,
-        endpoint=SimpleNamespace(width=640, height=480, selector="record"),
+        endpoint=SimpleNamespace(
+            width=640,
+            height=480,
+            selector="pixel_frame_authority",
+        ),
     )
 
 
@@ -219,6 +223,11 @@ def test_prepare_detection_binds_no_default_policy(monkeypatch) -> None:
     assert prepared.policy_record["default_estimator_id"] is None
     assert prepared.policy_record["selector_eligible"] is False
     assert prepared.anatomy_record["anatomy_profile_id"] is None
+    assert (
+        prepared.coordinate_record["coordinate_descriptor"]["reference_extent"]
+        ["authority"]["selector"]
+        == "record"
+    )
 
 
 def test_prepare_keypoint_triad_binds_exact_anatomy_recipe(monkeypatch) -> None:

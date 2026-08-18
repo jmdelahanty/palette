@@ -100,6 +100,25 @@ def test_resolved_recipe_binds_exact_source_schema_authority() -> None:
         keypoint._record_json[0] = 0
 
 
+def test_resolved_recipe_accepts_exact_keypoint_skeleton_semantics() -> None:
+    keypoint = resolve_anatomy_point_expression(
+        _profile(),
+        binding_id="zebrafish_larva_keypoint_traditional_v2_v1",
+        recipe_id="head_triad_equal_mean",
+    )
+
+    source_schema = _profile().binding(
+        "zebrafish_larva_keypoint_traditional_v2_v1"
+    )["source_schema"]
+    assert keypoint.record["source_schema_authority"] == (
+        "keypoint_skeleton_semantics"
+    )
+    assert keypoint.record["source_schema_id"] == "pose_skel_traditional_v2"
+    assert keypoint.record["source_schema_sha256"] == source_schema[
+        "skeleton_sha256"
+    ]
+
+
 def test_axis_recipe_is_not_silently_lowered_as_a_position() -> None:
     with pytest.raises(AnatomyProfileError, match="not a point recipe"):
         resolve_anatomy_point_expression(

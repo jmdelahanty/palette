@@ -109,6 +109,14 @@ def _source_schema_identity(source_schema: Mapping[str, Any]) -> tuple[str, str]
             raise AnatomyProfileError("Pose-schema package payload is unavailable.")
         schema_id = package_payload.get("skeleton_id")
         digest = source_schema.get("package_sha256")
+    elif authority == "keypoint_skeleton_semantics":
+        skeleton_document = source_schema.get("skeleton_document")
+        if not isinstance(skeleton_document, Mapping):
+            raise AnatomyProfileError(
+                "Keypoint skeleton-semantics document is unavailable."
+            )
+        schema_id = skeleton_document.get("skeleton_id")
+        digest = source_schema.get("skeleton_sha256")
     elif authority == "declared_schema":
         schema_id = source_schema.get("schema_id")
         digest = source_schema.get("schema_sha256")

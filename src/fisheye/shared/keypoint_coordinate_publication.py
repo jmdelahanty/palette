@@ -2850,7 +2850,165 @@ def publish_keypoint_coordinate_surfaces(
         raise
 
 
-def _load_persisted_keypoint_coordinate_surfaces(
+def _load_persisted_historical_crop_successor_binding(
+    root_node: Any,
+    run: Any,
+    *,
+    run_path: str,
+) -> Any:
+    """Rebind one successor-only crop adapter from exact persisted evidence."""
+
+    from pathlib import Path
+
+    from fisheye.shared.model_input_transform import (
+        model_input_transform_from_attrs,
+    )
+    from fisheye.shared.zarr.coordinate_successor_authority import (
+        KEYPOINT_COORDINATE_SUCCESSOR_KIND,
+        load_coordinate_successor_authority,
+    )
+    from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+        HISTORICAL_BBOX_NORMALIZATION_ATTR,
+        bind_historical_geometry_only_crop_source,
+        load_historical_bbox_normalization_from_successor,
+    )
+    from fisheye.shared.zarr.keypoint_manifest import (
+        KEYPOINT_RUN_MANIFEST_ATTRIBUTE,
+        keypoint_preprocessing_from_manifest,
+        validate_keypoint_run_manifest,
+    )
+    from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+
+    try:
+        authority = load_coordinate_successor_authority(
+            run,
+            expected_kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=run_path,
+        )
+        padded = bind_persisted_coordinate_record(
+            run,
+            attr_name="coordinate_successor_padded_crop_lineage",
+        )
+        adapter = bind_persisted_coordinate_record(
+            run,
+            attr_name="coordinate_successor_historical_crop_adapter",
+        )
+        bbox_normalization = bind_persisted_coordinate_record(
+            run,
+            attr_name=HISTORICAL_BBOX_NORMALIZATION_ATTR,
+        )
+    except Exception as exc:
+        _fail(f"Historical keypoint crop successor authority is invalid: {exc}.")
+
+    authority_payload = authority["payload"]
+    expected_padded = {
+        "record_ref": padded.record_ref,
+        "record_sha256": padded.record_sha256,
+    }
+    if authority_payload["coordinate_records"].get(
+        "padded_crop_lineage"
+    ) != expected_padded:
+        _fail("Historical keypoint crop successor padded lineage is stale.")
+    expected_bbox_normalization = {
+        "record_ref": bbox_normalization.record_ref,
+        "record_sha256": bbox_normalization.record_sha256,
+    }
+    if authority_payload["coordinate_records"].get(
+        "historical_bbox_normalization"
+    ) != expected_bbox_normalization:
+        _fail("Historical keypoint bbox-normalization authority is stale.")
+    adapter_record = padded.record.get("source_crop_adapter")
+    if not isinstance(adapter_record, Mapping) or adapter.record != adapter_record:
+        _fail(
+            "Historical keypoint crop successor adapter differs from its "
+            "authority-bound padded lineage."
+        )
+
+    source_authority = authority_payload["source"]
+    source_run_path = source_authority.get("run_path")
+    if (
+        source_authority.get("family") != "keypoints_runs"
+        or type(source_run_path) is not str
+        or source_run_path != adapter_record.get("source_run_path")
+    ):
+        _fail("Historical keypoint crop successor source path is inconsistent.")
+    source_run = _node(
+        root_node,
+        source_run_path,
+        label="historical keypoint source core",
+    )
+    source_manifest = source_run.attrs.get(KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(source_manifest, Mapping):
+        _fail("Historical keypoint source core lacks its run manifest.")
+    source_errors = validate_keypoint_run_manifest(source_manifest)
+    if source_errors:
+        _fail(
+            "Historical keypoint source core manifest is invalid: "
+            + "; ".join(source_errors)
+        )
+    source_payload = source_manifest["payload"]
+    source_logical = source_payload.get("logical_content")
+    if (
+        source_authority.get("manifest_payload_digest")
+        != source_manifest.get("payload_digest")
+        or source_authority.get("manifest_document_digest")
+        != canonical_json_sha256(source_manifest)
+        or not isinstance(source_logical, Mapping)
+        or source_authority.get("logical_content_digest")
+        != source_logical.get("digest")
+    ):
+        _fail("Historical keypoint source manifest changed after publication.")
+
+    try:
+        preprocessing = keypoint_preprocessing_from_manifest(
+            source_payload["preprocessing"]
+        )
+        transform = model_input_transform_from_attrs(
+            dict(preprocessing.document["model_input_transform"])
+        )
+        identity = archive_identity(root_node)
+        if identity.kind != "local_store_root":
+            _fail(
+                "Persisted historical keypoint crop successors require a stable "
+                "local archive identity."
+            )
+        binding = bind_historical_geometry_only_crop_source(
+            analysis_zarr=Path(identity.key[0]),
+            root=root_node,
+            crop_reference=source_payload["source_crop_snapshot"],
+            source_manifest=source_manifest,
+            source_arrays={
+                name: _child(
+                    source_run,
+                    name,
+                    label=f"historical keypoint source {name}",
+                )
+                for name in (
+                    "source_crop_row_ids",
+                    "instance_key",
+                    "source_acquisition_frame_index",
+                    "source_crop_row_signature",
+                )
+            },
+            source_run_path=source_run_path,
+            model_input_transform=transform,
+        )
+        binding = load_historical_bbox_normalization_from_successor(
+            binding,
+            root=root_node,
+            successor_run=run,
+            successor_run_path=run_path,
+        )
+    except KeypointCoordinatePublicationError:
+        raise
+    except Exception as exc:
+        _fail(f"Persisted historical keypoint crop cannot be rebound: {exc}.")
+    if binding.as_record() != adapter_record:
+        _fail("Persisted historical keypoint crop adapter evidence changed.")
+    return binding
+
+
+def _load_persisted_keypoint_coordinate_surfaces_impl(
     root_node: Any,
     run_path: str,
     *,
@@ -2888,6 +3046,47 @@ def _load_persisted_keypoint_coordinate_surfaces(
         context=context,
         derivation=derivation,
         _verification_seal=_BOUND_SURFACES_SEAL,
+    )
+
+
+def _load_persisted_keypoint_coordinate_surfaces(
+    root_node: Any,
+    run_path: str,
+    *,
+    require_complete: bool,
+    expected_selector_eligible: bool,
+) -> BoundKeypointCoordinateSurfaces:
+    """Verify one graph, reinstalling only its sealed successor adapter."""
+
+    path = _canonical_path(
+        run_path,
+        prefix="keypoints_runs/",
+        label="keypoint rowset",
+    )
+    run = _node(root_node, path, label="keypoint rowset")
+    adapter_attr = "coordinate_successor_historical_crop_adapter"
+    if require_complete and adapter_attr in getattr(run, "attrs", {}):
+        binding = _load_persisted_historical_crop_successor_binding(
+            root_node,
+            run,
+            run_path=path,
+        )
+        from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+            historical_geometry_only_crop_loader,
+        )
+
+        with historical_geometry_only_crop_loader(binding):
+            return _load_persisted_keypoint_coordinate_surfaces_impl(
+                root_node,
+                path,
+                require_complete=require_complete,
+                expected_selector_eligible=expected_selector_eligible,
+            )
+    return _load_persisted_keypoint_coordinate_surfaces_impl(
+        root_node,
+        path,
+        require_complete=require_complete,
+        expected_selector_eligible=expected_selector_eligible,
     )
 
 
