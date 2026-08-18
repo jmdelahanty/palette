@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.analysis.detect_bouts_multi_level import _load_track_kinematics_track_speeds
+from fisheye.analysis.detect_bouts_multi_level import (
+    _load_track_kinematics_track_speeds,
+)
 from fisheye.analysis.track_kinematics_io import (
     load_legacy_track_kinematics_track_for_inspection,
     load_track_kinematics_track,
@@ -406,6 +408,9 @@ def test_detect_bouts_load_speed_levels_uses_track_kinematics_resolver(
 
     assert metadata["track_kinematics_run"] == "tk_test"
     assert metadata["track_kinematics_scope"] == "offline"
+    assert metadata["source_track_path"] == (
+        "analysis/track_kinematics_runs/offline/tk_test/tracks/id_0"
+    )
     assert metadata["track_kinematics_git_commit"] == "abc"
     assert metadata["source_frame_indices_dtype"] == "int64"
     assert metadata["source_frame_indices_shape"] == [3]
@@ -422,3 +427,92 @@ def test_detect_bouts_load_speed_levels_uses_track_kinematics_resolver(
     np.testing.assert_allclose(speeds["speed_filtered_mm"], [40.0, 50.0, 60.0])
     np.testing.assert_allclose(speeds["frame_path_distance_filtered_mm"], [4.0, 5.0, 6.0])
     np.testing.assert_allclose(metadata["positions_px"], [[10.0, 20.0], [20.0, 20.0], [30.0, 20.0]])
+
+
+def test_detect_bouts_loads_one_exact_provider_motion_rowset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = np.asarray([100, 101, 102], dtype=np.int64)
+    arrays = {
+        "source_acquisition_frame_index": frames,
+        "speed_raw_mm": np.asarray([0.0, 2.0, 3.0], dtype=np.float32),
+        "speed_filtered_mm": np.asarray([0.0, 1.5, 2.5], dtype=np.float32),
+        "speed_smoothed_mm": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
+        "speed_averaged_mm": np.asarray([0.0, 0.5, 1.5], dtype=np.float32),
+        "frame_path_distance_raw_mm": np.asarray([0.0, 0.02, 0.03], dtype=np.float32),
+        "frame_path_distance_filtered_mm": np.asarray([0.0, 0.015, 0.025], dtype=np.float32),
+        "frame_path_distance_smoothed_mm": np.asarray([0.0, 0.01, 0.02], dtype=np.float32),
+        "frame_path_distance_raw_px": np.asarray([0.0, 0.2, 0.3], dtype=np.float32),
+        "frame_path_distance_filtered_px": np.asarray([0.0, 0.15, 0.25], dtype=np.float32),
+        "frame_path_distance_smoothed_px": np.asarray([0.0, 0.1, 0.2], dtype=np.float32),
+        "delta_seconds": np.asarray([0.0, 0.01, 0.01], dtype=np.float32),
+        "transition_valid": np.asarray([False, True, True]),
+        "linear_sample_valid": np.asarray([True, True, True]),
+        "positions_mm": np.asarray([[1.0, 2.0], [1.1, 2.0], [1.2, 2.0]], dtype=np.float32),
+        "positions_px": np.asarray([[10.0, 20.0], [11.0, 20.0], [12.0, 20.0]], dtype=np.float32),
+    }
+    provider = SimpleNamespace(
+        track_ids=np.asarray([0], dtype=np.int64),
+        track_row_offsets=np.asarray([0, 3], dtype=np.int64),
+        row_count=3,
+        run_name="provider_1",
+        computation_record={
+            "computation_id": "track_motion_provider_successor.v1",
+            "parameters": {"fps": 100.0, "pixel_to_mm": 0.1},
+        },
+        provider_manifest_sha256="a" * 64,
+        verification_digest="b" * 64,
+        physical_authority_sha256="c" * 64,
+        temporal_authority_status="compatibility_caller_fps_only",
+        timing_is_authoritative=False,
+        array=lambda name: arrays[name],
+    )
+    observed: dict[str, object] = {}
+
+    def fake_load(analysis_zarr, run_path, **kwargs):
+        observed.update(
+            analysis_zarr=analysis_zarr,
+            run_path=run_path,
+            kwargs=kwargs,
+        )
+        return provider
+
+    monkeypatch.setattr(
+        "fisheye.analysis_workflows.provider_track_motion_source_handle."
+        "load_provider_track_motion_source_handle",
+        fake_load,
+    )
+
+    speeds, metadata = _load_track_kinematics_track_speeds(
+        tmp_path / "recording.zarr",
+        track_kinematics_run="provider_1",
+        track_id=0,
+        track_kinematics_scope="provider",
+    )
+
+    assert observed["run_path"] == (
+        "analysis/track_kinematics_runs/provider/provider_1"
+    )
+    assert observed["kwargs"] == {
+        "use_consolidated": True,
+        "require_authoritative_timing": False,
+    }
+    assert metadata["track_kinematics_scope"] == "provider"
+    assert metadata["source_track_path"] == observed["run_path"]
+    assert metadata["track_motion_authority"]["motion_manifest_sha256"] == "a" * 64
+    assert metadata["source_array_paths"]["sample_valid"].endswith(
+        "/linear_sample_valid"
+    )
+    np.testing.assert_array_equal(speeds["frames"], frames)
+    np.testing.assert_allclose(speeds["speed_smoothed_mm"], [0.0, 1.0, 2.0])
+
+
+def test_detect_bouts_provider_motion_rejects_implicit_latest(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Provider track motion has no selector"):
+        _load_track_kinematics_track_speeds(
+            tmp_path / "recording.zarr",
+            track_kinematics_run="latest",
+            track_id=0,
+            track_kinematics_scope="provider",
+        )

@@ -165,6 +165,8 @@ class StimulusEpochCandidatePlan:
     scratch_root: Path
     local_zarr: Path
     profile_id: str
+    allow_selector_ineligible_source: bool
+    source_lifecycle: Mapping[str, Any]
     source_stimulus_run: str
     source_stimulus_path: str
     source_stimulus_fingerprint: str
@@ -205,6 +207,10 @@ class StimulusEpochCandidatePlan:
             "scratch_root": str(self.scratch_root),
             "local_zarr": str(self.local_zarr),
             "profile_id": self.profile_id,
+            "allow_selector_ineligible_source": bool(
+                self.allow_selector_ineligible_source
+            ),
+            "source_lifecycle": dict(self.source_lifecycle),
             "source_stimulus_run": self.source_stimulus_run,
             "source_stimulus_path": self.source_stimulus_path,
             "source_stimulus_fingerprint_algorithm": (
@@ -276,6 +282,38 @@ def _stimulus_group_fingerprint(group: Any) -> str:
     return stimulus_group_logical_fingerprint(group)
 
 
+def _source_lifecycle(
+    source_group: Any,
+    *,
+    allow_selector_ineligible_source: bool,
+) -> dict[str, Any]:
+    marker_present = "stage_selector_eligible" in source_group.attrs
+    marker = source_group.attrs.get("stage_selector_eligible")
+    if type(marker) is not bool:
+        marker = None
+    return {
+        "completion_status": source_group.attrs.get(RUN_COMPLETION_STATUS_ATTR),
+        "stage_selector_eligible": marker,
+        "stage_selector_marker": (
+            "explicit_true"
+            if marker is True
+            else "explicit_false"
+            if marker is False
+            else "legacy_missing"
+            if not marker_present
+            else "invalid"
+        ),
+        "selection_policy": (
+            "exact_named_complete_legacy_v1_selector_ineligible_opt_in"
+            if allow_selector_ineligible_source
+            else "exact_named_complete_legacy_v1_selector_eligible_strict"
+        ),
+        "allow_selector_ineligible_source": bool(
+            allow_selector_ineligible_source
+        ),
+    }
+
+
 def build_stimulus_epoch_candidate_plan(
     source_zarr: str | Path,
     *,
@@ -283,6 +321,7 @@ def build_stimulus_epoch_candidate_plan(
     run_name: str,
     scratch_root: str | Path,
     profile_id: str = SUPPORTED_PROFILE_ID,
+    allow_selector_ineligible_source: bool = False,
 ) -> StimulusEpochCandidatePlan:
     if profile_id != SUPPORTED_PROFILE_ID:
         raise ValueError(
@@ -323,7 +362,14 @@ def build_stimulus_epoch_candidate_plan(
         raise KeyError(f"Source stimulus-epoch run {source_name!r} does not exist.")
     if source_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
         raise ValueError("Source stimulus-epoch run is not explicitly complete.")
-    if source_group.attrs.get("stage_selector_eligible") is False:
+    source_selector_marker = source_group.attrs.get("stage_selector_eligible")
+    if allow_selector_ineligible_source:
+        if source_selector_marker is not False:
+            raise ValueError(
+                "Selector-ineligible source opt-in requires stage_selector_eligible "
+                "to be literally false."
+            )
+    elif source_selector_marker is False:
         raise ValueError("Source stimulus-epoch run is explicitly selector-ineligible.")
     errors = validate_legacy_stimulus_epoch_source(source_group)
     if errors:
@@ -335,6 +381,10 @@ def build_stimulus_epoch_candidate_plan(
     )
     source_epoch_logical_content_sha256 = stimulus_epoch_logical_content_sha256(
         source_group
+    )
+    source_lifecycle = _source_lifecycle(
+        source_group,
+        allow_selector_ineligible_source=allow_selector_ineligible_source,
     )
     source_stimulus_run = source_group.attrs.get("source_stimulus_run")
     source_stimulus_path = source_group.attrs.get("source_stimulus_path")
@@ -373,6 +423,8 @@ def build_stimulus_epoch_candidate_plan(
         scratch_root=scratch,
         local_zarr=scratch / "stimulus-epoch-candidate.zarr",
         profile_id=profile_id,
+        allow_selector_ineligible_source=bool(allow_selector_ineligible_source),
+        source_lifecycle=source_lifecycle,
         source_stimulus_run=source_stimulus_run,
         source_stimulus_path=source_stimulus_path,
         source_stimulus_fingerprint=source_stimulus_fingerprint,
@@ -669,6 +721,7 @@ def materialize_stimulus_epoch_candidate(
     run_name: str,
     scratch_root: str | Path,
     profile_id: str = SUPPORTED_PROFILE_ID,
+    allow_selector_ineligible_source: bool = False,
     copy_backend: str = "rsync",
     apply: bool = False,
     keep_scratch: bool = False,
@@ -683,6 +736,9 @@ def materialize_stimulus_epoch_candidate(
             "source_run": source_run,
             "run_name": run_name,
             "stage_source_to_scratch": bool(stage_source_to_scratch),
+            "allow_selector_ineligible_source": bool(
+                allow_selector_ineligible_source
+            ),
         },
     )
     with telemetry.phase("plan"):
@@ -692,11 +748,16 @@ def materialize_stimulus_epoch_candidate(
             run_name=run_name,
             scratch_root=scratch_root,
             profile_id=profile_id,
+            allow_selector_ineligible_source=allow_selector_ineligible_source,
         )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
         "mutates_archive": bool(apply),
+        "allow_selector_ineligible_source": bool(
+            allow_selector_ineligible_source
+        ),
+        "source_lifecycle": dict(plan.source_lifecycle),
         "plan": plan.as_dict(),
     }
     if not apply:
@@ -722,6 +783,12 @@ def materialize_stimulus_epoch_candidate(
             observed_source_content_sha256 = stimulus_epoch_logical_content_sha256(
                 authoritative_source
             )
+            observed_source_lifecycle = _source_lifecycle(
+                authoritative_source,
+                allow_selector_ineligible_source=(
+                    plan.allow_selector_ineligible_source
+                ),
+            )
             observed_stimulus_fingerprint = _stimulus_group_fingerprint(
                 authoritative_stimulus
             )
@@ -731,6 +798,7 @@ def materialize_stimulus_epoch_candidate(
                 != plan.source_epoch_lineage_payload_sha256
                 or observed_source_content_sha256
                 != plan.source_epoch_logical_content_sha256
+                or observed_source_lifecycle != dict(plan.source_lifecycle)
                 or observed_stimulus_fingerprint != plan.source_stimulus_fingerprint
             ):
                 raise RuntimeError(
@@ -782,6 +850,12 @@ def materialize_stimulus_epoch_candidate(
                     source_group,
                     label="Staged stimulus-epoch run",
                 )
+                staged_lifecycle = _source_lifecycle(
+                    source_group,
+                    allow_selector_ineligible_source=(
+                        plan.allow_selector_ineligible_source
+                    ),
+                )
                 staged_declarations = build_stimulus_epoch_array_declarations(
                     source_group,
                     byte_planner_adopted=False,
@@ -793,6 +867,7 @@ def materialize_stimulus_epoch_candidate(
                     != plan.source_epoch_lineage_payload_sha256
                     or stimulus_epoch_logical_content_sha256(source_group)
                     != plan.source_epoch_logical_content_sha256
+                    or staged_lifecycle != dict(plan.source_lifecycle)
                     or _stimulus_group_fingerprint(staged_stimulus)
                     != plan.source_stimulus_fingerprint
                     or _logical_hashes(source_group, staged_declarations)
@@ -844,6 +919,9 @@ def materialize_stimulus_epoch_candidate(
                     "storage_candidate_source_run": plan.source_run_name,
                     "storage_candidate_source_run_path": plan.source_run_path,
                     "storage_candidate_profile_promoted": False,
+                    "source_stimulus_epoch_lifecycle": dict(
+                        plan.source_lifecycle
+                    ),
                     "source_stimulus_epoch_run": plan.source_run_name,
                     "source_stimulus_epoch_path": plan.source_run_path,
                     "source_stimulus_fingerprint_algorithm": (
@@ -940,6 +1018,13 @@ def materialize_stimulus_epoch_candidate(
             or stable_lineage_payload_sha256 != plan.source_epoch_lineage_payload_sha256
             or stimulus_epoch_logical_content_sha256(stable_source)
             != plan.source_epoch_logical_content_sha256
+            or _source_lifecycle(
+                stable_source,
+                allow_selector_ineligible_source=(
+                    plan.allow_selector_ineligible_source
+                ),
+            )
+            != dict(plan.source_lifecycle)
             or _stimulus_group_fingerprint(stable_root[plan.source_stimulus_path])
             != plan.source_stimulus_fingerprint
         ):
@@ -1170,6 +1255,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile", choices=(SUPPORTED_PROFILE_ID,), default=SUPPORTED_PROFILE_ID
     )
+    parser.add_argument(
+        "--allow-selector-ineligible-source",
+        action="store_true",
+        help=(
+            "Accept only the exact named complete legacy v1 source whose "
+            "stage_selector_eligible is literally false."
+        ),
+    )
     parser.add_argument("--copy-backend", choices=("rsync", "python"), default="rsync")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--keep-scratch", action="store_true")
@@ -1185,6 +1278,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_name=args.run_name,
         scratch_root=args.scratch_root or _default_scratch_root(args.run_name),
         profile_id=args.profile,
+        allow_selector_ineligible_source=bool(
+            args.allow_selector_ineligible_source
+        ),
         copy_backend=args.copy_backend,
         apply=args.apply,
         keep_scratch=args.keep_scratch,

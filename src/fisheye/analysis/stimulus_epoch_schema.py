@@ -55,6 +55,13 @@ STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_VERSION = 1
 STIMULUS_SOURCE_FINGERPRINT_ALGORITHM = (
     "sha256_canonical_stimulus_group_logical_tree_v1"
 )
+_SOURCE_EPOCH_LIFECYCLE_FIELDS = {
+    "completion_status",
+    "stage_selector_eligible",
+    "stage_selector_marker",
+    "selection_policy",
+    "allow_selector_ineligible_source",
+}
 
 
 def _specs() -> dict[str, ColumnSpec]:
@@ -498,6 +505,34 @@ def _required_mapping_attr(
     return dict(value)
 
 
+def _optional_source_epoch_lifecycle(run_group: Any) -> dict[str, Any] | None:
+    """Read the lifecycle binding while retaining old v2 manifest compatibility."""
+
+    if "source_stimulus_epoch_lifecycle" not in run_group.attrs:
+        return None
+    value = _required_mapping_attr(
+        run_group,
+        "source_stimulus_epoch_lifecycle",
+        exact_fields=_SOURCE_EPOCH_LIFECYCLE_FIELDS,
+    )
+    if value["completion_status"] != "complete":
+        raise ValueError("source stimulus-epoch lifecycle is not complete.")
+    if value["stage_selector_eligible"] not in (True, False, None):
+        raise ValueError("source stimulus-epoch lifecycle selector state is not exact.")
+    if type(value["allow_selector_ineligible_source"]) is not bool:
+        raise ValueError(
+            "source stimulus-epoch lifecycle opt-in marker is not an exact bool."
+        )
+    if (
+        value["allow_selector_ineligible_source"]
+        and value["stage_selector_eligible"] is not False
+    ):
+        raise ValueError(
+            "selector-ineligible source lifecycle does not bind literal false."
+        )
+    return value
+
+
 def _require_protocol_profile_identity(value: Mapping[str, Any]) -> None:
     for name in (
         "profile_id",
@@ -571,6 +606,7 @@ def build_stimulus_epoch_candidate_lineage_payload(run_group: Any) -> dict[str, 
     source_epoch_content_sha256 = _required_text_attr(
         run_group, "source_stimulus_epoch_logical_content_sha256"
     )
+    source_epoch_lifecycle = _optional_source_epoch_lifecycle(run_group)
     for name, value in (
         ("source_stimulus_fingerprint", source_stimulus_fingerprint),
         ("source_stimulus_epoch_lineage_hash", source_epoch_lineage_hash),
@@ -608,6 +644,16 @@ def build_stimulus_epoch_candidate_lineage_payload(run_group: Any) -> dict[str, 
     materializer_dirty = run_group.attrs.get("candidate_materializer_git_dirty")
     if type(materializer_dirty) is not bool:
         raise ValueError("candidate_materializer_git_dirty must be an exact bool.")
+    lineage_parameters: dict[str, Any] = {
+        "recording_id": _required_text_attr(run_group, "recording_id"),
+        "fps": float(fps),
+        "total_frames": total_frames,
+        "epoch_policy": epoch_policy,
+        "epoch_policy_version": epoch_policy_version,
+        "protocol_profile": protocol_profile,
+    }
+    if source_epoch_lifecycle is not None:
+        lineage_parameters["source_stimulus_epoch_lifecycle"] = source_epoch_lifecycle
     return build_run_lineage_payload(
         run_family="analysis/stimulus_epoch_runs",
         analysis_schema={
@@ -635,14 +681,7 @@ def build_stimulus_epoch_candidate_lineage_payload(run_group: Any) -> dict[str, 
                 source_epoch_content_sha256
             ),
         },
-        parameters={
-            "recording_id": _required_text_attr(run_group, "recording_id"),
-            "fps": float(fps),
-            "total_frames": total_frames,
-            "epoch_policy": epoch_policy,
-            "epoch_policy_version": epoch_policy_version,
-            "protocol_profile": protocol_profile,
-        },
+        parameters=lineage_parameters,
         code={
             "git_commit": materializer_commit,
             "git_dirty": materializer_dirty,
@@ -786,6 +825,7 @@ def build_stimulus_epoch_run_manifest(run_group: Any) -> dict[str, object]:
         raise ValueError("run manifest source stimulus run/path binding mismatch.")
     if source_epoch_path != f"analysis/stimulus_epoch_runs/{source_epoch_run}":
         raise ValueError("run manifest source epoch run/path binding mismatch.")
+    source_epoch_lifecycle = _optional_source_epoch_lifecycle(run_group)
     if source_refs != {
         "source_stimulus_run": source_stimulus_run,
         "source_stimulus_path": source_stimulus_path,
@@ -813,6 +853,21 @@ def build_stimulus_epoch_run_manifest(run_group: Any) -> dict[str, object]:
         != source_epoch_path
     ):
         raise ValueError("storage candidate source identity differs from source epoch.")
+    source_epoch_payload: dict[str, object] = {
+        "run": source_epoch_run,
+        "path": source_epoch_path,
+        "schema_id": LEGACY_STIMULUS_EPOCH_SCHEMA_ID,
+        "schema_version": LEGACY_STIMULUS_EPOCH_SCHEMA_VERSION,
+        "lineage_hash": _required_text_attr(
+            run_group, "source_stimulus_epoch_lineage_hash"
+        ),
+        "lineage_payload_sha256": _required_text_attr(
+            run_group, "source_stimulus_epoch_lineage_payload_sha256"
+        ),
+        "logical_content_sha256": source_content_sha256,
+    }
+    if source_epoch_lifecycle is not None:
+        source_epoch_payload["lifecycle"] = source_epoch_lifecycle
     payload: dict[str, object] = {
         "run_identity": {
             "recording_id": _required_text_attr(run_group, "recording_id"),
@@ -842,19 +897,7 @@ def build_stimulus_epoch_run_manifest(run_group: Any) -> dict[str, object]:
             ),
             "event_schema": source_event_schema,
         },
-        "source_epoch": {
-            "run": source_epoch_run,
-            "path": source_epoch_path,
-            "schema_id": LEGACY_STIMULUS_EPOCH_SCHEMA_ID,
-            "schema_version": LEGACY_STIMULUS_EPOCH_SCHEMA_VERSION,
-            "lineage_hash": _required_text_attr(
-                run_group, "source_stimulus_epoch_lineage_hash"
-            ),
-            "lineage_payload_sha256": _required_text_attr(
-                run_group, "source_stimulus_epoch_lineage_payload_sha256"
-            ),
-            "logical_content_sha256": source_content_sha256,
-        },
+        "source_epoch": source_epoch_payload,
         "protocol": {
             "method": _required_text_attr(run_group, "method"),
             "method_version": _required_text_attr(run_group, "method_version"),

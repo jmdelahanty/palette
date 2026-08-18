@@ -17,7 +17,13 @@ from ..shared.rowset_fingerprint import (
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..shared.system_metadata import get_environment_info
 from .api import TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA, build_tracking
 from .contracts import TrackingObservations, TrackingResult
@@ -189,8 +195,8 @@ def write_tracking_run(
     root: zarr.Group,
     arena_ids: np.ndarray,
     frame_indices: np.ndarray,
-    source_detect_run: str,
-    source_arena_assignment_run: str,
+    source_detect_run: str | None,
+    source_arena_assignment_run: str | None,
     source_rowset_path: str,
     source_refined_run: Optional[str] = None,
     method: str,
@@ -201,9 +207,50 @@ def write_tracking_run(
     source_edit_revision: int | None = None,
     expected_source_rowset_fingerprint: RowsetFingerprint | None = None,
     source_rowset_fingerprint_reader: Callable[[], RowsetFingerprint] | None = None,
+    source_subject_position_run: str | None = None,
+    source_subject_position_manifest_sha256: str | None = None,
+    source_subject_position_decoded_content_sha256: str | None = None,
+    exact_run_name: str | None = None,
+    stage_selector_eligible: bool = True,
     console: Optional[Console] = None,
 ) -> Tuple[str, zarr.Group, Dict[str, object]]:
     """Build and persist one method-neutral ``tracking_runs`` entry."""
+
+    if type(stage_selector_eligible) is not bool:
+        raise TypeError("stage_selector_eligible must be an exact bool.")
+    if exact_run_name is not None and stage_selector_eligible:
+        raise ValueError(
+            "Exact-name tracking publication is reserved for selector-ineligible candidates."
+        )
+    if source_subject_position_run is not None:
+        if source_detect_run is not None or source_arena_assignment_run is not None:
+            raise ValueError(
+                "Subject-position tracking cannot also claim detection or arena-assignment authority."
+            )
+        if source_subject_position_run != source_rowset_path:
+            raise ValueError(
+                "Subject-position tracking source must be the exact source rowset path."
+            )
+        for label, value in (
+            (
+                "source_subject_position_manifest_sha256",
+                source_subject_position_manifest_sha256,
+            ),
+            (
+                "source_subject_position_decoded_content_sha256",
+                source_subject_position_decoded_content_sha256,
+            ),
+        ):
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"{label} must be one lowercase SHA-256 digest.")
+    elif source_detect_run in (None, "") or source_arena_assignment_run in (None, ""):
+        raise ValueError(
+            "Detection-backed tracking requires source detect and arena-assignment runs."
+        )
 
     observations = TrackingObservations.from_arrays(
         arena_ids=arena_ids,
@@ -227,11 +274,25 @@ def write_tracking_run(
     if expected_source_rowset_fingerprint is not None:
         assert_rowset_fingerprint_matches(expected_source_rowset_fingerprint, rowset_fingerprint)
 
-    run_group, run_name = get_run_group(root, "tracking", console)
-    tracking_parent = root.get("tracking_runs")
+    if exact_run_name is None:
+        run_group, run_name = get_run_group(root, "tracking", console)
+        tracking_parent = root.get("tracking_runs")
+    else:
+        run_name = str(exact_run_name)
+        if not run_name or run_name != run_name.strip() or "/" in run_name or "\\" in run_name:
+            raise ValueError("exact_run_name must be one canonical run-group name.")
+        tracking_parent = require_runs_parent(
+            root,
+            "tracking_runs",
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
+        if run_name in tracking_parent:
+            raise FileExistsError(f"Refusing existing tracking run: {run_name}")
+        run_group = tracking_parent.create_group(run_name)
     if tracking_parent is not None:
         mark_run_started(run_group, run_name=run_name, stage="track")
-        note_pending_latest(tracking_parent, run_name)
+        if exact_run_name is None:
+            note_pending_latest(tracking_parent, run_name)
 
     n_rows = int(result.track_ids.shape[0])
     n_tracks = int(result.track_ids_present.shape[0])
@@ -316,13 +377,15 @@ def write_tracking_run(
     }
 
     env_info = get_environment_info()
-    provenance_inputs: Dict[str, object] = {
-        "source_detect_run": source_detect_run,
-        "source_arena_assignment_run": source_arena_assignment_run,
-        "source_rowset_path": source_rowset_path,
-    }
+    provenance_inputs: Dict[str, object] = {"source_rowset_path": source_rowset_path}
+    if source_detect_run:
+        provenance_inputs["source_detect_run"] = source_detect_run
+    if source_arena_assignment_run:
+        provenance_inputs["source_arena_assignment_run"] = source_arena_assignment_run
     if source_refined_run:
         provenance_inputs["source_refined_run"] = source_refined_run
+    if source_subject_position_run:
+        provenance_inputs["source_subject_position_run"] = source_subject_position_run
 
     provenance = build_stage_provenance(
         stage="tracks",
@@ -360,6 +423,18 @@ def write_tracking_run(
             "source_detect_run": source_detect_run,
             "source_arena_assignment_run": source_arena_assignment_run,
             "source_rowset_path": source_rowset_path,
+            "source_authority_kind": (
+                "subject_position_run"
+                if source_subject_position_run is not None
+                else "detection_rowset"
+            ),
+            "source_subject_position_run": source_subject_position_run,
+            "source_subject_position_manifest_sha256": (
+                source_subject_position_manifest_sha256
+            ),
+            "source_subject_position_decoded_content_sha256": (
+                source_subject_position_decoded_content_sha256
+            ),
             "track_namespace": "local_per_run",
             "tracking_identity_mode": observations.identity_mode,
             "unassigned_track_id": UNASSIGNED_TRACK_ID,
@@ -387,7 +462,7 @@ def write_tracking_run(
             source_rowset_fingerprint_reader(),
         )
     if tracking_parent is not None:
-        run_group.attrs["stage_selector_eligible"] = True
+        run_group.attrs["stage_selector_eligible"] = stage_selector_eligible
         manifest = build_tracking_run_manifest(run_group, run_name=run_name)
         run_group.attrs[TRACKING_RUN_MANIFEST_ATTR] = json_attr_safe(manifest)
         run_group.attrs[TRACKING_RUN_MANIFEST_DIGEST_ATTR] = (
@@ -395,7 +470,7 @@ def write_tracking_run(
         )
         mark_run_complete(
             run_group,
-            parent_group=tracking_parent,
+            parent_group=tracking_parent if stage_selector_eligible else None,
             run_name=run_name,
             run_provenance=build_run_provenance_from_stage_record(provenance),
         )
@@ -408,8 +483,8 @@ def write_single_subject_per_arena_tracking_run(
     root: zarr.Group,
     arena_ids: np.ndarray,
     frame_indices: np.ndarray,
-    source_detect_run: str,
-    source_arena_assignment_run: str,
+    source_detect_run: str | None,
+    source_arena_assignment_run: str | None,
     source_rowset_path: str,
     source_refined_run: Optional[str] = None,
     conflict_policy: str = "fail",
@@ -419,6 +494,11 @@ def write_single_subject_per_arena_tracking_run(
     source_edit_revision: int | None = None,
     expected_source_rowset_fingerprint: RowsetFingerprint | None = None,
     source_rowset_fingerprint_reader: Callable[[], RowsetFingerprint] | None = None,
+    source_subject_position_run: str | None = None,
+    source_subject_position_manifest_sha256: str | None = None,
+    source_subject_position_decoded_content_sha256: str | None = None,
+    exact_run_name: str | None = None,
+    stage_selector_eligible: bool = True,
     console: Optional[Console] = None,
 ) -> Tuple[str, zarr.Group, Dict[str, object]]:
     """Compatibility wrapper for the current strict arena tracker."""
@@ -439,6 +519,15 @@ def write_single_subject_per_arena_tracking_run(
         source_edit_revision=source_edit_revision,
         expected_source_rowset_fingerprint=expected_source_rowset_fingerprint,
         source_rowset_fingerprint_reader=source_rowset_fingerprint_reader,
+        source_subject_position_run=source_subject_position_run,
+        source_subject_position_manifest_sha256=(
+            source_subject_position_manifest_sha256
+        ),
+        source_subject_position_decoded_content_sha256=(
+            source_subject_position_decoded_content_sha256
+        ),
+        exact_run_name=exact_run_name,
+        stage_selector_eligible=stage_selector_eligible,
         console=console,
     )
 

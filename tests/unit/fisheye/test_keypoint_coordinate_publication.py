@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from contextlib import nullcontext
 import hashlib
 import inspect
 import textwrap
@@ -111,6 +112,78 @@ class _RootRegistry:
         parent = self.nodes.get(parent_path)
         if parent is not None and getattr(parent, "children", {}).get(name) is node:
             del parent.children[name]
+
+
+def test_complete_coordinate_successor_reinstalls_its_sealed_crop_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = object()
+    root = _RootRegistry(token)
+    run = root.register(
+        FakeGroup(
+            path="keypoints_runs/successor",
+            archive_token=token,
+        )
+    )
+    run.attrs["coordinate_successor_historical_crop_adapter"] = {
+        "schema_id": "test-adapter"
+    }
+    binding = object()
+    result = object()
+    calls: list[tuple[object, ...]] = []
+
+    def rebind(root_node: Any, run_node: Any, *, run_path: str) -> object:
+        calls.append(("rebind", root_node, run_node, run_path))
+        return binding
+
+    def load_impl(
+        root_node: Any,
+        run_path: str,
+        *,
+        require_complete: bool,
+        expected_selector_eligible: bool,
+    ) -> object:
+        calls.append(
+            (
+                "load",
+                root_node,
+                run_path,
+                require_complete,
+                expected_selector_eligible,
+            )
+        )
+        return result
+
+    from fisheye.shared.zarr import historical_geometry_only_crop_adapter
+
+    monkeypatch.setattr(
+        publication_module,
+        "_load_persisted_historical_crop_successor_binding",
+        rebind,
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "_load_persisted_keypoint_coordinate_surfaces_impl",
+        load_impl,
+    )
+    monkeypatch.setattr(
+        historical_geometry_only_crop_adapter,
+        "historical_geometry_only_crop_loader",
+        lambda value: nullcontext(value),
+    )
+
+    loaded = publication_module._load_persisted_keypoint_coordinate_surfaces(
+        root,
+        "keypoints_runs/successor",
+        require_complete=True,
+        expected_selector_eligible=False,
+    )
+
+    assert loaded is result
+    assert calls == [
+        ("rebind", root, run, "keypoints_runs/successor"),
+        ("load", root, "keypoints_runs/successor", True, False),
+    ]
 
 
 def test_keypoint_crop_loader_reuses_only_within_one_proof_scope(

@@ -333,7 +333,14 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
     transition_valid = np.ones(frames.size, dtype=bool)
     transition_valid[0] = False
 
-    def fake_load_track(_zarr_path, _track_kinematics_run, track_id):
+    def fake_load_track(
+        _zarr_path,
+        _track_kinematics_run,
+        track_id,
+        *,
+        track_kinematics_scope="offline",
+    ):
+        assert track_kinematics_scope == "offline"
         speeds = {
             "speed_raw_mm": speed,
             "speed_filtered_mm": speed,
@@ -355,6 +362,10 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
             "pixel_to_mm": 0.1,
             "n_frames": frames.size,
             "track_kinematics_run": "tk_run",
+            "track_kinematics_scope": "offline",
+            "source_track_path": (
+                "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0"
+            ),
             "track_id": track_id,
             "positions_mm": np.column_stack((frames, frames)).astype(np.float64),
             "positions_px": np.column_stack((frames * 10, frames * 10)).astype(np.float64),

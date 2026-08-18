@@ -13,7 +13,8 @@ from fisheye.shared.zarr_run_completion import RUN_STATUS_COMPLETE
 
 
 TRACKING_RUN_MANIFEST_SCHEMA_ID = "palette.tracking_run_manifest"
-TRACKING_RUN_MANIFEST_SCHEMA_VERSION = 1
+TRACKING_RUN_MANIFEST_SCHEMA_VERSION = 2
+TRACKING_RUN_MANIFEST_LEGACY_SCHEMA_VERSION = 1
 TRACKING_RUN_MANIFEST_ATTR = "tracking_run_manifest"
 TRACKING_RUN_MANIFEST_DIGEST_ATTR = "tracking_run_manifest_sha256"
 
@@ -60,8 +61,12 @@ def _sha256(value: object, *, name: str) -> str:
     return value
 
 
-def _source_record(attrs: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+def _source_record(
+    attrs: Mapping[str, Any],
+    *,
+    schema_version: int = TRACKING_RUN_MANIFEST_SCHEMA_VERSION,
+) -> dict[str, Any]:
+    record = {
         "source_detect_run": attrs.get("source_detect_run"),
         "source_refined_run": attrs.get("source_refined_run"),
         "source_arena_assignment_run": attrs.get("source_arena_assignment_run"),
@@ -85,6 +90,25 @@ def _source_record(attrs: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "source_rowset_fingerprint": attrs.get("source_rowset_fingerprint"),
     }
+    if schema_version >= TRACKING_RUN_MANIFEST_SCHEMA_VERSION:
+        subject_position_run = attrs.get("source_subject_position_run")
+        record.update(
+            {
+                "source_authority_kind": (
+                    "subject_position_run"
+                    if subject_position_run not in (None, "")
+                    else "detection_rowset"
+                ),
+                "source_subject_position_run": subject_position_run,
+                "source_subject_position_manifest_sha256": attrs.get(
+                    "source_subject_position_manifest_sha256"
+                ),
+                "source_subject_position_decoded_content_sha256": attrs.get(
+                    "source_subject_position_decoded_content_sha256"
+                ),
+            }
+        )
+    return record
 
 
 def tracking_array_records(run_group: Any) -> list[dict[str, Any]]:
@@ -128,6 +152,11 @@ def build_tracking_run_manifest(
         raise TrackingRunManifestError(
             "Tracking manifests are written only for complete immutable runs."
         )
+    selector_eligible = run_group.attrs.get("stage_selector_eligible")
+    if type(selector_eligible) is not bool:
+        raise TrackingRunManifestError(
+            "Tracking run must declare exact selector eligibility before sealing."
+        )
     arrays = tracking_array_records(run_group)
     payload = {
         "namespace": "tracking_runs",
@@ -135,7 +164,7 @@ def build_tracking_run_manifest(
         "run_name": name,
         "run_path": f"tracking_runs/{name}",
         "status": status,
-        "stage_selector_eligible": True,
+        "stage_selector_eligible": selector_eligible,
         "tracking_method": run_group.attrs.get("tracking_method"),
         "tracking_identity_mode": run_group.attrs.get("tracking_identity_mode"),
         "unassigned_track_id": run_group.attrs.get("unassigned_track_id"),
@@ -169,7 +198,10 @@ def tracking_run_manifest_digest(manifest: Mapping[str, Any]) -> str:
         )
     if manifest["schema_id"] != TRACKING_RUN_MANIFEST_SCHEMA_ID:
         raise TrackingRunManifestError("Tracking run manifest schema ID differs.")
-    if manifest["schema_version"] != TRACKING_RUN_MANIFEST_SCHEMA_VERSION:
+    if manifest["schema_version"] not in {
+        TRACKING_RUN_MANIFEST_LEGACY_SCHEMA_VERSION,
+        TRACKING_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         raise TrackingRunManifestError(
             "Tracking run manifest schema version differs."
         )
@@ -189,6 +221,7 @@ def validate_tracking_run_manifest(
     *,
     expected_run_name: str | None = None,
     expected_status: str = RUN_STATUS_COMPLETE,
+    expected_selector_eligible: bool = True,
 ) -> dict[str, Any]:
     """Validate exact manifest structure independently of the Zarr payload."""
 
@@ -227,9 +260,13 @@ def validate_tracking_run_manifest(
         raise TrackingRunManifestError("Tracking run manifest path is stale.")
     if payload["status"] != expected_status:
         raise TrackingRunManifestError("Tracking run status differs.")
-    if payload["stage_selector_eligible"] is not True:
+    if type(expected_selector_eligible) is not bool:
         raise TrackingRunManifestError(
-            "Modern tracking authority must be explicitly selector eligible."
+            "expected_selector_eligible must be an exact bool."
+        )
+    if payload["stage_selector_eligible"] is not expected_selector_eligible:
+        raise TrackingRunManifestError(
+            "Tracking selector eligibility differs from the explicit expectation."
         )
     if not isinstance(payload["tracking_method"], str) or not payload[
         "tracking_method"
@@ -255,14 +292,15 @@ def validate_tracking_run_manifest(
     if not isinstance(configuration["provenance"], Mapping):
         raise TrackingRunManifestError("Tracking provenance is absent.")
     source = payload["source"]
-    expected_source_fields = set(_source_record({}))
+    schema_version = int(manifest["schema_version"])
+    expected_source_fields = set(
+        _source_record({}, schema_version=schema_version)
+    )
     if not isinstance(source, Mapping) or set(source) != expected_source_fields:
         raise TrackingRunManifestError(
             "Tracking source-lineage record is not exact."
         )
     for required in (
-        "source_detect_run",
-        "source_arena_assignment_run",
         "source_rowset_path",
         "source_rowset_fingerprint_status",
         "source_rowset_row_count",
@@ -270,6 +308,49 @@ def validate_tracking_run_manifest(
         if source[required] in (None, ""):
             raise TrackingRunManifestError(
                 f"Tracking source-lineage field {required!r} is absent."
+            )
+    if schema_version == TRACKING_RUN_MANIFEST_LEGACY_SCHEMA_VERSION:
+        for required in ("source_detect_run", "source_arena_assignment_run"):
+            if source[required] in (None, ""):
+                raise TrackingRunManifestError(
+                    f"Tracking source-lineage field {required!r} is absent."
+                )
+    else:
+        authority_kind = source["source_authority_kind"]
+        if authority_kind == "detection_rowset":
+            for required in ("source_detect_run", "source_arena_assignment_run"):
+                if source[required] in (None, ""):
+                    raise TrackingRunManifestError(
+                        f"Detection-backed tracking field {required!r} is absent."
+                    )
+            for absent in (
+                "source_subject_position_run",
+                "source_subject_position_manifest_sha256",
+                "source_subject_position_decoded_content_sha256",
+            ):
+                if source[absent] is not None:
+                    raise TrackingRunManifestError(
+                        "Detection-backed tracking carries subject-position lineage."
+                    )
+        elif authority_kind == "subject_position_run":
+            if source["source_detect_run"] is not None or source[
+                "source_arena_assignment_run"
+            ] is not None:
+                raise TrackingRunManifestError(
+                    "Subject-position tracking must not claim detection or arena-assignment authority."
+                )
+            if source["source_subject_position_run"] != source["source_rowset_path"]:
+                raise TrackingRunManifestError(
+                    "Subject-position tracking rowset path differs from its source run."
+                )
+            for required in (
+                "source_subject_position_manifest_sha256",
+                "source_subject_position_decoded_content_sha256",
+            ):
+                _sha256(source[required], name=required)
+        else:
+            raise TrackingRunManifestError(
+                "Tracking source authority kind is invalid."
             )
     arrays = payload["arrays"]
     if not isinstance(arrays, list):
@@ -317,6 +398,7 @@ __all__ = [
     "TRACKING_RUN_MANIFEST_ATTR",
     "TRACKING_RUN_MANIFEST_DIGEST_ATTR",
     "TRACKING_RUN_MANIFEST_SCHEMA_ID",
+    "TRACKING_RUN_MANIFEST_LEGACY_SCHEMA_VERSION",
     "TRACKING_RUN_MANIFEST_SCHEMA_VERSION",
     "TrackingRunManifestError",
     "build_tracking_run_manifest",

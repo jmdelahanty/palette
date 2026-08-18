@@ -200,6 +200,7 @@ def _read_verified_snapshot(
             manifest,
             expected_run_name=run_name,
             expected_status=RUN_STATUS_COMPLETE,
+            expected_selector_eligible=expected_selector_eligible,
         )
     except TrackingRunManifestError as exc:
         raise TrackingSourceHandleError(str(exc)) from exc

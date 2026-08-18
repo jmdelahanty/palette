@@ -14,6 +14,12 @@ from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
     load_chaser_distance_run,
 )
+from fisheye.analysis.provider_chaser_distance_candidates import (
+    MANIFEST_DIGEST_ATTR as PROVIDER_CHASER_CANDIDATE_MANIFEST_DIGEST_ATTR,
+    PARENT_PATH as PROVIDER_CHASER_CANDIDATE_PARENT_PATH,
+    SCHEMA_ID as PROVIDER_CHASER_CANDIDATE_SCHEMA_ID,
+    validate_provider_chaser_distance_candidate,
+)
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, SPEC_MEDIA_TYPE
 from fisheye.shared.recording_artifact_inventory import build_recording_artifact_inventory
 from fisheye.utils.view_zarr_visualization import iter_visualization_artifacts
@@ -39,6 +45,20 @@ from .common import join_path, normalize_path
 
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
 TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
+PROVIDER_CHASER_CANDIDATE_RENDERER = (
+    "palette-provider-chaser-distance-candidate-explorer-v1"
+)
+PROVIDER_CHASER_CANDIDATE_ARTIFACT = "provider_chaser_distance_candidate"
+_PROVIDER_CHASER_CANDIDATE_FORBIDDEN_SELECTORS = frozenset(
+    {
+        "latest",
+        "latest_complete",
+        "latest_pending",
+        "authoritative_run",
+        "selected",
+        "default",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -109,6 +129,15 @@ DEFAULT_RENDERER_REGISTRY: dict[str, RendererRegistration] = {
         label="Chaser dashboard",
         component_key="goodcopbadcop_chaser",
         description="Distance traces, selected-window occupancy, and persisted chaser protocol snapshots.",
+    ),
+    PROVIDER_CHASER_CANDIDATE_RENDERER: RendererRegistration(
+        renderer=PROVIDER_CHASER_CANDIDATE_RENDERER,
+        label="Chaser provider candidate",
+        component_key="provider_chaser_candidate",
+        description=(
+            "Read-only inspection of an exact, manifest-validated, unpromoted "
+            "provider-aware chaser-distance candidate."
+        ),
     ),
     LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER: RendererRegistration(
         renderer=LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
@@ -349,6 +378,119 @@ def _discover_goodcopbadcop_chaser_specs_fast(
     return []
 
 
+def discover_provider_chaser_candidate_options(
+    zarr_path: Path | str,
+    *,
+    run_path_filter: Optional[str] = None,
+    artifact_filter: Optional[str] = None,
+) -> list[InteractiveSpecOption]:
+    """Discover exact valid candidates without introducing selector semantics."""
+
+    archive = Path(zarr_path)
+    root = open_zarr_root(archive, mode="r")
+    run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
+    artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
+    try:
+        parent = root[PROVIDER_CHASER_CANDIDATE_PARENT_PATH]
+    except Exception:
+        return []
+    if _PROVIDER_CHASER_CANDIDATE_FORBIDDEN_SELECTORS.intersection(parent.attrs):
+        return []
+
+    options: list[InteractiveSpecOption] = []
+    for run_name in _group_names(parent):
+        run_path = f"{PROVIDER_CHASER_CANDIDATE_PARENT_PATH}/{run_name}"
+        if run_path_wanted and run_path != run_path_wanted:
+            continue
+        run = parent[run_name]
+        attrs = dict(getattr(run, "attrs", {}))
+        manifest_sha256 = str(
+            attrs.get(PROVIDER_CHASER_CANDIDATE_MANIFEST_DIGEST_ATTR) or ""
+        ).strip()
+        if (
+            attrs.get("schema_id") != PROVIDER_CHASER_CANDIDATE_SCHEMA_ID
+            or attrs.get("stage_selector_eligible") is not False
+            or attrs.get("row_axis") != "stimulus_samples"
+            or not manifest_sha256
+        ):
+            continue
+        try:
+            validation = validate_provider_chaser_distance_candidate(
+                archive / run_path,
+                use_consolidated=True,
+                archive_path=archive,
+                archive_run_path=run_path,
+                expected_manifest_sha256=manifest_sha256,
+            )
+        except Exception:
+            continue
+        if not validation.get("valid"):
+            continue
+
+        static_artifacts = {
+            "Distance trace (stimulus samples)": "visualizations/distance_trace_png",
+            "Distance histogram (stimulus samples)": (
+                "visualizations/distance_histogram_png"
+            ),
+        }
+        accepted_artifacts = {
+            PROVIDER_CHASER_CANDIDATE_ARTIFACT,
+            *static_artifacts.values(),
+            *(join_path(run_path, path) for path in static_artifacts.values()),
+        }
+        if artifact_wanted and artifact_wanted not in accepted_artifacts:
+            continue
+
+        title = f"Unpromoted chaser-distance candidate: {run_name}"
+        spec = {
+            "schema_id": "palette.provider_chaser_distance_candidate_explorer_spec",
+            "schema_version": 1,
+            "renderer": PROVIDER_CHASER_CANDIDATE_RENDERER,
+            "title": title,
+            "run_name": run_name,
+            "candidate_status": "unpromoted_selector_ineligible",
+            "row_axis": "stimulus_samples",
+            "manifest_sha256": manifest_sha256,
+            "source_paths": {
+                "candidate_run": run_path,
+                "position_run": attrs.get("source_position_run_path"),
+                "stimulus_run": attrs.get("source_stimulus_run_path"),
+                "stimulus_epoch_run": attrs.get("source_stimulus_epoch_run_path"),
+            },
+            "static_artifacts": static_artifacts,
+            "adapter_semantics": (
+                "read_only_exact_run_no_selector_no_canonical_promotion"
+            ),
+        }
+        options.append(
+            InteractiveSpecOption(
+                zarr_path=archive,
+                artifact_path=join_path(run_path, "visualizations"),
+                run_path=run_path,
+                artifact_name=PROVIDER_CHASER_CANDIDATE_ARTIFACT,
+                renderer=PROVIDER_CHASER_CANDIDATE_RENDERER,
+                schema_id=PROVIDER_CHASER_CANDIDATE_SCHEMA_ID,
+                title=title,
+                run_name=run_name,
+                label=(
+                    f"Chaser provider candidate | {run_name} | "
+                    "UNPROMOTED · selector-ineligible"
+                ),
+                is_supported=True,
+                attrs=attrs,
+                spec=spec,
+            )
+        )
+    return sorted(
+        options,
+        key=lambda item: (
+            str(item.attrs.get("created_at_utc") or ""),
+            item.run_name,
+        ),
+        reverse=True,
+    )
+
+
 def _discover_track_kinematics_specs_fast(
     root: zarr.Group,
     archive: Path,
@@ -525,6 +667,7 @@ def discover_recording_explorer_spec_options(
     renderer_wanted = str(renderer_filter).strip() if renderer_filter else None
     if renderer_wanted and renderer_wanted not in {
         TRACK_KINEMATICS_PLOT_RENDERER,
+        PROVIDER_CHASER_CANDIDATE_RENDERER,
         *CHASER_DASHBOARD_RENDERERS,
         *BOUT_PLOT_RENDERERS,
         LEGACY_BOUT_PLOT_RENDERER,
@@ -541,6 +684,14 @@ def discover_recording_explorer_spec_options(
         options.extend(
             _discover_track_kinematics_specs_fast(
                 root,
+                archive,
+                run_path_filter=run_path_filter,
+                artifact_filter=artifact_filter,
+            )
+        )
+    if renderer_wanted in {None, PROVIDER_CHASER_CANDIDATE_RENDERER}:
+        options.extend(
+            discover_provider_chaser_candidate_options(
                 archive,
                 run_path_filter=run_path_filter,
                 artifact_filter=artifact_filter,
@@ -585,6 +736,12 @@ def discover_interactive_spec_options(
     if renderer_wanted in CHASER_DASHBOARD_RENDERERS:
         return _discover_goodcopbadcop_chaser_specs_fast(
             root,
+            archive,
+            run_path_filter=run_path_wanted,
+            artifact_filter=artifact_wanted,
+        )
+    if renderer_wanted == PROVIDER_CHASER_CANDIDATE_RENDERER:
+        return discover_provider_chaser_candidate_options(
             archive,
             run_path_filter=run_path_wanted,
             artifact_filter=artifact_wanted,

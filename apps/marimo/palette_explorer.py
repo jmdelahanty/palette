@@ -45,7 +45,6 @@ def _():
         build_controls as build_chaser_controls,
         build_cra_near_field_output,
         build_cra_primary_endpoint_output,
-        build_debug_tables,
         build_detection_occupancy_output,
         build_distance_figure,
         build_egocentric_alignment_output,
@@ -62,6 +61,12 @@ def _():
         resolve_time_windows_from_multiselect,
     )
     from apps.marimo.components.provenance import build_spec_provenance_panel
+    from apps.marimo.components.provider_chaser_candidate import (
+        available_provider_chaser_candidate_analysis_ids,
+        build_provider_chaser_candidate_bearing_output,
+        build_provider_chaser_candidate_bout_response_output,
+        load_provider_chaser_candidate_projection,
+    )
     from apps.marimo.components.recording_workspace import (
         RecordingExplorationWorkspace,
     )
@@ -73,23 +78,23 @@ def _():
     from apps.marimo.components.tail_kinematics import build_tail_kinematics_output
 
     return (
-        PROVIDERS,
-        TRACK_KINEMATICS_RENDERER,
         CoreBehaviorSource,
+        PROVIDERS,
         Path,
         RecordingExplorationWorkspace,
+        TRACK_KINEMATICS_RENDERER,
         analyses_for_provider,
         available_bout_analysis_ids,
         available_chaser_analysis_ids,
+        available_provider_chaser_candidate_analysis_ids,
         build_arena_heatmap,
         build_bout_controls,
         build_bout_kinematics_output,
-        build_chaser_gaze_tracking_output,
         build_chaser_controls,
+        build_chaser_gaze_tracking_output,
         build_core_behavior_output,
         build_cra_near_field_output,
         build_cra_primary_endpoint_output,
-        build_debug_tables,
         build_detection_occupancy_output,
         build_distance_figure,
         build_egocentric_alignment_output,
@@ -98,20 +103,23 @@ def _():
         build_epoch_summary_output,
         build_escape_freeze_output,
         build_fish_heading_output,
+        build_provider_chaser_candidate_bearing_output,
+        build_provider_chaser_candidate_bout_response_output,
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
         build_tail_kinematics_output,
-        discover_recording_explorer_spec_options,
+        discover_chaser_gaze_tracking_components,
         discover_core_behavior_options,
         discover_protocol_recording_options,
-        discover_chaser_gaze_tracking_components,
+        discover_recording_explorer_spec_options,
         go,
         group_specs_by_provider,
-        load_core_behavior_projection,
-        load_chaser_gaze_tracking_view,
         load_bout_metric_projection,
+        load_chaser_gaze_tracking_view,
+        load_core_behavior_projection,
         load_goodcopbadcop_view,
+        load_provider_chaser_candidate_projection,
         mo,
         px,
         resolve_time_window_from_widgets,
@@ -169,8 +177,8 @@ def _(Path, discover_protocol_recording_options, mo):
         initial_artifact,
         initial_renderer,
         initial_run_path,
-        recording_scope_label,
         recording_options,
+        recording_scope_label,
         seed_zarr_path,
         workspace_mode,
     )
@@ -179,7 +187,8 @@ def _(Path, discover_protocol_recording_options, mo):
 @app.cell(hide_code=True)
 def _(mo, recording_options, recording_scope_label, seed_zarr_path):
     recording_by_label = {
-        f"{index + 1}. {option.label}": option for index, option in enumerate(recording_options)
+        f"{index + 1}. {option.label}": option
+        for index, option in enumerate(recording_options)
     }
     seed_resolved = seed_zarr_path.expanduser().resolve()
     default_recording = next(
@@ -201,9 +210,7 @@ def _(mo, recording_options, recording_scope_label, seed_zarr_path):
                 "Zarr projection; exported Parquet datasets use true Polars lazy scans."
             ),
             recording_picker,
-            mo.md(
-                f"{recording_scope_label} · {len(recording_options):,} recording(s)"
-            ),
+            mo.md(f"{recording_scope_label} · {len(recording_options):,} recording(s)"),
         ]
     )
     return recording_by_label, recording_picker
@@ -237,7 +244,14 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(PROVIDERS, core_options, group_specs_by_provider, mo, spec_options, zarr_path):
+def _(
+    PROVIDERS,
+    core_options,
+    group_specs_by_provider,
+    mo,
+    spec_options,
+    zarr_path,
+):
     specs_by_provider = group_specs_by_provider(spec_options)
     if core_options:
         specs_by_provider["core_behavior"] = list(core_options)
@@ -253,7 +267,9 @@ def _(PROVIDERS, core_options, group_specs_by_provider, mo, spec_options, zarr_p
             else next(iter(provider_by_label))
         )
         provider_picker = mo.ui.dropdown(
-            options=list(provider_by_label), value=default_provider, label="Analysis class"
+            options=list(provider_by_label),
+            value=default_provider,
+            label="Analysis class",
         )
         provider_output = mo.vstack(
             [
@@ -297,11 +313,15 @@ def _(mo, provider_specs, selected_provider):
             for index, option in enumerate(provider_specs)
         }
         source_picker = mo.ui.dropdown(
-            options=list(source_by_label), value=next(iter(source_by_label)), label="Analysis run"
+            options=list(source_by_label),
+            value=next(iter(source_by_label)),
+            label="Analysis run",
         )
         source_output = mo.vstack(
             [
-                mo.md(f"### {selected_provider.label}\n\n{selected_provider.description}"),
+                mo.md(
+                    f"### {selected_provider.label}\n\n{selected_provider.description}"
+                ),
                 source_picker,
             ]
         )
@@ -311,7 +331,9 @@ def _(mo, provider_specs, selected_provider):
 
 @app.cell(hide_code=True)
 def _(source_by_label, source_picker):
-    selected_spec = source_by_label[source_picker.value] if source_picker is not None else None
+    selected_spec = (
+        source_by_label[source_picker.value] if source_picker is not None else None
+    )
     return (selected_spec,)
 
 
@@ -321,6 +343,7 @@ def _(
     analyses_for_provider,
     available_bout_analysis_ids,
     available_chaser_analysis_ids,
+    available_provider_chaser_candidate_analysis_ids,
     mo,
     selected_provider,
     selected_spec,
@@ -334,11 +357,20 @@ def _(
         available_ids = core_source.available_analysis_ids()
     elif selected_provider.provider_id == "bout_kinematics":
         available_ids = available_bout_analysis_ids(zarr_path, selected_spec)
+    elif selected_provider.provider_id == "stimulus_chaser_candidate":
+        available_ids = available_provider_chaser_candidate_analysis_ids(
+            zarr_path, selected_spec
+        )
     else:
         available_ids = available_chaser_analysis_ids(zarr_path, selected_spec)
-    definitions = {
-        item.analysis_id: item for item in analyses_for_provider(selected_provider.provider_id)
-    } if selected_provider is not None else {}
+    definitions = (
+        {
+            item.analysis_id: item
+            for item in analyses_for_provider(selected_provider.provider_id)
+        }
+        if selected_provider is not None
+        else {}
+    )
     analysis_by_label = {
         definitions[analysis_id].label: definitions[analysis_id]
         for analysis_id in available_ids
@@ -346,12 +378,16 @@ def _(
     }
     if analysis_by_label:
         analysis_picker = mo.ui.dropdown(
-            options=list(analysis_by_label), value=next(iter(analysis_by_label)), label="Analysis"
+            options=list(analysis_by_label),
+            value=next(iter(analysis_by_label)),
+            label="Analysis",
         )
         analysis_output = analysis_picker
     else:
         analysis_picker = None
-        analysis_output = mo.md("No analysis in this class has all required persisted inputs.")
+        analysis_output = mo.md(
+            "No analysis in this class has all required persisted inputs."
+        )
     analysis_output
     return analysis_by_label, analysis_picker, core_source
 
@@ -359,9 +395,13 @@ def _(
 @app.cell(hide_code=True)
 def _(analysis_by_label, analysis_picker):
     selected_analysis = (
-        analysis_by_label[analysis_picker.value] if analysis_picker is not None else None
+        analysis_by_label[analysis_picker.value]
+        if analysis_picker is not None
+        else None
     )
-    selected_analysis_id = selected_analysis.analysis_id if selected_analysis is not None else ""
+    selected_analysis_id = (
+        selected_analysis.analysis_id if selected_analysis is not None else ""
+    )
     return selected_analysis, selected_analysis_id
 
 
@@ -418,7 +458,9 @@ def _(
     bout_projection_error = None
     if bout_controls is not None and selected_spec is not None:
         try:
-            bout_metric = bout_controls.metric_by_label[bout_controls.metric_picker.value]
+            bout_metric = bout_controls.metric_by_label[
+                bout_controls.metric_picker.value
+            ]
             bout_heading_level = (
                 str(bout_controls.heading_level_picker.value)
                 if bout_controls.heading_level_picker is not None
@@ -505,7 +547,7 @@ def _(core_source, mo, selected_analysis_id):
         selected_tail_run = None
         tail_run_output = mo.md("")
     tail_run_output
-    return selected_tail_run, tail_run_picker
+    return (selected_tail_run,)
 
 
 @app.cell(hide_code=True)
@@ -557,9 +599,7 @@ def _(
         core_series_picker = mo.ui.multiselect(
             options=core_series_options,
             value=list(
-                core_source.default_tail_scalar_series_for(
-                    selected_tail_run.run_name
-                )
+                core_source.default_tail_scalar_series_for(selected_tail_run.run_name)
             ),
             label="Tail scalar traces",
         )
@@ -603,7 +643,9 @@ def _(
                 min((core_stop_s - core_start_s) / 10000.0, 1.0),
                 0.01,
             )
-        elif selected_analysis_id == "tail_kinematics" and selected_tail_run is not None:
+        elif (
+            selected_analysis_id == "tail_kinematics" and selected_tail_run is not None
+        ):
             core_start_s, core_stop_s = core_source.tail_time_bounds(
                 selected_tail_run.run_name
             )
@@ -634,8 +676,8 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
-    core_source,
     core_series_picker,
+    core_source,
     core_time_window,
     eye_representation_picker,
     load_core_behavior_projection,
@@ -666,9 +708,7 @@ def _(
                     else None
                 ),
                 eye_run_name=(
-                    selected_eye_run.run_name
-                    if selected_eye_run is not None
-                    else None
+                    selected_eye_run.run_name if selected_eye_run is not None else None
                 ),
                 eye_representation=(
                     str(eye_representation_picker.value)
@@ -830,6 +870,33 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(
+    load_provider_chaser_candidate_projection,
+    selected_analysis_id,
+    selected_provider,
+    selected_spec,
+    zarr_path,
+):
+    candidate_projection = None
+    candidate_projection_error = None
+    if (
+        selected_provider is not None
+        and selected_provider.provider_id == "stimulus_chaser_candidate"
+        and selected_spec is not None
+        and selected_analysis_id in {"egocentric_bearing", "bout_response"}
+    ):
+        try:
+            candidate_projection = load_provider_chaser_candidate_projection(
+                zarr_path,
+                selected_spec,
+                require_bout=selected_analysis_id == "bout_response",
+            )
+        except Exception as exc:
+            candidate_projection_error = f"{type(exc).__name__}: {exc}"
+    return candidate_projection, candidate_projection_error
+
+
+@app.cell(hide_code=True)
 def _(build_chaser_controls, chaser_loaded, mo, selected_analysis_id):
     analyses_with_controls = {
         "distance",
@@ -856,19 +923,30 @@ def _(chaser_controls, mo, selected_analysis_id):
         items = []
         if selected_analysis_id == "distance":
             items.append(chaser_controls.distance_series_picker)
-        if selected_analysis_id in {"distance", "egocentric_bearing", "polar_distance", "alignment"}:
+        if selected_analysis_id in {
+            "distance",
+            "egocentric_bearing",
+            "polar_distance",
+            "alignment",
+        }:
             items.append(chaser_controls.chaser_picker)
         if selected_analysis_id == "egocentric_bearing":
             items.append(chaser_controls.egocentric_epoch_picker)
         else:
             items.append(chaser_controls.epoch_picker)
-            if chaser_controls.epoch_options.get(chaser_controls.epoch_picker.value) is None:
+            if (
+                chaser_controls.epoch_options.get(chaser_controls.epoch_picker.value)
+                is None
+            ):
                 items.append(chaser_controls.time_window)
         if selected_analysis_id in {"polar_distance", "position_heatmap"}:
             items.append(chaser_controls.heatmap_bins)
         if selected_analysis_id == "position_heatmap":
             items.append(chaser_controls.chaser_overlay)
-        if selected_analysis_id == "spatial_occupancy" and chaser_controls.spatial_zone_set_picker is not None:
+        if (
+            selected_analysis_id == "spatial_occupancy"
+            and chaser_controls.spatial_zone_set_picker is not None
+        ):
             items.append(chaser_controls.spatial_zone_set_picker)
         chaser_controls_output = mo.vstack(items)
     chaser_controls_output
@@ -890,7 +968,12 @@ def _(chaser_controls, chaser_loaded, resolve_time_window_from_widgets):
 
 
 @app.cell(hide_code=True)
-def _(chaser_controls, chaser_loaded, resolve_time_windows_from_multiselect, selected_analysis_id):
+def _(
+    chaser_controls,
+    chaser_loaded,
+    resolve_time_windows_from_multiselect,
+    selected_analysis_id,
+):
     if (
         selected_analysis_id == "egocentric_bearing"
         and chaser_loaded is not None
@@ -912,7 +995,6 @@ def _(
     build_chaser_gaze_tracking_output,
     build_cra_near_field_output,
     build_cra_primary_endpoint_output,
-    build_debug_tables,
     build_detection_occupancy_output,
     build_distance_figure,
     build_egocentric_alignment_output,
@@ -921,9 +1003,13 @@ def _(
     build_epoch_summary_output,
     build_escape_freeze_output,
     build_fish_heading_output,
+    build_provider_chaser_candidate_bearing_output,
+    build_provider_chaser_candidate_bout_response_output,
     build_spatial_occupancy_output,
     build_spec_provenance_panel,
     build_static_artifacts_panel,
+    candidate_projection,
+    candidate_projection_error,
     chaser_controls,
     chaser_egocentric_windows,
     chaser_error,
@@ -938,13 +1024,24 @@ def _(
     selected_spec,
     zarr_path,
 ):
-    if selected_provider is None or selected_provider.provider_id != "stimulus_chaser":
+    if selected_provider is None or selected_provider.provider_id not in {
+        "stimulus_chaser",
+        "stimulus_chaser_candidate",
+    }:
         chaser_output = mo.md("")
     elif chaser_error:
         chaser_output = mo.md(f"Chaser analysis failed: `{chaser_error}`")
+    elif candidate_projection_error:
+        chaser_output = mo.callout(
+            f"Candidate projection failed: `{candidate_projection_error}`",
+            kind="danger",
+        )
     elif selected_analysis_id == "static_artifacts" and selected_spec is not None:
         chaser_output = build_static_artifacts_panel(
-            mo, zarr_path=zarr_path, run_path=selected_spec.run_path, spec=selected_spec.spec
+            mo,
+            zarr_path=zarr_path,
+            run_path=selected_spec.run_path,
+            spec=selected_spec.spec,
         )
     elif selected_analysis_id == "provenance" and selected_spec is not None:
         chaser_output = build_spec_provenance_panel(
@@ -952,6 +1049,19 @@ def _(
             spec=selected_spec.spec,
             artifact_attrs=selected_spec.attrs,
             option=selected_spec,
+        )
+    elif (
+        selected_analysis_id == "egocentric_bearing"
+        and candidate_projection is not None
+    ):
+        chaser_output = build_provider_chaser_candidate_bearing_output(
+            mo,
+            candidate_projection,
+        )
+    elif selected_analysis_id == "bout_response" and candidate_projection is not None:
+        chaser_output = build_provider_chaser_candidate_bout_response_output(
+            mo,
+            candidate_projection,
         )
     elif selected_analysis_id == "gaze_tracking" and chaser_gaze_view is not None:
         chaser_output = build_chaser_gaze_tracking_output(
@@ -973,12 +1083,18 @@ def _(
         )
     elif selected_analysis_id == "egocentric_bearing":
         chaser_output = build_egocentric_bearing_output(
-            mo, go, loaded=chaser_loaded, windows=chaser_egocentric_windows,
+            mo,
+            go,
+            loaded=chaser_loaded,
+            windows=chaser_egocentric_windows,
             chaser_picker=chaser_controls.chaser_picker,
         )
     elif selected_analysis_id == "polar_distance" and chaser_window is not None:
         chaser_output = build_egocentric_polar_heatmap_output(
-            mo, go, loaded=chaser_loaded, window=chaser_window,
+            mo,
+            go,
+            loaded=chaser_loaded,
+            window=chaser_window,
             chaser_picker=chaser_controls.chaser_picker,
         )
     elif selected_analysis_id == "fish_heading" and chaser_window is not None:
@@ -987,7 +1103,10 @@ def _(
         )
     elif selected_analysis_id == "alignment" and chaser_window is not None:
         chaser_output = build_egocentric_alignment_output(
-            mo, go, loaded=chaser_loaded, window=chaser_window,
+            mo,
+            go,
+            loaded=chaser_loaded,
+            window=chaser_window,
             chaser_picker=chaser_controls.chaser_picker,
         )
     elif selected_analysis_id == "position_heatmap" and chaser_window is not None:
@@ -1004,7 +1123,10 @@ def _(
         )
     elif selected_analysis_id == "spatial_occupancy" and chaser_window is not None:
         chaser_output = build_spatial_occupancy_output(
-            mo, go, loaded=chaser_loaded, window=chaser_window,
+            mo,
+            go,
+            loaded=chaser_loaded,
+            window=chaser_window,
             spatial_zone_set_picker=chaser_controls.spatial_zone_set_picker,
         )
     elif selected_analysis_id == "cra_quadrant":
@@ -1082,7 +1204,7 @@ def _(recording_workspace, workspace_mode):
     # or `exploration.open_zarr()`.
     exploration = recording_workspace if workspace_mode else None
     exploration
-    return (exploration,)
+    return
 
 
 if __name__ == "__main__":

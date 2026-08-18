@@ -53,6 +53,10 @@ from fisheye.shared.pixel_frame_authority import (
     parse_crop_placement_ownership,
 )
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+)
 from tests.unit.fisheye.test_keypoint_coordinate_publication import (
     _artifact as _keypoint_artifact,
     _fixture as _keypoint_publication_fixture,
@@ -1381,6 +1385,30 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         surfaces.pose_bbox_xyxy_norm.reference_frame_authority.record_ref
         == bbox_evidence["normalized_frame"]["record_ref"]
     )
+    run.attrs["status"] = RUN_STATUS_COMPLETE
+    run.attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_COMPLETE
+    reloaded_binding = (
+        historical_crop.load_historical_bbox_normalization_from_successor(
+            binding,
+            root=root,
+            successor_run=run,
+            successor_run_path="keypoints_runs/k1",
+        )
+    )
+    reloaded_evidence = (
+        reloaded_binding.source.crop_geometry.source_geometry.frame_evidence
+    )
+    assert (
+        reloaded_evidence.normalized_frame.record_ref
+        == bbox_evidence["normalized_frame"]["record_ref"]
+    )
+    assert [
+        item.record_ref
+        for item in reloaded_evidence.normalized_to_source_camera.transform_records
+    ] == [
+        item["record_ref"]
+        for item in bbox_evidence["normalized_to_source_camera"]
+    ]
     fresh_root = type(root)(root._coordinate_archive_token)
     with historical_crop.historical_geometry_only_crop_loader(publication_binding):
         assert (

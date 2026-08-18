@@ -131,7 +131,12 @@ def _coordinate_record(source: Any) -> dict[str, Any]:
                 record_ref=frame.record_ref,
                 record_sha256=frame.record_sha256,
             ),
-            reference_selector=endpoint.selector,
+            # ``BoundPixelFrameAuthority.endpoint.selector`` names the
+            # persisted attribute that stores the pixel-frame record.  A
+            # canonical descriptor that also supplies ``frame_record`` must
+            # select that complete typed record, not repeat its attribute
+            # name as an extent selector.
+            reference_selector="record",
             row_identity_contract=identity.contract,
             row_identity_record_ref=identity.record_ref,
             overlay_transform_refs=(),

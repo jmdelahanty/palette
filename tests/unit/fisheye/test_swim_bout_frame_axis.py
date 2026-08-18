@@ -22,6 +22,10 @@ LEGACY_SOURCE_PATH = (
     "analysis/track_kinematics_runs/offline/tk_exact/tracks/id_0/frame_indices"
 )
 MOTION_MANIFEST_SHA256 = "a" * 64
+PROVIDER_SOURCE_PATH = (
+    "analysis/track_kinematics_runs/provider/provider_exact/"
+    "source_acquisition_frame_index"
+)
 
 
 def _root_with_run(*, source_values: np.ndarray | None = None):
@@ -69,6 +73,103 @@ def test_reference_contract_pins_exact_authoritative_path() -> None:
     assert contract["embedded_path"] is None
     assert contract["shape"] == [4]
     assert contract["content_sha256"] == canonical_frame_axis_sha256(frames)
+
+
+def test_resolver_accepts_manifest_bound_whole_track_provider_axis() -> None:
+    frames = np.asarray([10, 11, 15], dtype=np.int64)
+    root = zarr.group()
+    analysis = root.create_group("analysis")
+    provider = (
+        analysis.create_group("track_kinematics_runs")
+        .create_group("provider")
+        .create_group("provider_exact")
+    )
+    provider.create_array("source_acquisition_frame_index", data=frames)
+    run = (
+        analysis.create_group("swim_bout_runs")
+        .create_group("provider_bouts")
+    )
+    run.attrs.update(
+        {
+            "source_track_kinematics_run": "provider_exact",
+            "source_track_kinematics_scope": "provider",
+            "source_track_motion_manifest_sha256": MOTION_MANIFEST_SHA256,
+            "track_id": 0,
+            "source_track_motion_authority": {
+                "schema_id": "palette.provider_track_motion_read_authority",
+                "schema_version": 1,
+                "run_ref": (
+                    "/analysis/track_kinematics_runs/provider/provider_exact"
+                ),
+                "track_ref": (
+                    "/analysis/track_kinematics_runs/provider/provider_exact"
+                ),
+                "track_id": 0,
+                "track_row_start": 0,
+                "track_row_stop": 3,
+                "motion_manifest_sha256": MOTION_MANIFEST_SHA256,
+            },
+        }
+    )
+    run.attrs[FRAME_AXIS_CONTRACT_ATTR] = build_frame_axis_contract(
+        frames,
+        authoritative_path=PROVIDER_SOURCE_PATH,
+        source_track_kinematics_run="provider_exact",
+        track_id=0,
+        source_track_motion_manifest_sha256=MOTION_MANIFEST_SHA256,
+    )
+
+    resolved = resolve_swim_bout_frame_axis(root, run, expected_length=3)
+
+    np.testing.assert_array_equal(resolved, frames)
+
+
+def test_resolver_rejects_partial_provider_track_authority() -> None:
+    frames = np.asarray([10, 11, 15], dtype=np.int64)
+    root = zarr.group()
+    analysis = root.create_group("analysis")
+    provider = (
+        analysis.create_group("track_kinematics_runs")
+        .create_group("provider")
+        .create_group("provider_exact")
+    )
+    provider.create_array("source_acquisition_frame_index", data=frames)
+    run = analysis.create_group("swim_bout_runs").create_group("provider_bouts")
+    run.attrs.update(
+        {
+            "source_track_kinematics_run": "provider_exact",
+            "source_track_kinematics_scope": "provider",
+            "source_track_motion_manifest_sha256": MOTION_MANIFEST_SHA256,
+            "track_id": 0,
+            "source_track_motion_authority": {
+                "schema_id": "palette.provider_track_motion_read_authority",
+                "schema_version": 1,
+                "run_ref": (
+                    "/analysis/track_kinematics_runs/provider/provider_exact"
+                ),
+                "track_ref": (
+                    "/analysis/track_kinematics_runs/provider/provider_exact"
+                ),
+                "track_id": 0,
+                "track_row_start": 1,
+                "track_row_stop": 3,
+                "motion_manifest_sha256": MOTION_MANIFEST_SHA256,
+            },
+        }
+    )
+    run.attrs[FRAME_AXIS_CONTRACT_ATTR] = build_frame_axis_contract(
+        frames,
+        authoritative_path=PROVIDER_SOURCE_PATH,
+        source_track_kinematics_run="provider_exact",
+        track_id=0,
+        source_track_motion_manifest_sha256=MOTION_MANIFEST_SHA256,
+    )
+
+    with pytest.raises(
+        SwimBoutFrameAxisError,
+        match="complete selected track rowset",
+    ):
+        resolve_swim_bout_frame_axis(root, run, expected_length=3)
 
 
 def test_reference_contract_rejects_latest_pointer() -> None:

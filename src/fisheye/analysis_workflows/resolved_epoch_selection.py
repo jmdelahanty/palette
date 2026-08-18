@@ -34,6 +34,10 @@ from fisheye.analysis.stimulus_epoch_schema import (
     stimulus_epoch_logical_content_sha256,
     stimulus_group_logical_fingerprint,
 )
+from fisheye.shared.stimulus_coordinate_contract import (
+    COORDINATE_CONTRACT_EPOCH,
+    STIMULUS_IMPORT_VERSION,
+)
 from fisheye.analysis_workflows.provider_recording_timing_authority import (
     load_provider_recording_timing_authority,
 )
@@ -149,6 +153,55 @@ def _canonical_manifest(run_group: Any) -> tuple[dict[str, Any], str, str]:
     )
 
 
+def _source_stimulus_format_identity(source_group: Any) -> dict[str, Any]:
+    """Resolve a declared schema or one exact maintained legacy import contract.
+
+    Historical canonical stimulus imports predate top-level ``schema_id`` and
+    ``schema_version`` attributes.  They do, however, bind the maintained
+    import version, coordinate-contract epoch, and writer command.  Treat that
+    observed tuple as a format identity instead of inventing a schema name or
+    mutating the immutable stimulus run in place.
+    """
+
+    attrs = source_group.attrs
+    schema_id = attrs.get("schema_id")
+    schema_version = attrs.get("schema_version")
+    if schema_id is not None or schema_version is not None:
+        return {
+            "identity_kind": "declared_schema",
+            "schema_id": _require_text(
+                schema_id,
+                name="source stimulus schema_id",
+            ),
+            "schema_version": _require_positive_int(
+                schema_version,
+                name="source stimulus schema_version",
+            ),
+        }
+
+    import_version = attrs.get("import_version")
+    coordinate_epoch = attrs.get("coordinate_contract_epoch")
+    provenance = attrs.get("run_provenance")
+    writer_command = (
+        provenance.get("command") if isinstance(provenance, Mapping) else None
+    )
+    if (
+        import_version != STIMULUS_IMPORT_VERSION
+        or coordinate_epoch != COORDINATE_CONTRACT_EPOCH
+        or writer_command != "fisheye.analysis.import_stimulus_to_zarr"
+    ):
+        raise ResolvedEpochSelectionError(
+            "Source stimulus has neither a declared schema nor the exact "
+            "maintained legacy import identity."
+        )
+    return {
+        "identity_kind": "maintained_legacy_import_contract",
+        "import_version": import_version,
+        "coordinate_contract_epoch": int(coordinate_epoch),
+        "writer_command": writer_command,
+    }
+
+
 def _source_timeline_binding(
     root: zarr.Group,
     run_group: Any,
@@ -178,15 +231,7 @@ def _source_timeline_binding(
         raise ResolvedEpochSelectionError(
             "Source stimulus timeline run-name identity is stale."
         )
-    source_schema_id = _require_text(
-        source_group.attrs.get("schema_id"),
-        name="source stimulus schema_id",
-    )
-    source_schema_version = source_group.attrs.get("schema_version")
-    if type(source_schema_version) is not int or source_schema_version <= 0:
-        raise ResolvedEpochSelectionError(
-            "source stimulus schema_version must be one positive exact integer."
-        )
+    source_format_identity = _source_stimulus_format_identity(source_group)
     fingerprint_algorithm = _require_text(
         attrs.get("source_stimulus_fingerprint_algorithm"),
         name="source_stimulus_fingerprint_algorithm",
@@ -218,8 +263,7 @@ def _source_timeline_binding(
         "recording_id": recording_id,
         "source_stimulus_run": source_run,
         "source_stimulus_path": source_path,
-        "source_stimulus_schema_id": source_schema_id,
-        "source_stimulus_schema_version": source_schema_version,
+        "source_stimulus_format_identity": source_format_identity,
         "source_event_schema": source_event_schema,
         "fingerprint_algorithm": fingerprint_algorithm,
         "fingerprint": declared_fingerprint,

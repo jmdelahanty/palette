@@ -423,6 +423,21 @@ zero failures.
 11. Fail closed on stale source digests or incomplete/ineligible inputs.
 12. Do not make SQLite or an external image directory the analysis authority.
 
+## Implementation checkpoint (2026-08-18)
+
+The provider-aware foundation now supports exact recording/timing bindings,
+provider-motion source handles, resolved epoch selections, immutable
+provider-epoch behavior summaries, cohort exports/plots, and a
+provider-position chaser-distance canary. The recording Marimo explorer can
+inspect the selector-ineligible chaser candidate, semantic chaser roles,
+egocentric bearing, and bout-response rows without changing scientific or
+registry state.
+
+This is a narrow canary implementation, not the complete composable analytics
+system described here. Generic occupancy/contrast schemas, arbitrary
+selection algebra, plot recipes, recording-local discovery, and provider
+promotion remain open. No production provider selector was changed.
+
 ## Implementation Checklist
 
 ### Phase 1: contracts and in-memory composition
@@ -435,13 +450,18 @@ zero failures.
       union, intersection, difference, occurrence handling, and canonical
       digests.
 - [x] Add a compatibility adapter from existing stimulus epoch windows.
-- [ ] Define a capability registry for generic metrics and protocol providers.
+- [x] Define the provider-analysis capability/offer foundation used by the
+      implemented motion, epoch-behavior, and chaser-candidate canaries.
+- [ ] Generalize that capability registry to all generic metrics, protocol
+      providers, plot classes, and composed selections.
 - [x] Define typed position-provider and body-frame-provider requirements so
       generic metrics do not hardcode detection centroids or keypoint headings.
 - [x] Bind provider and temporal-selection identities to one exact validated
       recording/source-video/acquisition-clock authority digest.
-- [ ] Bind every position-, speed-, heading-, and angular-motion offer to exact
-      provider identities and digests.
+- [x] Bind implemented provider-motion, epoch-behavior, cohort, and
+      chaser-candidate products to exact provider identities and digests.
+- [ ] Extend exact provider binding to every generic position, speed, heading,
+      and angular-motion offer.
 
 ### Phase 2: scientific products
 
@@ -477,6 +497,9 @@ zero failures.
       and plot artifacts.
 - [ ] Refresh projections through one receipt-driven serial finalizer, never
       per-worker SQLite writes.
+- [x] Expose the selector-ineligible provider chaser-distance candidate,
+      semantic role labels, bearing, and bout-response rows in the
+      recording-level Marimo canary.
 - [ ] Update the review/reporting UI to browse available analyses and plot
       classes by recording, step, composition, and readiness.
 

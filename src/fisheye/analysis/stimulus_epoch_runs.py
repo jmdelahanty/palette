@@ -318,6 +318,7 @@ def write_stimulus_epoch_run(
     result: StimulusEpochResult,
     *,
     overwrite: bool = False,
+    selector_ineligible: bool = False,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
     analysis = root.require_group("analysis")
@@ -328,8 +329,14 @@ def write_stimulus_epoch_run(
             raise ValueError(f"Stimulus epoch run already exists: analysis/{PARENT_NAME}/{run_name}")
         del parent[run_name]
     run = parent.create_group(run_name)
-    mark_run_pending(parent, run_name)
+    if not selector_ineligible:
+        mark_run_pending(parent, run_name)
     mark_run_started(run, run_name=run_name, stage="stimulus_epoch")
+    if selector_ineligible:
+        # This v1 compatibility source is complete but must never become a
+        # parent-selected run.  Set the explicit marker before completion so
+        # mark_run_complete cannot publish it implicitly.
+        run.attrs["stage_selector_eligible"] = False
     try:
         windows = run.require_group("windows")
         items = list(result.windows)
@@ -404,6 +411,11 @@ def write_stimulus_epoch_run(
             "protocol_profile": profile_ref,
             "fps": result.fps,
             "total_frames": result.total_frames,
+            "publication_policy": (
+                "selector_ineligible_nonpromoting_v1"
+                if selector_ineligible
+                else "default_promoting_v1"
+            ),
         }
         attrs = {
             "schema_id": SCHEMA_ID,
@@ -456,7 +468,7 @@ def write_stimulus_epoch_run(
         write_run_lineage_attrs(run, lineage_payload, fingerprint_status="best_effort", overwrite=True)
         mark_run_complete(
             run,
-            parent_group=parent,
+            parent_group=None if selector_ineligible else parent,
             run_name=run_name,
             run_provenance=build_writer_run_provenance(
                 command="fisheye.analysis.stimulus_epoch_runs",
@@ -465,7 +477,12 @@ def write_stimulus_epoch_run(
             ),
         )
     except Exception as exc:
-        mark_run_failed(run, error=str(exc))
+        mark_run_failed(
+            run,
+            parent_group=None if selector_ineligible else parent,
+            run_name=run_name,
+            error=str(exc),
+        )
         raise
     return f"analysis/{PARENT_NAME}/{run_name}"
 
@@ -512,6 +529,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite an existing run with the same name.",
     )
+    parser.add_argument(
+        "--selector-ineligible",
+        action="store_true",
+        help=(
+            "Write a complete v1 compatibility run without changing parent "
+            "selectors."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     return parser
 
@@ -526,9 +551,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     path = None
     if args.apply:
-        path = write_stimulus_epoch_run(Path(args.zarr_path), result, overwrite=bool(args.overwrite))
+        path = write_stimulus_epoch_run(
+            Path(args.zarr_path),
+            result,
+            overwrite=bool(args.overwrite),
+            selector_ineligible=bool(args.selector_ineligible),
+        )
     payload = _result_payload(result)
     payload["applied_path"] = path
+    payload["selector_ineligible"] = bool(args.selector_ineligible)
     if args.json:
         print(json.dumps(json_attr_safe(payload), indent=2, sort_keys=True))
     else:
