@@ -12,10 +12,12 @@ from fisheye.tracking.single_subject_per_arena import (
     write_single_subject_per_arena_tracking_run,
 )
 from fisheye.shared.rowset_fingerprint import build_rowset_fingerprint
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.tracking.run_manifest import (
     TRACKING_RUN_MANIFEST_ATTR,
     TRACKING_RUN_MANIFEST_DIGEST_ATTR,
     tracking_run_manifest_digest,
+    validate_tracking_run_manifest,
 )
 
 
@@ -254,6 +256,44 @@ def test_tracking_run_persists_modern_identity_and_rowset_fingerprint() -> None:
     assert run_group.attrs[TRACKING_RUN_MANIFEST_DIGEST_ATTR] == (
         tracking_run_manifest_digest(run_group.attrs[TRACKING_RUN_MANIFEST_ATTR])
     )
+
+
+def test_tracking_manifest_v1_remains_readable_after_generic_source_upgrade() -> None:
+    root = _memory_root()
+    run_name, run_group, _ = write_single_subject_per_arena_tracking_run(
+        root=root,
+        arena_ids=np.array([0], dtype=np.int32),
+        frame_indices=np.array([4], dtype=np.int32),
+        instance_key=np.array([44], dtype=np.uint64),
+        source_detect_run="detect_a",
+        source_arena_assignment_run="arena_a",
+        source_rowset_path="detect_runs/detect_a",
+    )
+    manifest = dict(run_group.attrs[TRACKING_RUN_MANIFEST_ATTR])
+    payload = dict(manifest["payload"])
+    source = dict(payload["source"])
+    for name in (
+        "source_authority_kind",
+        "source_subject_position_run",
+        "source_subject_position_manifest_sha256",
+        "source_subject_position_decoded_content_sha256",
+    ):
+        source.pop(name)
+    payload["source"] = source
+    legacy = {
+        "schema_id": manifest["schema_id"],
+        "schema_version": 1,
+        "payload": payload,
+        "payload_digest": canonical_json_sha256(payload),
+    }
+
+    result = validate_tracking_run_manifest(
+        legacy,
+        expected_run_name=run_name,
+        expected_selector_eligible=True,
+    )
+
+    assert result["valid"] is True
 
 
 def test_load_tracking_ids_joins_by_instance_key_when_consumer_rows_reorder() -> None:
