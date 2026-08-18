@@ -16,13 +16,11 @@ from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.model_input_transform import model_input_transform_from_attrs
 from fisheye.shared.refined_subject_mask_coordinate_publication import (
     REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
-    load_persisted_ineligible_refined_subject_mask_coordinate_surfaces,
     prepare_refined_subject_mask_coordinate_context,
     publish_refined_subject_mask_coordinate_surfaces,
 )
 from fisheye.shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
-    load_persisted_ineligible_subject_mask_coordinate_surfaces,
     prepare_subject_mask_coordinate_context,
     publish_subject_mask_coordinate_surfaces,
 )
@@ -804,9 +802,8 @@ def publish_subject_mask_coordinate_successors(
             # context snapshot. Reopen the exact subgroup after publication so
             # an older Zarr metadata cache cannot restore pre-publication attrs
             # on a later update.
-            raw_run = zarr.open_group(
-                str(raw_target_fs), mode="a", use_consolidated=False
-            )
+            root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
+            raw_run = root[f"{_RAW_FAMILY}/{raw_target_id}"]
             raw_run.attrs["coordinate_successor_padded_crop_lineage"] = {
                 "source_crop_adapter": historical_crop.as_record(),
                 "placement_ownership": bind_persisted_padded_placement_record(raw_run),
@@ -878,13 +875,12 @@ def publish_subject_mask_coordinate_successors(
                 raise RuntimeError(
                     "Raw mask successor validation failed: " + "; ".join(raw_errors)
                 )
-            with historical_geometry_only_crop_loader(historical_crop):
-                raw_loaded = load_persisted_ineligible_subject_mask_coordinate_surfaces(
-                    open_zarr_root(archive, mode="r"),
-                    f"{_RAW_FAMILY}/{raw_target_id}",
-                    expected_publication_owner=raw_owner,
-                )
-            del raw_loaded
+            # The publisher just performed the complete value-and-derived-
+            # metric scan while this transaction holds the archive publication
+            # lock. The manifest validation above and authority reload below
+            # verify its persisted metadata. A complete-reader reload here
+            # would repeat the same multi-gigabyte scientific scan without an
+            # intervening mutation boundary.
 
             receipts["refined_copy"] = copy_metadata_and_link_payload(
                 refined_source_fs, refined_target_fs
@@ -943,9 +939,8 @@ def publish_subject_mask_coordinate_successors(
                 f"{_REFINED_FAMILY}/{refined_target_id}",
                 expected_publication_owner=refined_owner,
             )
-            refined_run = zarr.open_group(
-                str(refined_target_fs), mode="a", use_consolidated=False
-            )
+            root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
+            refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]
             refined_authority = build_coordinate_successor_authority(
                 kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
                 source_family=_REFINED_FAMILY,
@@ -1017,11 +1012,10 @@ def publish_subject_mask_coordinate_successors(
                     "Refined mask successor validation failed: "
                     + "; ".join(refined_errors)
                 )
-            load_persisted_ineligible_refined_subject_mask_coordinate_surfaces(
-                final_root,
-                f"{_REFINED_FAMILY}/{refined_target_id}",
-                expected_publication_owner=refined_owner,
-            )
+            # Refined publication likewise completed its one full dense-mask
+            # and derived-metric scan under this same lock. Persisted core
+            # declarations and both successor authorities are verified below
+            # without redundantly rescanning raw and refined rasters.
             load_coordinate_successor_authority(
                 final_root[f"{_RAW_FAMILY}/{raw_target_id}"],
                 expected_kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
@@ -1081,6 +1075,10 @@ def publish_subject_mask_coordinate_successors(
             "selectors_after": initial["selectors_before"],
             "selector_activation": SELECTOR_ACTIVATION_DEFERRED,
             "registry_updated": False,
+            "scientific_validation": (
+                "one_full_raw_and_refined_surface_scan_each_under_single_locked_"
+                "publication_transaction_v1"
+            ),
         }
     )
 

@@ -232,6 +232,30 @@ def test_subject_mask_successor_record_pointers_accept_bound_and_persisted_recor
     }
 
 
+def test_subject_mask_successor_fresh_archive_child_retains_record_path(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "fresh-child.zarr"
+    root = zarr.open_group(str(archive), mode="w")
+    run = root.create_group("subject_mask_runs/successor")
+    record = {
+        "schema_id": "palette.test.coordinate_record",
+        "schema_version": 1,
+    }
+    run.attrs["test_record"] = record
+    run.attrs["test_record_sha256"] = canonical_json_sha256(record)
+
+    fresh_root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
+    fresh_run = fresh_root["subject_mask_runs/successor"]
+
+    assert historical_crop.bind_persisted_run_attribute_record(
+        fresh_run, attr_name="test_record"
+    ) == {
+        "record_ref": "/subject_mask_runs/successor@test_record",
+        "record_sha256": canonical_json_sha256(record),
+    }
+
+
 def _historical_crop_fixture(tmp_path: Path):
     n_frames = 5
     n_instances = 4
