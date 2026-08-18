@@ -1239,6 +1239,7 @@ def _real_canonical_archive(
     tmp_path: Any,
     *,
     include_bilateral_eyes: bool = False,
+    selected_crop_rows: np.ndarray | None = None,
 ) -> tuple[Any, Any]:
     root = zarr.open_group(str(tmp_path / "canonical.zarr"), mode="w")
     root.attrs.update(
@@ -1583,7 +1584,10 @@ def _real_canonical_archive(
             "pose_schema": pose_schema,
         }
     )
-    selected = np.asarray([1, 0], dtype="<i8")
+    selected = np.asarray(
+        [1, 0] if selected_crop_rows is None else selected_crop_rows,
+        dtype="<i8",
+    )
     run.create_array("source_crop_row_ids", data=selected)
     run.create_array("instance_key", data=np.asarray(crop_key[:])[selected])
     run.create_array(
