@@ -459,6 +459,34 @@ silently redefine algorithm success as anatomical/QC validity. Downstream eye
 analytics must apply an explicit versioned QC policy if they wish to reject
 such fits.
 
+### Persisted historical-crop successor reload
+
+The strict raw successor loader must not reopen a sealed historical
+geometry-only crop through the ordinary future-normal crop loader. That crop is
+intentionally not a canonical materialized-pixel publication. Instead, a
+complete successor may reinstall only its own persisted historical-crop adapter
+after validating all of the following:
+
+- the raw coordinate-successor authority and coordinate-validation receipt;
+- the authority-bound padded-crop-lineage record;
+- the separately digest-bound adapter record, which must exactly equal the
+  adapter nested in padded-crop lineage;
+- the immutable source core manifest and the exact source/crop row selection;
+- a freshly reconstructed adapter record that exactly matches the persisted
+  record.
+
+The refined loader inherits the corresponding padded-placement ownership names
+from that verified raw successor. A selector-ineligible coordinate successor
+does not require the normal production activation receipt: its activation is
+explicitly deferred, while its coordinate validation receipt and successor
+authority remain mandatory.
+
+On the GoodBatBadBat v16 canary, the one-time raw-plus-refined publication and
+scientific scan took 2,017 seconds. A subsequent consolidated, strict,
+receipt-backed reload of both successors took 36.27 seconds with 528,004 KiB
+peak RSS. The reload verified the raw and refined inventory records and the
+refined scientific manifest without decoding the dense mask payload.
+
 Keypoint terminal receipts are analogous producer evidence, but the current
 keypoint coordinate-successor path still reads keypoint arrays for inspection
 and auxiliary derivation. It should not be described as a general zero-read

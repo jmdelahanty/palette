@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
@@ -67,6 +68,7 @@ from fisheye.shared.keypoint_coordinate_publication import (
 )
 from fisheye.shared.model_input_transform import (
     ModelInputTransform,
+    model_input_transform_from_attrs,
     resolve_model_input_transform,
 )
 from fisheye.shared.pixel_frame_authority import (
@@ -1552,6 +1554,159 @@ def prepare_subject_mask_coordinate_context(
 
 
 def _load_subject_mask_coordinate_context(
+    root_node: Any,
+    run_path: str,
+    *,
+    require_complete: bool,
+    expected_selector_eligible: bool,
+    expected_publication_owner: str | None = None,
+) -> BoundSubjectMaskCoordinateContext:
+    """Load one context, including its sealed successor-only crop adapter."""
+
+    path = _canonical_path(
+        run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
+    )
+    run = _node(root_node, path, label="subject-mask rowset")
+    adapter_attr = "coordinate_successor_historical_crop_adapter"
+    if require_complete and adapter_attr in getattr(run, "attrs", {}):
+        binding = _load_persisted_historical_crop_successor_binding(
+            root_node,
+            run,
+            run_path=path,
+        )
+        from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+            historical_geometry_only_crop_loader,
+        )
+
+        with historical_geometry_only_crop_loader(binding):
+            return _load_subject_mask_coordinate_context_impl(
+                root_node,
+                path,
+                require_complete=require_complete,
+                expected_selector_eligible=expected_selector_eligible,
+                expected_publication_owner=expected_publication_owner,
+            )
+    return _load_subject_mask_coordinate_context_impl(
+        root_node,
+        path,
+        require_complete=require_complete,
+        expected_selector_eligible=expected_selector_eligible,
+        expected_publication_owner=expected_publication_owner,
+    )
+
+
+def _load_persisted_historical_crop_successor_binding(
+    root_node: Any,
+    run: Any,
+    *,
+    run_path: str,
+) -> Any:
+    """Rebuild the exact historical crop adapter from successor-bound evidence."""
+
+    from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+        bind_historical_geometry_only_crop_source,
+    )
+
+    try:
+        authority = load_coordinate_successor_authority(
+            run,
+            expected_kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=run_path,
+        )
+        load_subject_mask_coordinate_validation_receipt(
+            run,
+            expected_kind=RAW_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+            expected_successor_run_path=run_path,
+            expected_coordinate_record_names=(
+                *_RAW_COORDINATE_VALIDATION_RECORD_NAMES,
+            ),
+        )
+        padded = bind_persisted_coordinate_record(
+            run,
+            attr_name="coordinate_successor_padded_crop_lineage",
+        )
+        adapter = bind_persisted_coordinate_record(
+            run,
+            attr_name="coordinate_successor_historical_crop_adapter",
+        )
+    except Exception as exc:
+        _fail(f"Historical crop successor authority is invalid: {exc}.")
+
+    authority_records = authority["payload"]["coordinate_records"]
+    if authority_records.get("padded_crop_lineage") != _record_pointer(padded):
+        _fail("Historical crop successor padded-lineage authority is stale.")
+    adapter_record = padded.record.get("source_crop_adapter")
+    if not isinstance(adapter_record, Mapping) or adapter.record != adapter_record:
+        _fail(
+            "Historical crop successor adapter differs from its authority-bound "
+            "padded lineage."
+        )
+
+    source_run_path = authority["payload"]["source"].get("run_path")
+    if (
+        type(source_run_path) is not str
+        or source_run_path != adapter_record.get("source_run_path")
+    ):
+        _fail("Historical crop successor source path is inconsistent.")
+    source_run = _node(
+        root_node,
+        source_run_path,
+        label="historical subject-mask source core",
+    )
+    source_manifest = source_run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(source_manifest, Mapping):
+        _fail("Historical subject-mask source core lacks its run manifest.")
+    source_errors = validate_subject_mask_core_run_manifest(source_manifest)
+    if source_errors:
+        _fail(
+            "Historical subject-mask source core manifest is invalid: "
+            + "; ".join(source_errors)
+        )
+    source_arrays = {
+        name: _child(source_run, name, label=f"historical source {name}")
+        for name in (
+            "source_crop_row_ids",
+            "instance_key",
+            "source_acquisition_frame_index",
+            "source_crop_xywh",
+        )
+    }
+    if "source_crop_row_signature" in source_run:
+        source_arrays["source_crop_row_signature"] = source_run[
+            "source_crop_row_signature"
+        ]
+    try:
+        crop_reference = source_manifest["payload"]["coordinate_dependencies"][
+            "document"
+        ]["crop"]
+        transform = model_input_transform_from_attrs(
+            dict(adapter_record["model_input_transform"])
+        )
+        identity = archive_identity(root_node)
+        if identity.kind != "local_store_root":
+            _fail(
+                "Persisted historical crop successors require a stable local archive "
+                "identity."
+            )
+        binding = bind_historical_geometry_only_crop_source(
+            analysis_zarr=Path(identity.key[0]),
+            root=root_node,
+            crop_reference=crop_reference,
+            source_manifest=source_manifest,
+            source_arrays=source_arrays,
+            source_run_path=source_run_path,
+            model_input_transform=transform,
+        )
+    except SubjectMaskCoordinatePublicationError:
+        raise
+    except Exception as exc:
+        _fail(f"Persisted historical crop successor cannot be rebound: {exc}.")
+    if binding.as_record() != adapter_record:
+        _fail("Persisted historical crop successor adapter evidence changed.")
+    return binding
+
+
+def _load_subject_mask_coordinate_context_impl(
     root_node: Any,
     run_path: str,
     *,

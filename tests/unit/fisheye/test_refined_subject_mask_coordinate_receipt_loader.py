@@ -9,6 +9,7 @@ import pytest
 import fisheye.shared.refined_subject_mask_coordinate_publication as module
 from fisheye.shared.refined_subject_mask_coordinate_publication import (
     BoundRefinedSubjectMaskCoordinateSurfaces,
+    load_persisted_ineligible_refined_subject_mask_coordinate_surfaces,
     load_persisted_refined_subject_mask_coordinate_surfaces,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -33,6 +34,27 @@ _SHA_C = "c" * 64
 _SHA_D = "d" * 64
 _SHA_E = "e" * 64
 _SHA_F = "f" * 64
+
+
+def test_ineligible_loader_does_not_require_production_activation_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    observed: dict[str, Any] = {}
+
+    def load(*_args: Any, **kwargs: Any) -> Any:
+        observed.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(module, "_load_refined_subject_mask_coordinate_surfaces", load)
+    result = load_persisted_ineligible_refined_subject_mask_coordinate_surfaces(
+        object(),
+        "refined_subject_masks_runs/successor",
+    )
+    assert result is sentinel
+    assert observed["require_complete"] is True
+    assert observed["require_activation_receipt"] is False
+    assert observed["expected_selector_eligible"] is False
 
 
 def _published(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any, Any]:

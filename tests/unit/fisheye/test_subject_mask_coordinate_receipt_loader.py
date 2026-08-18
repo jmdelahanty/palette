@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -83,6 +84,61 @@ class _DenseReadTrap:
 
     def __getitem__(self, key: Any) -> Any:
         raise AssertionError(f"dense or companion payload was indexed: {key!r}")
+
+
+def test_complete_historical_successor_reinstalls_its_sealed_crop_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _parent, run = _subject_fixture(monkeypatch, published=True, fresh=True)
+    run.attrs["coordinate_successor_historical_crop_adapter"] = {
+        "schema_id": "test.adapter",
+        "schema_version": 1,
+    }
+    binding = object()
+    sentinel = object()
+    active = False
+
+    monkeypatch.setattr(
+        publication_module,
+        "_load_persisted_historical_crop_successor_binding",
+        lambda *_args, **_kwargs: binding,
+    )
+
+    @contextmanager
+    def adapter_scope(value: Any) -> Any:
+        nonlocal active
+        assert value is binding
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    import fisheye.shared.zarr.historical_geometry_only_crop_adapter as adapter_module
+
+    monkeypatch.setattr(
+        adapter_module,
+        "historical_geometry_only_crop_loader",
+        adapter_scope,
+    )
+
+    def load_impl(*_args: Any, **_kwargs: Any) -> Any:
+        assert active is True
+        return sentinel
+
+    monkeypatch.setattr(
+        publication_module,
+        "_load_subject_mask_coordinate_context_impl",
+        load_impl,
+    )
+    result = publication_module._load_subject_mask_coordinate_context(
+        root,
+        run.path,
+        require_complete=True,
+        expected_selector_eligible=False,
+    )
+    assert result is sentinel
+    assert active is False
 
 
 def _pointer(value: Any) -> dict[str, str]:
