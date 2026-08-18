@@ -106,8 +106,8 @@ _REFINED_FAMILY = "refined_subject_masks_runs"
 _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR = (
     "coordinate_successor_historical_semantic_normalization"
 )
-_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR = (
-    "coordinate_successor_historical_refined_cache_state_normalization"
+_HISTORICAL_REFINED_SEMANTIC_NORMALIZATION_ATTR = (
+    "coordinate_successor_historical_refined_semantic_normalization"
 )
 _RAW_COORDINATE_VALIDATION_RECORD_NAMES = (
     "context",
@@ -488,13 +488,13 @@ def _raw_semantic_normalization(
     )
 
 
-def _refined_cache_state_normalization(
+def _refined_semantic_normalization(
     evidence: Any,
     *,
     source_manifest: Mapping[str, Any],
     evidence_run_path: str,
 ) -> dict[str, Any]:
-    """Bind legacy fresh-cache flags to the core's exact validated source draft."""
+    """Bind omitted refined semantics to the core's exact validated source draft."""
 
     payload = source_manifest.get("payload")
     source = payload.get("source") if isinstance(payload, Mapping) else None
@@ -523,23 +523,25 @@ def _refined_cache_state_normalization(
         "editable_mask_surface": "masks_roi",
         "mask_bitpacked_materialized": False,
         "mask_rle_materialized": False,
+        "bbox_xyxy_convention": "pixel_edge_half_open",
+        "bbox_xyxy_derivation": "foreground_half_open_pixel_edges_xyxy_v1",
     }
     for name, expected in resolved_attrs.items():
         actual = evidence.attrs.get(name)
         if type(actual) is not type(expected) or actual != expected:
             raise ValueError(
-                f"Refined worker-draft cache evidence {name!r} differs from "
+                f"Refined worker-draft semantic evidence {name!r} differs from "
                 f"the required exact value {expected!r}."
             )
     return json_attr_safe(
         {
             "schema_id": (
                 "palette.subject_mask_coordinate_successor."
-                "historical_refined_cache_state_normalization"
+                "historical_refined_semantic_normalization"
             ),
-            "schema_version": 1,
+            "schema_version": 2,
             "policy": (
-                "core_manifest_bound_validated_worker_draft_fresh_cache_state_v1"
+                "core_manifest_bound_validated_worker_draft_refined_semantics_v2"
             ),
             "evidence": {
                 "source_refined_manifest_payload_digest": source_manifest[
@@ -550,7 +552,7 @@ def _refined_cache_state_normalization(
                 ),
                 "worker_draft_run_path": evidence_run_path,
                 "worker_draft_validation_receipt": copy.deepcopy(dict(validation)),
-                "worker_draft_cache_state": resolved_attrs,
+                "worker_draft_refined_semantics": resolved_attrs,
             },
             "resolved_run_attrs": resolved_attrs,
         }
@@ -689,7 +691,7 @@ def inspect_subject_mask_coordinate_successor_source(
     evidence = root[str(refined_evidence_run_path).strip("/")]
     if "components" not in evidence:
         raise ValueError("Refined evidence run lacks component provenance groups.")
-    refined_cache_state_normalization = _refined_cache_state_normalization(
+    refined_semantic_normalization = _refined_semantic_normalization(
         evidence,
         source_manifest=refined_manifest,
         evidence_run_path=str(refined_evidence_run_path).strip("/"),
@@ -743,8 +745,8 @@ def inspect_subject_mask_coordinate_successor_source(
             ),
             "producer_run_path": inference["producer_run_path"],
             "raw_semantic_normalization": raw_semantic_normalization,
-            "refined_cache_state_normalization": (
-                refined_cache_state_normalization
+            "refined_semantic_normalization": (
+                refined_semantic_normalization
             ),
             "historical_crop_adapter": historical_crop.as_record(),
             "model_artifact": inference["model_artifact"],
@@ -766,8 +768,8 @@ def _clear_successor_attrs(run: Any, *, source_run_path: str, owner_attr: str) -
         f"{SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE}_sha256",
         _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR,
         f"{_HISTORICAL_SEMANTIC_NORMALIZATION_ATTR}_sha256",
-        _HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR,
-        f"{_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR}_sha256",
+        _HISTORICAL_REFINED_SEMANTIC_NORMALIZATION_ATTR,
+        f"{_HISTORICAL_REFINED_SEMANTIC_NORMALIZATION_ATTR}_sha256",
         RUN_COMPLETED_AT_ATTR,
         "palette_run_failed_at_utc",
         "palette_run_error",
@@ -961,17 +963,17 @@ def publish_subject_mask_coordinate_successors(
                 "Subject-mask semantic normalization changed between dry-run and apply."
             )
         evidence = root[evidence_path]
-        refined_cache_state_normalization = _refined_cache_state_normalization(
+        refined_semantic_normalization = _refined_semantic_normalization(
             evidence,
             source_manifest=refined_manifest,
             evidence_run_path=evidence_path,
         )
         if (
-            refined_cache_state_normalization
-            != checked["refined_cache_state_normalization"]
+            refined_semantic_normalization
+            != checked["refined_semantic_normalization"]
         ):
             raise RuntimeError(
-                "Refined cache-state normalization changed between dry-run and apply."
+                "Refined semantic normalization changed between dry-run and apply."
             )
         crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
             "crop"
@@ -1218,12 +1220,12 @@ def publish_subject_mask_coordinate_successors(
                         name: copy.deepcopy(draft.attrs[name])
                         for name in required_attrs
                     },
-                    **refined_cache_state_normalization["resolved_run_attrs"],
-                    _HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR: (
-                        refined_cache_state_normalization
+                    **refined_semantic_normalization["resolved_run_attrs"],
+                    _HISTORICAL_REFINED_SEMANTIC_NORMALIZATION_ATTR: (
+                        refined_semantic_normalization
                     ),
-                    f"{_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR}_sha256": (
-                        canonical_json_sha256(refined_cache_state_normalization)
+                    f"{_HISTORICAL_REFINED_SEMANTIC_NORMALIZATION_ATTR}_sha256": (
+                        canonical_json_sha256(refined_semantic_normalization)
                     ),
                 }
             )
@@ -1254,9 +1256,9 @@ def publish_subject_mask_coordinate_successors(
             )
             root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
             refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]
-            refined_cache_state_record = bind_persisted_run_attribute_record(
+            refined_semantic_record = bind_persisted_run_attribute_record(
                 refined_run,
-                attr_name=_HISTORICAL_REFINED_CACHE_STATE_NORMALIZATION_ATTR,
+                attr_name=_HISTORICAL_REFINED_SEMANTIC_NORMALIZATION_ATTR,
             )
             refined_coordinate_records = _record_pointers(
                 {
@@ -1326,8 +1328,8 @@ def publish_subject_mask_coordinate_successors(
                     "component_evidence_payload_equivalence": receipts[
                         "component_evidence_payload_equivalence"
                     ],
-                    "historical_refined_cache_state_normalization": (
-                        refined_cache_state_record
+                    "historical_refined_semantic_normalization": (
+                        refined_semantic_record
                     ),
                 },
                 coordinate_records=refined_authority_records,

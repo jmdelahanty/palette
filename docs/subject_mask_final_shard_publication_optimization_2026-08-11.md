@@ -432,15 +432,15 @@ record pointers, live array metadata, and target publication. An absent receipt
 retains the full-scan compatibility path. A present but invalid receipt must
 fail closed and must never trigger a silent full-scan fallback.
 
-Historical refined cores may omit the modern explicit cache-state attributes
-even though their manifest binds an immutable validated worker draft that
-contains them. A coordinate successor may carry `derived_mask_caches_stale =
-false`, `metrics_stale = false`, and `contours_stale = false` only when that
-exact manifest source is the supplied complete, selector-ineligible draft and
-the draft also declares dense `masks_roi` authority with no compact mask cache
-materialized. The successor records this as an immutable historical
-cache-state normalization. Missing, stale, differently sourced, or non-boolean
-evidence fails closed; the flags are never inferred from absence.
+Historical refined cores may omit modern explicit run semantics even though
+their manifest binds an immutable validated worker draft that contains them. A
+coordinate successor may carry `derived_mask_caches_stale = false`,
+`metrics_stale = false`, `contours_stale = false`, dense `masks_roi` authority,
+and the exact `pixel_edge_half_open` bbox convention and derivation only when
+that exact manifest source is the supplied complete, selector-ineligible draft
+and every value agrees. The successor records this as immutable historical
+refined-semantic normalization. Missing, stale, differently sourced, or
+inexact evidence fails closed; no value is inferred from absence.
 
 Keypoint terminal receipts are analogous producer evidence, but the current
 keypoint coordinate-successor path still reads keypoint arrays for inspection

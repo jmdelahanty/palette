@@ -204,7 +204,7 @@ def test_subject_mask_successor_rejects_schema_dtype_encoding_disagreement(
         )
 
 
-def test_subject_mask_successor_binds_refined_fresh_cache_state_to_core_source() -> None:
+def test_subject_mask_successor_binds_refined_semantics_to_core_source() -> None:
     evidence_path = "refined_subject_masks_runs/refined_worker_draft"
     evidence = _Node(path=evidence_path)
     evidence.attrs.update(
@@ -219,6 +219,8 @@ def test_subject_mask_successor_binds_refined_fresh_cache_state_to_core_source()
             "editable_mask_surface": "masks_roi",
             "mask_bitpacked_materialized": False,
             "mask_rle_materialized": False,
+            "bbox_xyxy_convention": "pixel_edge_half_open",
+            "bbox_xyxy_derivation": "foreground_half_open_pixel_edges_xyxy_v1",
         }
     )
     manifest = {
@@ -235,7 +237,7 @@ def test_subject_mask_successor_binds_refined_fresh_cache_state_to_core_source()
         },
     }
 
-    record = subject_mask_successor._refined_cache_state_normalization(
+    record = subject_mask_successor._refined_semantic_normalization(
         evidence,
         source_manifest=manifest,
         evidence_run_path=evidence_path,
@@ -244,6 +246,12 @@ def test_subject_mask_successor_binds_refined_fresh_cache_state_to_core_source()
     assert record["resolved_run_attrs"]["derived_mask_caches_stale"] is False
     assert record["resolved_run_attrs"]["metrics_stale"] is False
     assert record["resolved_run_attrs"]["contours_stale"] is False
+    assert record["resolved_run_attrs"]["bbox_xyxy_convention"] == (
+        "pixel_edge_half_open"
+    )
+    assert record["resolved_run_attrs"]["bbox_xyxy_derivation"] == (
+        "foreground_half_open_pixel_edges_xyxy_v1"
+    )
     assert record["evidence"]["worker_draft_run_path"] == evidence_path
 
 
@@ -253,9 +261,11 @@ def test_subject_mask_successor_binds_refined_fresh_cache_state_to_core_source()
         ("derived_mask_caches_stale", True),
         ("metrics_stale", 0),
         ("mask_storage_authority", "legacy_cache"),
+        ("bbox_xyxy_convention", "pixel_center_inclusive"),
+        ("bbox_xyxy_derivation", "legacy_unspecified"),
     ],
 )
-def test_subject_mask_successor_rejects_nonfresh_or_inexact_refined_cache_state(
+def test_subject_mask_successor_rejects_inexact_refined_semantics(
     attr_name: str,
     replacement: object,
 ) -> None:
@@ -273,6 +283,8 @@ def test_subject_mask_successor_rejects_nonfresh_or_inexact_refined_cache_state(
             "editable_mask_surface": "masks_roi",
             "mask_bitpacked_materialized": False,
             "mask_rle_materialized": False,
+            "bbox_xyxy_convention": "pixel_edge_half_open",
+            "bbox_xyxy_derivation": "foreground_half_open_pixel_edges_xyxy_v1",
         }
     )
     evidence.attrs[attr_name] = replacement
@@ -290,8 +302,8 @@ def test_subject_mask_successor_rejects_nonfresh_or_inexact_refined_cache_state(
         },
     }
 
-    with pytest.raises(ValueError, match="cache evidence"):
-        subject_mask_successor._refined_cache_state_normalization(
+    with pytest.raises(ValueError, match="semantic evidence"):
+        subject_mask_successor._refined_semantic_normalization(
             evidence,
             source_manifest=manifest,
             evidence_run_path=evidence_path,
