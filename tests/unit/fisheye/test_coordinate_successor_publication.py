@@ -31,6 +31,9 @@ from fisheye.shared.zarr.coordinate_successor_files import (
 )
 from fisheye.shared.model_input_transform import ModelInputTransform
 from fisheye.shared.zarr import keypoint_coordinate_successor as keypoint_successor
+from fisheye.shared.zarr import (
+    subject_mask_coordinate_successor as subject_mask_successor,
+)
 from fisheye.shared.zarr import historical_geometry_only_crop_adapter as historical_crop
 from fisheye.shared.zarr.crop_schema import (
     CROP_GEOMETRY_SCHEMA_V1,
@@ -111,6 +114,94 @@ class _Root:
 
     def __getitem__(self, key: str) -> object:
         return self.nodes[key]
+
+
+@pytest.mark.parametrize(
+    ("probability_dtype", "materialize_binary", "expected_encoding"),
+    [
+        (np.uint8, False, "linear_uint8_0_255"),
+        (np.float16, True, "unit_float"),
+    ],
+)
+def test_subject_mask_successor_derives_semantics_from_schema_and_arrays(
+    tmp_path: Path,
+    probability_dtype: type[np.generic],
+    materialize_binary: bool,
+    expected_encoding: str,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "semantic.zarr"), mode="w")
+    run = root.create_group("subject_mask_runs/source")
+    run.create_array(
+        "mask_probs_roi",
+        data=np.zeros((2, 3, 4, 5), dtype=probability_dtype),
+    )
+    if materialize_binary:
+        run.create_array(
+            "masks_roi",
+            data=np.zeros((2, 3, 4, 5), dtype=np.uint8),
+        )
+    manifest = {
+        "payload": {
+            "logical_schema": {
+                "schema_id": "palette.stage.subject_mask_probabilities_test",
+                "schema_version": 1,
+                "components": {
+                    "labels": ["subject_body", "eyes_union", "swim_bladder"]
+                },
+                "output_semantics": "multilabel",
+                "overlap_policy": "independent_sigmoid",
+                "probability_semantics": "sigmoid_multilabel_logits",
+                "probability_encoding": expected_encoding,
+                "threshold": 0.5,
+            }
+        }
+    }
+
+    record = subject_mask_successor._raw_semantic_normalization(
+        run,
+        manifest=manifest,
+        threshold=0.5,
+    )
+
+    attrs = record["resolved_run_attrs"]
+    assert attrs["probabilities_dtype"] == np.dtype(probability_dtype).name
+    assert attrs["probabilities_encoding"] == expected_encoding
+    assert attrs["masks_roi_materialized"] is materialize_binary
+    assert attrs["binary_masks_materialized"] is materialize_binary
+    assert attrs["binary_masks_source"] == (
+        "threshold(mask_probs_roi, threshold=0.5)"
+        if materialize_binary
+        else "not_materialized"
+    )
+
+
+def test_subject_mask_successor_rejects_schema_dtype_encoding_disagreement(
+    tmp_path: Path,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "semantic-mismatch.zarr"), mode="w")
+    run = root.create_group("subject_mask_runs/source")
+    run.create_array("mask_probs_roi", data=np.zeros((1, 1, 2, 2), dtype=np.uint8))
+    manifest = {
+        "payload": {
+            "logical_schema": {
+                "schema_id": "palette.stage.subject_mask_probabilities_test",
+                "schema_version": 1,
+                "components": {"labels": ["subject_body"]},
+                "output_semantics": "multilabel",
+                "overlap_policy": "independent_sigmoid",
+                "probability_semantics": "sigmoid_multilabel_logits",
+                "probability_encoding": "unit_float",
+                "threshold": 0.5,
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="probability encoding differs"):
+        subject_mask_successor._raw_semantic_normalization(
+            run,
+            manifest=manifest,
+            threshold=0.5,
+        )
 
 
 def _historical_crop_fixture(tmp_path: Path):

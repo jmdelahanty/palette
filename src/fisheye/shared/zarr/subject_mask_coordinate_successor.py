@@ -9,6 +9,7 @@ import re
 from typing import Any, Mapping
 from uuid import uuid4
 
+import numpy as np
 import zarr
 
 from fisheye.shared.json_safety import json_attr_safe
@@ -95,6 +96,9 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SELECTORS = ("latest", "latest_complete", "latest_pending", "authoritative_run")
 _RAW_FAMILY = "subject_mask_runs"
 _REFINED_FAMILY = "refined_subject_masks_runs"
+_HISTORICAL_SEMANTIC_NORMALIZATION_ATTR = (
+    "coordinate_successor_historical_semantic_normalization"
+)
 
 
 def _require_run_id(value: object, *, label: str) -> str:
@@ -254,6 +258,116 @@ def _labels(manifest: Mapping[str, Any]) -> list[str]:
     return [str(item) for item in labels]
 
 
+def _raw_semantic_normalization(
+    run: Any,
+    *,
+    manifest: Mapping[str, Any],
+    threshold: float,
+) -> dict[str, Any]:
+    """Derive modern run attrs from exact historical schema and array evidence."""
+
+    logical_schema = manifest["payload"]["logical_schema"]
+    expected_schema_semantics = {
+        "output_semantics": "multilabel",
+        "overlap_policy": "independent_sigmoid",
+        "probability_semantics": "sigmoid_multilabel_logits",
+    }
+    for name, expected in expected_schema_semantics.items():
+        if logical_schema.get(name) != expected:
+            raise ValueError(
+                f"Historical subject-mask logical schema {name!r} does not "
+                f"support canonical successor semantics {expected!r}."
+            )
+
+    schema_threshold = logical_schema.get("threshold")
+    if type(schema_threshold) is not float or schema_threshold != threshold:
+        raise ValueError(
+            "Historical subject-mask logical-schema threshold differs from its "
+            "exact inference authority."
+        )
+    if "mask_probs_roi" not in run:
+        raise ValueError("Historical subject-mask run lacks mask_probs_roi.")
+    probability_array = run["mask_probs_roi"]
+    probability_dtype = np.dtype(probability_array.dtype)
+    if probability_dtype == np.dtype("uint8"):
+        probability_dtype_name = "uint8"
+        probability_encoding = "linear_uint8_0_255"
+    elif probability_dtype == np.dtype("float16"):
+        probability_dtype_name = "float16"
+        probability_encoding = "unit_float"
+    else:
+        raise ValueError(
+            "Historical subject-mask probabilities must use uint8 or float16 "
+            "storage before semantic normalization."
+        )
+    if logical_schema.get("probability_encoding") != probability_encoding:
+        raise ValueError(
+            "Historical subject-mask logical-schema probability encoding differs "
+            "from the exact persisted mask_probs_roi dtype."
+        )
+
+    labels = _labels(manifest)
+    shape = tuple(int(value) for value in probability_array.shape)
+    if len(shape) != 4 or shape[1] != len(labels):
+        raise ValueError(
+            "Historical subject-mask probability channels differ from the exact "
+            "ordered component registry."
+        )
+    masks_materialized = "masks_roi" in run
+    if masks_materialized:
+        binary = run["masks_roi"]
+        if tuple(int(value) for value in binary.shape) != shape:
+            raise ValueError(
+                "Historical subject-mask binary cache shape differs from "
+                "mask_probs_roi."
+            )
+        if np.dtype(binary.dtype) != np.dtype("uint8"):
+            raise ValueError(
+                "Historical subject-mask binary cache must use uint8 storage."
+            )
+
+    resolved_attrs = {
+        **expected_schema_semantics,
+        "probabilities_dtype": probability_dtype_name,
+        "probabilities_encoding": probability_encoding,
+        "masks_roi_materialized": masks_materialized,
+        "binary_masks_materialized": masks_materialized,
+        "binary_masks_source": (
+            f"threshold(mask_probs_roi, threshold={threshold})"
+            if masks_materialized
+            else "not_materialized"
+        ),
+        "bbox_xyxy_convention": "pixel_edge_half_open",
+        "bbox_xyxy_derivation": "foreground_half_open_pixel_edges_xyxy_v1",
+    }
+    return json_attr_safe(
+        {
+            "schema_id": (
+                "palette.subject_mask_coordinate_successor."
+                "historical_semantic_normalization"
+            ),
+            "schema_version": 1,
+            "policy": "logical_schema_and_persisted_arrays_exact_evidence_v1",
+            "evidence": {
+                "logical_schema_id": logical_schema.get("schema_id"),
+                "logical_schema_version": logical_schema.get("schema_version"),
+                "logical_schema_semantics": {
+                    **expected_schema_semantics,
+                    "probability_encoding": probability_encoding,
+                    "threshold": threshold,
+                },
+                "mask_probs_roi": {
+                    "dtype": probability_dtype_name,
+                    "shape": list(shape),
+                },
+                "masks_roi_physically_present": masks_materialized,
+                "ordered_mask_labels": labels,
+            },
+            "resolved_run_attrs": resolved_attrs,
+        }
+    )
+
+
 def _raw_inference_inputs(
     root: Any, raw_manifest: Mapping[str, Any], model_path: Path
 ) -> dict[str, Any]:
@@ -387,6 +501,11 @@ def inspect_subject_mask_coordinate_successor_source(
     if "components" not in evidence:
         raise ValueError("Refined evidence run lacks component provenance groups.")
     inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
+    raw_semantic_normalization = _raw_semantic_normalization(
+        root[f"{_RAW_FAMILY}/{raw_id}"],
+        manifest=raw_manifest,
+        threshold=inference["mask_probability_threshold"],
+    )
     crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
         "crop"
     ]
@@ -429,6 +548,7 @@ def inspect_subject_mask_coordinate_successor_source(
                 paths["evidence"]
             ),
             "producer_run_path": inference["producer_run_path"],
+            "raw_semantic_normalization": raw_semantic_normalization,
             "historical_crop_adapter": historical_crop.as_record(),
             "model_artifact": inference["model_artifact"],
             "selectors_before": _selector_snapshot(root),
@@ -445,6 +565,8 @@ def _clear_successor_attrs(run: Any, *, source_run_path: str, owner_attr: str) -
         SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
         "coordinate_successor_authority",
         "coordinate_successor_authority_sha256",
+        _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR,
+        f"{_HISTORICAL_SEMANTIC_NORMALIZATION_ATTR}_sha256",
         RUN_COMPLETED_AT_ATTR,
         "palette_run_failed_at_utc",
         "palette_run_error",
@@ -586,6 +708,15 @@ def publish_subject_mask_coordinate_successors(
             refined_manifest=refined_manifest,
         )
         inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
+        raw_semantic_normalization = _raw_semantic_normalization(
+            raw_source,
+            manifest=raw_manifest,
+            threshold=inference["mask_probability_threshold"],
+        )
+        if raw_semantic_normalization != checked["raw_semantic_normalization"]:
+            raise RuntimeError(
+                "Subject-mask semantic normalization changed between dry-run and apply."
+            )
         crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
             "crop"
         ]
@@ -631,6 +762,11 @@ def publish_subject_mask_coordinate_successors(
                     "coordinate_successor_historical_crop_adapter_sha256": canonical_json_sha256(
                         historical_crop.as_record()
                     ),
+                    **raw_semantic_normalization["resolved_run_attrs"],
+                    _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR: raw_semantic_normalization,
+                    f"{_HISTORICAL_SEMANTIC_NORMALIZATION_ATTR}_sha256": canonical_json_sha256(
+                        raw_semantic_normalization
+                    ),
                 }
             )
             stamp_persisted_padded_placement_provenance(raw_run, historical_crop)
@@ -654,6 +790,10 @@ def publish_subject_mask_coordinate_successors(
                     f"{_RAW_FAMILY}/{raw_target_id}",
                     expected_publication_owner=raw_owner,
                 )
+            # The coordinate publisher reloads and verifies the target. Keep
+            # writing through that live group so an older Zarr metadata cache
+            # cannot restore pre-publication attrs on a later update.
+            raw_run = raw_surfaces.context._run_group
             raw_run.attrs["coordinate_successor_padded_crop_lineage"] = {
                 "source_crop_adapter": historical_crop.as_record(),
                 "placement_ownership": bind_persisted_padded_placement_record(raw_run),
@@ -665,6 +805,9 @@ def publish_subject_mask_coordinate_successors(
             )
             padded_lineage_record = bind_persisted_run_attribute_record(
                 raw_run, attr_name="coordinate_successor_padded_crop_lineage"
+            )
+            semantic_normalization_record = bind_persisted_run_attribute_record(
+                raw_run, attr_name=_HISTORICAL_SEMANTIC_NORMALIZATION_ATTR
             )
             raw_authority = build_coordinate_successor_authority(
                 kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
@@ -682,6 +825,7 @@ def publish_subject_mask_coordinate_successors(
                     ]["digest"],
                     **receipts["raw_copy"],
                     "padded_crop_lineage": padded_lineage_record,
+                    "historical_semantic_normalization": semantic_normalization_record,
                 },
                 coordinate_records=_record_pointers(
                     {
@@ -786,6 +930,7 @@ def publish_subject_mask_coordinate_successors(
                 f"{_REFINED_FAMILY}/{refined_target_id}",
                 expected_publication_owner=refined_owner,
             )
+            refined_run = refined_surfaces.context._run_group
             refined_authority = build_coordinate_successor_authority(
                 kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
                 source_family=_REFINED_FAMILY,
