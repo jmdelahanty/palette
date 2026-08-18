@@ -509,9 +509,16 @@ def _validate_summary(entry: CohortEntry) -> LoadedSummary:
             f"{entry.recording_id}: analysis offer is not an exact selector-ineligible scientifically ready offer."
         )
     epoch_record = source_refs["epoch_selection"].get("record")
+    epoch_source_timeline = (
+        epoch_record.get("source_timeline")
+        if isinstance(epoch_record, Mapping)
+        else None
+    )
     if (
         not isinstance(epoch_record, Mapping)
-        or epoch_record.get("recording_id") != entry.recording_id
+        or epoch_record.get("schema_id") != "palette.resolved_epoch_selection.v1"
+        or not isinstance(epoch_source_timeline, Mapping)
+        or epoch_source_timeline.get("recording_id") != entry.recording_id
     ):
         raise ProviderEpochBehaviorCohortError(
             f"{entry.recording_id}: epoch-selection recording identity is stale."

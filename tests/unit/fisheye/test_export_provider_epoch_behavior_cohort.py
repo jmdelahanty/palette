@@ -47,8 +47,8 @@ def _source_fixture(tmp_path: Path):
     refs = {
         "epoch_selection": {
             "record": {
-                "run_name": "epochs_v2",
-                "recording_id": recording_id,
+                "schema_id": "palette.resolved_epoch_selection.v1",
+                "source_timeline": {"recording_id": recording_id},
             },
             "sha256": "a" * 64,
         },
@@ -318,6 +318,31 @@ def test_source_binding_digest_mismatch_is_rejected(tmp_path: Path, monkeypatch)
     manifest = tmp_path / "cohort.json"
     _write_manifest(manifest, zarr_path=zarr_path)
     with pytest.raises(exporter.ProviderEpochBehaviorCohortError, match="source_refs digest"):
+        exporter.build_provider_epoch_behavior_cohort_plan(
+            manifest,
+            output_root=tmp_path / "exports",
+            analysis_run_id="talk-linear-only-v1",
+        )
+
+
+def test_epoch_selection_source_timeline_recording_mismatch_is_rejected(
+    tmp_path: Path, monkeypatch
+):
+    zarr_path, root, _recording_id, _summary_run = _source_fixture(tmp_path)
+    run = root.children["analysis"].children[
+        "stimulus_epoch_behavior_summary_runs"
+    ].children["summary_linear_only_v1"]
+    run.attrs["source_refs"]["epoch_selection"]["record"]["source_timeline"][
+        "recording_id"
+    ] = "different-recording"
+    run.attrs["source_refs_sha256"] = canonical_json_sha256(run.attrs["source_refs"])
+    _patch_source(monkeypatch, zarr_path, root)
+    manifest = tmp_path / "cohort.json"
+    _write_manifest(manifest, zarr_path=zarr_path)
+    with pytest.raises(
+        exporter.ProviderEpochBehaviorCohortError,
+        match="epoch-selection recording identity",
+    ):
         exporter.build_provider_epoch_behavior_cohort_plan(
             manifest,
             output_root=tmp_path / "exports",
