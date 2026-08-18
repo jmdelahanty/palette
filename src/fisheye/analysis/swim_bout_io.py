@@ -243,6 +243,72 @@ def load_default_swim_bout_tables(
     )
 
 
+def load_exact_selector_ineligible_default_swim_bout_tables(
+    root: zarr.Group,
+    *,
+    run_name: str,
+) -> SwimBoutTables:
+    """Load one explicitly named, complete selector-ineligible v8 candidate.
+
+    Ordinary readers intentionally reject selector-ineligible runs, including
+    when a caller happens to know the child name.  Phase-4 canaries need a
+    separate fail-closed boundary so they can evaluate an immutable candidate
+    without promoting it or weakening selector-backed production reads.
+
+    This boundary accepts only the maintained compact schema and never accepts
+    a selector alias, path, historical layout, or implicit compatibility mode.
+    """
+
+    if type(run_name) is not str:
+        raise TypeError("run_name must be one exact string.")
+    requested = run_name.strip()
+    if (
+        not requested
+        or requested != run_name
+        or requested in {".", "..", "latest", "latest_complete"}
+        or "/" in requested
+        or "\\" in requested
+        or any(character.isspace() for character in requested)
+    ):
+        raise SwimBoutIOError(
+            "Selector-ineligible swim-bout reads require one exact bare run name."
+        )
+    parent = _require_child(root, "analysis/swim_bout_runs")
+    if requested not in parent:
+        raise SwimBoutIOError(f"Swim-bout run {requested!r} not found.")
+    run_group = parent[requested]
+    if not is_run_complete_in_parent(parent, run_group, legacy_default=False):
+        raise SwimBoutIOError(f"Swim-bout run {requested!r} is not complete.")
+    if _attrs_dict(run_group).get("stage_selector_eligible") is not False:
+        raise SwimBoutIOError(
+            f"Swim-bout run {requested!r} is not an exact selector-ineligible candidate."
+        )
+    _require_read_contract(run_group, legacy_compatibility=False)
+    if not _is_compact_v2_group(run_group):
+        raise SwimBoutIOError(
+            "Selector-ineligible swim-bout canaries require the maintained compact v8 layout."
+        )
+    candidate = _default_candidate_from_run_group(
+        run_group,
+        run_name=requested,
+        is_latest=False,
+    )
+    if not candidate.signals:
+        raise SwimBoutIOError(
+            f"Swim-bout run {requested!r} has no readable speed levels."
+        )
+    default_signal = _default_signal(candidate)
+    return _load_compact_v2_tables(
+        root,
+        run_group,
+        run_name=requested,
+        is_latest=False,
+        candidate_id=candidate.candidate_id,
+        signal_id=default_signal.signal_id,
+        speed_level=None,
+    )
+
+
 def resolve_swim_bout_run_name(
     root: zarr.Group,
     *,
