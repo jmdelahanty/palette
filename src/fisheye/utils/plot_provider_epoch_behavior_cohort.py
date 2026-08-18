@@ -46,7 +46,7 @@ from fisheye.utils.export_provider_epoch_behavior_cohort import (
 
 
 PLOT_SCHEMA_ID = "palette.provider_epoch_behavior_cohort_plots"
-PLOT_SCHEMA_VERSION = 2
+PLOT_SCHEMA_VERSION = 3
 ANALYSIS_UNIT_DECISION_SCHEMA_ID = "palette.provider_epoch_analysis_unit_decision"
 ANALYSIS_UNIT_DECISION_SCHEMA_VERSION = 1
 DEFAULT_ANALYSIS_UNIT_MODE = "subject_id"
@@ -67,6 +67,7 @@ DISTRIBUTION_METRICS = {
     "bout_path_length_mm": ("Bout path length", "Bout path length (mm)"),
     "mean_bout_speed_mm_s": ("Mean bout speed", "Mean bout speed (mm s$^{-1}$)"),
 }
+HISTOGRAM_BIN_COUNT = 20
 NEUTRAL_EPOCH_COLORS = {
     "pre_event": "#6B7280",
     "training_event": "#8B8B72",
@@ -991,6 +992,25 @@ def _distribution_data(
         metric_audit[metric]["dropped_session_median_count_by_epoch"] = [
             data.n_recording_animal_sessions - count for count in valid_session_counts
         ]
+        total_analysis_units = (
+            data.n_subjects
+            if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE
+            else data.n_recording_animal_sessions
+        )
+        metric_audit[metric]["analysis_unit_total_count_by_epoch"] = [
+            total_analysis_units for _ in EXPECTED_EPOCH_IDS
+        ]
+        metric_audit[metric]["analysis_unit_dropped_count_by_epoch"] = [
+            total_analysis_units - count for count in valid_analysis_unit_counts
+        ]
+        metric_audit[metric]["analysis_unit_dropped_reason_counts_by_epoch"] = [
+            (
+                {"no_valid_metric_value": total_analysis_units - count}
+                if total_analysis_units - count
+                else {}
+            )
+            for count in valid_analysis_unit_counts
+        ]
 
     return BoutDistributionData(
         pooled_values_by_metric_epoch={
@@ -1000,6 +1020,121 @@ def _distribution_data(
         analysis_unit_values_by_metric_epoch=subject_values,
         metrics=metric_audit,
     )
+
+
+def _shared_log_histogram_summary(
+    metric: str,
+    values_by_epoch: Sequence[np.ndarray],
+    audit: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return reproducible shared-bin counts and fractions for one metric.
+
+    The bins are selected once from all valid positive observations for the
+    metric, then reused for every epoch.  The histogram is intentionally a
+    probability mass histogram (fraction in each bin), not a density: the
+    bins have unequal widths on the log scale.  The values reaching this
+    helper have already passed the positive-domain checks in
+    :func:`_distribution_data`; the audit is copied into the histogram
+    receipt so dropped source values remain visible beside the bin counts.
+    """
+
+    if metric not in DISTRIBUTION_METRICS:
+        raise ProviderEpochBehaviorPlotError(f"Unknown bout distribution metric: {metric}")
+    if len(values_by_epoch) != len(EXPECTED_EPOCH_IDS):
+        raise ProviderEpochBehaviorPlotError("Histogram values must contain exactly three epochs.")
+
+    normalized_values = tuple(
+        np.asarray(values, dtype=np.float64)[
+            np.isfinite(np.asarray(values, dtype=np.float64))
+            & (np.asarray(values, dtype=np.float64) > 0)
+        ]
+        for values in values_by_epoch
+    )
+    observed = (
+        np.concatenate([values for values in normalized_values if values.size])
+        if any(values.size for values in normalized_values)
+        else np.asarray([], dtype=np.float64)
+    )
+    if observed.size:
+        minimum = float(np.min(observed))
+        maximum = float(np.max(observed))
+        if minimum == maximum:
+            lower = minimum / np.sqrt(10.0)
+            upper = maximum * np.sqrt(10.0)
+            range_policy = "degenerate_value_expanded_by_sqrt_10"
+        else:
+            lower = minimum
+            upper = maximum
+            range_policy = "observed_minimum_to_observed_maximum"
+    else:
+        # Keep the artifact schema and axes deterministic even when a metric
+        # has no valid observations.  These placeholder bounds contain no
+        # data and must not be interpreted as an observed scientific range.
+        lower = 1.0
+        upper = 10.0
+        range_policy = "empty_input_placeholder_bounds"
+    edges = np.geomspace(lower, upper, HISTOGRAM_BIN_COUNT + 1)
+    edges[0] = lower
+    edges[-1] = upper
+
+    bin_counts: list[list[int]] = []
+    bin_fractions: list[list[float]] = []
+    underflow_counts: list[int] = []
+    overflow_counts: list[int] = []
+    in_range_counts: list[int] = []
+    for values in normalized_values:
+        underflow = int(np.count_nonzero(values < edges[0]))
+        overflow = int(np.count_nonzero(values > edges[-1]))
+        counts, _ = np.histogram(values, bins=edges)
+        counts_list = [int(value) for value in counts.tolist()]
+        valid_count = int(values.size)
+        denominator = valid_count
+        fractions = (
+            [float(value) / denominator for value in counts_list]
+            if denominator
+            else [0.0] * HISTOGRAM_BIN_COUNT
+        )
+        bin_counts.append(counts_list)
+        bin_fractions.append(fractions)
+        underflow_counts.append(underflow)
+        overflow_counts.append(overflow)
+        in_range_counts.append(int(sum(counts_list)))
+
+    return {
+        "metric": metric,
+        "value_domain": "strictly_positive_finite",
+        "binning": "shared_log_spaced_across_epochs",
+        "bin_count": HISTOGRAM_BIN_COUNT,
+        "bin_edges": [float(value) for value in edges.tolist()],
+        "range_policy": range_policy,
+        "normalization": "fraction_of_valid_values_per_epoch",
+        "normalization_denominator_by_epoch": [
+            int(values.size) for values in normalized_values
+        ],
+        "bin_counts_by_epoch": bin_counts,
+        "bin_fractions_by_epoch": bin_fractions,
+        "in_range_count_by_epoch": in_range_counts,
+        "underflow_count_by_epoch": underflow_counts,
+        "overflow_count_by_epoch": overflow_counts,
+        "out_of_range_count_by_epoch": [
+            underflow + overflow
+            for underflow, overflow in zip(underflow_counts, overflow_counts)
+        ],
+        "no_clipping": True,
+        "total_input_count_by_epoch": [
+            int(value) for value in audit["total_bout_count_by_epoch"]
+        ],
+        "valid_input_count_by_epoch": [
+            int(value) for value in audit["valid_bout_count_by_epoch"]
+        ],
+        "dropped_input_count_by_epoch": [
+            int(value) for value in audit["dropped_bout_count_by_epoch"]
+        ],
+        "dropped_reason_counts_by_epoch": [
+            dict(reasons) for reasons in audit["dropped_reason_counts_by_epoch"]
+        ],
+        "empty_input_by_epoch": [values.size == 0 for values in normalized_values],
+    }
 
 
 def _configure_axis(ax: Any, *, ylabel: str) -> None:
@@ -1350,17 +1485,141 @@ def _render_subject_balanced_distributions(
     plt.close(fig)
 
 
+def _render_log_histograms(
+    summaries: Mapping[str, Mapping[str, Any]],
+    path: Path,
+    *,
+    plt: Any,
+    title: str,
+    note: str,
+) -> None:
+    """Render one bounded, fraction-normalized log histogram per metric."""
+
+    fig, axes = plt.subplots(
+        1,
+        len(DISTRIBUTION_METRICS),
+        figsize=(7.0 * len(DISTRIBUTION_METRICS), 5.8),
+        squeeze=False,
+        dpi=160,
+    )
+    for axis, metric in zip(axes[0], DISTRIBUTION_METRICS):
+        summary = summaries[metric]
+        edges = np.asarray(summary["bin_edges"], dtype=np.float64)
+        fractions_by_epoch = summary["bin_fractions_by_epoch"]
+        valid_counts = summary["valid_input_count_by_epoch"]
+        observed_max_fraction = 0.0
+        for epoch_id, epoch_label in enumerate(EXPECTED_EPOCH_LABELS):
+            fractions = np.asarray(fractions_by_epoch[epoch_id], dtype=np.float64)
+            if not np.any(fractions):
+                continue
+            observed_max_fraction = max(
+                observed_max_fraction,
+                float(np.max(fractions)),
+            )
+            axis.bar(
+                edges[:-1],
+                fractions,
+                width=np.diff(edges),
+                align="edge",
+                color=NEUTRAL_EPOCH_COLORS[epoch_label],
+                alpha=0.58,
+                edgecolor="white",
+                linewidth=0.35,
+                label=f"{epoch_label.replace('_', ' ')} (n={valid_counts[epoch_id]:,})",
+            )
+        axis.set_xscale("log")
+        axis.set_xlim(float(edges[0]), float(edges[-1]))
+        axis.set_ylim(
+            0.0,
+            (
+                min(1.0, max(0.05, observed_max_fraction * 1.15))
+                if observed_max_fraction > 0.0
+                else 1.0
+            ),
+        )
+        axis.set_xlabel(f"{DISTRIBUTION_METRICS[metric][1]}; logarithmic x-axis")
+        axis.set_ylabel("Fraction of valid observations per bin")
+        axis.set_title(DISTRIBUTION_METRICS[metric][0])
+        axis.grid(axis="y", color="#D1D5DB", alpha=0.65, linewidth=0.7)
+        axis.set_axisbelow(True)
+        handles, labels = axis.get_legend_handles_labels()
+        if handles:
+            axis.legend(handles, labels, frameon=False, loc="upper right", fontsize=8)
+    fig.suptitle(title, y=0.99)
+    fig.text(
+        0.5,
+        0.01,
+        note,
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="#374151",
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 0.94))
+    fig.savefig(path, format=path.suffix.lstrip("."), dpi=160, metadata={"Date": None})
+    plt.close(fig)
+
+
 def _save_distribution_formats(
     distributions: BoutDistributionData,
     output_dir: Path,
     prefix: str,
     plt: Any,
     analysis_unit_mode: str = DEFAULT_ANALYSIS_UNIT_MODE,
-) -> list[Path]:
+) -> tuple[list[Path], dict[str, Any], dict[str, Any]]:
     generated: list[Path] = []
+    pooled_histogram_summaries = {
+        metric: _shared_log_histogram_summary(
+            metric,
+            distributions.pooled_values_by_metric_epoch[metric],
+            distributions.metrics[metric],
+        )
+        for metric in DISTRIBUTION_METRICS
+    }
+    analysis_unit_histogram_summaries = {
+        metric: _shared_log_histogram_summary(
+            metric,
+            distributions.analysis_unit_values_by_metric_epoch[metric],
+            {
+                **distributions.metrics[metric],
+                "total_bout_count_by_epoch": distributions.metrics[metric][
+                    "analysis_unit_total_count_by_epoch"
+                ],
+                "valid_bout_count_by_epoch": distributions.metrics[metric][
+                    "valid_analysis_unit_count_by_epoch"
+                ],
+                "dropped_bout_count_by_epoch": distributions.metrics[metric][
+                    "analysis_unit_dropped_count_by_epoch"
+                ],
+                "dropped_reason_counts_by_epoch": [
+                    dict(reasons)
+                    for reasons in distributions.metrics[metric][
+                        "analysis_unit_dropped_reason_counts_by_epoch"
+                    ]
+                ],
+            },
+        )
+        for metric in DISTRIBUTION_METRICS
+    }
+    if analysis_unit_mode == RECORDING_ANALYSIS_UNIT_MODE:
+        balanced_title = "Recording-balanced bout histograms: one median per recording×animal unit and epoch"
+        balanced_note = (
+            "Each recording×animal unit contributes one median bout value per epoch. "
+            "Bars show fractions of valid recording×animal medians; shared log-spaced bins; no clipping."
+        )
+        balanced_semantics = "one_recording_animal_median_per_epoch"
+    else:
+        balanced_title = "Subject-balanced bout histograms: one value per unique subject and epoch"
+        balanced_note = (
+            "Each recording contributes a median, then repeated sessions are equally weighted within subject. "
+            "Bars show fractions of valid subject values; shared log-spaced bins; no clipping."
+        )
+        balanced_semantics = "session_median_then_equal_weighted_subject_value"
     for extension in ("png", "svg"):
         ecdf_path = output_dir / f"{prefix}.pooled_bout_ecdf.{extension}"
         subject_path = output_dir / f"{prefix}.subject_balanced_bout_distributions.{extension}"
+        pooled_histogram_path = output_dir / f"{prefix}.pooled_bout_histograms.{extension}"
+        balanced_histogram_path = output_dir / f"{prefix}.subject_balanced_bout_histograms.{extension}"
         _render_pooled_bout_ecdf(distributions, ecdf_path, plt=plt)
         if analysis_unit_mode == RECORDING_ANALYSIS_UNIT_MODE:
             _render_subject_balanced_distributions(
@@ -1373,8 +1632,29 @@ def _save_distribution_formats(
             )
         else:
             _render_subject_balanced_distributions(distributions, subject_path, plt=plt)
-        generated.extend((ecdf_path, subject_path))
-    return generated
+        _render_log_histograms(
+            pooled_histogram_summaries,
+            pooled_histogram_path,
+            plt=plt,
+            title="Pooled bout histograms: descriptive per-bout distributions",
+            note=(
+                "Pooled bouts are descriptive only; bars show fractions of valid bouts per shared "
+                "log-spaced bin; no clipping or density normalization."
+            ),
+        )
+        _render_log_histograms(
+            analysis_unit_histogram_summaries,
+            balanced_histogram_path,
+            plt=plt,
+            title=balanced_title,
+            note=balanced_note,
+        )
+        generated.extend((ecdf_path, subject_path, pooled_histogram_path, balanced_histogram_path))
+    for summary in pooled_histogram_summaries.values():
+        summary["semantics"] = "pooled_per_bout"
+    for summary in analysis_unit_histogram_summaries.values():
+        summary["semantics"] = balanced_semantics
+    return generated, pooled_histogram_summaries, analysis_unit_histogram_summaries
 
 
 def render_provider_epoch_behavior_cohort(
@@ -1412,6 +1692,10 @@ def render_provider_epoch_behavior_cohort(
         output_dir / f"{prefix}.pooled_bout_ecdf.svg",
         output_dir / f"{prefix}.subject_balanced_bout_distributions.png",
         output_dir / f"{prefix}.subject_balanced_bout_distributions.svg",
+        output_dir / f"{prefix}.pooled_bout_histograms.png",
+        output_dir / f"{prefix}.pooled_bout_histograms.svg",
+        output_dir / f"{prefix}.subject_balanced_bout_histograms.png",
+        output_dir / f"{prefix}.subject_balanced_bout_histograms.svg",
         output_dir / f"{prefix}.receipt.json",
     ]
     if metric_names:
@@ -1451,15 +1735,14 @@ def render_provider_epoch_behavior_cohort(
         )
         generated.extend(metric_paths)
         plot_stats.update(metric_stats)
-    generated.extend(
-        _save_distribution_formats(
-            distributions,
-            output_dir,
-            prefix,
-            plt,
-            analysis_unit_mode=analysis_unit_mode,
-        )
+    distribution_paths, pooled_histogram_summaries, analysis_unit_histogram_summaries = _save_distribution_formats(
+        distributions,
+        output_dir,
+        prefix,
+        plt,
+        analysis_unit_mode=analysis_unit_mode,
     )
+    generated.extend(distribution_paths)
 
     source_manifest_sha256 = _canonical_sha256(data.manifest)
     session_counts_by_subject: dict[str, int] = {}
@@ -1556,6 +1839,40 @@ def render_provider_epoch_behavior_cohort(
                 "y_scale": "linear",
                 "clipping": "none",
             },
+            "pooled_bout_histograms": {
+                "files": [
+                    f"{prefix}.pooled_bout_histograms.png",
+                    f"{prefix}.pooled_bout_histograms.svg",
+                ],
+                "semantics": "pooled_per_bout_descriptive_only_nonindependent_within_subject",
+                "uncertainty": "none_inferential_uncertainty_not_shown",
+                "x_scale": "log10",
+                "x_scale_label": "logarithmic x-axis",
+                "binning": "shared_log_spaced_across_epochs_per_metric",
+                "normalization": "fraction_of_valid_values_per_epoch",
+                "clipping": "none",
+            },
+            "subject_balanced_bout_histograms": {
+                "files": [
+                    f"{prefix}.subject_balanced_bout_histograms.png",
+                    f"{prefix}.subject_balanced_bout_histograms.svg",
+                ],
+                "semantics": (
+                    "one_recording_animal_median_per_epoch"
+                    if analysis_unit_mode == RECORDING_ANALYSIS_UNIT_MODE
+                    else "session_median_then_equal_weighted_subject_value"
+                ),
+                "uncertainty": "none_inferential_uncertainty_not_shown",
+                "x_scale": "log10",
+                "x_scale_label": "logarithmic x-axis",
+                "binning": "shared_log_spaced_across_epochs_per_metric",
+                "normalization": "fraction_of_valid_values_per_epoch",
+                "clipping": "none",
+            },
+        },
+        "distribution_histograms": {
+            "pooled_per_bout": pooled_histogram_summaries,
+            "analysis_unit_balanced": analysis_unit_histogram_summaries,
         },
         "figures": [
             {
@@ -1575,6 +1892,8 @@ def render_provider_epoch_behavior_cohort(
             "The linear_only source disposition excludes heading metrics; these figures report linear motion and bout metrics only.",
             "Pooled bout ECDFs retain every valid positive finite bout value and are descriptive only; bouts within animals are not independent and no inferential uncertainty is shown.",
             "Subject-balanced distributions take the median across valid bouts within each recording/session×epoch, then average repeated session medians with equal weight within subject×epoch.",
+            "Histogram bins are metric-specific, shared across epochs, and log-spaced over the observed positive finite domain; values are represented as fractions per bin rather than density because log bins have unequal widths.",
+            "Histogram receipts retain bin edges, integer counts, per-bin fractions, valid denominators, in-range counts, underflow/overflow counts, and source drop reasons; no histogram value is clipped.",
             "Duration and path-length values that are zero, negative, missing, nonnumeric, or nonfinite are counted by reason and omitted from the positive-domain distributions; no values are clipped or substituted.",
             "Mean bout speed is bout_path_length_mm / bout_duration_s only when both inputs are finite and strictly positive.",
         ],

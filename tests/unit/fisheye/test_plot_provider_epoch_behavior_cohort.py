@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -21,8 +22,10 @@ from fisheye.utils.export_provider_epoch_behavior_cohort import (
 )
 from fisheye.utils.plot_provider_epoch_behavior_cohort import (
     EXPECTED_EPOCH_LABELS,
+    HISTOGRAM_BIN_COUNT,
     NEUTRAL_EPOCH_COLORS,
     ProviderEpochBehaviorPlotError,
+    _shared_log_histogram_summary,
     _distribution_data,
     plot_provider_epoch_behavior_cohort_parquet,
     plot_provider_epoch_behavior_cohort_tables,
@@ -452,18 +455,46 @@ def test_distribution_figures_and_receipt_are_deterministic(tmp_path: Path) -> N
         "distribution.pooled_bout_ecdf.svg",
         "distribution.subject_balanced_bout_distributions.png",
         "distribution.subject_balanced_bout_distributions.svg",
+        "distribution.pooled_bout_histograms.png",
+        "distribution.pooled_bout_histograms.svg",
+        "distribution.subject_balanced_bout_histograms.png",
+        "distribution.subject_balanced_bout_histograms.svg",
     } <= {path.name for path in first_paths}
     receipt = json.loads(Path(first["receipt_path"]).read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
     assert receipt["distribution_figures"]["pooled_bout_ecdf"]["x_scale"] == "log10"
     assert receipt["distribution_figures"]["pooled_bout_ecdf"]["clipping"] == "none"
     assert receipt["distribution_figures"]["subject_balanced_bout_distributions"]["y_scale"] == "linear"
+    histogram_figure = receipt["distribution_figures"]["pooled_bout_histograms"]
+    assert histogram_figure["binning"] == "shared_log_spaced_across_epochs_per_metric"
+    assert histogram_figure["normalization"] == "fraction_of_valid_values_per_epoch"
+    assert histogram_figure["clipping"] == "none"
     assert receipt["distribution_metrics"]["bout_path_length_mm"]["valid_bout_count_by_epoch"] == [6, 3, 3]
     assert receipt["distribution_metrics"]["mean_bout_speed_mm_s"]["valid_bout_count_by_epoch"] == [5, 3, 2]
+    for metric in ("bout_duration_s", "bout_path_length_mm", "mean_bout_speed_mm_s"):
+        histogram = receipt["distribution_histograms"]["pooled_per_bout"][metric]
+        assert histogram["bin_count"] == HISTOGRAM_BIN_COUNT
+        assert len(histogram["bin_edges"]) == HISTOGRAM_BIN_COUNT + 1
+        assert histogram["binning"] == "shared_log_spaced_across_epochs"
+        assert histogram["normalization"] == "fraction_of_valid_values_per_epoch"
+        assert histogram["no_clipping"] is True
+        assert histogram["out_of_range_count_by_epoch"] == [0, 0, 0]
+        for counts, fractions, denominator in zip(
+            histogram["bin_counts_by_epoch"],
+            histogram["bin_fractions_by_epoch"],
+            histogram["normalization_denominator_by_epoch"],
+        ):
+            assert sum(counts) == denominator
+            assert sum(fractions) == pytest.approx(1.0 if denominator else 0.0)
+        assert histogram["dropped_input_count_by_epoch"] == receipt["distribution_metrics"][metric][
+            "dropped_bout_count_by_epoch"
+        ]
     figure_receipt_names = {entry["path"] for entry in receipt["figures"]}
     assert {
         "distribution.pooled_bout_ecdf.png",
         "distribution.subject_balanced_bout_distributions.png",
+        "distribution.pooled_bout_histograms.png",
+        "distribution.subject_balanced_bout_histograms.png",
     } <= figure_receipt_names
     for entry in receipt["figures"]:
         assert len(entry["sha256"]) == 64
@@ -532,6 +563,14 @@ def test_recording_analysis_units_bind_decision_and_use_one_unit_per_recording(
     assert receipt["repeated_session_aggregation"] == "not_applicable_recording_id_is_analysis_unit"
     assert receipt["distribution_metrics"]["bout_duration_s"]["valid_analysis_unit_count_by_epoch"] == [16, 16, 16]
     assert receipt["distribution_metrics"]["bout_duration_s"]["valid_subject_count_by_epoch"] is None
+    balanced_histogram = receipt["distribution_histograms"]["analysis_unit_balanced"]["bout_duration_s"]
+    assert balanced_histogram["semantics"] == "one_recording_animal_median_per_epoch"
+    assert balanced_histogram["normalization_denominator_by_epoch"] == [16, 16, 16]
+    assert balanced_histogram["dropped_input_count_by_epoch"] == [0, 0, 0]
+    assert all(
+        sum(counts) == 16
+        for counts in balanced_histogram["bin_counts_by_epoch"]
+    )
     assert receipt["canonical_subject_identity_corrected"] is False
     assert receipt["duplicate_source_subject_id_count"] == 8
     assert receipt["affected_recording_count"] == 16
@@ -544,6 +583,37 @@ def test_recording_analysis_units_bind_decision_and_use_one_unit_per_recording(
             encoding="utf-8"
         )
     )
+
+
+def test_shared_histogram_bins_are_log_spaced_and_fraction_normalized() -> None:
+    summary = _shared_log_histogram_summary(
+        "bout_duration_s",
+        (
+            np.asarray([1.0, 10.0]),
+            np.asarray([2.0, 20.0]),
+            np.asarray([], dtype=float),
+        ),
+        {
+            "total_bout_count_by_epoch": [2, 2, 0],
+            "valid_bout_count_by_epoch": [2, 2, 0],
+            "dropped_bout_count_by_epoch": [0, 0, 0],
+            "dropped_reason_counts_by_epoch": [{}, {}, {}],
+        },
+    )
+
+    edges = np.asarray(summary["bin_edges"])
+    ratios = edges[1:] / edges[:-1]
+    assert summary["bin_count"] == HISTOGRAM_BIN_COUNT
+    assert np.allclose(ratios, ratios[0])
+    assert summary["normalization"] == "fraction_of_valid_values_per_epoch"
+    assert summary["bin_counts_by_epoch"][0].count(1) == 2
+    assert summary["bin_counts_by_epoch"][1].count(1) == 2
+    assert summary["bin_counts_by_epoch"][2] == [0] * HISTOGRAM_BIN_COUNT
+    assert summary["bin_fractions_by_epoch"][0] == pytest.approx(
+        [count / 2 for count in summary["bin_counts_by_epoch"][0]]
+    )
+    assert summary["out_of_range_count_by_epoch"] == [0, 0, 0]
+    assert summary["no_clipping"] is True
 
 
 def test_recording_analysis_units_fail_closed_without_decision_evidence(tmp_path: Path) -> None:
