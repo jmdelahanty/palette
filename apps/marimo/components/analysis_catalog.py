@@ -32,9 +32,17 @@ CORE_BEHAVIOR_PROVIDER = ProviderDefinition(
     description="Stimulus-independent movement and baseline views.",
     component_key="core_behavior",
     analyses=(
-        AnalysisDefinition("speed", "Speed traces", "Projected speed and acceleration series."),
-        AnalysisDefinition("heading", "Heading and turning", "Heading and angular-motion traces."),
-        AnalysisDefinition("position", "Position and trajectory", "Projected x/y trajectory and occupancy."),
+        AnalysisDefinition(
+            "speed", "Speed traces", "Projected speed and acceleration series."
+        ),
+        AnalysisDefinition(
+            "heading", "Heading and turning", "Heading and angular-motion traces."
+        ),
+        AnalysisDefinition(
+            "position",
+            "Position and trajectory",
+            "Projected x/y trajectory and occupancy.",
+        ),
         AnalysisDefinition(
             "eye_angles",
             "Eye angles and convergence",
@@ -45,7 +53,9 @@ CORE_BEHAVIOR_PROVIDER = ProviderDefinition(
             "Tail posture and curvature",
             "Framewise body-frame tail angles, spline curvature, and synchronized bouts.",
         ),
-        AnalysisDefinition("swim_bouts", "Swim bouts", "Persisted bout events and distributions."),
+        AnalysisDefinition(
+            "swim_bouts", "Swim bouts", "Persisted bout events and distributions."
+        ),
         AnalysisDefinition(
             "baseline",
             "Pre-period behavior",
@@ -122,8 +132,14 @@ CHASER_PROVIDER = ProviderDefinition(
             "Eye–chaser tracking",
             "Body-frame gaze tracking, rotated controls, and sustained lock-on events.",
         ),
-        AnalysisDefinition("static_artifacts", "Persisted plots", "Analysis-owned PNG artifacts."),
-        AnalysisDefinition("provenance", "Provenance and source rows", "Spec lineage and projected source rows."),
+        AnalysisDefinition(
+            "static_artifacts", "Persisted plots", "Analysis-owned PNG artifacts."
+        ),
+        AnalysisDefinition(
+            "provenance",
+            "Provenance and source rows",
+            "Spec lineage and projected source rows.",
+        ),
     ),
 )
 
@@ -137,6 +153,22 @@ CHASER_CANDIDATE_PROVIDER = ProviderDefinition(
     ),
     component_key="provider_chaser_candidate",
     analyses=(
+        AnalysisDefinition(
+            "egocentric_bearing",
+            "Candidate egocentric bearing",
+            (
+                "Descriptive chaser-bearing views using the exact unpromoted "
+                "position provider and its persisted body-heading authority."
+            ),
+        ),
+        AnalysisDefinition(
+            "bout_response",
+            "Candidate bout responses",
+            (
+                "Bout-start distance and bearing summaries joined to the exact "
+                "selector-ineligible swim-bout run."
+            ),
+        ),
         AnalysisDefinition(
             "static_artifacts",
             "Candidate plots",
@@ -206,7 +238,10 @@ def group_specs_by_provider(
     ordered = sorted(
         options,
         key=lambda item: (
-            0 if "chaser-dashboard" in item.renderer or "chaser-protocol-dashboard" in item.renderer else 1,
+            0
+            if "chaser-dashboard" in item.renderer
+            or "chaser-protocol-dashboard" in item.renderer
+            else 1,
             0 if item.renderer == BOUT_HEADING_PLOT_RENDERER else 1,
             item.artifact_path,
         ),
