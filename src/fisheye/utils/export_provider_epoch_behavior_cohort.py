@@ -499,6 +499,30 @@ def _validate_summary(entry: CohortEntry) -> LoadedSummary:
     analysis_offer = attrs.get("analysis_offer")
     if not isinstance(analysis_offer, Mapping) or attrs.get("analysis_offer_sha256") != canonical_json_sha256(analysis_offer):
         raise ProviderEpochBehaviorCohortError(f"{entry.recording_id}: analysis offer digest is invalid.")
+    readiness = analysis_offer.get("readiness")
+    if (
+        not isinstance(readiness, Mapping)
+        or readiness.get("scientific") != "ready"
+        or analysis_offer.get("selector_eligible") is not False
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            f"{entry.recording_id}: analysis offer is not an exact selector-ineligible scientifically ready offer."
+        )
+    epoch_record = source_refs["epoch_selection"].get("record")
+    if (
+        not isinstance(epoch_record, Mapping)
+        or epoch_record.get("recording_id") != entry.recording_id
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            f"{entry.recording_id}: epoch-selection recording identity is stale."
+        )
+    if (
+        source_refs["provider_motion"].get("track_id") != entry.track_id
+        or source_refs["swim_bouts"].get("track_id") != entry.track_id
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            f"{entry.recording_id}: provider or swim-bout track identity is stale."
+        )
     bouts, bout_attrs = load_structured_dataset(run, "per_epoch_bouts")
     fish, fish_attrs = load_structured_dataset(run, "per_epoch_fish")
     receipts = {

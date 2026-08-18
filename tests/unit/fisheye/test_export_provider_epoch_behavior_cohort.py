@@ -46,18 +46,23 @@ def _source_fixture(tmp_path: Path):
     summary_run = "summary_linear_only_v1"
     refs = {
         "epoch_selection": {
-            "record": {"run_name": "epochs_v2"},
+            "record": {
+                "run_name": "epochs_v2",
+                "recording_id": recording_id,
+            },
             "sha256": "a" * 64,
         },
         "provider_motion": {
             "run_path": "analysis/track_kinematics_runs/provider/motion_v1",
             "manifest_sha256": "b" * 64,
             "verification_digest": "c" * 64,
+            "track_id": 0,
         },
         "swim_bouts": {
             "run_path": "analysis/swim_bout_runs/bouts_v1",
             "lineage_hash": "d" * 64,
             "frame_axis_sha256": "e" * 64,
+            "track_id": 0,
         },
     }
     attrs = {
@@ -71,9 +76,15 @@ def _source_fixture(tmp_path: Path):
         "track_id": 0,
         "source_refs": refs,
         "source_refs_sha256": canonical_json_sha256(refs),
-        "analysis_offer": {"scientific_readiness": "ready"},
+        "analysis_offer": {
+            "readiness": {"scientific": "ready"},
+            "selector_eligible": False,
+        },
         "analysis_offer_sha256": canonical_json_sha256(
-            {"scientific_readiness": "ready"}
+            {
+                "readiness": {"scientific": "ready"},
+                "selector_eligible": False,
+            }
         ),
         "run_provenance": {"command": "test"},
     }
@@ -230,7 +241,6 @@ def test_linear_only_export_omits_heading_columns_and_records_disposition(
 
 
 def test_manifest_requires_explicit_metric_disposition(tmp_path: Path):
-    zarr_path = tmp_path / "recording.zarr"
     unsigned = {
         "schema_id": exporter.INPUT_SCHEMA_ID,
         "schema_version": exporter.INPUT_SCHEMA_VERSION,
