@@ -207,6 +207,52 @@ def test_materializer_computes_locally_and_publishes_atomically(
     assert validation["default_detector_finite_count"] == frames.size
 
 
+def test_materializer_can_publish_selector_ineligible_without_moving_pointers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    _build_source(source)
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    parent = root["analysis"].require_group("swim_bout_runs")
+    parent.attrs.update(
+        {
+            "latest": "reviewed_bouts",
+            "latest_complete": "reviewed_bouts",
+            "authoritative_run": "reviewed_bouts",
+        }
+    )
+    monkeypatch.setattr(mod.bout_writer, "main", _fake_writer)
+
+    result = mod.materialize_swim_bouts(
+        source,
+        scratch_root=tmp_path / "scratch",
+        run_name="bouts_canary",
+        writer_arguments=("--layout", "compact_v2"),
+        promote=False,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+    )
+
+    assert result["status"] == "complete"
+    assert result["plan"]["selector_eligible"] is False
+    assert result["publish"]["selector_eligible"] is False
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    direct_parent = direct["analysis/swim_bout_runs"]
+    assert direct_parent.attrs["latest"] == "reviewed_bouts"
+    assert direct_parent.attrs["latest_complete"] == "reviewed_bouts"
+    assert direct_parent.attrs["authoritative_run"] == "reviewed_bouts"
+    run = direct_parent["bouts_canary"]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["stage_selector_eligible"] is False
+
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    consolidated_run = consolidated["analysis/swim_bout_runs/bouts_canary"]
+    assert consolidated_run.attrs["palette_run_completion_status"] == "complete"
+    assert consolidated_run.attrs["stage_selector_eligible"] is False
+
+
 def test_materializer_rejects_all_nan_default_detector_before_publish(
     monkeypatch,
     tmp_path: Path,

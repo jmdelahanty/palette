@@ -9,7 +9,8 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from types import MappingProxyType
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
@@ -26,6 +27,12 @@ from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+)
 
 MATERIALIZATION_SCHEMA_ID = "palette.swim_bout_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.swim_bout_run_publish.v1"
@@ -34,6 +41,13 @@ MANAGED_WRITER_ARGUMENTS = {
     "--overwrite",
     "--run-name",
 }
+_SELECTOR_ATTRS = (
+    "latest",
+    "latest_complete",
+    "latest_pending",
+    "authoritative_run",
+    "authoritative_run_provenance",
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +57,8 @@ class SwimBoutMaterializationPlan:
     local_zarr: Path
     run_name: str
     writer_arguments: tuple[str, ...]
+    promote: bool
+    parent_selector_attrs: Mapping[str, Any]
 
     @property
     def local_run_path(self) -> Path:
@@ -51,6 +67,10 @@ class SwimBoutMaterializationPlan:
     @property
     def target_run_path(self) -> Path:
         return self.source_zarr / "analysis" / "swim_bout_runs" / self.run_name
+
+    @property
+    def run_path(self) -> str:
+        return f"analysis/swim_bout_runs/{self.run_name}"
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -62,6 +82,9 @@ class SwimBoutMaterializationPlan:
             "target_run_path": str(self.target_run_path),
             "run_name": self.run_name,
             "writer_arguments": list(self.writer_arguments),
+            "promote": self.promote,
+            "selector_eligible": self.promote,
+            "parent_selector_attrs": dict(self.parent_selector_attrs),
         }
 
 
@@ -72,12 +95,23 @@ def _validate_run_name(run_name: str) -> str:
     return value
 
 
+def _selector_attrs(parent: Any | None) -> dict[str, Any]:
+    if parent is None:
+        return {}
+    return {
+        name: json_attr_safe(parent.attrs[name])
+        for name in _SELECTOR_ATTRS
+        if name in parent.attrs
+    }
+
+
 def build_swim_bout_materialization_plan(
     source_zarr: str | Path,
     *,
     scratch_root: str | Path,
     run_name: str,
     writer_arguments: Sequence[str] = (),
+    promote: bool = True,
 ) -> SwimBoutMaterializationPlan:
     source = Path(source_zarr).expanduser().resolve()
     scratch = Path(scratch_root).expanduser().resolve()
@@ -92,6 +126,8 @@ def build_swim_bout_materialization_plan(
             "Scratch root must not be inside the authoritative source Zarr."
         )
     name = _validate_run_name(run_name)
+    if type(promote) is not bool:
+        raise TypeError("promote must be the exact boolean.")
     forwarded = tuple(str(value) for value in writer_arguments)
     forbidden = sorted(
         argument.split("=", 1)[0]
@@ -108,12 +144,16 @@ def build_swim_bout_materialization_plan(
         raise FileExistsError(
             f"Refusing to replace existing authoritative run: {target}"
         )
+    root = open_zarr_root(source, mode="r", use_consolidated=False)
+    parent = root.get("analysis/swim_bout_runs")
     return SwimBoutMaterializationPlan(
         source_zarr=source,
         scratch_root=scratch,
         local_zarr=scratch / "swim-bout-output.zarr",
         run_name=name,
         writer_arguments=forwarded,
+        promote=promote,
+        parent_selector_attrs=MappingProxyType(_selector_attrs(parent)),
     )
 
 
@@ -247,30 +287,40 @@ def publish_swim_bout_run(
         parent: zarr.Group,
         run_group: zarr.Group,
     ) -> None:
+        parent_for_completion = parent if plan.promote else None
         mark_run_complete(
             run_group,
-            parent_group=parent,
+            parent_group=parent_for_completion,
             run_name=plan.run_name,
             run_provenance=build_run_provenance_from_stage_record(
                 run_group.attrs.get("provenance", {}),
                 fallback_command="swim_bout_materializer",
             ),
         )
-        parent.attrs["latest_complete"] = plan.run_name
-        parent.attrs["latest"] = plan.run_name
+        if plan.promote:
+            parent.attrs["latest_complete"] = plan.run_name
+            parent.attrs["latest"] = plan.run_name
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/swim_bout_runs"]
         run_group = parent[plan.run_name]
-        if (
-            str(parent.attrs.get("latest")) != plan.run_name
-            or str(parent.attrs.get("latest_complete")) != plan.run_name
-            or run_group.attrs.get("palette_run_completion_status") != "complete"
-            or run_group.attrs.get("stage_selector_eligible") is not False
+        if run_group.attrs.get("palette_run_completion_status") != "complete" or (
+            run_group.attrs.get("stage_selector_eligible") is not False
         ):
             raise RuntimeError(
-                "Swim-bout run was not persisted complete and ineligible behind "
-                "its parent pointers."
+                "Swim-bout run was not persisted complete and selector-ineligible."
+            )
+        if plan.promote:
+            if (
+                str(parent.attrs.get("latest")) != plan.run_name
+                or str(parent.attrs.get("latest_complete")) != plan.run_name
+            ):
+                raise RuntimeError(
+                    "Swim-bout run was not persisted behind its parent pointers."
+                )
+        elif _selector_attrs(parent) != dict(plan.parent_selector_attrs):
+            raise RuntimeError(
+                "Selector-ineligible swim-bout publication changed parent selectors."
             )
 
     def activate(
@@ -278,21 +328,54 @@ def publish_swim_bout_run(
         parent: zarr.Group,
         run_group: zarr.Group,
     ) -> None:
-        if (
-            str(parent.attrs.get("latest")) != plan.run_name
-            or str(parent.attrs.get("latest_complete")) != plan.run_name
-            or run_group.attrs.get("palette_run_completion_status") != "complete"
-            or run_group.attrs.get("stage_selector_eligible") is not False
+        if run_group.attrs.get("palette_run_completion_status") != "complete" or (
+            run_group.attrs.get("stage_selector_eligible") is not False
         ):
             raise RuntimeError(
                 "Swim-bout activation requires one complete, ineligible run."
             )
-        try:
-            run_group.attrs["stage_selector_eligible"] = True
-        except BaseException:
-            if run_group.attrs.get("stage_selector_eligible") is True:
-                return
-            raise
+        if plan.promote:
+            if (
+                str(parent.attrs.get("latest")) != plan.run_name
+                or str(parent.attrs.get("latest_complete")) != plan.run_name
+            ):
+                raise RuntimeError(
+                    "Swim-bout activation requires exact parent pointers."
+                )
+            try:
+                run_group.attrs["stage_selector_eligible"] = True
+            except BaseException:
+                if run_group.attrs.get("stage_selector_eligible") is True:
+                    return
+                raise
+            return
+
+        if _selector_attrs(parent) != dict(plan.parent_selector_attrs):
+            raise RuntimeError(
+                "Selector-ineligible swim-bout finalization observed changed selectors."
+            )
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+        validate_direct_consolidated_subtree(
+            plan.source_zarr,
+            subtree_path=plan.run_path,
+        )
+        consolidated_root = open_zarr_root(
+            plan.source_zarr,
+            mode="r",
+            use_consolidated=True,
+        )
+        consolidated_run = consolidated_root[plan.run_path]
+        if (
+            consolidated_run.attrs.get("palette_run_completion_status") != "complete"
+            or consolidated_run.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Consolidated swim-bout canary is not complete and selector-ineligible."
+            )
+
+    def repair_failed(_target: Path) -> None:
+        if not plan.promote:
+            consolidate_metadata_capture_expected_warnings(plan.source_zarr)
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -313,11 +396,16 @@ def publish_swim_bout_run(
         complete_run=complete,
         verify_pointers=verify,
         activate_run=activate,
+        repair_failed_publication_visibility=repair_failed,
+        accept_persisted_activation_on_callback_error=plan.promote,
         payload_metadata={
             "copy_backend": copy_backend,
             "promotion_policy": (
                 "complete_ineligible_then_pointers_then_eligibility_final"
+                if plan.promote
+                else "named_selector_ineligible_candidate_parent_selectors_unchanged"
             ),
+            "selector_eligible": plan.promote,
             "materialization": json_attr_safe(materialization_payload),
         },
     )
@@ -329,6 +417,7 @@ def materialize_swim_bouts(
     scratch_root: str | Path,
     run_name: str,
     writer_arguments: Sequence[str] = (),
+    promote: bool = True,
     copy_backend: str = "rsync",
     apply: bool = False,
     keep_scratch: bool = False,
@@ -338,6 +427,7 @@ def materialize_swim_bouts(
         scratch_root=scratch_root,
         run_name=run_name,
         writer_arguments=writer_arguments,
+        promote=promote,
     )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -416,6 +506,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--copy-backend", choices=("rsync", "python"), default="rsync")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--keep-scratch", action="store_true")
+    parser.add_argument(
+        "--selector-ineligible",
+        action="store_true",
+        help="Publish one exact named canary without changing parent selectors.",
+    )
     parser.add_argument("--report", type=Path)
     parser.add_argument("--json", action="store_true")
     return parser
@@ -434,6 +529,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         scratch_root=args.scratch_root or _default_scratch_root(args.run_name),
         run_name=args.run_name,
         writer_arguments=writer_arguments,
+        promote=not args.selector_ineligible,
         copy_backend=args.copy_backend,
         apply=args.apply,
         keep_scratch=args.keep_scratch,

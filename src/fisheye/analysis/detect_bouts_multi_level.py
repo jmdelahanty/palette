@@ -129,6 +129,7 @@ DEFAULT_EXPONENTIAL_SOURCE_LEVEL = "filtered"
 DEFAULT_MIN_PEAK_PROMINENCE_MM_S = 4.0
 DEFAULT_MIN_PEAK_DISTANCE_S = 0.10
 DEFAULT_PEAK_WIDTH_REL_HEIGHT = 0.98
+TRACK_KINEMATICS_SCOPE_CHOICES = ("offline", "provider")
 BOUNDARY_MODES = ("threshold", "local_minimum")
 GAP_MERGE_POLICIES = ("sampled_frame_gap", "interpolated_core_gap")
 PEAK_EVENT_BOUNDARY_MODES = ("relative_prominence_width",)
@@ -2619,6 +2620,8 @@ def _load_track_kinematics_track_speeds(
     zarr_path: Path,
     track_kinematics_run: str,
     track_id: int = 0,
+    *,
+    track_kinematics_scope: str = "offline",
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
     """
     Load speed levels from a track kinematics track.
@@ -2627,6 +2630,9 @@ def _load_track_kinematics_track_speeds(
         zarr_path: Path to capture zarr
         track_kinematics_run: Track kinematics run name (or "latest")
         track_id: Track ID to load
+        track_kinematics_scope: Exact motion namespace. Provider runs must be
+            named explicitly because that namespace intentionally has no
+            selectors.
 
     Returns:
         Tuple of (speed_dict, metadata_dict)
@@ -2634,6 +2640,18 @@ def _load_track_kinematics_track_speeds(
         speed_smoothed_mm, speed_averaged_mm, and frames.
         metadata_dict keys: fps, pixel_to_mm, n_frames, etc.
     """
+    if track_kinematics_scope == "provider":
+        return _load_provider_track_motion_speeds(
+            zarr_path,
+            track_kinematics_run,
+            track_id=track_id,
+        )
+    if track_kinematics_scope != "offline":
+        raise ValueError(
+            "track_kinematics_scope must be one of "
+            f"{TRACK_KINEMATICS_SCOPE_CHOICES!r}."
+        )
+
     root = open_zarr_root(zarr_path, mode='r')
     track = load_track_kinematics_track(
         root,
@@ -2659,6 +2677,7 @@ def _load_track_kinematics_track_speeds(
         'n_frames': len(speeds['frames']),
         'track_kinematics_run': track.run_name,
         'track_kinematics_scope': track.scope,
+        'source_track_path': track.track_path,
         'track_kinematics_created_at_utc': track.run_attrs.get('created_at_utc'),
         'track_kinematics_stage': source_provenance.get('stage'),
         'track_kinematics_version': source_provenance.get('version'),
@@ -2676,6 +2695,179 @@ def _load_track_kinematics_track_speeds(
     }
 
     return speeds, metadata
+
+
+def _provider_track_motion_run_path(track_kinematics_run: str) -> str:
+    from fisheye.analysis_workflows.materializers.provider_track_motion import (
+        PROVIDER_TRACK_MOTION_PARENT_PATH,
+    )
+
+    value = str(track_kinematics_run).strip()
+    if value == "latest":
+        raise ValueError(
+            "Provider track motion has no selector; pass one exact provider run name."
+        )
+    prefix = f"{PROVIDER_TRACK_MOTION_PARENT_PATH}/"
+    if value and "/" not in value:
+        return f"{prefix}{value}"
+    if value.startswith(prefix) and value[len(prefix) :] and "/" not in value[len(prefix) :]:
+        return value
+    raise ValueError(
+        "Provider track-motion run must be a bare child name or the exact path "
+        f"{prefix}<run>; got {track_kinematics_run!r}."
+    )
+
+
+def _load_provider_track_motion_speeds(
+    zarr_path: Path,
+    track_kinematics_run: str,
+    *,
+    track_id: int,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    """Adapt one exact verified provider-motion rowset for bout detection.
+
+    Provider motion stores all tracks in one flat run. The current swim-bout
+    frame-axis contract references one complete physical array, so this bridge
+    accepts only a track that owns the complete provider rowset. Multi-track
+    provider runs require a future row-slice-aware frame-axis contract rather
+    than an implicit or lossy reinterpretation.
+    """
+
+    from fisheye.analysis_workflows.provider_track_motion_source_handle import (
+        load_provider_track_motion_source_handle,
+    )
+
+    run_path = _provider_track_motion_run_path(track_kinematics_run)
+    provider = load_provider_track_motion_source_handle(
+        zarr_path,
+        run_path,
+        use_consolidated=True,
+        require_authoritative_timing=False,
+    )
+    track_ids = np.asarray(provider.track_ids, dtype=np.int64)
+    row_offsets = np.asarray(provider.track_row_offsets, dtype=np.int64)
+    matches = np.flatnonzero(track_ids == int(track_id))
+    if matches.size != 1:
+        raise ValueError(
+            f"Provider motion {run_path!r} does not contain exactly one track "
+            f"with id {int(track_id)}; available={track_ids.tolist()}."
+        )
+    track_index = int(matches[0])
+    row_start = int(row_offsets[track_index])
+    row_stop = int(row_offsets[track_index + 1])
+    if row_start != 0 or row_stop != int(provider.row_count):
+        raise ValueError(
+            "Swim-bout provider adaptation currently requires the selected track "
+            "to own the complete provider rowset so the physical frame-axis path "
+            "is exact."
+        )
+
+    def values(name: str) -> np.ndarray:
+        return np.asarray(provider.array(name)[row_start:row_stop])
+
+    computation = dict(provider.computation_record)
+    parameters = computation.get("parameters")
+    if not isinstance(parameters, Mapping):
+        raise ValueError("Provider-motion computation parameters are missing.")
+    fps = parameters.get("fps")
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not math.isfinite(float(fps))
+        or float(fps) <= 0
+    ):
+        raise ValueError("Provider-motion computation FPS is invalid.")
+    pixel_to_mm = parameters.get("pixel_to_mm")
+
+    speeds: Dict[str, np.ndarray] = {
+        "frames": values("source_acquisition_frame_index").astype(
+            np.int64, copy=False
+        ),
+        "speed_raw_mm": values("speed_raw_mm"),
+        "speed_filtered_mm": values("speed_filtered_mm"),
+        "speed_smoothed_mm": values("speed_smoothed_mm"),
+        "speed_averaged_mm": values("speed_averaged_mm"),
+        "frame_path_distance_raw_mm": values("frame_path_distance_raw_mm"),
+        "frame_path_distance_filtered_mm": values(
+            "frame_path_distance_filtered_mm"
+        ),
+        "frame_path_distance_smoothed_mm": values(
+            "frame_path_distance_smoothed_mm"
+        ),
+        "frame_path_distance_raw_px": values("frame_path_distance_raw_px"),
+        "frame_path_distance_filtered_px": values(
+            "frame_path_distance_filtered_px"
+        ),
+        "frame_path_distance_smoothed_px": values(
+            "frame_path_distance_smoothed_px"
+        ),
+        "delta_seconds": values("delta_seconds"),
+        "transition_valid": values("transition_valid").astype(bool, copy=False),
+        "sample_valid": values("linear_sample_valid").astype(bool, copy=False),
+    }
+    source_array_paths = {
+        "frame_indices": f"{run_path}/source_acquisition_frame_index",
+        "track_sample_key": f"{run_path}/track_sample_key",
+        "source_acquisition_frame_index": (
+            f"{run_path}/source_acquisition_frame_index"
+        ),
+        "speed_mm": {
+            f"speed_{level}": f"{run_path}/speed_{level}_mm"
+            for level in ("raw", "filtered", "smoothed", "averaged")
+        },
+        "frame_path_distance_mm": {
+            level: f"{run_path}/frame_path_distance_{level}_mm"
+            for level in ("raw", "filtered", "smoothed")
+        },
+        "delta_seconds": f"{run_path}/delta_seconds",
+        "transition_valid": f"{run_path}/transition_valid",
+        "sample_valid": f"{run_path}/linear_sample_valid",
+        "positions_mm": f"{run_path}/positions_mm",
+        "positions_px": f"{run_path}/positions_px",
+    }
+    manifest_ref = f"/{run_path}@provider_track_motion_manifest"
+    authority = {
+        "schema_id": "palette.provider_track_motion_read_authority",
+        "schema_version": 1,
+        "run_ref": f"/{run_path}",
+        "track_ref": f"/{run_path}",
+        "track_id": int(track_id),
+        "track_row_start": row_start,
+        "track_row_stop": row_stop,
+        "motion_manifest_ref": manifest_ref,
+        "motion_manifest_sha256": provider.provider_manifest_sha256,
+        "positions_px_ref": f"/{run_path}/positions_px",
+        "positions_mm_ref": f"/{run_path}/positions_mm",
+        "track_sample_key_ref": f"/{run_path}/track_sample_key",
+        "source_acquisition_frame_index_ref": (
+            f"/{run_path}/source_acquisition_frame_index"
+        ),
+        "provider_verification_digest": provider.verification_digest,
+        "physical_authority_sha256": provider.physical_authority_sha256,
+        "temporal_authority_status": provider.temporal_authority_status,
+        "timing_is_authoritative": provider.timing_is_authoritative,
+    }
+    frames = speeds["frames"]
+    return speeds, {
+        "fps": float(fps),
+        "pixel_to_mm": pixel_to_mm,
+        "n_frames": int(frames.shape[0]),
+        "track_kinematics_run": provider.run_name,
+        "track_kinematics_scope": "provider",
+        "source_track_path": run_path,
+        "track_kinematics_created_at_utc": None,
+        "track_kinematics_stage": "provider_track_motion",
+        "track_kinematics_version": computation.get("computation_id"),
+        "track_kinematics_git_commit": None,
+        "track_kinematics_git_dirty": None,
+        "track_id": int(track_id),
+        "source_array_paths": source_array_paths,
+        "track_motion_authority": authority,
+        "source_frame_indices_dtype": str(np.dtype(frames.dtype)),
+        "source_frame_indices_shape": [int(frames.shape[0])],
+        "positions_mm": values("positions_mm"),
+        "positions_px": values("positions_px"),
+    }
 
 
 def _metric_inputs_for_level(
@@ -2723,6 +2915,7 @@ def detect_and_save_bouts(
     zarr_path: Path,
     run_name: Optional[str],
     track_kinematics_run: str = "latest",
+    track_kinematics_scope: str = "offline",
     track_id: int = 0,
     method: str = DEFAULT_DETECTION_METHOD,
     threshold_mm: float = 0.01,
@@ -2760,6 +2953,8 @@ def detect_and_save_bouts(
             run. Inputs are always read from ``zarr_path``. Production callers
             use this to compute locally before atomic publication.
         track_kinematics_run: Track kinematics run name (or "latest")
+        track_kinematics_scope: Exact motion namespace. ``provider`` requires
+            one explicitly named selector-ineligible provider run.
         track_id: Track ID to analyze
         method: Detection method ("threshold", "peak", or "peak_event")
         threshold_mm: Speed threshold in mm/s (for threshold method)
@@ -2848,6 +3043,7 @@ def detect_and_save_bouts(
     print(f"{'='*60}")
     print(f"Capture: {zarr_path.name}")
     print(f"Track kinematics run: {track_kinematics_run}")
+    print(f"Track kinematics scope: {track_kinematics_scope}")
     print(f"Track ID: {track_id}")
     print(f"Method: {method}")
     print(f"Boundary mode: {boundary_mode}")
@@ -2884,7 +3080,10 @@ def detect_and_save_bouts(
     print("Loading track kinematics track data...")
     phase_started_at = perf_counter()
     speeds, metadata = _load_track_kinematics_track_speeds(
-        zarr_path, track_kinematics_run, track_id
+        zarr_path,
+        track_kinematics_run,
+        track_id,
+        track_kinematics_scope=track_kinematics_scope,
     )
     _finish_timed_phase(
         phase_durations_s,
@@ -3160,6 +3359,9 @@ def detect_and_save_bouts(
         run_group.attrs['shape_split_policy'] = shape_split_policy
 
     run_group.attrs['source_track_kinematics_run'] = metadata['track_kinematics_run']
+    run_group.attrs['source_track_kinematics_scope'] = metadata[
+        'track_kinematics_scope'
+    ]
     run_group.attrs['track_id'] = track_id
     run_group.attrs['fps'] = fps
     track_motion_authority = _json_safe_attr_value(
@@ -3173,10 +3375,7 @@ def detect_and_save_bouts(
     run_group.attrs['git_commit'] = git_info['commit_hash']
     run_group.attrs['git_branch'] = git_info['branch']
     run_group.attrs['git_dirty'] = git_info['is_dirty']
-    source_track_path = (
-        f"analysis/track_kinematics_runs/offline/"
-        f"{metadata['track_kinematics_run']}/tracks/id_{int(track_id)}"
-    )
+    source_track_path = str(metadata['source_track_path'])
     frame_axis_contract: Optional[Dict[str, Any]] = None
     frame_axis_contract_sha256: Optional[str] = None
     if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
@@ -3264,10 +3463,12 @@ def detect_and_save_bouts(
         'peak_event_schema_version': PEAK_EVENT_SCHEMA_VERSION,
         'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
+        'track_kinematics_scope': metadata['track_kinematics_scope'],
     })
     run_group.attrs['parameters'] = parameters
     run_group.attrs['source_refs'] = _json_safe_attr_value({
         'source_track_kinematics_path': source_track_path,
+        'source_track_kinematics_scope': metadata['track_kinematics_scope'],
         'source_track_id': int(track_id),
         'source_track_motion_authority': track_motion_authority,
         'source_frame_axis_path': (
@@ -3307,6 +3508,7 @@ def detect_and_save_bouts(
     inputs = _json_safe_attr_value({
         'zarr_path': str(zarr_path),
         'source_track_kinematics_run': metadata['track_kinematics_run'],
+        'source_track_kinematics_scope': metadata['track_kinematics_scope'],
         'source_track_kinematics_stage': metadata.get('track_kinematics_stage'),
         'source_track_kinematics_version': metadata.get('track_kinematics_version'),
         'source_track_path': source_track_path,
@@ -3674,6 +3876,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     parser.add_argument(
+        '--track-kinematics-scope',
+        choices=TRACK_KINEMATICS_SCOPE_CHOICES,
+        default='offline',
+        help=(
+            'Track-motion namespace. Provider runs must be named explicitly '
+            '(default: offline).'
+        ),
+    )
+
+    parser.add_argument(
         '--track-id',
         type=int,
         default=0,
@@ -3879,6 +4091,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_name=args.run_name,
         output_zarr_path=args.output_zarr_path,
         track_kinematics_run=args.track_kinematics_run,
+        track_kinematics_scope=args.track_kinematics_scope,
         track_id=args.track_id,
         method=args.method,
         threshold_mm=args.threshold_mm,

@@ -81,7 +81,14 @@ def _make_track_kinematics_archive(
     _write_array(track, "positions_px", positions_px)
     _write_array(track, "positions_mm", positions_px * 0.1)
 
-    def _load_verified_track(_zarr_path: Path, _run_name: str, track_id: int = 0):
+    def _load_verified_track(
+        _zarr_path: Path,
+        _run_name: str,
+        track_id: int = 0,
+        *,
+        track_kinematics_scope: str = "offline",
+    ):
+        assert track_kinematics_scope == "offline"
         live_root = zarr.open_group(str(zarr_path), mode="r")
         live_track = live_root[
             "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"
@@ -139,6 +146,7 @@ def _make_track_kinematics_archive(
             "n_frames": int(live_frames.size),
             "track_kinematics_run": "tk_1",
             "track_kinematics_scope": "offline",
+            "source_track_path": track_path,
             "track_id": int(track_id),
             "positions_mm": np.asarray(live_track["positions_mm"][:]),
             "positions_px": np.asarray(live_track["positions_px"][:]),
