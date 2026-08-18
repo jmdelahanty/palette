@@ -752,7 +752,10 @@ contrast offers remain pending.
 - [ ] Include provider IDs and digests in every generic metric, contrast, and
       plot recipe.
 - [ ] Permit multiple explicit offers when several providers are available.
-- [ ] Add strict cross-provider comparison products.
+- [x] Add a strict selector-ineligible cross-provider position comparison
+      product over the sorted union of exact `instance_key` values. Provider
+      presence, estimator validity, failure reason, and pairwise distance are
+      separate arrays; missing providers are never filled from another method.
 - [ ] Reject incompatible providers in ordinary scientific contrasts.
 - [ ] Generalize provider discovery and readiness beyond the recording-level
       canary into reporting, registry, and review UIs.
@@ -867,6 +870,37 @@ until every required CI check passes and it is integrated through the normal
       methods using the same body-frame source.
 - [ ] Define promotion policy only after canary evidence exists.
 - [ ] Add legacy adapters without relabeling historical estimator semantics.
+
+#### Four-provider comparison implementation (2026-08-18)
+
+Palette now has an explicit, retryable canary boundary for the four registered
+position estimators. It accepts only exact run paths and publishes no selector:
+
+- `detection_bbox_centroid.v1` from a sealed canonical-v3 detection candidate;
+- `keypoint_anatomical_triad_mean.v1`;
+- `mask_component_anatomical_triad_mean.v1`; and
+- `subject_body_mask_centroid.v1`.
+
+The comparison artifact lives beneath
+`analysis/provider_position_comparison_runs/<run>`. Its row axis is the sorted
+union of observation `instance_key` values. It stores provider presence before
+validity so a missing pose/mask row cannot be confused with an invalid model
+result. It preserves each provider's own reason code and computes pairwise
+offsets only where both providers are present and valid. It also requires one
+exact source-camera frame authority and rejects the same key mapped to
+different acquisition frames.
+
+Canonical-v3 detection successors now persist the standard observation row
+identity contract on `instances`. The detection position reader consumes that
+exact persisted contract and the `instances/*` canonical-v3 table. It does not
+synthesize a row identity from equal cardinality or mutate older immutable
+successors. Existing older candidates therefore remain unchanged; a new
+selector-ineligible successor is required for this canary.
+
+This implementation is test evidence, not promotion evidence. AB-fish model
+coverage and disagreement must remain visible even when the current keypoint
+or mask model is weak. No provider is substituted, averaged across methods, or
+made the GoodBatBadBat default by successful materialization.
 
 ## Acceptance Criteria
 

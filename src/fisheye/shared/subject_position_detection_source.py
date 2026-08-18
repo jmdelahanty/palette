@@ -25,6 +25,16 @@ from typing import Any, Mapping
 import numpy as np
 
 from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.coordinate_descriptor import (
+    CanonicalCoordinateDescriptor,
+    CanonicalFrameRecord,
+    DigestBoundCoordinateRecordRef,
+    PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+    build_canonical_coordinate_descriptor,
+)
+from fisheye.shared.coordinate_identity import (
+    load_bound_row_identity_contract,
+)
 from fisheye.shared.coordinate_surface_contract import (
     CANONICAL_OVERLAY_DIRECT,
     SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
@@ -41,10 +51,20 @@ from fisheye.shared.subject_position_expression import (
     BoundingBoxSourceBinding,
     PointExpressionBindings,
 )
+from fisheye.shared.pixel_frame_authority import (
+    load_persisted_acquisition_camera_authority,
+    load_source_camera_pixel_frame_authority,
+)
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    canonical_detection_dimensions_from_manifest,
     validate_canonical_detection_run_manifest,
     require_active_coordinate_canonical_detection,
+)
+from fisheye.shared.zarr.benchmark_runtime import sha256_array
+from fisheye.shared.zarr.detection_schema import (
+    CANONICAL_DETECTION_SCHEMA_V1,
+    derive_canonical_detection_geometry,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
@@ -69,11 +89,38 @@ DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID = (
 DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID = (
     "sealed_selector_ineligible_coordinate_canonical_detection_candidate.v1"
 )
-DETECTION_POSITION_CANARY_PRODUCTION_SELECTOR_ACTIVATION = (
-    "deferred"
-)
+DETECTION_POSITION_CANARY_PRODUCTION_SELECTOR_ACTIVATION = "deferred"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BOUND_DETECTION_POSITION_SOURCE_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _ManifestBoundBBoxDescriptor:
+    """Canonical bbox descriptor reconstructed from sealed v3 authorities."""
+
+    descriptor: CanonicalCoordinateDescriptor
+    reference_frame_authority: Any
+
+
+@dataclass(frozen=True)
+class _DigestAuthority:
+    record_ref: str
+    record_sha256: str
+
+
+@dataclass(frozen=True)
+class _ManifestDetectionFrameEvidence:
+    source_camera_frame: Any
+    bbox_source_camera_frame: Any
+
+
+@dataclass(frozen=True)
+class _ManifestDetectionGeometry:
+    row_identity: Any
+    bbox_image: _ManifestBoundBBoxDescriptor
+    frame_evidence: _ManifestDetectionFrameEvidence
+    bbox_projection: _DigestAuthority
+    temporal_authority: _DigestAuthority
 
 
 class DetectionPositionSourceError(ValueError):
@@ -141,7 +188,9 @@ def _require_canary_run_path(run_path: Any) -> str:
 
 
 def _authority_record(value: Any, *, name: str) -> dict[str, str]:
-    record_ref = _required_text(getattr(value, "record_ref", None), name=f"{name}.record_ref")
+    record_ref = _required_text(
+        getattr(value, "record_ref", None), name=f"{name}.record_ref"
+    )
     record_sha256 = _required_sha256(
         getattr(value, "record_sha256", None), name=f"{name}.record_sha256"
     )
@@ -178,13 +227,14 @@ def _require_manifest_binding(
     }
     for name, expected in expected_publication.items():
         if publication.get(name) != expected:
-            _fail(f"Canonical detection publication evidence {name!r} is stale or invalid.")
-    for name in (
-        "metadata_declarations_digest",
-    ):
+            _fail(
+                f"Canonical detection publication evidence {name!r} is stale or invalid."
+            )
+    for name in ("metadata_declarations_digest",):
         _required_sha256(publication.get(name), name=f"publication.{name}")
     manifest_digest = _required_sha256(
-        manifest.get("payload_digest"), name="canonical detection manifest.payload_digest"
+        manifest.get("payload_digest"),
+        name="canonical detection manifest.payload_digest",
     )
     logical_content = payload.get("logical_content")
     if not isinstance(logical_content, Mapping):
@@ -234,7 +284,9 @@ def _require_selector_ineligible_candidate(
     if attrs.get("production_selector_activation") != (
         DETECTION_POSITION_CANARY_PRODUCTION_SELECTOR_ACTIVATION
     ):
-        _fail("Sealed canary detection run has an invalid production activation marker.")
+        _fail(
+            "Sealed canary detection run has an invalid production activation marker."
+        )
 
     # A selector-ineligible candidate must not be smuggled into any selector, and
     # no selector is ever used to find this run.  Missing selector attributes are
@@ -280,9 +332,7 @@ def _require_selector_ineligible_candidate(
         "run_path": path,
         "run_completion": {
             "status": attrs.get("status"),
-            "palette_run_completion_status": attrs.get(
-                "palette_run_completion_status"
-            ),
+            "palette_run_completion_status": attrs.get("palette_run_completion_status"),
         },
         "selector_state": {
             "stage_selector_eligible": attrs.get("stage_selector_eligible"),
@@ -326,11 +376,17 @@ def _require_bbox_descriptor(geometry: Any) -> None:
     authority = geometry.bbox_image.reference_frame_authority
     bbox_frame = geometry.frame_evidence.bbox_source_camera_frame
     if authority is None or authority.record_sha256 != bbox_frame.record_sha256:
-        _fail("Detection bbox descriptor is not bound to its exact bbox frame authority.")
-    if descriptor.profile_id != SOURCE_CAMERA_PROFILE_ID or descriptor.pixel_convention != (
-        SOURCE_CAMERA_BBOX_PIXEL_CONVENTION
-    ) or descriptor.source_camera_overlay.status != CANONICAL_OVERLAY_DIRECT:
-        _fail("Detection bbox descriptor has an incompatible source-camera coordinate authority.")
+        _fail(
+            "Detection bbox descriptor is not bound to its exact bbox frame authority."
+        )
+    if (
+        descriptor.profile_id != SOURCE_CAMERA_PROFILE_ID
+        or descriptor.pixel_convention != (SOURCE_CAMERA_BBOX_PIXEL_CONVENTION)
+        or descriptor.source_camera_overlay.status != CANONICAL_OVERLAY_DIRECT
+    ):
+        _fail(
+            "Detection bbox descriptor has an incompatible source-camera coordinate authority."
+        )
 
 
 def _canonical_detection_validity(
@@ -372,14 +428,205 @@ def _canonical_detection_validity(
         "record_ref": f"/{run_path}@run_manifest",
         "record_sha256": manifest_evidence["manifest_digest"],
         "logical_content_sha256": manifest_evidence["logical_content_digest"],
-        "validation": (
-            "canonical_detection_schema_v1_finite_positive_area_in_extent"
-        ),
+        "validation": ("canonical_detection_schema_v1_finite_positive_area_in_extent"),
         "values_dtype": "bool",
         "values_shape": [boxes.shape[0]],
         "values_sha256": array_values_sha256(validity),
     }
     return validity, record
+
+
+def _manifest_logical_arrays(
+    root_node: Any,
+    *,
+    run_path: str,
+    manifest: Mapping[str, Any],
+) -> dict[str, np.ndarray] | None:
+    """Load and revalidate one canonical-v3 ``instances/*`` table.
+
+    Older in-memory adapter fixtures deliberately expose only the historical
+    flat observation loader.  Returning ``None`` when the v3 table is absent
+    preserves those explicit compatibility tests; a persisted canonical-v3
+    run always has the table and therefore always takes this strict path.
+    """
+
+    try:
+        run = root_node[run_path]
+        instances = run["instances"]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    del instances  # existence is the layout discriminator; paths stay manifest-owned
+
+    dimensions = canonical_detection_dimensions_from_manifest(manifest)
+    arrays: dict[str, np.ndarray] = {}
+    try:
+        for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths:
+            values = np.asarray(run[path][...])
+            snapshot = np.array(values, copy=True, order="C")
+            snapshot.setflags(write=False)
+            arrays[path] = snapshot
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        _fail(f"Canonical-v3 detection arrays are unreadable: {exc}.")
+    try:
+        CANONICAL_DETECTION_SCHEMA_V1.require(arrays, dimensions=dimensions)
+    except (TypeError, ValueError) as exc:
+        _fail(f"Canonical-v3 detection arrays violate their logical schema: {exc}.")
+
+    logical_content = manifest["payload"]["logical_content"]
+    document = logical_content.get("document")
+    declarations = document.get("arrays") if isinstance(document, Mapping) else None
+    if not isinstance(declarations, Mapping):
+        _fail("Canonical-v3 detection manifest lacks exact array declarations.")
+    for path, values in arrays.items():
+        declaration = declarations.get(path)
+        if not isinstance(declaration, Mapping):
+            _fail(f"Canonical-v3 detection manifest does not declare {path!r}.")
+        observed = {
+            "shape": list(values.shape),
+            "dtype": str(values.dtype),
+            "sha256": sha256_array(values),
+        }
+        expected = {
+            "shape": declaration.get("shape"),
+            "dtype": declaration.get("dtype"),
+            "sha256": declaration.get("sha256"),
+        }
+        if observed != expected:
+            _fail(f"Canonical-v3 detection array {path!r} differs from its manifest.")
+    return arrays
+
+
+def _manifest_bound_detection_geometry(
+    root_node: Any,
+    *,
+    run_path: str,
+    manifest: Mapping[str, Any],
+    arrays: Mapping[str, np.ndarray],
+) -> tuple[_ManifestDetectionGeometry, dict[str, np.ndarray]]:
+    """Bind canonical-v3 geometry without invoking the legacy flat reader."""
+
+    dimensions = canonical_detection_dimensions_from_manifest(manifest)
+    instance_key = arrays["instances/instance_key"]
+    frame_indices = arrays["instances/frame_indices"]
+    acquisition_frames = arrays["instances/source_acquisition_frame_index"]
+    bbox_norm = arrays["instances/bbox_norm_coords"]
+    bbox_img = arrays["instances/bbox_img_xyxy"]
+    centers_img = arrays["instances/centers_img_xy"]
+    if not np.array_equal(frame_indices.astype(np.int64), acquisition_frames):
+        _fail(
+            "Canonical-v3 detection frame_indices and acquisition frames are not "
+            "the exact full-recording identity mapping."
+        )
+    expected_bbox, expected_centers = derive_canonical_detection_geometry(
+        bbox_norm,
+        source_width=int(dimensions.source_width),
+        source_height=int(dimensions.source_height),
+    )
+    if not np.array_equal(bbox_img, expected_bbox):
+        _fail("Canonical-v3 bbox_img_xyxy differs from its normalized projection.")
+    if not np.array_equal(centers_img, expected_centers):
+        _fail("Canonical-v3 centers_img_xy differs from its bbox midpoint.")
+
+    try:
+        _, acquisition = load_persisted_acquisition_camera_authority(root_node)
+        camera_id = str(acquisition.record.camera_id)
+        source_camera = load_source_camera_pixel_frame_authority(
+            root_node[
+                f"analysis/coordinate_frames/source_camera/{camera_id}/continuous"
+            ],
+            acquisition_frame=acquisition,
+        )
+        bbox_camera = load_source_camera_pixel_frame_authority(
+            root_node[
+                "analysis/coordinate_frames/source_camera/"
+                f"{camera_id}/{SOURCE_CAMERA_BBOX_PIXEL_CONVENTION}"
+            ],
+            acquisition_frame=acquisition,
+        )
+    except Exception as exc:
+        _fail(f"Canonical-v3 source-camera frame authority is invalid: {exc}.")
+
+    run = root_node[run_path]
+    pointer = run.attrs.get("source_pixel_authority")
+    expected_pointer = {
+        "record_ref": source_camera.record_ref,
+        "record_sha256": source_camera.record_sha256,
+    }
+    if pointer != expected_pointer:
+        _fail("Canonical-v3 source_pixel_authority is missing, stale, or mismatched.")
+    endpoint = source_camera.endpoint
+    if (
+        int(endpoint.width) != int(dimensions.source_width)
+        or int(endpoint.height) != int(dimensions.source_height)
+        or int(acquisition.record.source_total_frames) != int(dimensions.n_frames)
+    ):
+        _fail("Canonical-v3 dimensions disagree with acquisition camera authority.")
+    if acquisition_frames.size and (
+        np.any(acquisition_frames < 0)
+        or np.any(acquisition_frames >= int(acquisition.record.source_total_frames))
+    ):
+        _fail("Canonical-v3 rows fall outside the acquisition frame domain.")
+
+    manifest_digest = _required_sha256(
+        manifest.get("payload_digest"),
+        name="canonical detection manifest.payload_digest",
+    )
+    manifest_ref = f"/{run_path}@run_manifest"
+    try:
+        identity = load_bound_row_identity_contract(
+            run["instances"],
+            run["instances/instance_key"],
+        )
+    except Exception as exc:
+        _fail(f"Canonical-v3 detection row identity is invalid: {exc}.")
+    if identity.leading_dimension != int(instance_key.shape[0]):
+        _fail("Canonical-v3 row identity length differs from its instance table.")
+    manifest_authority = DigestBoundCoordinateRecordRef(
+        record_ref=manifest_ref,
+        record_sha256=manifest_digest,
+    )
+    bbox_descriptor = build_canonical_coordinate_descriptor(
+        **SOURCE_CAMERA_BBOX_XYXY.descriptor_kwargs(),
+        reference_width=int(endpoint.width),
+        reference_height=int(endpoint.height),
+        reference_authority=DigestBoundCoordinateRecordRef(
+            record_ref=bbox_camera.record_ref,
+            record_sha256=bbox_camera.record_sha256,
+        ),
+        reference_selector="record",
+        row_identity_contract=identity.contract,
+        row_identity_record_ref=identity.record_ref,
+        lineage_refs=(manifest_authority,),
+        frame_record=CanonicalFrameRecord(
+            kind=PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+            record_ref=bbox_camera.record_ref,
+            record_sha256=bbox_camera.record_sha256,
+        ),
+    )
+    authority = _DigestAuthority(
+        record_ref=manifest_ref,
+        record_sha256=manifest_digest,
+    )
+    geometry = _ManifestDetectionGeometry(
+        row_identity=identity,
+        bbox_image=_ManifestBoundBBoxDescriptor(
+            descriptor=bbox_descriptor,
+            reference_frame_authority=bbox_camera,
+        ),
+        frame_evidence=_ManifestDetectionFrameEvidence(
+            source_camera_frame=source_camera,
+            bbox_source_camera_frame=bbox_camera,
+        ),
+        bbox_projection=authority,
+        temporal_authority=authority,
+    )
+    return geometry, {
+        "instance_key": instance_key,
+        "source_acquisition_frame_index": acquisition_frames,
+        "bbox_norm_coords": bbox_norm,
+        "bbox_img_xyxy": bbox_img,
+        "centers_img_xy": centers_img,
+    }
 
 
 def _build_source(
@@ -413,18 +660,32 @@ def _build_source(
         run_path=run_path,
         expected_selector_eligible=expected_selector_eligible,
     )
-    geometry_loader = (
-        load_persisted_detection_observation_geometry
-        if authority_policy == DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID
-        else load_persisted_ineligible_detection_observation_geometry
+    manifest_arrays = _manifest_logical_arrays(
+        root_node,
+        run_path=run_path,
+        manifest=selected_manifest,
     )
-    geometry = geometry_loader(root_node, run_path)
-    geometry = require_bound_detection_observation_geometry(geometry)
-    if geometry.row_identity.rowset_path != run_path:
+    if manifest_arrays is None:
+        geometry_loader = (
+            load_persisted_detection_observation_geometry
+            if authority_policy == DETECTION_POSITION_ACTIVE_AUTHORITY_POLICY_ID
+            else load_persisted_ineligible_detection_observation_geometry
+        )
+        geometry = geometry_loader(root_node, run_path)
+        geometry = require_bound_detection_observation_geometry(geometry)
+        values = detection_observation_geometry_values(geometry)
+        expected_rowset_paths = {run_path}
+    else:
+        geometry, values = _manifest_bound_detection_geometry(
+            root_node,
+            run_path=run_path,
+            manifest=selected_manifest,
+            arrays=manifest_arrays,
+        )
+        expected_rowset_paths = {f"{run_path}/instances"}
+    if geometry.row_identity.rowset_path not in expected_rowset_paths:
         _fail("Detection geometry row identity is bound to another run.")
     _require_bbox_descriptor(geometry)
-
-    values = detection_observation_geometry_values(geometry)
     instance_key = _readonly_array(
         values["instance_key"], dtype=np.dtype("<u8"), name="instance_key"
     )
@@ -484,13 +745,16 @@ def _build_source(
                 "sha256": key_digest,
             },
             "source_acquisition_frame_index": {
-                "path": f"{run_path}/source_acquisition_frame_index",
+                "path": (
+                    f"{geometry.row_identity.rowset_path}/"
+                    "source_acquisition_frame_index"
+                ),
                 "dtype": "int64",
                 "shape": [acquisition_frames.shape[0]],
                 "sha256": array_values_sha256(acquisition_frames),
             },
             "bbox_img_xyxy": {
-                "path": f"{run_path}/bbox_img_xyxy",
+                "path": f"{geometry.row_identity.rowset_path}/bbox_img_xyxy",
                 "dtype": str(bbox.dtype),
                 "shape": list(bbox.shape),
                 "sha256": array_values_sha256(bbox),
@@ -584,7 +848,9 @@ class BoundDetectionPositionSource:
     _root_node: Any = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _BOUND_DETECTION_POSITION_SOURCE_SEAL:
             _fail("Detection position sources must be built by the strict adapter.")
         values.setdefault(
@@ -677,7 +943,9 @@ def require_bound_detection_position_source(
     elif value.authority_policy == DETECTION_POSITION_CANARY_AUTHORITY_POLICY_ID:
         loader = load_persisted_selector_ineligible_detection_position_source
     else:
-        _fail(f"Unsupported detection position authority policy: {value.authority_policy!r}.")
+        _fail(
+            f"Unsupported detection position authority policy: {value.authority_policy!r}."
+        )
     current = (
         loader(value._analysis_zarr, value.run_path)
         if value._analysis_zarr is not None

@@ -9,6 +9,11 @@ import zarr
 
 from fisheye.shared.detect_reason_codec import encode_reason_bytes
 from fisheye.shared.instance_keys import mint_detection_instance_keys
+from fisheye.shared.coordinate_identity import (
+    OBSERVATION_INSTANCE_DOMAIN,
+    RowIdentityContractError,
+    load_bound_row_identity_contract,
+)
 from fisheye.shared.zarr.detection_snapshot_publication import (
     inspect_accept_all_refined_detection_source,
     inspect_canonical_detection_successor_source,
@@ -287,6 +292,18 @@ def test_raw_successor_is_canonical_v3_atomic_and_selector_ineligible(
         successor["instances/instance_key"][:],
         custom_keys,
     )
+    identity = load_bound_row_identity_contract(
+        successor["instances"],
+        successor["instances/instance_key"],
+    )
+    assert identity.contract.domain == OBSERVATION_INSTANCE_DOMAIN
+    assert identity.contract.leading_dimension == 2
+    assert result["successor"]["row_identity_contract_sha256"] == (
+        identity.record_sha256
+    )
+    assert result["validation"]["row_identity"]["record_sha256"] == (
+        identity.record_sha256
+    )
     np.testing.assert_array_equal(source["instance_key"][:], custom_keys)
     assert np.asarray(successor["instances/frame_row_offsets"][:]).tolist() == [
         0,
@@ -339,6 +356,34 @@ def test_raw_successor_is_canonical_v3_atomic_and_selector_ineligible(
         0,
     ]
     assert crop_preflight["crop_zarr_writes"] is False
+
+
+def test_raw_successor_row_identity_rejects_postpublication_key_drift(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _build_sources(archive)
+    publish_canonical_detection_successor(
+        analysis_zarr=archive,
+        source_detect_group_path="detect_runs/detect_source",
+        recording_identity=RECORDING_IDENTITY,
+        successor_run_id="detect_canonical_v3",
+        scratch_root=scratch,
+    )
+
+    successor = zarr.open_group(
+        str(archive / "detect_runs/detect_canonical_v3"),
+        mode="a",
+        use_consolidated=False,
+    )
+    successor["instances/instance_key"][0] = np.uint64(999)
+    with pytest.raises(RowIdentityContractError, match="content"):
+        load_bound_row_identity_contract(
+            successor["instances"],
+            successor["instances/instance_key"],
+        )
 
 
 def test_raw_successor_requires_existing_instance_keys_before_writing(
@@ -401,8 +446,9 @@ def test_canonical_v3_publishes_accept_all_refined_root_without_selection(
     assert inspection["decision_policy"] == (
         "accept_every_canonical_source_row_exactly_once"
     )
-    assert inspection["source"]["instance_key_sha256"] == (
-        inspection["target"]["instance_key_sha256"]
+    assert (
+        inspection["source"]["instance_key_sha256"]
+        == (inspection["target"]["instance_key_sha256"])
     )
     assert not (archive / "refined_detect_runs/refined_accept_all_v2").exists()
 
@@ -417,8 +463,9 @@ def test_canonical_v3_publishes_accept_all_refined_root_without_selection(
     assert result["selector_eligible"] is False
     assert result["registry_updated"] is False
     assert result["selectors_before"] == result["selectors_after"]
-    assert result["source"]["instance_key_sha256"] == (
-        result["snapshot"]["instance_key_sha256"]
+    assert (
+        result["source"]["instance_key_sha256"]
+        == (result["snapshot"]["instance_key_sha256"])
     )
     assert result["validation"]["refined_errors"] == []
     assert result["validation"]["direct_consolidated_metadata_equal"] is True
@@ -513,12 +560,14 @@ def test_accept_all_refined_root_activates_as_analysis_authority(
     family = reopened["refined_detect_runs"]
     run = family["refined_accept_all_v2"]
     assert family.attrs["authoritative_run"] == "refined_accept_all_v2"
-    assert family.attrs["authoritative_run_provenance"]["payload"][
-        "intended_use"
-    ] == "analysis"
-    assert run.attrs["run_manifest"]["payload"]["publication"][
-        "stage_selector_eligible"
-    ] is True
+    assert (
+        family.attrs["authoritative_run_provenance"]["payload"]["intended_use"]
+        == "analysis"
+    )
+    assert (
+        run.attrs["run_manifest"]["payload"]["publication"]["stage_selector_eligible"]
+        is True
+    )
     assert run.attrs["stage_selector_eligible"] is True
     active = inspect_active_refined_detection_authority(
         analysis_zarr=archive,

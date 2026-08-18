@@ -25,6 +25,12 @@ from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
+from fisheye.shared.coordinate_identity import (
+    OBSERVATION_INSTANCE_DOMAIN,
+    build_row_identity_contract,
+    load_bound_row_identity_contract,
+    stamp_and_bind_row_identity_contract,
+)
 from fisheye.shared.detection_tables import (
     resolve_detection_source_pixel_authority,
 )
@@ -169,6 +175,47 @@ def _canonical_arrays(run: Any) -> dict[str, Any]:
     return {path: run[path] for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths}
 
 
+def _stamp_canonical_position_row_identity(run: Any) -> dict[str, object]:
+    """Persist the canonical observation-row identity on ``instances``."""
+
+    instances = run["instances"]
+    instance_key = instances["instance_key"]
+    contract = build_row_identity_contract(
+        domain=OBSERVATION_INSTANCE_DOMAIN,
+        values=np.asarray(instance_key[:]),
+    )
+    bound = stamp_and_bind_row_identity_contract(
+        instances,
+        instance_key,
+        contract=contract,
+    )
+    return {
+        "rowset_path": bound.rowset_path,
+        "key_array_path": bound.key_array_path,
+        "record_ref": bound.record_ref,
+        "record_sha256": bound.record_sha256,
+        "leading_dimension": bound.leading_dimension,
+    }
+
+
+def _require_canonical_position_row_identity(run: Any) -> dict[str, object]:
+    """Fully revalidate the persisted canonical observation-row identity."""
+
+    bound = load_bound_row_identity_contract(
+        run["instances"],
+        run["instances/instance_key"],
+    )
+    if bound.contract.domain != OBSERVATION_INSTANCE_DOMAIN:
+        raise ValueError("Canonical detection row identity has the wrong domain.")
+    return {
+        "rowset_path": bound.rowset_path,
+        "key_array_path": bound.key_array_path,
+        "record_ref": bound.record_ref,
+        "record_sha256": bound.record_sha256,
+        "leading_dimension": bound.leading_dimension,
+    }
+
+
 def _refined_arrays(run: Any, *, dimensions: Any) -> dict[str, Any]:
     return {
         path: run[path]
@@ -196,6 +243,7 @@ def _validate_canonical_run_path(
             consolidated_metadata_declarations=direct,
             arrays=arrays,
         )
+        _require_canonical_position_row_identity(run)
         if run.attrs.get("status") != "complete":
             errors = (*errors, "snapshot status is not complete")
         if run.attrs.get("stage_selector_eligible") is not False:
@@ -546,9 +594,7 @@ def publish_canonical_detection_successor(
                 "Canonical successor did not preserve source instance keys."
             )
         local_run = canonical.output_path / "detect_runs" / successor_id
-        local_group = zarr.open_group(
-            str(local_run), mode="a", use_consolidated=False
-        )
+        local_group = zarr.open_group(str(local_run), mode="a", use_consolidated=False)
         _mark_local_candidate(
             local_group,
             source_group_path=source_relative,
@@ -557,6 +603,7 @@ def publish_canonical_detection_successor(
             zarr.open_group(str(source_path), mode="r", use_consolidated=False),
             local_group,
         )
+        row_identity = _stamp_canonical_position_row_identity(local_group)
         local_validation = _validate_canonical_run_path(
             local_run,
             publication=canonical,
@@ -603,6 +650,9 @@ def publish_canonical_detection_successor(
                 expected=selectors_before,
             )
             published_run = published_root[f"detect_runs/{successor_id}"]
+            published_row_identity = _require_canonical_position_row_identity(
+                published_run
+            )
             errors = validate_canonical_detection_shadow_publication(
                 CanonicalDetectionShadowPublication(
                     output_path=archive,
@@ -625,6 +675,7 @@ def publish_canonical_detection_successor(
                     "canonical_errors": [],
                     "direct_consolidated_metadata_equal": True,
                     "source_binding_revalidated_after_copy": True,
+                    "row_identity": published_row_identity,
                 }
             )
 
@@ -663,6 +714,7 @@ def publish_canonical_detection_successor(
                 "snapshot_role": "canonical_raw_detection_v3_successor",
                 "source_group_path": source_relative,
                 "instance_key_policy": "preserved_from_source",
+                "row_identity_contract_sha256": row_identity["record_sha256"],
                 "selector_activation": "deferred",
             },
             activate_run=finalize_visibility,
@@ -697,6 +749,7 @@ def publish_canonical_detection_successor(
                 "instance_key_sha256": sha256_array(
                     canonical.arrays["instances/instance_key"]
                 ),
+                "row_identity_contract_sha256": row_identity["record_sha256"],
             },
             "dimensions": canonical.dimensions.as_manifest(),
             "storage_profile_id": canonical.plans.profile.profile_id,
@@ -764,9 +817,7 @@ def inspect_accept_all_refined_detection_source(
     refined_keys_hash = sha256_array(transition.arrays["instances/instance_key"])
     if source_keys_hash != refined_keys_hash:
         raise RuntimeError("Accept-all transition changed canonical instance keys.")
-    source_offsets_hash = sha256_array(
-        canonical.arrays["instances/frame_row_offsets"]
-    )
+    source_offsets_hash = sha256_array(canonical.arrays["instances/frame_row_offsets"])
     refined_offsets_hash = sha256_array(
         transition.arrays["instances/frame_row_offsets"]
     )
@@ -994,18 +1045,14 @@ def publish_accept_all_refined_detection_successor(
                 target_run_path=target,
                 run_name=refined_id,
                 lock_suffix="accept_all_refined_detection_publication",
-                publish_schema_id=(
-                    ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID
-                ),
+                publish_schema_id=(ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID),
                 policy=ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_POLICY,
                 rollback_policy=DETECTION_SNAPSHOT_ROLLBACK_POLICY,
                 content_checksum=True,
             ),
             copy_backend=copy_backend,
             validate_run=validator,
-            prepare_parents=lambda root: _prepare_parent(
-                root, "refined_detect_runs"
-            ),
+            prepare_parents=lambda root: _prepare_parent(root, "refined_detect_runs"),
             complete_run=complete_run,
             verify_pointers=lambda root: (
                 _require_unselected(
@@ -1035,9 +1082,7 @@ def publish_accept_all_refined_detection_successor(
 
         result: dict[str, object] = {
             "schema_id": ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID,
-            "schema_version": (
-                ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_VERSION
-            ),
+            "schema_version": (ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_VERSION),
             "status": "complete",
             "published_at_utc": utc_now(),
             "analysis_zarr": str(archive),
@@ -1048,9 +1093,7 @@ def publish_accept_all_refined_detection_successor(
                 "group_path": f"refined_detect_runs/{refined_id}",
                 "manifest_schema_version": refined.manifest["schema_version"],
                 "manifest_digest": refined.manifest["payload_digest"],
-                "logical_content_digest": refined.receipt[
-                    "logical_content_digest"
-                ],
+                "logical_content_digest": refined.receipt["logical_content_digest"],
                 "instance_key_sha256": sha256_array(
                     transition.arrays["instances/instance_key"]
                 ),
@@ -1239,6 +1282,9 @@ def publish_detection_snapshot_pair(
             ),
             local_canonical_group,
         )
+        canonical_row_identity = _stamp_canonical_position_row_identity(
+            local_canonical_group
+        )
         _mark_local_candidate(
             zarr.open_group(str(local_refined_run), mode="a", use_consolidated=False),
             source_group_path=source_refined_relative,
@@ -1303,6 +1349,7 @@ def publish_detection_snapshot_pair(
             payload_metadata={
                 "snapshot_role": "canonical_raw_detection_v1",
                 "source_group_path": source_detect_relative,
+                "row_identity_contract_sha256": canonical_row_identity["record_sha256"],
                 "selector_activation": "deferred",
             },
         )
@@ -1337,6 +1384,9 @@ def publish_detection_snapshot_pair(
         root = open_zarr_root(archive, mode="r")
         canonical_run = root[f"detect_runs/{canonical_id}"]
         refined_run = root[f"refined_detect_runs/{refined_id}"]
+        published_canonical_row_identity = _require_canonical_position_row_identity(
+            canonical_run
+        )
         # The shadow validator is also the complete canonical v1 validator and
         # additionally reopens the immutable compatibility source evidence.
         # Rebind it to the published archive so source drift during copy-back
@@ -1394,6 +1444,7 @@ def publish_detection_snapshot_pair(
                     "group_path": f"detect_runs/{canonical_id}",
                     "manifest_digest": canonical.manifest["payload_digest"],
                     "manifest_schema_version": canonical.manifest["schema_version"],
+                    "row_identity": published_canonical_row_identity,
                     "publication": canonical_publication,
                 },
                 "refined": {

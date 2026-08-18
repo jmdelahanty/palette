@@ -2,15 +2,17 @@
 
 <!-- contract-meta
 version: 1
-status: draft
-implementation: partial
-last_updated: 2026-08-16
+status: implemented-canary
+implementation: complete-selector-ineligible-publication
+last_updated: 2026-08-18
 -->
 
 Purpose: freeze the logical arrays, exact dtypes, coordinate authority,
 invalid-value representation, and publication envelope for materialized
-subject-position providers. Palette now implements the pure evaluator and
-logical in-memory validator; immutable Zarr publication remains a later phase.
+subject-position providers. Palette implements the pure evaluator, strict
+source adapters, immutable selector-ineligible publication, exact source
+handles, and union-key cross-provider canary comparison. Production provider
+selection remains intentionally unimplemented pending reviewed evidence.
 
 The Phase 1 logical-metadata helper is not a complete run manifest and cannot
 authorize publication. A pure evaluator result does not itself prove source
