@@ -962,6 +962,7 @@ promotion evidence are complete.
 ## Related Documents
 
 - [Composable Stimulus Analysis and Plot Recipe Design](composable_stimulus_analysis_and_plot_recipes_design.md)
+- [Provider-Aware Spatial Analytics Implementation Checklist](provider_aware_spatial_analytics_implementation_checklist_2026-08-18.md)
 - [Subject Position Storage Contract v1](subject_position_storage_contract_v1.md)
 - [Keypoint Heading Computation Contract](keypoint_heading_computation_contract.md)
 - [Body Frame Contract](body_frame_contract.md)

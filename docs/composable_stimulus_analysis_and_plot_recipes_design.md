@@ -14,6 +14,9 @@ defined in
 [`position_body_frame_and_motion_provider_design.md`](position_body_frame_and_motion_provider_design.md).
 Its exact logical array and dtype requirements are defined in
 [`subject_position_storage_contract_v1.md`](subject_position_storage_contract_v1.md).
+The accepted first implementation slice for generic trajectory, occupancy,
+contrast, cohort, and plot-recipe work is tracked in
+[`provider_aware_spatial_analytics_implementation_checklist_2026-08-18.md`](provider_aware_spatial_analytics_implementation_checklist_2026-08-18.md).
 
 This document records the design direction accepted during the 2026-08-14
 GoodBatBadBat positional-occupancy campaign. It is an implementation plan, not
