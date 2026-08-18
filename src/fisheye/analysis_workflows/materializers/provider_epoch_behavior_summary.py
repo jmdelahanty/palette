@@ -226,6 +226,12 @@ def _selector_snapshot(parent: Any | None) -> dict[str, Any]:
     }
 
 
+def _source_bindings_sha256(value: Mapping[str, Any]) -> str:
+    """Hash the same JSON-safe source-binding form stored in Zarr attrs."""
+
+    return canonical_json_sha256(json_attr_safe(dict(value)))
+
+
 def _fps_from_motion(provider: ProviderTrackMotionSourceHandle) -> float:
     parameters = provider.computation_record.get("parameters")
     if not isinstance(parameters, Mapping):
@@ -907,7 +913,7 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
         },
     )
     source_refs = json_attr_safe(dict(plan.result.source_bindings))
-    source_refs_sha256 = canonical_json_sha256(source_refs)
+    source_refs_sha256 = _source_bindings_sha256(plan.result.source_bindings)
     parameters = {
         "track_id": plan.track_id,
         "physical_speed_level": plan.speed_level,
@@ -1012,7 +1018,7 @@ def _validate_group(
         source_refs_sha256 = canonical_json_sha256(source_refs)
         if attrs.get("source_refs_sha256") != source_refs_sha256:
             errors.append("source bindings digest is stale")
-        if source_refs_sha256 != canonical_json_sha256(result.source_bindings):
+        if source_refs_sha256 != _source_bindings_sha256(result.source_bindings):
             errors.append("source bindings differ from the planned sources")
     expected_tables = {
         "per_epoch_fish": result.per_epoch_fish,

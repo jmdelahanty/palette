@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,6 +11,7 @@ from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary im
     _bind_track_id,
     _make_per_epoch_fish,
     _safe_name,
+    _source_bindings_sha256,
     _swim_bout_binding,
 )
 
@@ -115,6 +116,19 @@ def test_provider_epoch_bout_facts_bind_the_selected_track() -> None:
     assert bound.dtype.names == ("track_id", "window_id", "bout_id")
     assert bound["track_id"].tolist() == [4, 4]
     assert bound["bout_id"].tolist() == [11, 12]
+
+
+def test_source_binding_digest_normalizes_immutable_nested_mappings() -> None:
+    frozen = MappingProxyType(
+        {
+            "epoch": MappingProxyType(
+                {"run": "epochs_1", "digest": "a" * 64}
+            )
+        }
+    )
+    plain = {"epoch": {"run": "epochs_1", "digest": "a" * 64}}
+
+    assert _source_bindings_sha256(frozen) == _source_bindings_sha256(plain)
 
 
 def test_swim_bout_binding_requires_the_exact_provider_manifest_and_row_slice() -> None:
