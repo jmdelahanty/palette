@@ -75,6 +75,7 @@ RESULT_SCHEMA_ID = "palette.provider_behavior_chain_result"
 RESULT_SCHEMA_VERSION = 1
 LINEAR_ONLY_DISPOSITION = "linear_motion_and_swim_bouts_only_heading_excluded_v1"
 KEYPOINT_BINDING_ID = "zebrafish_larva_keypoint_traditional_v2_v1"
+SUMMARY_SPEED_LEVEL = "filtered"
 
 
 class ProviderBehaviorChainError(ValueError):
@@ -387,7 +388,7 @@ def _summary(task: Mapping[str, Any], scratch: Path) -> dict[str, Any]:
         motion_run=outputs["motion"],
         swim_bout_run_name=outputs["swim_bouts"],
         track_id=0,
-        speed_level="exponential",
+        speed_level=SUMMARY_SPEED_LEVEL,
         copy_backend="python",
         apply=True,
         keep_scratch=False,
@@ -459,6 +460,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "LINEAR_ONLY_DISPOSITION",
+    "SUMMARY_SPEED_LEVEL",
     "ProviderBehaviorChainError",
     "load_task",
     "materialize_chain",
