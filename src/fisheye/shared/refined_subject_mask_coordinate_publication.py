@@ -3610,6 +3610,7 @@ _KNOWN_RUN_ROOT_ARRAY_ROLES: Mapping[str, str] = {
     "source_crop_row_ids": "source_crop_row_identity",
     "instance_key": "observation_instance_identity",
     "source_acquisition_frame_index": "source_temporal_identity",
+    "frame_row_offsets": "source_frame_to_observation_row_csr_index",
     "source_crop_xywh": "roi_to_source_camera_placement",
 }
 _KNOWN_RUN_ROOT_GROUPS = frozenset(
@@ -4121,6 +4122,11 @@ def _scientific_manifest_record(
             "source_acquisition_frame_index",
             label="source acquisition frame index",
         ),
+        "frame_row_offsets": _child(
+            run,
+            "frame_row_offsets",
+            label="source frame to observation row offsets",
+        ),
         "source_crop_xywh": _child(
             run, "source_crop_xywh", label="source crop placement"
         ),
@@ -4394,9 +4400,12 @@ def _surface_evidence(
     dict[str, dict[str, Any]],
     dict[str, Any],
 ]:
-    required_nodes, required_payloads = _scan_required_surfaces(context)
     structure_inventory = _closed_world_structure_inventory(context)
     optional, ragged, relation_measurements = _validate_optional_geometry(context)
+    # Fail on undeclared namespaces and malformed optional geometry before the
+    # expensive dense-mask/metric equivalence scan. Structural incompatibility
+    # must not consume minutes of payload I/O before it is reported.
+    required_nodes, required_payloads = _scan_required_surfaces(context)
     specs = _required_geometry_specs(context, required_nodes)
     specs.update(optional)
     measurements = _measurement_specs(

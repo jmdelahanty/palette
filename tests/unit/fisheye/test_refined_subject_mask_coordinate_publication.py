@@ -219,6 +219,17 @@ def _build_refined_fixture(
         "source_crop_xywh",
     ):
         _copy_array(run, raw_run, name)
+    frame_row_offsets = run.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 1, 2], dtype=np.int64),
+        chunks=(3,),
+    )
+    frame_row_offsets.attrs.update(
+        {
+            "logical_schema_id": "palette.array.frame_row_offsets",
+            "logical_schema_version": 1,
+        }
+    )
     if with_eye_relation:
         raw_masks = np.asarray(raw_run["masks_roi"][:])
         masks = np.zeros((raw_masks.shape[0], 4, *raw_masks.shape[2:]), dtype=np.uint8)
@@ -486,6 +497,17 @@ def _add_minimal_refined_run(
         "masks_roi",
     ):
         _copy_array(run, raw_run, name)
+    frame_row_offsets = run.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 1, 2], dtype=np.int64),
+        chunks=(3,),
+    )
+    frame_row_offsets.attrs.update(
+        {
+            "logical_schema_id": "palette.array.frame_row_offsets",
+            "logical_schema_version": 1,
+        }
+    )
     metrics = run.create_group("metrics")
     for name in (
         "mask_present",
@@ -800,6 +822,13 @@ def test_refined_publication_rejects_stale_flags_and_unknown_root_arrays(
         data=np.zeros((2,), dtype=np.float32),
         chunks=(2,),
     )
+    monkeypatch.setattr(
+        module,
+        "_scan_required_surfaces",
+        lambda _context: pytest.fail(
+            "dense surface scan ran before closed-world structural validation"
+        ),
+    )
     with pytest.raises(
         RefinedSubjectMaskCoordinatePublicationError,
         match="unsupported root array",
@@ -811,6 +840,29 @@ def test_refined_publication_rejects_stale_flags_and_unknown_root_arrays(
                 REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
             ],
         )
+
+
+def test_refined_publication_binds_frame_row_offsets_as_row_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _parent, run, _raw, _snapshot_value = _refined_fixture(monkeypatch)
+    _prepare(root, run)
+
+    published = publish_refined_subject_mask_coordinate_surfaces(
+        root,
+        "refined_subject_masks_runs/r1",
+        expected_publication_owner=run.attrs[
+            REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
+        ],
+    )
+
+    root_arrays = published.inventory.record["closed_world_structure"]["run_root"][
+        "arrays"
+    ]
+    assert root_arrays["frame_row_offsets"]["semantic_role"] == (
+        "source_frame_to_observation_row_csr_index"
+    )
+    assert "frame_row_offsets" in published.scientific_manifest.record["table_arrays"]
 
 
 def test_refined_loader_rejects_descriptor_drop_or_payload_tamper(

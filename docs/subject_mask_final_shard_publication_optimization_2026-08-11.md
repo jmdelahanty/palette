@@ -442,6 +442,13 @@ and every value agrees. The successor records this as immutable historical
 refined-semantic normalization. Missing, stale, differently sourced, or
 inexact evidence fails closed; no value is inferred from absence.
 
+The refined closed-world inventory includes `frame_row_offsets` as the
+source-frame-to-observation-row CSR index. It is a first-class scientific row
+index already required by the subject-mask core and bundle schemas, not an
+unknown auxiliary. Closed-world namespace checks and optional-geometry
+validation run before the expensive dense-mask equivalence pass so structural
+contract errors fail quickly without wasting a complete raster scan.
+
 Keypoint terminal receipts are analogous producer evidence, but the current
 keypoint coordinate-successor path still reads keypoint arrays for inspection
 and auxiliary derivation. It should not be described as a general zero-read
