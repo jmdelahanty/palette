@@ -406,6 +406,37 @@ the streaming core/QC/cache computation path. This boundary is explicit: the
 validated promotion applies to the clip-parallel production topology first,
 not to a nominal profile flag that a whole-video producer cannot yet satisfy.
 
+### Coordinate-successor receipt boundary (2026-08-18)
+
+The worker/core receipts above and the coordinate-surface receipt solve two
+different validation problems. Core receipts hash C-contiguous array values and
+prove producer semantics. Canonical coordinate records hash a dtype/shape
+header followed by those values and additionally prove coordinate-derived
+metrics, optional refined geometry, and closed-world namespaces. One digest
+cannot be relabelled as the other.
+
+Consequently, existing `production_streaming_v1` GoodBatBadBat masks require
+one complete coordinate validation scan before they can receive an immutable
+`palette.subject_mask.coordinate_surface_validation_receipt` v1. That scan does
+not rewrite the masks. A coordinate successor hard-links the sealed payload,
+validates every source/target payload object by exact path, size, and same-file
+identity without opening chunks, and publishes new canonical-v2 metadata. The
+new receipt binds the source manifest and validation receipt, inactive bundle
+authority, exact coordinate-record set, and hard-link inventory.
+
+Within that first scan, already computed refined payload hashes are reused for
+later inventory, descriptor, measurement, and scientific-manifest construction;
+they are not recomputed from the dense arrays. Later strict readers may use the
+persisted coordinate receipt only after revalidating its successor authority,
+record pointers, live array metadata, and target publication. An absent receipt
+retains the full-scan compatibility path. A present but invalid receipt must
+fail closed and must never trigger a silent full-scan fallback.
+
+Keypoint terminal receipts are analogous producer evidence, but the current
+keypoint coordinate-successor path still reads keypoint arrays for inspection
+and auxiliary derivation. It should not be described as a general zero-read
+coordinate-publication implementation.
+
 Implementation verification at this checkpoint:
 
 - 53 adjacent clipped/recovery/whole-recording/package planner tests passed;

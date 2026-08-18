@@ -12,6 +12,7 @@ from uuid import uuid4
 import numpy as np
 import zarr
 
+from fisheye.shared import __version__ as FISHEYE_SHARED_VERSION
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.model_input_transform import model_input_transform_from_attrs
 from fisheye.shared.refined_subject_mask_coordinate_publication import (
@@ -35,6 +36,7 @@ from fisheye.shared.zarr.coordinate_successor_authority import (
 from fisheye.shared.zarr.coordinate_successor_files import (
     copy_metadata_and_link_payload,
     metadata_tree_sha256,
+    validate_payload_file_equivalence,
 )
 from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
     bind_persisted_padded_placement_record,
@@ -62,6 +64,13 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     validate_persisted_subject_mask_core_publication,
     validate_subject_mask_core_run_manifest,
 )
+from fisheye.shared.zarr.subject_mask_coordinate_validation_receipt import (
+    RAW_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+    REFINED_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+    SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE,
+    build_subject_mask_coordinate_validation_receipt,
+    stamp_subject_mask_coordinate_validation_receipt,
+)
 from fisheye.shared.zarr.keypoint_publication_mode import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
 )
@@ -83,9 +92,9 @@ from fisheye.shared.zarr_run_completion import (
 SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_ID = (
     "palette.subject_mask_coordinate_successor.production_publication"
 )
-SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_VERSION = 1
+SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_VERSION = 2
 SUBJECT_MASK_COORDINATE_SUCCESSOR_PUBLICATION_POLICY = (
-    "sealed_bundle_members_hardlink_payload_canonical_v2_metadata_pair_v1"
+    "sealed_bundle_members_hardlink_payload_canonical_v2_metadata_pair_v2"
 )
 SELECTOR_ACTIVATION_DEFERRED = "deferred_separate_reviewed_change"
 
@@ -97,6 +106,29 @@ _REFINED_FAMILY = "refined_subject_masks_runs"
 _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR = (
     "coordinate_successor_historical_semantic_normalization"
 )
+_RAW_COORDINATE_VALIDATION_RECORD_NAMES = (
+    "context",
+    "derivation",
+    "padded_crop_lineage",
+    "row_identity",
+    "surface_inventory",
+    "temporal_authority",
+)
+_REFINED_COORDINATE_VALIDATION_RECORD_NAMES = (
+    "component_qc_inventory",
+    "context",
+    "measurement_authority",
+    "refinement_authority",
+    "row_identity",
+    "scientific_manifest",
+    "source_authority",
+    "surface_inventory",
+    "temporal_authority",
+)
+_COORDINATE_VALIDATOR_IDENTITY = {
+    "package": "fisheye.shared",
+    "version": FISHEYE_SHARED_VERSION,
+}
 
 
 def _require_run_id(value: object, *, label: str) -> str:
@@ -136,6 +168,93 @@ def _manifest_member(
         "manifest_document_digest": canonical_json_sha256(manifest),
         "logical_content_digest": logical.get("digest"),
     }
+
+
+def _coordinate_validation_source_bindings(
+    manifest: Mapping[str, Any],
+    *,
+    source_run_path: str,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    payload = manifest.get("payload")
+    if not isinstance(payload, Mapping):  # guarded by manifest validation
+        raise ValueError("Subject-mask source manifest payload is unavailable.")
+    logical = payload.get("logical_content")
+    source = payload.get("source")
+    if not isinstance(logical, Mapping) or not isinstance(source, Mapping):
+        raise ValueError("Subject-mask source manifest bindings are unavailable.")
+    validation = source.get("validation_receipt")
+    if validation is None:
+        return None
+    if not isinstance(validation, Mapping):
+        raise ValueError("Subject-mask source-validation binding is invalid.")
+    return (
+        {
+            "run_path": source_run_path,
+            "core_manifest_payload_digest": manifest["payload_digest"],
+            "core_manifest_document_digest": canonical_json_sha256(manifest),
+            "logical_content_digest": logical["digest"],
+        },
+        {
+            "schema_id": validation["schema_id"],
+            "schema_version": validation["schema_version"],
+            "payload_digest": validation["payload_digest"],
+            "document_sha256": validation["document_sha256"],
+            "semantic_unit_count": validation["semantic_unit_count"],
+        },
+    )
+
+
+def _stamp_coordinate_validation_receipt(
+    run: Any,
+    *,
+    kind: str,
+    successor_run_path: str,
+    source_manifest: Mapping[str, Any],
+    source_run_path: str,
+    bundle_authority_kind: str,
+    bundle_manifest: Mapping[str, Any],
+    coordinate_records: Mapping[str, Mapping[str, str]],
+    coordinate_record_names: tuple[str, ...],
+    payload_equivalence: Mapping[str, Any],
+) -> Any | None:
+    source_bindings = _coordinate_validation_source_bindings(
+        source_manifest,
+        source_run_path=source_run_path,
+    )
+    if source_bindings is None:
+        return None
+    source, source_validation = source_bindings
+    receipt = build_subject_mask_coordinate_validation_receipt(
+        kind=kind,
+        successor_run_path=successor_run_path,
+        source=source,
+        source_validation=source_validation,
+        bundle_authority={
+            "kind": bundle_authority_kind,
+            "document_digest": canonical_json_sha256(bundle_manifest),
+        },
+        coordinate_records=coordinate_records,
+        coordinate_record_names=coordinate_record_names,
+        payload_equivalence={
+            "schema_id": payload_equivalence["schema_id"],
+            "schema_version": payload_equivalence["schema_version"],
+            "receipt_digest": payload_equivalence["receipt_digest"],
+            "inventory_digest": payload_equivalence["inventory_digest"],
+            "payload_file_count": payload_equivalence["payload_file_count"],
+        },
+        validator_identity=_COORDINATE_VALIDATOR_IDENTITY,
+    )
+    stamp_subject_mask_coordinate_validation_receipt(
+        run,
+        receipt,
+        expected_kind=kind,
+        expected_successor_run_path=successor_run_path,
+        expected_coordinate_record_names=coordinate_record_names,
+    )
+    return bind_persisted_run_attribute_record(
+        run,
+        attr_name=SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE,
+    )
 
 
 def _bundle_authority(
@@ -659,6 +778,10 @@ def _publish_refined_with_historical_crop(
     """Prepare and publish refined surfaces under one crop-adapter scope."""
 
     with historical_geometry_only_crop_loader(historical_crop):
+        stamp_persisted_padded_placement_provenance(
+            root[refined_run_path],
+            historical_crop,
+        )
         prepare_refined_subject_mask_coordinate_context(
             root,
             refined_run_path,
@@ -776,6 +899,12 @@ def publish_subject_mask_coordinate_successors(
             receipts["raw_copy"] = copy_metadata_and_link_payload(
                 raw_source_fs, raw_target_fs
             )
+            receipts["raw_payload_equivalence"] = validate_payload_file_equivalence(
+                raw_source_fs,
+                raw_target_fs,
+                source_label=f"{_RAW_FAMILY}/{raw_id}",
+                target_label=f"{_RAW_FAMILY}/{raw_target_id}",
+            )
             raw_run = root[f"{_RAW_FAMILY}/{raw_target_id}"]
             raw_owner = _clear_successor_attrs(
                 raw_run,
@@ -847,6 +976,42 @@ def publish_subject_mask_coordinate_successors(
             semantic_normalization_record = bind_persisted_run_attribute_record(
                 raw_run, attr_name=_HISTORICAL_SEMANTIC_NORMALIZATION_ATTR
             )
+            raw_coordinate_records = _record_pointers(
+                {
+                    "context": raw_surfaces.context.context_record,
+                    "row_identity": raw_surfaces.context.row_identity,
+                    "temporal_authority": raw_surfaces.context.temporal_authority,
+                    "surface_inventory": raw_surfaces.inventory,
+                    "derivation": raw_surfaces.derivation,
+                    "padded_crop_lineage": padded_lineage_record,
+                }
+            )
+            raw_validation_record = _stamp_coordinate_validation_receipt(
+                raw_run,
+                kind=RAW_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+                successor_run_path=f"{_RAW_FAMILY}/{raw_target_id}",
+                source_manifest=raw_manifest,
+                source_run_path=f"{_RAW_FAMILY}/{raw_id}",
+                bundle_authority_kind="inactive_subject_mask_bundle_v3",
+                bundle_manifest=bundle_manifest,
+                coordinate_records=raw_coordinate_records,
+                coordinate_record_names=_RAW_COORDINATE_VALIDATION_RECORD_NAMES,
+                payload_equivalence=receipts["raw_payload_equivalence"],
+            )
+            receipts["raw_coordinate_validation_receipt"] = (
+                None
+                if raw_validation_record is None
+                else {
+                    "record_ref": raw_validation_record["record_ref"],
+                    "record_sha256": raw_validation_record["record_sha256"],
+                }
+            )
+            raw_authority_records = dict(raw_coordinate_records)
+            if raw_validation_record is not None:
+                raw_authority_records["coordinate_validation_receipt"] = {
+                    "record_ref": raw_validation_record["record_ref"],
+                    "record_sha256": raw_validation_record["record_sha256"],
+                }
             raw_authority = build_coordinate_successor_authority(
                 kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
                 source_family=_RAW_FAMILY,
@@ -857,24 +1022,18 @@ def publish_subject_mask_coordinate_successors(
                 successor_family=_RAW_FAMILY,
                 successor_run_path=f"{_RAW_FAMILY}/{raw_target_id}",
                 payload_equivalence={
-                    "policy": "same_filesystem_hardlink_payload_exact_logical_digest_v1",
+                    "policy": "same_filesystem_hardlink_payload_exact_logical_digest_v2",
                     "source_logical_content_digest": raw_manifest["payload"][
                         "logical_content"
                     ]["digest"],
                     **receipts["raw_copy"],
+                    "payload_file_equivalence": receipts[
+                        "raw_payload_equivalence"
+                    ],
                     "padded_crop_lineage": padded_lineage_record,
                     "historical_semantic_normalization": semantic_normalization_record,
                 },
-                coordinate_records=_record_pointers(
-                    {
-                        "context": raw_surfaces.context.context_record,
-                        "row_identity": raw_surfaces.context.row_identity,
-                        "temporal_authority": raw_surfaces.context.temporal_authority,
-                        "surface_inventory": raw_surfaces.inventory,
-                        "derivation": raw_surfaces.derivation,
-                        "padded_crop_lineage": padded_lineage_record,
-                    }
-                ),
+                coordinate_records=raw_authority_records,
             )
             stamp_coordinate_successor_authority(raw_run, raw_authority)
             raw_run.attrs["status"] = RUN_STATUS_COMPLETE
@@ -913,6 +1072,14 @@ def publish_subject_mask_coordinate_successors(
             receipts["refined_copy"] = copy_metadata_and_link_payload(
                 refined_source_fs, refined_target_fs
             )
+            receipts["refined_payload_equivalence"] = (
+                validate_payload_file_equivalence(
+                    refined_source_fs,
+                    refined_target_fs,
+                    source_label=f"{_REFINED_FAMILY}/{refined_id}",
+                    target_label=f"{_REFINED_FAMILY}/{refined_target_id}",
+                )
+            )
             refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]
             refined_owner = _clear_successor_attrs(
                 refined_run,
@@ -925,6 +1092,14 @@ def publish_subject_mask_coordinate_successors(
                 )
             receipts["component_evidence_copy"] = copy_metadata_and_link_payload(
                 evidence_fs / "components", refined_target_fs / "components"
+            )
+            receipts["component_evidence_payload_equivalence"] = (
+                validate_payload_file_equivalence(
+                    evidence_fs / "components",
+                    refined_target_fs / "components",
+                    source_label=f"{evidence_path}/components",
+                    target_label=f"{_REFINED_FAMILY}/{refined_target_id}/components",
+                )
             )
             draft = root[evidence_path]
             required_attrs = (
@@ -970,6 +1145,49 @@ def publish_subject_mask_coordinate_successors(
             )
             root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
             refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]
+            refined_coordinate_records = _record_pointers(
+                {
+                    "context": refined_surfaces.context.context_record,
+                    "row_identity": refined_surfaces.context.row_identity,
+                    "temporal_authority": refined_surfaces.context.temporal_authority,
+                    "source_authority": refined_surfaces.context.source_authority,
+                    "refinement_authority": (
+                        refined_surfaces.context.refinement_authority
+                    ),
+                    "surface_inventory": refined_surfaces.inventory,
+                    "component_qc_inventory": (
+                        refined_surfaces.component_qc_inventory
+                    ),
+                    "measurement_authority": refined_surfaces.measurement_authority,
+                    "scientific_manifest": refined_surfaces.scientific_manifest,
+                }
+            )
+            refined_validation_record = _stamp_coordinate_validation_receipt(
+                refined_run,
+                kind=REFINED_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+                successor_run_path=f"{_REFINED_FAMILY}/{refined_target_id}",
+                source_manifest=refined_manifest,
+                source_run_path=f"{_REFINED_FAMILY}/{refined_id}",
+                bundle_authority_kind="inactive_subject_mask_bundle_v3",
+                bundle_manifest=bundle_manifest,
+                coordinate_records=refined_coordinate_records,
+                coordinate_record_names=_REFINED_COORDINATE_VALIDATION_RECORD_NAMES,
+                payload_equivalence=receipts["refined_payload_equivalence"],
+            )
+            receipts["refined_coordinate_validation_receipt"] = (
+                None
+                if refined_validation_record is None
+                else {
+                    "record_ref": refined_validation_record["record_ref"],
+                    "record_sha256": refined_validation_record["record_sha256"],
+                }
+            )
+            refined_authority_records = dict(refined_coordinate_records)
+            if refined_validation_record is not None:
+                refined_authority_records["coordinate_validation_receipt"] = {
+                    "record_ref": refined_validation_record["record_ref"],
+                    "record_sha256": refined_validation_record["record_sha256"],
+                }
             refined_authority = build_coordinate_successor_authority(
                 kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
                 source_family=_REFINED_FAMILY,
@@ -983,26 +1201,20 @@ def publish_subject_mask_coordinate_successors(
                 successor_family=_REFINED_FAMILY,
                 successor_run_path=f"{_REFINED_FAMILY}/{refined_target_id}",
                 payload_equivalence={
-                    "policy": "same_filesystem_hardlink_payload_exact_logical_digest_v1",
+                    "policy": "same_filesystem_hardlink_payload_exact_logical_digest_v2",
                     "source_logical_content_digest": refined_manifest["payload"][
                         "logical_content"
                     ]["digest"],
                     **receipts["refined_copy"],
+                    "payload_file_equivalence": receipts[
+                        "refined_payload_equivalence"
+                    ],
                     "component_evidence_source_run_path": evidence_path,
+                    "component_evidence_payload_equivalence": receipts[
+                        "component_evidence_payload_equivalence"
+                    ],
                 },
-                coordinate_records=_record_pointers(
-                    {
-                        "context": refined_surfaces.context.context_record,
-                        "row_identity": refined_surfaces.context.row_identity,
-                        "temporal_authority": refined_surfaces.context.temporal_authority,
-                        "source_authority": refined_surfaces.context.source_authority,
-                        "refinement_authority": refined_surfaces.context.refinement_authority,
-                        "surface_inventory": refined_surfaces.inventory,
-                        "component_qc_inventory": refined_surfaces.component_qc_inventory,
-                        "measurement_authority": refined_surfaces.measurement_authority,
-                        "scientific_manifest": refined_surfaces.scientific_manifest,
-                    }
-                ),
+                coordinate_records=refined_authority_records,
             )
             stamp_coordinate_successor_authority(refined_run, refined_authority)
             refined_run.attrs["status"] = RUN_STATUS_COMPLETE

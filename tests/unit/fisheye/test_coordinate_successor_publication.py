@@ -232,6 +232,95 @@ def test_subject_mask_successor_record_pointers_accept_bound_and_persisted_recor
     }
 
 
+def test_subject_mask_successor_stamps_coordinate_receipt_from_closed_evidence() -> None:
+    run = _Node(path="subject_mask_runs/successor", children={})
+    names = subject_mask_successor._RAW_COORDINATE_VALIDATION_RECORD_NAMES
+    coordinate_records = {
+        name: {
+            "record_ref": f"/subject_mask_runs/successor@{name}",
+            "record_sha256": f"{index + 1:064x}",
+        }
+        for index, name in enumerate(names)
+    }
+    source_manifest = {
+        "payload_digest": "a" * 64,
+        "payload": {
+            "logical_content": {"digest": "b" * 64},
+            "source": {
+                "validation_receipt": {
+                    "schema_id": "palette.subject_mask.source_validation_receipt",
+                    "schema_version": 2,
+                    "payload_digest": "c" * 64,
+                    "document_sha256": "d" * 64,
+                    "semantic_unit_count": 4,
+                }
+            },
+        },
+    }
+    pointer = subject_mask_successor._stamp_coordinate_validation_receipt(
+        run,
+        kind="raw_subject_mask",
+        successor_run_path="subject_mask_runs/successor",
+        source_manifest=source_manifest,
+        source_run_path="subject_mask_runs/source",
+        bundle_authority_kind="inactive_subject_mask_bundle_v3",
+        bundle_manifest={"bundle": "authority"},
+        coordinate_records=coordinate_records,
+        coordinate_record_names=names,
+        payload_equivalence={
+            "schema_id": "palette.coordinate_successor_payload_file_equivalence",
+            "schema_version": 1,
+            "receipt_digest": "e" * 64,
+            "inventory_digest": "f" * 64,
+            "payload_file_count": 3,
+        },
+    )
+
+    assert pointer is not None
+    assert pointer["record_ref"] == (
+        "/subject_mask_runs/successor@coordinate_surface_validation_receipt"
+    )
+    receipt = run.attrs["coordinate_surface_validation_receipt"]
+    assert receipt["payload"]["coordinate_records"] == coordinate_records
+    assert receipt["payload"]["source"]["logical_content_digest"] == "b" * 64
+
+
+def test_subject_mask_successor_omits_reuse_receipt_without_source_receipt() -> None:
+    run = _Node(path="subject_mask_runs/successor", children={})
+    observed = subject_mask_successor._stamp_coordinate_validation_receipt(
+        run,
+        kind="raw_subject_mask",
+        successor_run_path="subject_mask_runs/successor",
+        source_manifest={
+            "payload_digest": "a" * 64,
+            "payload": {
+                "logical_content": {"digest": "b" * 64},
+                "source": {"validation_receipt": None},
+            },
+        },
+        source_run_path="subject_mask_runs/source",
+        bundle_authority_kind="inactive_subject_mask_bundle_v3",
+        bundle_manifest={"bundle": "authority"},
+        coordinate_records={
+            "context": {
+                "record_ref": "/subject_mask_runs/successor@context",
+                "record_sha256": "c" * 64,
+            }
+        },
+        coordinate_record_names=("context",),
+        payload_equivalence={
+            "schema_id": "palette.coordinate_successor_payload_file_equivalence",
+            "schema_version": 1,
+            "receipt_digest": "d" * 64,
+            "inventory_digest": "e" * 64,
+            "payload_file_count": 1,
+        },
+    )
+
+    assert observed is None
+    assert "coordinate_surface_validation_receipt" not in run.attrs
+
+
 def test_subject_mask_successor_fresh_archive_child_retains_record_path(
     tmp_path: Path,
 ) -> None:
@@ -262,6 +351,7 @@ def test_subject_mask_successor_keeps_adapter_active_for_refined_publication(
     active = False
     calls: list[str] = []
     expected_surfaces = object()
+    expected_root = {"refined_subject_masks_runs/refined": "refined-run"}
 
     class _AdapterScope:
         def __enter__(self):
@@ -274,15 +364,21 @@ def test_subject_mask_successor_keeps_adapter_active_for_refined_publication(
 
     def fake_prepare(root, run_path, **kwargs):
         assert active
-        assert root == "root"
+        assert root is expected_root
         assert run_path == "refined_subject_masks_runs/refined"
         assert kwargs["source_subject_mask_path"] == "subject_mask_runs/raw"
         assert kwargs["source_selector_eligible"] is False
         calls.append("prepare")
 
+    def fake_stamp(run, binding):
+        assert active
+        assert run == "refined-run"
+        assert binding == "historical-crop"
+        calls.append("stamp")
+
     def fake_publish(root, run_path, **kwargs):
         assert active
-        assert root == "root"
+        assert root is expected_root
         assert run_path == "refined_subject_masks_runs/refined"
         assert kwargs["expected_publication_owner"] == "owner"
         calls.append("publish")
@@ -300,21 +396,26 @@ def test_subject_mask_successor_keeps_adapter_active_for_refined_publication(
     )
     monkeypatch.setattr(
         subject_mask_successor,
+        "stamp_persisted_padded_placement_provenance",
+        fake_stamp,
+    )
+    monkeypatch.setattr(
+        subject_mask_successor,
         "publish_refined_subject_mask_coordinate_surfaces",
         fake_publish,
     )
 
     observed = subject_mask_successor._publish_refined_with_historical_crop(
-        "root",
+        expected_root,
         refined_run_path="refined_subject_masks_runs/refined",
         refined_owner="owner",
         raw_run_path="subject_mask_runs/raw",
         mask_labels=["subject_body"],
-        historical_crop=object(),
+        historical_crop="historical-crop",
     )
 
     assert observed is expected_surfaces
-    assert calls == ["prepare", "publish"]
+    assert calls == ["stamp", "prepare", "publish"]
     assert active is False
 
 
@@ -662,7 +763,7 @@ def test_historical_geometry_only_adapter_proves_keypoint_source_and_records_no_
     assert record["padded_crop_lineage"]["max_padding_ltrb"] == [0, 0, 289, 290]
 
 
-def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_paths(
+def test_historical_geometry_only_adapter_is_shared_by_all_coordinate_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _historical_crop_fixture(tmp_path)
@@ -677,6 +778,9 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
         model_input_transform=fixture["transform"],
     )
     from fisheye.shared import keypoint_coordinate_publication as keypoint_publication
+    from fisheye.shared import (
+        refined_subject_mask_coordinate_publication as refined_mask_publication,
+    )
     from fisheye.shared import subject_mask_coordinate_publication as mask_publication
 
     original_keypoint_loader = keypoint_publication.load_persisted_keypoint_crop_source
@@ -689,6 +793,11 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
         mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
         mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
         mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    )
+    original_refined_mask_attrs = (
+        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     )
     with historical_crop.historical_geometry_only_crop_loader(binding):
         assert (
@@ -719,6 +828,15 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
             CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
             CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
         )
+        assert (
+            refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+            refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+            refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        ) == (
+            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+            CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
+            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
+        )
         with pytest.raises(historical_crop.HistoricalGeometryOnlyCropAdapterError):
             keypoint_publication.load_persisted_keypoint_crop_source(
                 object(), binding.crop_path
@@ -739,6 +857,11 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
         mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
         mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     ) == original_mask_attrs
+    assert (
+        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    ) == original_refined_mask_attrs
     with pytest.raises(RuntimeError, match="restore"):
         with historical_crop.historical_geometry_only_crop_loader(binding):
             raise RuntimeError("restore")
@@ -749,6 +872,11 @@ def test_historical_geometry_only_adapter_is_shared_by_keypoint_and_raw_mask_pat
     assert (
         mask_publication.load_persisted_subject_mask_crop_source is original_mask_loader
     )
+    assert (
+        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    ) == original_refined_mask_attrs
 
 
 def test_ordinary_keypoint_crop_loader_still_rejects_geometry_only_layout(

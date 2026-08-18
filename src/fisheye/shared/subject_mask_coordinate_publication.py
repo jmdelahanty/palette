@@ -101,6 +101,26 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STATUS_COMPLETE,
     RUN_STATUS_RUNNING,
 )
+from fisheye.shared.zarr.coordinate_successor_authority import (
+    SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    CoordinateSuccessorAuthorityError,
+    load_coordinate_successor_authority,
+)
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
+    validate_subject_mask_core_run_manifest,
+)
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID,
+    validate_subject_mask_bundle_manifest,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.subject_mask_coordinate_validation_receipt import (
+    RAW_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+    SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE,
+    SubjectMaskCoordinateValidationReceiptError,
+    load_subject_mask_coordinate_validation_receipt,
+)
 
 SUBJECT_MASK_COMPONENT_LABELS_ATTR = "subject_mask_component_labels"
 SUBJECT_MASK_COORDINATE_CONTEXT_ATTR = "subject_mask_coordinate_context"
@@ -189,6 +209,17 @@ _ACTIVATION_GUARDED_SELECTOR_ATTRS = (
 _SUBJECT_MASK_PUBLICATION_POLICY = (
     "owner_generation_guarded_selectors_then_eligibility_v1"
 )
+_RAW_COORDINATE_VALIDATION_RECORD_NAMES = (
+    "context",
+    "derivation",
+    "padded_crop_lineage",
+    "row_identity",
+    "surface_inventory",
+    "temporal_authority",
+)
+_RAW_FAMILY = "subject_mask_runs"
+_COORDINATE_RECORD_POINTER_FIELDS = {"record_ref", "record_sha256"}
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SubjectMaskCoordinatePublicationError(ValueError):
@@ -2569,6 +2600,471 @@ def _bindings(
     return result
 
 
+def _receipt_pointer(value: Any, *, label: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != _COORDINATE_RECORD_POINTER_FIELDS:
+        _fail(f"{label} is not one exact coordinate-record pointer.")
+    record_ref = value.get("record_ref")
+    record_sha256 = value.get("record_sha256")
+    if (
+        type(record_ref) is not str
+        or not record_ref.startswith("/")
+        or record_ref.count("@") != 1
+        or type(record_sha256) is not str
+        or _SHA256_RE.fullmatch(record_sha256) is None
+    ):
+        _fail(f"{label} is not one canonical coordinate-record pointer.")
+    return {"record_ref": record_ref, "record_sha256": record_sha256}
+
+
+def _require_receipt_pointer(
+    receipt_records: Mapping[str, Any],
+    name: str,
+    value: Any,
+) -> None:
+    expected = _receipt_pointer(receipt_records.get(name), label=f"receipt {name}")
+    actual = _receipt_pointer(
+        value if isinstance(value, Mapping) else _record_pointer(value),
+        label=f"live {name}",
+    )
+    if actual != expected:
+        _fail(f"Coordinate validation receipt {name!r} pointer is stale.")
+
+
+def _validate_raw_coordinate_successor_receipt_authority(
+    context: BoundSubjectMaskCoordinateContext,
+    receipt: Mapping[str, Any],
+    receipt_binding: BoundCoordinateRecord,
+) -> None:
+    try:
+        authority = load_coordinate_successor_authority(
+            context._run_group,
+            expected_kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=context.run_path,
+        )
+    except (CoordinateSuccessorAuthorityError, ValueError) as exc:
+        _fail(f"Raw subject-mask coordinate successor authority is invalid: {exc}.")
+
+    payload = authority["payload"]
+    receipt_payload = receipt["payload"]
+    manifest = context._run_group.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest, Mapping):
+        _fail("Raw coordinate successor target lacks its core run manifest.")
+    manifest_errors = validate_subject_mask_core_run_manifest(manifest)
+    if manifest_errors:
+        _fail(
+            "Raw coordinate successor target core run manifest is invalid: "
+            + "; ".join(manifest_errors)
+        )
+    manifest_payload = manifest["payload"]
+    target_run_id = context.run_path.rsplit("/", 1)[-1]
+    if (
+        manifest_payload.get("run_id") != target_run_id
+        or manifest_payload.get("stage_family") != _RAW_FAMILY
+        or manifest_payload.get("kind") != "raw_probability_uint8"
+    ):
+        _fail("Raw coordinate successor target manifest path or kind is stale.")
+    if context._run_group.attrs.get("coordinate_contract") != "canonical_v2":
+        _fail("Raw coordinate successor target is not marked canonical_v2.")
+    source = payload["source"]
+    receipt_source = receipt_payload["source"]
+    source_run_path = source.get("run_path")
+    if (
+        source.get("family") != _RAW_FAMILY
+        or type(source_run_path) is not str
+        or source_run_path.split("/")[0] != _RAW_FAMILY
+        or len(source_run_path.split("/")) != 2
+        or not source_run_path.split("/", 1)[1]
+    ):
+        _fail("Raw coordinate successor authority names a non-raw source family.")
+    try:
+        source_run = _node(
+            context._root,
+            source_run_path,
+            label="raw coordinate successor source core",
+        )
+    except SubjectMaskCoordinatePublicationError as exc:
+        _fail(f"Raw coordinate successor source core is unavailable: {exc}.")
+    source_manifest = source_run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(source_manifest, Mapping):
+        _fail("Raw coordinate successor source core lacks its run manifest.")
+    source_manifest_errors = validate_subject_mask_core_run_manifest(source_manifest)
+    if source_manifest_errors:
+        _fail(
+            "Raw coordinate successor source core manifest is invalid: "
+            + "; ".join(source_manifest_errors)
+        )
+    source_manifest_payload = source_manifest["payload"]
+    source_manifest_logical = source_manifest_payload.get("logical_content")
+    if not isinstance(source_manifest_logical, Mapping):
+        _fail("Raw coordinate successor source core lacks logical-content evidence.")
+    source_run_id = source_run_path.rsplit("/", 1)[-1]
+    if (
+        source_manifest_payload.get("run_id") != source_run_id
+        or source_manifest_payload.get("stage_family") != _RAW_FAMILY
+        or source_manifest_payload.get("kind") != "raw_probability_uint8"
+        or source_manifest.get("payload_digest")
+        != source["manifest_payload_digest"]
+        or canonical_json_sha256(source_manifest) != source["manifest_document_digest"]
+        or source_manifest_logical.get("digest") != source["logical_content_digest"]
+    ):
+        _fail(
+            "Raw coordinate successor source core manifest differs from the "
+            "successor authority or receipt."
+        )
+    expected_source = {
+        "run_path": receipt_source["run_path"],
+        "manifest_payload_digest": receipt_source["core_manifest_payload_digest"],
+        "manifest_document_digest": receipt_source["core_manifest_document_digest"],
+        "logical_content_digest": receipt_source["logical_content_digest"],
+    }
+    if source.get("family") != _RAW_FAMILY or source.get("run_path") != expected_source[
+        "run_path"
+    ]:
+        _fail("Raw coordinate receipt source run differs from successor authority.")
+    for authority_name, receipt_name in (
+        ("manifest_payload_digest", "manifest_payload_digest"),
+        ("manifest_document_digest", "manifest_document_digest"),
+        ("logical_content_digest", "logical_content_digest"),
+    ):
+        if source.get(authority_name) != expected_source[receipt_name]:
+            _fail(
+                "Raw coordinate receipt source manifest or logical-content digest "
+                "differs from successor authority."
+            )
+    target_logical = manifest_payload.get("logical_content")
+    if not isinstance(target_logical, Mapping):
+        _fail("Raw coordinate successor target manifest lacks logical-content bindings.")
+    if target_logical.get("digest") != receipt_source["logical_content_digest"]:
+        _fail(
+            "Raw coordinate successor target manifest logical identity differs "
+            "from the receipt and successor authority."
+        )
+
+    source_authority = payload["source_authority"]
+    bundle = receipt_payload["bundle_authority"]
+    bundle_manifest = source_authority.get("record")
+    if not isinstance(bundle_manifest, Mapping):
+        _fail("Raw coordinate successor bundle authority is absent.")
+    bundle_errors = validate_subject_mask_bundle_manifest(bundle_manifest)
+    if bundle_errors:
+        _fail(
+            "Raw coordinate successor bundle authority is invalid: "
+            + "; ".join(bundle_errors)
+        )
+    bundle_members = bundle_manifest.get("payload", {}).get("members")
+    raw_member = bundle_members.get("raw") if isinstance(bundle_members, Mapping) else None
+    expected_source = {
+        name: raw_member.get(name) if isinstance(raw_member, Mapping) else None
+        for name in (
+            "family",
+            "run_path",
+            "manifest_schema_id",
+            "manifest_schema_version",
+            "manifest_payload_digest",
+            "manifest_document_digest",
+            "logical_content_digest",
+        )
+    }
+    if not isinstance(raw_member, Mapping) or source != expected_source:
+        _fail(
+            "Raw coordinate successor source authority is not bound to the "
+            "bundle raw member."
+        )
+    if (
+        source_authority.get("kind") != bundle["kind"]
+        or bundle["kind"] != "inactive_subject_mask_bundle_v3"
+        or bundle_manifest.get("schema_id") != SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID
+        or bundle_manifest.get("schema_version") != 3
+        or source_authority.get("record_sha256") != bundle["document_digest"]
+    ):
+        _fail("Raw coordinate receipt bundle authority differs from successor authority.")
+
+    authority_equivalence = payload["payload_equivalence"]
+    receipt_equivalence = receipt_payload["payload_equivalence"]
+    if authority_equivalence.get("source_logical_content_digest") != receipt_source[
+        "logical_content_digest"
+    ]:
+        _fail("Raw coordinate payload equivalence is bound to another source digest.")
+    file_equivalence = authority_equivalence.get("payload_file_equivalence")
+    if not isinstance(file_equivalence, Mapping):
+        _fail("Raw coordinate successor lacks payload-file equivalence evidence.")
+    for name in (
+        "schema_id",
+        "schema_version",
+        "receipt_digest",
+        "inventory_digest",
+        "payload_file_count",
+    ):
+        if file_equivalence.get(name) != receipt_equivalence.get(name):
+            _fail(
+                "Raw coordinate receipt payload-file equivalence differs from "
+                "successor authority."
+            )
+
+    authority_records = payload["coordinate_records"]
+    receipt_records = receipt_payload["coordinate_records"]
+    for name in _RAW_COORDINATE_VALIDATION_RECORD_NAMES:
+        if name not in authority_records:
+            _fail(f"Successor authority omits raw coordinate record {name!r}.")
+        _require_receipt_pointer(receipt_records, name, authority_records[name])
+    expected_receipt_pointer = _record_pointer(receipt_binding)
+    if authority_records.get("coordinate_validation_receipt") != expected_receipt_pointer:
+        _fail("Successor authority does not bind the exact coordinate validation receipt.")
+
+
+def _validate_coordinate_payload_inventory_entry(
+    name: str,
+    entry: Any,
+    node: Any,
+    *,
+    publication: str | None,
+) -> None:
+    if not isinstance(entry, Mapping):
+        _fail(f"Raw coordinate inventory entry {name!r} is not an object.")
+    expected_fields = {"array_role", "payload", "interpretation"}
+    if publication is not None:
+        expected_fields.add("publication")
+    if set(entry) != expected_fields or entry.get("array_role") != name:
+        _fail(f"Raw coordinate inventory entry {name!r} has an unexpected shape.")
+    if publication is not None and entry.get("publication") != publication:
+        _fail(f"Raw coordinate inventory entry {name!r} has an unexpected publication.")
+    payload = entry.get("payload")
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "array_ref",
+        "shape",
+        "dtype",
+        "array_values_sha256",
+    }:
+        _fail(f"Raw coordinate inventory payload {name!r} is incomplete.")
+    live = _array_metadata(node)
+    if payload.get("array_ref") != live["array_ref"]:
+        _fail(f"Raw coordinate inventory array_ref for {name!r} is stale.")
+    if payload.get("shape") != live["shape"] or payload.get("dtype") != live["dtype"]:
+        _fail(f"Raw coordinate inventory shape or dtype for {name!r} is stale.")
+    if (
+        type(payload.get("array_values_sha256")) is not str
+        or _SHA256_RE.fullmatch(payload["array_values_sha256"]) is None
+    ):
+        _fail(f"Raw coordinate inventory payload digest for {name!r} is malformed.")
+
+
+def _validate_raw_coordinate_inventory_metadata(
+    context: BoundSubjectMaskCoordinateContext,
+    geometry_nodes: Mapping[str, Any],
+    companion_nodes: Mapping[str, Any],
+    inventory: BoundCoordinateRecord,
+    derivation: BoundCoordinateRecord,
+) -> dict[str, BoundCoordinateRecord]:
+    record = inventory.record
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "row_identity",
+        "component_labels",
+        "inference_authority",
+        "required_geometry",
+        "optional_geometry",
+        "required_companions",
+        "geometry",
+        "companions",
+    }
+    if set(record) != expected_fields:
+        _fail("Raw coordinate surface inventory record fields are not exact.")
+    if record["row_identity"] != _record_pointer(context.row_identity):
+        _fail("Raw coordinate surface inventory has a stale row-identity pointer.")
+    if record["component_labels"] != _record_pointer(context.component_labels):
+        _fail("Raw coordinate surface inventory has a stale component-label pointer.")
+    if record["inference_authority"] != _record_pointer(context.inference_authority):
+        _fail("Raw coordinate surface inventory has a stale inference pointer.")
+    if record["required_geometry"] != ["bbox_xyxy", "centroid_xy", "mask_probs_roi"]:
+        _fail("Raw coordinate surface inventory required geometry set is not exact.")
+    if record["optional_geometry"] != {"masks_roi": "masks_roi" in geometry_nodes}:
+        _fail("Raw coordinate surface inventory optional geometry set is stale.")
+    if record["required_companions"] != sorted(_SUBJECT_MASK_COMPANION_SPECS):
+        _fail("Raw coordinate surface inventory companion set is not exact.")
+    geometry_inventory = record["geometry"]
+    companion_inventory = record["companions"]
+    if (
+        not isinstance(geometry_inventory, Mapping)
+        or not isinstance(companion_inventory, Mapping)
+        or set(geometry_inventory) != set(geometry_nodes)
+        or set(companion_inventory) != set(companion_nodes)
+    ):
+        _fail("Raw coordinate surface inventory does not cover the live array set.")
+
+    all_nodes = {**dict(geometry_nodes), **dict(companion_nodes)}
+    all_inventory = {**dict(geometry_inventory), **dict(companion_inventory)}
+    interpretations: dict[str, BoundCoordinateRecord] = {}
+    for name, node in all_nodes.items():
+        _validate_coordinate_payload_inventory_entry(
+            name,
+            all_inventory[name],
+            node,
+            publication=(
+                "canonical_coordinate_descriptor_v2" if name in geometry_nodes else None
+            ),
+        )
+        try:
+            interpretation = bind_persisted_coordinate_record(
+                node,
+                attr_name=SUBJECT_MASK_ARRAY_INTERPRETATION_ATTR,
+            )
+        except Exception as exc:
+            _fail(f"Raw coordinate interpretation {name!r} is unavailable: {exc}.")
+        entry = all_inventory[name]
+        if entry["interpretation"] != _record_pointer(interpretation):
+            _fail(f"Raw coordinate inventory interpretation {name!r} is stale.")
+        interpretation_record = interpretation.record
+        if (
+            interpretation_record.get("array_role") != name
+            or interpretation_record.get("payload") != entry["payload"]
+        ):
+            _fail(f"Raw coordinate interpretation {name!r} disagrees with inventory.")
+        interpretations[name] = interpretation
+
+    derivation_record = derivation.record
+    expected_derivation_fields = {
+        "schema_id",
+        "schema_version",
+        "coordinate_context",
+        "row_identity",
+        "component_labels",
+        "inference_authority",
+        "surface_inventory",
+        "array_interpretations",
+        "validation_rules",
+        "operations",
+        "arrays",
+    }
+    if set(derivation_record) != expected_derivation_fields:
+        _fail("Raw coordinate derivation record fields are not exact.")
+    for name, expected in (
+        ("coordinate_context", context.context_record),
+        ("row_identity", context.row_identity),
+        ("component_labels", context.component_labels),
+        ("inference_authority", context.inference_authority),
+        ("surface_inventory", inventory),
+    ):
+        if derivation_record[name] != _record_pointer(expected):
+            _fail(f"Raw coordinate derivation has a stale {name} pointer.")
+    if set(derivation_record["array_interpretations"]) != set(interpretations):
+        _fail("Raw coordinate derivation interpretation set is stale.")
+    for name, interpretation in interpretations.items():
+        if derivation_record["array_interpretations"][name] != _record_pointer(
+            interpretation
+        ):
+            _fail(f"Raw coordinate derivation interpretation {name!r} is stale.")
+    all_nodes = {**dict(geometry_nodes), **dict(companion_nodes)}
+    if set(derivation_record["operations"]) != set(geometry_nodes):
+        _fail("Raw coordinate derivation operation set is stale.")
+    if set(derivation_record["arrays"]) != set(all_nodes):
+        _fail("Raw coordinate derivation array set is stale.")
+    for name in all_nodes:
+        array_record = derivation_record["arrays"].get(name)
+        inventory_entry = all_inventory[name]
+        if (
+            not isinstance(array_record, Mapping)
+            or set(array_record) != {"array_role", "payload", "interpretation"}
+            or array_record["array_role"] != name
+            or array_record["payload"] != inventory_entry["payload"]
+            or array_record["interpretation"]
+            != _record_pointer(interpretations[name])
+        ):
+            _fail(f"Raw coordinate derivation array {name!r} is stale.")
+    validation_rules = derivation_record["validation_rules"]
+    if not isinstance(validation_rules, Mapping):
+        _fail("Raw coordinate derivation validation rules are absent.")
+    if validation_rules.get("content_binding") != ARRAY_VALUES_CANONICALIZATION:
+        _fail("Raw coordinate derivation content binding is unsupported.")
+    if validation_rules.get("threshold_comparison") != "greater_than_or_equal":
+        _fail("Raw coordinate derivation threshold semantics are unsupported.")
+    return interpretations
+
+
+def _load_raw_subject_mask_coordinate_surfaces_from_receipt(
+    context: BoundSubjectMaskCoordinateContext,
+) -> BoundSubjectMaskCoordinateSurfaces:
+    run = context._run_group
+    try:
+        receipt = load_subject_mask_coordinate_validation_receipt(
+            run,
+            expected_kind=RAW_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+            expected_successor_run_path=context.run_path,
+            expected_coordinate_record_names=_RAW_COORDINATE_VALIDATION_RECORD_NAMES,
+        )
+    except SubjectMaskCoordinateValidationReceiptError as exc:
+        _fail(f"Raw subject-mask coordinate validation receipt is invalid: {exc}.")
+
+    try:
+        receipt_binding = bind_persisted_coordinate_record(
+            run,
+            attr_name=SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE,
+        )
+    except Exception as exc:
+        _fail(f"Raw coordinate validation receipt pointer is unavailable: {exc}.")
+    _validate_raw_coordinate_successor_receipt_authority(
+        context,
+        receipt,
+        receipt_binding,
+    )
+
+    try:
+        inventory = bind_persisted_coordinate_record(
+            run,
+            attr_name=SUBJECT_MASK_SURFACE_INVENTORY_ATTR,
+        )
+        derivation = bind_persisted_coordinate_record(
+            run,
+            attr_name=SUBJECT_MASK_COORDINATE_DERIVATION_ATTR,
+        )
+        padded = bind_persisted_coordinate_record(
+            run,
+            attr_name="coordinate_successor_padded_crop_lineage",
+        )
+    except Exception as exc:
+        _fail(f"Raw coordinate receipt lineage record is unavailable: {exc}.")
+
+    live_records = {
+        "context": context.context_record,
+        "derivation": derivation,
+        "padded_crop_lineage": padded,
+        "row_identity": context.row_identity,
+        "surface_inventory": inventory,
+        "temporal_authority": context.temporal_authority,
+    }
+    receipt_records = receipt["payload"]["coordinate_records"]
+    for name in _RAW_COORDINATE_VALIDATION_RECORD_NAMES:
+        _require_receipt_pointer(receipt_records, name, live_records[name])
+
+    geometry_nodes = _validate_surface_metadata(context)
+    companion_nodes = _companion_nodes(run)
+    interpretations = _validate_raw_coordinate_inventory_metadata(
+        context,
+        geometry_nodes,
+        companion_nodes,
+        inventory,
+        derivation,
+    )
+    bindings = _bindings(
+        context,
+        derivation,
+        inventory,
+        interpretations,
+        load=True,
+    )
+    return BoundSubjectMaskCoordinateSurfaces(
+        mask_probs_roi=bindings["mask_probs_roi"],
+        masks_roi=bindings.get("masks_roi"),
+        centroid_xy=bindings["centroid_xy"],
+        bbox_xyxy=bindings["bbox_xyxy"],
+        context=context,
+        derivation=derivation,
+        inventory=inventory,
+        interpretations=interpretations,
+        _verification_seal=_BOUND_SURFACES_SEAL,
+    )
+
+
 @dataclass(frozen=True, init=False)
 class BoundSubjectMaskCoordinateSurfaces:
     mask_probs_roi: BoundCanonicalCoordinateDescriptor
@@ -2786,6 +3282,8 @@ def _load_subject_mask_coordinate_surfaces(
         expected_selector_eligible=expected_selector_eligible,
         expected_publication_owner=expected_publication_owner,
     )
+    if SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE in context._run_group.attrs:
+        return _load_raw_subject_mask_coordinate_surfaces_from_receipt(context)
     nodes = _validate_surface_metadata(context)
     companions, payloads = _validate_companion_metadata_and_values(context, nodes)
     interpretations = _bind_interpretations(

@@ -16,10 +16,13 @@ publication gate or become a future-normal scientific input.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import hashlib
 import json
 import re
+from threading import RLock
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -68,6 +71,7 @@ from fisheye.shared.run_provenance import (
     sha256_payload,
     validate_run_provenance,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.coordinate_reference import (
     bind_persisted_record_reference_extent,
     canonical_node_path,
@@ -127,6 +131,27 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STAGE_ATTR,
     RUN_STATUS_COMPLETE,
     RUN_STATUS_RUNNING,
+)
+from fisheye.shared.zarr.coordinate_successor_authority import (
+    REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    CoordinateSuccessorAuthorityError,
+    load_coordinate_successor_authority,
+    validate_coordinate_successor_authority,
+)
+from fisheye.shared.zarr.subject_mask_coordinate_validation_receipt import (
+    REFINED_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+    SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE,
+    SubjectMaskCoordinateValidationReceiptError,
+    load_subject_mask_coordinate_validation_receipt,
+)
+from fisheye.shared.zarr.subject_mask_core_publication import (
+    SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
+    validate_subject_mask_core_run_manifest,
+)
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID,
+    validate_subject_mask_bundle_manifest,
 )
 
 REFINED_SUBJECT_MASK_COMPONENT_LABELS_ATTR = "refined_subject_mask_component_labels"
@@ -235,6 +260,60 @@ _PUBLICATION_OWNED_ARRAY_ATTRS = frozenset(
         f"{ARRAY_MEASUREMENT_DESCRIPTOR_ATTR}_sha256",
     }
 )
+
+_REFINED_COORDINATE_VALIDATION_RECORD_NAMES = frozenset(
+    {
+        "component_qc_inventory",
+        "context",
+        "measurement_authority",
+        "refinement_authority",
+        "row_identity",
+        "scientific_manifest",
+        "source_authority",
+        "surface_inventory",
+        "temporal_authority",
+    }
+)
+_REFINED_COORDINATE_AUTHORITY_RECORD_NAMES = (
+    _REFINED_COORDINATE_VALIDATION_RECORD_NAMES
+    | {"coordinate_validation_receipt"}
+)
+
+
+@dataclass
+class _PayloadCacheEntry:
+    node: Any
+    path: str
+    shape: tuple[int, ...]
+    dtype: str
+    payload: dict[str, Any]
+
+
+@dataclass
+class _PayloadCacheState:
+    entries: dict[tuple[int, str, tuple[int, ...], str], _PayloadCacheEntry] = field(
+        default_factory=dict
+    )
+    lock: RLock = field(default_factory=RLock)
+
+
+_PAYLOAD_CACHE: ContextVar[_PayloadCacheState | None] = ContextVar(
+    "_REFINED_SUBJECT_MASK_PAYLOAD_CACHE",
+    default=None,
+)
+
+
+@contextmanager
+def _payload_cache_scope():
+    """Memoize complete payload evidence for one refined publication call."""
+
+    token = _PAYLOAD_CACHE.set(_PayloadCacheState())
+    try:
+        yield
+    finally:
+        _PAYLOAD_CACHE.reset(token)
+
+
 _COMPONENT_METRIC_DEFINITIONS: Mapping[str, tuple[str, str, str, str]] = {
     "component_count": (
         "connected_component_count",
@@ -614,8 +693,87 @@ def _payload_row_chunk(node: Any) -> int:
     return max(1, min(shape[0], _PAYLOAD_SCAN_TARGET_BYTES // row_bytes))
 
 
+def _payload_cache_key(
+    node: Any,
+    *,
+    path: str,
+    shape: tuple[int, ...],
+    dtype: np.dtype[Any],
+) -> tuple[int, str, tuple[int, ...], str]:
+    return id(node), path, shape, dtype.str
+
+
+def _payload_cache_lookup(
+    node: Any,
+    *,
+    metadata: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    state = _PAYLOAD_CACHE.get()
+    if state is None:
+        return None
+    path = str(metadata["array_ref"]).removeprefix("/")
+    shape = tuple(int(value) for value in metadata["shape"])
+    dtype = np.dtype(str(metadata["dtype"]))
+    key = _payload_cache_key(node, path=path, shape=shape, dtype=dtype)
+    with state.lock:
+        entry = state.entries.get(key)
+        if entry is None:
+            return None
+        # Re-check all identity metadata on every hit.  The node reference in
+        # the entry also prevents object-id reuse while this call is active.
+        if (
+            entry.node is not node
+            or entry.path != path
+            or entry.shape != shape
+            or entry.dtype != dtype.str
+        ):
+            state.entries.pop(key, None)
+            return None
+        return copy.deepcopy(entry.payload)
+
+
+def _payload_cache_store(
+    node: Any,
+    payload: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Store evidence only after the caller has completed its full scan."""
+
+    state = _PAYLOAD_CACHE.get()
+    if state is None:
+        return
+    if metadata is None:
+        _, metadata = _payload_digest_state(node)
+    path = str(metadata["array_ref"]).removeprefix("/")
+    shape = tuple(int(value) for value in metadata["shape"])
+    dtype = np.dtype(str(metadata["dtype"]))
+    expected = {
+        "array_ref": f"/{path}",
+        "shape": list(shape),
+        "dtype": dtype.str,
+    }
+    if any(payload.get(name) != value for name, value in expected.items()):
+        _fail("Completed payload evidence metadata does not match its array node.")
+    if not isinstance(payload.get("array_values_sha256"), str):
+        _fail("Completed payload evidence lacks an exact values digest.")
+    key = _payload_cache_key(node, path=path, shape=shape, dtype=dtype)
+    entry = _PayloadCacheEntry(
+        node=node,
+        path=path,
+        shape=shape,
+        dtype=dtype.str,
+        payload=copy.deepcopy(dict(payload)),
+    )
+    with state.lock:
+        state.entries[key] = entry
+
+
 def _payload(node: Any) -> dict[str, Any]:
     digest, metadata = _payload_digest_state(node)
+    cached = _payload_cache_lookup(node, metadata=metadata)
+    if cached is not None:
+        return cached
     shape = tuple(int(item) for item in node.shape)
     label = canonical_node_path(node)
     if not shape:
@@ -639,7 +797,9 @@ def _payload(node: Any) -> dict[str, Any]:
             if values.dtype != np.dtype(node.dtype) or values.dtype.hasobject:
                 _fail(f"{label} changed dtype during payload validation.")
             digest.update(np.ascontiguousarray(values).tobytes(order="C"))
-    return {**metadata, "array_values_sha256": digest.hexdigest()}
+    payload = {**metadata, "array_values_sha256": digest.hexdigest()}
+    _payload_cache_store(node, payload, metadata=metadata)
+    return payload
 
 
 def _record_pointer(value: BoundCoordinateRecord) -> dict[str, str]:
@@ -2477,6 +2637,11 @@ def _scan_required_surfaces(
         name: _finish_payload(digest, metadata)
         for name, (digest, metadata) in states.items()
     }
+    # Every required surface has now been completely read, semantically
+    # checked, and hashed.  Seed the call-scoped cache only at this point so
+    # later inventory/manifest construction cannot repeat those payload scans.
+    for name, payload in payloads.items():
+        _payload_cache_store(nodes[name], payload)
     return nodes, payloads
 
 
@@ -4255,8 +4420,7 @@ def _surface_evidence(
     return required_nodes, specs, ragged, measurements, payloads, structure_inventory
 
 
-@proof_verification_operation
-def publish_refined_subject_mask_coordinate_surfaces(
+def _publish_refined_subject_mask_coordinate_surfaces_impl(
     root: Any,
     run_path: str,
     *,
@@ -4416,7 +4580,972 @@ def publish_refined_subject_mask_coordinate_surfaces(
         raise
 
 
-def _load_refined_subject_mask_coordinate_surfaces(
+@proof_verification_operation
+def publish_refined_subject_mask_coordinate_surfaces(
+    root: Any,
+    run_path: str,
+    *,
+    expected_publication_owner: str,
+) -> BoundRefinedSubjectMaskCoordinateSurfaces:
+    with _payload_cache_scope():
+        return _publish_refined_subject_mask_coordinate_surfaces_impl(
+            root,
+            run_path,
+            expected_publication_owner=expected_publication_owner,
+        )
+
+
+def _receipt_path_under_run(
+    value: Any,
+    *,
+    run_path: str,
+    label: str,
+) -> str:
+    """Return a receipt path relative to its exact successor run."""
+
+    if type(value) is not str or not value:
+        _fail(f"{label} must be one nonempty path.")
+    normalized = value.strip("/")
+    marker = run_path.strip("/")
+    if normalized == marker:
+        return ""
+    suffix = f"{marker}/"
+    if normalized.startswith(suffix):
+        return normalized[len(suffix) :]
+    qualified = f"/{marker}/"
+    index = normalized.find(qualified)
+    if index >= 0:
+        return normalized[index + len(qualified) :]
+    if normalized.endswith(f"/{marker}"):
+        return ""
+    _fail(f"{label} leaves the exact successor run {run_path!r}.")
+
+
+def _receipt_node(
+    root: Any,
+    *,
+    run_path: str,
+    path: Any,
+    label: str,
+) -> Any:
+    relative = _receipt_path_under_run(path, run_path=run_path, label=label)
+    return _node(
+        root,
+        run_path if not relative else f"{run_path}/{relative}",
+        label=label,
+    )
+
+
+def _receipt_array_node(
+    root: Any,
+    *,
+    run_path: str,
+    payload: Mapping[str, Any],
+    label: str,
+) -> Any:
+    if not isinstance(payload, Mapping):
+        _fail(f"{label} payload is not an object.")
+    node = _receipt_node(
+        root,
+        run_path=run_path,
+        path=payload.get("array_ref"),
+        label=label,
+    )
+    if not hasattr(node, "shape"):
+        _fail(f"{label} does not resolve to an array.")
+    try:
+        expected_shape = tuple(int(value) for value in payload["shape"])
+        expected_dtype = np.dtype(str(payload["dtype"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(f"{label} has invalid shape/dtype metadata: {exc}.")
+    if tuple(int(value) for value in node.shape) != expected_shape:
+        _fail(
+            f"{label} shape differs from its sealed receipt: "
+            f"{tuple(node.shape)!r} != {expected_shape!r}."
+        )
+    try:
+        actual_dtype = np.dtype(node.dtype)
+    except (AttributeError, TypeError) as exc:
+        _fail(f"{label} has no usable dtype: {exc}.")
+    if actual_dtype != expected_dtype or actual_dtype.hasobject:
+        _fail(
+            f"{label} dtype differs from its sealed receipt: "
+            f"{actual_dtype.str!r} != {expected_dtype.str!r}."
+        )
+    return node
+
+
+def _receipt_record(
+    root: Any,
+    *,
+    run_path: str,
+    pointer: Mapping[str, Any],
+    label: str,
+) -> BoundCoordinateRecord:
+    if not isinstance(pointer, Mapping) or set(pointer) != {
+        "record_ref",
+        "record_sha256",
+    }:
+        _fail(f"{label} is not an exact persisted-record pointer.")
+    record_ref = pointer["record_ref"]
+    if type(record_ref) is not str or record_ref.count("@") != 1:
+        _fail(f"{label} has an invalid record reference.")
+    node_path, attr_name = record_ref.split("@", 1)
+    node = _receipt_node(
+        root,
+        run_path=run_path,
+        path=node_path,
+        label=f"{label} node",
+    )
+    try:
+        bound = bind_persisted_coordinate_record(node, attr_name=attr_name)
+    except Exception as exc:
+        _fail(f"{label} is absent or invalid: {exc}.")
+    if bound.record_ref != record_ref or bound.record_sha256 != pointer["record_sha256"]:
+        _fail(f"{label} is stale.")
+    return bound
+
+
+def _receipt_live_attrs(
+    node: Any,
+    expected: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if _scientific_attrs(node, label=label) != dict(expected):
+        _fail(f"{label} producer metadata changed after receipt sealing.")
+
+
+def _receipt_validate_structure_tree(
+    node: Any,
+    expected: Mapping[str, Any],
+    *,
+    label: str,
+    run_path: str,
+) -> None:
+    if not isinstance(expected, Mapping):
+        _fail(f"{label} structure evidence is malformed.")
+    kind = expected.get("kind")
+    if kind == "array":
+        if not hasattr(node, "shape"):
+            _fail(f"{label} is not an array.")
+        payload = expected.get("payload")
+        if not isinstance(payload, Mapping):
+            _fail(f"{label} lacks array payload metadata.")
+        try:
+            shape = tuple(int(value) for value in payload["shape"])
+            dtype = np.dtype(str(payload["dtype"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            _fail(f"{label} has invalid array metadata: {exc}.")
+        if tuple(int(value) for value in node.shape) != shape or np.dtype(node.dtype) != dtype:
+            _fail(f"{label} shape or dtype changed after receipt sealing.")
+        _receipt_live_attrs(node, expected.get("producer_attrs", {}), label=label)
+        return
+    if kind != "group" or hasattr(node, "shape"):
+        _fail(f"{label} structure kind is invalid.")
+    children = expected.get("children")
+    if not isinstance(children, Mapping):
+        _fail(f"{label} group children are malformed.")
+    if set(_member_names(node)) != set(children):
+        _fail(f"{label} namespace members changed after receipt sealing.")
+    _receipt_live_attrs(node, expected.get("producer_attrs", {}), label=label)
+    for name, child in children.items():
+        _receipt_validate_structure_tree(
+            _child(node, name, label=f"{label}/{name}"),
+            child,
+            label=f"{label}/{name}",
+            run_path=run_path,
+        )
+
+
+def _receipt_validate_closed_world_structure(
+    context: BoundRefinedSubjectMaskCoordinateContext,
+    structure: Mapping[str, Any],
+) -> None:
+    """Validate closed-world names and metadata without reading values."""
+
+    if structure.get("policy") != "closed_world_exact_component_and_relation_namespaces_v2":
+        _fail("Persisted refined closed-world structure policy is unsupported.")
+    run = context._run_group
+    root_arrays = structure.get("run_root", {}).get("arrays")
+    root_groups = structure.get("run_root", {}).get("groups")
+    if not isinstance(root_arrays, Mapping) or not isinstance(root_groups, Mapping):
+        _fail("Persisted refined closed-world root inventory is malformed.")
+    if set(_member_names(run)) != set(root_arrays) | set(root_groups):
+        _fail("Refined run root namespace members changed after receipt sealing.")
+    for name, evidence in root_arrays.items():
+        node = _child(run, name, label=f"refined root array {name}")
+        if not hasattr(node, "shape"):
+            _fail(f"Refined root member {name!r} changed from array to group.")
+        _receipt_array_node(
+            context._root,
+            run_path=context.run_path,
+            payload=evidence.get("payload", {}),
+            label=f"refined root array {name}",
+        )
+        _receipt_live_attrs(
+            node,
+            evidence.get("producer_attrs", {}),
+            label=f"refined root array {name}",
+        )
+    for name, evidence in root_groups.items():
+        node = _child(run, name, label=f"refined root group {name}")
+        if hasattr(node, "shape"):
+            _fail(f"Refined root member {name!r} changed from group to array.")
+        if tuple(_member_names(node)) != tuple(evidence.get("members", ())):
+            _fail(f"Refined root group {name!r} members changed after receipt sealing.")
+        _receipt_live_attrs(
+            node,
+            evidence.get("producer_attrs", {}),
+            label=f"refined root group {name}",
+        )
+
+    components_parent = _optional_child(run, "components")
+    components = structure.get("components")
+    if not isinstance(components, Mapping):
+        _fail("Persisted refined component structure is malformed.")
+    if components_parent is None:
+        if any(entry.get("status") == "present" for entry in components.values()):
+            _fail("Refined component namespaces disappeared after receipt sealing.")
+    else:
+        _receipt_live_attrs(
+            components_parent,
+            structure.get("components_parent_attrs", {}),
+            label="refined components parent",
+        )
+        if set(_member_names(components_parent)) != {
+            name for name, entry in components.items() if entry.get("status") == "present"
+        }:
+            _fail("Refined component namespace names changed after receipt sealing.")
+    for component, evidence in components.items():
+        group = _component_group(run, component)
+        if evidence.get("status") == "absent":
+            if group is not None:
+                _fail(f"Refined component {component!r} appeared after receipt sealing.")
+            continue
+        if group is None:
+            _fail(f"Refined component {component!r} disappeared after receipt sealing.")
+        _receipt_live_attrs(group, evidence.get("producer_attrs", {}), label=component)
+        arrays = evidence.get("arrays", {})
+        groups = evidence.get("groups", {})
+        if set(_member_names(group)) != set(arrays) | set(groups):
+            _fail(f"Refined component {component!r} namespace members changed.")
+        for name, item in arrays.items():
+            node = _child(group, name, label=f"{component}/{name}")
+            if not hasattr(node, "shape"):
+                _fail(f"Refined component array {component}/{name} changed kind.")
+            _receipt_array_node(
+                context._root,
+                run_path=context.run_path,
+                payload=item.get("payload", {}),
+                label=f"{component}/{name}",
+            )
+            _receipt_live_attrs(node, item.get("attrs", {}), label=f"{component}/{name}")
+        for name, item in groups.items():
+            node = _child(group, name, label=f"{component}/{name}")
+            if item.get("classification") == "known_typed_namespace":
+                _receipt_validate_structure_tree(
+                    node,
+                    item.get("exact_contents", {}),
+                    label=f"{component}/{name}",
+                    run_path=context.run_path,
+                )
+            elif item.get("classification") == "explicit_non_geometry":
+                if hasattr(node, "shape"):
+                    _fail(f"Explicit non-geometry namespace {component}/{name} changed kind.")
+                _receipt_live_attrs(node, item.get("attrs", {}), label=f"{component}/{name}")
+                arrays = item.get("arrays", {})
+                if set(_member_names(node)) != set(arrays):
+                    _fail(f"Explicit non-geometry namespace {component}/{name} changed members.")
+                for child_name, payload in arrays.items():
+                    _receipt_array_node(
+                        context._root,
+                        run_path=context.run_path,
+                        payload=payload,
+                        label=f"{component}/{name}/{child_name}",
+                    )
+            else:
+                _fail(f"Refined component group {component}/{name} classification is unsupported.")
+
+    relations = _optional_child(run, "relations")
+    relation_inventory = structure.get("relations")
+    if not isinstance(relation_inventory, Mapping):
+        _fail("Persisted refined relation structure is malformed.")
+    if relations is None:
+        if relation_inventory:
+            _fail("Refined relation namespaces disappeared after receipt sealing.")
+    else:
+        _receipt_live_attrs(
+            relations,
+            structure.get("relations_parent_attrs", {}),
+            label="refined relations parent",
+        )
+        if set(_member_names(relations)) != set(relation_inventory):
+            _fail("Refined relation namespace names changed after receipt sealing.")
+        for name, evidence in relation_inventory.items():
+            _receipt_validate_structure_tree(
+                _child(relations, name, label=f"relation {name}"),
+                evidence.get("exact_contents", {}),
+                label=f"relation {name}",
+                run_path=context.run_path,
+            )
+
+
+def _receipt_validate_component_qc(
+    context: BoundRefinedSubjectMaskCoordinateContext,
+    record: BoundCoordinateRecord,
+) -> None:
+    value = record.record
+    if value.get("row_identity") != _record_pointer(context.row_identity):
+        _fail("Persisted refined QC inventory row identity differs from context.")
+    if value.get("component_labels") != _record_pointer(context.component_labels):
+        _fail("Persisted refined QC inventory labels differ from context.")
+    components = value.get("components")
+    if not isinstance(components, Mapping):
+        _fail("Persisted refined QC inventory components are malformed.")
+    parent = _optional_child(context._run_group, "components")
+    if set(components) != set(context.labels):
+        _fail("Persisted refined QC inventory component set is not closed.")
+    for component in context.labels:
+        evidence = components[component]
+        group = _optional_child(parent, component) if parent is not None else None
+        qc = _optional_child(group, "qc") if group is not None else None
+        if evidence.get("status") == "absent":
+            if qc is not None:
+                _fail(f"QC namespace for {component!r} appeared after receipt sealing.")
+            continue
+        if qc is None or hasattr(qc, "shape"):
+            _fail(f"QC namespace for {component!r} changed kind or disappeared.")
+        if canonical_node_path(qc) != evidence.get("path"):
+            _fail(f"QC path for {component!r} changed after receipt sealing.")
+        _receipt_live_attrs(qc, evidence.get("attrs", {}), label=f"{component} QC")
+        arrays = evidence.get("arrays")
+        if not isinstance(arrays, Mapping) or set(_member_names(qc)) != set(arrays):
+            _fail(f"QC array names for {component!r} changed after receipt sealing.")
+        for name, payload in arrays.items():
+            _receipt_array_node(
+                context._root,
+                run_path=context.run_path,
+                payload=payload,
+                label=f"{component} QC {name}",
+            )
+
+
+def _receipt_coordinate_specs(
+    context: BoundRefinedSubjectMaskCoordinateContext,
+    inventory: BoundCoordinateRecord,
+    measurement_authority: BoundCoordinateRecord,
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, BoundCoordinateRecord],
+    dict[str, BoundCoordinateRecord],
+    dict[str, dict[str, Any]],
+]:
+    """Rebuild descriptor and measurement specs from sealed records only."""
+
+    record = inventory.record
+    canonical = record.get("canonical_geometry")
+    ragged = record.get("ragged_geometry")
+    measurement_surfaces = measurement_authority.record.get("surfaces")
+    if not isinstance(canonical, Mapping) or not isinstance(ragged, Mapping):
+        _fail("Persisted refined surface inventory lacks sealed geometry maps.")
+    if not isinstance(measurement_surfaces, Mapping):
+        _fail("Persisted refined measurement authority lacks sealed surfaces.")
+    required_nodes = {
+        "masks_roi": _child(
+            context._run_group,
+            "masks_roi",
+            label="authoritative refined dense masks",
+        ),
+        "mask_present": _child(
+            _child(context._run_group, "metrics", label="refined metrics"),
+            "mask_present",
+            label="mask_present",
+        ),
+        "area_px": _child(
+            _child(context._run_group, "metrics", label="refined metrics"),
+            "area_px",
+            label="area_px",
+        ),
+        "centroid_xy": _child(
+            _child(context._run_group, "metrics", label="refined metrics"),
+            "centroid_xy",
+            label="centroid_xy",
+        ),
+        "centroid_valid": _child(
+            _child(context._run_group, "metrics", label="refined metrics"),
+            "centroid_valid",
+            label="centroid_valid",
+        ),
+        "bbox_xyxy": _child(
+            _child(context._run_group, "metrics", label="refined metrics"),
+            "bbox_xyxy",
+            label="bbox_xyxy",
+        ),
+        "bbox_valid": _child(
+            _child(context._run_group, "metrics", label="refined metrics"),
+            "bbox_valid",
+            label="bbox_valid",
+        ),
+        "available_channels": _child(
+            context._run_group,
+            "available_channels",
+            label="available_channels",
+        ),
+    }
+    metrics = _child(context._run_group, "metrics", label="refined metrics")
+    _require_exact_members(
+        metrics,
+        ("mask_present", "area_px", "centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid"),
+        label="refined run metrics",
+    )
+    mask_shape = tuple(int(value) for value in required_nodes["masks_roi"].shape)
+    if len(mask_shape) != 4 or mask_shape[0] != context.row_identity.leading_dimension:
+        _fail("Refined masks_roi shape differs from sealed row identity.")
+    if mask_shape[1] != len(context.labels):
+        _fail("Refined masks_roi channel count differs from sealed labels.")
+    expected_shapes = {
+        "masks_roi": mask_shape,
+        "mask_present": (mask_shape[0], mask_shape[1]),
+        "area_px": (mask_shape[0], mask_shape[1]),
+        "centroid_xy": (mask_shape[0], mask_shape[1], 2),
+        "centroid_valid": (mask_shape[0], mask_shape[1]),
+        "bbox_xyxy": (mask_shape[0], mask_shape[1], 4),
+        "bbox_valid": (mask_shape[0], mask_shape[1]),
+        "available_channels": (mask_shape[1],),
+    }
+    expected_dtypes = {
+        "masks_roi": np.dtype("uint8"),
+        "mask_present": np.dtype("bool"),
+        "area_px": np.dtype("float32"),
+        "centroid_xy": np.dtype("float32"),
+        "centroid_valid": np.dtype("bool"),
+        "bbox_xyxy": np.dtype("float32"),
+        "bbox_valid": np.dtype("bool"),
+        "available_channels": np.dtype("bool"),
+    }
+    for name, node in required_nodes.items():
+        _require_shape_dtype(
+            node,
+            shape=expected_shapes[name],
+            dtype=expected_dtypes[name],
+            label=name,
+        )
+    if context._run_group.attrs.get("bbox_xyxy_convention") != "pixel_edge_half_open":
+        _fail("Refined bbox_xyxy convention changed after receipt sealing.")
+    if context._run_group.attrs.get("bbox_xyxy_derivation") != "foreground_half_open_pixel_edges_xyxy_v1":
+        _fail("Refined bbox_xyxy derivation changed after receipt sealing.")
+
+    payloads: dict[str, dict[str, Any]] = {}
+    interpretations: dict[str, BoundCoordinateRecord] = {}
+    specs = _required_geometry_specs(context, {
+        "masks_roi": required_nodes["masks_roi"],
+        "centroid_xy": required_nodes["centroid_xy"],
+        "centroid_valid": required_nodes["centroid_valid"],
+        "bbox_xyxy": required_nodes["bbox_xyxy"],
+        "bbox_valid": required_nodes["bbox_valid"],
+    })
+    for path, entry in canonical.items():
+        if not isinstance(entry, Mapping):
+            _fail(f"Persisted canonical geometry entry {path!r} is malformed.")
+        payload = entry.get("payload")
+        node = _receipt_array_node(
+            context._root,
+            run_path=context.run_path,
+            payload=payload,
+            label=f"refined canonical geometry {path}",
+        )
+        payloads[path] = copy.deepcopy(dict(payload))
+        interpretation = _receipt_record(
+            context._root,
+            run_path=context.run_path,
+            pointer=entry.get("interpretation"),
+            label=f"refined interpretation {path}",
+        )
+        interpretation_record = interpretation.record
+        if str(interpretation_record.get("array_path", "")).strip("/") != str(
+            payload.get("array_ref", "")
+        ).strip("/"):
+            _fail(f"Refined interpretation {path!r} array path is stale.")
+        interpretations[path] = interpretation
+        if path in specs:
+            continue
+        if path.endswith("/geometry/ellipse_params"):
+            geometry_type = "ellipse_cxcy_wh_angle"
+            components = ("center_x", "center_y", "width", "height", "angle")
+            units = ("px", "px", "px", "px", "deg")
+            convention = "continuous"
+        elif path.endswith("/sampled_contours/points_xy"):
+            geometry_type = "points_xy"
+            components = ("x", "y")
+            units = ("px", "px")
+            convention = "pixel_center"
+        else:
+            _fail(f"Sealed refined canonical geometry path {path!r} is unsupported.")
+        frame = (
+            context.continuous_frame if convention == "continuous" else context.pixel_center_frame
+        )
+        chain = (
+            context.continuous_chain if convention == "continuous" else context.pixel_center_chain
+        )
+        validity = interpretation_record.get("validity")
+        validity_node = None
+        if validity is not None:
+            validity_node = _receipt_array_node(
+                context._root,
+                run_path=context.run_path,
+                payload=validity.get("payload"),
+                label=f"refined {path} validity",
+            )
+            payloads[f"{path}@validity"] = copy.deepcopy(dict(validity["payload"]))
+        container_evidence = interpretation_record.get("container_evidence")
+        if not isinstance(container_evidence, Mapping):
+            _fail(f"Refined interpretation {path!r} lacks container evidence.")
+        container = _receipt_node(
+            context._root,
+            run_path=context.run_path,
+            path=container_evidence.get("path"),
+            label=f"refined {path} container",
+        )
+        spec = {
+            "node": node,
+            "validity_node": validity_node,
+            "geometry_type": geometry_type,
+            "components": components,
+            "component_units": units,
+            "pixel_convention": convention,
+            "frame": frame,
+            "chain": chain,
+            "overlay": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
+            "component": interpretation_record.get("component"),
+            "container": container,
+            "invalid_value_policy": (
+                validity.get("false_value_policy") if isinstance(validity, Mapping) else None
+            ),
+        }
+        if path.endswith("/sampled_contours/points_xy"):
+            count_path = path.removesuffix("points_xy") + "source_point_count"
+            count_entry = measurement_surfaces.get(count_path)
+            if not isinstance(count_entry, Mapping):
+                _fail(f"Sealed sampled contour {path!r} lacks source-point-count evidence.")
+            count_node = _receipt_array_node(
+                context._root,
+                run_path=context.run_path,
+                payload=count_entry.get("payload"),
+                label=f"refined {count_path}",
+            )
+            spec["companion_nodes"] = {"source_point_count": count_node}
+            payloads[f"{path}@companion:source_point_count"] = copy.deepcopy(
+                dict(count_entry["payload"])
+            )
+        specs[path] = spec
+
+    ragged_specs: dict[str, dict[str, Any]] = {}
+    ragged_records: dict[str, BoundCoordinateRecord] = {}
+    for path, entry in ragged.items():
+        if not isinstance(entry, Mapping):
+            _fail(f"Persisted ragged geometry entry {path!r} is malformed.")
+        payload = entry.get("payload")
+        node = _receipt_array_node(
+            context._root,
+            run_path=context.run_path,
+            payload=payload,
+            label=f"refined ragged geometry {path}",
+        )
+        mapping = entry.get("row_mapping")
+        if not isinstance(mapping, Mapping):
+            _fail(f"Persisted ragged geometry {path!r} row mapping is malformed.")
+        ptr_payload = mapping.get("ptr")
+        len_payload = mapping.get("len")
+        ptr_node = _receipt_array_node(
+            context._root,
+            run_path=context.run_path,
+            payload=ptr_payload,
+            label=f"refined ragged geometry {path} ptr",
+        )
+        len_node = _receipt_array_node(
+            context._root,
+            run_path=context.run_path,
+            payload=len_payload,
+            label=f"refined ragged geometry {path} len",
+        )
+        interpretation = _receipt_record(
+            context._root,
+            run_path=context.run_path,
+            pointer=entry.get("interpretation"),
+            label=f"refined ragged interpretation {path}",
+        )
+        ragged_records[path] = interpretation
+        container_evidence = interpretation.record.get("container_evidence")
+        container = _receipt_node(
+            context._root,
+            run_path=context.run_path,
+            path=container_evidence.get("path") if isinstance(container_evidence, Mapping) else None,
+            label=f"refined ragged {path} container",
+        )
+        ragged_specs[path] = {
+            "node": node,
+            "ptr_node": ptr_node,
+            "len_node": len_node,
+            "component": interpretation.record.get("component"),
+            "point_count": int(mapping.get("point_count", 0)),
+            "container": container,
+        }
+        payloads[path] = copy.deepcopy(dict(payload))
+        payloads[f"{path}@ptr"] = copy.deepcopy(dict(ptr_payload))
+        payloads[f"{path}@len"] = copy.deepcopy(dict(len_payload))
+
+    measurement_specs: dict[str, dict[str, Any]] = {}
+    for path, entry in measurement_surfaces.items():
+        if not isinstance(entry, Mapping):
+            _fail(f"Persisted measurement surface {path!r} is malformed.")
+        node = _receipt_array_node(
+            context._root,
+            run_path=context.run_path,
+            payload=entry.get("payload"),
+            label=f"refined measurement {path}",
+        )
+        validity_entry = entry.get("validity")
+        validity_node = None
+        validity_policy = None
+        if validity_entry is not None:
+            if not isinstance(validity_entry, Mapping):
+                _fail(f"Persisted measurement validity {path!r} is malformed.")
+            validity_node = _receipt_array_node(
+                context._root,
+                run_path=context.run_path,
+                payload=validity_entry.get("payload"),
+                label=f"refined measurement {path} validity",
+            )
+            validity_policy = validity_entry.get("policy")
+        axes = tuple(str(value) for value in entry.get("axis_order", ()))
+        measurement_specs[path] = {
+            "node": node,
+            "quantity": entry.get("quantity"),
+            "units": entry.get("units"),
+            "operation": entry.get("operation"),
+            "axes": axes,
+            "coordinate_input_paths": tuple(entry.get("coordinate_input_paths", ())),
+            "measurement_input_paths": tuple(entry.get("measurement_input_paths", ())),
+            "row_axis_name": "observation" if "observation" in axes else None,
+            "collection_axis": "subject_component" in axes and "observation" in axes,
+            "selected_collection_members": tuple(entry.get("selected_collection_members", ())),
+            "semantic_kind": entry.get("semantic_kind"),
+            "validity_node": validity_node,
+            "validity_policy": validity_policy,
+        }
+
+    return (
+        required_nodes,
+        specs,
+        ragged_specs,
+        interpretations,
+        ragged_records,
+        measurement_specs,
+    )
+
+
+def _load_refined_coordinate_surfaces_from_receipt(
+    context: BoundRefinedSubjectMaskCoordinateContext,
+    receipt: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> BoundRefinedSubjectMaskCoordinateSurfaces:
+    payload = receipt["payload"]
+    inventory = _receipt_record(
+        context._root,
+        run_path=context.run_path,
+        pointer=payload["coordinate_records"]["surface_inventory"],
+        label="refined surface inventory",
+    )
+    component_qc_inventory = _receipt_record(
+        context._root,
+        run_path=context.run_path,
+        pointer=payload["coordinate_records"]["component_qc_inventory"],
+        label="refined component QC inventory",
+    )
+    measurement_authority = _receipt_record(
+        context._root,
+        run_path=context.run_path,
+        pointer=payload["coordinate_records"]["measurement_authority"],
+        label="refined measurement authority",
+    )
+    scientific_manifest = _receipt_record(
+        context._root,
+        run_path=context.run_path,
+        pointer=payload["coordinate_records"]["scientific_manifest"],
+        label="refined scientific manifest",
+    )
+    _receipt_validate_closed_world_structure(
+        context,
+        inventory.record["closed_world_structure"],
+    )
+    _receipt_validate_component_qc(context, component_qc_inventory)
+    if inventory.record.get("row_identity") != _record_pointer(context.row_identity):
+        _fail("Refined surface inventory row identity differs from context.")
+    if measurement_authority.record.get("surface_inventory") != _record_pointer(inventory):
+        _fail("Refined measurement authority is not bound to the sealed inventory.")
+    if scientific_manifest.record.get("surface_inventory") != _record_pointer(inventory):
+        _fail("Refined scientific manifest is not bound to the sealed inventory.")
+    specs_result = _receipt_coordinate_specs(context, inventory, measurement_authority)
+    required_nodes, specs, ragged_specs, interpretations, ragged_records, measurement_specs = specs_result
+    if scientific_manifest.record.get("coordinate_descriptor_paths") != sorted(specs):
+        _fail("Refined scientific manifest descriptor paths changed after sealing.")
+    descriptor_paths = scientific_manifest.record.get("measurement_descriptor_paths")
+    if not isinstance(descriptor_paths, Mapping) or set(descriptor_paths) != set(measurement_specs):
+        _fail("Refined scientific manifest measurement paths changed after sealing.")
+    for path, table_payload in scientific_manifest.record.get("table_arrays", {}).items():
+        _receipt_array_node(
+            context._root,
+            run_path=context.run_path,
+            payload=table_payload,
+            label=f"refined scientific manifest table {path}",
+        )
+    descriptors = _bindings(
+        context,
+        specs,
+        inventory,
+        interpretations,
+        ragged_records,
+        load=True,
+    )
+    measurements = _measurement_bindings(
+        context,
+        measurement_specs,
+        descriptors,
+        measurement_authority,
+        load=True,
+    )
+    if {
+        path: value.record_sha256 for path, value in measurements.items()
+    } != {
+        path: pointer["record_sha256"] for path, pointer in descriptor_paths.items()
+    }:
+        _fail("Refined measurement descriptors differ from the sealed manifest.")
+    return BoundRefinedSubjectMaskCoordinateSurfaces(
+        descriptors=descriptors,
+        context=context,
+        inventory=inventory,
+        component_qc_inventory=component_qc_inventory,
+        measurement_authority=measurement_authority,
+        measurements=measurements,
+        scientific_manifest=scientific_manifest,
+        interpretations=interpretations,
+        ragged_geometry=ragged_records,
+        _verification_seal=_BOUND_SURFACES_SEAL,
+    )
+
+
+def _load_refined_coordinate_receipt_authority(
+    root: Any,
+    run_path: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    run = _node(root, run_path, label="refined coordinate successor")
+    try:
+        authority = load_coordinate_successor_authority(
+            run,
+            expected_kind=REFINED_SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=run_path,
+        )
+        receipt = load_subject_mask_coordinate_validation_receipt(
+            run,
+            expected_kind=REFINED_SUBJECT_MASK_COORDINATE_VALIDATION_KIND,
+            expected_successor_run_path=run_path,
+            expected_coordinate_record_names=_REFINED_COORDINATE_VALIDATION_RECORD_NAMES,
+        )
+    except (CoordinateSuccessorAuthorityError, SubjectMaskCoordinateValidationReceiptError) as exc:
+        raise RefinedSubjectMaskCoordinatePublicationError(
+            f"Present refined coordinate validation receipt or successor authority is invalid: {exc}"
+        ) from exc
+    authority_payload = authority["payload"]
+    target_manifest = run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(target_manifest, Mapping):
+        _fail("Refined coordinate successor target manifest is absent.")
+    manifest_errors = validate_subject_mask_core_run_manifest(target_manifest)
+    if manifest_errors:
+        _fail(
+            "Refined coordinate successor target manifest is invalid: "
+            + "; ".join(manifest_errors)
+        )
+    target_payload = target_manifest.get("payload", {})
+    if (
+        target_payload.get("run_id") != run_path.split("/", 1)[1]
+        or target_payload.get("stage_family") != "refined_subject_masks_runs"
+        or target_payload.get("kind") != "refined_dense_core"
+    ):
+        _fail("Refined coordinate successor target manifest path or kind is stale.")
+    if run.attrs.get("coordinate_contract") != "canonical_v2":
+        _fail("Refined coordinate successor target is not marked canonical_v2.")
+    authority_records = authority_payload.get("coordinate_records")
+    receipt_records = receipt["payload"]["coordinate_records"]
+    if set(receipt_records) != _REFINED_COORDINATE_VALIDATION_RECORD_NAMES:
+        _fail("Refined coordinate receipt record set is not exact.")
+    if set(authority_records) != _REFINED_COORDINATE_AUTHORITY_RECORD_NAMES:
+        _fail("Refined coordinate successor authority record set is not exact.")
+    for name in _REFINED_COORDINATE_VALIDATION_RECORD_NAMES:
+        if authority_records[name] != receipt_records[name]:
+            _fail(f"Refined authority and receipt disagree for record {name!r}.")
+    receipt_pointer = authority_records["coordinate_validation_receipt"]
+    if receipt_pointer["record_ref"].split("@", 1)[0].strip("/") != run_path:
+        _fail("Refined coordinate authority receipt pointer leaves the successor run.")
+    source = authority_payload["source"]
+    receipt_source = receipt["payload"]["source"]
+    for name in (
+        "run_path",
+        "core_manifest_payload_digest",
+        "core_manifest_document_digest",
+        "logical_content_digest",
+    ):
+        if receipt_source.get(name) != source.get(
+            {
+                "core_manifest_payload_digest": "manifest_payload_digest",
+                "core_manifest_document_digest": "manifest_document_digest",
+                "logical_content_digest": "logical_content_digest",
+            }.get(name, name)
+        ):
+            _fail(f"Refined coordinate receipt source {name!r} differs from authority.")
+    source_path = source["run_path"]
+    source_run = _node(root, source_path, label="refined coordinate source run")
+    source_manifest = source_run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(source_manifest, Mapping):
+        _fail("Refined coordinate source manifest is absent.")
+    if (
+        source["manifest_payload_digest"] != source_manifest.get("payload_digest")
+        or source["manifest_document_digest"] != canonical_json_sha256(source_manifest)
+        or source["logical_content_digest"]
+        != source_manifest.get("payload", {}).get("logical_content", {}).get("digest")
+        or receipt["payload"]["source"]["run_path"] != source_path
+    ):
+        _fail("Refined coordinate source manifest or logical-content digest is stale.")
+    live_source_validation = source_manifest.get("payload", {}).get("source", {}).get(
+        "validation_receipt"
+    )
+    receipt_validation = receipt["payload"]["source_validation"]
+    if not isinstance(live_source_validation, Mapping):
+        _fail("Refined coordinate source validation receipt is absent.")
+    for name in (
+        "schema_id",
+        "schema_version",
+        "payload_digest",
+        "document_sha256",
+        "semantic_unit_count",
+    ):
+        if receipt_validation.get(name) != live_source_validation.get(name):
+            _fail(f"Refined coordinate source validation field {name!r} is stale.")
+    target_logical = target_payload.get("logical_content", {})
+    if target_logical.get("digest") != source["logical_content_digest"]:
+        _fail("Refined coordinate target manifest logical-content digest is stale.")
+    target_source = target_payload.get("source")
+    source_source = source_manifest.get("payload", {}).get("source", {})
+    if not isinstance(target_source, Mapping) or not isinstance(source_source, Mapping):
+        _fail("Refined coordinate target manifest source identity is stale.")
+    target_validation = target_source.get("validation_receipt")
+    source_validation = source_source.get("validation_receipt")
+    if not isinstance(target_validation, Mapping) or not isinstance(source_validation, Mapping):
+        _fail("Refined coordinate target manifest source validation is stale.")
+    for name in (
+        "schema_id",
+        "schema_version",
+        "payload_digest",
+        "document_sha256",
+        "semantic_unit_count",
+    ):
+        if target_validation.get(name) != source_validation.get(name):
+            _fail("Refined coordinate target manifest source identity is stale.")
+    source_authority = authority_payload["source_authority"]
+    if source_authority.get("kind") != "inactive_subject_mask_bundle_v3_plus_raw_successor":
+        _fail("Refined coordinate source-authority kind is not the expected bundle successor authority.")
+    source_record = source_authority.get("record")
+    if not isinstance(source_record, Mapping) or set(source_record) != {
+        "bundle_manifest",
+        "raw_successor_authority",
+    }:
+        _fail("Refined coordinate source-authority bundle structure is malformed.")
+    bundle_manifest = source_record.get("bundle_manifest")
+    if not isinstance(bundle_manifest, Mapping):
+        _fail("Refined coordinate successor bundle authority is absent.")
+    bundle_errors = validate_subject_mask_bundle_manifest(bundle_manifest)
+    if bundle_errors:
+        _fail(
+            "Refined coordinate successor bundle authority is invalid: "
+            + "; ".join(bundle_errors)
+        )
+    if (
+        receipt["payload"]["bundle_authority"]["kind"]
+        != "inactive_subject_mask_bundle_v3"
+        or bundle_manifest.get("schema_id") != SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID
+        or bundle_manifest.get("schema_version") != 3
+        or receipt["payload"]["bundle_authority"]["document_digest"]
+        != canonical_json_sha256(bundle_manifest)
+    ):
+        _fail("Refined coordinate bundle authority digest is stale.")
+    raw_authority = source_record["raw_successor_authority"]
+    raw_errors = validate_coordinate_successor_authority(
+        raw_authority,
+        expected_kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
+    )
+    if raw_errors:
+        _fail(
+            "Refined coordinate raw successor authority is invalid: "
+            + "; ".join(raw_errors)
+        )
+    bundle_members = bundle_manifest.get("payload", {}).get("members")
+    raw_member = bundle_members.get("raw") if isinstance(bundle_members, Mapping) else None
+    raw_source = raw_authority.get("payload", {}).get("source", {})
+    expected_raw_source = {
+        "family": raw_member.get("family") if isinstance(raw_member, Mapping) else None,
+        "run_path": raw_member.get("run_path") if isinstance(raw_member, Mapping) else None,
+        "manifest_schema_id": (
+            raw_member.get("manifest_schema_id")
+            if isinstance(raw_member, Mapping)
+            else None
+        ),
+        "manifest_schema_version": (
+            raw_member.get("manifest_schema_version")
+            if isinstance(raw_member, Mapping)
+            else None
+        ),
+        "manifest_payload_digest": (
+            raw_member.get("manifest_payload_digest")
+            if isinstance(raw_member, Mapping)
+            else None
+        ),
+        "manifest_document_digest": (
+            raw_member.get("manifest_document_digest")
+            if isinstance(raw_member, Mapping)
+            else None
+        ),
+        "logical_content_digest": (
+            raw_member.get("logical_content_digest")
+            if isinstance(raw_member, Mapping)
+            else None
+        ),
+    }
+    if not isinstance(raw_member, Mapping) or raw_source != expected_raw_source:
+        _fail(
+            "Refined coordinate raw successor source authority is not bound to "
+            "the bundle raw member."
+        )
+    authority_equivalence = authority_payload["payload_equivalence"]
+    equivalence = authority_equivalence.get("payload_file_equivalence")
+    receipt_equivalence = receipt["payload"]["payload_equivalence"]
+    if not isinstance(equivalence, Mapping):
+        _fail("Refined coordinate payload-file equivalence evidence is absent.")
+    if any(
+        equivalence.get(name) != receipt_equivalence.get(name)
+        for name in ("schema_id", "schema_version", "receipt_digest", "inventory_digest", "payload_file_count")
+    ):
+        _fail("Refined coordinate payload-file equivalence evidence is stale.")
+    if (
+        authority_equivalence.get("source_logical_content_digest")
+        != source["logical_content_digest"]
+    ):
+        _fail("Refined coordinate payload equivalence source digest is stale.")
+    return receipt, authority
+
+
+def _load_refined_subject_mask_coordinate_surfaces_impl(
     root: Any,
     run_path: str,
     *,
@@ -4460,6 +5589,16 @@ def _load_refined_subject_mask_coordinate_surfaces(
             != context.source_authority.record
         ):
             _fail("Selected raw subject-mask authority changed after refinement.")
+        if SUBJECT_MASK_COORDINATE_VALIDATION_RECEIPT_ATTRIBUTE in context._run_group.attrs:
+            receipt, authority = _load_refined_coordinate_receipt_authority(
+                root,
+                context.run_path,
+            )
+            return _load_refined_coordinate_surfaces_from_receipt(
+                context,
+                receipt,
+                authority,
+            )
     (
         _required,
         specs,
@@ -4554,6 +5693,35 @@ def _load_refined_subject_mask_coordinate_surfaces(
         ragged_geometry=ragged_records,
         _verification_seal=_BOUND_SURFACES_SEAL,
     )
+
+
+def _load_refined_subject_mask_coordinate_surfaces(
+    root: Any,
+    run_path: str,
+    *,
+    require_complete: bool,
+    require_activation_receipt: bool | None = None,
+    expected_selector_eligible: bool,
+    expected_publication_owner: str | None = None,
+) -> BoundRefinedSubjectMaskCoordinateSurfaces:
+    if not require_complete:
+        return _load_refined_subject_mask_coordinate_surfaces_impl(
+            root,
+            run_path,
+            require_complete=require_complete,
+            require_activation_receipt=require_activation_receipt,
+            expected_selector_eligible=expected_selector_eligible,
+            expected_publication_owner=expected_publication_owner,
+        )
+    with _payload_cache_scope():
+        return _load_refined_subject_mask_coordinate_surfaces_impl(
+            root,
+            run_path,
+            require_complete=require_complete,
+            require_activation_receipt=require_activation_receipt,
+            expected_selector_eligible=expected_selector_eligible,
+            expected_publication_owner=expected_publication_owner,
+        )
 
 
 @proof_verification_operation
