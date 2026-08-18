@@ -11021,7 +11021,7 @@
       "window_start_frame"
     ],
     "note": "Leaf-name coverage is orientation evidence only; dynamic paths and semantic reuse require manual review.",
-    "writer_leaf_name_count": 628,
+    "writer_leaf_name_count": 629,
     "writer_without_array_spec_leaf_names": [
       "acceleration",
       "acceleration_mm",
@@ -11217,6 +11217,7 @@
       "hist_density",
       "hist_probability",
       "histograms",
+      "historical_source_camera_normalized_bbox_to_image",
       "homography_matrix",
       "id",
       "immobile_fraction",
@@ -48019,6 +48020,40 @@
       "write_lifecycle_basis": "production output; exact write mode unverified"
     },
     {
+      "access_pattern": "unclassified",
+      "access_pattern_basis": "no high-confidence static access rule",
+      "array_name": "historical_source_camera_normalized_bbox_to_image",
+      "array_name_expression": "'historical_source_camera_normalized_bbox_to_image'",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "unclassified",
+      "consumer_basis": "consumer is not provable from static creation/declaration",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.shared.zarr.historical_geometry_only_crop_adapter:bind_historical_bbox_normalization_to_successor",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": null,
+      "dtype_expression": null,
+      "dynamic_name": false,
+      "file": "src/fisheye/shared/zarr/historical_geometry_only_crop_adapter.py",
+      "line": 238,
+      "occurrence_id": "schema-writer-19a729b4872c4e1e",
+      "path_pattern": "<_require_or_create_group(run, 'coordinate_transforms')>/historical_source_camera_normalized_bbox_to_image",
+      "required": null,
+      "shape_expression": null,
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "packaged Palette module without a maintenance marker",
+      "subgroup": null,
+      "write_lifecycle": "append_or_build_then_publish",
+      "write_lifecycle_basis": "production output; exact write mode unverified",
+      "writer_site_id": "writer-46ba861b237567de"
+    },
+    {
       "access_pattern": "windowed",
       "access_pattern_basis": "row/timeline/coordinate naming",
       "array_name": "source_frame_indices",
@@ -74369,33 +74404,33 @@
     "array_spec_declaration_count": 450,
     "array_spec_unique_leaf_name_count": 270,
     "array_spec_unique_signature_count": 343,
-    "direct_zarr_api_site_count": 642,
-    "dynamic_or_unresolved_writer_site_count": 330,
+    "direct_zarr_api_site_count": 643,
+    "dynamic_or_unresolved_writer_site_count": 332,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 215,
+    "parsed_writer_candidate_module_count": 217,
     "reader_required_array_declaration_count": 95,
-    "resolved_writer_leaf_name_count": 628,
-    "scanned_python_module_count": 1499,
+    "resolved_writer_leaf_name_count": 629,
+    "scanned_python_module_count": 1501,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
-      "unmapped": 1756
+      "unmapped": 1757
     },
     "schema_occurrences_by_source_kind": {
       "array_spec_stage_binding": 306,
       "array_spec_unbound_declaration": 144,
       "reader_required_array_declaration": 95,
-      "writer_observed_schema": 1287
+      "writer_observed_schema": 1288
     },
-    "writer_site_count": 1617,
-    "writer_site_with_chunks_expression_count": 712,
+    "writer_site_count": 1620,
+    "writer_site_with_chunks_expression_count": 713,
     "writer_site_with_codec_expression_count": 15,
     "writer_site_with_shards_expression_count": 17,
     "writer_site_with_stage_classification_count": 479,
-    "writer_site_without_dtype_evidence_count": 980,
-    "writer_site_without_shape_evidence_count": 159,
+    "writer_site_without_dtype_evidence_count": 983,
+    "writer_site_without_shape_evidence_count": 161,
     "writer_sites_by_status": {
-      "current": 1482,
+      "current": 1485,
       "unclear": 135
     },
     "writer_sites_by_surface": {
@@ -74404,10 +74439,10 @@
       "diagnostic": 14,
       "legacy": 49,
       "migration_or_maintenance": 47,
-      "production": 1210,
+      "production": 1213,
       "publication": 68,
       "training": 180
     },
-    "writer_wrapper_call_site_count": 974
+    "writer_wrapper_call_site_count": 976
   }
 }
