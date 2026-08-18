@@ -1276,10 +1276,17 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
     monkeypatch.setattr(
         keypoint_successor, "prepare_keypoint_coordinate_context", fake_prepare
     )
+
+    def fake_publish(target_root, target_path):
+        fresh_target = target_root[target_path]
+        fresh_target.attrs["coordinate_contract"] = "canonical_v2"
+        surfaces.context._run_group = fresh_target
+        return surfaces
+
     monkeypatch.setattr(
         keypoint_successor,
         "publish_keypoint_coordinate_surfaces",
-        lambda *_args: surfaces,
+        fake_publish,
     )
     monkeypatch.setattr(
         keypoint_successor,
@@ -1352,6 +1359,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
             == keypoint_successor.KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_POLICY
         )
         assert CROP_PLACEMENT_PADDED_PROVENANCE_ATTR in target["source_crop_xywh"].attrs
+        assert target.attrs["coordinate_contract"] == "canonical_v2"
     assert (
         keypoint_successor._selector_snapshot(
             zarr.open_group(str(archive), mode="r", use_consolidated=False)

@@ -942,6 +942,12 @@ def publish_keypoint_coordinate_successor(
                 surfaces = publish_keypoint_coordinate_surfaces(
                     root, f"keypoints_runs/{successor_id}"
                 )
+            # Zarr group objects retain their own metadata snapshot.  The
+            # coordinate publisher reloads the target and returns that exact
+            # freshly verified group; continuing through the older preflight
+            # object can restore its stale ``coordinate_successor_preparing``
+            # attrs on the next write.
+            run = surfaces.context._run_group
             run.attrs["coordinate_successor_padded_crop_lineage"] = {
                 "source_crop_adapter": historical_crop.as_record(),
                 "placement_ownership": bind_persisted_padded_placement_record(run),
