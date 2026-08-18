@@ -256,6 +256,68 @@ def test_subject_mask_successor_fresh_archive_child_retains_record_path(
     }
 
 
+def test_subject_mask_successor_keeps_adapter_active_for_refined_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = False
+    calls: list[str] = []
+    expected_surfaces = object()
+
+    class _AdapterScope:
+        def __enter__(self):
+            nonlocal active
+            active = True
+
+        def __exit__(self, *_args):
+            nonlocal active
+            active = False
+
+    def fake_prepare(root, run_path, **kwargs):
+        assert active
+        assert root == "root"
+        assert run_path == "refined_subject_masks_runs/refined"
+        assert kwargs["source_subject_mask_path"] == "subject_mask_runs/raw"
+        assert kwargs["source_selector_eligible"] is False
+        calls.append("prepare")
+
+    def fake_publish(root, run_path, **kwargs):
+        assert active
+        assert root == "root"
+        assert run_path == "refined_subject_masks_runs/refined"
+        assert kwargs["expected_publication_owner"] == "owner"
+        calls.append("publish")
+        return expected_surfaces
+
+    monkeypatch.setattr(
+        subject_mask_successor,
+        "historical_geometry_only_crop_loader",
+        lambda _binding: _AdapterScope(),
+    )
+    monkeypatch.setattr(
+        subject_mask_successor,
+        "prepare_refined_subject_mask_coordinate_context",
+        fake_prepare,
+    )
+    monkeypatch.setattr(
+        subject_mask_successor,
+        "publish_refined_subject_mask_coordinate_surfaces",
+        fake_publish,
+    )
+
+    observed = subject_mask_successor._publish_refined_with_historical_crop(
+        "root",
+        refined_run_path="refined_subject_masks_runs/refined",
+        refined_owner="owner",
+        raw_run_path="subject_mask_runs/raw",
+        mask_labels=["subject_body"],
+        historical_crop=object(),
+    )
+
+    assert observed is expected_surfaces
+    assert calls == ["prepare", "publish"]
+    assert active is False
+
+
 def _historical_crop_fixture(tmp_path: Path):
     n_frames = 5
     n_instances = 4

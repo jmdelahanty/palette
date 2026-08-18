@@ -647,6 +647,34 @@ def _refined_dependencies(
     return dependencies
 
 
+def _publish_refined_with_historical_crop(
+    root: Any,
+    *,
+    refined_run_path: str,
+    refined_owner: str,
+    raw_run_path: str,
+    mask_labels: list[str],
+    historical_crop: Any,
+) -> Any:
+    """Prepare and publish refined surfaces under one crop-adapter scope."""
+
+    with historical_geometry_only_crop_loader(historical_crop):
+        prepare_refined_subject_mask_coordinate_context(
+            root,
+            refined_run_path,
+            expected_publication_owner=refined_owner,
+            source_subject_mask_path=raw_run_path,
+            mask_labels=mask_labels,
+            assignment_keypoint_surfaces=None,
+            source_selector_eligible=False,
+        )
+        return publish_refined_subject_mask_coordinate_surfaces(
+            root,
+            refined_run_path,
+            expected_publication_owner=refined_owner,
+        )
+
+
 def publish_subject_mask_coordinate_successors(
     *,
     analysis_zarr: Path,
@@ -925,19 +953,20 @@ def publish_subject_mask_coordinate_successors(
             mark_run_started(
                 refined_run, run_name=refined_target_id, stage="refined_subject_masks"
             )
-            prepare_refined_subject_mask_coordinate_context(
+            # Refined context preparation reloads the selected raw coordinate
+            # metadata (without scanning its probability raster). Keep the
+            # same sealed historical crop adapter active for that reload and
+            # for the publisher's second context load. Refreshing the archive
+            # root also prevents pre-lifecycle metadata cached by the earlier
+            # copy from restoring source run attrs.
+            root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
+            refined_surfaces = _publish_refined_with_historical_crop(
                 root,
-                f"{_REFINED_FAMILY}/{refined_target_id}",
-                expected_publication_owner=refined_owner,
-                source_subject_mask_path=f"{_RAW_FAMILY}/{raw_target_id}",
+                refined_run_path=f"{_REFINED_FAMILY}/{refined_target_id}",
+                refined_owner=refined_owner,
+                raw_run_path=f"{_RAW_FAMILY}/{raw_target_id}",
                 mask_labels=_labels(refined_manifest),
-                assignment_keypoint_surfaces=None,
-                source_selector_eligible=False,
-            )
-            refined_surfaces = publish_refined_subject_mask_coordinate_surfaces(
-                root,
-                f"{_REFINED_FAMILY}/{refined_target_id}",
-                expected_publication_owner=refined_owner,
+                historical_crop=historical_crop,
             )
             root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
             refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]
