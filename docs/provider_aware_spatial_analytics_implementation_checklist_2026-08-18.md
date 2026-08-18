@@ -3,7 +3,7 @@
 <!-- contract-meta
 status: accepted-implementation-checklist
 decision_date: 2026-08-18
-implementation: pending
+implementation: pure-foundation
 promotion_status: selector-ineligible-only
 -->
 
@@ -23,6 +23,39 @@ Existing immutable stimulus, detection, position, tracking, occupancy, motion,
 and visualization runs remain unchanged. New publications are immutable
 successors or new run families. No production selector, registry authority, or
 provider default may change during this checklist's canary phases.
+
+## Implementation checkpoint: pure foundation (2026-08-18)
+
+The first implementation pass is complete as pure in-memory code. It does not
+yet load or publish Zarr runs:
+
+- `analysis_workflows.composable_stimulus_selection` implements authority-bound
+  atomic step/annotation references, exact member/union/intersection/difference
+  expressions, directional trim policy, source-membership-preserving overlap,
+  occurrence and pooled interval resolution, and independent request/resolved
+  digests.
+- `analysis.provider_spatial_trajectory` validates Palette's canonical integer
+  `[track_id, acquisition_frame]` keys, complete selected-frame membership,
+  single-subject frame uniqueness, explicit camera-to-arena-mm transforms,
+  multi-occurrence frame membership, independent validity states, and
+  deterministic coverage evidence.
+- `analysis.provider_occupancy_v2` computes provider-neutral per-occurrence and
+  pooled occupancy over exact float64 grids. Expected exposure comes from the
+  complete resolved selection, not merely from provider rows that exist.
+  Overlapping frames count once in the pooled product and once in each exact
+  contributing occurrence.
+- `analysis.provider_occupancy_contrast` implements strict difference-only
+  contrasts. It requires exact digested estimator, track-policy, coordinate,
+  transform, geometry, timing, grid, selection, occurrence, and source-manifest
+  identities and rejects cross-provider ordinary contrasts.
+- The four new focused suites pass together (`69 passed`). The maintained
+  provider-offer/binding and epoch-selection baseline passed before integration
+  (`47 passed`).
+
+Still open are the exact Zarr source adapters, immutable materializers and
+manifests, a frozen GoodBatBadBat millimetre grid profile, real recording
+canary publication, cohort products, plot recipes, Marimo discovery, registry
+projection, required CI, and any provider promotion.
 
 ## Accepted first-slice decisions
 
