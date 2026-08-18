@@ -97,6 +97,13 @@ ARRAY_PATHS = tuple(f"windows/{name}" for name in STIMULUS_EPOCH_FIELD_NAMES)
 _ALIASES = frozenset({"latest", "latest_complete", "latest_pending"})
 _PHYSICAL_IO_AVAILABILITY = "not_collected_requires_external_trace"
 _SHA256_LENGTH = 64
+_SOURCE_EPOCH_LIFECYCLE_FIELDS = {
+    "completion_status",
+    "stage_selector_eligible",
+    "stage_selector_marker",
+    "selection_policy",
+    "allow_selector_ineligible_source",
+}
 
 
 def _strict_envelope(schema_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -894,19 +901,25 @@ def _require_run_manifest_document(
         or float(dimensions["fps"]) <= 0
     ):
         raise ValueError("Stimulus-epoch run-manifest dimensions are invalid.")
-    source_epoch = _exact_mapping(
-        payload["source_epoch"],
-        fields={
-            "run",
-            "path",
-            "schema_id",
-            "schema_version",
-            "lineage_hash",
-            "lineage_payload_sha256",
-            "logical_content_sha256",
-        },
-        label="source-epoch binding",
-    )
+    source_epoch_value = payload["source_epoch"]
+    source_epoch_fields = {
+        "run",
+        "path",
+        "schema_id",
+        "schema_version",
+        "lineage_hash",
+        "lineage_payload_sha256",
+        "logical_content_sha256",
+    }
+    if not isinstance(source_epoch_value, Mapping) or set(source_epoch_value) not in {
+        frozenset(source_epoch_fields),
+        frozenset(source_epoch_fields | {"lifecycle"}),
+    }:
+        raise ValueError(
+            "Stimulus-epoch source-epoch binding has an unexpected field set."
+        )
+    source_epoch = dict(source_epoch_value)
+    source_epoch_lifecycle = source_epoch.pop("lifecycle", None)
     if source_epoch != {
         "run": source_run_name,
         "path": source_run_path,
@@ -917,6 +930,43 @@ def _require_run_manifest_document(
         "logical_content_sha256": canonical_json_sha256(logical_content),
     }:
         raise ValueError("Stimulus-epoch run-manifest source binding is invalid.")
+    if source_epoch_lifecycle is not None:
+        lifecycle = _exact_mapping(
+            source_epoch_lifecycle,
+            fields=_SOURCE_EPOCH_LIFECYCLE_FIELDS,
+            label="source-epoch lifecycle binding",
+        )
+        allow_ineligible = lifecycle["allow_selector_ineligible_source"]
+        selector_eligible = lifecycle["stage_selector_eligible"]
+        selector_marker = lifecycle["stage_selector_marker"]
+        expected_policy = (
+            "exact_named_complete_legacy_v1_selector_ineligible_opt_in"
+            if allow_ineligible is True
+            else "exact_named_complete_legacy_v1_selector_eligible_strict"
+        )
+        if (
+            lifecycle["completion_status"] != "complete"
+            or type(allow_ineligible) is not bool
+            or not (
+                selector_eligible is True
+                or selector_eligible is False
+                or selector_eligible is None
+            )
+            or type(selector_marker) is not str
+            or selector_marker
+            not in {"explicit_true", "explicit_false", "legacy_missing", "invalid"}
+            or lifecycle["selection_policy"] != expected_policy
+            or (allow_ineligible and selector_eligible is not False)
+            or (selector_eligible is True and selector_marker != "explicit_true")
+            or (selector_eligible is False and selector_marker != "explicit_false")
+            or (
+                selector_eligible is None
+                and selector_marker not in {"legacy_missing", "invalid"}
+            )
+        ):
+            raise ValueError(
+                "Stimulus-epoch run-manifest source lifecycle is invalid."
+            )
     source_stimulus = _exact_mapping(
         payload["source_stimulus"],
         fields={"run", "path", "fingerprint_algorithm", "fingerprint", "event_schema"},
@@ -1029,6 +1079,18 @@ def _require_run_manifest_document(
         "fingerprint_status": "complete",
     }:
         raise ValueError("Stimulus-epoch candidate lineage binding is invalid.")
+    expected_lineage_parameters = {
+        "recording_id": run_identity["recording_id"],
+        "fps": float(dimensions["fps"]),
+        "total_frames": dimensions["total_frames"],
+        "epoch_policy": protocol["epoch_policy"],
+        "epoch_policy_version": protocol["epoch_policy_version"],
+        "protocol_profile": profile,
+    }
+    if source_epoch_lifecycle is not None:
+        expected_lineage_parameters["source_stimulus_epoch_lifecycle"] = dict(
+            source_epoch_lifecycle
+        )
     if (
         candidate_lineage_payload["method"] != protocol["method"]
         or candidate_lineage_payload["method_version"] != protocol["method_version"]
@@ -1053,15 +1115,7 @@ def _require_run_manifest_document(
                 logical_content
             ),
         }
-        or candidate_lineage_payload["parameters"]
-        != {
-            "recording_id": run_identity["recording_id"],
-            "fps": float(dimensions["fps"]),
-            "total_frames": dimensions["total_frames"],
-            "epoch_policy": protocol["epoch_policy"],
-            "epoch_policy_version": protocol["epoch_policy_version"],
-            "protocol_profile": profile,
-        }
+        or candidate_lineage_payload["parameters"] != expected_lineage_parameters
         or candidate_lineage_payload["code"] != candidate_materializer_identity
     ):
         raise ValueError(

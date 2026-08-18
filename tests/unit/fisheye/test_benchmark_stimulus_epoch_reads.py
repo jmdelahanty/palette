@@ -180,6 +180,22 @@ def test_rehashed_evidence_tampering_fails_deep_validation(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="access declaration"):
         benchmark.require_workload(wrong_access)
 
+    wrong_source_lifecycle = copy.deepcopy(workload)
+    lifecycle_payload = wrong_source_lifecycle["payload"]
+    lifecycle_manifest = lifecycle_payload["candidate_run_manifest"]
+    lifecycle_manifest["payload"]["source_epoch"]["lifecycle"][
+        "selection_policy"
+    ] = "fabricated_policy"
+    lifecycle_manifest["payload_digest"] = canonical_json_sha256(
+        lifecycle_manifest["payload"]
+    )
+    lifecycle_payload["candidate_run_manifest_payload_digest"] = (
+        lifecycle_manifest["payload_digest"]
+    )
+    _rehash(wrong_source_lifecycle)
+    with pytest.raises(ValueError, match="source lifecycle is invalid"):
+        benchmark.require_workload(wrong_source_lifecycle)
+
     wrong_candidate_lineage = copy.deepcopy(workload)
     candidate_payload = wrong_candidate_lineage["payload"]
     candidate_payload["candidate_lineage_hash"] = "d" * 64

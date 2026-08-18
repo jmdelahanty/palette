@@ -75,6 +75,7 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STATUS_COMPLETE,
     mark_run_complete,
     mark_run_started,
+    require_runs_parent,
 )
 from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
@@ -1077,7 +1078,10 @@ def publish_provider_chaser_distance_candidate(
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
         analysis = root.require_group("analysis")
-        parent = analysis.require_group("provider_chaser_distance_candidate_runs")
+        parent = require_runs_parent(
+            analysis,
+            "provider_chaser_distance_candidate_runs",
+        )
         occupied = _SELECTOR_ATTRS.intersection(parent.attrs)
         if occupied:
             raise RuntimeError(
