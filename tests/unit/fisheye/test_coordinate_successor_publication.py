@@ -808,8 +808,39 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
     """Exercise the unmocked coordinate publisher with a padded requested window."""
 
     root, run, _crop, _roi_images = _keypoint_publication_fixture(monkeypatch)
-    source = keypoint_coordinate_publication.load_persisted_keypoint_crop_source(
-        root, "crop_runs/c1"
+    canonical_source = (
+        keypoint_coordinate_publication.load_persisted_keypoint_crop_source(
+            root, "crop_runs/c1"
+        )
+    )
+    canonical_geometry = canonical_source.crop_geometry
+    canonical_frames = canonical_geometry.source_geometry.frame_evidence
+    source = SimpleNamespace(
+        crop_geometry=SimpleNamespace(
+            source_geometry=SimpleNamespace(
+                frame_evidence=SimpleNamespace(
+                    source_camera_frame=canonical_frames.source_camera_frame,
+                    bbox_source_camera_frame=canonical_frames.bbox_source_camera_frame,
+                    acquisition_frame=canonical_frames.acquisition_frame,
+                    normalized_frame=SimpleNamespace(
+                        record_ref="/crop_runs/c1@historical_manifest",
+                        record_sha256="6" * 64,
+                    ),
+                    normalized_to_source_camera=SimpleNamespace(transform_records=()),
+                )
+            ),
+            row_identity=canonical_geometry.row_identity,
+            selection_derivation=canonical_geometry.selection_derivation,
+        ),
+        roi_geometry=canonical_source.roi_geometry,
+        roi_frame=canonical_source.roi_frame,
+        bbox_roi_frame=canonical_source.bbox_roi_frame,
+        crop_path=canonical_source.crop_path,
+        _root=canonical_source._root,
+        _rowset_node=canonical_source._rowset_node,
+        _placement_node=canonical_source._placement_node,
+        _roi_images_node=canonical_source._roi_images_node,
+        _seal=None,
     )
 
     source_rows = np.asarray(run["source_crop_row_ids"][:])
@@ -847,12 +878,37 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         origin_authority_digest="b" * 64,
         provider_record_sha256="c" * 64,
     )
-    binding = SimpleNamespace(
+    binding = historical_crop.HistoricalGeometryOnlyCropBinding(
         source=source,
         crop_path="crop_runs/c1",
+        manifest={},
+        manifest_digest="1" * 64,
+        manifest_payload_digest="2" * 64,
+        logical_content_digest="3" * 64,
+        row_signatures_digest="4" * 64,
+        coordinate_catalog_digest="5" * 64,
+        n_frames=2,
+        n_instances=2,
+        source_width=100,
+        source_height=80,
+        source_run_path="keypoints_runs/source",
         padded_lineage=padded_lineage,
+        adapter_record={
+            "schema_id": historical_crop.HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_ID,
+            "schema_version": historical_crop.HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_VERSION,
+            "adapter_kind": historical_crop.HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_KIND,
+            "crop_path": "crop_runs/c1",
+        },
     )
     historical_crop.stamp_persisted_padded_placement_provenance(run, binding)
+    publication_binding = (
+        historical_crop.bind_historical_bbox_normalization_to_successor(
+            binding,
+            root=root,
+            successor_run=run,
+            successor_run_path="keypoints_runs/k1",
+        )
+    )
 
     transform = ModelInputTransform(
         name="identity",
@@ -861,7 +917,7 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         model_height=40,
         model_width=40,
     )
-    with historical_crop.historical_geometry_only_crop_loader(binding):
+    with historical_crop.historical_geometry_only_crop_loader(publication_binding):
         keypoint_coordinate_publication.prepare_keypoint_coordinate_context(
             root,
             "keypoints_runs/k1",
@@ -878,6 +934,22 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
     assert ownership["schema_id"] == CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID
     assert ownership["window_geometry"]["padded_row_count"] == 1
     assert surfaces.source_crop_xywh.descriptor.source_camera_overlay.status == "direct"
+    bbox_evidence = run.attrs[historical_crop.HISTORICAL_BBOX_NORMALIZATION_ATTR]
+    assert bbox_evidence["normalized_frame"]["record_ref"].startswith(
+        "/keypoints_runs/k1/coordinate_frames/"
+    )
+    assert (
+        surfaces.pose_bbox_xyxy_norm.reference_frame_authority.record_ref
+        == bbox_evidence["normalized_frame"]["record_ref"]
+    )
+    fresh_root = type(root)(root._coordinate_archive_token)
+    with historical_crop.historical_geometry_only_crop_loader(publication_binding):
+        assert (
+            keypoint_coordinate_publication.load_persisted_keypoint_crop_source(
+                fresh_root, "crop_runs/c1"
+            )
+            is publication_binding.source
+        )
 
 
 def test_actual_subject_mask_prepare_and_publish_accept_explicit_padded_crop_authority(
@@ -1170,6 +1242,26 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         keypoint_successor,
         "bind_historical_geometry_only_crop_source",
         lambda **_kwargs: binding,
+    )
+
+    def fake_bind_bbox_normalization(bound, *, root, successor_run, successor_run_path):
+        del root
+        target = successor_run
+        record = {
+            "schema_id": historical_crop.HISTORICAL_BBOX_NORMALIZATION_SCHEMA_ID,
+            "schema_version": historical_crop.HISTORICAL_BBOX_NORMALIZATION_SCHEMA_VERSION,
+            "successor_run_path": successor_run_path,
+        }
+        target.attrs[historical_crop.HISTORICAL_BBOX_NORMALIZATION_ATTR] = record
+        target.attrs[f"{historical_crop.HISTORICAL_BBOX_NORMALIZATION_ATTR}_sha256"] = (
+            canonical_json_sha256(record)
+        )
+        return bound
+
+    monkeypatch.setattr(
+        keypoint_successor,
+        "bind_historical_bbox_normalization_to_successor",
+        fake_bind_bbox_normalization,
     )
     monkeypatch.setattr(
         keypoint_successor,

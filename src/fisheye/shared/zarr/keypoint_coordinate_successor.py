@@ -64,6 +64,8 @@ from fisheye.shared.zarr.keypoint_publication_mode import (
 from fisheye.shared.zarr.keypoint_schema import KEYPOINT_SCHEMA_V2, KeypointDimensions
 from fisheye.shared.zarr.keypoint_storage import plan_keypoint_storage
 from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+    HISTORICAL_BBOX_NORMALIZATION_ATTR,
+    bind_historical_bbox_normalization_to_successor,
     bind_persisted_padded_placement_record,
     bind_persisted_run_attribute_record,
     bind_historical_geometry_only_crop_source,
@@ -862,6 +864,8 @@ def publish_keypoint_coordinate_successor(
                 f"{KEYPOINT_COORDINATE_AUXILIARY_ATTR}_sha256",
                 "coordinate_successor_padded_crop_lineage",
                 "coordinate_successor_padded_crop_lineage_sha256",
+                HISTORICAL_BBOX_NORMALIZATION_ATTR,
+                f"{HISTORICAL_BBOX_NORMALIZATION_ATTR}_sha256",
                 RUN_COMPLETED_AT_ATTR,
                 "palette_run_failed_at_utc",
                 "palette_run_error",
@@ -912,6 +916,12 @@ def publish_keypoint_coordinate_successor(
                 canonical_json_sha256(run.attrs[KEYPOINT_COORDINATE_AUXILIARY_ATTR])
             )
             stamp_persisted_padded_placement_provenance(run, historical_crop)
+            publication_crop = bind_historical_bbox_normalization_to_successor(
+                historical_crop,
+                root=root,
+                successor_run=run,
+                successor_run_path=f"keypoints_runs/{successor_id}",
+            )
 
             payload = source_manifest["payload"]
             preprocessing = keypoint_preprocessing_from_manifest(
@@ -920,7 +930,7 @@ def publish_keypoint_coordinate_successor(
             transform = model_input_transform_from_attrs(
                 dict(preprocessing.document["model_input_transform"])
             )
-            with historical_geometry_only_crop_loader(historical_crop):
+            with historical_geometry_only_crop_loader(publication_crop):
                 prepare_keypoint_coordinate_context(
                     root,
                     f"keypoints_runs/{successor_id}",
@@ -946,6 +956,9 @@ def publish_keypoint_coordinate_successor(
             )
             auxiliary_record = bind_persisted_run_attribute_record(
                 run, attr_name=KEYPOINT_COORDINATE_AUXILIARY_ATTR
+            )
+            bbox_normalization_record = bind_persisted_run_attribute_record(
+                run, attr_name=HISTORICAL_BBOX_NORMALIZATION_ATTR
             )
             authority = build_coordinate_successor_authority(
                 kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,
@@ -980,6 +993,7 @@ def publish_keypoint_coordinate_successor(
                     **_coordinate_record_pointers(surfaces),
                     "auxiliary_materialization": auxiliary_record,
                     "padded_crop_lineage": padded_lineage_record,
+                    "historical_bbox_normalization": bbox_normalization_record,
                 },
             )
             stamp_coordinate_successor_authority(run, authority)
@@ -1010,7 +1024,7 @@ def publish_keypoint_coordinate_successor(
                     "Keypoint selectors changed during successor publication."
                 )
             published_run = published[f"keypoints_runs/{successor_id}"]
-            with historical_geometry_only_crop_loader(historical_crop):
+            with historical_geometry_only_crop_loader(publication_crop):
                 published_surfaces = (
                     require_bound_ineligible_keypoint_coordinate_surfaces(
                         load_persisted_ineligible_keypoint_coordinate_surfaces(

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import copy
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import hashlib
 from pathlib import Path
 from threading import RLock
 from types import SimpleNamespace
@@ -24,10 +25,15 @@ from typing import Any, Iterator, Mapping
 
 import numpy as np
 
+from fisheye.shared.archive_identity import archive_identity
 from fisheye.shared.coordinate_surface_contract import (
     SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
     SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
 )
+from fisheye.shared.directed_transform_chain import (
+    resolve_bound_directed_transform_chain,
+)
+from fisheye.shared.directed_transform_v2 import stamp_directed_transform_v2
 from fisheye.shared.model_input_transform import ModelInputTransform
 from fisheye.shared.pixel_frame_authority import (
     CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
@@ -40,6 +46,11 @@ from fisheye.shared.pixel_frame_authority import (
     array_values_sha256,
     load_persisted_acquisition_camera_authority,
     load_source_camera_pixel_frame_authority,
+    normalized_to_pixel_matrix,
+    stamp_normalized_pixel_frame_authority,
+)
+from fisheye.shared.transform_authority import (
+    stamp_normalized_to_pixel_transform_authority,
 )
 from fisheye.shared.zarr.crop_manifest import (
     CROP_GEOMETRY_SCHEMA_V1,
@@ -57,6 +68,10 @@ from fisheye.shared.zarr.crop_shadow import (
 )
 from fisheye.shared.coordinate_reference import canonical_node_path
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_RUNNING,
+)
 
 
 HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_ID = (
@@ -66,6 +81,13 @@ HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_VERSION = 1
 HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_KIND = (
     "sealed_geometry_only_crop_manifest_v2_no_pixel_source"
 )
+HISTORICAL_BBOX_NORMALIZATION_ATTR = (
+    "coordinate_successor_historical_bbox_normalization"
+)
+HISTORICAL_BBOX_NORMALIZATION_SCHEMA_ID = (
+    "palette.coordinate_successor.historical_bbox_normalization"
+)
+HISTORICAL_BBOX_NORMALIZATION_SCHEMA_VERSION = 1
 _LOADER_OVERRIDE_LOCK = RLock()
 
 
@@ -95,6 +117,210 @@ class HistoricalGeometryOnlyCropBinding:
 
     def as_record(self) -> dict[str, Any]:
         return dict(self.adapter_record)
+
+
+def _require_or_create_group(parent: Any, name: str) -> Any:
+    try:
+        child = parent[name]
+    except (KeyError, TypeError):
+        try:
+            child = parent.create_group(name)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise HistoricalGeometryOnlyCropAdapterError(
+                f"Cannot create successor coordinate-evidence group {name!r}: {exc}"
+            ) from exc
+    if not hasattr(child, "attrs") or not callable(
+        getattr(child, "create_group", None)
+    ):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Successor coordinate-evidence child {name!r} is not a group."
+        )
+    return child
+
+
+def _require_or_create_matrix(parent: Any, name: str, expected: np.ndarray) -> Any:
+    matrix = np.asarray(expected)
+    try:
+        child = parent[name]
+    except (KeyError, TypeError):
+        try:
+            child = parent.create_array(name, data=matrix, chunks=matrix.shape)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise HistoricalGeometryOnlyCropAdapterError(
+                f"Cannot create successor coordinate-evidence matrix {name!r}: {exc}"
+            ) from exc
+    actual = _array(child, label=name)
+    if (
+        actual.dtype != matrix.dtype
+        or actual.shape != matrix.shape
+        or not np.array_equal(actual, matrix)
+    ):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Successor coordinate-evidence matrix {name!r} differs from the exact "
+            "bbox-normalization formula."
+        )
+    return child
+
+
+def bind_historical_bbox_normalization_to_successor(
+    binding: HistoricalGeometryOnlyCropBinding,
+    *,
+    root: Any,
+    successor_run: Any,
+    successor_run_path: str,
+) -> HistoricalGeometryOnlyCropBinding:
+    """Persist and bind the missing bbox-normalized authority on the successor.
+
+    The sealed historical crop contains source-camera point and bbox frames, but
+    its geometry-only publication predates a reusable normalized-bbox endpoint.
+    A coordinate successor therefore owns this small piece of derived evidence.
+    It is never written back to the historical crop and is bound to that crop's
+    exact adapter record and bbox camera authority.
+    """
+
+    if type(binding) is not HistoricalGeometryOnlyCropBinding:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical bbox normalization requires one exact sealed crop binding."
+        )
+    path = str(successor_run_path).strip("/")
+    if not path or path.count("/") != 1:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical bbox normalization requires one exact successor run path."
+        )
+    try:
+        if archive_identity(root) != archive_identity(binding.source._root):
+            raise HistoricalGeometryOnlyCropAdapterError(
+                "Historical bbox normalization target belongs to another archive."
+            )
+        crop = root[binding.crop_path]
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, HistoricalGeometryOnlyCropAdapterError):
+            raise
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Historical bbox normalization target cannot be resolved: {exc}"
+        ) from exc
+    run = successor_run
+    if canonical_node_path(run) != path:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical bbox normalization target node differs from its exact run path."
+        )
+    try:
+        if archive_identity(run) != archive_identity(root):
+            raise HistoricalGeometryOnlyCropAdapterError(
+                "Historical bbox normalization target node belongs to another archive."
+            )
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, HistoricalGeometryOnlyCropAdapterError):
+            raise
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Historical bbox normalization target identity is unavailable: {exc}"
+        ) from exc
+    attrs = getattr(run, "attrs", None)
+    if not isinstance(attrs, Mapping) or not hasattr(attrs, "__setitem__"):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical bbox normalization target lacks writable attributes."
+        )
+    lifecycle_status = attrs.get(RUN_COMPLETION_STATUS_ATTR, attrs.get("status"))
+    if (
+        lifecycle_status != RUN_STATUS_RUNNING
+        or attrs.get("stage_selector_eligible") is not False
+    ):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical bbox normalization requires a running selector-ineligible successor."
+        )
+
+    frames = _require_or_create_group(run, "coordinate_frames")
+    frame_node = _require_or_create_group(
+        frames, "historical_source_camera_normalized_bbox"
+    )
+    transforms = _require_or_create_group(run, "coordinate_transforms")
+    bbox_camera = binding.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame
+    matrix_node = _require_or_create_matrix(
+        transforms,
+        "historical_source_camera_normalized_bbox_to_image",
+        normalized_to_pixel_matrix(bbox_camera),
+    )
+    authority_node = _require_or_create_group(
+        transforms,
+        "historical_source_camera_normalized_bbox_to_image_authority",
+    )
+    token = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+    normalized_frame = stamp_normalized_pixel_frame_authority(
+        frame_node,
+        frame_id=f"historical_source_camera_normalized_bbox_{token}",
+        pixel_frame=bbox_camera,
+    )
+    authority = stamp_normalized_to_pixel_transform_authority(
+        authority_node,
+        authority_id=f"historical_source_camera_normalized_bbox_to_image_{token}",
+        matrix_node=matrix_node,
+        source_frame=normalized_frame,
+        target_frame=bbox_camera,
+    )
+    link = stamp_directed_transform_v2(
+        matrix_node,
+        transform_id=f"historical_source_camera_normalized_bbox_to_image_{token}",
+        authority=authority,
+        source_frame=normalized_frame,
+        target_frame=bbox_camera,
+    )
+    chain = resolve_bound_directed_transform_chain((link,))
+
+    record = {
+        "schema_id": HISTORICAL_BBOX_NORMALIZATION_SCHEMA_ID,
+        "schema_version": HISTORICAL_BBOX_NORMALIZATION_SCHEMA_VERSION,
+        "successor_run_path": path,
+        "historical_crop_adapter_sha256": canonical_json_sha256(binding.as_record()),
+        "bbox_source_camera_frame": {
+            "record_ref": bbox_camera.record_ref,
+            "record_sha256": bbox_camera.record_sha256,
+        },
+        "normalized_frame": {
+            "record_ref": normalized_frame.record_ref,
+            "record_sha256": normalized_frame.record_sha256,
+        },
+        "normalized_to_source_camera": [
+            {
+                "record_ref": item.record_ref,
+                "record_sha256": item.record_sha256,
+            }
+            for item in chain.transform_records
+        ],
+        "formula": "normalized_xy=image_xy/[reference_width_px,reference_height_px]",
+        "reference_extent": {
+            "width": int(bbox_camera.endpoint.width),
+            "height": int(bbox_camera.endpoint.height),
+            "units": "px",
+        },
+    }
+    digest = canonical_json_sha256(record)
+    existing = attrs.get(HISTORICAL_BBOX_NORMALIZATION_ATTR)
+    existing_digest = attrs.get(f"{HISTORICAL_BBOX_NORMALIZATION_ATTR}_sha256")
+    if existing is not None or existing_digest is not None:
+        if existing != record or existing_digest != digest:
+            raise HistoricalGeometryOnlyCropAdapterError(
+                "Successor historical bbox-normalization evidence already exists "
+                "with different content."
+            )
+    else:
+        attrs[HISTORICAL_BBOX_NORMALIZATION_ATTR] = copy.deepcopy(record)
+        attrs[f"{HISTORICAL_BBOX_NORMALIZATION_ATTR}_sha256"] = digest
+
+    frame_evidence = copy.copy(
+        binding.source.crop_geometry.source_geometry.frame_evidence
+    )
+    frame_evidence.normalized_frame = normalized_frame
+    frame_evidence.normalized_to_source_camera = chain
+    source_geometry = copy.copy(binding.source.crop_geometry.source_geometry)
+    source_geometry.frame_evidence = frame_evidence
+    crop_geometry = copy.copy(binding.source.crop_geometry)
+    crop_geometry.source_geometry = source_geometry
+    source = copy.copy(binding.source)
+    source.crop_geometry = crop_geometry
+    source._root = root
+    source._rowset_node = crop
+    source._placement_node = crop["source_crop_xywh"]
+    return replace(binding, source=source)
 
 
 def _padded_lineage_summary(
@@ -875,10 +1101,15 @@ def historical_geometry_only_crop_loader(
     from fisheye.shared import subject_mask_coordinate_publication as mask_publication
 
     def load(root: Any, crop_path: str) -> Any:
-        if (
-            root is not binding.source._root
-            or str(crop_path).strip("/") != binding.crop_path
-        ):
+        same_archive = root is binding.source._root
+        if not same_archive:
+            try:
+                same_archive = archive_identity(root) == archive_identity(
+                    binding.source._root
+                )
+            except (TypeError, ValueError):
+                same_archive = False
+        if not same_archive or str(crop_path).strip("/") != binding.crop_path:
             raise HistoricalGeometryOnlyCropAdapterError(
                 "Historical crop adapter was asked for an unbound root or crop path."
             )
