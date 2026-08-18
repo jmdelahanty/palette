@@ -10,12 +10,14 @@ the new child supplies only a freshly validated coordinate publication.
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import re
 from typing import Any, Mapping
 from uuid import uuid4
 
+import numpy as np
 import zarr
 
 from fisheye.shared.artifact_fingerprint import CONTENT_FINGERPRINT_SCHEME
@@ -30,7 +32,7 @@ from fisheye.shared.keypoint_coordinate_publication import (
     require_bound_ineligible_keypoint_coordinate_surfaces,
 )
 from fisheye.shared.model_input_transform import model_input_transform_from_attrs
-from fisheye.shared.zarr.benchmark_runtime import utc_now
+from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.coordinate_successor_authority import (
     KEYPOINT_COORDINATE_SUCCESSOR_KIND,
     build_coordinate_successor_authority,
@@ -61,10 +63,17 @@ from fisheye.shared.zarr.keypoint_publication_mode import (
 from fisheye.shared.zarr.keypoint_schema import KEYPOINT_SCHEMA_V2, KeypointDimensions
 from fisheye.shared.zarr.keypoint_storage import plan_keypoint_storage
 from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+    bind_persisted_padded_placement_record,
+    bind_persisted_run_attribute_record,
     bind_historical_geometry_only_crop_source,
     historical_geometry_only_crop_loader,
+    stamp_persisted_padded_placement_provenance,
 )
+from fisheye.shared.zarr.array_contracts import ArrayContract, DTypeContract
+from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.storage_intent import AccessPattern, ArrayIntent, WriteMode
+from fisheye.shared.zarr.storage_planner import plan_storage
 from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock,
@@ -85,8 +94,14 @@ KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_ID = (
     "palette.keypoint_coordinate_successor.production_publication"
 )
 KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_SCHEMA_VERSION = 1
-KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_POLICY = (
-    "sealed_raw_bundle_member_hardlink_payload_canonical_v2_metadata_v1"
+KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_POLICY = "sealed_raw_bundle_member_hardlink_logical_payload_with_successor_owned_coordinate_auxiliaries_v2"
+KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_ID = (
+    "palette.keypoint_coordinate_successor.derived_auxiliary"
+)
+KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_VERSION = 1
+KEYPOINT_COORDINATE_AUXILIARY_ATTR = "coordinate_successor_auxiliary_materialization"
+KEYPOINT_COORDINATE_AUXILIARY_POLICY = (
+    "successor_owned_derived_coordinates_not_keypoint_v2_logical_payload_v2"
 )
 SELECTOR_ACTIVATION_DEFERRED = "deferred_separate_reviewed_change"
 
@@ -177,8 +192,7 @@ def _source_bundle_authority(
         not isinstance(raw, Mapping)
         or raw.get("run_path") != run_path
         or raw.get("manifest_payload_digest") != source_manifest.get("payload_digest")
-        or raw.get("manifest_document_digest")
-        != canonical_json_sha256(source_manifest)
+        or raw.get("manifest_document_digest") != canonical_json_sha256(source_manifest)
         or raw.get("logical_content_digest") != logical.get("digest")
     ):
         raise ValueError(
@@ -211,6 +225,264 @@ def _submitted_input_mode(preprocessing: Any) -> str:
     return str(value)
 
 
+@dataclass(frozen=True)
+class _KeypointAuxiliaryMaterializationPlan:
+    """Read-only values and storage contracts for successor-owned auxiliaries."""
+
+    values: Mapping[str, np.ndarray]
+    storage: Mapping[str, Mapping[str, Any]]
+    source_existing: Mapping[str, Mapping[str, Any]]
+    source_crop_row_ids_sha256: str
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "schema_id": KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_ID,
+            "schema_version": KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_VERSION,
+            "policy": KEYPOINT_COORDINATE_AUXILIARY_POLICY,
+            "write_ownership": "single_writer_immutable_materialization",
+            "source_crop_row_ids_sha256": self.source_crop_row_ids_sha256,
+            "arrays": {
+                name: {
+                    "action": "materialize_successor_owned",
+                    "source": (
+                        "exact_crop_rows_from_source_crop_row_ids"
+                        if name == "source_crop_xywh"
+                        else "validated_source_keypoints_img_or_pose_bbox_img"
+                    ),
+                    "shape": [int(value) for value in values.shape],
+                    "dtype": values.dtype.str,
+                    "sha256": sha256_array(values),
+                    "storage": dict(self.storage[name]),
+                }
+                for name, values in self.values.items()
+            },
+            "validated_existing_source_arrays": {
+                name: dict(value) for name, value in self.source_existing.items()
+            },
+            "logical_payload_scope": {
+                "schema_id": KEYPOINT_SCHEMA_V2.schema_id,
+                "schema_version": KEYPOINT_SCHEMA_V2.schema_version,
+                "auxiliary_arrays_excluded": True,
+                "source_schema_arrays_remain_hardlinked": True,
+            },
+        }
+
+
+def _read_successor_source_array(run: Any, name: str) -> np.ndarray:
+    try:
+        node = run[name]
+        values = np.asarray(node[...])
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Keypoint source array {name!r} is unavailable: {exc}"
+        ) from exc
+    return np.ascontiguousarray(values)
+
+
+def _derive_historical_image_coordinates(
+    roi_values: np.ndarray,
+    placement: np.ndarray,
+    *,
+    roi_width: int,
+    roi_height: int,
+) -> np.ndarray:
+    values = np.asarray(roi_values)
+    if values.dtype.kind != "f" or np.isinf(values).any():
+        raise ValueError(
+            "Historical ROI coordinates must be finite-or-NaN floating values."
+        )
+    bbox = values.ndim >= 2 and values.shape[-1] == 4
+    shaped = values.reshape(*values.shape[:-1], 2, 2) if bbox else values
+    finite = np.isfinite(shaped)
+    filled = np.where(finite, shaped, np.zeros((), dtype=values.dtype))
+    scale = placement[:, 2:].astype(np.float64) / np.asarray(
+        [roi_width, roi_height], dtype=np.float64
+    )
+    shape = (placement.shape[0],) + (1,) * (filled.ndim - 2) + (2,)
+    projected = filled.astype(np.float64) * scale.reshape(shape) + placement[
+        :, :2
+    ].reshape(shape)
+    result = np.asarray(projected, dtype=values.dtype)
+    result[~finite] = np.nan
+    return result.reshape(values.shape) if bbox else result
+
+
+def _normalize_historical_image_coordinates(
+    values: np.ndarray,
+    *,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    source = np.asarray(values)
+    if source.dtype.kind != "f" or np.isinf(source).any():
+        raise ValueError(
+            "Historical image coordinates must be finite-or-NaN floating values."
+        )
+    factors = np.asarray(
+        [width, height] if source.shape[-1] == 2 else [width, height, width, height],
+        dtype=np.float64,
+    )
+    result = np.asarray(source.astype(np.float64) / factors, dtype=source.dtype)
+    result[np.isnan(source)] = np.nan
+    return result
+
+
+def _auxiliary_array_contract_and_plan(
+    name: str,
+    values: np.ndarray,
+    *,
+    profile: Any,
+) -> tuple[ArrayContract, Any]:
+    shape = tuple(int(value) for value in values.shape)
+    dimensions = {
+        "n_instances": int(shape[0]),
+        "n_keypoints": int(shape[1]) if len(shape) == 3 else 0,
+    }
+    schema_id = f"{KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_ID}.{name}"
+    contract = ArrayContract(
+        schema_id=schema_id,
+        schema_version=KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_VERSION,
+        dtype=DTypeContract(
+            dtype_id=f"numpy:{values.dtype.str}",
+            numpy_dtype=values.dtype.str,
+        ),
+        shape_template=(
+            ("n_instances", "n_keypoints", 2) if len(shape) == 3 else ("n_instances", 4)
+        ),
+        axis_names=(
+            ("observation_instance", "keypoint", "coordinate")
+            if len(shape) == 3
+            else ("observation_instance", "coordinate")
+        ),
+        description=(
+            "Successor-owned derived coordinate auxiliary; excluded from frozen keypoint-v2 logical payload."
+        ),
+        units="px" if name == "source_crop_xywh" else None,
+        coordinate_space=(
+            "source_camera_xywh" if name == "source_crop_xywh" else "source_camera"
+        ),
+    )
+    shape_errors = contract.validate_shape(shape, dimensions=dimensions)
+    if shape_errors:
+        raise ValueError(
+            f"Auxiliary {name} shape is invalid: {'; '.join(shape_errors)}"
+        )
+    intent = ArrayIntent(
+        shape=shape,
+        dtype=values.dtype,
+        access=AccessPattern.WINDOWED,
+        write_mode=WriteMode.IMMUTABLE,
+        logical_schema_id=contract.schema_id,
+        logical_schema_version=contract.schema_version,
+        access_unit_shape=((1, shape[1], 2) if len(shape) == 3 else (1, shape[1])),
+        name=name,
+    )
+    return contract, plan_storage(intent, profile)
+
+
+def _plan_keypoint_auxiliaries(
+    *,
+    source_run: Any,
+    source_manifest: Mapping[str, Any],
+    historical_crop: Any,
+) -> _KeypointAuxiliaryMaterializationPlan:
+    rows = _read_successor_source_array(source_run, "source_crop_row_ids")
+    placement_source = historical_crop.source._rowset_node["source_crop_xywh"]
+    placement = np.ascontiguousarray(np.asarray(placement_source[rows]))
+    expected_count = int(rows.shape[0])
+    if rows.dtype != np.dtype("<i8") or rows.ndim != 1 or expected_count == 0:
+        raise ValueError(
+            "Keypoint source_crop_row_ids must be a nonempty little-endian int64 row array."
+        )
+    if placement.shape != (expected_count, 4):
+        raise ValueError(
+            "Historical crop placement does not cover every keypoint source row."
+        )
+    roi_width = int(historical_crop.source.roi_frame.endpoint.width)
+    roi_height = int(historical_crop.source.roi_frame.endpoint.height)
+    # The adapter has already validated the full crop. Re-check the selected
+    # placement values here so this preflight is the exact apply input.
+    if placement.dtype != np.dtype("<f4") or not np.isfinite(placement).all():
+        raise ValueError(
+            "Selected historical crop placement is not exact finite float32 xywh."
+        )
+    keypoints_roi = _read_successor_source_array(source_run, "keypoints_roi")
+    keypoints_img = _read_successor_source_array(source_run, "keypoints_img")
+    bbox_roi = _read_successor_source_array(source_run, "pose_bbox_xyxy_roi")
+    bbox_img = _read_successor_source_array(source_run, "pose_bbox_xyxy_img")
+    if keypoints_roi.shape[0] != expected_count or bbox_roi.shape != (
+        expected_count,
+        4,
+    ):
+        raise ValueError(
+            "Historical keypoint ROI arrays do not cover the exact source rowset."
+        )
+    if keypoints_img.shape != keypoints_roi.shape or bbox_img.shape != bbox_roi.shape:
+        raise ValueError(
+            "Historical keypoint image arrays do not match ROI array shapes."
+        )
+    expected_keypoints_img = _derive_historical_image_coordinates(
+        keypoints_roi, placement, roi_width=roi_width, roi_height=roi_height
+    )
+    expected_bbox_img = _derive_historical_image_coordinates(
+        bbox_roi, placement, roi_width=roi_width, roi_height=roi_height
+    )
+    if keypoints_img.dtype != keypoints_roi.dtype or not np.array_equal(
+        keypoints_img, expected_keypoints_img, equal_nan=True
+    ):
+        raise ValueError(
+            "Historical keypoints_img is not an exact dtype-preserving ROI+placement derivation."
+        )
+    if bbox_img.dtype != bbox_roi.dtype or not np.array_equal(
+        bbox_img, expected_bbox_img, equal_nan=True
+    ):
+        raise ValueError(
+            "Historical pose_bbox_xyxy_img is not an exact dtype-preserving ROI+placement derivation."
+        )
+    keypoints_norm = _normalize_historical_image_coordinates(
+        expected_keypoints_img,
+        width=historical_crop.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame.endpoint.width,
+        height=historical_crop.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame.endpoint.height,
+    )
+    bbox_norm = _normalize_historical_image_coordinates(
+        expected_bbox_img,
+        width=historical_crop.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame.endpoint.width,
+        height=historical_crop.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame.endpoint.height,
+    )
+    profile = storage_profile_from_manifest(
+        source_manifest["payload"]["storage_plan"]["storage_profile"]
+    )
+    values = {
+        "source_crop_xywh": np.array(placement, copy=True, order="C"),
+        "keypoints_norm": np.array(keypoints_norm, copy=True, order="C"),
+        "pose_bbox_xyxy_norm": np.array(bbox_norm, copy=True, order="C"),
+    }
+    storage: dict[str, Mapping[str, Any]] = {}
+    for name, value in values.items():
+        _contract, plan = _auxiliary_array_contract_and_plan(
+            name, value, profile=profile
+        )
+        storage[name] = plan.as_dict()
+    source_existing = {
+        name: {
+            "shape": [int(value) for value in array.shape],
+            "dtype": array.dtype.str,
+            "sha256": sha256_array(array),
+            "derivation": "validated_exact_roi_plus_requested_crop_placement_v1",
+        }
+        for name, array in {
+            "keypoints_img": keypoints_img,
+            "pose_bbox_xyxy_img": bbox_img,
+        }.items()
+    }
+    return _KeypointAuxiliaryMaterializationPlan(
+        values=values,
+        storage=storage,
+        source_existing=source_existing,
+        source_crop_row_ids_sha256=sha256_array(rows),
+    )
+
+
 def inspect_keypoint_coordinate_successor_source(
     *,
     analysis_zarr: Path,
@@ -241,7 +513,9 @@ def inspect_keypoint_coordinate_successor_source(
         raise ValueError("Raw keypoint source lacks an immutable run manifest.")
     errors = validate_keypoint_run_manifest(manifest)
     if errors:
-        raise ValueError("Raw keypoint source manifest is invalid: " + "; ".join(errors))
+        raise ValueError(
+            "Raw keypoint source manifest is invalid: " + "; ".join(errors)
+        )
     payload = manifest["payload"]
     if payload.get("run_id") != source_id:
         raise ValueError("Raw keypoint source manifest binds another run ID.")
@@ -258,9 +532,7 @@ def inspect_keypoint_coordinate_successor_source(
         source_manifest=manifest,
     )
     dimensions = _dimensions(payload)
-    profile = storage_profile_from_manifest(
-        payload["storage_plan"]["storage_profile"]
-    )
+    profile = storage_profile_from_manifest(payload["storage_plan"]["storage_profile"])
     plans = plan_keypoint_storage(dimensions, profile=profile)
     direct, consolidated = keypoint_metadata_declaration_maps(
         archive, run_id=source_id, plans=plans
@@ -276,8 +548,7 @@ def inspect_keypoint_coordinate_successor_source(
     )
     if source_errors:
         raise ValueError(
-            "Raw keypoint source publication is invalid: "
-            + "; ".join(source_errors)
+            "Raw keypoint source publication is invalid: " + "; ".join(source_errors)
         )
     preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
     transform_value = preprocessing.document.get("model_input_transform")
@@ -292,9 +563,7 @@ def inspect_keypoint_coordinate_successor_source(
         source_arrays={
             "source_crop_row_ids": source["source_crop_row_ids"],
             "instance_key": source["instance_key"],
-            "source_acquisition_frame_index": source[
-                "source_acquisition_frame_index"
-            ],
+            "source_acquisition_frame_index": source["source_acquisition_frame_index"],
             "source_crop_row_signature": source["source_crop_row_signature"],
         },
         source_run_path=f"keypoints_runs/{source_id}",
@@ -303,6 +572,11 @@ def inspect_keypoint_coordinate_successor_source(
     artifact = _model_artifact(
         keypoint_model_path,
         pose_binding=payload["pose_model_schema_binding"],
+    )
+    auxiliary_plan = _plan_keypoint_auxiliaries(
+        source_run=source,
+        source_manifest=manifest,
+        historical_crop=historical_crop,
     )
     crop = payload["source_crop_snapshot"]
     return json_attr_safe(
@@ -322,6 +596,7 @@ def inspect_keypoint_coordinate_successor_source(
             "source_authority_digest": canonical_json_sha256(authority),
             "source_crop_path": crop["run_path"],
             "historical_crop_adapter": historical_crop.as_record(),
+            "auxiliary_materialization": auxiliary_plan.as_record(),
             "preprocessing_input_mode": _submitted_input_mode(preprocessing),
             "model_input_transform": transform.to_attrs(),
             "model_artifact": artifact,
@@ -349,7 +624,9 @@ def _coordinate_record_pointers(surfaces: Any) -> dict[str, dict[str, str]]:
     }
 
 
-def _source_crop_manifest_and_arrays(root: Any, payload: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+def _source_crop_manifest_and_arrays(
+    root: Any, payload: Mapping[str, Any]
+) -> tuple[Any, dict[str, Any]]:
     crop_snapshot = payload["source_crop_snapshot"]
     crop_path = str(crop_snapshot["run_path"])
     crop = root[crop_path]
@@ -368,6 +645,75 @@ def _source_crop_manifest_and_arrays(root: Any, payload: Mapping[str, Any]) -> t
         )
     }
     return manifest, arrays
+
+
+def _materialize_keypoint_auxiliaries(
+    run: Any,
+    *,
+    plan: _KeypointAuxiliaryMaterializationPlan,
+    source_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create fresh target-owned auxiliary arrays from the read-only plan."""
+
+    profile = storage_profile_from_manifest(
+        source_manifest["payload"]["storage_plan"]["storage_profile"]
+    )
+    receipts: dict[str, Any] = {}
+    for name, values in plan.values.items():
+        if name in run:
+            raise ValueError(
+                f"Successor target already contains auxiliary array {name!r}; refusing reuse or overwrite."
+            )
+        contract, storage_plan = _auxiliary_array_contract_and_plan(
+            name, values, profile=profile
+        )
+        if storage_plan.as_dict() != dict(plan.storage[name]):
+            raise RuntimeError(
+                f"Auxiliary storage plan changed between dry-run and apply for {name!r}."
+            )
+        target = create_array_from_plan(
+            run,
+            name=name,
+            contract=contract,
+            plan=storage_plan,
+            fill_value=np.nan if values.dtype.kind == "f" else 0,
+            attributes={
+                "coordinate_successor_auxiliary": True,
+                "coordinate_successor_auxiliary_policy": KEYPOINT_COORDINATE_AUXILIARY_POLICY,
+                "source_crop_row_ids_sha256": plan.source_crop_row_ids_sha256,
+            },
+        )
+        target[...] = values
+        observed = np.asarray(target[...])
+        if (
+            observed.dtype != values.dtype
+            or observed.shape != values.shape
+            or not np.array_equal(observed, values, equal_nan=True)
+        ):
+            raise RuntimeError(
+                f"Materialized keypoint auxiliary {name!r} failed exact readback validation."
+            )
+        receipts[name] = {
+            "target_path": f"{run.path}/{name}",
+            "shape": [int(value) for value in observed.shape],
+            "dtype": observed.dtype.str,
+            "sha256": sha256_array(observed),
+            "source_plan_sha256": sha256_array(values),
+            "materialization": "fresh_target_owned_single_writer_v1",
+            "physical_chunks": {
+                "chunk_shape": [int(value) for value in storage_plan.chunk_shape or ()],
+                "shard_shape": [int(value) for value in storage_plan.shard_shape or ()]
+                if storage_plan.shard_shape
+                else None,
+                "write_ownership": storage_plan.write_ownership,
+            },
+        }
+    return {
+        "schema_id": KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_ID,
+        "schema_version": KEYPOINT_COORDINATE_AUXILIARY_SCHEMA_VERSION,
+        "policy": KEYPOINT_COORDINATE_AUXILIARY_POLICY,
+        "arrays": receipts,
+    }
 
 
 def publish_keypoint_coordinate_successor(
@@ -391,6 +737,7 @@ def publish_keypoint_coordinate_successor(
     source_path = archive / "keypoints_runs" / source_id
     target_path = archive / "keypoints_runs" / successor_id
     copy_receipt: dict[str, int] | None = None
+    auxiliary_receipt: dict[str, Any] | None = None
 
     with archive_metadata_publication_lock(archive):
         checked = inspect_keypoint_coordinate_successor_source(
@@ -403,7 +750,9 @@ def publish_keypoint_coordinate_successor(
             raise RuntimeError("Keypoint selectors changed after successor planning.")
         root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
         source = root[f"keypoints_runs/{source_id}"]
-        source_manifest = copy.deepcopy(dict(source.attrs[KEYPOINT_RUN_MANIFEST_ATTRIBUTE]))
+        source_manifest = copy.deepcopy(
+            dict(source.attrs[KEYPOINT_RUN_MANIFEST_ATTRIBUTE])
+        )
         source_authority = _source_bundle_authority(
             root,
             run_path=f"keypoints_runs/{source_id}",
@@ -425,13 +774,20 @@ def publish_keypoint_coordinate_successor(
                 "source_acquisition_frame_index": source[
                     "source_acquisition_frame_index"
                 ],
-                "source_crop_row_signature": source[
-                    "source_crop_row_signature"
-                ],
+                "source_crop_row_signature": source["source_crop_row_signature"],
             },
             source_run_path=f"keypoints_runs/{source_id}",
             model_input_transform=transform,
         )
+        auxiliary_plan = _plan_keypoint_auxiliaries(
+            source_run=source,
+            source_manifest=source_manifest,
+            historical_crop=historical_crop,
+        )
+        if auxiliary_plan.as_record() != checked["auxiliary_materialization"]:
+            raise RuntimeError(
+                "Keypoint auxiliary materialization plan changed between dry-run and apply."
+            )
         try:
             copy_receipt = copy_metadata_and_link_payload(source_path, target_path)
             run = root[f"keypoints_runs/{successor_id}"]
@@ -442,6 +798,10 @@ def publish_keypoint_coordinate_successor(
                 KEYPOINT_COORDINATE_DERIVATION_ATTR,
                 "coordinate_successor_authority",
                 "coordinate_successor_authority_sha256",
+                KEYPOINT_COORDINATE_AUXILIARY_ATTR,
+                f"{KEYPOINT_COORDINATE_AUXILIARY_ATTR}_sha256",
+                "coordinate_successor_padded_crop_lineage",
+                "coordinate_successor_padded_crop_lineage_sha256",
                 RUN_COMPLETED_AT_ATTR,
                 "palette_run_failed_at_utc",
                 "palette_run_error",
@@ -468,8 +828,34 @@ def publish_keypoint_coordinate_successor(
             run.attrs.put(attrs)
             mark_run_started(run, run_name=successor_id, stage="keypoints")
 
+            auxiliary_receipt = _materialize_keypoint_auxiliaries(
+                run,
+                plan=auxiliary_plan,
+                source_manifest=source_manifest,
+            )
+            run.attrs[KEYPOINT_COORDINATE_AUXILIARY_ATTR] = {
+                **auxiliary_receipt,
+                "plan": auxiliary_plan.as_record(),
+                "authority": "successor_owned_derived_coordinate_auxiliaries",
+                "logical_payload_exclusion": {
+                    "schema_id": KEYPOINT_SCHEMA_V2.schema_id,
+                    "schema_version": KEYPOINT_SCHEMA_V2.schema_version,
+                    "arrays_excluded": [
+                        "source_crop_xywh",
+                        "keypoints_norm",
+                        "pose_bbox_xyxy_norm",
+                    ],
+                },
+            }
+            run.attrs[f"{KEYPOINT_COORDINATE_AUXILIARY_ATTR}_sha256"] = (
+                canonical_json_sha256(run.attrs[KEYPOINT_COORDINATE_AUXILIARY_ATTR])
+            )
+            stamp_persisted_padded_placement_provenance(run, historical_crop)
+
             payload = source_manifest["payload"]
-            preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
+            preprocessing = keypoint_preprocessing_from_manifest(
+                payload["preprocessing"]
+            )
             transform = model_input_transform_from_attrs(
                 dict(preprocessing.document["model_input_transform"])
             )
@@ -489,6 +875,21 @@ def publish_keypoint_coordinate_successor(
                 surfaces = publish_keypoint_coordinate_surfaces(
                     root, f"keypoints_runs/{successor_id}"
                 )
+            run.attrs["coordinate_successor_padded_crop_lineage"] = {
+                "source_crop_adapter": historical_crop.as_record(),
+                "placement_ownership": bind_persisted_padded_placement_record(run),
+            }
+            run.attrs["coordinate_successor_padded_crop_lineage_sha256"] = (
+                canonical_json_sha256(
+                    run.attrs["coordinate_successor_padded_crop_lineage"]
+                )
+            )
+            padded_lineage_record = bind_persisted_run_attribute_record(
+                run, attr_name="coordinate_successor_padded_crop_lineage"
+            )
+            auxiliary_record = bind_persisted_run_attribute_record(
+                run, attr_name=KEYPOINT_COORDINATE_AUXILIARY_ATTR
+            )
             authority = build_coordinate_successor_authority(
                 kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,
                 source_family="keypoints_runs",
@@ -499,11 +900,30 @@ def publish_keypoint_coordinate_successor(
                 successor_family="keypoints_runs",
                 successor_run_path=f"keypoints_runs/{successor_id}",
                 payload_equivalence={
-                    "policy": "same_filesystem_hardlink_payload_exact_logical_digest_v1",
-                    "source_logical_content_digest": payload["logical_content"]["digest"],
+                    "policy": KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_POLICY,
+                    "source_logical_content_digest": payload["logical_content"][
+                        "digest"
+                    ],
+                    "logical_payload": {
+                        "schema_id": KEYPOINT_SCHEMA_V2.schema_id,
+                        "schema_version": KEYPOINT_SCHEMA_V2.schema_version,
+                        "byte_identical_hardlinked": True,
+                        "source_schema_arrays_remain_hardlinked": True,
+                        "auxiliary_arrays_excluded": [
+                            "source_crop_xywh",
+                            "keypoints_norm",
+                            "pose_bbox_xyxy_norm",
+                        ],
+                    },
+                    "auxiliary_materialization_record": auxiliary_record,
+                    "auxiliary_materialization_receipt": auxiliary_receipt,
                     **dict(copy_receipt),
                 },
-                coordinate_records=_coordinate_record_pointers(surfaces),
+                coordinate_records={
+                    **_coordinate_record_pointers(surfaces),
+                    "auxiliary_materialization": auxiliary_record,
+                    "padded_crop_lineage": padded_lineage_record,
+                },
             )
             stamp_coordinate_successor_authority(run, authority)
             run.attrs["status"] = RUN_STATUS_COMPLETE
@@ -529,12 +949,16 @@ def publish_keypoint_coordinate_successor(
 
             published = open_zarr_root(archive, mode="r")
             if _selector_snapshot(published) != initial["selectors_before"]:
-                raise RuntimeError("Keypoint selectors changed during successor publication.")
+                raise RuntimeError(
+                    "Keypoint selectors changed during successor publication."
+                )
             published_run = published[f"keypoints_runs/{successor_id}"]
             with historical_geometry_only_crop_loader(historical_crop):
-                published_surfaces = require_bound_ineligible_keypoint_coordinate_surfaces(
-                    load_persisted_ineligible_keypoint_coordinate_surfaces(
-                        published, f"keypoints_runs/{successor_id}"
+                published_surfaces = (
+                    require_bound_ineligible_keypoint_coordinate_surfaces(
+                        load_persisted_ineligible_keypoint_coordinate_surfaces(
+                            published, f"keypoints_runs/{successor_id}"
+                        )
                     )
                 )
             load_coordinate_successor_authority(
@@ -552,16 +976,23 @@ def publish_keypoint_coordinate_successor(
                 successor_manifest,
                 direct_metadata_declarations=direct,
                 consolidated_metadata_declarations=consolidated,
-                arrays={name: published_run[name] for name in KEYPOINT_SCHEMA_V2.binding_paths},
+                arrays={
+                    name: published_run[name]
+                    for name in KEYPOINT_SCHEMA_V2.binding_paths
+                },
                 source_crop_arrays=crop_arrays,
                 source_crop_manifest=crop_manifest,
             )
             if errors:
                 raise RuntimeError(
-                    "Published keypoint successor failed validation: " + "; ".join(errors)
+                    "Published keypoint successor failed validation: "
+                    + "; ".join(errors)
                 )
             del published_surfaces
-            if metadata_tree_sha256(source_path) != initial["source_metadata_tree_sha256"]:
+            if (
+                metadata_tree_sha256(source_path)
+                != initial["source_metadata_tree_sha256"]
+            ):
                 raise RuntimeError("Immutable source keypoint metadata changed.")
         except BaseException as exc:
             if target_path.exists():
@@ -590,6 +1021,8 @@ def publish_keypoint_coordinate_successor(
             "source_manifest_digest": initial["source_manifest_digest"],
             "source_metadata_tree_sha256": initial["source_metadata_tree_sha256"],
             "historical_crop_adapter": initial["historical_crop_adapter"],
+            "auxiliary_materialization_plan": initial["auxiliary_materialization"],
+            "auxiliary_materialization": auxiliary_receipt,
             "copy": copy_receipt,
             "coordinate_contract": "canonical_v2",
             "selector_eligible": False,

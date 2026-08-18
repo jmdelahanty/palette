@@ -14,6 +14,7 @@ strict loaders.
 
 from __future__ import annotations
 
+import copy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,14 @@ from fisheye.shared.coordinate_surface_contract import (
 )
 from fisheye.shared.model_input_transform import ModelInputTransform
 from fisheye.shared.pixel_frame_authority import (
+    CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PADDED_PROVENANCE_ATTR,
+    CROP_PLACEMENT_PADDED_PROVENANCE_DIGEST_ATTR,
+    CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_ID,
+    CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_VERSION,
+    array_values_sha256,
     load_persisted_acquisition_camera_authority,
     load_source_camera_pixel_frame_authority,
 )
@@ -37,9 +46,16 @@ from fisheye.shared.zarr.crop_manifest import (
     CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_crop_run_manifest,
 )
+from fisheye.shared.zarr.crop_schema import (
+    CropPaddingMode,
+    CropPlacementMode,
+    CropSizeMode,
+    crop_geometry_policy_from_manifest,
+)
 from fisheye.shared.zarr.crop_shadow import (
     open_persisted_crop_geometry_publication,
 )
+from fisheye.shared.coordinate_reference import canonical_node_path
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
@@ -74,10 +90,228 @@ class HistoricalGeometryOnlyCropBinding:
     source_width: int
     source_height: int
     source_run_path: str
+    padded_lineage: Mapping[str, Any]
     adapter_record: Mapping[str, Any]
 
     def as_record(self) -> dict[str, Any]:
         return dict(self.adapter_record)
+
+
+def _padded_lineage_summary(
+    values: np.ndarray,
+    *,
+    source_width: int,
+    source_height: int,
+    roi_width: int,
+    roi_height: int,
+    crop_policy_payload_digest: str,
+    origin_authority_digest: str,
+    provider_record_sha256: str,
+) -> dict[str, Any]:
+    """Freeze requested/clipped/padding semantics without storing pixel data."""
+
+    placement = np.asarray(values)
+    if (
+        placement.dtype != np.dtype("<f4")
+        or placement.ndim != 2
+        or placement.shape[1] != 4
+    ):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical padded crop placement must be a little-endian float32 (N,4) array."
+        )
+    if placement.shape[0] == 0:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical padded crop placement must contain at least one row."
+        )
+    if not np.isfinite(placement).all():
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical padded crop placement must be finite."
+        )
+    numeric = placement.astype(np.float64, copy=False)
+    rounded = np.rint(numeric)
+    if not np.array_equal(numeric, rounded):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical padded crop placement must contain exact integer-valued coordinates."
+        )
+    requested = rounded.astype(np.int64)
+    if (
+        np.any(requested[:, 2] != int(roi_width))
+        or np.any(requested[:, 3] != int(roi_height))
+        or np.any(requested[:, 2:] <= 0)
+    ):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical padded crop placement must use the exact fixed positive ROI extent."
+        )
+    clipped_x0 = np.maximum(requested[:, 0], 0)
+    clipped_y0 = np.maximum(requested[:, 1], 0)
+    clipped_x1 = np.minimum(requested[:, 0] + requested[:, 2], int(source_width))
+    clipped_y1 = np.minimum(requested[:, 1] + requested[:, 3], int(source_height))
+    if np.any(clipped_x1 <= clipped_x0) or np.any(clipped_y1 <= clipped_y0):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical padded crop placement contains a row with no source-camera intersection."
+        )
+    clipped = np.column_stack(
+        (clipped_x0, clipped_y0, clipped_x1 - clipped_x0, clipped_y1 - clipped_y0)
+    ).astype("<i8", copy=False)
+    padding = np.column_stack(
+        (
+            np.maximum(0, -requested[:, 0]),
+            np.maximum(0, -requested[:, 1]),
+            np.maximum(0, requested[:, 0] + requested[:, 2] - int(source_width)),
+            np.maximum(0, requested[:, 1] + requested[:, 3] - int(source_height)),
+        )
+    ).astype("<i8", copy=False)
+    padded_rows = np.any(padding != 0, axis=1)
+    provenance = {
+        "schema_id": CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_ID,
+        "schema_version": CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_VERSION,
+        "crop_policy_payload_digest": crop_policy_payload_digest,
+        "origin_authority_digest": origin_authority_digest,
+        "provider_record_sha256": provider_record_sha256,
+    }
+    return {
+        "schema_id": "palette.coordinate_successor.padded_crop_lineage",
+        "schema_version": 1,
+        "requested_roi": {
+            "array_role": "source_crop_xywh",
+            "dtype": placement.dtype.str,
+            "shape": [int(value) for value in placement.shape],
+            "extent": {
+                "width": int(roi_width),
+                "height": int(roi_height),
+                "units": "px",
+            },
+            "window_policy": "requested_window_zero_padded_v1",
+        },
+        "source_camera_extent": {
+            "width": int(source_width),
+            "height": int(source_height),
+            "units": "px",
+        },
+        "clipped_source_camera_intersection": {
+            "formula": "x0=max(requested_x,0); y0=max(requested_y,0); x1=min(requested_x+width,W); y1=min(requested_y+height,H)",
+            "dtype": clipped.dtype.str,
+            "shape": [int(value) for value in clipped.shape],
+            "sha256": array_values_sha256(clipped),
+        },
+        "zero_padding_offsets_ltrb": {
+            "formula": "left=max(0,-x); top=max(0,-y); right=max(0,x+width-W); bottom=max(0,y+height-H)",
+            "dtype": padding.dtype.str,
+            "shape": [int(value) for value in padding.shape],
+            "sha256": array_values_sha256(padding),
+        },
+        "padded_row_count": int(np.count_nonzero(padded_rows)),
+        "padded_row_fraction": float(np.mean(padded_rows))
+        if placement.shape[0]
+        else 0.0,
+        "max_padding_ltrb": [int(value) for value in padding.max(axis=0, initial=0)],
+        "crop_policy_provenance": provenance,
+        "crop_local_to_source_camera": {
+            "formula": "source_xy = requested_origin_xy + crop_local_xy",
+            "source_pixel_authority": "clipped_source_camera_intersection_only",
+            "source_pixels_outside_extent": "synthetic_zero_padding_no_source_pixel_correspondence",
+        },
+    }
+
+
+def bind_persisted_padded_placement_record(
+    run: Any,
+    *,
+    attr_name: str = CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+) -> dict[str, Any]:
+    """Return a digest-bound pointer to a successor-owned padded placement attr."""
+
+    try:
+        placement = run["source_crop_xywh"]
+    except (KeyError, TypeError) as exc:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Successor lacks its source_crop_xywh placement node."
+        ) from exc
+    raw = getattr(placement, "attrs", {}).get(attr_name)
+    if not isinstance(raw, Mapping):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Successor placement lacks durable padded ownership attr {attr_name!r}."
+        )
+    digest = canonical_json_sha256(raw)
+    if getattr(placement, "attrs", {}).get(f"{attr_name}_sha256") != digest:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Successor placement has a stale padded ownership digest for {attr_name!r}."
+        )
+    provenance = bind_persisted_run_attribute_record(
+        placement,
+        attr_name=CROP_PLACEMENT_PADDED_PROVENANCE_ATTR,
+    )
+    return {
+        "record_ref": f"/{canonical_node_path(placement)}@{attr_name}",
+        "record_sha256": digest,
+        "provenance": provenance,
+    }
+
+
+def bind_persisted_run_attribute_record(
+    node: Any,
+    *,
+    attr_name: str,
+) -> dict[str, Any]:
+    """Bind a pointer to one exact persisted node attribute."""
+
+    attrs = getattr(node, "attrs", None)
+    value = attrs.get(attr_name) if isinstance(attrs, Mapping) else None
+    if not isinstance(value, Mapping):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Node {canonical_node_path(node)!r} lacks durable mapping attr {attr_name!r}."
+        )
+    digest = canonical_json_sha256(value)
+    stored_digest = attrs.get(f"{attr_name}_sha256")
+    if stored_digest != digest:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            f"Node {canonical_node_path(node)!r} has a missing or stale digest for attr {attr_name!r}."
+        )
+    return {
+        "record_ref": f"/{canonical_node_path(node)}@{attr_name}",
+        "record_sha256": digest,
+    }
+
+
+def stamp_persisted_padded_placement_provenance(
+    run: Any,
+    binding: HistoricalGeometryOnlyCropBinding,
+) -> dict[str, Any]:
+    """Persist the successor-owned proof needed by padded placement stamping."""
+
+    placement = run["source_crop_xywh"]
+    attrs = getattr(placement, "attrs", None)
+    if not isinstance(attrs, Mapping) or not hasattr(attrs, "__setitem__"):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Successor placement does not expose writable attrs for padded provenance."
+        )
+    lineage = binding.padded_lineage
+    provenance = dict(lineage["crop_policy_provenance"])
+    if set(provenance) != {
+        "schema_id",
+        "schema_version",
+        "crop_policy_payload_digest",
+        "origin_authority_digest",
+        "provider_record_sha256",
+    }:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical padded lineage has an incomplete crop-policy provenance record."
+        )
+    digest = canonical_json_sha256(provenance)
+    existing = attrs.get(CROP_PLACEMENT_PADDED_PROVENANCE_ATTR)
+    existing_digest = attrs.get(CROP_PLACEMENT_PADDED_PROVENANCE_DIGEST_ATTR)
+    if existing is not None or existing_digest is not None:
+        if existing != provenance or existing_digest != digest:
+            raise HistoricalGeometryOnlyCropAdapterError(
+                "Successor padded placement provenance already exists with different content."
+            )
+    else:
+        attrs[CROP_PLACEMENT_PADDED_PROVENANCE_ATTR] = copy.deepcopy(provenance)
+        attrs[CROP_PLACEMENT_PADDED_PROVENANCE_DIGEST_ATTR] = digest
+    return bind_persisted_run_attribute_record(
+        placement,
+        attr_name=CROP_PLACEMENT_PADDED_PROVENANCE_ATTR,
+    )
 
 
 def _array(node: Any, *, label: str) -> np.ndarray:
@@ -125,13 +359,17 @@ def _require_crop_reference(
             raise HistoricalGeometryOnlyCropAdapterError(
                 f"Historical crop reference {name!r} does not match the exact crop manifest."
             )
-    if "manifest_digest" in value and value.get("manifest_digest") != canonical_json_sha256(manifest):
+    if "manifest_digest" in value and value.get(
+        "manifest_digest"
+    ) != canonical_json_sha256(manifest):
         raise HistoricalGeometryOnlyCropAdapterError(
             "Historical crop reference manifest_digest does not match the exact crop manifest."
         )
     if "row_signatures_digest" in value:
-        declared = logical.get("document", {}).get("arrays", {}).get(
-            "source_row_signature", {}
+        declared = (
+            logical.get("document", {})
+            .get("arrays", {})
+            .get("source_row_signature", {})
         )
         if value.get("row_signatures_digest") != declared.get("sha256"):
             raise HistoricalGeometryOnlyCropAdapterError(
@@ -150,8 +388,12 @@ def _require_crop_reference(
 
 
 def _source_dimensions(source_manifest: Mapping[str, Any]) -> tuple[int, int, int]:
-    payload = _require_mapping(source_manifest.get("payload"), label="source manifest payload")
-    logical = _require_mapping(payload.get("logical_schema"), label="source logical schema")
+    payload = _require_mapping(
+        source_manifest.get("payload"), label="source manifest payload"
+    )
+    logical = _require_mapping(
+        payload.get("logical_schema"), label="source logical schema"
+    )
     dimensions = _require_mapping(logical.get("dimensions"), label="source dimensions")
     values: list[int] = []
     for name in ("n_frames", "n_instances"):
@@ -381,6 +623,28 @@ def bind_historical_geometry_only_crop_source(
     payload = _require_mapping(manifest["payload"], label="manifest payload")
     logical = _require_mapping(payload["logical_schema"], label="logical schema")
     dimensions = _require_mapping(logical["dimensions"], label="dimensions")
+    try:
+        crop_policy = crop_geometry_policy_from_manifest(logical["crop_policy"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical crop lacks a valid canonical crop_geometry_policy manifest."
+        ) from exc
+    if crop_policy.padding_mode is not CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical geometry-only successor requires the producer zero_outside_source_frame crop policy."
+        )
+    if crop_policy.size_mode is not CropSizeMode.FIXED_PER_RUN:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical geometry-only successor requires a fixed per-run crop extent."
+        )
+    if crop_policy.placement_mode is not CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW:
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical geometry-only successor requires verified explicit per-row crop origins."
+        )
+    if not isinstance(crop_policy.placement_authority, Mapping):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical crop policy lacks its normalized explicit origin authority."
+        )
     if payload.get("coordinate_contract") is None:
         raise HistoricalGeometryOnlyCropAdapterError(
             "Historical geometry-only crop lacks its coordinate catalog."
@@ -486,6 +750,35 @@ def bind_historical_geometry_only_crop_source(
             "Historical crop ROI sizes are not one exact constant positive extent."
         )
     roi_width, roi_height = (int(roi_sizes[0, 0]), int(roi_sizes[0, 1]))
+    if crop_policy.fixed_size_wh != (roi_width, roi_height):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical crop policy fixed_size_wh differs from the actual ROI extent."
+        )
+    placement = _array(crop_arrays["source_crop_xywh"], label="source_crop_xywh")
+    origins = _array(crop_arrays["roi_coordinates_full"], label="roi_coordinates_full")
+    if origins.dtype != np.dtype("<i4") or origins.shape != (n_instances, 2):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical crop ROI origins are not the exact little-endian int32 row-aligned array."
+        )
+    if not np.array_equal(
+        origins,
+        np.rint(placement[:, :2]).astype("<i4", copy=False),
+    ):
+        raise HistoricalGeometryOnlyCropAdapterError(
+            "Historical crop ROI origins do not exactly equal source_crop_xywh requested origins."
+        )
+    padded_lineage = _padded_lineage_summary(
+        placement,
+        source_width=source_width,
+        source_height=source_height,
+        roi_width=roi_width,
+        roi_height=roi_height,
+        crop_policy_payload_digest=crop_policy.payload_digest,
+        origin_authority_digest=canonical_json_sha256(crop_policy.placement_authority),
+        provider_record_sha256=str(
+            crop_policy.placement_authority["provider_record_sha256"]
+        ),
+    )
     if type(model_input_transform) is not ModelInputTransform:
         raise HistoricalGeometryOnlyCropAdapterError(
             "Historical crop adapter requires one exact model input transform."
@@ -509,9 +802,15 @@ def bind_historical_geometry_only_crop_source(
     logical_document = _require_mapping(
         payload["logical_content"], label="logical content"
     )
-    declarations = _require_mapping(logical_document["document"], label="logical content document")["arrays"]
-    row_digest = _require_mapping(declarations, label="logical content arrays")["source_row_signature"]["sha256"]
-    coordinate_catalog_digest = _require_mapping(payload["coordinate_contract"], label="coordinate contract")["digest"]
+    declarations = _require_mapping(
+        logical_document["document"], label="logical content document"
+    )["arrays"]
+    row_digest = _require_mapping(declarations, label="logical content arrays")[
+        "source_row_signature"
+    ]["sha256"]
+    coordinate_catalog_digest = _require_mapping(
+        payload["coordinate_contract"], label="coordinate contract"
+    )["digest"]
     return HistoricalGeometryOnlyCropBinding(
         source=source,
         crop_path=crop_path,
@@ -526,6 +825,7 @@ def bind_historical_geometry_only_crop_source(
         source_width=source_width,
         source_height=source_height,
         source_run_path=source_run_path,
+        padded_lineage=padded_lineage,
         adapter_record={
             "schema_id": HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_ID,
             "schema_version": HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_VERSION,
@@ -547,6 +847,12 @@ def bind_historical_geometry_only_crop_source(
             "ephemeral_flat_pixel_cache": "not_an_immutable_source",
             "validated_array_digest_basis": "crop_manifest_logical_content_v1",
             "validated_source_rowset": True,
+            "padded_crop_lineage": padded_lineage,
+            "crop_policy_payload_digest": crop_policy.payload_digest,
+            "origin_authority_digest": canonical_json_sha256(
+                crop_policy.placement_authority
+            ),
+            "origin_authority": copy.deepcopy(dict(crop_policy.placement_authority)),
         },
     )
 
@@ -569,7 +875,10 @@ def historical_geometry_only_crop_loader(
     from fisheye.shared import subject_mask_coordinate_publication as mask_publication
 
     def load(root: Any, crop_path: str) -> Any:
-        if root is not binding.source._root or str(crop_path).strip("/") != binding.crop_path:
+        if (
+            root is not binding.source._root
+            or str(crop_path).strip("/") != binding.crop_path
+        ):
             raise HistoricalGeometryOnlyCropAdapterError(
                 "Historical crop adapter was asked for an unbound root or crop path."
             )
@@ -578,13 +887,47 @@ def historical_geometry_only_crop_loader(
     with _LOADER_OVERRIDE_LOCK:
         old_keypoint = keypoint_publication.load_persisted_keypoint_crop_source
         old_mask = mask_publication.load_persisted_subject_mask_crop_source
+        old_keypoint_attrs = {
+            name: getattr(keypoint_publication, name)
+            for name in (
+                "CROP_PLACEMENT_OWNERSHIP_ATTR",
+                "CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR",
+            )
+        }
+        old_mask_attrs = {
+            name: getattr(mask_publication, name)
+            for name in (
+                "CROP_PLACEMENT_OWNERSHIP_ATTR",
+                "CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR",
+                "CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR",
+            )
+        }
         keypoint_publication.load_persisted_keypoint_crop_source = load
         mask_publication.load_persisted_subject_mask_crop_source = load
+        keypoint_publication.CROP_PLACEMENT_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR
+        )
+        keypoint_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR
+        )
+        mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR
+        )
+        mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR
+        )
+        mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR = (
+            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR
+        )
         try:
             yield
         finally:
             keypoint_publication.load_persisted_keypoint_crop_source = old_keypoint
             mask_publication.load_persisted_subject_mask_crop_source = old_mask
+            for name, value in old_keypoint_attrs.items():
+                setattr(keypoint_publication, name, value)
+            for name, value in old_mask_attrs.items():
+                setattr(mask_publication, name, value)
 
 
 __all__ = [
@@ -593,6 +936,9 @@ __all__ = [
     "HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_VERSION",
     "HistoricalGeometryOnlyCropAdapterError",
     "HistoricalGeometryOnlyCropBinding",
+    "bind_persisted_padded_placement_record",
+    "bind_persisted_run_attribute_record",
     "bind_historical_geometry_only_crop_source",
     "historical_geometry_only_crop_loader",
+    "stamp_persisted_padded_placement_provenance",
 ]

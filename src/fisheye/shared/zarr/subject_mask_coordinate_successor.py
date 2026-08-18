@@ -38,8 +38,11 @@ from fisheye.shared.zarr.coordinate_successor_files import (
     metadata_tree_sha256,
 )
 from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+    bind_persisted_padded_placement_record,
+    bind_persisted_run_attribute_record,
     bind_historical_geometry_only_crop_source,
     historical_geometry_only_crop_loader,
+    stamp_persisted_padded_placement_provenance,
 )
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
@@ -165,7 +168,10 @@ def _bundle_authority(
     if payload.get("bundle_id") != bundle_run_id:
         raise ValueError("Subject-mask bundle ID differs from its exact path.")
     publication = payload.get("publication")
-    if not isinstance(publication, Mapping) or publication.get("activation_state") != "deferred":
+    if (
+        not isinstance(publication, Mapping)
+        or publication.get("activation_state") != "deferred"
+    ):
         raise ValueError("Subject-mask source bundle is not activation-deferred.")
     members = payload.get("members")
     if not isinstance(members, Mapping):
@@ -183,7 +189,9 @@ def _bundle_authority(
         manifest=refined_manifest,
     )
     if members.get("raw") != expected_raw or members.get("refined") != expected_refined:
-        raise ValueError("Subject-mask bundle does not bind the exact raw/refined source pair.")
+        raise ValueError(
+            "Subject-mask bundle does not bind the exact raw/refined source pair."
+        )
     return copy.deepcopy(dict(manifest))
 
 
@@ -193,7 +201,9 @@ def _source_manifest(run: Any, *, run_id: str, kind: str) -> dict[str, Any]:
         raise ValueError(f"Subject-mask source {run_id!r} lacks a run manifest.")
     errors = validate_subject_mask_core_run_manifest(manifest)
     if errors:
-        raise ValueError(f"Subject-mask source {run_id!r} is invalid: " + "; ".join(errors))
+        raise ValueError(
+            f"Subject-mask source {run_id!r} is invalid: " + "; ".join(errors)
+        )
     payload = manifest["payload"]
     if payload.get("run_id") != run_id or payload.get("kind") != kind:
         raise ValueError("Subject-mask source manifest binds another run or kind.")
@@ -222,7 +232,9 @@ def _model_artifact(path: Path, *, expected_sha256: str) -> dict[str, Any]:
         raise ValueError("Subject-mask source lacks one exact model SHA-256.")
     actual = _sha256_file(resolved)
     if actual != expected_sha256:
-        raise ValueError("Subject-mask model bytes differ from source inference authority.")
+        raise ValueError(
+            "Subject-mask model bytes differ from source inference authority."
+        )
     stat = resolved.stat()
     return {
         "role": "subject_mask_unet_checkpoint",
@@ -242,7 +254,9 @@ def _labels(manifest: Mapping[str, Any]) -> list[str]:
     return [str(item) for item in labels]
 
 
-def _raw_inference_inputs(root: Any, raw_manifest: Mapping[str, Any], model_path: Path) -> dict[str, Any]:
+def _raw_inference_inputs(
+    root: Any, raw_manifest: Mapping[str, Any], model_path: Path
+) -> dict[str, Any]:
     payload = raw_manifest["payload"]
     source_path = str(payload["source"]["run_path"])
     producer = root[source_path]
@@ -267,12 +281,16 @@ def _raw_inference_inputs(root: Any, raw_manifest: Mapping[str, Any], model_path
                 "Raw subject-mask producer lacks one exact model artifact authority."
             )
         prior_artifact = matches[0]
-    artifact = _model_artifact(model_path, expected_sha256=str(prior_artifact.get("sha256") or ""))
+    artifact = _model_artifact(
+        model_path, expected_sha256=str(prior_artifact.get("sha256") or "")
+    )
     threshold = producer.attrs.get("mask_probability_threshold")
     if type(threshold) is not float:
         threshold = payload["logical_schema"].get("threshold")
     if type(threshold) is not float:
-        raise ValueError("Raw subject-mask source lacks an exact probability threshold.")
+        raise ValueError(
+            "Raw subject-mask source lacks an exact probability threshold."
+        )
     provenance = producer.attrs.get("provenance")
     if not isinstance(provenance, Mapping):
         raise ValueError("Raw subject-mask producer lacks exact stage provenance.")
@@ -312,7 +330,9 @@ def inspect_subject_mask_coordinate_successor_source(
         raise ValueError("Subject-mask successors cannot replace their source runs.")
     evidence_parts = str(refined_evidence_run_path).strip("/").split("/")
     if len(evidence_parts) != 2 or not evidence_parts[0].endswith("_runs"):
-        raise ValueError("refined_evidence_run_path must name one exact runs-family child.")
+        raise ValueError(
+            "refined_evidence_run_path must name one exact runs-family child."
+        )
     paths = {
         "raw": archive / _RAW_FAMILY / raw_id,
         "refined": archive / _REFINED_FAMILY / refined_id,
@@ -322,10 +342,14 @@ def inspect_subject_mask_coordinate_successor_source(
     }
     for name in ("raw", "refined", "evidence"):
         if not paths[name].is_dir():
-            raise FileNotFoundError(f"Subject-mask {name} source not found: {paths[name]}")
+            raise FileNotFoundError(
+                f"Subject-mask {name} source not found: {paths[name]}"
+            )
     for name in ("raw_target", "refined_target"):
         if paths[name].exists():
-            raise FileExistsError(f"Immutable subject-mask target exists: {paths[name]}")
+            raise FileExistsError(
+                f"Immutable subject-mask target exists: {paths[name]}"
+            )
 
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     raw_manifest = _source_manifest(
@@ -372,16 +396,12 @@ def inspect_subject_mask_coordinate_successor_source(
         crop_reference=crop_reference,
         source_manifest=raw_manifest,
         source_arrays={
-            "source_crop_row_ids": root[
-                f"{_RAW_FAMILY}/{raw_id}/source_crop_row_ids"
-            ],
+            "source_crop_row_ids": root[f"{_RAW_FAMILY}/{raw_id}/source_crop_row_ids"],
             "instance_key": root[f"{_RAW_FAMILY}/{raw_id}/instance_key"],
             "source_acquisition_frame_index": root[
                 f"{_RAW_FAMILY}/{raw_id}/source_acquisition_frame_index"
             ],
-            "source_crop_xywh": root[
-                f"{_RAW_FAMILY}/{raw_id}/source_crop_xywh"
-            ],
+            "source_crop_xywh": root[f"{_RAW_FAMILY}/{raw_id}/source_crop_xywh"],
         },
         source_run_path=f"{_RAW_FAMILY}/{raw_id}",
         model_input_transform=inference["model_input_transform"],
@@ -402,8 +422,12 @@ def inspect_subject_mask_coordinate_successor_source(
             "source_refined_manifest_digest": canonical_json_sha256(refined_manifest),
             "source_bundle_manifest_digest": canonical_json_sha256(bundle_manifest),
             "source_raw_metadata_tree_sha256": metadata_tree_sha256(paths["raw"]),
-            "source_refined_metadata_tree_sha256": metadata_tree_sha256(paths["refined"]),
-            "source_evidence_metadata_tree_sha256": metadata_tree_sha256(paths["evidence"]),
+            "source_refined_metadata_tree_sha256": metadata_tree_sha256(
+                paths["refined"]
+            ),
+            "source_evidence_metadata_tree_sha256": metadata_tree_sha256(
+                paths["evidence"]
+            ),
             "producer_run_path": inference["producer_run_path"],
             "historical_crop_adapter": historical_crop.as_record(),
             "model_artifact": inference["model_artifact"],
@@ -466,7 +490,9 @@ def _rebase_component_provenance(
         surface = str(attrs.get("source_surface_path") or "")
         surface_name = surface.rsplit("/", 1)[-1]
         if surface_name not in {"mask_probs_roi", "masks_roi"}:
-            raise ValueError(f"Refined component {label!r} has an invalid source surface.")
+            raise ValueError(
+                f"Refined component {label!r} has an invalid source surface."
+            )
         rebased = f"{raw_successor_path}/{surface_name}"
         attrs["source_surface_path"] = rebased
         if "source_probability_path" in attrs:
@@ -560,9 +586,9 @@ def publish_subject_mask_coordinate_successors(
             refined_manifest=refined_manifest,
         )
         inference = _raw_inference_inputs(root, raw_manifest, subject_mask_model_path)
-        crop_reference = raw_manifest["payload"]["coordinate_dependencies"][
-            "document"
-        ]["crop"]
+        crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
+            "crop"
+        ]
         historical_crop = bind_historical_geometry_only_crop_source(
             analysis_zarr=archive,
             root=root,
@@ -591,8 +617,12 @@ def publish_subject_mask_coordinate_successors(
             )
             raw_run.attrs.update(
                 {
-                    "model_input_transform": inference["model_input_transform"].to_attrs(),
-                    "mask_probability_threshold": inference["mask_probability_threshold"],
+                    "model_input_transform": inference[
+                        "model_input_transform"
+                    ].to_attrs(),
+                    "mask_probability_threshold": inference[
+                        "mask_probability_threshold"
+                    ],
                     "source_checkpoint": inference["model_artifact"]["path"],
                     "subject_mask_model_artifact": inference["model_artifact"],
                     "mask_labels": _labels(raw_manifest),
@@ -603,6 +633,7 @@ def publish_subject_mask_coordinate_successors(
                     ),
                 }
             )
+            stamp_persisted_padded_placement_provenance(raw_run, historical_crop)
             mark_run_started(raw_run, run_name=raw_target_id, stage="subject_masks")
             crop_path = raw_manifest["payload"]["coordinate_dependencies"]["document"][
                 "crop"
@@ -623,6 +654,18 @@ def publish_subject_mask_coordinate_successors(
                     f"{_RAW_FAMILY}/{raw_target_id}",
                     expected_publication_owner=raw_owner,
                 )
+            raw_run.attrs["coordinate_successor_padded_crop_lineage"] = {
+                "source_crop_adapter": historical_crop.as_record(),
+                "placement_ownership": bind_persisted_padded_placement_record(raw_run),
+            }
+            raw_run.attrs["coordinate_successor_padded_crop_lineage_sha256"] = (
+                canonical_json_sha256(
+                    raw_run.attrs["coordinate_successor_padded_crop_lineage"]
+                )
+            )
+            padded_lineage_record = bind_persisted_run_attribute_record(
+                raw_run, attr_name="coordinate_successor_padded_crop_lineage"
+            )
             raw_authority = build_coordinate_successor_authority(
                 kind=SUBJECT_MASK_COORDINATE_SUCCESSOR_KIND,
                 source_family=_RAW_FAMILY,
@@ -638,6 +681,7 @@ def publish_subject_mask_coordinate_successors(
                         "logical_content"
                     ]["digest"],
                     **receipts["raw_copy"],
+                    "padded_crop_lineage": padded_lineage_record,
                 },
                 coordinate_records=_record_pointers(
                     {
@@ -646,6 +690,7 @@ def publish_subject_mask_coordinate_successors(
                         "temporal_authority": raw_surfaces.context.temporal_authority,
                         "surface_inventory": raw_surfaces.inventory,
                         "derivation": raw_surfaces.derivation,
+                        "padded_crop_lineage": padded_lineage_record,
                     }
                 ),
             )
@@ -665,13 +710,17 @@ def publish_subject_mask_coordinate_successors(
                 direct_metadata_declarations=direct,
                 consolidated_metadata_declarations=consolidated,
             )
-            raw_run.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE] = raw_successor_manifest
+            raw_run.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE] = (
+                raw_successor_manifest
+            )
             consolidate_metadata_capture_expected_warnings(archive)
             raw_errors = validate_persisted_subject_mask_core_publication(
                 archive, family=_RAW_FAMILY, run_id=raw_target_id
             )
             if raw_errors:
-                raise RuntimeError("Raw mask successor validation failed: " + "; ".join(raw_errors))
+                raise RuntimeError(
+                    "Raw mask successor validation failed: " + "; ".join(raw_errors)
+                )
             with historical_geometry_only_crop_loader(historical_crop):
                 raw_loaded = load_persisted_ineligible_subject_mask_coordinate_surfaces(
                     open_zarr_root(archive, mode="r"),
@@ -690,7 +739,9 @@ def publish_subject_mask_coordinate_successors(
                 owner_attr=REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
             )
             if "components" in refined_run:
-                raise ValueError("Refined immutable core unexpectedly already has components.")
+                raise ValueError(
+                    "Refined immutable core unexpectedly already has components."
+                )
             receipts["component_evidence_copy"] = copy_metadata_and_link_payload(
                 evidence_fs / "components", refined_target_fs / "components"
             )
@@ -705,8 +756,12 @@ def publish_subject_mask_coordinate_successors(
             )
             missing = [name for name in required_attrs if name not in draft.attrs]
             if missing:
-                raise ValueError(f"Refined evidence is missing required attrs {missing!r}.")
-            refined_run.attrs.update({name: copy.deepcopy(draft.attrs[name]) for name in required_attrs})
+                raise ValueError(
+                    f"Refined evidence is missing required attrs {missing!r}."
+                )
+            refined_run.attrs.update(
+                {name: copy.deepcopy(draft.attrs[name]) for name in required_attrs}
+            )
             refined_run.attrs["source_subject_mask_run"] = raw_target_id
             refined_run.attrs.pop("assignment_keypoint_coordinate_contract", None)
             _rebase_component_provenance(
@@ -775,14 +830,16 @@ def publish_subject_mask_coordinate_successors(
                 run_id=refined_target_id,
                 manifest=refined_manifest,
             )
-            refined_successor_manifest = build_subject_mask_coordinate_successor_manifest(
-                refined_manifest,
-                run_id=refined_target_id,
-                direct_metadata_declarations=direct,
-                consolidated_metadata_declarations=consolidated,
-                coordinate_dependencies=_refined_dependencies(
-                    refined_manifest, raw_successor_manifest
-                ),
+            refined_successor_manifest = (
+                build_subject_mask_coordinate_successor_manifest(
+                    refined_manifest,
+                    run_id=refined_target_id,
+                    direct_metadata_declarations=direct,
+                    consolidated_metadata_declarations=consolidated,
+                    coordinate_dependencies=_refined_dependencies(
+                        refined_manifest, raw_successor_manifest
+                    ),
+                )
             )
             refined_run.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE] = (
                 refined_successor_manifest

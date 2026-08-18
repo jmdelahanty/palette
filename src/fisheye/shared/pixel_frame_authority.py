@@ -87,9 +87,7 @@ ACQUISITION_PHYSICAL_CHUNK_MANIFEST_SCHEMA_ID = (
     "palette.acquisition_physical_chunk_manifest"
 )
 ACQUISITION_PHYSICAL_CHUNK_MANIFEST_SCHEMA_VERSION = 2
-ACQUISITION_PHYSICAL_CHUNK_MANIFEST_ATTR = (
-    "acquisition_physical_chunk_manifest"
-)
+ACQUISITION_PHYSICAL_CHUNK_MANIFEST_ATTR = "acquisition_physical_chunk_manifest"
 ACQUISITION_PHYSICAL_CHUNK_MANIFEST_DIGEST_ATTR = (
     "acquisition_physical_chunk_manifest_sha256"
 )
@@ -114,21 +112,57 @@ CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID = "palette.crop_placement_ownership"
 CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION = 1
 CROP_PLACEMENT_OWNERSHIP_ATTR = "crop_placement_ownership"
 CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR = "crop_placement_ownership_sha256"
-CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR = (
-    "crop_placement_ownership_pixel_center"
-)
+CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR = "crop_placement_ownership_pixel_center"
 CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR = (
     "crop_placement_ownership_pixel_edge_half_open"
+)
+# Historical coordinate-only successors may retain the producer's requested
+# zero-padded windows.  These names are deliberately separate from the
+# ordinary crop-writer ownership attrs: the latter continue to mean contained
+# source-camera windows and must continue to fail closed for negative or
+# out-of-frame origins.
+CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR = (
+    "coordinate_successor_padded_crop_placement_ownership"
+)
+CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR = (
+    "coordinate_successor_padded_crop_placement_ownership_pixel_center"
+)
+CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR = (
+    "coordinate_successor_padded_crop_placement_ownership_pixel_edge_half_open"
+)
+CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID = (
+    "palette.coordinate_successor.padded_crop_placement_ownership"
+)
+CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_VERSION = 1
+CROP_PLACEMENT_PADDED_WINDOW_GEOMETRY_SCHEMA_ID = (
+    "palette.coordinate_successor.padded_crop_window_geometry"
+)
+CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_ID = (
+    "palette.coordinate_successor.padded_crop_placement_provenance"
+)
+CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_VERSION = 1
+CROP_PLACEMENT_PADDED_PROVENANCE_ATTR = (
+    "coordinate_successor_padded_crop_placement_provenance"
+)
+CROP_PLACEMENT_PADDED_PROVENANCE_DIGEST_ATTR = (
+    f"{CROP_PLACEMENT_PADDED_PROVENANCE_ATTR}_sha256"
 )
 CROP_PLACEMENT_OWNERSHIP_ATTRS = frozenset(
     {
         CROP_PLACEMENT_OWNERSHIP_ATTR,
         CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
         CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+        CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
+        CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
     }
 )
 CROP_PLACEMENT_PRODUCER = "palette.crop_writer.v1"
 CROP_PLACEMENT_WINDOW_POLICY = "contained_actual_source_window_v1"
+CROP_PLACEMENT_PADDED_PRODUCER = (
+    "palette.coordinate_successor.historical_geometry_only_crop_adapter.v1"
+)
+CROP_PLACEMENT_PADDED_WINDOW_POLICY = "requested_window_zero_padded_v1"
 
 SOURCE_CAMERA_FRAME_KIND = "acquisition_source_camera"
 SELECTED_CANVAS_FRAME_KIND = "selected_stimulus_canvas"
@@ -160,12 +194,8 @@ DETECTOR_NORMALIZED_SPACE_ID = "detector_normalized_xy"
 PROJECTIVE_XY_DIRECT_V1 = "projective_xy_direct_v1"
 TRANSLATION_XY_DIRECT_V1 = "translation_xy_direct_v1"
 SCALE_XY_EDGE_ALIGNED_V1 = "target=offset+source*target_extent/source_extent"
-SCALE_XY_PIXEL_CENTER_V1 = (
-    "target=offset+(source+0.5)*target_extent/source_extent-0.5"
-)
-NORMALIZED_TO_PIXEL_EDGE_EXTENT_V1 = (
-    "target_px=source_normalized*reference_extent_px"
-)
+SCALE_XY_PIXEL_CENTER_V1 = "target=offset+(source+0.5)*target_extent/source_extent-0.5"
+NORMALIZED_TO_PIXEL_EDGE_EXTENT_V1 = "target_px=source_normalized*reference_extent_px"
 NORMALIZED_TO_PIXEL_CENTER_INDEX_V1 = (
     "target_px=source_normalized*(reference_extent_px-1)"
 )
@@ -494,9 +524,7 @@ class BoundAcquisitionCameraFrame:
     _archive_identity: ArchiveIdentity = field(repr=False, compare=False)
     _root_node: Any = field(repr=False, compare=False)
     _authority_node: Any = field(repr=False, compare=False)
-    import_ownership: BoundAcquisitionImportOwnership = field(
-        repr=False, compare=False
-    )
+    import_ownership: BoundAcquisitionImportOwnership = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
     def __init__(
@@ -903,10 +931,9 @@ def _same_resolved_persisted_node(resolved: Any, supplied: Any) -> bool:
     }:
         return False
     try:
-        if (
-            canonical_node_path(resolved) != canonical_node_path(supplied)
-            or archive_identity(resolved) != archive_identity(supplied)
-        ):
+        if canonical_node_path(resolved) != canonical_node_path(
+            supplied
+        ) or archive_identity(resolved) != archive_identity(supplied):
             return False
         if type(resolved) is zarr.Array:
             return _exact_json_equal(
@@ -1009,8 +1036,10 @@ def _hash_encoded_storage_object(
     the opened file's identity and size are checked again after the read.
     """
 
-    if not relative_parts or not hasattr(os, "O_NOFOLLOW") or not hasattr(
-        os, "O_DIRECTORY"
+    if (
+        not relative_parts
+        or not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_DIRECTORY")
     ):
         raise PixelFrameAuthorityError(
             "Importer physical-object evidence requires no-follow descriptor traversal."
@@ -1232,9 +1261,12 @@ def _canonical_import_decode(
         raise PixelFrameAuthorityError(
             "Canonical materialized acquisition authority requires a completed full import."
         )
-    if _required_text(
-        import_operation_attrs.get("source_path"), field_name="source_path"
-    ) != source_path:
+    if (
+        _required_text(
+            import_operation_attrs.get("source_path"), field_name="source_path"
+        )
+        != source_path
+    ):
         raise PixelFrameAuthorityError(
             "Import operation source_path conflicts with source-video metadata."
         )
@@ -1278,7 +1310,9 @@ def _acquisition_manifest_records(
         raise PixelFrameAuthorityError(str(exc)) from exc
     decode = _canonical_import_decode(
         import_operation_attrs,
-        source_path=_required_text(metadata.get("source_path"), field_name="source_path"),
+        source_path=_required_text(
+            metadata.get("source_path"), field_name="source_path"
+        ),
     )
     storage = _array_storage_identity(frame_node)
     frame_map = _array_pointer(frame_index_node)
@@ -1377,9 +1411,7 @@ def stamp_acquisition_import_writer_materialization_manifest(
     )
     intended = {
         ACQUISITION_PHYSICAL_CHUNK_MANIFEST_ATTR: chunk_record,
-        ACQUISITION_PHYSICAL_CHUNK_MANIFEST_DIGEST_ATTR: _mapping_sha256(
-            chunk_record
-        ),
+        ACQUISITION_PHYSICAL_CHUNK_MANIFEST_DIGEST_ATTR: _mapping_sha256(chunk_record),
         ACQUISITION_MATERIALIZATION_MANIFEST_ATTR: materialization_record,
         ACQUISITION_MATERIALIZATION_MANIFEST_DIGEST_ATTR: _mapping_sha256(
             materialization_record
@@ -1499,8 +1531,7 @@ def _load_acquisition_materialization_manifest(
         frame_node=frame_node,
     )
     if (
-        chunk_payload["schema_id"]
-        != ACQUISITION_PHYSICAL_CHUNK_MANIFEST_SCHEMA_ID
+        chunk_payload["schema_id"] != ACQUISITION_PHYSICAL_CHUNK_MANIFEST_SCHEMA_ID
         or type(chunk_payload["schema_version"]) is not int
         or chunk_payload["schema_version"]
         != ACQUISITION_PHYSICAL_CHUNK_MANIFEST_SCHEMA_VERSION
@@ -1521,8 +1552,7 @@ def _load_acquisition_materialization_manifest(
         != hashlib.sha256(_canonical_json(entries).encode("utf-8")).hexdigest()
         or chunk_payload["entries_canonicalization"]
         != ACQUISITION_CHUNK_ENTRY_CANONICALIZATION
-        or chunk_payload["canonicalization"]
-        != PIXEL_FRAME_AUTHORITY_CANONICALIZATION
+        or chunk_payload["canonicalization"] != PIXEL_FRAME_AUTHORITY_CANONICALIZATION
     ):
         raise PixelFrameAuthorityError(
             "Acquisition physical-chunk manifest does not exactly bind live storage metadata and importer content evidence."
@@ -1591,10 +1621,13 @@ def _load_acquisition_materialization_manifest(
             "Acquisition materialization manifest recording/camera identity changed."
         )
     metadata_digest = _mapping_sha256(metadata)
-    if _sha256(
-        payload["source_video_metadata_sha256"],
-        field_name="source_video_metadata_sha256",
-    ) != metadata_digest:
+    if (
+        _sha256(
+            payload["source_video_metadata_sha256"],
+            field_name="source_video_metadata_sha256",
+        )
+        != metadata_digest
+    ):
         raise PixelFrameAuthorityError(
             "Acquisition materialization manifest source metadata is stale."
         )
@@ -1613,7 +1646,9 @@ def _load_acquisition_materialization_manifest(
     )
     canonical_decode = _canonical_import_decode(
         {**dict(decode), "source_path": metadata.get("source_path")},
-        source_path=_required_text(metadata.get("source_path"), field_name="source_path"),
+        source_path=_required_text(
+            metadata.get("source_path"), field_name="source_path"
+        ),
     )
     frame_map = _array_pointer(frame_index_node)
     if (
@@ -1664,9 +1699,9 @@ def _load_acquisition_materialization_manifest(
         "frame_map": frame_map,
         "physical_chunk_manifest": expected_chunk_pointer,
     }
-    if _sha256(payload["materialization_id"], field_name="materialization_id") != _mapping_sha256(
-        identity_basis
-    ):
+    if _sha256(
+        payload["materialization_id"], field_name="materialization_id"
+    ) != _mapping_sha256(identity_basis):
         raise PixelFrameAuthorityError("Acquisition materialization identity is stale.")
     canonical = json.loads(_canonical_json(payload))
     if not _exact_json_equal(raw, canonical):
@@ -1862,9 +1897,11 @@ def build_verified_acquisition_materialization(
         require_same_archive(root_node, frame_node, frame_index_node)
     except ArchiveIdentityError as exc:
         raise PixelFrameAuthorityError(str(exc)) from exc
-    if canonical_node_path(frame_node) != "raw_video/images_full" or canonical_node_path(
-        frame_index_node
-    ) != "raw_video/frame_domain_maps/stored_zarr_frame_to_acquisition_frame":
+    if (
+        canonical_node_path(frame_node) != "raw_video/images_full"
+        or canonical_node_path(frame_index_node)
+        != "raw_video/frame_domain_maps/stored_zarr_frame_to_acquisition_frame"
+    ):
         raise PixelFrameAuthorityError(
             "Acquisition materialization receipt requires canonical image and frame-map nodes."
         )
@@ -1876,7 +1913,9 @@ def build_verified_acquisition_materialization(
         )
     decode = _canonical_import_decode(
         import_operation_attrs,
-        source_path=_required_text(metadata.get("source_path"), field_name="source_path"),
+        source_path=_required_text(
+            metadata.get("source_path"), field_name="source_path"
+        ),
     )
     persisted_manifest = _load_acquisition_materialization_manifest(
         root_node,
@@ -1932,7 +1971,9 @@ def _require_verified_acquisition_materialization(
         )
     operation = value.operation
     if not isinstance(operation, Mapping):
-        raise PixelFrameAuthorityError("Acquisition materialization receipt is invalid.")
+        raise PixelFrameAuthorityError(
+            "Acquisition materialization receipt is invalid."
+        )
     rebuilt = build_verified_acquisition_materialization(
         root_node,
         frame_node=frame_node,
@@ -2012,8 +2053,7 @@ def _acquisition_ownership_record(
     else:
         expected_frame_path = "raw_video/images_full"
         expected_index_path = (
-            "raw_video/frame_domain_maps/"
-            "stored_zarr_frame_to_acquisition_frame"
+            "raw_video/frame_domain_maps/stored_zarr_frame_to_acquisition_frame"
         )
         if canonical_node_path(frame_node) != expected_frame_path:
             raise PixelFrameAuthorityError(
@@ -2174,10 +2214,14 @@ def parse_acquisition_import_ownership(
             field_name="source_video_metadata_sha256",
         ),
         frame_array=(
-            json.loads(_canonical_json(frame_array)) if frame_array is not None else None
+            json.loads(_canonical_json(frame_array))
+            if frame_array is not None
+            else None
         ),
         frame_index=(
-            json.loads(_canonical_json(frame_index)) if frame_index is not None else None
+            json.loads(_canonical_json(frame_index))
+            if frame_index is not None
+            else None
         ),
         import_operation=(
             json.loads(_canonical_json(import_operation))
@@ -2287,8 +2331,7 @@ def _resolve_materialized_acquisition_nodes(root_node: Any) -> tuple[Any, Any]:
         frame_maps,
         "stored_zarr_frame_to_acquisition_frame",
         expected_path=(
-            "raw_video/frame_domain_maps/"
-            "stored_zarr_frame_to_acquisition_frame"
+            "raw_video/frame_domain_maps/stored_zarr_frame_to_acquisition_frame"
         ),
     )
     return frame_node, frame_index_node
@@ -2603,10 +2646,10 @@ def parse_acquisition_camera_frame(value: Any) -> AcquisitionCameraFrameRecord:
     ):
         raise PixelFrameAuthorityError("Unsupported acquisition-camera schema_version.")
     if payload["canonicalization"] != PIXEL_FRAME_AUTHORITY_CANONICALIZATION:
-        raise PixelFrameAuthorityError("Unsupported acquisition-camera canonicalization.")
-    normalized_metadata = parse_source_video_metadata(
-        payload["source_video_metadata"]
-    )
+        raise PixelFrameAuthorityError(
+            "Unsupported acquisition-camera canonicalization."
+        )
+    normalized_metadata = parse_source_video_metadata(payload["source_video_metadata"])
     digest = _sha256(
         payload["source_video_metadata_sha256"],
         field_name="source_video_metadata_sha256",
@@ -2645,7 +2688,9 @@ def parse_acquisition_camera_frame(value: Any) -> AcquisitionCameraFrameRecord:
             if payload["frame_index"] is not None
             else None
         ),
-        frame_count=_exact_positive_int(payload["frame_count"], field_name="frame_count"),
+        frame_count=_exact_positive_int(
+            payload["frame_count"], field_name="frame_count"
+        ),
         import_ownership=json.loads(_canonical_json(payload["import_ownership"])),
     )
     ownership_pointer = _exact_fields(
@@ -2657,10 +2702,13 @@ def parse_acquisition_camera_frame(value: Any) -> AcquisitionCameraFrameRecord:
         f"/analysis/acquisition_camera_frames/{record.camera_id}"
         f"@{ACQUISITION_IMPORT_OWNERSHIP_ATTR}"
     )
-    if _required_text(
-        ownership_pointer["record_ref"],
-        field_name="import_ownership.record_ref",
-    ) != expected_ownership_ref:
+    if (
+        _required_text(
+            ownership_pointer["record_ref"],
+            field_name="import_ownership.record_ref",
+        )
+        != expected_ownership_ref
+    ):
         raise PixelFrameAuthorityError(
             "Acquisition frame must reference exact import ownership."
         )
@@ -2694,9 +2742,13 @@ def parse_acquisition_camera_frame(value: Any) -> AcquisitionCameraFrameRecord:
             "first_frame_index": 0,
             "last_frame_index_inclusive": record.source_total_frames - 1,
         }:
-            raise PixelFrameAuthorityError("External acquisition frame domain is invalid.")
+            raise PixelFrameAuthorityError(
+                "External acquisition frame domain is invalid."
+            )
     elif record.frame_array is None or record.frame_index is None:
-        raise PixelFrameAuthorityError("Materialized acquisition lineage is incomplete.")
+        raise PixelFrameAuthorityError(
+            "Materialized acquisition lineage is incomplete."
+        )
     return record
 
 
@@ -2998,7 +3050,9 @@ class BoundPixelFrameAuthority:
 
     def assert_verified(self) -> None:
         if self._seal is not _BOUND_PIXEL_FRAME_SEAL:
-            raise PixelFrameAuthorityError("Pixel-frame authority is not sealed evidence.")
+            raise PixelFrameAuthorityError(
+                "Pixel-frame authority is not sealed evidence."
+            )
         current = _load_by_kind(
             self.record.kind,
             self._authority_node,
@@ -3027,11 +3081,15 @@ def _parse_extent(value: Any) -> dict[str, Any]:
     if payload["units"] != "px":
         raise PixelFrameAuthorityError("Pixel-frame reference units must be 'px'.")
     result = {
-        "record_ref": _required_text(payload["record_ref"], field_name="reference_extent.record_ref"),
+        "record_ref": _required_text(
+            payload["record_ref"], field_name="reference_extent.record_ref"
+        ),
         "record_sha256": _sha256(
             payload["record_sha256"], field_name="reference_extent.record_sha256"
         ),
-        "selector": _required_text(payload["selector"], field_name="reference_extent.selector"),
+        "selector": _required_text(
+            payload["selector"], field_name="reference_extent.selector"
+        ),
         "width": payload["width"],
         "height": payload["height"],
         "units": "px",
@@ -3093,10 +3151,13 @@ def parse_pixel_frame_record(value: Any) -> PixelFrameRecord:
     if kind not in expected_spaces:
         raise PixelFrameAuthorityError(f"Unsupported pixel-frame kind {kind!r}.")
     if payload["space_id"] != expected_spaces[kind]:
-        raise PixelFrameAuthorityError("Pixel-frame kind and controlled space disagree.")
+        raise PixelFrameAuthorityError(
+            "Pixel-frame kind and controlled space disagree."
+        )
     expected_units = (
         "normalized"
-        if kind in {
+        if kind
+        in {
             SOURCE_CAMERA_NORMALIZED_FRAME_KIND,
             DETECTOR_NORMALIZED_FRAME_KIND,
         }
@@ -3110,9 +3171,7 @@ def parse_pixel_frame_record(value: Any) -> PixelFrameRecord:
         payload["pixel_convention"], field_name="pixel_convention"
     )
     if convention not in _SUPPORTED_PIXEL_CONVENTIONS:
-        raise PixelFrameAuthorityError(
-            f"Unsupported pixel convention {convention!r}."
-        )
+        raise PixelFrameAuthorityError(f"Unsupported pixel convention {convention!r}.")
     if not isinstance(payload["lineage"], Mapping):
         raise PixelFrameAuthorityError("lineage must be a mapping.")
     # Canonical JSON round-trip rejects non-JSON and preserves an inert copy.
@@ -3128,7 +3187,9 @@ def parse_pixel_frame_record(value: Any) -> PixelFrameRecord:
     )
 
 
-def _same_frame(left: BoundPixelFrameAuthority, right: BoundPixelFrameAuthority) -> bool:
+def _same_frame(
+    left: BoundPixelFrameAuthority, right: BoundPixelFrameAuthority
+) -> bool:
     return (
         left.archive_identity == right.archive_identity
         and left.record_ref == right.record_ref
@@ -3163,10 +3224,8 @@ def _require_archive(
         raise PixelFrameAuthorityError(
             "Pixel-frame evidence comes from different archives/stores."
         )
-    if (
-        require_colocated
-        and canonical_node_path(authority_node)
-        != canonical_node_path(extent._authority_node)
+    if require_colocated and canonical_node_path(authority_node) != canonical_node_path(
+        extent._authority_node
     ):
         raise PixelFrameAuthorityError(
             "Pixel-frame attrs must be persisted on the exact extent-authority node."
@@ -3320,9 +3379,7 @@ def _source_camera_authority_path(
     pixel_convention: str,
 ) -> str:
     acquisition = require_bound_acquisition_camera_frame(acquisition_frame)
-    convention = _required_text(
-        pixel_convention, field_name="pixel_convention"
-    )
+    convention = _required_text(pixel_convention, field_name="pixel_convention")
     if convention not in _SUPPORTED_PIXEL_CONVENTIONS:
         raise PixelFrameAuthorityError(
             f"Unsupported source-camera pixel convention {convention!r}."
@@ -3386,9 +3443,7 @@ def _arena_relative_canvas_lineage(
     geometry_node: Any,
     selected_canvas_frame: BoundPixelFrameAuthority,
 ) -> dict[str, Any]:
-    selected = require_selected_canvas_pixel_frame_authority(
-        selected_canvas_frame
-    )
+    selected = require_selected_canvas_pixel_frame_authority(selected_canvas_frame)
     values = _array_values(geometry_node)
     if values.shape != (4,) or not np.issubdtype(values.dtype, np.integer):
         raise PixelFrameAuthorityError(
@@ -3430,9 +3485,7 @@ def _validate_arena_relative_canvas(
         expected_kind=ARENA_RELATIVE_CANVAS_FRAME_KIND,
         reference_extent=reference_extent,
     )
-    selected = require_selected_canvas_pixel_frame_authority(
-        selected_canvas_frame
-    )
+    selected = require_selected_canvas_pixel_frame_authority(selected_canvas_frame)
     lineage = _arena_relative_canvas_lineage(geometry_node, selected)
     if record.lineage != lineage:
         raise PixelFrameAuthorityError(
@@ -3443,10 +3496,9 @@ def _validate_arena_relative_canvas(
             "Arena-relative and selected-canvas frames must use one exact pixel convention."
         )
     geometry = _array_values(geometry_node)
-    if (
-        record.reference_extent["width"] != int(geometry[2])
-        or record.reference_extent["height"] != int(geometry[3])
-    ):
+    if record.reference_extent["width"] != int(geometry[2]) or record.reference_extent[
+        "height"
+    ] != int(geometry[3]):
         raise PixelFrameAuthorityError(
             "Arena-relative extent conflicts with exact persisted arena geometry."
         )
@@ -3461,11 +3513,14 @@ class CropPlacementOwnershipRecord:
     row_identity: Mapping[str, Any]
     source_camera_frame: Mapping[str, Any]
     camera_id: str
+    schema_id: str = CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID
+    schema_version: int = CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION
+    window_geometry: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema_id": CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID,
-            "schema_version": CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION,
+        result = {
+            "schema_id": self.schema_id,
+            "schema_version": self.schema_version,
             "producer": self.producer,
             "layout": self.layout,
             "window_policy": self.window_policy,
@@ -3475,6 +3530,9 @@ class CropPlacementOwnershipRecord:
             "camera_id": self.camera_id,
             "canonicalization": PIXEL_FRAME_AUTHORITY_CANONICALIZATION,
         }
+        if self.window_geometry is not None:
+            result["window_geometry"] = copy.deepcopy(dict(self.window_geometry))
+        return result
 
     def digest(self) -> str:
         return _mapping_sha256(self.to_dict())
@@ -3551,6 +3609,8 @@ def _crop_placement_values(
     placement_node: Any,
     row_identity: BoundRowIdentityContract,
     source_camera_frame: BoundPixelFrameAuthority,
+    *,
+    allow_zero_padded: bool = False,
 ) -> np.ndarray:
     values = _array_values(placement_node)
     # ``np.number`` includes complex, and bool can be coerced to float.  Crop
@@ -3576,7 +3636,7 @@ def _crop_placement_values(
             "Crop placement must use the crop writer's canonical source_crop_xywh path."
         )
     camera = require_source_camera_pixel_frame_authority(source_camera_frame)
-    if (
+    if not allow_zero_padded and (
         np.any(numeric[:, :2] < 0)
         or np.any(numeric[:, 0] + numeric[:, 2] > camera.endpoint.width)
         or np.any(numeric[:, 1] + numeric[:, 3] > camera.endpoint.height)
@@ -3584,6 +3644,36 @@ def _crop_placement_values(
         raise PixelFrameAuthorityError(
             "Canonical crop placement records only contained actual source-camera windows; negative/out-of-frame padded windows require a separate explicit lineage contract."
         )
+    if allow_zero_padded:
+        if not np.equal(numeric, np.floor(numeric)).all():
+            raise PixelFrameAuthorityError(
+                "Historical padded crop placement must use exact integer-valued xywh coordinates."
+            )
+        requested_width = numeric[:, 2]
+        requested_height = numeric[:, 3]
+        if (
+            np.any(requested_width != requested_width[0])
+            or np.any(requested_height != requested_height[0])
+            or requested_width[0] <= 0
+            or requested_height[0] <= 0
+        ):
+            raise PixelFrameAuthorityError(
+                "Historical padded crop placement must use one positive fixed requested extent."
+            )
+        clipped_left = np.maximum(numeric[:, 0], 0.0)
+        clipped_top = np.maximum(numeric[:, 1], 0.0)
+        clipped_right = np.minimum(
+            numeric[:, 0] + numeric[:, 2], float(camera.endpoint.width)
+        )
+        clipped_bottom = np.minimum(
+            numeric[:, 1] + numeric[:, 3], float(camera.endpoint.height)
+        )
+        if np.any(clipped_right <= clipped_left) or np.any(
+            clipped_bottom <= clipped_top
+        ):
+            raise PixelFrameAuthorityError(
+                "Historical padded crop placement must retain a positive source-camera intersection."
+            )
     return values
 
 
@@ -3591,6 +3681,8 @@ def _crop_ownership_record(
     placement_node: Any,
     row_identity: BoundRowIdentityContract,
     source_camera_frame: BoundPixelFrameAuthority,
+    *,
+    allow_zero_padded: bool = False,
 ) -> CropPlacementOwnershipRecord:
     try:
         row_identity.assert_verified()
@@ -3605,11 +3697,119 @@ def _crop_ownership_record(
         raise PixelFrameAuthorityError(
             "Crop ownership requires exact observation instance_key identity."
         )
-    _crop_placement_values(placement_node, row_identity, camera)
+    values = _crop_placement_values(
+        placement_node,
+        row_identity,
+        camera,
+        allow_zero_padded=allow_zero_padded,
+    )
+    window_geometry: dict[str, Any] | None = None
+    producer = CROP_PLACEMENT_PRODUCER
+    window_policy = CROP_PLACEMENT_WINDOW_POLICY
+    schema_id = CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID
+    schema_version = CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION
+    if allow_zero_padded:
+        attrs = getattr(placement_node, "attrs", None)
+        provenance = (
+            attrs.get(CROP_PLACEMENT_PADDED_PROVENANCE_ATTR)
+            if isinstance(attrs, Mapping)
+            else None
+        )
+        if not isinstance(provenance, Mapping):
+            raise PixelFrameAuthorityError(
+                "Padded crop placement requires its separately persisted successor provenance record."
+            )
+        provenance_digest = _mapping_sha256(provenance)
+        if attrs.get(CROP_PLACEMENT_PADDED_PROVENANCE_DIGEST_ATTR) != provenance_digest:
+            raise PixelFrameAuthorityError(
+                "Padded crop placement provenance digest is missing or stale."
+            )
+        provenance_fields = {
+            "schema_id",
+            "schema_version",
+            "crop_policy_payload_digest",
+            "origin_authority_digest",
+            "provider_record_sha256",
+        }
+        if (
+            set(provenance) != provenance_fields
+            or provenance.get("schema_id") != CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_ID
+            or provenance.get("schema_version")
+            != CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_VERSION
+        ):
+            raise PixelFrameAuthorityError(
+                "Padded crop placement provenance has an invalid explicit field set."
+            )
+        for name in (
+            "crop_policy_payload_digest",
+            "origin_authority_digest",
+            "provider_record_sha256",
+        ):
+            _sha256(provenance.get(name), field_name=name)
+        numeric = values.astype(np.float64, copy=False)
+        width = int(camera.endpoint.width)
+        height = int(camera.endpoint.height)
+        requested = np.rint(numeric).astype(np.int64)
+        clipped_x0 = np.maximum(requested[:, 0], 0)
+        clipped_y0 = np.maximum(requested[:, 1], 0)
+        clipped_x1 = np.minimum(requested[:, 0] + requested[:, 2], width)
+        clipped_y1 = np.minimum(requested[:, 1] + requested[:, 3], height)
+        left = np.maximum(0, -requested[:, 0])
+        top = np.maximum(0, -requested[:, 1])
+        right = np.maximum(0, requested[:, 0] + requested[:, 2] - width)
+        bottom = np.maximum(0, requested[:, 1] + requested[:, 3] - height)
+        clipped = np.column_stack(
+            (clipped_x0, clipped_y0, clipped_x1 - clipped_x0, clipped_y1 - clipped_y0)
+        ).astype("<i8", copy=False)
+        padding = np.column_stack((left, top, right, bottom)).astype("<i8", copy=False)
+        padded_rows = np.any(padding != 0, axis=1)
+        window_geometry = {
+            "schema_id": CROP_PLACEMENT_PADDED_WINDOW_GEOMETRY_SCHEMA_ID,
+            "schema_version": 1,
+            "requested_extent": {
+                "width": int(requested[0, 2]),
+                "height": int(requested[0, 3]),
+                "units": "px",
+            },
+            "source_camera_extent": {
+                "width": width,
+                "height": height,
+                "units": "px",
+            },
+            "clipped_source_camera_intersection": {
+                "formula": "x0=max(requested_x,0); y0=max(requested_y,0); x1=min(requested_x+width,W); y1=min(requested_y+height,H)",
+                "dtype": clipped.dtype.str,
+                "shape": [int(value) for value in clipped.shape],
+                "sha256": array_values_sha256(clipped),
+            },
+            "zero_padding_offsets_ltrb": {
+                "formula": "left=max(0,-x); top=max(0,-y); right=max(0,x+width-W); bottom=max(0,y+height-H)",
+                "dtype": padding.dtype.str,
+                "shape": [int(value) for value in padding.shape],
+                "sha256": array_values_sha256(padding),
+            },
+            "padded_row_count": int(np.count_nonzero(padded_rows)),
+            "padded_row_fraction": float(np.mean(padded_rows))
+            if padding.shape[0]
+            else 0.0,
+            "max_padding_ltrb": [
+                int(value) for value in padding.max(axis=0, initial=0)
+            ],
+            "crop_local_to_source_camera": {
+                "formula": "source_xy = requested_origin_xy + crop_local_xy",
+                "source_pixel_authority": "clipped_source_camera_intersection_only",
+                "source_pixels_outside_extent": "synthetic_zero_padding_no_source_pixel_correspondence",
+            },
+            "crop_policy_provenance": copy.deepcopy(dict(provenance)),
+        }
+        producer = CROP_PLACEMENT_PADDED_PRODUCER
+        window_policy = CROP_PLACEMENT_PADDED_WINDOW_POLICY
+        schema_id = CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID
+        schema_version = CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_VERSION
     return CropPlacementOwnershipRecord(
-        producer=CROP_PLACEMENT_PRODUCER,
+        producer=producer,
         layout="xywh",
-        window_policy=CROP_PLACEMENT_WINDOW_POLICY,
+        window_policy=window_policy,
         crop_placement=_array_pointer(placement_node),
         row_identity=_identity_pointer(row_identity),
         source_camera_frame={
@@ -3617,56 +3817,146 @@ def _crop_ownership_record(
             "record_sha256": camera.record_sha256,
         },
         camera_id=camera.record.lineage["camera_id"],
+        schema_id=schema_id,
+        schema_version=schema_version,
+        window_geometry=window_geometry,
     )
 
 
 def parse_crop_placement_ownership(value: Any) -> CropPlacementOwnershipRecord:
     if isinstance(value, CropPlacementOwnershipRecord):
         value = value.to_dict()
-    payload = _exact_fields(
-        value,
-        expected=frozenset(
-            {
-                "schema_id",
-                "schema_version",
-                "producer",
-                "layout",
-                "window_policy",
-                "crop_placement",
-                "row_identity",
-                "source_camera_frame",
-                "camera_id",
-                "canonicalization",
-            }
-        ),
-        field_name="crop_placement_ownership",
+    base_fields = frozenset(
+        {
+            "schema_id",
+            "schema_version",
+            "producer",
+            "layout",
+            "window_policy",
+            "crop_placement",
+            "row_identity",
+            "source_camera_frame",
+            "camera_id",
+            "canonicalization",
+        }
     )
-    if payload["schema_id"] != CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID:
+    if not isinstance(value, Mapping):
+        raise PixelFrameAuthorityError("Crop ownership must be a mapping.")
+    schema_id = value.get("schema_id")
+    if schema_id == CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID:
+        payload = _exact_fields(
+            value, expected=base_fields, field_name="crop_placement_ownership"
+        )
+        if payload["schema_version"] != CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION:
+            raise PixelFrameAuthorityError("Unsupported crop-ownership schema_version.")
+        ordinary = (
+            payload["producer"] == CROP_PLACEMENT_PRODUCER
+            and payload["layout"] == "xywh"
+            and payload["window_policy"] == CROP_PLACEMENT_WINDOW_POLICY
+        )
+        if not ordinary:
+            raise PixelFrameAuthorityError(
+                "Unsupported ordinary crop ownership producer/layout."
+            )
+        padded = False
+    elif schema_id == CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID:
+        payload = _exact_fields(
+            value,
+            expected=base_fields | {"window_geometry"},
+            field_name="padded_crop_placement_ownership",
+        )
+        if payload["schema_version"] != CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_VERSION:
+            raise PixelFrameAuthorityError(
+                "Unsupported padded crop-ownership schema_version."
+            )
+        padded = True
+        if not (
+            payload["producer"] == CROP_PLACEMENT_PADDED_PRODUCER
+            and payload["layout"] == "xywh"
+            and payload["window_policy"] == CROP_PLACEMENT_PADDED_WINDOW_POLICY
+        ):
+            raise PixelFrameAuthorityError(
+                "Unsupported padded crop ownership producer/layout."
+            )
+    else:
         raise PixelFrameAuthorityError("Unsupported crop-ownership schema_id.")
-    if (
-        type(payload["schema_version"]) is not int
-        or payload["schema_version"] != CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION
-    ):
-        raise PixelFrameAuthorityError("Unsupported crop-ownership schema_version.")
-    if (
-        payload["producer"] != CROP_PLACEMENT_PRODUCER
-        or payload["layout"] != "xywh"
-        or payload["window_policy"] != CROP_PLACEMENT_WINDOW_POLICY
-    ):
-        raise PixelFrameAuthorityError("Unsupported crop ownership producer/layout.")
     if payload["canonicalization"] != PIXEL_FRAME_AUTHORITY_CANONICALIZATION:
         raise PixelFrameAuthorityError("Unsupported crop ownership canonicalization.")
     for name in ("crop_placement", "row_identity", "source_camera_frame"):
         if not isinstance(payload[name], Mapping):
             raise PixelFrameAuthorityError(f"{name} must be an exact pointer mapping.")
+    if padded:
+        geometry = payload.get("window_geometry")
+        if not isinstance(geometry, Mapping):
+            raise PixelFrameAuthorityError(
+                "Padded crop ownership requires its explicit window_geometry record."
+            )
+        expected_geometry_fields = {
+            "schema_id",
+            "schema_version",
+            "requested_extent",
+            "source_camera_extent",
+            "clipped_source_camera_intersection",
+            "zero_padding_offsets_ltrb",
+            "padded_row_count",
+            "padded_row_fraction",
+            "max_padding_ltrb",
+            "crop_local_to_source_camera",
+            "crop_policy_provenance",
+        }
+        if set(geometry) != expected_geometry_fields or (
+            geometry.get("schema_id") != CROP_PLACEMENT_PADDED_WINDOW_GEOMETRY_SCHEMA_ID
+            or geometry.get("schema_version") != 1
+            or geometry.get("crop_local_to_source_camera", {}).get(
+                "source_pixels_outside_extent"
+            )
+            != "synthetic_zero_padding_no_source_pixel_correspondence"
+        ):
+            raise PixelFrameAuthorityError(
+                "Padded crop ownership has an invalid window_geometry contract."
+            )
+        provenance = geometry.get("crop_policy_provenance")
+        if not isinstance(provenance, Mapping) or set(provenance) != {
+            "schema_id",
+            "schema_version",
+            "crop_policy_payload_digest",
+            "origin_authority_digest",
+            "provider_record_sha256",
+        }:
+            raise PixelFrameAuthorityError(
+                "Padded crop ownership lacks its exact crop-policy provenance."
+            )
+        if (
+            provenance.get("schema_id") != CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_ID
+            or provenance.get("schema_version")
+            != CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_VERSION
+        ):
+            raise PixelFrameAuthorityError(
+                "Padded crop ownership has an invalid crop-policy provenance identity."
+            )
+        for name in (
+            "crop_policy_payload_digest",
+            "origin_authority_digest",
+            "provider_record_sha256",
+        ):
+            _sha256(provenance.get(name), field_name=name)
+    elif "window_geometry" in payload:
+        raise PixelFrameAuthorityError(
+            "Contained crop ownership cannot carry padded window geometry."
+        )
     return CropPlacementOwnershipRecord(
-        producer=CROP_PLACEMENT_PRODUCER,
+        producer=str(payload["producer"]),
         layout="xywh",
-        window_policy=CROP_PLACEMENT_WINDOW_POLICY,
+        window_policy=str(payload["window_policy"]),
         crop_placement=json.loads(_canonical_json(payload["crop_placement"])),
         row_identity=json.loads(_canonical_json(payload["row_identity"])),
         source_camera_frame=json.loads(_canonical_json(payload["source_camera_frame"])),
         camera_id=_required_text(payload["camera_id"], field_name="camera_id"),
+        schema_id=str(payload["schema_id"]),
+        schema_version=int(payload["schema_version"]),
+        window_geometry=(
+            json.loads(_canonical_json(payload["window_geometry"])) if padded else None
+        ),
     )
 
 
@@ -3685,6 +3975,8 @@ def load_crop_placement_ownership(
     expected_convention = {
         CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR: "pixel_center",
         CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR: "pixel_edge_half_open",
+        CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR: "pixel_center",
+        CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR: "pixel_edge_half_open",
     }.get(attr_name)
     if (
         expected_convention is not None
@@ -3695,7 +3987,10 @@ def load_crop_placement_ownership(
             f"a {expected_convention} source-camera frame."
         )
     expected = _crop_ownership_record(
-        placement_node, row_identity, camera
+        placement_node,
+        row_identity,
+        camera,
+        allow_zero_padded=attr_name.startswith("coordinate_successor_padded_"),
     )
     try:
         archive = require_same_archive(
@@ -3750,6 +4045,8 @@ def stamp_crop_placement_ownership(
     expected_convention = {
         CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR: "pixel_center",
         CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR: "pixel_edge_half_open",
+        CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR: "pixel_center",
+        CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR: "pixel_edge_half_open",
     }.get(attr_name)
     if (
         expected_convention is not None
@@ -3760,7 +4057,10 @@ def stamp_crop_placement_ownership(
             f"a {expected_convention} source-camera frame."
         )
     record = _crop_ownership_record(
-        placement_node, row_identity, camera
+        placement_node,
+        row_identity,
+        camera,
+        allow_zero_padded=attr_name.startswith("coordinate_successor_padded_"),
     )
     attrs = require_trusted_coordinate_attrs(
         placement_node,
@@ -3824,9 +4124,7 @@ def require_bound_crop_placement_ownership(
 def _roi_lineage(
     crop_placement_ownership: BoundCropPlacementOwnership,
 ) -> dict[str, Any]:
-    ownership = require_bound_crop_placement_ownership(
-        crop_placement_ownership
-    )
+    ownership = require_bound_crop_placement_ownership(crop_placement_ownership)
     return {
         "crop_placement_ownership": {
             "record_ref": ownership.record_ref,
@@ -3849,9 +4147,7 @@ def _validate_roi(
     reference_extent: BoundReferenceExtent,
     crop_placement_ownership: BoundCropPlacementOwnership,
 ) -> None:
-    ownership = require_bound_crop_placement_ownership(
-        crop_placement_ownership
-    )
+    ownership = require_bound_crop_placement_ownership(crop_placement_ownership)
     row_identity = ownership.row_identity
     _validate_common(
         record,
@@ -3886,12 +4182,15 @@ def _model_semantics(transform: ModelInputTransform) -> dict[str, Any]:
             raise PixelFrameAuthorityError(
                 f"Model preprocessing {name} must be an exact nonnegative integer."
             )
-    if min(
-        transform.native_height,
-        transform.native_width,
-        transform.model_height,
-        transform.model_width,
-    ) <= 0:
+    if (
+        min(
+            transform.native_height,
+            transform.native_width,
+            transform.model_height,
+            transform.model_width,
+        )
+        <= 0
+    ):
         raise PixelFrameAuthorityError("Model/native dimensions must be positive.")
     if (
         transform.pad_top + transform.native_height + transform.pad_bottom
@@ -4236,8 +4535,7 @@ def _stamp(
             _restore_exact_attrs(attrs, snapshot)
         except Exception as rollback_exc:  # pragma: no cover - hostile mapping
             raise PixelFrameAuthorityError(
-                "Pixel-frame stamp failed and rollback was incomplete: "
-                f"{rollback_exc}"
+                f"Pixel-frame stamp failed and rollback was incomplete: {rollback_exc}"
             ) from exc
         if isinstance(exc, PixelFrameAuthorityError):
             raise
@@ -4390,9 +4688,7 @@ def stamp_arena_relative_canvas_pixel_frame_authority(
     selected_canvas_frame: BoundPixelFrameAuthority,
 ) -> BoundPixelFrameAuthority:
     extent = verify_bound_reference_extent(reference_extent)
-    selected = require_selected_canvas_pixel_frame_authority(
-        selected_canvas_frame
-    )
+    selected = require_selected_canvas_pixel_frame_authority(selected_canvas_frame)
     context = {
         "geometry_node": geometry_node,
         "selected_canvas_frame": selected,
@@ -4444,9 +4740,7 @@ def stamp_roi_pixel_frame_authority(
     crop_placement_ownership: BoundCropPlacementOwnership,
 ) -> BoundPixelFrameAuthority:
     extent = verify_bound_reference_extent(reference_extent)
-    ownership = require_bound_crop_placement_ownership(
-        crop_placement_ownership
-    )
+    ownership = require_bound_crop_placement_ownership(crop_placement_ownership)
     context = {"crop_placement_ownership": ownership}
     record = _record(
         frame_id=frame_id,
@@ -4618,11 +4912,17 @@ def require_bound_pixel_frame_authority(
 
 
 def require_source_camera_pixel_frame_authority(value: Any) -> BoundPixelFrameAuthority:
-    return require_bound_pixel_frame_authority(value, expected_kind=SOURCE_CAMERA_FRAME_KIND)
+    return require_bound_pixel_frame_authority(
+        value, expected_kind=SOURCE_CAMERA_FRAME_KIND
+    )
 
 
-def require_selected_canvas_pixel_frame_authority(value: Any) -> BoundPixelFrameAuthority:
-    return require_bound_pixel_frame_authority(value, expected_kind=SELECTED_CANVAS_FRAME_KIND)
+def require_selected_canvas_pixel_frame_authority(
+    value: Any,
+) -> BoundPixelFrameAuthority:
+    return require_bound_pixel_frame_authority(
+        value, expected_kind=SELECTED_CANVAS_FRAME_KIND
+    )
 
 
 def require_arena_relative_canvas_pixel_frame_authority(
@@ -4639,7 +4939,9 @@ def require_roi_pixel_frame_authority(value: Any) -> BoundPixelFrameAuthority:
 
 
 def require_model_input_pixel_frame_authority(value: Any) -> BoundPixelFrameAuthority:
-    return require_bound_pixel_frame_authority(value, expected_kind=MODEL_INPUT_FRAME_KIND)
+    return require_bound_pixel_frame_authority(
+        value, expected_kind=MODEL_INPUT_FRAME_KIND
+    )
 
 
 def require_normalized_pixel_frame_authority(
@@ -4687,9 +4989,21 @@ __all__ = [
     "CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR",
     "CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR",
     "CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR",
+    "CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR",
+    "CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR",
+    "CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR",
+    "CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID",
+    "CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_VERSION",
+    "CROP_PLACEMENT_PADDED_PROVENANCE_ATTR",
+    "CROP_PLACEMENT_PADDED_PROVENANCE_DIGEST_ATTR",
+    "CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_ID",
+    "CROP_PLACEMENT_PADDED_PROVENANCE_SCHEMA_VERSION",
+    "CROP_PLACEMENT_PADDED_WINDOW_GEOMETRY_SCHEMA_ID",
     "CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID",
     "CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION",
     "CROP_PLACEMENT_WINDOW_POLICY",
+    "CROP_PLACEMENT_PADDED_PRODUCER",
+    "CROP_PLACEMENT_PADDED_WINDOW_POLICY",
     "DETECTOR_MODEL_INPUT_SPACE_ID",
     "DETECTOR_NORMALIZED_FRAME_KIND",
     "DETECTOR_NORMALIZED_SPACE_ID",
