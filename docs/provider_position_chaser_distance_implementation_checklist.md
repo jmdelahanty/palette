@@ -59,6 +59,9 @@ successful computation does not promote it to the GoodBatBadBat default.
 - [x] Embed per-epoch distance histograms using the persisted common bin edges.
 - [x] Label raw sample counts and normalization. Do not silently clip finite
   values.
+- [x] Expose exact manifest-valid candidates in the individual-recording
+  Marimo explorer through a separately labeled, read-only, selector-ineligible
+  provider. Explorer visibility does not imply scientific promotion.
 - [ ] Use semantic chaser behavior labels from sealed role authority when
   available. Never infer behavior from red/blue color or chaser index.
 - [ ] For cohort views, provide both pooled descriptive distributions and a

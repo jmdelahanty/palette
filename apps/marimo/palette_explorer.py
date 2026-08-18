@@ -45,7 +45,6 @@ def _():
         build_controls as build_chaser_controls,
         build_cra_near_field_output,
         build_cra_primary_endpoint_output,
-        build_debug_tables,
         build_detection_occupancy_output,
         build_distance_figure,
         build_egocentric_alignment_output,
@@ -62,6 +61,9 @@ def _():
         resolve_time_windows_from_multiselect,
     )
     from apps.marimo.components.provenance import build_spec_provenance_panel
+    from apps.marimo.components.provider_chaser_candidate import (
+        available_provider_chaser_candidate_analysis_ids,
+    )
     from apps.marimo.components.recording_workspace import (
         RecordingExplorationWorkspace,
     )
@@ -73,23 +75,23 @@ def _():
     from apps.marimo.components.tail_kinematics import build_tail_kinematics_output
 
     return (
-        PROVIDERS,
-        TRACK_KINEMATICS_RENDERER,
         CoreBehaviorSource,
+        PROVIDERS,
         Path,
         RecordingExplorationWorkspace,
+        TRACK_KINEMATICS_RENDERER,
         analyses_for_provider,
         available_bout_analysis_ids,
         available_chaser_analysis_ids,
+        available_provider_chaser_candidate_analysis_ids,
         build_arena_heatmap,
         build_bout_controls,
         build_bout_kinematics_output,
-        build_chaser_gaze_tracking_output,
         build_chaser_controls,
+        build_chaser_gaze_tracking_output,
         build_core_behavior_output,
         build_cra_near_field_output,
         build_cra_primary_endpoint_output,
-        build_debug_tables,
         build_detection_occupancy_output,
         build_distance_figure,
         build_egocentric_alignment_output,
@@ -102,15 +104,15 @@ def _():
         build_spec_provenance_panel,
         build_static_artifacts_panel,
         build_tail_kinematics_output,
-        discover_recording_explorer_spec_options,
+        discover_chaser_gaze_tracking_components,
         discover_core_behavior_options,
         discover_protocol_recording_options,
-        discover_chaser_gaze_tracking_components,
+        discover_recording_explorer_spec_options,
         go,
         group_specs_by_provider,
-        load_core_behavior_projection,
-        load_chaser_gaze_tracking_view,
         load_bout_metric_projection,
+        load_chaser_gaze_tracking_view,
+        load_core_behavior_projection,
         load_goodcopbadcop_view,
         mo,
         px,
@@ -169,8 +171,8 @@ def _(Path, discover_protocol_recording_options, mo):
         initial_artifact,
         initial_renderer,
         initial_run_path,
-        recording_scope_label,
         recording_options,
+        recording_scope_label,
         seed_zarr_path,
         workspace_mode,
     )
@@ -237,7 +239,14 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(PROVIDERS, core_options, group_specs_by_provider, mo, spec_options, zarr_path):
+def _(
+    PROVIDERS,
+    core_options,
+    group_specs_by_provider,
+    mo,
+    spec_options,
+    zarr_path,
+):
     specs_by_provider = group_specs_by_provider(spec_options)
     if core_options:
         specs_by_provider["core_behavior"] = list(core_options)
@@ -321,6 +330,7 @@ def _(
     analyses_for_provider,
     available_bout_analysis_ids,
     available_chaser_analysis_ids,
+    available_provider_chaser_candidate_analysis_ids,
     mo,
     selected_provider,
     selected_spec,
@@ -334,6 +344,10 @@ def _(
         available_ids = core_source.available_analysis_ids()
     elif selected_provider.provider_id == "bout_kinematics":
         available_ids = available_bout_analysis_ids(zarr_path, selected_spec)
+    elif selected_provider.provider_id == "stimulus_chaser_candidate":
+        available_ids = available_provider_chaser_candidate_analysis_ids(
+            zarr_path, selected_spec
+        )
     else:
         available_ids = available_chaser_analysis_ids(zarr_path, selected_spec)
     definitions = {
@@ -505,7 +519,7 @@ def _(core_source, mo, selected_analysis_id):
         selected_tail_run = None
         tail_run_output = mo.md("")
     tail_run_output
-    return selected_tail_run, tail_run_picker
+    return (selected_tail_run,)
 
 
 @app.cell(hide_code=True)
@@ -634,8 +648,8 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
-    core_source,
     core_series_picker,
+    core_source,
     core_time_window,
     eye_representation_picker,
     load_core_behavior_projection,
@@ -890,7 +904,12 @@ def _(chaser_controls, chaser_loaded, resolve_time_window_from_widgets):
 
 
 @app.cell(hide_code=True)
-def _(chaser_controls, chaser_loaded, resolve_time_windows_from_multiselect, selected_analysis_id):
+def _(
+    chaser_controls,
+    chaser_loaded,
+    resolve_time_windows_from_multiselect,
+    selected_analysis_id,
+):
     if (
         selected_analysis_id == "egocentric_bearing"
         and chaser_loaded is not None
@@ -912,7 +931,6 @@ def _(
     build_chaser_gaze_tracking_output,
     build_cra_near_field_output,
     build_cra_primary_endpoint_output,
-    build_debug_tables,
     build_detection_occupancy_output,
     build_distance_figure,
     build_egocentric_alignment_output,
@@ -938,7 +956,10 @@ def _(
     selected_spec,
     zarr_path,
 ):
-    if selected_provider is None or selected_provider.provider_id != "stimulus_chaser":
+    if selected_provider is None or selected_provider.provider_id not in {
+        "stimulus_chaser",
+        "stimulus_chaser_candidate",
+    }:
         chaser_output = mo.md("")
     elif chaser_error:
         chaser_output = mo.md(f"Chaser analysis failed: `{chaser_error}`")
@@ -1082,7 +1103,7 @@ def _(recording_workspace, workspace_mode):
     # or `exploration.open_zarr()`.
     exploration = recording_workspace if workspace_mode else None
     exploration
-    return (exploration,)
+    return
 
 
 if __name__ == "__main__":

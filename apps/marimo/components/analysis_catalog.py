@@ -128,6 +128,29 @@ CHASER_PROVIDER = ProviderDefinition(
 )
 
 
+CHASER_CANDIDATE_PROVIDER = ProviderDefinition(
+    provider_id="stimulus_chaser_candidate",
+    label="Chaser provider candidates (unpromoted)",
+    description=(
+        "Read-only comparison candidates. These runs are manifest-validated but "
+        "remain selector-ineligible until a scientific promotion decision."
+    ),
+    component_key="provider_chaser_candidate",
+    analyses=(
+        AnalysisDefinition(
+            "static_artifacts",
+            "Candidate plots",
+            "Persisted stimulus-sample distance traces and histograms.",
+        ),
+        AnalysisDefinition(
+            "provenance",
+            "Candidate provenance",
+            "Exact manifest, provider lineage, coordinate authority, and candidate status.",
+        ),
+    ),
+)
+
+
 BOUT_KINEMATICS_PROVIDER = ProviderDefinition(
     provider_id="bout_kinematics",
     label="Bout kinematics",
@@ -161,6 +184,7 @@ BOUT_KINEMATICS_PROVIDER = ProviderDefinition(
 PROVIDERS: Mapping[str, ProviderDefinition] = {
     CORE_BEHAVIOR_PROVIDER.provider_id: CORE_BEHAVIOR_PROVIDER,
     CHASER_PROVIDER.provider_id: CHASER_PROVIDER,
+    CHASER_CANDIDATE_PROVIDER.provider_id: CHASER_CANDIDATE_PROVIDER,
     BOUT_KINEMATICS_PROVIDER.provider_id: BOUT_KINEMATICS_PROVIDER,
 }
 
@@ -206,6 +230,14 @@ def group_specs_by_provider(
         grouped.setdefault(provider_id, []).append(option)
     if "bout_kinematics" in grouped:
         grouped["bout_kinematics"].sort(
+            key=lambda item: (
+                str(item.attrs.get("created_at_utc") or ""),
+                item.run_name,
+            ),
+            reverse=True,
+        )
+    if "stimulus_chaser_candidate" in grouped:
+        grouped["stimulus_chaser_candidate"].sort(
             key=lambda item: (
                 str(item.attrs.get("created_at_utc") or ""),
                 item.run_name,
