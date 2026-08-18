@@ -6,7 +6,6 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
-import shutil
 
 import numpy as np
 import zarr
@@ -50,7 +49,7 @@ def _build_templates(destination: Path) -> None:
     )
 
     destination.mkdir()
-    builder = destination.parent / "builder"
+    builder = destination.parent / "matched-builder"
     builder.mkdir()
     root, _keypoints = _real_canonical_archive(
         builder,
@@ -61,18 +60,17 @@ def _build_templates(destination: Path) -> None:
     (builder / "canonical.zarr").replace(matched)
     builder.rmdir()
 
+    builder = destination.parent / "mismatched-builder"
+    builder.mkdir()
+    mismatch_root, _keypoints = _real_canonical_archive(
+        builder,
+        include_bilateral_eyes=True,
+        selected_crop_rows=np.asarray([0, 1], dtype="<i8"),
+    )
+    _publish_real_canonical_subject_mask(mismatch_root)
     mismatched = destination / _MISMATCHED
-    shutil.copytree(matched, mismatched)
-    mismatch_root = zarr.open_group(
-        str(mismatched),
-        mode="a",
-        use_consolidated=False,
-    )
-    del mismatch_root["subject_mask_runs"]
-    _publish_real_canonical_subject_mask(
-        mismatch_root,
-        selected_rows=np.asarray([0, 1], dtype="<i8"),
-    )
+    (builder / "canonical.zarr").replace(mismatched)
+    builder.rmdir()
 
 
 def _validate_template(path: Path) -> None:

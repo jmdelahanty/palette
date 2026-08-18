@@ -1,7 +1,9 @@
 import numpy as np
+import pytest
 import torch
 
 from fisheye.shared.model_input_transform import (
+    model_input_transform_from_attrs,
     resolve_model_input_transform,
     resolve_stride_aligned_square_input_transform,
 )
@@ -75,3 +77,32 @@ def test_identity_rejects_shape_mismatch() -> None:
         assert "identity" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("identity transform accepted mismatched shapes")
+
+
+def test_persisted_transform_round_trips_without_defaults() -> None:
+    expected = resolve_model_input_transform(
+        (384, 384), mode="pad_to_size", model_hw=(512, 512)
+    )
+
+    loaded = model_input_transform_from_attrs(expected.to_attrs())
+
+    assert loaded == expected
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        lambda attrs: attrs.pop("pad_left"),
+        lambda attrs: attrs.update({"pad_left": True}),
+        lambda attrs: attrs.update({"model_shape_hw": [512, 384]}),
+        lambda attrs: attrs.update({"coordinate_mapping": "guessed"}),
+    ),
+)
+def test_persisted_transform_rejects_partial_or_inconsistent_attrs(change) -> None:
+    attrs = resolve_model_input_transform(
+        (384, 384), mode="pad_to_size", model_hw=(512, 512)
+    ).to_attrs()
+    change(attrs)
+
+    with pytest.raises(ValueError):
+        model_input_transform_from_attrs(attrs)

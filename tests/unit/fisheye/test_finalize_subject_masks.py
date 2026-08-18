@@ -70,6 +70,9 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
 )
 from fisheye.shared.zarr.stage_arrays import REFINED_SUBJECT_MASKS_SPEC, validate_run
+from fisheye.shared.zarr.subject_mask_schema import (
+    derive_subject_mask_frame_row_offsets,
+)
 from fisheye.tune import refined_subject_mask_review as review_mod
 from tests.unit.fisheye.test_subject_mask_coordinate_publication import (
     MODEL_ARTIFACT,
@@ -241,6 +244,17 @@ def _publish_real_canonical_subject_mask(
     ):
         values = np.asarray(selected[name])
         run.create_array(name, data=values, chunks=values.shape)
+    source_frames = np.asarray(
+        selected["source_acquisition_frame_index"], dtype=np.int64
+    )
+    run.create_array(
+        "frame_row_offsets",
+        data=derive_subject_mask_frame_row_offsets(
+            source_frames,
+            n_frames=int(source_frames.max(initial=-1)) + 1,
+        ),
+        overwrite=True,
+    )
 
     masks = np.zeros((2, 3, 40, 40), dtype=np.uint8)
     masks[:, 0, 10:30, 10:30] = 1
@@ -435,6 +449,9 @@ def test_canonical_refined_lineage_copy_is_exact_and_omits_legacy_aliases() -> N
         "source_crop_row_ids": np.asarray([7, 3], dtype="<i8"),
         "instance_key": np.asarray([101, 202], dtype="<u8"),
         "source_acquisition_frame_index": np.asarray([44, 45], dtype="<i8"),
+        "frame_row_offsets": derive_subject_mask_frame_row_offsets(
+            np.asarray([44, 45], dtype="<i8"), n_frames=46
+        ),
         "source_crop_xywh": np.asarray(
             [[11, 12, 20, 21], [31, 32, 20, 21]], dtype="<i4"
         ),
@@ -489,6 +506,13 @@ def test_finalizer_routes_canonical_source_through_strict_publication_lifecycle(
         "source_acquisition_frame_index",
         data=np.asarray([10, 11], dtype="<i8"),
         chunks=(2,),
+    )
+    raw.create_array(
+        "frame_row_offsets",
+        data=derive_subject_mask_frame_row_offsets(
+            np.asarray([10, 11], dtype="<i8"), n_frames=12
+        ),
+        chunks=(13,),
     )
     raw.create_array(
         "source_crop_xywh",

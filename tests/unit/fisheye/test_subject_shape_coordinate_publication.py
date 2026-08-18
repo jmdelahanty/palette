@@ -50,6 +50,9 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     selector_snapshot,
 )
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started
+from fisheye.shared.zarr.subject_mask_schema import (
+    derive_subject_mask_frame_row_offsets,
+)
 from tests.unit.fisheye.test_keypoint_coordinate_publication import (
     _real_canonical_archive,
 )
@@ -172,7 +175,7 @@ def _create_canonical_subject_masks(root: Any) -> Any:
     source = load_persisted_subject_mask_crop_source(root, "crop_runs/c1")
     selected = selected_subject_mask_crop_values(
         source,
-        np.asarray([0, 1], dtype="<i8"),
+        np.asarray([1, 0], dtype="<i8"),
     )
     for name in (
         "source_crop_row_ids",
@@ -181,6 +184,16 @@ def _create_canonical_subject_masks(root: Any) -> Any:
         "source_crop_xywh",
     ):
         run.create_array(name, data=selected[name])
+    source_frames = np.asarray(
+        selected["source_acquisition_frame_index"], dtype=np.int64
+    )
+    run.create_array(
+        "frame_row_offsets",
+        data=derive_subject_mask_frame_row_offsets(
+            source_frames,
+            n_frames=int(source_frames.max(initial=-1)) + 1,
+        ),
+    )
 
     masks = _fish_masks()
     probabilities = masks * np.uint8(255)
@@ -277,6 +290,7 @@ def _create_canonical_refined_masks(root: Any, raw: Any) -> Any:
         "source_crop_row_ids",
         "instance_key",
         "source_acquisition_frame_index",
+        "frame_row_offsets",
         "source_crop_xywh",
         "available_channels",
         "masks_roi",

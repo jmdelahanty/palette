@@ -219,6 +219,17 @@ def _build_refined_fixture(
         "source_crop_xywh",
     ):
         _copy_array(run, raw_run, name)
+    frame_row_offsets = run.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 1, 2], dtype=np.int64),
+        chunks=(3,),
+    )
+    frame_row_offsets.attrs.update(
+        {
+            "logical_schema_id": "palette.array.frame_row_offsets",
+            "logical_schema_version": 1,
+        }
+    )
     if with_eye_relation:
         raw_masks = np.asarray(raw_run["masks_roi"][:])
         masks = np.zeros((raw_masks.shape[0], 4, *raw_masks.shape[2:]), dtype=np.uint8)
@@ -324,7 +335,7 @@ def _build_refined_fixture(
         ):
             geometry = components[component_name].create_group("geometry")
             ellipse = np.full((2, 5), np.nan, dtype=np.float32)
-            ellipse[0] = np.asarray([*center, 3.0, 4.0, 0.0], dtype=np.float32)
+            ellipse[0] = np.asarray([*center, 4.0, 3.0, 0.0], dtype=np.float32)
             geometry.create_array("ellipse_params", data=ellipse, chunks=(2, 5))
             geometry.create_array(
                 "ellipse_success",
@@ -486,6 +497,17 @@ def _add_minimal_refined_run(
         "masks_roi",
     ):
         _copy_array(run, raw_run, name)
+    frame_row_offsets = run.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 1, 2], dtype=np.int64),
+        chunks=(3,),
+    )
+    frame_row_offsets.attrs.update(
+        {
+            "logical_schema_id": "palette.array.frame_row_offsets",
+            "logical_schema_version": 1,
+        }
+    )
     metrics = run.create_group("metrics")
     for name in (
         "mask_present",
@@ -800,6 +822,13 @@ def test_refined_publication_rejects_stale_flags_and_unknown_root_arrays(
         data=np.zeros((2,), dtype=np.float32),
         chunks=(2,),
     )
+    monkeypatch.setattr(
+        module,
+        "_scan_required_surfaces",
+        lambda _context: pytest.fail(
+            "dense surface scan ran before closed-world structural validation"
+        ),
+    )
     with pytest.raises(
         RefinedSubjectMaskCoordinatePublicationError,
         match="unsupported root array",
@@ -811,6 +840,29 @@ def test_refined_publication_rejects_stale_flags_and_unknown_root_arrays(
                 REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
             ],
         )
+
+
+def test_refined_publication_binds_frame_row_offsets_as_row_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _parent, run, _raw, _snapshot_value = _refined_fixture(monkeypatch)
+    _prepare(root, run)
+
+    published = publish_refined_subject_mask_coordinate_surfaces(
+        root,
+        "refined_subject_masks_runs/r1",
+        expected_publication_owner=run.attrs[
+            REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
+        ],
+    )
+
+    root_arrays = published.inventory.record["closed_world_structure"]["run_root"][
+        "arrays"
+    ]
+    assert root_arrays["frame_row_offsets"]["semantic_role"] == (
+        "source_frame_to_observation_row_csr_index"
+    )
+    assert "frame_row_offsets" in published.scientific_manifest.record["table_arrays"]
 
 
 def test_refined_loader_rejects_descriptor_drop_or_payload_tamper(
@@ -1339,6 +1391,68 @@ def test_refined_optional_invalid_geometry_requires_nan_sentinel(
     with pytest.raises(
         RefinedSubjectMaskCoordinatePublicationError,
         match="all-NaN sentinel",
+    ):
+        publish_refined_subject_mask_coordinate_surfaces(
+            root,
+            "refined_subject_masks_runs/r1",
+            expected_publication_owner=run.attrs[
+                REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
+            ],
+        )
+
+
+def test_refined_ellipse_fit_outlier_is_sealed_as_diagnostic_not_coordinate_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _parent, run, _raw, _snapshot_value = _refined_fixture(monkeypatch)
+    geometry = run["components"]["subject_body"]["geometry"]
+    geometry["ellipse_params"].data[0] = np.asarray(
+        [-184.0, 193.0, 909.0, 2.0, 0.2],
+        dtype=np.float32,
+    )
+    geometry["ellipse_success"].data[0] = True
+    _prepare(root, run)
+
+    published = publish_refined_subject_mask_coordinate_surfaces(
+        root,
+        "refined_subject_masks_runs/r1",
+        expected_publication_owner=run.attrs[
+            REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
+        ],
+    )
+
+    interpretation = published.interpretations[
+        "components/subject_body/geometry/ellipse_params"
+    ].record
+    assert interpretation["fit_result_diagnostics"] == {
+        "policy": "diagnostic_only_does_not_override_opencv_fit_success_v1",
+        "algorithm_success_count": 1,
+        "center_outside_roi_count": 1,
+        "axis_larger_than_roi_extent_count": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "ellipse",
+    (
+        [10.0, 10.0, 2.0, 3.0, 0.0],
+        [10.0, 10.0, 3.0, 2.0, -0.1],
+        [10.0, 10.0, 3.0, 2.0, 180.0],
+    ),
+)
+def test_refined_ellipse_success_requires_normalized_opencv_fit_result(
+    monkeypatch: pytest.MonkeyPatch,
+    ellipse: list[float],
+) -> None:
+    root, _parent, run, _raw, _snapshot_value = _refined_fixture(monkeypatch)
+    geometry = run["components"]["subject_body"]["geometry"]
+    geometry["ellipse_params"].data[0] = np.asarray(ellipse, dtype=np.float32)
+    geometry["ellipse_success"].data[0] = True
+    _prepare(root, run)
+
+    with pytest.raises(
+        RefinedSubjectMaskCoordinatePublicationError,
+        match="normalized OpenCV fit-result contract",
     ):
         publish_refined_subject_mask_coordinate_surfaces(
             root,

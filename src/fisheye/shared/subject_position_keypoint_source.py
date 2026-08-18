@@ -65,6 +65,11 @@ from fisheye.shared.zarr.keypoint_publication_mode import (
 from fisheye.shared.zarr.keypoint_publication import (
     keypoint_metadata_declaration_maps,
 )
+from fisheye.shared.zarr.coordinate_successor_authority import (
+    KEYPOINT_COORDINATE_SUCCESSOR_KIND,
+    CoordinateSuccessorAuthorityError,
+    load_coordinate_successor_authority,
+)
 from fisheye.shared.zarr.keypoint_schema import (
     KEYPOINT_SCHEMA_V2,
     KeypointDimensions,
@@ -92,9 +97,13 @@ from fisheye.shared.coordinate_surface_contract import (
 SOURCE_MODALITY = "keypoint"
 SOURCE_KIND = "canonical_keypoint_coordinate_selector"
 SEALED_BUNDLE_SOURCE_KIND = "sealed_keypoint_bundle_member_canary"
+COORDINATE_SUCCESSOR_SOURCE_KIND = "sealed_keypoint_coordinate_successor_canary"
 CANONICAL_COORDINATE_CONTRACT = "canonical_v2"
 KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR = "canonical_selector"
 KEYPOINT_AUTHORITY_MODE_SEALED_BUNDLE_CANARY = "sealed_keypoint_bundle_canary_v1"
+KEYPOINT_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY = (
+    "sealed_keypoint_coordinate_successor_canary_v1"
+)
 SEALED_BUNDLE_PRODUCTION_SELECTOR_ACTIVATION = (
     "deferred_separate_reviewed_change"
 )
@@ -159,6 +168,8 @@ class BoundKeypointPositionSource:
     authority_mode: str
     keypoint_bundle_authority: Mapping[str, Any] | None
     keypoint_bundle_authority_digest: str | None
+    coordinate_successor_authority: Mapping[str, Any] | None
+    coordinate_successor_authority_digest: str | None
     _analysis_zarr: str | Path | Any = field(repr=False, compare=False)
     _anatomy_profile: AnatomyProfile = field(repr=False, compare=False)
     _binding_id: str = field(repr=False, compare=False)
@@ -615,12 +626,136 @@ def _require_authority_mode(value: Any) -> str:
     if value not in {
         KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR,
         KEYPOINT_AUTHORITY_MODE_SEALED_BUNDLE_CANARY,
+        KEYPOINT_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY,
     }:
         raise KeypointPositionSourceError(
             "Unsupported keypoint position authority mode; use the canonical "
-            "selector or the explicit sealed-bundle canary mode."
+            "selector, explicit sealed-bundle canary, or explicit coordinate-"
+            "successor canary mode."
         )
     return str(value)
+
+
+def _require_coordinate_successor_authority(
+    root: Any,
+    analysis_zarr: str | Path | Any,
+    *,
+    run: Any,
+    parent: Any,
+    run_path: str,
+    run_id: str,
+    manifest: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], str]:
+    """Bind an ineligible successor back to its still-current source authority."""
+
+    try:
+        authority = load_coordinate_successor_authority(
+            run,
+            expected_kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,
+            expected_successor_run_path=run_path,
+        )
+    except CoordinateSuccessorAuthorityError as exc:
+        raise KeypointPositionSourceError(
+            f"Keypoint coordinate-successor authority is invalid: {exc}."
+        ) from exc
+    authority_payload = authority["payload"]
+    source_binding = authority_payload["source"]
+    source_path = source_binding["run_path"]
+    try:
+        source_run = root[source_path]
+    except Exception as exc:
+        raise KeypointPositionSourceError(
+            "The immutable keypoint coordinate-successor source is absent."
+        ) from exc
+    source_manifest = getattr(source_run, "attrs", {}).get(
+        KEYPOINT_RUN_MANIFEST_ATTRIBUTE
+    )
+    if not isinstance(source_manifest, Mapping):
+        raise KeypointPositionSourceError(
+            "The keypoint coordinate-successor source manifest is absent."
+        )
+    source_logical = source_manifest.get("payload", {}).get("logical_content", {})
+    if (
+        source_manifest.get("payload_digest")
+        != source_binding.get("manifest_payload_digest")
+        or canonical_json_sha256(source_manifest)
+        != source_binding.get("manifest_document_digest")
+        or source_logical.get("digest")
+        != source_binding.get("logical_content_digest")
+    ):
+        raise KeypointPositionSourceError(
+            "The keypoint coordinate-successor source manifest changed."
+        )
+    successor_logical = payload.get("logical_content")
+    if (
+        not isinstance(successor_logical, Mapping)
+        or successor_logical.get("digest") != source_logical.get("digest")
+    ):
+        raise KeypointPositionSourceError(
+            "The keypoint coordinate successor changed the logical observation payload."
+        )
+
+    try:
+        resolved = resolve_active_keypoint_bundle_from_root(root)
+    except Exception as exc:
+        raise KeypointPositionSourceError(
+            f"Current source keypoint bundle authority is invalid: {exc}."
+        ) from exc
+    current_source_authority = (
+        resolved.get("authority") if isinstance(resolved, Mapping) else None
+    )
+    sealed_source_authority = authority_payload["source_authority"]
+    if (
+        not isinstance(current_source_authority, Mapping)
+        or current_source_authority != sealed_source_authority.get("record")
+        or canonical_json_sha256(current_source_authority)
+        != sealed_source_authority.get("record_sha256")
+    ):
+        raise KeypointPositionSourceError(
+            "The source keypoint bundle authority changed after successor publication."
+        )
+    persisted = _validate_bundle_authority_direct_consolidated(
+        analysis_zarr,
+        authority=current_source_authority,
+    )
+    if persisted != dict(current_source_authority):
+        raise KeypointPositionSourceError(
+            "The published source keypoint authority differs between metadata views."
+        )
+
+    attrs = getattr(run, "attrs", {})
+    owner = attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR)
+    if (
+        attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT
+        or attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or attrs.get("status") != RUN_STATUS_COMPLETE
+        or attrs.get("stage_selector_eligible") is not False
+        or attrs.get("production_candidate") is not True
+        or attrs.get("production_selector_activation")
+        != SEALED_BUNDLE_PRODUCTION_SELECTOR_ACTIVATION
+        or type(owner) is not str
+        or _PUBLICATION_OWNER_UUID.fullmatch(owner) is None
+    ):
+        raise KeypointPositionSourceError(
+            "The keypoint coordinate successor is not one sealed ineligible candidate."
+        )
+    try:
+        complete = is_run_complete_in_parent(parent, run)
+    except Exception as exc:
+        raise KeypointPositionSourceError(
+            f"Unable to validate keypoint successor completion: {exc}."
+        ) from exc
+    if complete is not True:
+        raise KeypointPositionSourceError(
+            "The keypoint coordinate successor is incomplete under its parent policy."
+        )
+    selector_refs = tuple(parent.attrs.get(name) for name in _SELECTOR_ALIAS_NAMES)
+    if run_id in selector_refs or root.attrs.get("current_keypoint_group_path") == run_path:
+        raise KeypointPositionSourceError(
+            "The coordinate successor canary is unexpectedly selected."
+        )
+    return _readonly_mapping(authority), canonical_json_sha256(authority)
 
 
 def _bind_source_schema(
@@ -772,6 +907,8 @@ def load_bound_keypoint_position_source(
     run = _require_group(root, normalized_path, label="keypoint run")
     authority_record: Mapping[str, Any] | None = None
     authority_digest: str | None = None
+    successor_authority: Mapping[str, Any] | None = None
+    successor_authority_digest: str | None = None
     if authority_mode == KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR:
         _require_current_selector(
             root,
@@ -791,6 +928,19 @@ def load_bound_keypoint_position_source(
             run_id=run_id,
             manifest=manifest,
             payload=payload,
+        )
+    elif authority_mode == KEYPOINT_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY:
+        successor_authority, successor_authority_digest = (
+            _require_coordinate_successor_authority(
+                root,
+                analysis_zarr,
+                run=run,
+                parent=parent,
+                run_path=normalized_path,
+                run_id=run_id,
+                manifest=manifest,
+                payload=payload,
+            )
         )
     metadata_digest = _validate_published_metadata(
         analysis_zarr,
@@ -885,7 +1035,12 @@ def load_bound_keypoint_position_source(
         source_kind=(
             SOURCE_KIND
             if authority_mode == KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR
-            else SEALED_BUNDLE_SOURCE_KIND
+            else (
+                COORDINATE_SUCCESSOR_SOURCE_KIND
+                if authority_mode
+                == KEYPOINT_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY
+                else SEALED_BUNDLE_SOURCE_KIND
+            )
         ),
         run_path=normalized_path,
         run_id=run_id,
@@ -913,6 +1068,8 @@ def load_bound_keypoint_position_source(
         authority_mode=authority_mode,
         keypoint_bundle_authority=authority_record,
         keypoint_bundle_authority_digest=authority_digest,
+        coordinate_successor_authority=successor_authority,
+        coordinate_successor_authority_digest=successor_authority_digest,
         _analysis_zarr=analysis_zarr,
         _anatomy_profile=profile,
         _binding_id=policy.binding_id,
@@ -957,6 +1114,8 @@ def revalidate_bound_keypoint_position_source(
         "authority_mode",
         "keypoint_bundle_authority",
         "keypoint_bundle_authority_digest",
+        "coordinate_successor_authority",
+        "coordinate_successor_authority_digest",
     ):
         if getattr(current, name) != getattr(source, name):
             raise KeypointPositionSourceError(
@@ -995,7 +1154,9 @@ __all__ = [
     "KeypointPositionSourceError",
     "KeypointPositionSourcePolicy",
     "KEYPOINT_AUTHORITY_MODE_CANONICAL_SELECTOR",
+    "KEYPOINT_AUTHORITY_MODE_COORDINATE_SUCCESSOR_CANARY",
     "KEYPOINT_AUTHORITY_MODE_SEALED_BUNDLE_CANARY",
+    "COORDINATE_SUCCESSOR_SOURCE_KIND",
     "SEALED_BUNDLE_PRODUCTION_SELECTOR_ACTIVATION",
     "SEALED_BUNDLE_SOURCE_KIND",
     "SOURCE_KIND",

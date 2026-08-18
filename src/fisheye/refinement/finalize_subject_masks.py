@@ -233,6 +233,7 @@ _CANONICAL_REFINED_SOURCE_ARRAYS = (
     "source_crop_row_ids",
     "instance_key",
     "source_acquisition_frame_index",
+    "frame_row_offsets",
     "source_crop_xywh",
 )
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"

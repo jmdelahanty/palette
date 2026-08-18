@@ -9,6 +9,7 @@ publishes a closed-world Zarr v3 store with consolidated metadata.
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+import copy
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
@@ -749,6 +750,80 @@ def subject_mask_core_metadata_declaration_maps(
         run_id=str(run_id),
         paths=tuple(str(path) for path in arrays),
     )
+
+
+def build_subject_mask_coordinate_successor_manifest(
+    source_manifest: Mapping[str, Any],
+    *,
+    run_id: str,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    coordinate_dependencies: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Rebind an immutable core payload to successor coordinate metadata.
+
+    The logical-content and source-production evidence remain byte-for-byte
+    identical.  A refined successor may additionally replace only its exact raw
+    core dependency with the already validated raw coordinate successor.
+    """
+
+    errors = validate_subject_mask_core_run_manifest(source_manifest)
+    if errors:
+        raise ValueError(
+            "Subject-mask coordinate-successor source manifest is invalid: "
+            + "; ".join(errors)
+        )
+    successor = copy.deepcopy(dict(source_manifest))
+    payload = successor.get("payload")
+    if not isinstance(payload, dict):  # pragma: no cover - validated above
+        raise ValueError("Subject-mask source manifest payload is absent.")
+    publication = payload.get("publication")
+    if not isinstance(publication, dict):  # pragma: no cover - validated above
+        raise ValueError("Subject-mask source publication record is absent.")
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id or "/" in normalized_run_id:
+        raise ValueError("Subject-mask successor run_id must be one run name.")
+    payload["run_id"] = normalized_run_id
+    source = payload.get("source")
+    if not isinstance(source, dict):  # pragma: no cover - validated above
+        raise ValueError("Subject-mask source binding is absent.")
+    validation_receipt = source.get("validation_receipt")
+    if validation_receipt is not None:
+        if not isinstance(validation_receipt, dict):  # pragma: no cover
+            raise ValueError("Subject-mask source-validation binding is malformed.")
+        validation_receipt["relative_path"] = (
+            f"{payload['stage_family']}/{normalized_run_id}/"
+            f"{SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR}"
+        )
+    publication["stage_selector_eligible"] = False
+    publication["metadata_state"] = "direct_and_consolidated_validated"
+    publication["metadata_digest"] = _metadata_digest(
+        direct_metadata_declarations,
+        consolidated_metadata_declarations,
+    )
+    if coordinate_dependencies is not None:
+        normalized_dependencies = json.loads(
+            canonical_json_bytes(coordinate_dependencies).decode("utf-8")
+        )
+        dependency_errors = _validate_core_coordinate_dependencies(
+            normalized_dependencies,
+            kind=str(payload.get("kind")),
+        )
+        if dependency_errors:
+            raise ValueError(
+                "Subject-mask successor dependencies are invalid: "
+                + "; ".join(dependency_errors)
+            )
+        payload["coordinate_dependencies"] = normalized_dependencies
+    successor["payload_digest"] = canonical_json_sha256(payload)
+    canonical_json_bytes(successor)
+    successor_errors = validate_subject_mask_core_run_manifest(successor)
+    if successor_errors:
+        raise ValueError(
+            "Subject-mask coordinate-successor manifest is invalid: "
+            + "; ".join(successor_errors)
+        )
+    return successor
 
 
 def validate_persisted_subject_mask_core_publication(
@@ -2542,6 +2617,7 @@ __all__ = [
     "SubjectMaskCorePublication",
     "SubjectMaskCoreValidationMode",
     "build_subject_mask_core_coordinate_dependencies",
+    "build_subject_mask_coordinate_successor_manifest",
     "publish_selector_ineligible_subject_mask_core_snapshot",
     "subject_mask_core_metadata_declaration_maps",
     "validate_persisted_subject_mask_core_publication",

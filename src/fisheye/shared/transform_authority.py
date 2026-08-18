@@ -16,8 +16,15 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from fisheye.shared.archive_identity import ArchiveIdentity, ArchiveIdentityError, archive_identity
-from fisheye.shared.coordinate_identity import BoundRowIdentityContract, RowIdentityContractError
+from fisheye.shared.archive_identity import (
+    ArchiveIdentity,
+    ArchiveIdentityError,
+    archive_identity,
+)
+from fisheye.shared.coordinate_identity import (
+    BoundRowIdentityContract,
+    RowIdentityContractError,
+)
 from fisheye.shared.coordinate_reference import canonical_node_path
 from fisheye.shared.pixel_frame_authority import (
     ARENA_RELATIVE_CANVAS_SPACE_ID,
@@ -34,6 +41,9 @@ from fisheye.shared.pixel_frame_authority import (
     STIMULUS_CANVAS_SPACE_ID,
     TRANSLATION_XY_DIRECT_V1,
     CROP_PLACEMENT_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
     CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
     CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     BoundPixelFrameAuthority,
@@ -82,17 +92,26 @@ def _require_crop_ownership_attr_pair(
         source._context.get("crop_placement_ownership")
     )
     expected = {
-        TRANSFORM_AUTHORITY_ATTR: CROP_PLACEMENT_OWNERSHIP_ATTR,
-        TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR: (
-            CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR
-        ),
-        TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR: CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        TRANSFORM_AUTHORITY_ATTR: {
+            CROP_PLACEMENT_OWNERSHIP_ATTR,
+            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+        },
+        TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR: {
+            CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+            CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
+        },
+        TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR: {
+            CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
+        },
     }[attr_name]
-    if ownership.attr_name != expected:
+    if ownership.attr_name not in expected:
         raise TransformAuthorityError(
             "Crop-placement transform authority is cross-wired to the wrong "
             "closed ownership attr."
         )
+
+
 TRANSFORM_AUTHORITY_CANONICALIZATION = "canonical_json_sort_keys_v1"
 
 SELECTED_CALIBRATION_AUTHORITY_KIND = "selected_calibration"
@@ -200,7 +219,9 @@ def _restore_exact_attrs(attrs: Any, snapshot: Mapping[str, Any]) -> None:
         raise RuntimeError("restored attrs differ type-strictly from snapshot")
 
 
-def _exact_fields(value: Any, *, expected: frozenset[str], field_name: str) -> Mapping[str, Any]:
+def _exact_fields(
+    value: Any, *, expected: frozenset[str], field_name: str
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TransformAuthorityError(f"{field_name} must be a mapping.")
     actual = frozenset(value)
@@ -379,7 +400,9 @@ def _parse_payload(value: Any) -> AuthorityPayload:
         raise TransformAuthorityError("payload.selector must be 'array_values'.")
     return AuthorityPayload(
         record_ref=ref,
-        record_sha256=_sha256(payload["record_sha256"], field_name="payload.record_sha256"),
+        record_sha256=_sha256(
+            payload["record_sha256"], field_name="payload.record_sha256"
+        ),
         selector="array_values",
     )
 
@@ -390,12 +413,17 @@ def _parse_identity(value: Any) -> AuthorityRowIdentity:
         expected=frozenset({"record_ref", "record_sha256", "leading_dimension"}),
         field_name="row_identity",
     )
-    if type(payload["leading_dimension"]) is not int or payload["leading_dimension"] < 0:
+    if (
+        type(payload["leading_dimension"]) is not int
+        or payload["leading_dimension"] < 0
+    ):
         raise TransformAuthorityError(
             "row_identity.leading_dimension must be an exact nonnegative integer."
         )
     return AuthorityRowIdentity(
-        record_ref=_required_text(payload["record_ref"], field_name="row_identity.record_ref"),
+        record_ref=_required_text(
+            payload["record_ref"], field_name="row_identity.record_ref"
+        ),
         record_sha256=_sha256(
             payload["record_sha256"], field_name="row_identity.record_sha256"
         ),
@@ -423,8 +451,8 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
     actual = set(value)
     if not required.issubset(actual) or not actual.issubset(allowed):
         raise TransformAuthorityError(
-            f"Transform-authority fields are invalid; missing={sorted(required-actual)}, "
-            f"unknown={sorted(actual-allowed)}."
+            f"Transform-authority fields are invalid; missing={sorted(required - actual)}, "
+            f"unknown={sorted(actual - allowed)}."
         )
     if value["schema_id"] != TRANSFORM_AUTHORITY_SCHEMA_ID:
         raise TransformAuthorityError("Unsupported transform-authority schema_id.")
@@ -447,7 +475,9 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
         if "camera_id" in value
         else None
     )
-    row_identity = _parse_identity(value["row_identity"]) if "row_identity" in value else None
+    row_identity = (
+        _parse_identity(value["row_identity"]) if "row_identity" in value else None
+    )
     if not isinstance(value["semantics"], Mapping):
         raise TransformAuthorityError("semantics must be a mapping.")
     semantics = json.loads(_canonical_json(value["semantics"]))
@@ -460,7 +490,9 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
             or row_identity is not None
             or formula != PROJECTIVE_XY_DIRECT_V1
         ):
-            raise TransformAuthorityError("Selected calibration direction/semantics are invalid.")
+            raise TransformAuthorityError(
+                "Selected calibration direction/semantics are invalid."
+            )
     elif kind == CROP_PLACEMENT_AUTHORITY_KIND:
         expected_formula = (
             SCALE_XY_PIXEL_CENTER_V1
@@ -476,7 +508,9 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
             or formula != expected_formula
             or semantics != {"layout": "xywh"}
         ):
-            raise TransformAuthorityError("Crop-placement direction/semantics are invalid.")
+            raise TransformAuthorityError(
+                "Crop-placement direction/semantics are invalid."
+            )
     elif kind == MODEL_INPUT_PREPROCESSING_AUTHORITY_KIND:
         if (
             source.space_id != DETECTOR_MODEL_INPUT_SPACE_ID
@@ -486,7 +520,9 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
             or source.pixel_convention != target.pixel_convention
             or formula != TRANSLATION_XY_DIRECT_V1
         ):
-            raise TransformAuthorityError("Model preprocessing direction/semantics are invalid.")
+            raise TransformAuthorityError(
+                "Model preprocessing direction/semantics are invalid."
+            )
     elif kind == ARENA_CANVAS_PLACEMENT_AUTHORITY_KIND:
         expected_semantics = _exact_fields(
             semantics,
@@ -504,7 +540,9 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
             or type(expected_semantics["origin_x_px"]) is not int
             or type(expected_semantics["origin_y_px"]) is not int
         ):
-            raise TransformAuthorityError("Arena placement direction/semantics are invalid.")
+            raise TransformAuthorityError(
+                "Arena placement direction/semantics are invalid."
+            )
     else:
         if source.space_id == SOURCE_CAMERA_NORMALIZED_SPACE_ID:
             expected_target = SOURCE_CAMERA_IMAGE_SPACE_ID
@@ -532,12 +570,12 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
             }
             or expected_semantics["reference_width_px"] != target.width
             or expected_semantics["reference_height_px"] != target.height
-            or (
-                formula == NORMALIZED_TO_PIXEL_CENTER_INDEX_V1
-            )
+            or (formula == NORMALIZED_TO_PIXEL_CENTER_INDEX_V1)
             != (target.pixel_convention == "pixel_center")
         ):
-            raise TransformAuthorityError("Normalized-to-pixel direction/semantics are invalid.")
+            raise TransformAuthorityError(
+                "Normalized-to-pixel direction/semantics are invalid."
+            )
     return TransformAuthorityRecord(
         authority_id=authority_id,
         kind=kind,
@@ -551,7 +589,9 @@ def parse_transform_authority(value: Any) -> TransformAuthorityRecord:
     )
 
 
-def _same_frame_endpoint(record: AuthorityEndpoint, frame: BoundPixelFrameAuthority) -> bool:
+def _same_frame_endpoint(
+    record: AuthorityEndpoint, frame: BoundPixelFrameAuthority
+) -> bool:
     return record == frame.endpoint
 
 
@@ -559,7 +599,9 @@ def _matrix(node: Any) -> np.ndarray:
     try:
         raw = np.asarray(node[:])
     except Exception as exc:
-        raise TransformAuthorityError("Unable to read exact transform payload.") from exc
+        raise TransformAuthorityError(
+            "Unable to read exact transform payload."
+        ) from exc
     if raw.dtype.str != "<f8" or raw.shape != (3, 3) or not np.isfinite(raw).all():
         raise TransformAuthorityError(
             "Constant/projective payload must be finite little-endian float64 3x3."
@@ -571,7 +613,8 @@ def _matrix(node: Any) -> np.ndarray:
 
 def _homography_digest(matrix: np.ndarray) -> str:
     return hashlib.sha256(
-        b"float64_little_endian_c_order_v1\x00" + matrix.astype("<f8", copy=False).tobytes(order="C")
+        b"float64_little_endian_c_order_v1\x00"
+        + matrix.astype("<f8", copy=False).tobytes(order="C")
     ).hexdigest()
 
 
@@ -637,7 +680,9 @@ def _selected_semantics(
 def _model_semantics(source_frame: BoundPixelFrameAuthority) -> dict[str, Any]:
     raw = source_frame.record.lineage.get("preprocessing")
     if not isinstance(raw, Mapping):
-        raise TransformAuthorityError("Model-input frame lacks preprocessing semantics.")
+        raise TransformAuthorityError(
+            "Model-input frame lacks preprocessing semantics."
+        )
     return json.loads(_canonical_json(raw))
 
 
@@ -727,8 +772,12 @@ def _validate(
         source = require_bound_pixel_frame_authority(source_frame)
         target = require_bound_pixel_frame_authority(target_frame)
     except PixelFrameAuthorityError as exc:
-        raise TransformAuthorityError(f"Typed endpoint authority is stale: {exc}") from exc
-    if not _same_frame_endpoint(record.source, source) or not _same_frame_endpoint(record.target, target):
+        raise TransformAuthorityError(
+            f"Typed endpoint authority is stale: {exc}"
+        ) from exc
+    if not _same_frame_endpoint(record.source, source) or not _same_frame_endpoint(
+        record.target, target
+    ):
         raise TransformAuthorityError(
             "Transform authority endpoints do not equal exact typed pixel frames."
         )
@@ -753,7 +802,11 @@ def _validate(
         ownership = require_bound_crop_placement_ownership(
             roi._context.get("crop_placement_ownership")
         )
-        if row_identity is None or roi.row_identity is None or _identity(row_identity) != _identity(roi.row_identity):
+        if (
+            row_identity is None
+            or roi.row_identity is None
+            or _identity(row_identity) != _identity(roi.row_identity)
+        ):
             raise TransformAuthorityError(
                 "Crop authority does not use the ROI frame's exact observation identity."
             )
@@ -781,15 +834,22 @@ def _validate(
             "record_ref": roi.record_ref,
             "record_sha256": roi.record_sha256,
         }:
-            raise TransformAuthorityError("Model-input frame targets a different ROI frame.")
-        if model.record.lineage.get("preprocessing_payload") != _payload(payload_node).to_dict():
+            raise TransformAuthorityError(
+                "Model-input frame targets a different ROI frame."
+            )
+        if (
+            model.record.lineage.get("preprocessing_payload")
+            != _payload(payload_node).to_dict()
+        ):
             raise TransformAuthorityError(
                 "Model transform payload is not its exact preprocessing record."
             )
         if record.semantics != _model_semantics(model):
             raise TransformAuthorityError("Model preprocessing semantics changed.")
         transform = model._context["transform"]
-        if not np.array_equal(_matrix(payload_node), model_input_to_roi_matrix(transform)):
+        if not np.array_equal(
+            _matrix(payload_node), model_input_to_roi_matrix(transform)
+        ):
             raise TransformAuthorityError("Model preprocessing matrix changed.")
     elif record.kind == ARENA_CANVAS_PLACEMENT_AUTHORITY_KIND:
         arena = require_arena_relative_canvas_pixel_frame_authority(source)
@@ -973,7 +1033,10 @@ def load_bound_transform_authority(
 
 
 def require_bound_transform_authority(value: Any) -> BoundTransformAuthority:
-    if type(value) is not BoundTransformAuthority or value._seal is not _BOUND_AUTHORITY_SEAL:
+    if (
+        type(value) is not BoundTransformAuthority
+        or value._seal is not _BOUND_AUTHORITY_SEAL
+    ):
         raise TransformAuthorityError("A sealed bound transform authority is required.")
     value.assert_verified()
     return value

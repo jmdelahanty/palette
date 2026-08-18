@@ -776,8 +776,42 @@ authority from array shape, an atomic writer owner, or a newer manifest. The
 existing detection, keypoint, refined-mask, bundle, and selector artifacts
 remain unchanged.
 
-- [ ] Publish selector-ineligible canonical coordinate successors for this
-      recording without changing any source selector.
+#### Coordinate-successor implementation boundary
+
+A coordinate successor is a migration artifact for an already immutable run;
+it is not another inference result. The publisher copies each Zarr metadata
+object, hard-links each immutable array payload object, and then adds the
+complete `canonical_v2` coordinate graph under a new run ID. The source run's
+manifest, payload objects, bundle authority, family selectors, registry state,
+and production eligibility must remain byte-for-byte unchanged. A copied
+source-validation JSON sidecar remains content-identical but its storage path
+is rebound to the successor run in the successor manifest.
+
+The canary readers accept these runs only through the separately named
+`coordinate_successor_canary_v1` authority mode. They revalidate the original
+sealed bundle authority, source and successor logical-content digests,
+direct/consolidated metadata agreement, every persisted coordinate-record
+pointer, and the false selector-eligibility state. Ordinary production readers
+do not fall back to this mode. Newly published coordinate-complete inference
+runs do not need successors.
+
+Implementation preflight on 2026-08-17 used the reviewed
+`2026-08-10T17-20-55Z_arena_2_goodbatbadbat` archive. Both the five-point
+keypoint source and the raw/refined subject-mask pair passed read-only source
+inspection, including exact model hashes and the mask model's persisted
+384-to-512 zero-padding transform. The dry runs made no Zarr, selector, or
+registry writes. Publication remains pending required CI and the
+commit-pinned selector-ineligible canary.
+
+- [x] Implement strict keypoint and raw/refined subject-mask successor
+      publishers, authority records, explicit canary readers, and dry-run CLIs.
+- [x] Prove metadata-copy/payload-hard-link isolation, transform reconstruction,
+      manifest rebinding, and tamper rejection in focused tests.
+- [x] Complete read-only source inspection for the reviewed GoodBatBadBat
+      recording without changing any archive or selector.
+- [ ] Pass required CI, deploy the exact green commit, and publish
+      selector-ineligible canonical coordinate successors for this recording
+      without changing any source selector.
 - [ ] Materialize all initial providers for one reviewed zebrafish recording.
 - [ ] Compare offsets, valid coverage, speed, occupancy, and bout sensitivity
       without selecting a production default.

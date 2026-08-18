@@ -34,7 +34,9 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR,
     SubjectMaskCoreValidationMode,
     build_subject_mask_core_coordinate_dependencies,
+    build_subject_mask_coordinate_successor_manifest,
     publish_selector_ineligible_subject_mask_core_snapshot,
+    subject_mask_core_metadata_declaration_maps,
     validate_subject_mask_core_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
@@ -1158,6 +1160,22 @@ def test_coordinate_core_v4_binds_crop_raw_refined_and_worker_evidence(
         == SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
     )
     assert validate_subject_mask_core_run_manifest(raw_publication.manifest) == ()
+    raw_direct, raw_consolidated = subject_mask_core_metadata_declaration_maps(
+        raw_publication.output_path,
+        family=raw_publication.family,
+        run_id=raw_publication.run_id,
+        manifest=raw_publication.manifest,
+    )
+    raw_successor = build_subject_mask_coordinate_successor_manifest(
+        raw_publication.manifest,
+        run_id="raw_coordinate_v4_successor",
+        direct_metadata_declarations=raw_direct,
+        consolidated_metadata_declarations=raw_consolidated,
+    )
+    assert validate_subject_mask_core_run_manifest(raw_successor) == ()
+    assert raw_successor["payload"]["logical_content"] == (
+        raw_publication.manifest["payload"]["logical_content"]
+    )
     unsupported_v6 = deepcopy(raw_publication.manifest)
     unsupported_v6["schema_version"] = 6
     assert "subject-mask core manifest envelope identity mismatch" in (

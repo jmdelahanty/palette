@@ -406,6 +406,92 @@ the streaming core/QC/cache computation path. This boundary is explicit: the
 validated promotion applies to the clip-parallel production topology first,
 not to a nominal profile flag that a whole-video producer cannot yet satisfy.
 
+### Coordinate-successor receipt boundary (2026-08-18)
+
+The worker/core receipts above and the coordinate-surface receipt solve two
+different validation problems. Core receipts hash C-contiguous array values and
+prove producer semantics. Canonical coordinate records hash a dtype/shape
+header followed by those values and additionally prove coordinate-derived
+metrics, optional refined geometry, and closed-world namespaces. One digest
+cannot be relabelled as the other.
+
+Consequently, existing `production_streaming_v1` GoodBatBadBat masks require
+one complete coordinate validation scan before they can receive an immutable
+`palette.subject_mask.coordinate_surface_validation_receipt` v1. That scan does
+not rewrite the masks. A coordinate successor hard-links the sealed payload,
+validates every source/target payload object by exact path, size, and same-file
+identity without opening chunks, and publishes new canonical-v2 metadata. The
+new receipt binds the source manifest and validation receipt, inactive bundle
+authority, exact coordinate-record set, and hard-link inventory.
+
+Within that first scan, already computed refined payload hashes are reused for
+later inventory, descriptor, measurement, and scientific-manifest construction;
+they are not recomputed from the dense arrays. Later strict readers may use the
+persisted coordinate receipt only after revalidating its successor authority,
+record pointers, live array metadata, and target publication. An absent receipt
+retains the full-scan compatibility path. A present but invalid receipt must
+fail closed and must never trigger a silent full-scan fallback.
+
+Historical refined cores may omit modern explicit run semantics even though
+their manifest binds an immutable validated worker draft that contains them. A
+coordinate successor may carry `derived_mask_caches_stale = false`,
+`metrics_stale = false`, `contours_stale = false`, dense `masks_roi` authority,
+and the exact `pixel_edge_half_open` bbox convention and derivation only when
+that exact manifest source is the supplied complete, selector-ineligible draft
+and every value agrees. The successor records this as immutable historical
+refined-semantic normalization. Missing, stale, differently sourced, or
+inexact evidence fails closed; no value is inferred from absence.
+
+The refined closed-world inventory includes `frame_row_offsets` as the
+source-frame-to-observation-row CSR index. It is a first-class scientific row
+index already required by the subject-mask core and bundle schemas, not an
+unknown auxiliary. Closed-world namespace checks and optional-geometry
+validation run before the expensive dense-mask equivalence pass so structural
+contract errors fail quickly without wasting a complete raster scan.
+
+`ellipse_success` retains its producer meaning: OpenCV returned one finite,
+normalized fit with positive axes (`major >= minor`, angle in `[0,180)`). A
+least-squares fit to a degenerate in-ROI contour can still place its center
+outside the ROI or produce an axis larger than the ROI. Publication preserves
+that exact derived result and records `center_outside_roi_count` and
+`axis_larger_than_roi_extent_count` as diagnostic evidence; those counts do not
+silently redefine algorithm success as anatomical/QC validity. Downstream eye
+analytics must apply an explicit versioned QC policy if they wish to reject
+such fits.
+
+### Persisted historical-crop successor reload
+
+The strict raw successor loader must not reopen a sealed historical
+geometry-only crop through the ordinary future-normal crop loader. That crop is
+intentionally not a canonical materialized-pixel publication. Instead, a
+complete successor may reinstall only its own persisted historical-crop adapter
+after validating all of the following:
+
+- the raw coordinate-successor authority and coordinate-validation receipt;
+- the authority-bound padded-crop-lineage record;
+- the separately digest-bound adapter record, which must exactly equal the
+  adapter nested in padded-crop lineage;
+- the immutable source core manifest and the exact source/crop row selection;
+- a freshly reconstructed adapter record that exactly matches the persisted
+  record.
+
+The refined loader inherits the corresponding padded-placement ownership names
+from that verified raw successor. A selector-ineligible coordinate successor
+does not require the normal production activation receipt: its activation is
+explicitly deferred, while its coordinate validation receipt and successor
+authority remain mandatory.
+
+On the GoodBatBadBat v16 canary, the one-time raw-plus-refined publication and
+scientific scan took 2,017 seconds. A subsequent consolidated, strict,
+receipt-backed reload of both successors took 36.27 seconds with 528,004 KiB
+peak RSS. The reload verified the raw and refined inventory records and the
+refined scientific manifest without decoding the dense mask payload.
+
+Keypoint terminal receipts are analogous producer evidence, but the current
+keypoint coordinate-successor path still reads keypoint arrays for inspection
+and auxiliary derivation. It should not be described as a general zero-read
+coordinate-publication implementation.
+
 Implementation verification at this checkpoint:
 
 - 53 adjacent clipped/recovery/whole-recording/package planner tests passed;
