@@ -449,6 +449,16 @@ unknown auxiliary. Closed-world namespace checks and optional-geometry
 validation run before the expensive dense-mask equivalence pass so structural
 contract errors fail quickly without wasting a complete raster scan.
 
+`ellipse_success` retains its producer meaning: OpenCV returned one finite,
+normalized fit with positive axes (`major >= minor`, angle in `[0,180)`). A
+least-squares fit to a degenerate in-ROI contour can still place its center
+outside the ROI or produce an axis larger than the ROI. Publication preserves
+that exact derived result and records `center_outside_roi_count` and
+`axis_larger_than_roi_extent_count` as diagnostic evidence; those counts do not
+silently redefine algorithm success as anatomical/QC validity. Downstream eye
+analytics must apply an explicit versioned QC policy if they wish to reject
+such fits.
+
 Keypoint terminal receipts are analogous producer evidence, but the current
 keypoint coordinate-successor path still reads keypoint arrays for inspection
 and auxiliary derivation. It should not be described as a general zero-read

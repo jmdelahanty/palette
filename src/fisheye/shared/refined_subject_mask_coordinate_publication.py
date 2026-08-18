@@ -2696,19 +2696,40 @@ def _validate_optional_geometry(
             )
             values = _array(ellipse, label=f"{component} ellipse_params")
             valid = _array(success, label=f"{component} ellipse_success")
+            fit_diagnostics = {
+                "policy": "diagnostic_only_does_not_override_opencv_fit_success_v1",
+                "algorithm_success_count": int(np.count_nonzero(valid)),
+                "center_outside_roi_count": 0,
+                "axis_larger_than_roi_extent_count": 0,
+            }
             if bool(np.any(valid)):
                 selected = values[valid]
                 if (
                     not bool(np.isfinite(selected).all())
-                    or bool(np.any(selected[:, 0] < 0.0))
-                    or bool(np.any(selected[:, 0] >= width))
-                    or bool(np.any(selected[:, 1] < 0.0))
-                    or bool(np.any(selected[:, 1] >= height))
                     or bool(np.any(selected[:, 2:4] <= 0.0))
+                    or bool(np.any(selected[:, 2] < selected[:, 3]))
+                    or bool(np.any(selected[:, 4] < 0.0))
+                    or bool(np.any(selected[:, 4] >= 180.0))
                 ):
                     _fail(
-                        f"{component} valid ellipse geometry is outside the exact ROI extent."
+                        f"{component} valid ellipse geometry violates the exact "
+                        "normalized OpenCV fit-result contract."
                     )
+                center_outside = (
+                    (selected[:, 0] < 0.0)
+                    | (selected[:, 0] >= width)
+                    | (selected[:, 1] < 0.0)
+                    | (selected[:, 1] >= height)
+                )
+                axis_larger_than_extent = (selected[:, 2] > max(width, height)) | (
+                    selected[:, 3] > max(width, height)
+                )
+                fit_diagnostics["center_outside_roi_count"] = int(
+                    np.count_nonzero(center_outside)
+                )
+                fit_diagnostics["axis_larger_than_roi_extent_count"] = int(
+                    np.count_nonzero(axis_larger_than_extent)
+                )
             if bool(np.any(~valid)) and not bool(np.isnan(values[~valid]).all()):
                 _fail(
                     f"{component} invalid ellipse geometry must use an all-NaN sentinel."
@@ -2726,6 +2747,7 @@ def _validate_optional_geometry(
                 "overlay": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
                 "component": component,
                 "container": geometry,
+                "fit_result_diagnostics": fit_diagnostics,
                 "invalid_value_policy": "all_nan_geometry_is_invalid_sentinel_not_coordinate",
             }
         sampled = _optional_child(group, "sampled_contours")
@@ -3390,6 +3412,10 @@ def _interpretation_record(
                 else "zero_geometry_is_invalid_sentinel_not_coordinate"
             ),
         }
+    if "fit_result_diagnostics" in spec:
+        record["fit_result_diagnostics"] = copy.deepcopy(
+            dict(spec["fit_result_diagnostics"])
+        )
     return record
 
 
