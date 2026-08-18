@@ -62,11 +62,18 @@ successful computation does not promote it to the GoodBatBadBat default.
 - [x] Expose exact manifest-valid candidates in the individual-recording
   Marimo explorer through a separately labeled, read-only, selector-ineligible
   provider. Explorer visibility does not imply scientific promotion.
-- [ ] Use semantic chaser behavior labels from sealed role authority when
-  available. Never infer behavior from red/blue color or chaser index.
+- [x] Use semantic chaser behavior labels from the sealed
+  `chaser_behavior_class_id` role authority. Unknown or incompatible authority
+  fails closed; behavior is never inferred from red/blue color or chaser
+  index.
 - [ ] For cohort views, provide both pooled descriptive distributions and a
   recording-balanced view with one value per recording x animal unit and
   epoch.
+
+Provider epoch-behavior cohort exports and plots already provide pooled and
+recording-balanced movement/bout surfaces. A corresponding cross-recording
+provider-chaser-distance cohort product is still pending, so the checkbox
+above intentionally remains open.
 
 ## Canary acceptance
 
@@ -100,6 +107,10 @@ Current immutable evidence:
 - The preserved v1 candidate has the same scientific arrays but an imprecise
   histogram y-axis label (`frames`); v2 corrects that label without rewriting
   v1.
+- The recording explorer now resolves the two semantic behavior labels as
+  `aggressive` and `inert`, and exposes exact heading-bound egocentric bearing
+  plus a read-only bout-response projection. Those projections remain
+  selector-ineligible and do not constitute provider promotion.
 
 ## Downstream scope
 
@@ -107,11 +118,15 @@ Current immutable evidence:
   radial occupancy against an equivalent-position fixture.
 - [ ] Validate near-field occupancy only with its required quadrant component
   and explicit motion/immobility authority.
-- [ ] Add a distance-only bout response component for onset distance, bout
-  rate, duration, and peak speed by distance band.
-- [ ] Defer egocentric bearing, gaze, turn-toward, circling, predicted miss,
-  and heading-dependent escape analysis until the heading provider has its own
-  reviewed promotion evidence.
+- [x] Add a read-only canary bout-response projection for onset distance,
+  duration, path length, and peak speed with exact position/motion lineage.
+- [ ] Publish a sealed distance-only bout-response component including bout
+  rate and distance-band summaries.
+- [x] Expose exact heading-bound egocentric bearing as a read-only,
+  selector-ineligible canary projection.
+- [ ] Defer gaze, turn-toward, circling, predicted miss, and promotion of
+  heading-dependent escape analysis until the heading provider has its own
+  reviewed evidence.
 
 ## Promotion and campaign
 
@@ -121,7 +136,9 @@ Current immutable evidence:
   evidence, estimator, policy version, and exact source manifests.
 - [ ] Add a provider-aware sealed chaser-distance contract with generic
   `source_position_*` lineage while retaining the detection-specific v1 reader.
-- [ ] Require focused tests and all required CI before selector activation or
-  production publication.
+- [x] Pass the focused provider-position, motion, epoch, chaser-candidate, and
+  Marimo projection test suites locally.
+- [ ] Pass all required CI before selector activation, production publication,
+  or integration to `main`.
 - [ ] After promotion, launch the 84-recording campaign from the frozen cohort
   input manifest and publish a recording-balanced cohort export.

@@ -736,17 +736,26 @@ The shared Phase 4A foundation is implemented by
 `provider_analysis_offers`, `provider_analysis_bindings`,
 `provider_recording_timing_authority`,
 `provider_track_motion_source_handle`, and `resolved_epoch_selection`.
-Metric-specific occupancy, motion, and heading offers remain pending.
+Selector-ineligible provider epoch-behavior summaries, cohort exports/plots,
+and provider-aware chaser-distance candidates now exercise that foundation.
+Generic occupancy, trajectory, acceleration, heading, angular-speed, and
+contrast offers remain pending.
 
 - [x] Late-bind provider and temporal identities to one exact recording,
       source-video metadata record, and acquisition frame-clock authority.
-- [ ] Add provider requirements to occupancy, trajectory, speed,
-      acceleration, heading, and angular-speed offers.
-- [ ] Include provider IDs and digests in metric, contrast, and plot recipes.
+- [x] Bind provider IDs and digests in the implemented provider-motion,
+      epoch-behavior, cohort-export, and chaser-distance candidate products.
+- [x] Expose provider identity and readiness for the recording-level
+      selector-ineligible canary in the Marimo explorer.
+- [ ] Extend provider requirements to generic occupancy, trajectory,
+      acceleration, heading, angular-speed, and contrast offers.
+- [ ] Include provider IDs and digests in every generic metric, contrast, and
+      plot recipe.
 - [ ] Permit multiple explicit offers when several providers are available.
 - [ ] Add strict cross-provider comparison products.
 - [ ] Reject incompatible providers in ordinary scientific contrasts.
-- [ ] Expose provider identity and readiness in reporting and review UIs.
+- [ ] Generalize provider discovery and readiness beyond the recording-level
+      canary into reporting, registry, and review UIs.
 
 ### Phase 5: canaries, migration, and activation
 
@@ -800,8 +809,41 @@ Implementation preflight on 2026-08-17 used the reviewed
 keypoint source and the raw/refined subject-mask pair passed read-only source
 inspection, including exact model hashes and the mask model's persisted
 384-to-512 zero-padding transform. The dry runs made no Zarr, selector, or
-registry writes. Publication remains pending required CI and the
-commit-pinned selector-ineligible canary.
+registry writes. At that preflight checkpoint, publication was still pending
+required CI and the commit-pinned selector-ineligible canary.
+
+#### Selector-ineligible canary publication (2026-08-18)
+
+The commit-pinned experimental canary subsequently published complete,
+selector-ineligible coordinate successors without replacing any source run or
+production selector:
+
+- detection:
+  `detect_runs/detect_goodbatbadbat_raw_detection_20260813_v1_canonical_v3`;
+- keypoints:
+  `keypoints_runs/keypoints_goodbatbadbat_coordinate_v2_canary_20260817_v6`;
+- raw subject masks:
+  `subject_mask_runs/subject_masks_goodbatbadbat_coordinate_v2_canary_20260818_v16`;
+  and
+- refined subject masks:
+  `refined_subject_masks_runs/refined_subject_masks_goodbatbadbat_coordinate_v2_canary_20260818_v16`.
+
+The keypoint successor also drove one complete selector-ineligible position
+and motion chain:
+
+- `analysis/subject_position_runs/observation/position_goodbatbadbat_keypoint_triad_canary_20260818_v1`;
+- `analysis/track_kinematics_runs/provider/provider_motion_goodbatbadbat_keypoint_triad_canary_20260818_v1`;
+- provider epoch-behavior, swim-bout, cohort-export/plot, and provider-aware
+  chaser-distance canary products bound to those exact inputs.
+
+The position estimator is `keypoint_anatomical_triad_mean.v1`, with equal
+left-eye, right-eye, and swim-bladder weights. The motion run contains 150,788
+rows and passed its local, temporary, pre-pointer, final, and consolidated
+validations. Detection- and mask-derived position/motion runs have not yet
+been materialized, so this is not cross-provider promotion evidence. All
+published runs remain selector-ineligible, and the branch remains incomplete
+until every required CI check passes and it is integrated through the normal
+`main` workflow.
 
 - [x] Implement strict keypoint and raw/refined subject-mask successor
       publishers, authority records, explicit canary readers, and dry-run CLIs.
@@ -809,16 +851,20 @@ commit-pinned selector-ineligible canary.
       manifest rebinding, and tamper rejection in focused tests.
 - [x] Complete read-only source inspection for the reviewed GoodBatBadBat
       recording without changing any archive or selector.
-- [ ] Pass required CI, deploy the exact green commit, and publish
-      selector-ineligible canonical coordinate successors for this recording
-      without changing any source selector.
-- [ ] Materialize all initial providers for one reviewed zebrafish recording.
+- [x] Publish commit-pinned, selector-ineligible canonical coordinate
+      successors for this recording without changing any source selector.
+- [x] Materialize the keypoint-triad position, provider-motion, and initial
+      selector-ineligible analytics chain for one reviewed recording.
+- [x] Validate source preservation, exact lineage, and direct/consolidated
+      visibility for the published successors and keypoint chain.
+- [ ] Pass every required CI check and integrate the exact commit to `main`.
+- [ ] Materialize detection-, keypoint-, component-mask-triad-, and
+      subject-body-mask position providers for the same reviewed recording.
 - [ ] Compare offsets, valid coverage, speed, occupancy, and bout sensitivity
       without selecting a production default.
 - [ ] Review representative frames where providers disagree.
 - [ ] Publish selector-ineligible track successors for at least two position
       methods using the same body-frame source.
-- [ ] Validate source preservation, exact lineage, and consolidated visibility.
 - [ ] Define promotion policy only after canary evidence exists.
 - [ ] Add legacy adapters without relabeling historical estimator semantics.
 
