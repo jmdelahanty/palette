@@ -1087,10 +1087,6 @@ def _occupancy_authorities(
         "coordinate_frame_id": transform.target_coordinate_authority_id,
         "coordinate_authority_id": transform.target_coordinate_authority_id,
         "coordinate_space": "arena_mm",
-        "origin": "selected_arena_circle_center",
-        "positive_x": "camera_right",
-        "positive_y": "camera_down",
-        "units": "mm",
     }
     geometry_identity = {
         "geometry_id": grid_policy.geometry.geometry_id,
