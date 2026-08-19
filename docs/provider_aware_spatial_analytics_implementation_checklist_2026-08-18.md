@@ -78,8 +78,8 @@ outside the Codex sandbox as required by `AGENTS.md`. Static compile, Ruff, and
 `git diff --check` validation also pass.
 
 At that checkpoint, the canonical source adapters and millimetre grid were
-still open. The 2026-08-19 checkpoint below implements them. Real recording
-canary publication, physical `ArrayContract` migration for
+still open. The 2026-08-19 checkpoints below implement them and complete the
+first real recording publication. Physical `ArrayContract` migration for
 selection/trajectory/contrast, cohort products, plot recipes, Marimo
 discovery, registry projection, required CI, and any provider promotion remain
 open. No production selector, registry authority, or provider default has been
@@ -125,9 +125,10 @@ does not absorb the 264 detection-only observations.
 
 The new focused suite passes (`39 passed`), the read-only canonical authority,
 epoch, geometry, detection-tracking-plan, and keypoint-join preflights pass,
-and static compile, Ruff, and `git diff --check` pass. Real canary publication,
-required CI, cohort products, plots, Marimo discovery, registry projection,
-and any provider promotion remain separate gates.
+and static compile, Ruff, and `git diff --check` pass. The real canary
+publication evidence is recorded below. Required CI, cohort products, plots,
+Marimo discovery, registry projection, and any provider promotion remain
+separate gates.
 
 ### Read-only canary coordinate preflight
 
@@ -152,6 +153,114 @@ The 2026-08-19 checkpoint froze the cohort grid explicitly. It uses a declared
 boundary and exact camera scale. For this recording that produces `[-41, 41]`
 mm edges; it does not hardcode the nominal `[-40, 40]` mm dish or derive bins
 from observed position minima and maxima.
+
+## Real GoodBatBadBat canary publication (2026-08-19)
+
+Campaign `goodbatbadbat_position_spatial_canary_20260819_v2` completed at
+`2026-08-19T21:25:54.708229+00:00` from Palette commit
+`1db19d7ba024192daa1354fd2e714d4a1f327ec0` on branch
+`agent/palette/provider-comparison-canary-20260818`. The exact executed task
+bytes had SHA-256
+`b197691d8292bdd3501ef59b7d3cafa07cd6545a0c4936770aca97af5c4c141e`.
+The parsed task is reproduced exactly in
+[`diagnostics/provider_spatial_canary_2026-08-19/task.v2.json`](diagnostics/provider_spatial_canary_2026-08-19/task.v2.json),
+whose formatted file SHA-256 is
+`2538ce6dd421ab9fa45c6d88c5a71d420aab66ad957019f1bb2525da76a1e3a2`.
+The result document had SHA-256
+`a5f96e3546eff5d848a70be62de786ef97c29bbd066448ed57644f06548323f2`.
+
+The executed command was:
+
+```text
+scripts/py -m fisheye.utils.materialize_provider_spatial_canary --task-json /tmp/goodbatbadbat_provider_spatial_canary_20260819_v1.task.json --scratch-root /tmp/goodbatbadbat-provider-spatial-canary-20260819-v2-scratch --result-json /tmp/goodbatbadbat-provider-spatial-canary-20260819-v2.result.json --apply --json
+```
+
+The immutable epoch source was
+`analysis/stimulus_epoch_runs/stimulus_epochs_goodbatbadbat_canary_20260818_v2`
+with manifest digest
+`6232cb9f35635e942c525cc6ccb38721aec8953c949dd8a527d31aa9bddd96d7`.
+The three selector-ineligible selection publications are under
+`analysis/stimulus_selection_runs/`:
+
+| Selection | Frames | Request digest | Resolved digest | Logical array manifest |
+| --- | ---: | --- | --- | --- |
+| `black_before` | 60,000 | `9717a598da1c3056e1acd06e9fee50ffad7aa23dd7b9c76d0255a1a9f2784a26` | `b00bc6b84ca79eec4a0e77eee59427cf9d87a033618eb40c0cc2a4700fc00634` | `190eed401edf701fadae33517b564ca3e90758f8f97c087f6d9414fa44529734` |
+| `chaser` | 30,001 | `c5fb1d4a672a787643cf1cb6af86780deb4647204c6f601f454c61ef00f707f5` | `c6182fe2e43840d5659d385bdc7ef76b3ee97c9ce08feb1e13213d223ade41c4` | `9d6890d4d2b57d168553ba58657db480705903e5662ec4846050d61133f7a15f` |
+| `black_after` | 59,999 | `5f7b03fa245356c4d0d54a38642a29c4994c64bae39d4088217da21b085e7c21` | `f37739f10063fe9a67a3235aa2e9775bc9211044236f41314985c91f66c476db` | `5b5b99c9aa4a10ad54b464e44bed31b959f7228a387fddc1e897079f2c8ba16e` |
+
+The detection source binds 151,052 exact position/tracking rows with position
+manifest `953aa1e19e7db52e5621333e232959b669e7090b85966551d5ead64718b44ad5`
+and tracking manifest
+`8f4d7b4390a6aab147a95cc43f0d6a4dcce4e4a6a6dc65ac6dbd93a2ad38a52b`.
+The keypoint source binds 150,788 exact rows with position manifest
+`3e47c00354477945b191685d8dc8dcd934f382a85b7fdf280c01f20169986d88`
+and tracking manifest
+`8c547bb482f7597080925718c550ab4faa9921a57aa6aa4fff1712cbdf473aa7`.
+Both providers use the exact same resolved selections, 1 mm grid edges from
+`-41` through `+41` mm, and camera-to-arena transform digest
+`3d273f76e028c4f9847e6f33fb6f60cce69af51b1d41c86e2ef12d4ec311fb9d`.
+
+Trajectory runs are under `analysis/provider_spatial_trajectory_runs/` and
+occupancy runs are under `analysis/provider_occupancy_runs/`. The table gives
+the exact child run name, exact publication manifest digests, and selected-row
+coverage. Prefix each listed suffix with `provider_spatial_trajectory_` for the
+trajectory child and `provider_occupancy_` for the occupancy child:
+
+| Provider / selection | Child run suffix | Valid / expected frames | Missing frames | Provider-invalid rows | Trajectory manifest | Occupancy manifest |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| detection / `black_before` | `detection_black_before_goodbatbadbat_position_spatial_canary_20260819_v2` | 59,601 / 60,000 | 399 | 0 | `c8a6b2d6f7fffc3773fa4605d2778720e5233f9068ec8b9c440352caa1add0d9` | `eeb477ab5b9cb4833443e69b4498f3e7676af4908acd8322e841fdacd2cd1001` |
+| detection / `chaser` | `detection_chaser_goodbatbadbat_position_spatial_canary_20260819_v2` | 29,688 / 30,001 | 313 | 0 | `ecff00c61780ce2d9c899f17d22c6ef61400347d0edae94dfc7ec187807c2d29` | `6b2a956114bbd975f6f6d011310292d0cad3f8bc1b04c57e56bb961a57706990` |
+| detection / `black_after` | `detection_black_after_goodbatbadbat_position_spatial_canary_20260819_v2` | 59,728 / 59,999 | 271 | 0 | `0b730087ae59b0d71a9607b0a3a68d7293c574e5ad83dddc963d86445fc27329` | `e5b17f527133fa17803ba32e3e58f98b2d306af0652a6cb7025abe6d01e94960` |
+| keypoint / `black_before` | `keypoint_black_before_goodbatbadbat_position_spatial_canary_20260819_v2` | 58,414 / 60,000 | 508 | 1,078 | `7572e445be7bd870ac95ab0dc71cfd6f5f6a0da586b659f1ab37ef18e21bf325` | `c9632a437630f0cfe78d31e974e6e8c4e6f1e711d6f4204946bce5db87e55a28` |
+| keypoint / `chaser` | `keypoint_chaser_goodbatbadbat_position_spatial_canary_20260819_v2` | 29,034 / 30,001 | 381 | 586 | `b63fc08f623ce1c4b3dfc5b3af086ba4fcebdde03cc13109ba15e8de609e99e4` | `99a67b7b0a69c25783f0afeb65c6536b1a61eba31c2c87bd3c8c8a57a84697c2` |
+| keypoint / `black_after` | `keypoint_black_after_goodbatbadbat_position_spatial_canary_20260819_v2` | 59,016 / 59,999 | 358 | 625 | `c6576f78d1fc0b8eff5208d2a979e3ea58bd72cd5d5220222a7812dbe7a6e654` | `7f5b78d07646dc74c0e7734aa7e466b745291ba19d1c8bb0b93f28d88a269eb7` |
+
+All six products reported zero selected out-of-grid rows. Missing selected
+frames and provider-invalid rows remain separate evidence; neither was
+interpolated or filled from the other provider.
+
+The four exact contrast children under
+`analysis/provider_occupancy_contrast_runs/` are:
+
+| Provider / contrast | Child run name | Manifest digest |
+| --- | --- | --- |
+| detection / `chaser - black_before` | `provider_occupancy_contrast_detection_chaser_minus_black_before_goodbatbadbat_position_spatial_canary_20260819_v2` | `7ee816cd3b24f5073bad96815d81041852f72ed8b16b712561083990363f70d2` |
+| detection / `black_after - black_before` | `provider_occupancy_contrast_detection_black_after_minus_black_before_goodbatbadbat_position_spatial_canary_20260819_v2` | `2c5a0f095d4c6b27fb38015fc25cf4e435973f7c48fac081465f91641dcfd2b4` |
+| keypoint / `chaser - black_before` | `provider_occupancy_contrast_keypoint_chaser_minus_black_before_goodbatbadbat_position_spatial_canary_20260819_v2` | `83c3f02356b144a91d9d884a9683127c96e16942b599c10e6a45db9793fa0d22` |
+| keypoint / `black_after - black_before` | `provider_occupancy_contrast_keypoint_black_after_minus_black_before_goodbatbadbat_position_spatial_canary_20260819_v2` | `e0b79d9565862e70dc2f97ac8c01305dfbdde6f5b018455a9d8ce9ae4a8a361e` |
+
+The post-publication metadata audit found exactly 19 expected artifacts: 3
+selections, 6 trajectories, 6 occupancies, and 4 contrasts. Every root reports
+complete and selector-ineligible, every staging record reports a successful
+final validation and selector-ineligible policy, and every publisher recorded
+identical parent selector attributes before and after publication. The result
+also explicitly records `selector_updates: false`, `registry_updates: false`,
+and `source_payloads_rewritten: false`.
+
+The final aggregate focused suite passed `147` tests with `12` expected Zarr-v3
+consolidated-metadata warnings in 95.09 seconds outside the sandbox:
+
+```text
+scripts/py -m pytest -p no:cacheprovider tests/unit/fisheye/test_composable_epoch_selection_adapter.py tests/unit/fisheye/test_composable_stimulus_selection.py tests/unit/fisheye/test_composable_stimulus_selection_materializer.py tests/unit/fisheye/test_materialize_provider_spatial_canary.py tests/unit/fisheye/test_provider_occupancy_contrast.py tests/unit/fisheye/test_provider_occupancy_contrast_materializer.py tests/unit/fisheye/test_provider_occupancy_v2.py tests/unit/fisheye/test_provider_occupancy_v2_materializer.py tests/unit/fisheye/test_provider_spatial_grid_policy.py tests/unit/fisheye/test_provider_spatial_pipeline.py tests/unit/fisheye/test_provider_spatial_track_source.py tests/unit/fisheye/test_provider_spatial_trajectory.py tests/unit/fisheye/test_provider_spatial_trajectory_materializer.py -q
+```
+
+An earlier mechanical V1 attempt published one valid selector-ineligible
+diagnostic trajectory before a coordinate-frame compatibility check stopped
+the run:
+`analysis/provider_spatial_trajectory_runs/provider_spatial_trajectory_detection_black_before_goodbatbadbat_position_spatial_canary_20260819_v1`,
+manifest
+`7d2daee46c7ee70cffac06cc42e4e9ff8797c4984bbdcb1df5db0e148d5b1d63`.
+It is not selected and was not reused as V2 evidence.
+
+The deliberately serial canary took about 49 minutes. Independent immutable
+provider/selection products remain the correct scientific publication model,
+but production execution can fan out the six trajectory/occupancy branches
+and fan in only for contrasts. The canary also exposed repeated full parent
+validation/consolidation during contrast publication as a performance target;
+a trusted-parent receipt fast path can be evaluated separately without
+changing scientific semantics. The timestamped decision for this canary is to
+retain both providers as comparison-only offers: successful publication is not
+evidence to promote either provider as the GoodBatBadBat default.
 
 ## Accepted first-slice decisions
 
@@ -233,7 +342,7 @@ from observed position minima and maxima.
       the first single-subject profile.
 - [x] Preserve provider-present, provider-valid, in-selection, transform-valid,
       and in-grid states separately.
-- [ ] Publish or bind selector-ineligible track successors for both detection
+- [x] Publish or bind selector-ineligible track successors for both detection
       and keypoint position. Do not reuse a body-frame source as position
       evidence.
 - [x] Reject implicit provider fallback, selector lookup, same-length joins,
@@ -303,7 +412,7 @@ from observed position minima and maxima.
 - [ ] Migrate trajectory arrays to the shared physical `ArrayContract`
       authority; occupancy-v2 has this declaration surface, but selection and
       trajectory do not yet share it.
-- [ ] Publish one detection-position and one keypoint-position trajectory for
+- [x] Publish one detection-position and one keypoint-position trajectory for
       the same GoodBatBadBat selections without selecting a winner.
 - [x] Validate source preservation and direct/consolidated metadata equality.
 
@@ -340,7 +449,7 @@ from observed position minima and maxima.
       the occupancy-v2 source-binding manifest and cross-stage adapter.
 - [x] Connect those exact bindings to canonical stimulus and detection/keypoint
       source adapters rather than fixture/in-memory provider inputs.
-- [ ] Publish detection and keypoint occupancy canaries for identical saved
+- [x] Publish detection and keypoint occupancy canaries for identical saved
       `black_before`, `chaser`, and `black_after` selections and the same
       millimetre grid.
 
@@ -356,7 +465,7 @@ from observed position minima and maxima.
 - [x] Reject ordinary scientific contrasts between detection and keypoint
       providers. Cross-provider sensitivity belongs in an explicitly labeled
       comparison product.
-- [ ] Publish `chaser - black_before` and `black_after - black_before` canary
+- [x] Publish `chaser - black_before` and `black_after - black_before` canary
       contrasts separately for detection and keypoint position.
 - [x] Store result arrays and exact references; do not overwrite, average, or
       duplicate the immutable source occupancy runs.
@@ -438,12 +547,12 @@ Use `2026-08-10T17-20-55Z_arena_2_goodbatbadbat` first because its four
 position providers and immutable provider-comparison evidence already exist.
 This checklist's canary uses only detection and keypoint position.
 
-- [ ] Preflight exact source manifests, selector-ineligible state, coordinate
+- [x] Preflight exact source manifests, selector-ineligible state, coordinate
       graph, geometry, transform, acquisition clock, stimulus run, and frame
       domain without writing.
-- [ ] Freeze the selection specs and millimetre-grid profile in the canary
+- [x] Freeze the selection specs and millimetre-grid profile in the canary
       plan before materialization.
-- [ ] Prove detection and keypoint calculations use identical resolved frame
+- [x] Prove detection and keypoint calculations use identical resolved frame
       sets and grid edges while retaining their own validity and row lineage.
 - [ ] Review trajectories and occupancy panels against recording playback for
       representative pre-, chaser-, and post-period frames.
@@ -451,9 +560,9 @@ This checklist's canary uses only detection and keypoint position.
       contrasts, speed, acceleration, and bouts.
 - [ ] Check for systematic step/state-dependent disagreement; do not replace
       this with review of weak mask-model disagreements.
-- [ ] Record exact canary run IDs, manifests, Palette commit, commands, test
+- [x] Record exact canary run IDs, manifests, Palette commit, commands, test
       results, and a timestamped decision.
-- [ ] Keep all canary runs selector-ineligible and leave production/default
+- [x] Keep all canary runs selector-ineligible and leave production/default
       provider policy unchanged.
 
 ## Production and integration gates
