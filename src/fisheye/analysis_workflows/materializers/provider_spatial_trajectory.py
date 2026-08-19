@@ -476,7 +476,6 @@ def _validate_trajectory(trajectory: object) -> ProviderSpatialTrajectory:
         raise ProviderSpatialTrajectoryMaterializationError(
             "selected-frame membership vectors have mismatched cardinality."
         )
-    flattened_membership_keys: list[str] = []
     for index, rows in enumerate(zip(*membership_vectors, strict=True)):
         keys, occurrences, roles = (tuple(row) for row in rows)
         if not keys or len(keys) != len(occurrences) or len(keys) != len(roles):
@@ -495,11 +494,6 @@ def _validate_trajectory(trajectory: object) -> ProviderSpatialTrajectory:
             raise ProviderSpatialTrajectoryMaterializationError(
                 f"selected-frame membership keys are duplicated at row {index}."
             )
-        flattened_membership_keys.extend(keys)
-    if len(set(flattened_membership_keys)) != len(flattened_membership_keys):
-        raise ProviderSpatialTrajectoryMaterializationError(
-            "selected-frame membership keys are duplicated across rows."
-        )
     matrix = np.asarray(value.transform.matrix)
     if (
         matrix.dtype != np.dtype(np.float64)

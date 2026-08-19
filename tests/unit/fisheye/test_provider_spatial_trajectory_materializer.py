@@ -215,6 +215,52 @@ def test_overlap_memberships_are_persisted_as_aligned_ragged_arrays(
     ]
 
 
+def test_one_interval_membership_identity_may_repeat_across_its_frames(
+    tmp_path: Path,
+) -> None:
+    base = _trajectory()
+    selection = SelectedFrameMembership(
+        recording_id="recording-1",
+        timeline_authority_id="timeline-v1",
+        selection_authority_id="stimulus-selection-v1",
+        acquisition_frames=np.asarray([0, 1, 2], dtype=np.int64),
+        membership_keys=(("atomic-pre",), ("atomic-pre",), ("atomic-pre",)),
+        occurrence_ids=(("occ-pre",), ("occ-pre",), ("occ-pre",)),
+        roles=(("pre",), ("pre",), ("pre",)),
+    )
+    rows = ProviderTrackSamples(
+        track_sample_key=base.track_sample_key,
+        acquisition_frame=base.acquisition_frame,
+        subject_identity=base.subject_identity,
+        track_identity=base.track_identity,
+        source_position_xy=base.source_position_xy,
+        provider_present=base.provider_present,
+        provider_valid=base.provider_valid,
+        provider_reason_code=("ok", "ok"),
+    )
+    trajectory = prepare_provider_spatial_trajectory(
+        authorities=base.authorities,
+        rows=rows,
+        selection=selection,
+        transform=base.transform,
+    )
+    plan = plan_provider_spatial_trajectory_run(
+        _archive(tmp_path / "analysis.zarr"),
+        trajectory,
+        run_name="repeated-membership-canary-v1",
+        scratch_root=tmp_path / "scratch",
+    )
+    publish_provider_spatial_trajectory_run(plan)
+    run = open_zarr_root(plan.source_zarr, mode="r", use_consolidated=False)[
+        plan.run_path
+    ]
+    assert _decode_text(run, "selection/membership_key") == [
+        "atomic-pre",
+        "atomic-pre",
+        "atomic-pre",
+    ]
+
+
 def test_source_trajectory_is_not_mutated(tmp_path: Path) -> None:
     trajectory = _trajectory()
     before = trajectory.source_position_xy.copy()
