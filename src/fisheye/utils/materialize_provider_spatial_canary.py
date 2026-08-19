@@ -785,7 +785,7 @@ def _tracking_for_provider(
         "status": "published",
         "run_path": handle.run_path,
         "manifest_sha256": handle.manifest_sha256,
-        "publication_status": published["publication"]["status"],
+        "publication_status": published.get("status", "complete"),
     }
 
 
