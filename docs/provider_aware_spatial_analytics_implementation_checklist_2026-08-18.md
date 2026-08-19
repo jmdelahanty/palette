@@ -77,14 +77,57 @@ with three existing Zarr-v3 consolidated-metadata warnings). Both suites ran
 outside the Codex sandbox as required by `AGENTS.md`. Static compile, Ruff, and
 `git diff --check` validation also pass.
 
-Still open are the canonical stimulus and detection/keypoint source adapters,
-real published source handles for those providers, a frozen GoodBatBadBat
-millimetre grid profile, real recording canary publication, physical
-`ArrayContract` migration for selection/trajectory/contrast, cohort products,
-plot recipes, Marimo discovery, registry projection, required CI, and any
-provider promotion. No production data, selector, registry authority, or
-provider default has been written or changed, and this checkpoint is not
-merge-ready.
+At that checkpoint, the canonical source adapters and millimetre grid were
+still open. The 2026-08-19 checkpoint below implements them. Real recording
+canary publication, physical `ArrayContract` migration for
+selection/trajectory/contrast, cohort products, plot recipes, Marimo
+discovery, registry projection, required CI, and any provider promotion remain
+open. No production selector, registry authority, or provider default has been
+written or changed, and this branch is not merge-ready.
+
+## Implementation checkpoint: exact canary adapters and frozen grid (2026-08-19)
+
+This checkpoint implements the remaining read boundary for the first real
+GoodBatBadBat provider comparison. It is still selector-ineligible and is not
+a provider-promotion decision:
+
+- `analysis_workflows.composable_epoch_selection_adapter` accepts only a
+  loader-minted exact epoch-v2 selection plus explicit caller bindings from
+  source window IDs to `black_before`, `chaser`, and `black_after`. It binds the
+  source video, acquisition clock, recording timing, source timeline, epoch
+  manifest, and interval evidence without inferring roles from labels or
+  order. `all_black` is available only as an explicit composition.
+- `analysis_workflows.provider_spatial_track_source` joins one exact
+  observation-position run to its exact tracking projection exclusively by
+  `uint64 instance_key`. It revalidates both loader-minted handles, preserves
+  source failure evidence, excludes explicitly unassigned tracking rows, and
+  rejects partial rowsets, frame disagreement, duplicate assigned frames, and
+  cross-recording composition.
+- `analysis_workflows.provider_spatial_grid_policy` freezes
+  `goodbatbadbat_arena_mm_grid_v1`: 1 mm bins and a symmetric extent rounded
+  outward from the exact selected circular arena boundary. Observed positions
+  cannot influence the extent. A physical inner rim and a manually reviewed
+  `visible_dish_top_rim_edge` remain distinct allowed boundary roles; an
+  outward detection centroid gate is rejected as grid geometry.
+- `utils.materialize_provider_spatial_canary` consumes one explicit task
+  document, creates a provider-specific detection tracking successor when
+  needed, and publishes three selection, six trajectory, six occupancy, and
+  four contrast runs. Every output is immutable and selector-ineligible. The
+  utility does not update the registry, any selector, or any source payload.
+
+The canonical arena-2 read-only preflight passed with recording timing
+authority `7b96148686e885648e20aa8d19f6cfa45c3b902ed7a2d78673b2760be7c2c3c8`,
+100 Hz and 152,035 acquisition frames. The selected reviewed Palette circle
+has radius 40.93503226842414 mm under the exact physical scale, yielding
+float64 grid edges from -41 through +41 mm. The detection tracking plan binds
+151,052 rows. The exact keypoint position/tracking join binds 150,788 rows and
+does not absorb the 264 detection-only observations.
+
+The new focused suite passes (`39 passed`), the read-only canonical authority,
+epoch, geometry, detection-tracking-plan, and keypoint-join preflights pass,
+and static compile, Ruff, and `git diff --check` pass. Real canary publication,
+required CI, cohort products, plots, Marimo discovery, registry projection,
+and any provider promotion remain separate gates.
 
 ### Read-only canary coordinate preflight
 
@@ -104,11 +147,11 @@ from source-camera pixels to arena-centred millimetres. It must preserve +X
 right and +Y down and must not apply a presentation reflection or heuristic
 Y flip.
 
-The transform authority is available, but the cohort grid remains open. The
-nominal 80 mm dish and the older 64-camera-pixel heatmap bins provide useful
-evidence (64 pixels are about 1.22 mm for this camera), but neither justifies
-silently hardcoding an `[-40, 40] mm` extent or a 1 mm bin width. Freeze the
-grid profile explicitly before canary publication.
+The 2026-08-19 checkpoint froze the cohort grid explicitly. It uses a declared
+1 mm scientific bin width and derives the outer extent from the selected arena
+boundary and exact camera scale. For this recording that produces `[-41, 41]`
+mm edges; it does not hardcode the nominal `[-40, 40]` mm dish or derive bins
+from observed position minima and maxima.
 
 ## Accepted first-slice decisions
 
@@ -178,15 +221,14 @@ grid profile explicitly before canary publication.
 
 ### Provider-track binding contract
 
-- [ ] Define a typed input handle for one exact
+- [x] Define a typed input handle for one exact
       `analysis/subject_position_runs/track_sample/<run>` or for an exact
       observation-position run plus its immutable observation-to-track
       projection.
-- [ ] Require exact `track_sample_key`, acquisition frame, subject/track
+- [x] Require exact `track_sample_key`, acquisition frame, subject/track
       identity, coordinate descriptor, provider ID, estimator digest, source
       manifest, and recording-timing authority from a canonical published
-      detection or keypoint source handle. The current materializers record
-      these identities but still receive provider rows as an in-memory object.
+      detection or keypoint source handle.
 - [x] Require uniqueness of `(subject_track_identity, acquisition_frame)` for
       the first single-subject profile.
 - [x] Preserve provider-present, provider-valid, in-selection, transform-valid,
@@ -200,9 +242,9 @@ grid profile explicitly before canary publication.
 
 ### Scientific spatial-grid contract
 
-- [ ] Freeze one versioned GoodBatBadBat arena-millimetre grid profile before
+- [x] Freeze one versioned GoodBatBadBat arena-millimetre grid profile before
       writing a canary. Record exact x/y edges as float64 arrays.
-- [ ] Choose the fixed grid extent and bin width from declared arena geometry
+- [x] Choose the fixed grid extent and bin width from declared arena geometry
       and bounded canary evidence, not the observed position minima/maxima.
 - [x] Define bin membership as left-closed/right-open, with the final outer
       edge inclusive. Persist the edge policy.
@@ -219,7 +261,7 @@ grid profile explicitly before canary publication.
 - [x] Implement pure schema models, canonical JSON, and digest helpers for
       atomic references, annotations, expressions, resolved intervals, source
       memberships, occurrences, and assigned roles.
-- [ ] Generalize `resolved_epoch_selection` through the new compiler while
+- [x] Generalize `resolved_epoch_selection` through the new compiler while
       retaining its current compatibility behavior for maintained epoch-v2
       runs.
 - [ ] Resolve exact canonical stimulus steps rather than relying only on
@@ -232,7 +274,7 @@ grid profile explicitly before canary publication.
 - [x] Materialize immutable named selection runs with content manifests,
       direct/consolidated validation, and permanently selector-ineligible
       publication semantics.
-- [ ] Add a mixed `SOLID_BLACK -> CHASER_PRESENTATION -> SOLID_BLACK` fixture
+- [x] Add a mixed `SOLID_BLACK -> CHASER_PRESENTATION -> SOLID_BLACK` fixture
       with distinct `black_before`, `chaser`, `black_after`, and `all_black`
       compositions.
 - [x] Prove that the two black steps remain separate occurrences unless a
@@ -256,9 +298,8 @@ grid profile explicitly before canary publication.
       geometry, transform, and software identities in the immutable trajectory
       content manifest, including `track_sample_policy_id`, source-row digest,
       and source-camera extent validity.
-- [ ] Bind those identities to actual canonical detection/keypoint source
-      handles and published source manifests; the current trajectory API still
-      accepts provider rows as an in-memory input.
+- [x] Bind those identities to actual canonical detection/keypoint source
+      handles and published source manifests through the exact keyed adapter.
 - [ ] Migrate trajectory arrays to the shared physical `ArrayContract`
       authority; occupancy-v2 has this declaration surface, but selection and
       trajectory do not yet share it.
@@ -297,7 +338,7 @@ grid profile explicitly before canary publication.
 - [x] Bind every declared position, tracking, selection, geometry, transform,
       timing, grid, validity, and configuration source by exact path/digest in
       the occupancy-v2 source-binding manifest and cross-stage adapter.
-- [ ] Connect those exact bindings to canonical stimulus and detection/keypoint
+- [x] Connect those exact bindings to canonical stimulus and detection/keypoint
       source adapters rather than fixture/in-memory provider inputs.
 - [ ] Publish detection and keypoint occupancy canaries for identical saved
       `black_before`, `chaser`, and `black_after` selections and the same
