@@ -791,6 +791,9 @@ def _tracking_for_provider(
 
 def _source_coordinate_authority_id(position: SubjectPositionSourceHandle) -> str:
     coordinate = position.coordinate_record
+    descriptor = coordinate.get("coordinate_descriptor")
+    if isinstance(descriptor, Mapping):
+        coordinate = descriptor
     frame = coordinate.get("frame_record")
     if not isinstance(frame, Mapping):
         extent = coordinate.get("reference_extent")

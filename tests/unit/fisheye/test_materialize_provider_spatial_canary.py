@@ -8,6 +8,7 @@ import pytest
 from fisheye.utils.materialize_provider_spatial_canary import (
     CANARY_DISPOSITION,
     ProviderSpatialCanaryError,
+    _source_coordinate_authority_id,
     load_task,
     planned_run_names,
 )
@@ -103,3 +104,14 @@ def test_task_rejects_duplicate_directed_contrast(tmp_path: Path) -> None:
     task_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ProviderSpatialCanaryError, match="duplicate directed"):
         load_task(task_path)
+
+
+def test_source_coordinate_authority_unwraps_validated_descriptor_record() -> None:
+    class Position:
+        coordinate_record = {
+            "coordinate_descriptor": {
+                "frame_record": {"record_sha256": "a" * 64}
+            }
+        }
+
+    assert _source_coordinate_authority_id(Position()) == "a" * 64
