@@ -1,14 +1,20 @@
 # Recording Step Status Parallel Agent Contract
 <!-- contract-meta
 version: 2
-status: active
+status: superseded
 implementation: implemented
 last_verified: 2026-05-21
+superseded_date: 2026-08-20
+superseded_by: docs/current_pipeline_contract.md and repository AGENTS.md
 -->
 
 Purpose: define a conflict-free parallel execution plan for RS3/RS4 hook-write
 work so multiple agents can implement status writes simultaneously and produce
 compatible outputs.
+
+This is a historical implementation-coordination record. Its agent ownership
+map and eye-mask-first stage list are no longer normative; current production
+direction lives in `docs/current_pipeline_contract.md` and `AGENTS.md`.
 
 ## Scope
 

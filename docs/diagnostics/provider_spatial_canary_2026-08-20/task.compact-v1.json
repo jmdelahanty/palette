@@ -1,0 +1,62 @@
+{
+  "schema_id": "palette.provider_spatial_canary_task",
+  "schema_version": 1,
+  "disposition": "selector_ineligible_provider_comparison_only_v1",
+  "campaign_id": "goodbatbadbat_spatial_compact_provenance_20260820_v1",
+  "recording_id": "2026-08-10T17-20-55Z_arena_2_goodbatbadbat",
+  "analysis_zarr": "/groups/johnson/johnsonlab/jeremy/recordings/2026-08-10T17-20-55Z_arena_2_goodbatbadbat/zarr/2026-08-10T17-20-55Z_arena_2_goodbatbadbat_analysis.zarr",
+  "arena_id": 2,
+  "subject_id": "9475911d-4d35-485f-8ba2-c7d1d841168a",
+  "epoch_source": {
+    "run_name": "stimulus_epochs_goodbatbadbat_canary_20260818_v2",
+    "manifest_sha256": "6232cb9f35635e942c525cc6ccb38721aec8953c949dd8a527d31aa9bddd96d7"
+  },
+  "geometry_source": {
+    "selection_run_name": "arena_geometry_selection_06b5cd2c35c04917004e",
+    "selection_record_sha256": "06b5cd2c35c04917004e52a897b3bae60cbbcfa8f2f97a2b80735826e0677026",
+    "physical_authority_sha256": "47758cca2a336a848300b92ebc77d953e74d417b0634915ada7421b63a401d69"
+  },
+  "recording_timing_authority_sha256": "7b96148686e885648e20aa8d19f6cfa45c3b902ed7a2d78673b2760be7c2c3c8",
+  "providers": {
+    "detection": {
+      "position_run_path": "analysis/subject_position_runs/observation/position_goodbatbadbat_detection_bbox_canary_20260818_v1",
+      "position_manifest_sha256": "953aa1e19e7db52e5621333e232959b669e7090b85966551d5ead64718b44ad5",
+      "tracking_run_path": "tracking_runs/tracking_detection_goodbatbadbat_position_spatial_canary_20260819_v1",
+      "tracking_manifest_sha256": "8f4d7b4390a6aab147a95cc43f0d6a4dcce4e4a6a6dc65ac6dbd93a2ad38a52b"
+    },
+    "keypoint": {
+      "position_run_path": "analysis/subject_position_runs/observation/position_goodbatbadbat_keypoint_triad_canary_20260818_v1",
+      "position_manifest_sha256": "3e47c00354477945b191685d8dc8dcd934f382a85b7fdf280c01f20169986d88",
+      "tracking_run_path": "tracking_runs/tracking_goodbatbadbat_single_subject_canary_20260818_v1",
+      "tracking_manifest_sha256": "8c547bb482f7597080925718c550ab4faa9921a57aa6aa4fff1712cbdf473aa7"
+    }
+  },
+  "selections": {
+    "black_before": {
+      "window_ids": [0],
+      "role": "black_before"
+    },
+    "chaser": {
+      "window_ids": [1],
+      "role": "chaser"
+    },
+    "black_after": {
+      "window_ids": [2],
+      "role": "black_after"
+    }
+  },
+  "grid": {
+    "policy_id": "goodbatbadbat_arena_mm_grid_v1",
+    "bin_width_mm": 1.0
+  },
+  "contrasts": [
+    {
+      "baseline": "black_before",
+      "treatment": "chaser"
+    },
+    {
+      "baseline": "black_before",
+      "treatment": "black_after"
+    }
+  ]
+}

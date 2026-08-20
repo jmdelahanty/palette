@@ -6,6 +6,7 @@ import pytest
 
 from scripts.ci_pytest_shard import (
     HISTORICAL_TEST_FILE_COST_OVERRIDES,
+    MEASURED_DOMINANT_COST_THRESHOLD,
     PROOF_HEAVY_TEST_COST_MULTIPLIER,
     PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES,
     REPOSITORY_ROOT,
@@ -93,7 +94,8 @@ def test_measured_dominant_suites_are_separate_in_current_sixteen_shards() -> No
         path.name
         for shard in shards
         for path in shard
-        if path.name in expected_names and estimated_test_file_cost(path) >= 100_000
+        if path.name in expected_names
+        and estimated_test_file_cost(path) >= MEASURED_DOMINANT_COST_THRESHOLD
     }
     dominant_owners = {owners[name] for name in dominant_names}
     assert len(dominant_owners) == len(dominant_names)

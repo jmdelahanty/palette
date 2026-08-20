@@ -752,7 +752,10 @@ contrast offers remain pending.
 - [ ] Include provider IDs and digests in every generic metric, contrast, and
       plot recipe.
 - [ ] Permit multiple explicit offers when several providers are available.
-- [ ] Add strict cross-provider comparison products.
+- [x] Add a strict selector-ineligible cross-provider position comparison
+      product over the sorted union of exact `instance_key` values. Provider
+      presence, estimator validity, failure reason, and pairwise distance are
+      separate arrays; missing providers are never filled from another method.
 - [ ] Reject incompatible providers in ordinary scientific contrasts.
 - [ ] Generalize provider discovery and readiness beyond the recording-level
       canary into reporting, registry, and review UIs.
@@ -858,15 +861,78 @@ until every required CI check passes and it is integrated through the normal
 - [x] Validate source preservation, exact lineage, and direct/consolidated
       visibility for the published successors and keypoint chain.
 - [ ] Pass every required CI check and integrate the exact commit to `main`.
-- [ ] Materialize detection-, keypoint-, component-mask-triad-, and
+- [x] Materialize detection-, keypoint-, component-mask-triad-, and
       subject-body-mask position providers for the same reviewed recording.
-- [ ] Compare offsets, valid coverage, speed, occupancy, and bout sensitivity
-      without selecting a production default.
+- [x] Compare position offsets and valid coverage without selecting a
+      production default.
+- [ ] Compare speed, occupancy, and bout sensitivity without selecting a
+      production default.
 - [ ] Review representative frames where providers disagree.
 - [ ] Publish selector-ineligible track successors for at least two position
       methods using the same body-frame source.
 - [ ] Define promotion policy only after canary evidence exists.
 - [ ] Add legacy adapters without relabeling historical estimator semantics.
+
+#### Four-provider comparison implementation (2026-08-18)
+
+Palette now has an explicit, retryable canary boundary for the four registered
+position estimators. It accepts only exact run paths and publishes no selector:
+
+- `detection_bbox_centroid.v1` from a sealed canonical-v3 detection candidate;
+- `keypoint_anatomical_triad_mean.v1`;
+- `mask_component_anatomical_triad_mean.v1`; and
+- `subject_body_mask_centroid.v1`.
+
+The comparison artifact lives beneath
+`analysis/provider_position_comparison_runs/<run>`. Its row axis is the sorted
+union of observation `instance_key` values. It stores provider presence before
+validity so a missing pose/mask row cannot be confused with an invalid model
+result. It preserves each provider's own reason code and computes pairwise
+offsets only where both providers are present and valid. It also requires one
+exact source-camera frame authority and rejects the same key mapped to
+different acquisition frames.
+
+Canonical-v3 detection successors now persist the standard observation row
+identity contract on `instances`. The detection position reader consumes that
+exact persisted contract and the `instances/*` canonical-v3 table. It does not
+synthesize a row identity from equal cardinality or mutate older immutable
+successors. Existing older candidates therefore remain unchanged; a new
+selector-ineligible successor is required for this canary.
+
+This implementation is test evidence, not promotion evidence. AB-fish model
+coverage and disagreement must remain visible even when the current keypoint
+or mask model is weak. No provider is substituted, averaged across methods, or
+made the GoodBatBadBat default by successful materialization.
+
+The first execution completed on
+`2026-08-10T17-20-55Z_arena_2_goodbatbadbat` at commit
+`172f8e45ac67b445c4487290baf5f7030d73ba58`. The immutable comparison is:
+
+```text
+analysis/provider_position_comparison_runs/
+  provider_position_comparison_goodbatbadbat_20260818_v1
+manifest_sha256:
+  43024cfa98849bb0808d3dfeea90bd05bfa1cd944a43f11f9193f1c740dcd90f
+```
+
+The union has 151,052 detection observations. Keypoints and both mask
+providers each have 150,788 rows (99.825% union coverage), leaving 264 explicit
+detection-only observations. Validity among each provider's own rows is:
+
+| Provider | Valid rows | Valid fraction | Preserved invalid reason |
+| --- | ---: | ---: | --- |
+| detection bbox | 151,052 | 100.000% | none |
+| keypoint triad | 148,496 | 98.480% | 2,292 non-finite source geometries |
+| mask-component triad | 146,077 | 96.876% | 4,711 empty mask components |
+| subject-body mask | 149,455 | 99.116% | 1,333 empty mask components |
+
+Keypoint-triad versus component-mask-triad has the closest position agreement:
+146,077 jointly valid rows, median distance 3.747 px, 95th percentile 9.258 px,
+and maximum 80.783 px. The three comparisons involving the body-mask centroid
+have rare maximum disagreements above 200 px. Those tails require reviewed
+frame inspection before any provider promotion. Position coverage and offsets
+are now measured; speed, occupancy, bout sensitivity, camera/state bias, and
+representative visual review remain open.
 
 ## Acceptance Criteria
 
@@ -896,6 +962,7 @@ promotion evidence are complete.
 ## Related Documents
 
 - [Composable Stimulus Analysis and Plot Recipe Design](composable_stimulus_analysis_and_plot_recipes_design.md)
+- [Provider-Aware Spatial Analytics Implementation Checklist](provider_aware_spatial_analytics_implementation_checklist_2026-08-18.md)
 - [Subject Position Storage Contract v1](subject_position_storage_contract_v1.md)
 - [Keypoint Heading Computation Contract](keypoint_heading_computation_contract.md)
 - [Body Frame Contract](body_frame_contract.md)

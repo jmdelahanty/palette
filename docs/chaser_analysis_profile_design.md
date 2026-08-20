@@ -22,6 +22,10 @@ The reusable stack has five layers:
 GoodCopBadCop remains an appropriate name for its source adapter and cohort
 reports. It is not an analysis family.
 
+The accepted provider-aware migration, heading/body-frame dependency, event-
+unit, visualization, and default full-profile execution checklist is
+[`composable_chaser_analytics_implementation_checklist_2026-08-20.md`](composable_chaser_analytics_implementation_checklist_2026-08-20.md).
+
 ## Canonical chaser identity and roles
 
 Identity and experimental role are separate contracts.
@@ -65,6 +69,43 @@ The runner snapshots both normalized profiles into provenance.
 including bout response, escape events, radial occupancy, and response regimes.
 The `goodcopbadcop_v2` runner preset selects this full profile and supplies
 versioned output names; it does not invoke protocol-branded analysis modules.
+
+`chaser_behavior_full_v3.yaml` is the provider-aware full-profile declaration.
+It adds an explicit `full` scope, provider-selection policy IDs, plot-recipe
+policy, module requirement classes, and controlled input capabilities while
+keeping every mature module planned by default. Its policies require exact
+provider bindings; the profile does not name a detection, keypoint, or mask run
+and does not promote a provider. A digest-bound applicability plan must
+distinguish `not_applicable` protocol features from missing, invalid, stale, or
+review-pending inputs. Until that per-recording plan and the provider-aware
+relative-frame consumers are wired into the maintained runner, v3 is a
+validated declaration rather than the production script default.
+
+The first v3 runtime foundation is intentionally selector-ineligible. Its pure
+computation, typed base/body schemas, bounded preparation record, and atomic
+publisher are implemented in:
+
+- `fisheye.analysis_workflows.chaser_relative_frame`;
+- `fisheye.shared.zarr.chaser_relative_frame_schema`;
+- `fisheye.analysis_workflows.chaser_relative_frame_storage`; and
+- `fisheye.analysis_workflows.materializers.chaser_relative_frame`.
+
+Its read boundary is also explicit:
+
+- `fisheye.analysis_workflows.provider_chaser_stimulus_source_handle` validates
+  the existing native stimulus-sample candidate without replacing its writer
+  or collapsing duplicate acquisition-frame mappings;
+- `fisheye.analysis_workflows.chaser_relative_frame_source_handle` validates
+  an exact immutable relative-frame publication and its consolidated metadata;
+  and
+- `fisheye.analysis_workflows.chaser_relative_distance_view` exposes a
+  provider-neutral distance relation while retaining the full chaser axis.
+
+These surfaces consume an already projected acquisition-frame chaser track.
+They do not decide how multiple native stimulus samples map onto one camera
+frame when the persisted rates differ. Both rates must come from their exact
+metadata authorities. The scientific projection policy remains an explicit
+gate, not an implementation default.
 
 `--enable-chaser-module` adds a module and its dependency closure.
 `--disable-chaser-module` is fail-closed: selection is rejected if any selected
