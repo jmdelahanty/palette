@@ -219,8 +219,7 @@ def _configured_chasers(
         f"{stimulus_run_name}:chaser_index:{index}" for index in indices
     )
     role_values = tuple(by_index[index].behavior_class for index in indices)
-    width = max(1, *(len(value) for value in role_values))
-    roles = np.asarray(role_values, dtype=f"<U{width}")
+    roles = np.asarray(role_values, dtype=np.dtypes.StringDType())
     protocol_sha256 = canonical_json_sha256(_plain(payload))
     occurrence_record = _record(
         "palette.chaser_relative_frame.chaser_occurrence_binding",

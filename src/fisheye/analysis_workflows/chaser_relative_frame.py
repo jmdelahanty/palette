@@ -317,9 +317,9 @@ class ChaserObservations:
             label="chaser source_row_index",
         )
         _require_bool(valid, label="chaser valid")
-        if roles.dtype.kind not in "US":
-            _error("chaser behavior roles must use a fixed-width string dtype.")
-        if np.any(np.char.str_len(roles.astype(str)) == 0):
+        if roles.dtype.kind not in "UST":
+            _error("chaser behavior roles must use a string dtype.")
+        if np.any(np.char.str_len(roles) == 0):
             _error("chaser behavior roles cannot contain empty values.")
         _require_int64(source_rows, label="chaser source_row_index")
         object.__setattr__(self, "xy", xy)
@@ -583,8 +583,8 @@ class ChaserRelativeFrameResult:
         if len(set(identities)) != len(identities):
             _error("chaser identities contain duplicates.")
         object.__setattr__(self, "chaser_identities", identities)
-        if self.chaser_behavior_roles.dtype.kind not in "US":
-            _error("chaser_behavior_roles must use a fixed-width string dtype.")
+        if self.chaser_behavior_roles.dtype.kind not in "UST":
+            _error("chaser_behavior_roles must use a string dtype.")
         for name in (
             "fish_source_row_index",
             "chaser_source_row_index",
@@ -678,7 +678,7 @@ def _validate_provider_digest_consistency(
 
 
 def _reason_array(shape: tuple[int, ...], value: str) -> np.ndarray:
-    return np.full(shape, value, dtype="<U48")
+    return np.full(shape, value, dtype=np.dtypes.StringDType())
 
 
 def _base_transition_reasons(

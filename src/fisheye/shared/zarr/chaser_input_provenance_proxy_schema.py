@@ -132,7 +132,10 @@ def _exact_dtype(
     expected = np.dtype(dtype)
     if array.dtype != expected:
         _fail(f"{field} must have exact dtype {expected.str}, got {array.dtype.str}.")
-    if array.dtype.hasobject or (array.dtype.kind in {"U", "S"} and not allow_text):
+    variable_text = allow_text and array.dtype.kind == "T"
+    if (array.dtype.hasobject and not variable_text) or (
+        array.dtype.kind in {"U", "S"} and not allow_text
+    ):
         _fail(f"{field} cannot be an object or string array.")
     return array
 
@@ -421,11 +424,11 @@ def validate_proxy_result(
         "candidate_timestamp_ns_session": "<i8",
         "candidate_source_acquisition_frame_index": "<i8",
         "candidate_complete": "bool",
-        "candidate_reason_code": "<U32",
+        "candidate_reason_code": "T",
         "candidate_source_stimulus_run_row_index": "<i8",
         "candidate_source_stimulus_source_row_index": "<i8",
         "selected": "bool",
-        "selection_reason_code": "<U32",
+        "selection_reason_code": "T",
         "selected_native_sample_row_index": "<i8",
         "selected_stimulus_frame_num": "<i8",
         "selected_timestamp_ns_session": "<i8",
@@ -570,6 +573,7 @@ def build_array_declarations(
 ) -> tuple[ProxyArrayDeclaration, ...]:
     dimensions, arrays, _record = validate_proxy_result(result)
     del dimensions
+    arrays = _encode_reason_arrays(arrays)
     axes: dict[str, tuple[str, ...]] = {
         "acquisition_frame_index": (FRAME_AXIS,),
         "candidate_offsets": (FRAME_BOUNDARY_AXIS,),
@@ -622,19 +626,35 @@ def build_array_declarations(
     return tuple(declarations)
 
 
+def _encode_reason_arrays(
+    arrays: Mapping[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    encoded = {
+        name: np.array(value, copy=True, order="C")
+        for name, value in arrays.items()
+    }
+    encoded["candidate_reason_code"] = np.asarray(
+        [
+            CANDIDATE_REASON_CODES[str(value)]
+            for value in arrays["candidate_reason_code"]
+        ],
+        dtype=np.uint8,
+    )
+    encoded["selection_reason_code"] = np.asarray(
+        [
+            SELECTION_REASON_CODES[str(value)]
+            for value in arrays["selection_reason_code"]
+        ],
+        dtype=np.uint8,
+    )
+    return encoded
+
+
 def encode_reason_codes(result: ChaserInputProvenanceProxyResult) -> dict[str, np.ndarray]:
     """Return a copied array map with all reason strings converted to uint8."""
 
     _dimensions, arrays, _record = validate_proxy_result(result)
-    encoded = {name: np.array(value, copy=True, order="C") for name, value in arrays.items()}
-    encoded["candidate_reason_code"] = np.asarray(
-        [CANDIDATE_REASON_CODES[str(value)] for value in arrays["candidate_reason_code"]],
-        dtype=np.uint8,
-    )
-    encoded["selection_reason_code"] = np.asarray(
-        [SELECTION_REASON_CODES[str(value)] for value in arrays["selection_reason_code"]],
-        dtype=np.uint8,
-    )
+    encoded = _encode_reason_arrays(arrays)
     for value in encoded.values():
         value.setflags(write=False)
     return encoded

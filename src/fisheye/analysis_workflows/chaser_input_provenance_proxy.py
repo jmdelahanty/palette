@@ -408,7 +408,11 @@ def select_chaser_input_provenance_proxy(
     offsets = [0]
     selected_rows = np.full(n_frames, -1, dtype=np.int64)
     selected = np.zeros(n_frames, dtype=bool)
-    selection_reason = np.full(n_frames, "no_complete_chaser_sample", dtype="<U32")
+    selection_reason = np.full(
+        n_frames,
+        "no_complete_chaser_sample",
+        dtype=np.dtypes.StringDType(),
+    )
 
     for frame_offset, frame in enumerate(frame_values.tolist()):
         rows = np.flatnonzero(snapshot.source_acquisition_frame_index == frame)
@@ -510,7 +514,10 @@ def select_chaser_input_provenance_proxy(
             snapshot.source_acquisition_frame_index[candidate_rows_array], dtype=np.int64
         ),
         candidate_complete=_readonly_result_array(candidate_complete, dtype=bool),
-        candidate_reason_code=_readonly_result_array(candidate_reason, dtype="<U32"),
+        candidate_reason_code=_readonly_result_array(
+            candidate_reason,
+            dtype=np.dtypes.StringDType(),
+        ),
         candidate_source_stimulus_run_row_index=_readonly_result_array(
             candidate_source_run, dtype=np.int64
         ),
@@ -518,7 +525,10 @@ def select_chaser_input_provenance_proxy(
             candidate_source_source, dtype=np.int64
         ),
         selected=_readonly_result_array(selected, dtype=bool),
-        selection_reason_code=_readonly_result_array(selection_reason, dtype="<U32"),
+        selection_reason_code=_readonly_result_array(
+            selection_reason,
+            dtype=np.dtypes.StringDType(),
+        ),
         selected_native_sample_row_index=_readonly_result_array(selected_rows, dtype=np.int64),
         selected_stimulus_frame_num=_readonly_result_array(
             selected_values(snapshot.stimulus_frame_num, fill=-1), dtype=np.int64

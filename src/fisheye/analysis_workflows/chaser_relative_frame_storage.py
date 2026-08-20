@@ -597,7 +597,11 @@ def _reason_codes_for_position(
     *,
     invalid_reason: str,
 ) -> np.ndarray:
-    reasons = np.full(declared_valid.shape, invalid_reason, dtype="<U48")
+    reasons = np.full(
+        declared_valid.shape,
+        invalid_reason,
+        dtype=np.dtypes.StringDType(),
+    )
     reasons[declared_valid & ~finite] = "nonfinite_coordinate"
     reasons[declared_valid & finite] = "valid"
     return _encode_reasons(reasons, field=f"{invalid_reason}_position_reason")
@@ -883,7 +887,9 @@ def prepare_chaser_relative_frame(
             _fail("A valid body frame lacks a nonnegative source-row identity.")
         body_relative_values = pair(result.body_relative_xy)
         body_relative_valid = _valid_float_rows(body_relative_values)
-        body_pair_reason_text = pair(result.egocentric_reason_code).astype("<U48")
+        body_pair_reason_text = pair(result.egocentric_reason_code).astype(
+            np.dtypes.StringDType()
+        )
         body_pair_reason_text[body_relative_valid] = "valid"
         body_pair_reason = _encode_reasons(
             body_pair_reason_text, field="body_relative_reason_code"
