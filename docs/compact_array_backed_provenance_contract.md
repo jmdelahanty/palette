@@ -1,7 +1,10 @@
 # Compact Array-Backed Provenance Contract
 
 <!-- contract-meta
-status: accepted-implementation-contract
+version: 1
+status: active
+implementation: implemented
+last_verified: 2026-08-20
 decision_date: 2026-08-20
 scope: provider-aware selection-trajectory-occupancy-contrast chain
 -->

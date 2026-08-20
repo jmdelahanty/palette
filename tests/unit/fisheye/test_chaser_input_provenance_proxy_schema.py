@@ -26,7 +26,7 @@ def _result():
 def test_schema_preserves_three_axes_and_encodes_reason_arrays() -> None:
     result = _result()
     dimensions, arrays, record = validate_proxy_result(
-        result, revalidate_source=True
+        result, revalidate_source=select_chaser_input_provenance_proxy
     )
     encoded = encode_reason_codes(result)
 

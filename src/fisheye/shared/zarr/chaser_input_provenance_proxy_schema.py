@@ -17,11 +17,11 @@ from dataclasses import dataclass
 import json
 import re
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
-from fisheye.analysis_workflows.chaser_input_provenance_proxy import (
+from fisheye.shared.chaser_input_provenance_proxy_contract import (
     BEHAVIORAL_DENOMINATOR,
     CAMERA_EXPOSURE_REFERENCE,
     CAMERA_PRESENTATION_CLOCK_TRANSFORM_AVAILABLE,
@@ -342,14 +342,17 @@ def _validate_projection_record(result: ChaserInputProvenanceProxyResult) -> dic
 def validate_proxy_result(
     result: ChaserInputProvenanceProxyResult,
     *,
-    revalidate_source: bool = False,
+    revalidate_source: Callable[
+        [object], ChaserInputProvenanceProxyResult
+    ] | None = None,
 ) -> tuple[ChaserInputProvenanceProxyDimensions, dict[str, np.ndarray], dict[str, Any]]:
     """Validate a result before it becomes an immutable storage payload.
 
-    ``revalidate_source=True`` reruns the pure selector against the result's
-    verified source handle and compares every publication array and the full
-    projection record.  Materializers use this mode to reject a result object
-    that was altered after computation.
+    When ``revalidate_source`` is supplied, it reruns that analysis-layer pure
+    selector against the result's verified source handle and compares every
+    publication array and the full projection record. Materializers use this
+    callback to reject a result object that was altered after computation
+    without making the shared schema import a higher application layer.
     """
 
     if not isinstance(result, ChaserInputProvenanceProxyResult):
@@ -542,17 +545,13 @@ def validate_proxy_result(
     if record.get("selected_acquisition_frame_count") != int(np.count_nonzero(selected)):
         _fail("Projection selected count differs from the selected axis.")
 
-    if revalidate_source:
+    if revalidate_source is not None:
         verifier = getattr(result.source_handle, "assert_verified", None)
         if not callable(verifier):
             _fail("Result source handle does not expose assert_verified().")
         try:
             verifier()
-            from fisheye.analysis_workflows.chaser_input_provenance_proxy import (
-                select_chaser_input_provenance_proxy,
-            )
-
-            fresh = select_chaser_input_provenance_proxy(result.source_handle)
+            fresh = revalidate_source(result.source_handle)
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             _fail(f"Source revalidation failed: {exc}")
         fresh_arrays = _array_values(fresh)

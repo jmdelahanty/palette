@@ -2,9 +2,9 @@
 
 <!-- contract-meta
 version: 1
-status: implemented-canary
-implementation: complete-selector-ineligible-publication
-last_updated: 2026-08-18
+status: active
+implementation: partial
+last_verified: 2026-08-20
 -->
 
 Purpose: freeze the logical arrays, exact dtypes, coordinate authority,

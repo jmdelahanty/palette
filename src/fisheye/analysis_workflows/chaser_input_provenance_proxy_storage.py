@@ -10,6 +10,7 @@ import numpy as np
 
 from fisheye.analysis_workflows.chaser_input_provenance_proxy import (
     ChaserInputProvenanceProxyResult,
+    select_chaser_input_provenance_proxy,
 )
 from fisheye.shared.zarr.chaser_input_provenance_proxy_schema import (
     ChaserInputProvenanceProxyDimensions,
@@ -66,7 +67,7 @@ def prepare_chaser_input_provenance_proxy(
 
     dimensions, _arrays, _record = validate_proxy_result(
         result,
-        revalidate_source=True,
+        revalidate_source=select_chaser_input_provenance_proxy,
     )
     arrays = _readonly_arrays(encode_reason_codes(result))
     manifest = validate_publication_manifest(
