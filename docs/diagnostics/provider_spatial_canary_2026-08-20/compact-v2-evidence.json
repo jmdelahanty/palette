@@ -1,0 +1,100 @@
+{
+  "schema_id": "palette.provider_spatial_compact_canary_evidence",
+  "schema_version": 1,
+  "recording_id": "2026-08-10T17-20-55Z_arena_2_goodbatbadbat",
+  "campaign_id": "goodbatbadbat_spatial_compact_provenance_20260820_v2",
+  "disposition": "selector_ineligible_provider_comparison_only_v1",
+  "palette_commit": "2e930535eee177c9d49491da776edba135b53a93",
+  "completed_at_utc": "2026-08-20T06:36:29.005137+00:00",
+  "task": {
+    "path": "docs/diagnostics/provider_spatial_canary_2026-08-20/task.compact-v2.json",
+    "sha256": "44488ac5be3a74e0620ed42402c69117215f9d530de4c02913840dc557bc461d"
+  },
+  "result": {
+    "execution_path": "/tmp/goodbatbadbat-spatial-compact-provenance-20260820-v2.result.json",
+    "sha256": "704a5af82157ba4a23e7dc096b77a8a861da5344d87e32cb3ca5322927054580",
+    "status": "complete",
+    "selector_updates": false,
+    "registry_updates": false,
+    "source_payloads_rewritten": false
+  },
+  "outputs": {
+    "selection": 3,
+    "trajectory": 6,
+    "occupancy": 6,
+    "contrast": 4,
+    "total": 19,
+    "all_complete": true,
+    "all_schema_version_2": true,
+    "all_selector_ineligible": true,
+    "parent_selector_campaign_mention_count": 0
+  },
+  "compact_metadata_audit": {
+    "old_campaign_id": "goodbatbadbat_position_spatial_canary_20260819_v2",
+    "new_campaign_id": "goodbatbadbat_spatial_compact_provenance_20260820_v2",
+    "old_metadata_bytes_total": 1214070133,
+    "new_metadata_bytes_total": 2444477,
+    "metadata_reduction_fraction": 0.9979865438300837,
+    "old_metadata_bytes_by_kind": {
+      "selection": 204491,
+      "trajectory": 92904482,
+      "occupancy": 198310621,
+      "contrast": 922650539
+    },
+    "new_metadata_bytes_by_kind": {
+      "selection": 169498,
+      "trajectory": 316316,
+      "occupancy": 1855520,
+      "contrast": 103143
+    },
+    "banned_duplicated_key_path_count": 0,
+    "root_zarr_json_bytes_after_publication": 1456962277
+  },
+  "grid_edge_storage": {
+    "occupancy_run_count": 6,
+    "x_array": {
+      "path": "grid/x_edges",
+      "dtype": "float64",
+      "shape": [83]
+    },
+    "y_array": {
+      "path": "grid/y_edges",
+      "dtype": "float64",
+      "shape": [83]
+    },
+    "embedded_edge_vectors_in_compact_metadata": false,
+    "binding_evidence": [
+      "occupancy_config_digest",
+      "edge_count_xy",
+      "bounds_mm",
+      "edge_array_paths",
+      "x_edges_sha256",
+      "y_edges_sha256",
+      "grid_policy_record_sha256"
+    ]
+  },
+  "failed_predecessor": {
+    "campaign_id": "goodbatbadbat_spatial_compact_provenance_20260820_v1",
+    "palette_commit": "3ba20c8dd1f9ce6fc2308eb246b7e60f261050be",
+    "durable_selector_ineligible_outputs": {
+      "selection": 3,
+      "trajectory": 1
+    },
+    "failure": "fixed_grid_policy_authority.x_edges did not match because the cross-stage validator still required legacy embedded edge vectors",
+    "correction": "accept legacy embedded-edge records or compact v2 array-backed records, preserve compact bindings without reinserting edge vectors, and bind both edge-array SHA-256 values"
+  },
+  "focused_validation": {
+    "command": "scripts/py -m pytest -p no:cacheprovider tests/unit/fisheye/test_provider_spatial_grid_policy.py tests/unit/fisheye/test_provider_spatial_pipeline.py tests/unit/fisheye/test_materialize_provider_spatial_canary.py tests/unit/fisheye/test_provider_occupancy_v2_materializer.py -q --tb=short",
+    "result": "33 passed in 39.54s",
+    "static_checks": [
+      "scripts/py -m py_compile",
+      "scripts/py -m ruff check",
+      "git diff --check"
+    ]
+  },
+  "integration_status": {
+    "required_ci_run": false,
+    "merge_ready": false,
+    "production_selector_eligible": false
+  }
+}

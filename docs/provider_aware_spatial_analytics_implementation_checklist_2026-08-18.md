@@ -295,7 +295,7 @@ The accepted correction is the
       readable source-run/arm summaries and exact source/edge array references.
 - [x] Add a reusable fail-closed structural metadata-cardinality guard and
       focused tests.
-- [ ] Publish clean v2 canary successors and measure direct and consolidated
+- [x] Publish clean v2 canary successors and measure direct and consolidated
       metadata size before deciding whether to extract the old canary into a
       clean archive generation.
 - [ ] Add a separate operational consolidated-metadata size budget after the
@@ -307,6 +307,61 @@ and requires required CI before integration. The focused and adjacent
 provider-spatial suite passed `152` tests with `12` expected Zarr-v3 warnings
 outside the sandbox; Ruff, static compilation, and `git diff --check` also
 passed.
+
+### Compact successor evidence
+
+Campaign `goodbatbadbat_spatial_compact_provenance_20260820_v2` completed at
+`2026-08-20T06:36:29.005137+00:00` from Palette commit
+`2e930535eee177c9d49491da776edba135b53a93`. Its frozen task and concise
+measurement record are
+[`task.compact-v2.json`](diagnostics/provider_spatial_canary_2026-08-20/task.compact-v2.json)
+and
+[`compact-v2-evidence.json`](diagnostics/provider_spatial_canary_2026-08-20/compact-v2-evidence.json).
+The task SHA-256 is
+`44488ac5be3a74e0620ed42402c69117215f9d530de4c02913840dc557bc461d`;
+the complete execution result SHA-256 is
+`704a5af82157ba4a23e7dc096b77a8a861da5344d87e32cb3ca5322927054580`.
+
+All 19 expected successors completed: 3 selections, 6 trajectories, 6
+occupancies, and 4 contrasts. Every run is schema v2 and selector-ineligible;
+no parent selector references the campaign. The result records no selector or
+registry update and no source-payload rewrite. Every occupancy stores exactly
+two edge arrays, `grid/x_edges` and `grid/y_edges`, each `float64[83]`. Compact
+metadata retains their paths, counts, bounds, occupancy configuration digest,
+full-policy digest, and separate x/y content digests; it contains no copied
+edge vectors.
+
+The equivalent 19-run direct metadata fell from `1,214,070,133` bytes in the
+original v2 canary to `2,444,477` bytes in the compact successor, a
+`99.798654383%` reduction. The by-stage comparison was:
+
+| Stage | Original bytes | Compact bytes |
+| --- | ---: | ---: |
+| selection | 204,491 | 169,498 |
+| trajectory | 92,904,482 | 316,316 |
+| occupancy | 198,310,621 | 1,855,520 |
+| contrast | 922,650,539 | 103,143 |
+
+The structural audit found zero forbidden row-, occurrence-, manifest-, or
+edge-vector duplicates. The archive root remains `1,456,962,277` bytes because
+the immutable legacy canary is still represented in the consolidated root;
+the compact successor proves new publications no longer create that growth.
+
+The first attempt,
+`goodbatbadbat_spatial_compact_provenance_20260820_v1`, stopped after three
+selections and one trajectory because the cross-stage occupancy validator
+still required legacy embedded `x_edges`/`y_edges`. Those four immutable runs
+remain selector-ineligible. The corrected validator accepts either legacy
+embedded-edge records or compact v2 array-backed records, never reinserts
+vectors into compact bindings, and validates exact x/y content digests. The
+focused regression suite passed `33` tests in `39.54s` outside the sandbox.
+
+The deliberately serial successor campaign also confirmed the performance
+diagnosis: the scientific arrays finish quickly, while every child publication
+rebuilds and verifies the inherited 1.45 GB consolidated root. A future
+campaign transaction should stage and validate independent immutable children
+and perform one final archive consolidation, without weakening per-run
+scientific validation.
 
 ## Accepted first-slice decisions
 
