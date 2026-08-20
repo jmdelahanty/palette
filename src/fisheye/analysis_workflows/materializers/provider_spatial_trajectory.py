@@ -41,6 +41,9 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
+from fisheye.shared.zarr.metadata_cardinality import (
+    require_cardinality_independent_metadata,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -62,14 +65,14 @@ MATERIALIZATION_SCHEMA_ID = "palette.provider_spatial_trajectory_materialization
 MATERIALIZATION_SCHEMA_VERSION = 1
 PUBLISH_SCHEMA_ID = "palette.provider_spatial_trajectory_publish"
 RUN_SCHEMA_ID = "palette.provider_spatial_trajectory_run"
-RUN_SCHEMA_VERSION = 1
+RUN_SCHEMA_VERSION = 2
 ARRAY_MANIFEST_SCHEMA_ID = "palette.provider_spatial_trajectory_array_manifest"
 ARRAY_MANIFEST_SCHEMA_VERSION = 1
 RUN_MANIFEST_ATTR = "provider_spatial_trajectory_manifest"
 RUN_MANIFEST_SHA256_ATTR = "provider_spatial_trajectory_manifest_sha256"
 ARRAY_MANIFEST_ATTR = "provider_spatial_trajectory_array_manifest"
 ARRAY_MANIFEST_SHA256_ATTR = "provider_spatial_trajectory_array_manifest_sha256"
-POLICY_ID = "exact_provider_trajectory_selector_ineligible_v1"
+POLICY_ID = "exact_provider_trajectory_selector_ineligible_v2_compact_provenance"
 RETRY_POLICY_ID = "immutable_named_run_no_overwrite_v1"
 STRING_ENCODING = "utf8_uint8_buffer_int64_offsets_v1"
 
@@ -925,6 +928,48 @@ def _build_manifests(
     }
     array_manifest_sha256 = canonical_json_sha256(array_manifest)
     selected_denominator = dict(array_manifest["selected_frame_denominator"])
+    declarations_by_path = {
+        str(declaration["path"]): declaration for declaration in declarations
+    }
+
+    def array_ref(path: str) -> dict[str, Any]:
+        declaration = declarations_by_path[path]
+        return {
+            "array_path": path,
+            "dtype": declaration["dtype"],
+            "shape": list(declaration["shape"]),
+            "content_sha256": declaration["content_sha256"],
+        }
+
+    membership_edge_count = sum(
+        len(values) for values in trajectory.selection.membership_keys
+    )
+    selection_binding = {
+        "schema_id": "palette.provider_spatial_selection_binding",
+        "schema_version": 2,
+        "recording_id": trajectory.selection.recording_id,
+        "timeline_authority_id": trajectory.selection.timeline_authority_id,
+        "selection_authority_id": trajectory.selection.selection_authority_id,
+        "selection_sha256": trajectory.selection.sha256,
+        "selected_frame_count": int(trajectory.selection.acquisition_frames.size),
+        "membership_edge_count": int(membership_edge_count),
+        "array_path_scope": "relative_to_trajectory_run",
+        "arrays": {
+            "acquisition_frame": array_ref("selection/acquisition_frame"),
+            "membership_offsets": array_ref("selection/membership_offsets"),
+            "membership_key_offsets": array_ref(
+                "selection/membership_key_offsets"
+            ),
+            "membership_key_utf8": array_ref("selection/membership_key_utf8"),
+            "occurrence_id_offsets": array_ref(
+                "selection/occurrence_id_offsets"
+            ),
+            "occurrence_id_utf8": array_ref("selection/occurrence_id_utf8"),
+            "role_offsets": array_ref("selection/role_offsets"),
+            "role_utf8": array_ref("selection/role_utf8"),
+        },
+        "array_manifest_sha256": array_manifest_sha256,
+    }
     run_manifest = {
         "schema_id": RUN_SCHEMA_ID,
         "schema_version": RUN_SCHEMA_VERSION,
@@ -935,7 +980,7 @@ def _build_manifests(
         "stage_selector_eligible": False,
         "authorities": trajectory.authorities.as_record(),
         "authorities_sha256": canonical_json_sha256(trajectory.authorities.as_record()),
-        "selection": trajectory.selection.as_record(),
+        "selection": selection_binding,
         "selection_sha256": trajectory.selection.sha256,
         "transform": trajectory.transform.as_record(),
         "transform_sha256": trajectory.transform.sha256,
@@ -956,6 +1001,19 @@ def _build_manifests(
             "retry_requires": "new_explicit_run_name",
         },
     }
+    require_cardinality_independent_metadata(
+        run_manifest,
+        forbidden_fields=(
+            "acquisition_frames",
+            "membership_keys",
+            "occurrence_ids",
+            "roles",
+            "failure_reason_codes",
+            "failure_reason_tags",
+            "provider_reason_tags",
+        ),
+        label="provider_spatial_trajectory_manifest",
+    )
     return array_manifest, run_manifest
 
 

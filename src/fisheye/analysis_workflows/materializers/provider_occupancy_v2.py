@@ -63,6 +63,9 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
+from fisheye.shared.zarr.metadata_cardinality import (
+    require_cardinality_independent_metadata,
+)
 from fisheye.shared.zarr.storage_intent import AccessPattern, WriteMode
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
 from fisheye.shared.zarr_helpers import (
@@ -83,11 +86,17 @@ from fisheye.shared.zarr_run_completion import (
 
 PROVIDER_OCCUPANCY_PARENT_PATH = "analysis/provider_occupancy_runs"
 PROVIDER_OCCUPANCY_SCHEMA_ID = "palette.provider_occupancy_v2_run"
-PROVIDER_OCCUPANCY_SCHEMA_VERSION = 1
+PROVIDER_OCCUPANCY_SCHEMA_VERSION = 2
+PROVIDER_OCCUPANCY_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {1, PROVIDER_OCCUPANCY_SCHEMA_VERSION}
+)
 PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_ID = (
     "palette.provider_occupancy_v2_run_manifest"
 )
-PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION = 1
+PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION = 2
+PROVIDER_OCCUPANCY_SUPPORTED_MANIFEST_SCHEMA_VERSIONS = frozenset(
+    {1, PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION}
+)
 PROVIDER_OCCUPANCY_MANIFEST_ATTR = "provider_occupancy_v2_manifest"
 PROVIDER_OCCUPANCY_MANIFEST_DIGEST_ATTR = (
     "provider_occupancy_v2_manifest_sha256"
@@ -96,7 +105,9 @@ PROVIDER_OCCUPANCY_STORAGE_PLAN_ATTR = "provider_occupancy_v2_storage_plan"
 PROVIDER_OCCUPANCY_PUBLICATION_ATTEMPT_ATTR = (
     "provider_occupancy_v2_publication_attempt_uuid"
 )
-PROVIDER_OCCUPANCY_PUBLISH_POLICY = "provider_occupancy_v2_atomic_nonpromoting_v1"
+PROVIDER_OCCUPANCY_PUBLISH_POLICY = (
+    "provider_occupancy_v2_atomic_nonpromoting_compact_provenance_v2"
+)
 PROVIDER_OCCUPANCY_RETRY_POLICY = "new_immutable_run_name_required"
 PROVIDER_OCCUPANCY_ARRAY_SCHEMA_ID = "palette.provider_occupancy_v2_array"
 PROVIDER_OCCUPANCY_ARRAY_SCHEMA_VERSION = 1
@@ -910,17 +921,22 @@ def _manifest(
         "array_content_sha256": _array_content_digest(records),
         "physical_storage_plan": plan.storage_receipt.as_manifest(),
         "conservation": {
-            "per_occurrence_count_sums": [
-                int(summary.counts.sum(dtype=np.int64))
-                for summary in plan.result.per_occurrence
-            ],
-            "per_occurrence_valid_in_grid_sample_counts": [
-                summary.valid_in_grid_sample_count
-                for summary in plan.result.per_occurrence
-            ],
+            "policy_id": "provider_occupancy_v2_array_backed_conservation_v2",
+            "per_occurrence_count": len(plan.result.per_occurrence),
+            "per_occurrence_count_sum_array": "per_occurrence/counts",
+            "per_occurrence_valid_in_grid_sample_count_array": (
+                "per_occurrence/valid_in_grid_sample_count"
+            ),
+            "per_occurrence_invariant": (
+                "sum(per_occurrence/counts, axes=(1,2)) == "
+                "per_occurrence/valid_in_grid_sample_count"
+            ),
             "pooled_count_sum": int(plan.result.pooled.counts.sum(dtype=np.int64)),
             "pooled_valid_in_grid_sample_count": (
                 plan.result.pooled.valid_in_grid_sample_count
+            ),
+            "pooled_invariant": (
+                "sum(pooled/counts) == pooled/valid_in_grid_sample_count"
             ),
             "empty_fraction_policy": "nan_when_no_valid_in_grid_samples_v1",
         },
@@ -932,12 +948,31 @@ def _manifest(
             "parent_selector_mutation": "forbidden",
         },
     }
-    return {
+    manifest = {
         "schema_id": PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_ID,
         "schema_version": PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION,
         "payload": payload,
         "payload_digest": canonical_json_sha256(payload),
     }
+    require_cardinality_independent_metadata(
+        manifest,
+        forbidden_fields=(
+            "trajectory_run_manifest",
+            "trajectory_array_manifest",
+            "acquisition_frames",
+            "membership_keys",
+            "occurrence_ids",
+            "failure_reason_codes",
+            "failure_reason_tags",
+            "provider_reason_tags",
+            "source_arm_records",
+            "source_manifest_bindings",
+            "per_occurrence_count_sums",
+            "per_occurrence_valid_in_grid_sample_counts",
+        ),
+        label="provider_occupancy_v2_manifest",
+    )
+    return manifest
 
 
 def provider_occupancy_v2_manifest_digest(manifest: Mapping[str, Any]) -> str:
@@ -952,7 +987,8 @@ def provider_occupancy_v2_manifest_digest(manifest: Mapping[str, Any]) -> str:
         )
     if (
         manifest["schema_id"] != PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_ID
-        or manifest["schema_version"] != PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION
+        or manifest["schema_version"]
+        not in PROVIDER_OCCUPANCY_SUPPORTED_MANIFEST_SCHEMA_VERSIONS
         or not isinstance(manifest["payload"], Mapping)
         or manifest["payload_digest"]
         != canonical_json_sha256(manifest["payload"])
@@ -1555,11 +1591,13 @@ __all__ = [
     "PROVIDER_OCCUPANCY_MANIFEST_DIGEST_ATTR",
     "PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_ID",
     "PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION",
+    "PROVIDER_OCCUPANCY_SUPPORTED_MANIFEST_SCHEMA_VERSIONS",
     "PROVIDER_OCCUPANCY_PARENT_PATH",
     "PROVIDER_OCCUPANCY_PUBLISH_POLICY",
     "PROVIDER_OCCUPANCY_RETRY_POLICY",
     "PROVIDER_OCCUPANCY_SCHEMA_ID",
     "PROVIDER_OCCUPANCY_SCHEMA_VERSION",
+    "PROVIDER_OCCUPANCY_SUPPORTED_SCHEMA_VERSIONS",
     "ProviderOccupancyV2MaterializationError",
     "ProviderOccupancyV2RunPlan",
     "ProviderOccupancyV2SourceBindings",

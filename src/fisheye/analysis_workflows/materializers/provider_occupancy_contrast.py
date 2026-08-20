@@ -26,10 +26,10 @@ from fisheye.analysis_workflows.materializers.provider_occupancy_v2 import (
     PROVIDER_OCCUPANCY_MANIFEST_ATTR,
     PROVIDER_OCCUPANCY_MANIFEST_DIGEST_ATTR,
     PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_ID,
-    PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION,
     PROVIDER_OCCUPANCY_PARENT_PATH,
     PROVIDER_OCCUPANCY_SCHEMA_ID,
-    PROVIDER_OCCUPANCY_SCHEMA_VERSION,
+    PROVIDER_OCCUPANCY_SUPPORTED_MANIFEST_SCHEMA_VERSIONS,
+    PROVIDER_OCCUPANCY_SUPPORTED_SCHEMA_VERSIONS,
     provider_occupancy_v2_manifest_digest,
 )
 from fisheye.shared.atomic_run_publisher import (
@@ -42,6 +42,9 @@ from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
+)
+from fisheye.shared.zarr.metadata_cardinality import (
+    require_cardinality_independent_metadata,
 )
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
@@ -59,10 +62,10 @@ from fisheye.shared.zarr_run_completion import (
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.provider_occupancy_contrast_materialization"
-MATERIALIZATION_SCHEMA_VERSION = 1
+MATERIALIZATION_SCHEMA_VERSION = 2
 PUBLISH_SCHEMA_ID = "palette.provider_occupancy_contrast_publish"
 CONTRAST_RUN_SCHEMA_ID = "palette.provider_occupancy_contrast_run_manifest"
-CONTRAST_RUN_SCHEMA_VERSION = 1
+CONTRAST_RUN_SCHEMA_VERSION = 2
 PARENT_PATH = "analysis/provider_occupancy_contrast_runs"
 SOURCE_PARENT_PATH = PROVIDER_OCCUPANCY_PARENT_PATH
 SOURCE_MANIFEST_ATTR = PROVIDER_OCCUPANCY_MANIFEST_ATTR
@@ -490,7 +493,11 @@ def _validate_source_manifest(
     _digest(expected_manifest_digest, field=f"{arm}_manifest_digest")
     root = open_zarr_root(archive, mode="r", use_consolidated=True)
     run = root[canonical_path]
-    if run.attrs.get("schema_id") != PROVIDER_OCCUPANCY_SCHEMA_ID or run.attrs.get("schema_version") != PROVIDER_OCCUPANCY_SCHEMA_VERSION:
+    if (
+        run.attrs.get("schema_id") != PROVIDER_OCCUPANCY_SCHEMA_ID
+        or run.attrs.get("schema_version")
+        not in PROVIDER_OCCUPANCY_SUPPORTED_SCHEMA_VERSIONS
+    ):
         raise _fail(f"{arm}.source_run", "is not an occupancy-v2 run")
     if run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE or run.attrs.get("stage_selector_eligible") is not False:
         raise _fail(f"{arm}.source_run", "must be complete and selector-ineligible")
@@ -500,6 +507,11 @@ def _validate_source_manifest(
     manifest = _json_copy(manifest, field=f"{arm}.source_manifest")
     if set(manifest) != {"schema_id", "schema_version", "payload", "payload_digest"}:
         raise _fail(f"{arm}.source_manifest", "does not use the occupancy-v2 envelope")
+    if manifest.get("schema_version") != run.attrs.get("schema_version"):
+        raise _fail(
+            f"{arm}.source_manifest",
+            "manifest and run schema versions disagree",
+        )
     try:
         manifest_digest = provider_occupancy_v2_manifest_digest(manifest)
     except Exception as exc:
@@ -561,10 +573,15 @@ def _validate_source_manifest(
     # payload digest stored in the source attribute.
     source_manifest_envelope_digest = canonical_json_sha256(manifest)
     source_manifest_identity = {
+        "schema_id": manifest["schema_id"],
+        "schema_version": manifest["schema_version"],
         "run_id": canonical_path,
         "identity": canonical_path,
         "sha256": source_manifest_envelope_digest,
-        "payload": manifest,
+        "manifest_sha256": source_manifest_envelope_digest,
+        "occupancy_payload_digest": manifest_digest,
+        "manifest_attr": SOURCE_MANIFEST_ATTR,
+        "manifest_digest_attr": SOURCE_MANIFEST_SHA256_ATTR,
     }
     source_selections = [_binding_identity(bindings, "compiled_selection")]
     source_occurrences = _decode_occurrences(run, run_path=canonical_path, arrays=arrays)
@@ -631,6 +648,8 @@ def _validate_source_manifest(
     }
     return {
         "run_path": canonical_path,
+        "run_schema_version": run.attrs.get("schema_version"),
+        "manifest_schema_version": manifest["schema_version"],
         "manifest": manifest,
         "manifest_sha256": manifest_digest,
         "manifest_envelope_sha256": source_manifest_envelope_digest,
@@ -854,6 +873,44 @@ def build_provider_occupancy_contrast_materialization_plan(
         cwd=Path(__file__).resolve().parents[4],
         include_system_context=False,
     )
+
+    array_declarations = {
+        path: {
+            "array_path": path,
+            "shape": list(values.shape),
+            "dtype": values.dtype.str,
+            "content_sha256": sha256_array(values),
+        }
+        for path, values in sorted(arrays.items())
+    }
+
+    def compact_source_arm(arm: str) -> dict[str, Any]:
+        source_arrays = evidence[arm]["arrays"]
+        occurrences = normalized["source_arms"][arm]["source_occurrences"]
+        return {
+            "role": arm,
+            "source_manifest": normalized["source_arms"][arm]["source_manifest"],
+            "source_selections": normalized["source_arms"][arm]["source_selections"],
+            "occurrence_evidence": {
+                "count": len(occurrences),
+                "ordered_records_sha256": canonical_json_sha256(occurrences),
+                "array_path_scope": "relative_to_source_occupancy_run",
+                "offsets_array": {
+                    "array_path": "occurrence_id_offsets",
+                    "dtype": source_arrays["occurrence_id_offsets"]["dtype"],
+                    "shape": source_arrays["occurrence_id_offsets"]["shape"],
+                    "content_sha256": source_arrays["occurrence_id_offsets"]["sha256"],
+                },
+                "utf8_array": {
+                    "array_path": "occurrence_id_utf8",
+                    "dtype": source_arrays["occurrence_id_utf8"]["dtype"],
+                    "shape": source_arrays["occurrence_id_utf8"]["shape"],
+                    "content_sha256": source_arrays["occurrence_id_utf8"]["sha256"],
+                },
+                "encoding": "utf8_uint8_buffer_int64_offsets_v1",
+            },
+        }
+
     payload = {
         "schema_id": CONTRAST_RUN_SCHEMA_ID,
         "schema_version": CONTRAST_RUN_SCHEMA_VERSION,
@@ -869,7 +926,23 @@ def build_provider_occupancy_contrast_materialization_plan(
         "policy_digest": normalized["policy_digest"],
         "config_digest": normalized["config_digest"],
         "valid_sample_counts": normalized["valid_sample_counts"],
-        "grid": {"x_edges": arrays["x_edges"].tolist(), "y_edges": arrays["y_edges"].tolist()},
+        "grid": {
+            "bin_shape_yx": [
+                int(arrays["y_edges"].size - 1),
+                int(arrays["x_edges"].size - 1),
+            ],
+            "x_bounds_mm": [
+                float(arrays["x_edges"][0]),
+                float(arrays["x_edges"][-1]),
+            ],
+            "y_bounds_mm": [
+                float(arrays["y_edges"][0]),
+                float(arrays["y_edges"][-1]),
+            ],
+            "x_edges_array": array_declarations["x_edges"],
+            "y_edges_array": array_declarations["y_edges"],
+            "comparison_policy": "exact_float64_edges_v1",
+        },
         "source_runs": {
             arm: {
                 "role": arm,
@@ -877,29 +950,61 @@ def build_provider_occupancy_contrast_materialization_plan(
                 "manifest_sha256": evidence[arm]["manifest_sha256"],
                 "manifest_envelope_sha256": evidence[arm]["manifest_envelope_sha256"],
                 "source_bindings_sha256": evidence[arm]["bindings_sha256"],
+                "run_schema_version": evidence[arm]["run_schema_version"],
+                "manifest_schema_version": evidence[arm][
+                    "manifest_schema_version"
+                ],
             }
             for arm in ("baseline", "treatment")
         },
-        "source_arm_records": normalized["source_arms"],
-        "source_manifest_bindings": {
-            arm: {
-                "run_path": evidence[arm]["run_path"],
-                "manifest_sha256": evidence[arm]["manifest_sha256"],
-                "manifest_envelope_sha256": evidence[arm]["manifest_envelope_sha256"],
-                "source_manifest_attr": SOURCE_MANIFEST_ATTR,
-                "source_manifest_digest_attr": SOURCE_MANIFEST_SHA256_ATTR,
-                "source_bindings": evidence[arm]["payload"]["source_bindings"],
-                "source_bindings_sha256": evidence[arm]["bindings_sha256"],
-            }
-            for arm in ("baseline", "treatment")
+        "source_arm_records": {
+            arm: compact_source_arm(arm) for arm in ("baseline", "treatment")
         },
-        "arrays": [{"path": path, "shape": list(values.shape), "dtype": values.dtype.str, "sha256": sha256_array(values)} for path, values in sorted(arrays.items())],
-        "provenance": {"software": software, "source_occupancy_schema_id": PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_ID, "source_occupancy_schema_version": PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_VERSION, "materialization_schema": MATERIALIZATION_SCHEMA_ID},
+        "arrays": [
+            {
+                "path": path,
+                "shape": declaration["shape"],
+                "dtype": declaration["dtype"],
+                "sha256": declaration["content_sha256"],
+            }
+            for path, declaration in array_declarations.items()
+        ],
+        "provenance": {
+            "software": software,
+            "source_occupancy_schema_id": PROVIDER_OCCUPANCY_MANIFEST_SCHEMA_ID,
+            "source_occupancy_supported_manifest_schema_versions": sorted(
+                PROVIDER_OCCUPANCY_SUPPORTED_MANIFEST_SCHEMA_VERSIONS
+            ),
+            "source_occupancy_observed_manifest_schema_versions": {
+                arm: evidence[arm]["manifest_schema_version"]
+                for arm in ("baseline", "treatment")
+            },
+            "materialization_schema": MATERIALIZATION_SCHEMA_ID,
+        },
         "retry_policy": "immutable_named_run_no_replace_retry_requires_new_run_name_v1",
         "selector_policy": "selector_ineligible_parent_selectors_unchanged_v1",
         "parent_selector_attrs_before": _selector_snapshot(parent),
     }
     manifest = {"schema_id": CONTRAST_RUN_SCHEMA_ID, "schema_version": CONTRAST_RUN_SCHEMA_VERSION, "payload_sha256": canonical_json_sha256(payload), "payload": payload}
+    require_cardinality_independent_metadata(
+        manifest,
+        forbidden_fields=(
+            "source_manifest_bindings",
+            "source_bindings",
+            "trajectory_run_manifest",
+            "trajectory_array_manifest",
+            "acquisition_frames",
+            "membership_keys",
+            "occurrence_ids",
+            "source_occurrences",
+            "failure_reason_codes",
+            "failure_reason_tags",
+            "provider_reason_tags",
+            "x_edges",
+            "y_edges",
+        ),
+        label="provider_occupancy_contrast_manifest",
+    )
     return ProviderOccupancyContrastMaterializationPlan(
         source_zarr=archive,
         run_name=name,
@@ -957,7 +1062,7 @@ def _write_local(plan: ProviderOccupancyContrastMaterializationPlan) -> None:
         array_parent.create_array(leaf or path, data=values, chunks=tuple(max(1, min(int(size), 16384)) for size in values.shape))
     run.attrs[MANIFEST_ATTR] = json_attr_safe(plan.manifest)
     run.attrs[MANIFEST_SHA256_ATTR] = canonical_json_sha256(plan.manifest)
-    run.attrs.update({"schema_id": CONTRAST_RUN_SCHEMA_ID, "schema_version": CONTRAST_RUN_SCHEMA_VERSION, "stage_selector_eligible": False, "source_scope": plan.source_scope, "policy": json_attr_safe(plan.contrast_result["policy"]), "policy_digest": plan.contrast_result["policy_digest"], "config_digest": plan.contrast_result["config_digest"], "source_runs": json_attr_safe(plan.manifest["payload"]["source_runs"]), "source_bindings": json_attr_safe(plan.manifest["payload"]["source_manifest_bindings"]), "valid_sample_counts": json_attr_safe(plan.contrast_result["valid_sample_counts"]), "retry_policy": plan.manifest["payload"]["retry_policy"], "run_provenance": json_attr_safe(dict(plan.run_provenance)), "direct_consolidated_metadata_equality": {"status": "pending_final_publication_consolidation"}})
+    run.attrs.update({"schema_id": CONTRAST_RUN_SCHEMA_ID, "schema_version": CONTRAST_RUN_SCHEMA_VERSION, "stage_selector_eligible": False, "source_scope": plan.source_scope, "policy": json_attr_safe(plan.contrast_result["policy"]), "policy_digest": plan.contrast_result["policy_digest"], "config_digest": plan.contrast_result["config_digest"], "source_runs": json_attr_safe(plan.manifest["payload"]["source_runs"]), "valid_sample_counts": json_attr_safe(plan.contrast_result["valid_sample_counts"]), "retry_policy": plan.manifest["payload"]["retry_policy"], "run_provenance": json_attr_safe(dict(plan.run_provenance)), "direct_consolidated_metadata_equality": {"status": "pending_final_publication_consolidation"}})
     if run.attrs.get(MANIFEST_ATTR) != plan.manifest:
         raise ProviderOccupancyContrastMaterializationError(
             "contrast manifest was not persisted exactly before completion"

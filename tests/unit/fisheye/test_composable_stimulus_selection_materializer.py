@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import zarr
 
@@ -9,12 +10,18 @@ from fisheye.analysis_workflows.composable_stimulus_selection import (
     RoleMetadata,
     SelectionSpec,
     TimelineAuthority,
+    canonical_json,
     compile_selection,
     member,
     stimulus_step_reference,
     union,
 )
 from fisheye.analysis_workflows.materializers.composable_stimulus_selection import (
+    REQUESTED_JSON_ARRAY,
+    REQUESTED_JSON_ATTR,
+    RESOLVED_JSON_ATTR,
+    TIMELINE_AUTHORITY_JSON_ARRAY,
+    TIMELINE_AUTHORITY_JSON_ATTR,
     PARENT_PATH,
     build_composable_stimulus_selection_materialization_plan,
     materialize_composable_stimulus_selection,
@@ -120,7 +127,7 @@ def test_materializer_round_trips_overlap_and_preserves_selectors(tmp_path: Path
             archive,
             subtree_path=f"{PARENT_PATH}/selection_canary_v1",
         ).array_count
-        == 30
+        == 32
     )
     assert (
         dict(consolidated[f"{PARENT_PATH}/selection_canary_v1"].attrs)
@@ -136,6 +143,18 @@ def test_materializer_round_trips_overlap_and_preserves_selectors(tmp_path: Path
         for item in reconstructed.resolved_intervals[1].source_memberships
     } == {"step-pre", "step-chaser"}
     assert run["resolved_membership_offsets"][:].tolist() == [0, 1, 3, 4]
+    assert np.asarray(run[REQUESTED_JSON_ARRAY][:], dtype=np.uint8).tobytes().decode(
+        "utf-8"
+    ) == canonical_json(compiled.requested)
+    assert np.asarray(
+        run[TIMELINE_AUTHORITY_JSON_ARRAY][:], dtype=np.uint8
+    ).tobytes().decode("utf-8") == canonical_json(compiled.authority.to_dict())
+    assert not {
+        REQUESTED_JSON_ATTR,
+        RESOLVED_JSON_ATTR,
+        TIMELINE_AUTHORITY_JSON_ATTR,
+    }.intersection(run.attrs)
+    assert run.attrs["selection_summary"]["selected_frame_count"] == 10
     assert all(
         run[name].dtype.kind not in {"O", "U", "S"}
         for name in run.array_keys()
@@ -257,3 +276,26 @@ def test_selector_like_child_attribute_is_rejected(tmp_path: Path) -> None:
     result = validate_composable_stimulus_selection_run(run_path)
     assert result["valid"] is False
     assert any("selector alias" in error for error in result["errors"])
+
+
+def test_unknown_schema_version_fails_closed(tmp_path: Path) -> None:
+    archive = tmp_path / "analysis.zarr"
+    _archive(archive)
+    materialize_composable_stimulus_selection(
+        archive,
+        compiled_selection=_compiled(),
+        scratch_root=tmp_path / "scratch",
+        run_name="selection_unknown_schema_v1",
+    )
+    run_path = archive / PARENT_PATH / "selection_unknown_schema_v1"
+    run = zarr.open_group(str(run_path), mode="r+", use_consolidated=False)
+    run.attrs["schema_version"] = 999
+
+    validation = validate_composable_stimulus_selection_run(run_path)
+    assert validation["valid"] is False
+    assert any(
+        "unsupported selection-run schema" in error
+        for error in validation["errors"]
+    )
+    with pytest.raises(ValueError, match="unsupported schema version"):
+        reconstruct_compiled_selection(run_path)

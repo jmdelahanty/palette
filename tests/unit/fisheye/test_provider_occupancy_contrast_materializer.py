@@ -263,13 +263,89 @@ def test_true_occupancy_v2_integration_round_trip(tmp_path: Path) -> None:
     assert run["x_edges"].dtype == np.dtype("<f8")
     assert run["y_edges"].dtype == np.dtype("<f8")
     assert run.attrs[MANIFEST_ATTR]["payload"]["source_scope"] == SOURCE_SCOPE_POOLED
+    manifest_payload = run.attrs[MANIFEST_ATTR]["payload"]
+    assert "x_edges" not in manifest_payload["grid"]
+    assert "y_edges" not in manifest_payload["grid"]
+    assert manifest_payload["grid"]["x_edges_array"]["array_path"] == "x_edges"
+    assert manifest_payload["grid"]["y_edges_array"]["array_path"] == "y_edges"
+    for arm in ("baseline", "treatment"):
+        occurrence_evidence = manifest_payload["source_arm_records"][arm][
+            "occurrence_evidence"
+        ]
+        assert occurrence_evidence["count"] > 0
+        assert occurrence_evidence["offsets_array"]["array_path"] == (
+            "occurrence_id_offsets"
+        )
+        assert "source_occurrences" not in manifest_payload["source_arm_records"][arm]
     assert run.attrs["direct_consolidated_metadata_equality"]["array_count"] == 3
     assert validate_direct_consolidated_subtree(archive, subtree_path=run_path).array_count == 3
     for arm in ("baseline", "treatment"):
         source_identity = contrast["source_arms"][arm]["source_manifest"]
-        assert source_identity["sha256"] == canonical_json_sha256(
-            source_identity["payload"]
-        )
+        assert "payload" not in source_identity
+        assert source_identity["sha256"] == source_identity["manifest_sha256"]
+        assert source_identity["manifest_attr"] == PROVIDER_OCCUPANCY_MANIFEST_ATTR
+        assert source_identity["occupancy_payload_digest"] in {
+            plan.baseline_manifest_digest,
+            plan.treatment_manifest_digest,
+        }
+
+
+def test_compact_contrast_reader_accepts_explicit_v1_occupancy_source(
+    tmp_path: Path,
+) -> None:
+    (
+        archive,
+        baseline_path,
+        baseline_digest,
+        treatment_path,
+        treatment_digest,
+    ) = _fixture(tmp_path)
+    root = open_zarr_root(archive, mode="a", use_consolidated=False)
+    baseline_run = root[baseline_path]
+    baseline_manifest = deepcopy(
+        baseline_run.attrs[PROVIDER_OCCUPANCY_MANIFEST_ATTR]
+    )
+    baseline_run.attrs["schema_version"] = 1
+    baseline_manifest["schema_version"] = 1
+    baseline_run.attrs[PROVIDER_OCCUPANCY_MANIFEST_ATTR] = baseline_manifest
+    consolidate_metadata_capture_expected_warnings(archive)
+
+    baseline = build_pooled_occupancy_contrast_summary(
+        archive,
+        run_path=baseline_path,
+        manifest_sha256=baseline_digest,
+        arm_role="baseline",
+    )
+    treatment = build_pooled_occupancy_contrast_summary(
+        archive,
+        run_path=treatment_path,
+        manifest_sha256=treatment_digest,
+        arm_role="treatment",
+    )
+    contrast = compute_occupancy_contrast(
+        baseline,
+        treatment,
+        config={"selection_policy": "mixed-publication-schema-compatibility-v1"},
+    )
+    plan = build_provider_occupancy_contrast_materialization_plan(
+        archive,
+        baseline_run_path=baseline_path,
+        treatment_run_path=treatment_path,
+        baseline_manifest_digest=baseline_digest,
+        treatment_manifest_digest=treatment_digest,
+        contrast_result=contrast,
+        run_name="occupancy-contrast-mixed-source-schema-v1",
+        scratch_root=tmp_path / "contrast-scratch",
+        source_scope=SOURCE_SCOPE_POOLED,
+    )
+
+    assert plan.manifest["payload"]["source_runs"]["baseline"][
+        "run_schema_version"
+    ] == 1
+    assert plan.manifest["payload"]["source_runs"]["treatment"][
+        "run_schema_version"
+    ] == 2
+    assert "source_manifest_bindings" not in plan.manifest["payload"]
 
 
 def test_selector_like_child_attribute_is_rejected(tmp_path: Path) -> None:
@@ -286,7 +362,9 @@ def test_selector_like_child_attribute_is_rejected(tmp_path: Path) -> None:
         )
 
 
-def test_actual_manifest_and_seven_binding_references_are_persisted(tmp_path: Path) -> None:
+def test_compact_source_references_are_persisted_without_recursive_manifests(
+    tmp_path: Path,
+) -> None:
     archive, plan, _contrast = _plan(tmp_path)
     source_root_before = open_zarr_root(archive, mode="r", use_consolidated=True)
     source_manifests_before = {
@@ -299,12 +377,21 @@ def test_actual_manifest_and_seven_binding_references_are_persisted(tmp_path: Pa
     publish_provider_occupancy_contrast_run(plan)
     root = open_zarr_root(archive, mode="r", use_consolidated=True)
     payload = root["analysis/provider_occupancy_contrast_runs/occupancy-contrast-v1"].attrs[MANIFEST_ATTR]["payload"]
+    assert "source_manifest_bindings" not in payload
     for arm, path in (("baseline", plan.baseline_run_path), ("treatment", plan.treatment_run_path)):
-        binding = payload["source_manifest_bindings"][arm]
         source_manifest = root[path].attrs[PROVIDER_OCCUPANCY_MANIFEST_ATTR]
-        assert binding["source_manifest_attr"] == PROVIDER_OCCUPANCY_MANIFEST_ATTR
-        assert binding["source_bindings"] == source_manifest["payload"]["source_bindings"]
-        assert binding["source_bindings_sha256"] == source_manifest["payload"]["source_bindings_sha256"]
+        source_run = payload["source_runs"][arm]
+        assert source_run["run_path"] == path
+        assert source_run["manifest_sha256"] == source_manifest["payload_digest"]
+        assert source_run["source_bindings_sha256"] == source_manifest["payload"][
+            "source_bindings_sha256"
+        ]
+        assert payload["source_arm_records"][arm]["source_manifest"][
+            "manifest_attr"
+        ] == PROVIDER_OCCUPANCY_MANIFEST_ATTR
+        assert "payload" not in payload["source_arm_records"][arm][
+            "source_manifest"
+        ]
         assert source_manifest == source_manifests_before[arm]
     assert root[PARENT_PATH].attrs["latest"] == "preexisting-contrast"
 

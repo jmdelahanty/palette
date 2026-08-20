@@ -42,6 +42,10 @@ from fisheye.analysis_workflows.materializers.composable_stimulus_selection impo
     REQUESTED_JSON_ATTR,
     RESOLVED_JSON_ATTR,
     RUN_SCHEMA_ID as SELECTION_RUN_SCHEMA_ID,
+    RUN_SCHEMA_VERSION as SELECTION_RUN_SCHEMA_VERSION,
+    SUPPORTED_RUN_SCHEMA_VERSIONS as SELECTION_SUPPORTED_RUN_SCHEMA_VERSIONS,
+    REQUESTED_JSON_ARRAY,
+    TIMELINE_AUTHORITY_JSON_ARRAY,
     TIMELINE_AUTHORITY_JSON_ATTR,
 )
 from fisheye.analysis_workflows.materializers.provider_occupancy_v2 import (
@@ -344,12 +348,12 @@ def _selection_source_record(
         field="selection run",
         schema_id=SELECTION_RUN_SCHEMA_ID,
     )
+    if attrs.get("schema_version", 1) not in SELECTION_SUPPORTED_RUN_SCHEMA_VERSIONS:
+        raise _fail("Published selection has an unsupported schema version.")
     child_name = run_path.rsplit("/", 1)[1]
     if attrs.get("palette_run_name") != child_name:
         raise _fail("Selection run name does not match its path.")
-    _require_attrs(
-        attrs,
-        (
+    required_attrs = [
             "selection_id",
             "request_digest",
             "resolved_digest",
@@ -357,10 +361,17 @@ def _selection_source_record(
             "timeline_authority_sha256",
             SELECTION_ARRAY_MANIFEST_JSON_ATTR,
             SELECTION_ARRAY_MANIFEST_DIGEST_ATTR,
-            REQUESTED_JSON_ATTR,
-            RESOLVED_JSON_ATTR,
-            TIMELINE_AUTHORITY_JSON_ATTR,
-        ),
+        ]
+    compact = attrs.get("schema_version") == SELECTION_RUN_SCHEMA_VERSION
+    if compact:
+        required_attrs.extend(("selection_summary", "provenance_array_paths"))
+    else:
+        required_attrs.extend(
+            (REQUESTED_JSON_ATTR, RESOLVED_JSON_ATTR, TIMELINE_AUTHORITY_JSON_ATTR)
+        )
+    _require_attrs(
+        attrs,
+        tuple(required_attrs),
         field="selection run",
     )
     if attrs["selection_id"] != compiled.selection_id:
@@ -375,14 +386,35 @@ def _selection_source_record(
         compiled.authority.to_dict()
     ):
         raise _fail("Published selection has a stale timeline-authority digest.")
-    if attrs[REQUESTED_JSON_ATTR] != canonical_json(compiled.requested):
-        raise _fail("Published selection requested JSON is stale.")
-    if attrs[RESOLVED_JSON_ATTR] != canonical_json(compiled.resolved_payload()):
-        raise _fail("Published selection resolved JSON is stale.")
-    if attrs[TIMELINE_AUTHORITY_JSON_ATTR] != canonical_json(
-        compiled.authority.to_dict()
-    ):
-        raise _fail("Published selection timeline-authority JSON is stale.")
+    if compact:
+        for path, expected in (
+            (REQUESTED_JSON_ARRAY, canonical_json(compiled.requested)),
+            (
+                TIMELINE_AUTHORITY_JSON_ARRAY,
+                canonical_json(compiled.authority.to_dict()),
+            ),
+        ):
+            try:
+                values = np.asarray(run[path][:])
+                observed = values.tobytes().decode("utf-8")
+            except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+                raise _fail(f"Published selection provenance array {path!r} is unreadable.") from exc
+            if values.dtype != np.dtype("uint8") or values.ndim != 1 or observed != expected:
+                raise _fail(f"Published selection provenance array {path!r} is stale.")
+        if any(
+            name in attrs
+            for name in (REQUESTED_JSON_ATTR, RESOLVED_JSON_ATTR, TIMELINE_AUTHORITY_JSON_ATTR)
+        ):
+            raise _fail("Compact selection contains legacy cardinality-scaled JSON attrs.")
+    else:
+        if attrs[REQUESTED_JSON_ATTR] != canonical_json(compiled.requested):
+            raise _fail("Published selection requested JSON is stale.")
+        if attrs[RESOLVED_JSON_ATTR] != canonical_json(compiled.resolved_payload()):
+            raise _fail("Published selection resolved JSON is stale.")
+        if attrs[TIMELINE_AUTHORITY_JSON_ATTR] != canonical_json(
+            compiled.authority.to_dict()
+        ):
+            raise _fail("Published selection timeline-authority JSON is stale.")
     try:
         array_manifest = json.loads(attrs[SELECTION_ARRAY_MANIFEST_JSON_ATTR])
     except (TypeError, ValueError) as exc:
@@ -410,6 +442,8 @@ def _selection_source_record(
         "compiled_selection_sha256": attrs[COMPILED_SELECTION_DIGEST_ATTR],
         "timeline_authority_sha256": attrs["timeline_authority_sha256"],
         "logical_array_manifest_sha256": attrs[SELECTION_ARRAY_MANIFEST_DIGEST_ATTR],
+        "selection_summary": dict(attrs.get("selection_summary", {})),
+        "provenance_array_paths": dict(attrs.get("provenance_array_paths", {})),
         "status": attrs[RUN_COMPLETION_STATUS_ATTR],
         "stage_selector_eligible": False,
     }
@@ -518,8 +552,10 @@ def _trajectory_source_record(
         "track_sample_key_sha256": track_key_digest,
         "acquisition_frame_sha256": acquisition_frame_digest,
         "selected_frame_denominator": dict(denominator),
-        "trajectory_run_manifest": dict(run_manifest),
-        "trajectory_array_manifest": dict(array_manifest),
+        "row_axis": run_manifest["row_axis"],
+        "source_rows_sha256": run_manifest["source_rows_sha256"],
+        "trajectory_sha256": run_manifest["trajectory_sha256"],
+        "policy_id": run_manifest["policy_id"],
         "status": attrs[RUN_COMPLETION_STATUS_ATTR],
         "stage_selector_eligible": False,
     }
@@ -668,10 +704,8 @@ def build_provider_occupancy_v2_source_bindings(
     position_policy = _stable_subrecord(
         {
             "policy_id": trajectory.authorities.track_sample_policy_id,
-            "row_axis": trajectory_record["trajectory_run_manifest"]["row_axis"],
-            "source_rows_sha256": trajectory_record["trajectory_run_manifest"][
-                "source_rows_sha256"
-            ],
+            "row_axis": trajectory_record["row_axis"],
+            "source_rows_sha256": trajectory_record["source_rows_sha256"],
             "provider_id": trajectory.authorities.provider_id,
             "recording_id": trajectory.authorities.recording_id,
         },

@@ -36,11 +36,14 @@ from fisheye.shared.subject_position_types import (
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.metadata_cardinality import (
+    require_cardinality_independent_metadata,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 
 
 PROVIDER_TRACK_SOURCE_SCHEMA_ID = "palette.provider_spatial_track_source"
-PROVIDER_TRACK_SOURCE_SCHEMA_VERSION = 1
+PROVIDER_TRACK_SOURCE_SCHEMA_VERSION = 2
 TRACK_SAMPLE_POLICY_ID = "single_subject_instance_key_one_sample_per_frame_v1"
 
 _SHA256_LENGTH = 64
@@ -345,9 +348,12 @@ def _build_source_binding(
     assigned_rows: np.ndarray,
     position_rows: np.ndarray,
     output_order: np.ndarray,
-    provider_reason_tags: tuple[str, ...],
     unassigned_track_id: int,
 ) -> ProviderTrackSourceEvidence:
+    reason_counts = {
+        tag: int(np.count_nonzero(source_reasons == code))
+        for code, tag in sorted(POSITION_FAILURE_REASON_TAGS.items())
+    }
     record = {
         "schema_id": PROVIDER_TRACK_SOURCE_SCHEMA_ID,
         "schema_version": PROVIDER_TRACK_SOURCE_SCHEMA_VERSION,
@@ -368,22 +374,59 @@ def _build_source_binding(
             "manifest_sha256": position.manifest_sha256,
             "decoded_content_sha256": position.decoded_content_sha256,
             "row_count": int(source_keys.size),
-            "instance_key_sha256": array_values_sha256(source_keys),
-            "frame_index_sha256": array_values_sha256(source_frames),
-            "failure_reason_code_sha256": array_values_sha256(source_reasons),
-            "failure_reason_codes": [int(value) for value in source_reasons.tolist()],
-            "failure_reason_tags": list(
-                POSITION_FAILURE_REASON_TAGS[int(value)] for value in source_reasons
-            ),
+            "array_path_scope": "relative_to_subject_position_source_run",
+            "arrays": {
+                "instance_key": {
+                    "array_path": "instance_key",
+                    "dtype": source_keys.dtype.str,
+                    "shape": [int(source_keys.size)],
+                    "content_sha256": array_values_sha256(source_keys),
+                },
+                "acquisition_frame": {
+                    "array_path": "source_acquisition_frame_index",
+                    "dtype": source_frames.dtype.str,
+                    "shape": [int(source_frames.size)],
+                    "content_sha256": array_values_sha256(source_frames),
+                },
+                "failure_reason_code": {
+                    "array_path": "failure_reason_codes",
+                    "dtype": source_reasons.dtype.str,
+                    "shape": [int(source_reasons.size)],
+                    "content_sha256": array_values_sha256(source_reasons),
+                },
+            },
+            "failure_reason_codebook": [
+                {"code": int(code), "tag": tag}
+                for code, tag in sorted(POSITION_FAILURE_REASON_TAGS.items())
+            ],
+            "failure_reason_counts": reason_counts,
         },
         "tracking_source": {
             "run_path": tracking.run_path,
             "manifest_sha256": tracking.manifest_sha256,
             "verification_digest": tracking.verification_digest,
             "row_count": int(tracking_keys.size),
-            "instance_key_sha256": array_values_sha256(tracking_keys),
-            "frame_index_sha256": array_values_sha256(tracking_frames),
-            "track_id_sha256": array_values_sha256(tracking_ids),
+            "array_path_scope": "relative_to_tracking_source_run",
+            "arrays": {
+                "instance_key": {
+                    "array_path": "instance_key",
+                    "dtype": tracking_keys.dtype.str,
+                    "shape": [int(tracking_keys.size)],
+                    "content_sha256": array_values_sha256(tracking_keys),
+                },
+                "acquisition_frame": {
+                    "array_path": "frame_indices",
+                    "dtype": tracking_frames.dtype.str,
+                    "shape": [int(tracking_frames.size)],
+                    "content_sha256": array_values_sha256(tracking_frames),
+                },
+                "track_id": {
+                    "array_path": "track_ids",
+                    "dtype": tracking_ids.dtype.str,
+                    "shape": [int(tracking_ids.size)],
+                    "content_sha256": array_values_sha256(tracking_ids),
+                },
+            },
             "unassigned_track_id": int(unassigned_track_id),
         },
         "keyed_join": {
@@ -399,9 +442,17 @@ def _build_source_binding(
                 position_rows
             ),
             "output_order_sha256": array_values_sha256(output_order),
-            "provider_reason_tags": list(provider_reason_tags),
         },
     }
+    require_cardinality_independent_metadata(
+        record,
+        forbidden_fields=(
+            "failure_reason_codes",
+            "failure_reason_tags",
+            "provider_reason_tags",
+        ),
+        label="provider_track_source",
+    )
     return ProviderTrackSourceEvidence(record=record)
 
 
@@ -491,7 +542,6 @@ def build_provider_track_source(
         raise ProviderSpatialTrackSourceError(
             "subject-position marks a nonfinite position valid."
         )
-    reason_tags: list[str] = []
     for row, code in enumerate(source_reasons.tolist()):
         tag = POSITION_FAILURE_REASON_TAGS.get(int(code))
         if tag is None:
@@ -502,7 +552,6 @@ def build_provider_track_source(
             raise ProviderSpatialTrackSourceError(
                 "subject-position valid and failure reason code disagree."
             )
-        reason_tags.append(str(tag))
 
     tracking_keys = np.asarray(tracking.instance_key)
     tracking_ids = np.asarray(tracking.track_ids)
@@ -620,7 +669,6 @@ def build_provider_track_source(
         assigned_rows=assigned_rows,
         position_rows=matched_position_rows,
         output_order=output_order,
-        provider_reason_tags=tuple(reason_tags),
         unassigned_track_id=unassigned_track_id,
     )
     return samples, evidence

@@ -343,8 +343,14 @@ def test_selection_trajectory_occupancy_pipeline_publishes_exact_overlap_lineage
     assert values["bindings_a"].values["trajectory"]["record"][
         "position_track_policy"
     ]["policy_id"] != values["bindings_a"].values["trajectory"]["record"][
-        "trajectory_run_manifest"
-    ]["policy_id"]
+        "policy_id"
+    ]
+    assert "trajectory_run_manifest" not in values["bindings_a"].values[
+        "trajectory"
+    ]["record"]
+    assert "trajectory_array_manifest" not in values["bindings_a"].values[
+        "trajectory"
+    ]["record"]
     assert values["bindings_a"].values["trajectory"]["record"]["sample_unit"] == values[
         "bindings_b"
     ].values["trajectory"]["record"]["sample_unit"]
@@ -423,6 +429,8 @@ def test_selection_trajectory_occupancy_pipeline_publishes_exact_overlap_lineage
         "manifest_sha256": occupancy_a_digest,
         "manifest_envelope_sha256": baseline["source_manifest"]["sha256"],
         "source_bindings_sha256": baseline["bindings_sha256"],
+        "run_schema_version": 2,
+        "manifest_schema_version": 2,
     }
     assert contrast_payload["source_runs"]["treatment"] == {
         "role": "treatment",
@@ -430,6 +438,8 @@ def test_selection_trajectory_occupancy_pipeline_publishes_exact_overlap_lineage
         "manifest_sha256": occupancy_b_digest,
         "manifest_envelope_sha256": treatment["source_manifest"]["sha256"],
         "source_bindings_sha256": treatment["bindings_sha256"],
+        "run_schema_version": 2,
+        "manifest_schema_version": 2,
     }
     for path in (
         values["selection_a_path"],

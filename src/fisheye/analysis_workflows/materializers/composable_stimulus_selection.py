@@ -41,6 +41,9 @@ from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
+from fisheye.shared.zarr.metadata_cardinality import (
+    require_cardinality_independent_metadata,
+)
 from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock_path,
     consolidate_metadata_capture_expected_warnings,
@@ -60,9 +63,11 @@ from fisheye.shared.zarr_run_completion import (
 
 PARENT_PATH = "analysis/stimulus_selection_runs"
 MATERIALIZATION_SCHEMA_ID = "palette.composable_stimulus_selection_materialization"
-MATERIALIZATION_SCHEMA_VERSION = 1
+MATERIALIZATION_SCHEMA_VERSION = 2
 PUBLISH_SCHEMA_ID = "palette.composable_stimulus_selection_publish"
 RUN_SCHEMA_ID = "palette.composable_stimulus_selection_run"
+RUN_SCHEMA_VERSION = 2
+SUPPORTED_RUN_SCHEMA_VERSIONS = frozenset({1, RUN_SCHEMA_VERSION})
 RETRY_POLICY = "new_immutable_run_name_required"
 RUN_PATH_POLICY = "exact_non_selector_child_v1"
 SELECTOR_INELIGIBLE_POLICY = "permanent_selector_ineligible_no_parent_pointer_update"
@@ -72,6 +77,8 @@ TIMELINE_AUTHORITY_JSON_ATTR = "timeline_authority_json"
 ARRAY_MANIFEST_JSON_ATTR = "logical_array_manifest_json"
 ARRAY_MANIFEST_DIGEST_ATTR = "logical_array_manifest_sha256"
 COMPILED_SELECTION_DIGEST_ATTR = "compiled_selection_sha256"
+REQUESTED_JSON_ARRAY = "requested_selection_json_utf8"
+TIMELINE_AUTHORITY_JSON_ARRAY = "timeline_authority_json_utf8"
 
 _SELECTOR_ALIASES = frozenset(
     {
@@ -442,6 +449,13 @@ def _selection_arrays(compiled: CompiledSelection) -> dict[str, np.ndarray]:
         "occurrence_frame_counts": np.asarray(
             [item.frame_count for item in compiled.occurrences], dtype=np.int64
         ),
+        REQUESTED_JSON_ARRAY: np.frombuffer(
+            canonical_json(compiled.requested).encode("utf-8"), dtype=np.uint8
+        ).copy(),
+        TIMELINE_AUTHORITY_JSON_ARRAY: np.frombuffer(
+            canonical_json(compiled.authority.to_dict()).encode("utf-8"),
+            dtype=np.uint8,
+        ).copy(),
     }
     membership_string_values = {
         "membership_reference_kind": [item.reference_kind for item in memberships],
@@ -556,7 +570,27 @@ for _prefix in (
         f"UTF-8 byte length for {_prefix}",
         "selection.resolved_occurrences",
     )
+_EXPECTED_ARRAY_NAMES_V1 = tuple(sorted(_ARRAY_SPECS))
+_ARRAY_SPECS[REQUESTED_JSON_ARRAY] = (
+    ("requested_selection_json_utf8_byte",),
+    "utf8_byte",
+    "exact canonical requested selection JSON bytes",
+    "selection.requested_expression",
+)
+_ARRAY_SPECS[TIMELINE_AUTHORITY_JSON_ARRAY] = (
+    ("timeline_authority_json_utf8_byte",),
+    "utf8_byte",
+    "exact canonical timeline authority JSON bytes",
+    "timeline.authority",
+)
 _EXPECTED_ARRAY_NAMES = tuple(sorted(_ARRAY_SPECS))
+
+
+def _expected_array_names(group: Any) -> tuple[str, ...]:
+    version = group.attrs.get("schema_version", 1)
+    if version not in SUPPORTED_RUN_SCHEMA_VERSIONS:
+        raise ValueError(f"unsupported selection-run schema version {version!r}")
+    return _EXPECTED_ARRAY_NAMES if version == RUN_SCHEMA_VERSION else _EXPECTED_ARRAY_NAMES_V1
 
 
 def _array_content_digest(array: Any) -> str:
@@ -572,7 +606,8 @@ def _array_content_digest(array: Any) -> str:
 
 def _build_array_manifest(group: Any) -> dict[str, Any]:
     declarations: list[dict[str, Any]] = []
-    for name in _EXPECTED_ARRAY_NAMES:
+    expected_names = _expected_array_names(group)
+    for name in expected_names:
         array = group[name]
         axes, units, description, authority_role = _ARRAY_SPECS[name]
         declarations.append(
@@ -589,7 +624,7 @@ def _build_array_manifest(group: Any) -> dict[str, Any]:
         )
     return {
         "schema_id": "palette.composable_stimulus_selection.logical_array_manifest",
-        "schema_version": 1,
+        "schema_version": 2 if expected_names == _EXPECTED_ARRAY_NAMES else 1,
         "manifest_written_last": True,
         "array_count": len(declarations),
         "digest_algorithm": "sha256(dtype_shape_c_order_bytes)_v1",
@@ -605,6 +640,23 @@ def _strict_json_attr(attrs: Mapping[str, Any], name: str) -> tuple[str, Any]:
         decoded = json.loads(value)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{name} is not valid JSON") from exc
+    if canonical_json(decoded) != value:
+        raise ValueError(f"{name} is not canonical strict JSON")
+    return value, decoded
+
+
+def _strict_json_array(group: Any, name: str) -> tuple[str, Any]:
+    try:
+        values = np.asarray(group[name][:])
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise ValueError(f"{name} must be one readable uint8 JSON byte array") from exc
+    if values.dtype != np.dtype("uint8") or values.ndim != 1:
+        raise ValueError(f"{name} must be one uint8 JSON byte vector")
+    try:
+        value = values.tobytes().decode("utf-8")
+        decoded = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{name} is not valid UTF-8 canonical JSON") from exc
     if canonical_json(decoded) != value:
         raise ValueError(f"{name} is not canonical strict JSON")
     return value, decoded
@@ -702,8 +754,16 @@ def reconstruct_compiled_selection(run_path: str | Path) -> CompiledSelection:
 
     group = open_zarr_root(Path(run_path), mode="r", use_consolidated=False)
     attrs = dict(group.attrs)
-    _, requested = _strict_json_attr(attrs, REQUESTED_JSON_ATTR)
-    _, authority_payload = _strict_json_attr(attrs, TIMELINE_AUTHORITY_JSON_ATTR)
+    if attrs.get("schema_version", 1) not in SUPPORTED_RUN_SCHEMA_VERSIONS:
+        raise ValueError("materialized selection has an unsupported schema version")
+    if attrs.get("schema_version", 1) == RUN_SCHEMA_VERSION:
+        _, requested = _strict_json_array(group, REQUESTED_JSON_ARRAY)
+        _, authority_payload = _strict_json_array(
+            group, TIMELINE_AUTHORITY_JSON_ARRAY
+        )
+    else:
+        _, requested = _strict_json_attr(attrs, REQUESTED_JSON_ATTR)
+        _, authority_payload = _strict_json_attr(attrs, TIMELINE_AUTHORITY_JSON_ATTR)
     authority = TimelineAuthority(**authority_payload)
     resolved_bounds = _require_bounds(
         group["resolved_interval_bounds"],
@@ -849,7 +909,8 @@ def _validate_array_manifest(group: Any) -> tuple[dict[str, Any], list[str]]:
             errors.append("logical array manifest digest mismatch")
         if manifest.get("manifest_written_last") is not True:
             errors.append("logical array manifest is not marked manifest-last")
-        if tuple(sorted(group.array_keys())) != _EXPECTED_ARRAY_NAMES:
+        expected_names = _expected_array_names(group)
+        if tuple(sorted(group.array_keys())) != expected_names:
             errors.append("run contains unexpected or missing logical arrays")
         observed = _build_array_manifest(group)
         if canonical_json(observed) != manifest_json:
@@ -877,6 +938,8 @@ def validate_composable_stimulus_selection_run(
         return {"valid": False, "errors": [f"cannot open run: {exc}"]}
     if attrs.get("schema_id") != RUN_SCHEMA_ID:
         errors.append("invalid selection-run schema")
+    if attrs.get("schema_version", 1) not in SUPPORTED_RUN_SCHEMA_VERSIONS:
+        errors.append("unsupported selection-run schema version")
     if attrs.get("stage_selector_eligible") is not False:
         errors.append("run is not permanently selector-ineligible")
     if attrs.get("selector_policy") != SELECTOR_INELIGIBLE_POLICY:
@@ -887,19 +950,35 @@ def validate_composable_stimulus_selection_run(
         errors.append("run is not complete")
     if any(_selector_alias_attr_name(key) for key in attrs):
         errors.append("run contains a selector alias attribute")
-    for name in (REQUESTED_JSON_ATTR, RESOLVED_JSON_ATTR, TIMELINE_AUTHORITY_JSON_ATTR):
-        try:
-            _strict_json_attr(attrs, name)
-        except ValueError as exc:
-            errors.append(str(exc))
+    schema_version = attrs.get("schema_version", 1)
+    if schema_version == RUN_SCHEMA_VERSION:
+        for name in (REQUESTED_JSON_ARRAY, TIMELINE_AUTHORITY_JSON_ARRAY):
+            try:
+                _strict_json_array(group, name)
+            except ValueError as exc:
+                errors.append(str(exc))
+        for name in (REQUESTED_JSON_ATTR, RESOLVED_JSON_ATTR, TIMELINE_AUTHORITY_JSON_ATTR):
+            if name in attrs:
+                errors.append(f"compact selection run contains legacy JSON attribute {name}")
+    else:
+        for name in (REQUESTED_JSON_ATTR, RESOLVED_JSON_ATTR, TIMELINE_AUTHORITY_JSON_ATTR):
+            try:
+                _strict_json_attr(attrs, name)
+            except ValueError as exc:
+                errors.append(str(exc))
     try:
         compiled = reconstruct_compiled_selection(run_path)
         resolved_json = canonical_json(compiled.resolved_payload())
         requested_json = canonical_json(compiled.requested)
-        if attrs.get(REQUESTED_JSON_ATTR) != requested_json:
-            errors.append("requested selection JSON does not reconstruct exactly")
-        if attrs.get(RESOLVED_JSON_ATTR) != resolved_json:
-            errors.append("resolved selection JSON does not reconstruct exactly")
+        if schema_version == RUN_SCHEMA_VERSION:
+            stored_requested_json, _ = _strict_json_array(group, REQUESTED_JSON_ARRAY)
+            if stored_requested_json != requested_json:
+                errors.append("requested selection JSON array does not reconstruct exactly")
+        else:
+            if attrs.get(REQUESTED_JSON_ATTR) != requested_json:
+                errors.append("requested selection JSON does not reconstruct exactly")
+            if attrs.get(RESOLVED_JSON_ATTR) != resolved_json:
+                errors.append("resolved selection JSON does not reconstruct exactly")
         if attrs.get("timeline_authority_sha256") != canonical_sha256(
             compiled.authority.to_dict()
         ):
@@ -944,7 +1023,7 @@ def validate_composable_stimulus_selection_run(
     return {
         "valid": not errors,
         "errors": errors,
-        "array_count": len(_EXPECTED_ARRAY_NAMES),
+        "array_count": len(tuple(group.array_keys())),
         "request_digest": attrs.get("request_digest"),
         "resolved_digest": attrs.get("resolved_digest"),
         "logical_array_manifest_sha256": attrs.get(ARRAY_MANIFEST_DIGEST_ATTR),
@@ -965,19 +1044,33 @@ def _write_local_run(
     run.attrs.update(
         {
             "schema_id": RUN_SCHEMA_ID,
-            "schema_version": MATERIALIZATION_SCHEMA_VERSION,
+            "schema_version": RUN_SCHEMA_VERSION,
             "selection_id": compiled.selection_id,
             "aggregation_policy": compiled.aggregation_policy,
             "selection_schema_id": "palette.composable_stimulus_selection_request.v1",
             "request_digest": compiled.request_digest,
             "resolved_digest": compiled.resolved_digest,
             COMPILED_SELECTION_DIGEST_ATTR: _compiled_digest(compiled),
-            REQUESTED_JSON_ATTR: plan.requested_json,
-            RESOLVED_JSON_ATTR: plan.resolved_json,
-            TIMELINE_AUTHORITY_JSON_ATTR: plan.timeline_authority_json,
             "timeline_authority_sha256": canonical_sha256(
                 compiled.authority.to_dict()
             ),
+            "selection_summary": {
+                "resolved_interval_count": len(compiled.resolved_intervals),
+                "pooled_interval_count": len(compiled.pooled_intervals),
+                "occurrence_count": len(compiled.occurrences),
+                "membership_count": sum(
+                    len(interval.source_memberships)
+                    for interval in compiled.resolved_intervals
+                ),
+                "selected_frame_count": sum(
+                    int(end) - int(start) for start, end in compiled.pooled_intervals
+                ),
+            },
+            "provenance_array_paths": {
+                "requested_selection_array_path": REQUESTED_JSON_ARRAY,
+                "timeline_authority_array_path": TIMELINE_AUTHORITY_JSON_ARRAY,
+                "resolved_selection_array_layout": "normalized_selection_arrays",
+            },
             "interval_policy_id": "half_open_acquisition_frame_v1",
             "selector_policy": SELECTOR_INELIGIBLE_POLICY,
             "stage_selector_eligible": False,
@@ -997,7 +1090,7 @@ def _write_local_run(
     # The run is intentionally incomplete until the exact manifest exists.
     # Reading every array here catches malformed physical writes while the
     # manifest itself is still absent; the full contract is validated below.
-    for name in _EXPECTED_ARRAY_NAMES:
+    for name in _expected_array_names(run):
         _array_content_digest(run[name])
     manifest = _build_array_manifest(run)
     run.attrs[ARRAY_MANIFEST_JSON_ATTR] = canonical_json(manifest)
@@ -1016,6 +1109,18 @@ def _write_local_run(
         cwd=Path(__file__).resolve().parents[4],
     )
     run.attrs["run_provenance"] = json_attr_safe(provenance)
+    require_cardinality_independent_metadata(
+        dict(run.attrs),
+        forbidden_fields=(
+            REQUESTED_JSON_ATTR,
+            RESOLVED_JSON_ATTR,
+            TIMELINE_AUTHORITY_JSON_ATTR,
+            "acquisition_frames",
+            "membership_keys",
+            "occurrence_ids",
+        ),
+        label="composable_stimulus_selection_attrs",
+    )
     mark_run_complete(
         run,
         parent_group=parent,
@@ -1223,8 +1328,15 @@ __all__ = [
     "MATERIALIZATION_SCHEMA_ID",
     "PARENT_PATH",
     "PUBLISH_SCHEMA_ID",
+    "REQUESTED_JSON_ARRAY",
+    "REQUESTED_JSON_ATTR",
     "RETRY_POLICY",
+    "RESOLVED_JSON_ATTR",
     "RUN_SCHEMA_ID",
+    "RUN_SCHEMA_VERSION",
+    "SUPPORTED_RUN_SCHEMA_VERSIONS",
+    "TIMELINE_AUTHORITY_JSON_ARRAY",
+    "TIMELINE_AUTHORITY_JSON_ATTR",
     "build_composable_stimulus_selection_materialization_plan",
     "materialize_composable_stimulus_selection",
     "materialize_composable_stimulus_selection_plan",

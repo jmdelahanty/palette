@@ -18,6 +18,7 @@ This checklist narrows the next implementation slice of:
 - [Position, Body-Frame, and Motion Provider Design](position_body_frame_and_motion_provider_design.md);
 - [Subject Position Storage Contract v1](subject_position_storage_contract_v1.md); and
 - [Derived Analysis Run Contract](derived_analysis_run_contract.md).
+- [Compact Array-Backed Provenance Contract](compact_array_backed_provenance_contract.md).
 
 Existing immutable stimulus, detection, position, tracking, occupancy, motion,
 and visualization runs remain unchanged. New publications are immutable
@@ -261,6 +262,51 @@ a trusted-parent receipt fast path can be evaluated separately without
 changing scientific semantics. The timestamped decision for this canary is to
 retain both providers as comparison-only offers: successful publication is not
 evidence to promote either provider as the GoodBatBadBat default.
+
+## Implementation checkpoint: compact readable provenance v2 (2026-08-20)
+
+The first real canary exposed a publication-shape defect rather than a loss of
+scientific evidence. Its root consolidated `zarr.json` reached approximately
+1.45 GB because row/occurrence-sized attribute values and complete upstream
+manifests were copied recursively through selections, trajectories,
+occupancies, and contrasts. The same exact values already existed in typed
+arrays.
+
+The accepted correction is the
+[Compact Array-Backed Provenance Contract](compact_array_backed_provenance_contract.md):
+
+- [x] Keep explicit policy IDs, formulas, parameters, units, authorities,
+      source paths, codebooks, counts, and array declarations readable.
+- [x] Treat digests as verification evidence, never as a replacement for the
+      scientific description.
+- [x] Store frame-, row-, observation-, occurrence-, and grid-cardinality
+      values in typed arrays, referenced by path, dtype, shape, and digest.
+- [x] Stop recursively embedding upstream manifests in downstream source
+      bindings.
+- [x] Store exact requested-selection and timeline-authority JSON bytes in
+      arrays while retaining readable fixed selection summaries in metadata.
+- [x] Replace row-sized provider reason lists with array references, a fixed
+      reason codebook, and per-code counts.
+- [x] Replace trajectory selection payload copies with exact compact selection
+      authority and selection-array references.
+- [x] Replace per-occurrence occupancy conservation lists with named arrays and
+      explicit invariant formulas.
+- [x] Replace contrast source-manifest, occurrence, and grid-edge copies with
+      readable source-run/arm summaries and exact source/edge array references.
+- [x] Add a reusable fail-closed structural metadata-cardinality guard and
+      focused tests.
+- [ ] Publish clean v2 canary successors and measure direct and consolidated
+      metadata size before deciding whether to extract the old canary into a
+      clean archive generation.
+- [ ] Add a separate operational consolidated-metadata size budget after the
+      legacy root no longer makes such a gate fail by construction.
+
+Existing immutable canary runs and the existing large root metadata file are
+not rewritten by this implementation. The branch remains selector-ineligible
+and requires required CI before integration. The focused and adjacent
+provider-spatial suite passed `152` tests with `12` expected Zarr-v3 warnings
+outside the sandbox; Ruff, static compilation, and `git diff --check` also
+passed.
 
 ## Accepted first-slice decisions
 

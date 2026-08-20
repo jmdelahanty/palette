@@ -125,6 +125,15 @@ def test_materializer_preserves_expected_denominator_and_overlap(tmp_path: Path)
     assert run["pooled/counts"][:].sum() == 3
     assert run["per_occurrence/expected_selected_frames"][:].tolist() == [3, 2]
     assert run["per_occurrence/counts"][:].sum(axis=(1, 2)).tolist() == [2, 2]
+    conservation = run.attrs["provider_occupancy_v2_manifest"]["payload"][
+        "conservation"
+    ]
+    assert conservation["per_occurrence_count"] == 2
+    assert conservation["per_occurrence_count_sum_array"] == (
+        "per_occurrence/counts"
+    )
+    assert "per_occurrence_count_sums" not in conservation
+    assert "per_occurrence_valid_in_grid_sample_counts" not in conservation
     assert output["acceptance"]["consolidated_validation"]["valid"] is True
     assert output["acceptance"]["direct_consolidated"]["declarations_sha256"]
 

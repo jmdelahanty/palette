@@ -150,6 +150,15 @@ def test_round_trip_publishes_exact_arrays_and_direct_consolidated_metadata(
     assert run.attrs["provider_spatial_trajectory_manifest"]["authorities"][
         "track_sample_policy_id"
     ] == "one_track_sample_per_subject_frame_v1"
+    selection_binding = run.attrs["provider_spatial_trajectory_manifest"]["selection"]
+    assert selection_binding["selected_frame_count"] == 3
+    assert selection_binding["membership_edge_count"] == 4
+    assert "acquisition_frames" not in selection_binding
+    assert "membership_keys" not in selection_binding
+    assert "occurrence_ids" not in selection_binding
+    assert selection_binding["arrays"]["acquisition_frame"]["array_path"] == (
+        "selection/acquisition_frame"
+    )
     assert run["subject_identity_offsets"].dtype == np.dtype(np.int64)
     assert run["subject_identity_utf8"].dtype == np.dtype(np.uint8)
     assert run["track_identity_offsets"].dtype == np.dtype(np.int64)

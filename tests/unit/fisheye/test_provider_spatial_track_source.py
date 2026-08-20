@@ -163,6 +163,17 @@ def test_detection_and_keypoint_modalities_join_by_exact_instance_key(
     assert evidence.source_id == evidence.sha256
     assert evidence.track_sample_policy_id == TRACK_SAMPLE_POLICY_ID
     assert evidence.record_sha256 == evidence.sha256
+    position_source = evidence.record["subject_position_source"]
+    assert "failure_reason_codes" not in position_source
+    assert "failure_reason_tags" not in position_source
+    assert position_source["arrays"]["failure_reason_code"]["array_path"] == (
+        "failure_reason_codes"
+    )
+    assert sum(position_source["failure_reason_counts"].values()) == 3
+    assert evidence.record["tracking_source"]["arrays"]["track_id"][
+        "array_path"
+    ] == "track_ids"
+    assert "provider_reason_tags" not in evidence.record["keyed_join"]
 
 
 def test_unassigned_tracking_rows_are_explicitly_excluded_after_full_key_join(
