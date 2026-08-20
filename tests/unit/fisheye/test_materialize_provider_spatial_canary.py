@@ -193,5 +193,6 @@ def test_occupancy_authority_keeps_grid_edges_array_backed() -> None:
     assert "y_edges" not in authority
     assert "x_edges_float64" not in authority["grid_policy"]
     assert "y_edges_float64" not in authority["grid_policy"]
+    assert authority["recording_id"] == "recording-v1"
     assert authority["edge_count_xy"] == {"x": 83, "y": 83}
     assert authority["edge_array_paths"]["x"] == "grid/x_edges"

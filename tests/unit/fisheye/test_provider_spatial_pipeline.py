@@ -51,6 +51,12 @@ from fisheye.analysis_workflows.provider_spatial_pipeline import (
     compiled_selection_membership,
     occupancy_samples_from_provider_trajectory,
 )
+from fisheye.analysis_workflows.provider_spatial_grid_policy import (
+    CircularArenaGeometryAuthority,
+    PhysicalScaleAuthority,
+    SelectionAuthority,
+    build_arena_mm_grid_policy,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 
 
@@ -451,6 +457,120 @@ def test_selection_trajectory_occupancy_pipeline_publishes_exact_overlap_lineage
         "analysis/provider_occupancy_contrast_runs/occupancy-contrast-a-b",
     ):
         assert root[path].attrs["stage_selector_eligible"] is False
+
+
+def test_adapter_preserves_compact_array_backed_grid_authority(tmp_path: Path) -> None:
+    values = _canary(tmp_path)
+    selection_authority = SelectionAuthority(
+        selection_id="grid-selection-v1",
+        recording_id=RECORDING_ID,
+        record_sha256="a" * 64,
+        record_ref="analysis/arena_geometry_selection/grid-selection-v1",
+    )
+    grid_policy = build_arena_mm_grid_policy(
+        recording_id=RECORDING_ID,
+        geometry=CircularArenaGeometryAuthority(
+            geometry_id="dish-geometry-v1",
+            coordinate_authority_id=COORDINATE_AUTHORITY_ID,
+            center_x_px=1.5,
+            center_y_px=1.5,
+            radius_px=1.5,
+            record_ref="analysis/arena_geometry_candidates/dish-geometry-v1",
+        ),
+        scale=PhysicalScaleAuthority(
+            scale_id="camera-scale-v1",
+            coordinate_authority_id=COORDINATE_AUTHORITY_ID,
+            mm_per_pixel=1.0,
+            record_ref="analysis/source_camera_scale/camera-scale-v1",
+        ),
+        selection=selection_authority,
+    )
+    result = calculate_provider_occupancy_v2(
+        occupancy_samples_from_provider_trajectory(
+            values["trajectory_a"],
+            selection=compiled_selection_membership(values["compiled_a"]),
+        ),
+        grid_policy.to_occupancy_grid(),
+        values["timing"],
+    )
+    authorities = _authorities(result, values["trajectory_a"])
+    authorities["fixed_grid_policy"] = {
+        "schema_id": "palette.provider_spatial_fixed_grid_policy_authority",
+        "schema_version": 2,
+        "recording_id": RECORDING_ID,
+        "grid_id": grid_policy.policy_id,
+        "config_digest": result.config_digest,
+        "edge_policy_id": result.edge_policy_id,
+        "timing_policy_id": result.timing_policy_id,
+        "fps_hz": result.fps_hz,
+        "edge_count_xy": {
+            "x": int(result.x_edges.size),
+            "y": int(result.y_edges.size),
+        },
+        "bounds_mm": {
+            "x": [float(result.x_edges[0]), float(result.x_edges[-1])],
+            "y": [float(result.y_edges[0]), float(result.y_edges[-1])],
+        },
+        "edge_array_paths": {
+            "x": "grid/x_edges",
+            "y": "grid/y_edges",
+            "path_scope": "relative_to_provider_occupancy_run",
+        },
+        "grid_policy": grid_policy.source_binding_authority_record(),
+    }
+
+    bindings = build_provider_occupancy_v2_source_bindings(
+        values["archive"],
+        selection_run_path=values["selection_a_path"],
+        trajectory_run_path=values["trajectory_a_path"],
+        compiled_selection=values["compiled_a"],
+        trajectory=values["trajectory_a"],
+        result=result,
+        provider_authority=authorities["provider"],
+        timing_authority=authorities["timing"],
+        geometry_authority=authorities["geometry"],
+        transform_authority=authorities["transform"],
+        fixed_grid_policy_authority=authorities["fixed_grid_policy"],
+    )
+
+    fixed = bindings.values["fixed_grid_policy"]["record"]
+    assert "x_edges" not in fixed
+    assert "y_edges" not in fixed
+    assert fixed["edge_array_paths"]["x"] == "grid/x_edges"
+    assert fixed["grid_policy"]["x_edges_sha256"]
+    assert fixed["grid_policy"]["y_edges_sha256"]
+
+    wrong_grid_policy = build_arena_mm_grid_policy(
+        recording_id=RECORDING_ID,
+        geometry=CircularArenaGeometryAuthority(
+            geometry_id="dish-geometry-wrong-v1",
+            coordinate_authority_id=COORDINATE_AUTHORITY_ID,
+            center_x_px=1.5,
+            center_y_px=1.5,
+            radius_px=2.5,
+            record_ref="analysis/arena_geometry_candidates/dish-geometry-wrong-v1",
+        ),
+        scale=grid_policy.scale,
+        selection=selection_authority,
+    )
+    mismatched_authority = dict(authorities["fixed_grid_policy"])
+    mismatched_authority["grid_policy"] = (
+        wrong_grid_policy.source_binding_authority_record()
+    )
+    with pytest.raises(ProviderSpatialPipelineError, match="x_edges_sha256"):
+        build_provider_occupancy_v2_source_bindings(
+            values["archive"],
+            selection_run_path=values["selection_a_path"],
+            trajectory_run_path=values["trajectory_a_path"],
+            compiled_selection=values["compiled_a"],
+            trajectory=values["trajectory_a"],
+            result=result,
+            provider_authority=authorities["provider"],
+            timing_authority=authorities["timing"],
+            geometry_authority=authorities["geometry"],
+            transform_authority=authorities["transform"],
+            fixed_grid_policy_authority=mismatched_authority,
+        )
 
 
 def test_adapter_rejects_direct_array_payload_tamper(tmp_path: Path) -> None:

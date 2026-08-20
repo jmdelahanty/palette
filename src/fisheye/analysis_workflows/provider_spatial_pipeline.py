@@ -59,8 +59,15 @@ from fisheye.analysis_workflows.materializers.provider_spatial_trajectory import
     RUN_MANIFEST_SHA256_ATTR as TRAJECTORY_RUN_MANIFEST_SHA256_ATTR,
     RUN_SCHEMA_ID as TRAJECTORY_RUN_SCHEMA_ID,
 )
-from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.analysis_workflows.provider_spatial_grid_policy import (
+    ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_ID,
+    ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_VERSION,
+    ArenaMMGridPolicyError,
+    validate_source_binding_authority_record,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.zarr.benchmark_runtime import sha256_array
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
@@ -579,6 +586,101 @@ def _require_stable_text(value: object, *, field: str) -> str:
     return value
 
 
+def _validate_fixed_grid_policy_authority(
+    fixed_grid: Mapping[str, Any],
+    *,
+    result: ProviderOccupancyV2Result,
+) -> str:
+    """Validate legacy embedded edges or compact array-backed grid authority."""
+
+    _compare(
+        fixed_grid,
+        {
+            "config_digest": result.config_digest,
+            "edge_policy_id": result.edge_policy_id,
+            "timing_policy_id": result.timing_policy_id,
+            "fps_hz": result.fps_hz,
+        },
+        field="fixed_grid_policy_authority",
+    )
+    grid_id = _require_stable_text(
+        fixed_grid.get("grid_id"),
+        field="fixed_grid_policy_authority.grid_id",
+    )
+
+    has_x_edges = "x_edges" in fixed_grid
+    has_y_edges = "y_edges" in fixed_grid
+    if has_x_edges or has_y_edges:
+        if not has_x_edges or not has_y_edges:
+            raise _fail(
+                "fixed_grid_policy_authority legacy edge vectors must include "
+                "both x_edges and y_edges."
+            )
+        _compare(
+            fixed_grid,
+            {
+                "x_edges": result.x_edges.tolist(),
+                "y_edges": result.y_edges.tolist(),
+            },
+            field="fixed_grid_policy_authority",
+        )
+        return grid_id
+
+    if (
+        fixed_grid.get("schema_id")
+        != "palette.provider_spatial_fixed_grid_policy_authority"
+        or fixed_grid.get("schema_version") != 2
+    ):
+        raise _fail(
+            "fixed_grid_policy_authority without embedded edges must use the "
+            "compact array-backed v2 schema."
+        )
+    _compare(
+        fixed_grid,
+        {
+            "edge_count_xy": {
+                "x": int(result.x_edges.size),
+                "y": int(result.y_edges.size),
+            },
+            "bounds_mm": {
+                "x": [float(result.x_edges[0]), float(result.x_edges[-1])],
+                "y": [float(result.y_edges[0]), float(result.y_edges[-1])],
+            },
+            "edge_array_paths": {
+                "x": "grid/x_edges",
+                "y": "grid/y_edges",
+                "path_scope": "relative_to_provider_occupancy_run",
+            },
+        },
+        field="fixed_grid_policy_authority",
+    )
+    grid_policy = _strict_record(
+        fixed_grid.get("grid_policy"),
+        field="fixed_grid_policy_authority.grid_policy",
+    )
+    try:
+        validate_source_binding_authority_record(grid_policy)
+    except ArenaMMGridPolicyError as exc:
+        raise _fail(
+            "fixed_grid_policy_authority.grid_policy is not a valid "
+            "digest-bound source-binding authority."
+        ) from exc
+    _compare(
+        grid_policy,
+        {
+            "schema_id": ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_ID,
+            "schema_version": ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_VERSION,
+            "recording_id": fixed_grid.get("recording_id"),
+            "grid_policy_id": grid_id,
+            "edge_policy_id": result.edge_policy_id,
+            "x_edges_sha256": sha256_array(result.x_edges),
+            "y_edges_sha256": sha256_array(result.y_edges),
+        },
+        field="fixed_grid_policy_authority.grid_policy",
+    )
+    return grid_id
+
+
 def compiled_selection_membership(compiled: CompiledSelection) -> SelectedFrameMembership:
     """Convert one exact compiled selection without dropping overlap roles."""
 
@@ -794,22 +896,7 @@ def build_provider_occupancy_v2_source_bindings(
         },
         field="transform_authority",
     )
-    _compare(
-        fixed_grid,
-        {
-            "config_digest": result.config_digest,
-            "edge_policy_id": result.edge_policy_id,
-            "timing_policy_id": result.timing_policy_id,
-            "fps_hz": result.fps_hz,
-            "x_edges": result.x_edges.tolist(),
-            "y_edges": result.y_edges.tolist(),
-        },
-        field="fixed_grid_policy_authority",
-    )
-    grid_id = _require_stable_text(
-        fixed_grid.get("grid_id"),
-        field="fixed_grid_policy_authority.grid_id",
-    )
+    grid_id = _validate_fixed_grid_policy_authority(fixed_grid, result=result)
 
     provider_record = dict(provider)
     provider_record["estimator"] = estimator
@@ -832,8 +919,6 @@ def build_provider_occupancy_v2_source_bindings(
     fixed_grid_record.update(
         {
             "grid_id": grid_id,
-            "x_edges": result.x_edges.tolist(),
-            "y_edges": result.y_edges.tolist(),
             "config_digest": result.config_digest,
         }
     )

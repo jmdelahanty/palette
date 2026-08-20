@@ -38,7 +38,8 @@ ARENA_MM_GRID_POLICY_SCHEMA_VERSION: Final = 1
 ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_ID: Final = (
     "palette.arena_mm_grid_source_binding"
 )
-ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_VERSION: Final = 1
+ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_VERSION: Final = 2
+ARENA_MM_GRID_SOURCE_BINDING_SUPPORTED_SCHEMA_VERSIONS: Final = frozenset({1, 2})
 
 GOODBATBADBAT_GRID_POLICY_ID: Final = "goodbatbadbat_arena_mm_grid_v1"
 GOODBATBADBAT_BIN_WIDTH_MM: Final = 1.0
@@ -91,6 +92,11 @@ def _canonical_json(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _array_payload_sha256(value: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(value)
+    return hashlib.sha256(contiguous.view(np.uint8)).hexdigest()
 
 
 def _require_identity(value: object, *, field: str) -> str:
@@ -553,6 +559,8 @@ class ArenaMMGridPolicy:
                 "record_sha256": self.selection.record_sha256,
             },
             "edge_policy_id": self.edge_policy_id,
+            "x_edges_sha256": _array_payload_sha256(self.x_edges),
+            "y_edges_sha256": _array_payload_sha256(self.y_edges),
             "bin_width_rule_id": self.bin_width_rule_id,
             "bin_width_mm": self.bin_width_mm,
             "extent_rule_id": self.extent_rule_id,
@@ -639,7 +647,7 @@ def validate_source_binding_authority_record(record: Mapping[str, Any]) -> None:
     """Validate an exact source-binding record without opening production data."""
 
     normalized = _record_with_digest(record, field="grid source binding")
-    expected_keys = {
+    common_keys = {
         "schema_id",
         "schema_version",
         "recording_id",
@@ -655,10 +663,20 @@ def validate_source_binding_authority_record(record: Mapping[str, Any]) -> None:
         "extent_rule_id",
         "record_sha256",
     }
+    expected_keys = set(common_keys)
+    if normalized.get("schema_version") == 2:
+        expected_keys.update({"x_edges_sha256", "y_edges_sha256"})
     if set(normalized) != expected_keys:
         raise ArenaMMGridPolicyError("Grid source binding has unexpected fields.")
-    if normalized["schema_id"] != ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_ID or normalized["schema_version"] != ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_VERSION:
+    if (
+        normalized["schema_id"] != ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_ID
+        or normalized["schema_version"]
+        not in ARENA_MM_GRID_SOURCE_BINDING_SUPPORTED_SCHEMA_VERSIONS
+    ):
         raise ArenaMMGridPolicyError("Unsupported grid source-binding schema.")
+    if normalized["schema_version"] == 2:
+        _require_sha256(normalized["x_edges_sha256"], field="binding.x_edges_sha256")
+        _require_sha256(normalized["y_edges_sha256"], field="binding.y_edges_sha256")
     _require_identity(normalized["recording_id"], field="binding.recording_id")
     _require_identity(normalized["grid_policy_id"], field="binding.grid_policy_id")
     _require_sha256(normalized["grid_policy_record_sha256"], field="binding.grid_policy_record_sha256")
@@ -724,6 +742,7 @@ __all__ = [
     "ARENA_MM_GRID_POLICY_SCHEMA_VERSION",
     "ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_ID",
     "ARENA_MM_GRID_SOURCE_BINDING_SCHEMA_VERSION",
+    "ARENA_MM_GRID_SOURCE_BINDING_SUPPORTED_SCHEMA_VERSIONS",
     "BIN_WIDTH_RULE_ID",
     "CircularArenaGeometryAuthority",
     "EXTENT_RULE_ID",

@@ -1147,6 +1147,7 @@ def _occupancy_authorities(
         "fixed_grid_policy": {
             "schema_id": "palette.provider_spatial_fixed_grid_policy_authority",
             "schema_version": 2,
+            "recording_id": str(task["recording_id"]),
             "grid_id": grid_policy.policy_id,
             "config_digest": result.config_digest,
             "edge_policy_id": result.edge_policy_id,

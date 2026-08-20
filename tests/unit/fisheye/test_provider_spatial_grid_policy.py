@@ -121,12 +121,24 @@ def test_grid_policy_is_deterministic_and_round_trips_its_digest() -> None:
 def test_source_binding_is_exact_and_digest_bound() -> None:
     binding = _policy().source_binding_authority_record()
     validate_source_binding_authority_record(binding)
+    assert binding["schema_version"] == 2
     assert binding["grid_coordinate_space"] == GRID_COORDINATE_SPACE_ID
     assert binding["bin_width_rule_id"] == BIN_WIDTH_RULE_ID
+    assert binding["x_edges_sha256"] == binding["y_edges_sha256"]
     tampered = dict(binding)
     tampered["bin_width_mm"] = 2.0
     with pytest.raises(ArenaMMGridPolicyError, match="stale record_sha256"):
         validate_source_binding_authority_record(tampered)
+
+    legacy = dict(binding)
+    legacy.pop("x_edges_sha256")
+    legacy.pop("y_edges_sha256")
+    legacy["schema_version"] = 1
+    legacy.pop("record_sha256")
+    legacy["record_sha256"] = hashlib.sha256(
+        json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    validate_source_binding_authority_record(legacy)
 
 
 def test_reviewed_palette_top_rim_semantics_are_preserved() -> None:
