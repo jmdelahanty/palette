@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from fisheye.utils.materialize_provider_spatial_canary import (
     CANARY_DISPOSITION,
     ProviderSpatialCanaryError,
+    _occupancy_authorities,
     _source_coordinate_authority_id,
     load_task,
     planned_run_names,
@@ -115,3 +118,80 @@ def test_source_coordinate_authority_unwraps_validated_descriptor_record() -> No
         }
 
     assert _source_coordinate_authority_id(Position()) == "a" * 64
+
+
+def test_occupancy_authority_keeps_grid_edges_array_backed() -> None:
+    class GridPolicy:
+        policy_id = "grid-v1"
+        geometry = SimpleNamespace(
+            geometry_id="geometry-v1",
+            record_ref="geometry-ref",
+            record_sha256="a" * 64,
+            boundary_role="physical_inner_rim",
+            observed_feature="dish_inner_rim_water_side_edge",
+        )
+        selection = SimpleNamespace(record_sha256="b" * 64)
+        scale = SimpleNamespace(record_sha256="c" * 64)
+
+        @staticmethod
+        def source_binding_authority_record():
+            return {
+                "schema_id": "palette.arena_mm_grid_source_binding",
+                "schema_version": 1,
+                "grid_policy_id": "grid-v1",
+                "bin_width_mm": 1.0,
+                "extent_rule_id": "symmetric_outward_v1",
+                "record_sha256": "d" * 64,
+            }
+
+    transform = SimpleNamespace(
+        target_coordinate_authority_id="arena-mm-v1",
+        source_coordinate_authority_id="camera-v1",
+        sha256="e" * 64,
+        matrix=np.eye(3, dtype=np.float64),
+        source_camera_extent_px=(0.0, 100.0, 0.0, 100.0),
+        grid_extent_mm=(-41.0, 41.0, -41.0, 41.0),
+    )
+    position = SimpleNamespace(
+        manifest_sha256="f" * 64,
+        estimator_record={"estimator_id": "detection_bbox_centroid.v1"},
+    )
+    evidence = SimpleNamespace(
+        source_id="source-v1",
+        sha256="1" * 64,
+        record={
+            "authorities": {"timeline_authority_id": "timeline-v1"},
+            "schema_id": "palette.provider_spatial_track_source",
+            "schema_version": 2,
+        },
+    )
+    timing = SimpleNamespace(
+        sha256="2" * 64,
+        record={"nominal_fps": 100.0},
+    )
+    result = SimpleNamespace(
+        config_digest="3" * 64,
+        edge_policy_id="left_closed_right_open_final_inclusive_v1",
+        timing_policy_id="valid_in_grid_sample_count_divided_by_fps_v1",
+        fps_hz=100.0,
+        x_edges=np.arange(-41.0, 42.0, dtype=np.float64),
+        y_edges=np.arange(-41.0, 42.0, dtype=np.float64),
+    )
+
+    authority = _occupancy_authorities(
+        {"recording_id": "recording-v1", "subject_id": "subject-v1"},
+        provider="detection",
+        position=position,
+        evidence=evidence,
+        timing=timing,
+        grid_policy=GridPolicy(),
+        transform=transform,
+        result=result,
+    )["fixed_grid_policy"]
+
+    assert "x_edges" not in authority
+    assert "y_edges" not in authority
+    assert "x_edges_float64" not in authority["grid_policy"]
+    assert "y_edges_float64" not in authority["grid_policy"]
+    assert authority["edge_count_xy"] == {"x": 83, "y": 83}
+    assert authority["edge_array_paths"]["x"] == "grid/x_edges"

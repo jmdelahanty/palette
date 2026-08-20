@@ -1146,15 +1146,26 @@ def _occupancy_authorities(
         },
         "fixed_grid_policy": {
             "schema_id": "palette.provider_spatial_fixed_grid_policy_authority",
-            "schema_version": 1,
+            "schema_version": 2,
             "grid_id": grid_policy.policy_id,
             "config_digest": result.config_digest,
             "edge_policy_id": result.edge_policy_id,
             "timing_policy_id": result.timing_policy_id,
             "fps_hz": result.fps_hz,
-            "x_edges": result.x_edges.tolist(),
-            "y_edges": result.y_edges.tolist(),
-            "grid_policy": grid_policy.as_record(),
+            "edge_count_xy": {
+                "x": int(result.x_edges.size),
+                "y": int(result.y_edges.size),
+            },
+            "bounds_mm": {
+                "x": [float(result.x_edges[0]), float(result.x_edges[-1])],
+                "y": [float(result.y_edges[0]), float(result.y_edges[-1])],
+            },
+            "edge_array_paths": {
+                "x": "grid/x_edges",
+                "y": "grid/y_edges",
+                "path_scope": "relative_to_provider_occupancy_run",
+            },
+            "grid_policy": grid_policy.source_binding_authority_record(),
         },
     }
 
