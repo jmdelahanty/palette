@@ -262,18 +262,28 @@ class StimulusResponseCoordinateAuthority:
             )
 
     def arena_to_source_camera_mm(self, points_xy: Any) -> np.ndarray:
+        return self.arena_to_source_camera_px(points_xy) * self.mm_per_pixel
+
+    def arena_to_source_camera_px(self, points_xy: Any) -> np.ndarray:
+        """Apply the exact published arena-to-source-camera transform chain."""
+
         camera_px = apply_bound_directed_transform_chain(
             points_xy,
             self.evidence.frame_transform.transform_chain,
         )
-        return np.asarray(camera_px, dtype=np.float64) * self.mm_per_pixel
+        return np.asarray(camera_px, dtype=np.float64)
 
     def selected_canvas_to_source_camera_mm(self, points_xy: Any) -> np.ndarray:
+        return self.selected_canvas_to_source_camera_px(points_xy) * self.mm_per_pixel
+
+    def selected_canvas_to_source_camera_px(self, points_xy: Any) -> np.ndarray:
+        """Apply the exact selected-canvas-to-source-camera transform."""
+
         camera_px = apply_bound_directed_transform_v2(
             points_xy,
             self.evidence.frame_transform.canvas_to_source_camera,
         )
-        return np.asarray(camera_px, dtype=np.float64) * self.mm_per_pixel
+        return np.asarray(camera_px, dtype=np.float64)
 
     def arena_center_mm(self) -> tuple[float, float]:
         center_arena = np.asarray(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -14,11 +14,50 @@ import yaml
 PROTOCOL_PROFILE_SCHEMA_ID = "palette.chaser_protocol_profile"
 PROTOCOL_PROFILE_SCHEMA_VERSION = 1
 ANALYSIS_PROFILE_SCHEMA_ID = "palette.chaser_analysis_profile"
-ANALYSIS_PROFILE_SCHEMA_VERSION = 1
+ANALYSIS_PROFILE_SCHEMA_VERSION_V1 = 1
+ANALYSIS_PROFILE_SCHEMA_VERSION_V2 = 2
+ANALYSIS_PROFILE_SCHEMA_VERSION = ANALYSIS_PROFILE_SCHEMA_VERSION_V2
+SUPPORTED_ANALYSIS_PROFILE_SCHEMA_VERSIONS = frozenset(
+    {ANALYSIS_PROFILE_SCHEMA_VERSION_V1, ANALYSIS_PROFILE_SCHEMA_VERSION_V2}
+)
 PROFILE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 BOUNDARY_POLICY = "inclusive_start_exclusive_end_event_boundary"
 ALLOWED_FALLBACKS = frozenset({"recording_start", "recording_end"})
 ALLOWED_CARDINALITIES = frozenset({"recording", "per_chaser"})
+ALLOWED_REQUIREMENT_CLASSES = frozenset(
+    {"required", "conditional_required", "optional"}
+)
+ALLOWED_PROFILE_SCOPES = frozenset({"full", "reduced"})
+ALLOWED_POLICY_KEYS = frozenset(
+    {
+        "position",
+        "body_frame",
+        "motion",
+        "bout",
+        "geometry",
+        "trial",
+        "plot_recipe",
+        "temporal_alignment",
+    }
+)
+ALLOWED_CHASER_CAPABILITIES = frozenset(
+    {
+        "stimulus_epochs",
+        "position_series",
+        "positioned_chaser",
+        "temporal_authority",
+        "chaser_temporal_alignment",
+        "motion_series",
+        "chaser_geometry",
+        "moving_chaser_track",
+        "arena_geometry",
+        "virtual_reference_controls",
+        "body_frame",
+        "eye_orientation",
+        "swim_bouts",
+        "chase_trials",
+    }
+)
 CHASER_RUNNER_IMPLEMENTATIONS: Mapping[str, str] = {
     "stimulus_epochs": "fisheye.analysis.stimulus_epoch_runs",
     "detection_occupancy": "fisheye.analysis.detection_occupancy_runs",
@@ -258,9 +297,16 @@ class ChaserAnalysisModule:
     depends_on: tuple[str, ...]
     execution_cardinality: str
     default_enabled: bool
+    requirement_class: str = "required"
+    required_capabilities: tuple[str, ...] = ()
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "ChaserAnalysisModule":
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any],
+        *,
+        profile_schema_version: int = ANALYSIS_PROFILE_SCHEMA_VERSION_V1,
+    ) -> "ChaserAnalysisModule":
         cardinality = str(raw.get("execution_cardinality") or "recording").strip()
         if cardinality not in ALLOWED_CARDINALITIES:
             raise ValueError(f"unsupported execution_cardinality: {cardinality!r}")
@@ -273,8 +319,44 @@ class ChaserAnalysisModule:
         implementation = str(raw.get("implementation") or "").strip()
         if not implementation.startswith("fisheye.analysis."):
             raise ValueError(f"invalid module implementation: {implementation!r}")
+        if profile_schema_version >= ANALYSIS_PROFILE_SCHEMA_VERSION_V2:
+            if "requirement_class" not in raw:
+                raise ValueError("schema v2 modules require requirement_class")
+            requirement_class = str(raw["requirement_class"]).strip()
+            if requirement_class not in ALLOWED_REQUIREMENT_CLASSES:
+                raise ValueError(
+                    f"unsupported requirement_class: {requirement_class!r}"
+                )
+            capabilities_raw = raw.get("required_capabilities", ())
+            if isinstance(capabilities_raw, str) or not isinstance(
+                capabilities_raw, Sequence
+            ):
+                raise ValueError("module required_capabilities must be a sequence")
+            capabilities = tuple(
+                _identifier(value, label="required capability")
+                for value in capabilities_raw
+            )
+            if len(set(capabilities)) != len(capabilities):
+                raise ValueError("module required_capabilities must be unique")
+            unknown_capabilities = sorted(
+                set(capabilities) - ALLOWED_CHASER_CAPABILITIES
+            )
+            if unknown_capabilities:
+                raise ValueError(
+                    "unsupported required capability(s): "
+                    + ", ".join(unknown_capabilities)
+                )
+            if requirement_class == "conditional_required" and not capabilities:
+                raise ValueError(
+                    "conditional_required modules must declare at least one "
+                    "required_capabilities value"
+                )
+        else:
+            requirement_class = "required"
+            capabilities = ()
+        module_identifier = raw.get("id", raw.get("module_id"))
         return cls(
-            module_id=_identifier(raw.get("id"), label="module id"),
+            module_id=_identifier(module_identifier, label="module id"),
             implementation=implementation,
             schema_id=schema_id,
             schema_version=int(raw.get("schema_version") or 0),
@@ -283,6 +365,8 @@ class ChaserAnalysisModule:
             ),
             execution_cardinality=cardinality,
             default_enabled=bool(raw.get("default_enabled", False)),
+            requirement_class=requirement_class,
+            required_capabilities=capabilities,
         )
 
 
@@ -292,6 +376,9 @@ class ChaserAnalysisProfile:
     profile_version: int
     modules: tuple[ChaserAnalysisModule, ...]
     source_path: str
+    schema_version: int = ANALYSIS_PROFILE_SCHEMA_VERSION_V1
+    profile_scope: str = "reduced"
+    policies: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(
@@ -304,15 +391,23 @@ class ChaserAnalysisProfile:
             raise ValueError(
                 f"analysis profile schema_id must be {ANALYSIS_PROFILE_SCHEMA_ID!r}"
             )
-        if int(raw.get("schema_version") or 0) != ANALYSIS_PROFILE_SCHEMA_VERSION:
+        schema_version = int(raw.get("schema_version") or 0)
+        if schema_version not in SUPPORTED_ANALYSIS_PROFILE_SCHEMA_VERSIONS:
             raise ValueError(
-                f"analysis profile schema_version must be {ANALYSIS_PROFILE_SCHEMA_VERSION}"
+                "analysis profile schema_version must be one of "
+                + ", ".join(
+                    str(value)
+                    for value in sorted(SUPPORTED_ANALYSIS_PROFILE_SCHEMA_VERSIONS)
+                )
             )
         rows = raw.get("modules")
         if isinstance(rows, str) or not isinstance(rows, Sequence):
             raise ValueError("analysis profile modules must be a sequence")
         modules = tuple(
-            ChaserAnalysisModule.from_mapping(row)
+            ChaserAnalysisModule.from_mapping(
+                row,
+                profile_schema_version=schema_version,
+            )
             for row in rows
             if isinstance(row, Mapping)
         )
@@ -327,21 +422,61 @@ class ChaserAnalysisProfile:
                 raise ValueError(
                     f"module {module.module_id!r} references unknown dependencies: {missing}"
                 )
+        policies: dict[str, str] = {}
+        profile_scope = "reduced"
+        if schema_version >= ANALYSIS_PROFILE_SCHEMA_VERSION_V2:
+            profile_scope = str(raw.get("profile_scope") or "").strip()
+            if profile_scope not in ALLOWED_PROFILE_SCOPES:
+                raise ValueError(
+                    "schema v2 profile_scope must be one of "
+                    + ", ".join(sorted(ALLOWED_PROFILE_SCOPES))
+                )
+            policies_raw = raw.get("policies", {})
+            if not isinstance(policies_raw, Mapping):
+                raise ValueError("analysis profile policies must be a mapping")
+            invalid_policy_keys = sorted(
+                set(str(key).strip() for key in policies_raw) - ALLOWED_POLICY_KEYS
+            )
+            if invalid_policy_keys:
+                raise ValueError(
+                    "unsupported analysis policy key(s): "
+                    + ", ".join(invalid_policy_keys)
+                )
+            for key, value in policies_raw.items():
+                policy_key = _identifier(key, label="analysis policy key")
+                policies[policy_key] = _identifier(
+                    value,
+                    label=f"analysis policy {policy_key}",
+                )
         return cls(
             profile_id=_identifier(raw.get("profile_id"), label="profile_id"),
             profile_version=int(raw.get("profile_version") or 0),
             modules=modules,
             source_path=str(source_path),
+            schema_version=schema_version,
+            profile_scope=profile_scope,
+            policies=policies,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        modules: list[dict[str, Any]] = []
+        for module in self.modules:
+            normalized = asdict(module)
+            if self.schema_version == ANALYSIS_PROFILE_SCHEMA_VERSION_V1:
+                normalized.pop("requirement_class", None)
+                normalized.pop("required_capabilities", None)
+            modules.append(normalized)
+        payload = {
             "schema_id": ANALYSIS_PROFILE_SCHEMA_ID,
-            "schema_version": ANALYSIS_PROFILE_SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "profile_id": self.profile_id,
             "profile_version": self.profile_version,
-            "modules": [asdict(module) for module in self.modules],
+            "modules": modules,
         }
+        if self.schema_version >= ANALYSIS_PROFILE_SCHEMA_VERSION_V2:
+            payload["profile_scope"] = self.profile_scope
+            payload["policies"] = dict(self.policies)
+        return payload
 
     @property
     def sha256(self) -> str:
@@ -572,9 +707,19 @@ def full_chaser_analysis_profile_path() -> Path:
     return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_full_v2.yaml"
 
 
+def full_chaser_analysis_profile_v3_path() -> Path:
+    return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_full_v3.yaml"
+
+
 __all__ = [
     "ANALYSIS_PROFILE_SCHEMA_ID",
     "ANALYSIS_PROFILE_SCHEMA_VERSION",
+    "ANALYSIS_PROFILE_SCHEMA_VERSION_V1",
+    "ANALYSIS_PROFILE_SCHEMA_VERSION_V2",
+    "ALLOWED_CHASER_CAPABILITIES",
+    "ALLOWED_POLICY_KEYS",
+    "ALLOWED_PROFILE_SCOPES",
+    "ALLOWED_REQUIREMENT_CLASSES",
     "BOUNDARY_POLICY",
     "CHASER_RUNNER_IMPLEMENTATIONS",
     "PROTOCOL_PROFILE_SCHEMA_ID",
@@ -588,6 +733,7 @@ __all__ = [
     "default_chaser_protocol_profile_path",
     "default_goodcopbadcop_source_profile_path",
     "full_chaser_analysis_profile_path",
+    "full_chaser_analysis_profile_v3_path",
     "load_chaser_analysis_profile",
     "load_chaser_protocol_profile",
     "resolve_chaser_analysis_modules",

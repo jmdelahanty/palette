@@ -1423,6 +1423,14 @@ def test_stimulus_response_authority_uses_typed_inverse_transform_direction(
     # The selected 50 camera px/mm scale then yields (8.64, 13.44) mm.
     np.testing.assert_allclose(authority.arena_center_mm(), (8.64, 13.44))
     np.testing.assert_allclose(
+        authority.arena_to_source_camera_px([172.0, 172.0]),
+        [432.0, 672.0],
+    )
+    np.testing.assert_allclose(
+        authority.selected_canvas_to_source_camera_px([442.0, 692.0]),
+        [432.0, 672.0],
+    )
+    np.testing.assert_allclose(
         authority.selected_canvas_to_source_camera_mm([442.0, 692.0]),
         [8.64, 13.44],
     )

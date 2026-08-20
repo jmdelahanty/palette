@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
 from fisheye.analysis.chaser_profiles import (
     ANALYSIS_PROFILE_SCHEMA_ID,
+    ANALYSIS_PROFILE_SCHEMA_VERSION_V2,
     PROTOCOL_PROFILE_SCHEMA_ID,
     ChaserAnalysisProfile,
     default_chaser_analysis_profile_path,
     default_chaser_protocol_profile_path,
     default_goodcopbadcop_source_profile_path,
     full_chaser_analysis_profile_path,
+    full_chaser_analysis_profile_v3_path,
     load_chaser_analysis_profile,
     load_chaser_protocol_profile,
     resolve_chaser_analysis_modules,
@@ -31,6 +35,115 @@ def test_default_profiles_are_versioned_and_separate_protocol_from_analysis() ->
     assert "goodcopbadcop" not in str(analysis.to_dict()).lower()
     assert len(protocol.sha256) == 64
     assert len(analysis.sha256) == 64
+
+
+def test_schema_v1_normalized_payload_and_digest_remain_stable() -> None:
+    expected = {
+        default_chaser_analysis_profile_path(): (
+            "9f3f6d8bb40bb7b7c0149c109e51043064b91859a07e73f36f9dd0fe98a2b0fa"
+        ),
+        full_chaser_analysis_profile_path(): (
+            "c9f7d80fb8256065068390c5174a9dbe27a034c058f0c5fccbec960771dfe5aa"
+        ),
+    }
+
+    for path, digest in expected.items():
+        profile = load_chaser_analysis_profile(path)
+        assert profile.schema_version == 1
+        assert "profile_scope" not in profile.to_dict()
+        assert "policies" not in profile.to_dict()
+        assert all(
+            "requirement_class" not in module
+            and "required_capabilities" not in module
+            for module in profile.to_dict()["modules"]
+        )
+        assert profile.sha256 == digest
+
+
+def test_schema_v2_normalizes_scope_requirements_capabilities_and_policies() -> None:
+    payload = {
+        "schema_id": ANALYSIS_PROFILE_SCHEMA_ID,
+        "schema_version": ANALYSIS_PROFILE_SCHEMA_VERSION_V2,
+        "profile_id": "v2_test",
+        "profile_version": 2,
+        "profile_scope": "full",
+        "policies": {
+            "position": "explicit_position_provider_required_v1",
+            "body_frame": "explicit_body_frame_provider_required_v1",
+            "plot_recipe": "full_applicable_recipe_catalog_v1",
+        },
+        "modules": [
+            {
+                "id": "position",
+                "implementation": "fisheye.analysis.position",
+                "schema_id": "palette.position.v1",
+                "schema_version": 1,
+                "depends_on": [],
+                "execution_cardinality": "recording",
+                "default_enabled": True,
+                "requirement_class": "required",
+                "required_capabilities": ["position_series"],
+            },
+            {
+                "id": "heading",
+                "implementation": "fisheye.analysis.heading",
+                "schema_id": "palette.heading.v1",
+                "schema_version": 1,
+                "depends_on": ["position"],
+                "execution_cardinality": "recording",
+                "default_enabled": True,
+                "requirement_class": "conditional_required",
+                "required_capabilities": ["body_frame"],
+            },
+        ],
+    }
+    profile = ChaserAnalysisProfile.from_mapping(payload)
+
+    assert profile.profile_scope == "full"
+    assert profile.modules[1].required_capabilities == ("body_frame",)
+    assert profile.to_dict()["policies"] == payload["policies"]
+    assert profile.sha256 == ChaserAnalysisProfile.from_mapping(
+        profile.to_dict()
+    ).sha256
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("profile_scope", "unknown", "profile_scope"),
+        ("policies", {"unknown": "policy_v1"}, "policy key"),
+    ],
+)
+def test_schema_v2_rejects_unknown_scope_and_policy_keys(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = {
+        "schema_id": ANALYSIS_PROFILE_SCHEMA_ID,
+        "schema_version": 2,
+        "profile_id": "invalid_v2",
+        "profile_version": 2,
+        "profile_scope": "full",
+        "policies": {},
+        "modules": [
+            {
+                "id": "position",
+                "implementation": "fisheye.analysis.position",
+                "schema_id": "palette.position.v1",
+                "schema_version": 1,
+                "depends_on": [],
+                "execution_cardinality": "recording",
+                "default_enabled": True,
+                "requirement_class": "required",
+                "required_capabilities": ["position_series"],
+            }
+        ],
+    }
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        ChaserAnalysisProfile.from_mapping(payload)
 
 
 def test_generic_profile_contains_renamed_modules_and_per_chaser_escape() -> None:
@@ -152,6 +265,36 @@ def test_full_profile_enables_the_complete_generic_module_catalog() -> None:
 
     assert profile.profile_id == "chaser_behavior_full_v2"
     assert len(selected) == len(profile.modules)
+    validate_chaser_runner_modules(selected)
+
+
+def test_full_v3_profile_declares_complete_applicable_catalog_without_provider_guessing() -> None:
+    profile = load_chaser_analysis_profile(full_chaser_analysis_profile_v3_path())
+    selected = resolve_chaser_analysis_modules(profile)
+
+    assert profile.profile_id == "chaser_behavior_full_v3"
+    assert profile.profile_scope == "full"
+    assert len(selected) == len(profile.modules) == 13
+    assert profile.policies["position"] == (
+        "explicit_position_provider_binding_required_v1"
+    )
+    assert profile.policies["body_frame"] == (
+        "explicit_body_frame_provider_binding_required_v1"
+    )
+    assert profile.policies["plot_recipe"] == (
+        "full_applicable_recipe_catalog_v1"
+    )
+    assert profile.policies["temporal_alignment"] == (
+        "explicit_temporal_alignment_requirement_required_v1"
+    )
+    distance = next(
+        module for module in profile.modules if module.module_id == "chaser_distance"
+    )
+    assert "chaser_temporal_alignment" in distance.required_capabilities
+    assert all(module.default_enabled for module in profile.modules)
+    assert {
+        module.requirement_class for module in profile.modules
+    } <= {"required", "conditional_required", "optional"}
     validate_chaser_runner_modules(selected)
 
 

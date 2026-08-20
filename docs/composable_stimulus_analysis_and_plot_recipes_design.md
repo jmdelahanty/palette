@@ -17,6 +17,9 @@ Its exact logical array and dtype requirements are defined in
 The accepted first implementation slice for generic trajectory, occupancy,
 contrast, cohort, and plot-recipe work is tracked in
 [`provider_aware_spatial_analytics_implementation_checklist_2026-08-18.md`](provider_aware_spatial_analytics_implementation_checklist_2026-08-18.md).
+The provider-aware migration and default-execution plan for the complete
+chaser-analysis suite is tracked in
+[`composable_chaser_analytics_implementation_checklist_2026-08-20.md`](composable_chaser_analytics_implementation_checklist_2026-08-20.md).
 
 This document records the design direction accepted during the 2026-08-14
 GoodBatBadBat positional-occupancy campaign. It is an implementation plan, not
