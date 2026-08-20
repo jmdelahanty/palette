@@ -38,6 +38,7 @@ DURATION_BASELINE = (
     else {"files": {}}
 )
 COST_UNITS_PER_SECOND = 1_000
+MEASURED_DOMINANT_COST_THRESHOLD = 100_000
 
 # A four-shard workstation run on 2026-07-22 finished in 9, 38, 61, and 51
 # minutes despite nearly equal source-byte loads. The first eight-shard run
@@ -119,6 +120,22 @@ def discover_test_files(test_root: Path) -> tuple[Path, ...]:
     return tuple(sorted(test_root.rglob("test_*.py"), key=lambda path: path.as_posix()))
 
 
+def _is_measured_dominant_suite(path: Path) -> bool:
+    try:
+        relative_path = path.resolve().relative_to(
+            REPOSITORY_ROOT.resolve()
+        ).as_posix()
+    except ValueError:
+        relative_path = None
+    has_measured_override = (
+        relative_path in HISTORICAL_TEST_FILE_COST_OVERRIDES
+        or path.name in PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES
+    )
+    return has_measured_override and (
+        estimated_test_file_cost(path) >= MEASURED_DOMINANT_COST_THRESHOLD
+    )
+
+
 def assign_test_file_shards(
     test_files: Sequence[Path],
     *,
@@ -134,7 +151,19 @@ def assign_test_file_shards(
         test_files,
         key=lambda path: (-estimated_test_file_cost(path), path.as_posix()),
     )
+    # Reserve distinct workers for the measured dominant suites before ordinary
+    # greedy fill. LPT alone can place two dominant suites together when newly
+    # added tests change the aggregate loads ahead of them, recreating the long
+    # tail this evidence-based override is intended to prevent.
+    dominant = [path for path in ordered if _is_measured_dominant_suite(path)]
+    for shard_index, path in enumerate(dominant[:shard_count]):
+        buckets[shard_index].append(path)
+        estimated_loads[shard_index] += estimated_test_file_cost(path)
+
+    reserved = set(dominant[:shard_count])
     for path in ordered:
+        if path in reserved:
+            continue
         shard_index = min(
             range(shard_count),
             key=lambda index: (estimated_loads[index], index),
