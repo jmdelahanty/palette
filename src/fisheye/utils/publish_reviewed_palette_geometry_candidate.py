@@ -30,6 +30,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reviewer", required=True)
     parser.add_argument(
+        "--rig-id",
+        help="Arena rig identity; required for clipped archives that do not store it.",
+    )
+    parser.add_argument(
+        "--canvas-name",
+        help="Arena canvas identity; required for clipped archives that do not store it.",
+    )
+    parser.add_argument(
+        "--arena-id",
+        help="Arena identity; required for clipped archives that do not store it.",
+    )
+    parser.add_argument(
         "--reviewed-at-utc",
         required=True,
         help="Immutable RFC3339 review time supplied by the review record.",
@@ -67,6 +79,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(
             "Supply --fit-review-run or both --fit-report and --review-montage."
         )
+    arena_values = (args.rig_id, args.canvas_name, args.arena_id)
+    if any(value is not None for value in arena_values) and not all(
+        value is not None for value in arena_values
+    ):
+        raise ValueError("Supply --rig-id, --canvas-name, and --arena-id together.")
+    arena_binding = (
+        {
+            "rig_id": args.rig_id,
+            "canvas_name": args.canvas_name,
+            "arena_id": args.arena_id,
+        }
+        if all(value is not None for value in arena_values)
+        else None
+    )
     plan = plan_reviewed_palette_geometry_candidate(
         source_zarr=args.zarr,
         fit_report_path=args.fit_report,
@@ -74,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         fit_review_run=args.fit_review_run,
         reviewer=args.reviewer,
         reviewed_at_utc=args.reviewed_at_utc,
+        arena_binding=arena_binding,
     )
     existing = None
     if plan.target_run_path.exists():

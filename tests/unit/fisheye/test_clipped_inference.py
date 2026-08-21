@@ -27,7 +27,6 @@ from fisheye.cluster.clipped_detection import (
     build_detection_fragment,
     build_raw_detection_fragment,
     compose_detection_workflow,
-    compose_raw_detection_workflow,
 )
 from fisheye.cluster.clipped_inference_cleanup import cleanup
 from fisheye.cluster.clipped_inference_validate import (
@@ -183,6 +182,54 @@ def _target(
     )
 
 
+def test_active_arena_geometry_selection_requires_matching_complete_selectors(
+    tmp_path: Path,
+) -> None:
+    zarr = tmp_path / "analysis.zarr"
+    parent = zarr / "analysis" / "arena_geometry_selection"
+    selection = "arena_geometry_selection_fixture"
+    _write_json(
+        parent / "zarr.json",
+        {"attributes": {"latest": selection, "latest_complete": selection}},
+    )
+    _write_json(
+        parent / selection / "zarr.json",
+        {
+            "attributes": {
+                "schema_id": "palette.arena_geometry_selection_run",
+                "selection_id": selection,
+            }
+        },
+    )
+
+    assert workflow._active_arena_geometry_selection(zarr) == selection
+
+    _write_json(
+        parent / "zarr.json",
+        {
+            "attributes": {
+                "latest": "arena_geometry_selection_unpublished",
+                "latest_complete": selection,
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="active complete selection"):
+        workflow._active_arena_geometry_selection(zarr)
+
+
+def test_full_scope_still_requires_downstream_model_identifiers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="subject_mask_run_id"):
+        workflow.build_plan(
+            targets=(_target(tmp_path),),
+            run_label="full_missing_models",
+            repo=tmp_path / "repo",
+            registry_path=tmp_path / "registry.sqlite",
+            run_root=tmp_path / "run",
+            detection_set_id="detect_set",
+            detection_run_id="detect_run",
+        )
+
+
 def _detection_plan(
     target: workflow.CampaignTarget, workflow_id: str, *, work_unit_count: int = 22
 ) -> dict[str, object]:
@@ -234,6 +281,7 @@ def _build_fixture_plan(
     frame_index_work_unit_count: int | None = None,
     registered_gate_requirement: str = "off",
     registered_gate_run: str | None = None,
+    workflow_scope: str = workflow.WORKFLOW_SCOPE_FULL,
 ) -> workflow.ClippedInferencePlan:
     indexed_work_unit_count = (
         work_unit_count
@@ -276,6 +324,11 @@ def _build_fixture_plan(
     )
     monkeypatch.setattr(workflow, "_verify_binding", lambda _binding: None)
     monkeypatch.setattr(workflow, "_repo_commit", lambda _repo: "c" * 40)
+    monkeypatch.setattr(
+        workflow,
+        "_active_arena_geometry_selection",
+        lambda _zarr: "arena_geometry_selection_fixture",
+    )
     monkeypatch.setattr(
         workflow,
         "load_native_archive_authority",
@@ -346,6 +399,7 @@ def _build_fixture_plan(
         run_root=tmp_path / "run",
         detection_set_id="detect_set",
         detection_run_id="detect_run",
+        workflow_scope=workflow_scope,
         pose_set_id="pose_set",
         pose_run_id="pose_run",
         subject_mask_set_id="mask_set",
@@ -455,9 +509,7 @@ def test_required_geometry_uses_canonical_refined_collection_without_legacy_bypa
     quality = jobs[f"recording_detect_quality:{target_safe}"]
     refine = jobs[f"recording_detect_refine:{target_safe}"]
     assert "--require-active-canonical-source" in quality.command
-    assert " ".join(refine.command).count(
-        "--require-active-canonical-source"
-    ) == 2
+    assert " ".join(refine.command).count("--require-active-canonical-source") == 2
     cache = jobs[f"cache_array:{target_safe}"]
     assert cache.dependency.upstream_job_keys == (collection.job_key,)
     crop_fragment = next(
@@ -465,13 +517,13 @@ def test_required_geometry_uses_canonical_refined_collection_without_legacy_bypa
         for fragment in fragments
         if fragment["fragment_id"] == f"crop_roi_cache:{target_safe}"
     )
-    assert crop_fragment["requires"] == [
-        f"finalized_refined_detection:{target_safe}"
-    ]
+    assert crop_fragment["requires"] == [f"finalized_refined_detection:{target_safe}"]
     assert target["strict_detection_storage"] is None
     assert target["registered_dish_geometry"] == {
         "gate_requirement": "required",
+        "selection_run": None,
         "gate_run": "gate_exact_v1",
+        "gate_materialization_planned": False,
         "selection_policy_id": "manual_review_only_v1",
     }
 
@@ -1129,6 +1181,154 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
         f"validated_analysis:{first_safe}",
         f"validated_analysis:{second_safe}",
     ]
+
+
+def test_detection_scope_uses_same_composer_and_stops_at_finalized_collections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        target_count=2,
+        max_active_targets=1,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DETECTION,
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    first, second = plan.target_plans
+    first_safe = workflow.safe_component(
+        str(first["target_id"]), default="target", max_length=56
+    )
+    second_safe = workflow.safe_component(
+        str(second["target_id"]), default="target", max_length=56
+    )
+
+    assert plan.workflow_scope == workflow.WORKFLOW_SCOPE_DETECTION
+    assert set(plan.model_bindings) == {"detection"}
+    assert plan.cleanup_nrs_after_success is False
+    assert plan.lsf_workflow.metadata["workflow_scope"] == "detection_only"
+    assert len(jobs) == 12
+    assert "registry_finalize" not in jobs
+    assert not any(key.startswith("cache_array:") for key in jobs)
+    assert not any(key.startswith("keypoints_array:") for key in jobs)
+    assert not any(key.startswith("subject_masks_array:") for key in jobs)
+    assert jobs[
+        f"detect_artifact_array:{second_safe}"
+    ].dependency.upstream_job_keys == (f"detect_collection:{first_safe}",)
+    fragments = {
+        fragment["fragment_id"]: fragment
+        for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    }
+    assert fragments[f"native_detection:{second_safe}"]["requires"] == [
+        f"finalized_detection_collection:{first_safe}"
+    ]
+
+
+def test_detection_scope_ignores_outputs_owned_only_by_full_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    full_scope_cache = (
+        tmp_path / "cache_root" / "sleepyfish_full_20260714" / "sleepyfish_cam2010093"
+    )
+    full_scope_cache.mkdir(parents=True)
+
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=1,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DETECTION,
+    )
+
+    assert plan.workflow_scope == workflow.WORKFLOW_SCOPE_DETECTION
+
+
+def test_detection_scope_supports_required_registered_geometry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DETECTION,
+        registered_gate_requirement="required",
+        registered_gate_run="gate_exact_v1",
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    target_safe = workflow.safe_component(
+        str(plan.target_plans[0]["target_id"]), default="target", max_length=56
+    )
+
+    assert set(jobs) == {
+        f"detect_artifact_array:{target_safe}",
+        f"detect_native_publish:{target_safe}",
+        f"recording_detect_quality:{target_safe}",
+        f"recording_detect_refine:{target_safe}",
+        f"registered_refined_collection:{target_safe}",
+    }
+    assert "--registered-gate-run gate_exact_v1" in " ".join(
+        jobs[f"registered_refined_collection:{target_safe}"].command
+    )
+
+
+def test_detection_scope_materializes_required_gate_from_active_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DETECTION,
+        registered_gate_requirement="required",
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    native_publish = jobs[f"detect_native_publish:{target_safe}"]
+    gate = jobs[f"registered_detection_gate:{target_safe}"]
+    quality = jobs[f"recording_detect_quality:{target_safe}"]
+
+    assert gate.dependency.upstream_job_keys == (native_publish.job_key,)
+    assert quality.dependency.upstream_job_keys == (gate.job_key,)
+    assert "--selection-run arena_geometry_selection_fixture" in " ".join(gate.command)
+    assert target["registered_dish_geometry"] == {
+        "gate_requirement": "required",
+        "selection_run": "arena_geometry_selection_fixture",
+        "gate_run": (
+            "registered_detection_gate_sleepyfish_full_20260714_sleepyfish_cam2010093"
+        ),
+        "gate_materialization_planned": True,
+        "selection_policy_id": "manual_review_only_v1",
+    }
+
+
+def test_detection_scope_cli_does_not_require_downstream_model_arguments() -> None:
+    args = workflow._parser().parse_args(
+        [
+            "--workflow-scope",
+            "detection",
+            "--manifest",
+            "targets.json",
+            "--run-label",
+            "detect_only",
+            "--run-root",
+            "run",
+            "--detection-set-id",
+            "detect_set",
+            "--detection-run-id",
+            "detect_run",
+            "--dry-run",
+        ]
+    )
+
+    assert args.workflow_scope == workflow.WORKFLOW_SCOPE_DETECTION
+    assert args.pose_set_id is None
+    assert args.subject_mask_set_id is None
 
 
 def test_keypoint_recovery_reuses_cache_and_raw_masks(

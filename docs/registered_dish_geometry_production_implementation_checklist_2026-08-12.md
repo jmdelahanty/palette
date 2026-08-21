@@ -607,8 +607,9 @@ New or extended immutable contracts:
   `palette.arena_geometry_candidate_run` v1;
 - `palette.arena_geometry_comparison_record` v1 and
   `palette.arena_geometry_comparison_run` v1;
-- `palette.arena_geometry_selection_record` v2, comparison-bound, with the
-  existing selection-run envelope v1;
+- `palette.arena_geometry_selection_record` v2 for comparison-bound selections
+  and v3 for an explicitly reviewed Palette candidate without comparison
+  evidence, with the existing selection-run envelope v1;
 - `palette.registered_detection_gate_run` v1;
 - `palette.recording_refined_detection.finalization` v1; and
 - `palette.registered_geometry_clipped_refined_collection.v1`.

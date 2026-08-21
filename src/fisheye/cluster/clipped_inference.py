@@ -1,4 +1,4 @@
-"""Plan a complete registry-pinned clipped-recording inference campaign on LSF."""
+"""Plan registry-pinned clipped-recording workflow scopes on LSF."""
 
 from __future__ import annotations
 
@@ -14,14 +14,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from fisheye.cluster.arena_geometry import (
+    RegisteredDetectionGateFragmentInputs,
+    build_registered_detection_gate_fragment,
+)
 from fisheye.cluster.clipped_detection import (
     DetectionFragmentInputs,
     DetectionFragmentOutputs,
     DetectionModelSpec,
+    DetectionWorkflowModule,
     DetectionWorkUnitSpec,
     RawDetectionFragmentOutputs,
     RawDetectionWorkflowModule,
     build_detection_fragment,
+    compose_detection_workflow,
 )
 from fisheye.cluster.clipped_detection_evidence import (
     ClipDetectionEvidenceInput,
@@ -96,6 +102,9 @@ PLAN_SCHEMA = "palette.clipped_inference_bsub_plan.v2"
 SUPPORTED_PLAN_SCHEMAS = frozenset((LEGACY_PLAN_SCHEMA, PLAN_SCHEMA))
 TARGET_MANIFEST_SCHEMA = "palette.clipped_inference_targets.v1"
 FAMILY = "clipped_inference"
+WORKFLOW_SCOPE_FULL = "full"
+WORKFLOW_SCOPE_DETECTION = "detection"
+WORKFLOW_SCOPES = (WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DETECTION)
 DEFAULT_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
 DEFAULT_REGISTRY = Path(
     "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
@@ -152,6 +161,7 @@ class ModelBinding:
 class ClippedInferencePlan:
     run_label: str
     workflow_id: str
+    workflow_scope: str
     repo: Path
     registry: Path
     run_root: Path
@@ -178,6 +188,7 @@ class ClippedInferencePlan:
             "schema": PLAN_SCHEMA,
             "run_label": self.run_label,
             "workflow_id": self.workflow_id,
+            "workflow_scope": self.workflow_scope,
             "repo": str(self.repo),
             "registry": str(self.registry),
             "run_root": str(self.run_root),
@@ -396,6 +407,7 @@ def _assert_same_binding(name: str, bindings: Sequence[ModelBinding]) -> ModelBi
 def _refuse_output_collisions(
     target_plan: Mapping[str, Any],
     *,
+    workflow_scope: str,
     allow_existing_detections: bool = False,
 ) -> None:
     zarr = Path(str(target_plan["analysis_zarr"]))
@@ -403,14 +415,8 @@ def _refuse_output_collisions(
     for clip in target_plan["clips"]:
         if not allow_existing_detections:
             outputs.append(zarr / str(clip["detect_group_path"]))
-        outputs.extend(
-            [
-                zarr / str(clip["refined_detect_group_path"]),
-                zarr / "crop_runs" / str(clip["proxy_crop_run"]),
-                zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"]),
-                zarr / "subject_mask_shard_runs" / str(clip["subject_mask_shard_run"]),
-            ]
-        )
+        if not target_plan.get("canonical_refined_run_id"):
+            outputs.append(zarr / str(clip["refined_detect_group_path"]))
     outputs.extend(
         [
             zarr
@@ -421,35 +427,60 @@ def _refuse_output_collisions(
             / "detect_collection_sources"
             / str(target_plan["detect_quality_source_run"]),
             zarr / "detect_quality_runs" / str(target_plan["detect_quality_run"]),
-            zarr / "crop_runs" / str(target_plan["merged_proxy_crop_run"]),
-            zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
-            zarr / "refined_keypoints_runs" / str(target_plan["refined_keypoint_run"]),
-            zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
-            zarr
-            / "refined_subject_masks_runs"
-            / str(target_plan["refined_subject_mask_draft_run"]),
-            zarr
-            / "refined_subject_masks_runs"
-            / str(target_plan["refined_subject_mask_run"]),
-            zarr
-            / "subject_mask_quality_runs"
-            / str(target_plan["subject_mask_quality_run"]),
-            zarr
-            / "subject_mask_cache_runs"
-            / str(target_plan["subject_mask_cache_run"]),
-            zarr
-            / "subject_mask_bundle_runs"
-            / str(target_plan["subject_mask_bundle_id"]),
-            Path(str(target_plan["cache_dir"])),
-            Path(str(target_plan["package_dir"])),
         ]
     )
     canonical_run = str(target_plan.get("native_canonical_run_id") or "")
     if canonical_run:
         outputs.append(zarr / "detect_runs" / canonical_run)
-    strict_bundle = str(target_plan.get("strict_storage_bundle_root") or "")
-    if strict_bundle:
-        outputs.append(Path(strict_bundle))
+    canonical_refined_run = str(target_plan.get("canonical_refined_run_id") or "")
+    if canonical_refined_run:
+        outputs.append(zarr / "refined_detect_runs" / canonical_refined_run)
+    planned_gate_group = str(
+        target_plan.get("planned_registered_gate_group_path") or ""
+    )
+    if planned_gate_group:
+        outputs.append(zarr / planned_gate_group)
+    if workflow_scope == WORKFLOW_SCOPE_FULL:
+        for clip in target_plan["clips"]:
+            outputs.extend(
+                [
+                    zarr / "crop_runs" / str(clip["proxy_crop_run"]),
+                    zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"]),
+                    zarr
+                    / "subject_mask_shard_runs"
+                    / str(clip["subject_mask_shard_run"]),
+                ]
+            )
+        outputs.extend(
+            [
+                zarr / "crop_runs" / str(target_plan["merged_proxy_crop_run"]),
+                zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
+                zarr
+                / "refined_keypoints_runs"
+                / str(target_plan["refined_keypoint_run"]),
+                zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
+                zarr
+                / "refined_subject_masks_runs"
+                / str(target_plan["refined_subject_mask_draft_run"]),
+                zarr
+                / "refined_subject_masks_runs"
+                / str(target_plan["refined_subject_mask_run"]),
+                zarr
+                / "subject_mask_quality_runs"
+                / str(target_plan["subject_mask_quality_run"]),
+                zarr
+                / "subject_mask_cache_runs"
+                / str(target_plan["subject_mask_cache_run"]),
+                zarr
+                / "subject_mask_bundle_runs"
+                / str(target_plan["subject_mask_bundle_id"]),
+                Path(str(target_plan["cache_dir"])),
+                Path(str(target_plan["package_dir"])),
+            ]
+        )
+        strict_bundle = str(target_plan.get("strict_storage_bundle_root") or "")
+        if strict_bundle:
+            outputs.append(Path(strict_bundle))
     collisions = [path for path in outputs if path.exists()]
     if collisions:
         raise FileExistsError(
@@ -463,6 +494,31 @@ def _read_strict_json(path: Path) -> Any:
         raise ValueError(f"non-finite JSON constant {value!r}")
 
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
+
+
+def _active_arena_geometry_selection(analysis_zarr: Path) -> str:
+    parent = analysis_zarr / "analysis" / "arena_geometry_selection"
+    metadata = _read_strict_json(parent / "zarr.json")
+    attrs = metadata.get("attributes")
+    if not isinstance(attrs, Mapping):
+        raise ValueError("Arena geometry selection parent has no attributes.")
+    latest = str(attrs.get("latest") or "").strip()
+    latest_complete = str(attrs.get("latest_complete") or "").strip()
+    if not latest or latest != latest_complete:
+        raise ValueError(
+            "Required registered geometry needs one active complete selection."
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", latest):
+        raise ValueError("Active arena geometry selection has an unsafe run name.")
+    run_metadata = _read_strict_json(parent / latest / "zarr.json")
+    run_attrs = run_metadata.get("attributes")
+    if not isinstance(run_attrs, Mapping):
+        raise ValueError("Active arena geometry selection has no attributes.")
+    if run_attrs.get("schema_id") != "palette.arena_geometry_selection_run":
+        raise ValueError("Active arena geometry selection has an unsupported schema.")
+    if str(run_attrs.get("selection_id") or "") != latest:
+        raise ValueError("Active arena geometry selection identity disagrees.")
+    return latest
 
 
 def _artifact_backed_detection_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -677,10 +733,11 @@ def build_plan(
     run_root: Path,
     detection_set_id: str,
     detection_run_id: str,
-    pose_set_id: str,
-    pose_run_id: str,
-    subject_mask_set_id: str,
-    subject_mask_run_id: str,
+    pose_set_id: str | None = None,
+    pose_run_id: str | None = None,
+    subject_mask_set_id: str | None = None,
+    subject_mask_run_id: str | None = None,
+    workflow_scope: str = WORKFLOW_SCOPE_FULL,
     subject_mask_coverage_class: str = "dense_all_components",
     subject_mask_component_coverage_key: str = "body+eyes+swim_bladder",
     subject_mask_label_schema_id: str = "subject_v1_union",
@@ -703,7 +760,29 @@ def build_plan(
 ) -> ClippedInferencePlan:
     if not targets:
         raise ValueError("At least one target is required.")
-    if subject_mask_publication_profile not in SUBJECT_MASK_PUBLICATION_PROFILES:
+    scope = str(workflow_scope).strip()
+    if scope not in WORKFLOW_SCOPES:
+        raise ValueError(f"workflow_scope must be one of {WORKFLOW_SCOPES!r}.")
+    downstream_model_ids = {
+        "pose_set_id": pose_set_id,
+        "pose_run_id": pose_run_id,
+        "subject_mask_set_id": subject_mask_set_id,
+        "subject_mask_run_id": subject_mask_run_id,
+    }
+    missing_downstream_ids = sorted(
+        name
+        for name, value in downstream_model_ids.items()
+        if not str(value or "").strip()
+    )
+    if scope == WORKFLOW_SCOPE_FULL and missing_downstream_ids:
+        raise ValueError(
+            "Full workflow scope requires exact downstream model identifiers: "
+            + ", ".join(missing_downstream_ids)
+        )
+    if (
+        scope == WORKFLOW_SCOPE_FULL
+        and subject_mask_publication_profile not in SUBJECT_MASK_PUBLICATION_PROFILES
+    ):
         raise ValueError(
             "Unsupported subject-mask publication profile: "
             f"{subject_mask_publication_profile!r}."
@@ -714,8 +793,6 @@ def build_plan(
             "registered_gate_requirement must be off, if_available, or required."
         )
     gate_run = str(registered_gate_run or "").strip() or None
-    if gate_requirement == "required" and gate_run is None:
-        raise ValueError("Required registered geometry needs an exact gate run.")
     policy_id = str(selection_policy_id).strip()
     if policy_id not in {"manual_review_only_v1", "corroborated_acquisition_v1"}:
         raise ValueError("Unsupported registered geometry selection policy id.")
@@ -744,6 +821,7 @@ def build_plan(
         if not required.exists():
             raise FileNotFoundError(required)
     repo_commit = _repo_commit(repo)
+    modern_registered_pipeline = gate_requirement != "off"
 
     detect_bindings: list[ModelBinding] = []
     pose_bindings: list[ModelBinding] = []
@@ -762,31 +840,40 @@ def build_plan(
                 run_id=detection_run_id,
             )
         )
-        pose = resolve_pose_model_binding(
-            registry_path=registry_path,
-            recording_id=target.recording_id,
-            recording_dir=target.recording_dir,
-            set_id=pose_set_id,
-            run_id=pose_run_id,
-        )
-        pose_binding = ModelBinding(
-            task="pose",
-            set_id=pose.set_id,
-            run_id=pose.run_id,
-            path=pose.model_path,
-            sha256=pose.model_sha256,
-        )
-        _verify_binding(pose_binding)
-        pose_bindings.append(pose_binding)
+        if scope == WORKFLOW_SCOPE_FULL:
+            pose = resolve_pose_model_binding(
+                registry_path=registry_path,
+                recording_id=target.recording_id,
+                recording_dir=target.recording_dir,
+                set_id=str(pose_set_id),
+                run_id=str(pose_run_id),
+            )
+            pose_binding = ModelBinding(
+                task="pose",
+                set_id=pose.set_id,
+                run_id=pose.run_id,
+                path=pose.model_path,
+                sha256=pose.model_sha256,
+            )
+            _verify_binding(pose_binding)
+            pose_bindings.append(pose_binding)
     detection_binding = _assert_same_binding("detection", detect_bindings)
-    pose_binding = _assert_same_binding("pose", pose_bindings)
-    subject_binding = _resolve_subject_binding(
-        registry_path=registry_path,
-        set_id=subject_mask_set_id,
-        run_id=subject_mask_run_id,
-        coverage_class=subject_mask_coverage_class,
-        component_coverage_key=subject_mask_component_coverage_key,
-        label_schema_id=subject_mask_label_schema_id,
+    pose_binding = (
+        _assert_same_binding("pose", pose_bindings)
+        if scope == WORKFLOW_SCOPE_FULL
+        else None
+    )
+    subject_binding = (
+        _resolve_subject_binding(
+            registry_path=registry_path,
+            set_id=str(subject_mask_set_id),
+            run_id=str(subject_mask_run_id),
+            coverage_class=subject_mask_coverage_class,
+            component_coverage_key=subject_mask_component_coverage_key,
+            label_schema_id=subject_mask_label_schema_id,
+        )
+        if scope == WORKFLOW_SCOPE_FULL
+        else None
     )
 
     gpu = LsfResources(queue="gpu_l4", ncores=8, mem_gb=48, gpus=1, walltime="4:00")
@@ -804,8 +891,10 @@ def build_plan(
 
     jobs: list[LsfJob] = []
     fragments: list[LsfWorkflowFragment] = []
+    detection_modules: list[DetectionWorkflowModule] = []
     target_payloads: list[dict[str, Any]] = []
-    target_validation_keys: list[str] = []
+    target_terminal_keys: list[str] = []
+    target_terminal_artifacts: list[str] = []
 
     for target_index, target in enumerate(targets):
         target_safe = safe_component(
@@ -865,6 +954,29 @@ def build_plan(
         subject_mask_quality_run = f"subject_mask_quality_{target_label}"
         subject_mask_cache_run = f"subject_mask_cache_{target_label}"
         subject_mask_bundle_id = f"subject_mask_bundle_{target_label}"
+        canonical_refined_run = (
+            f"refined_detect_native_{target_label}"
+            if modern_registered_pipeline
+            else None
+        )
+        materialize_registered_gate = (
+            gate_requirement == "required" and gate_run is None
+        )
+        geometry_selection_run = (
+            _active_arena_geometry_selection(target.analysis_zarr)
+            if materialize_registered_gate
+            else None
+        )
+        target_gate_run = (
+            f"registered_detection_gate_{target_label}"
+            if materialize_registered_gate
+            else gate_run
+        )
+        planned_gate_group_path = (
+            f"analysis/detection_gate_runs/{target_gate_run}"
+            if materialize_registered_gate
+            else None
+        )
         clips: list[dict[str, Any]] = []
         ordered_work_units = _order_detection_work_units_by_recording_frame(
             target_id=target.target_id,
@@ -936,6 +1048,8 @@ def build_plan(
             "detection_plan_path": str(detection_plan_path),
             "native_detection_authority": authority.to_json(),
             "native_canonical_run_id": native_canonical_run,
+            "canonical_refined_run_id": canonical_refined_run,
+            "planned_registered_gate_group_path": planned_gate_group_path,
             "strict_storage_bundle_root": str(strict_storage_bundle),
             "collection_id": collection_id,
             "detect_quality_source_run": detect_quality_source_run,
@@ -959,12 +1073,15 @@ def build_plan(
             "clips": clips,
             "registered_dish_geometry": {
                 "gate_requirement": gate_requirement,
-                "gate_run": gate_run,
+                "selection_run": geometry_selection_run,
+                "gate_run": target_gate_run,
+                "gate_materialization_planned": materialize_registered_gate,
                 "selection_policy_id": policy_id,
             },
         }
         _refuse_output_collisions(
             target_payload,
+            workflow_scope=scope,
             allow_existing_detections=resume_existing_detections,
         )
         if resume_existing_detections:
@@ -981,15 +1098,13 @@ def build_plan(
 
         gate: tuple[str, ...] = ()
         if target_index >= max_active_targets:
-            gate = (target_validation_keys[target_index - max_active_targets],)
+            gate = (target_terminal_keys[target_index - max_active_targets],)
 
         gate_artifacts: tuple[str, ...] = ()
         if target_index >= max_active_targets:
-            gated_target = target_payloads[target_index - max_active_targets]
-            gated_safe = safe_component(
-                str(gated_target["target_id"]), default="target", max_length=56
+            gate_artifacts = (
+                target_terminal_artifacts[target_index - max_active_targets],
             )
-            gate_artifacts = (f"validated_analysis:{gated_safe}",)
         native_module = build_native_detection_fragment(
             NativeDetectionFragmentInputs(
                 workflow_id=workflow_id,
@@ -1070,11 +1185,40 @@ def build_plan(
             refine_bundle_concurrency=detect_refine_bundle_concurrency,
         )
         target_payload["native_detection_module"] = native_module.outputs.to_json()
-        modern_registered_pipeline = gate_requirement != "off"
         if modern_registered_pipeline:
             jobs.extend(native_module.fragment.jobs)
             fragments.append(native_module.fragment)
-            canonical_refined_run = f"refined_detect_native_{target_label}"
+            assert canonical_refined_run is not None
+            postprocess_upstream = (native_module.outputs.terminal_job_key,)
+            postprocess_artifacts = (native_module.outputs.artifact_key,)
+            detection_module_fragments = [native_module.fragment]
+            if materialize_registered_gate:
+                assert geometry_selection_run is not None
+                assert target_gate_run is not None
+                gate_module = build_registered_detection_gate_fragment(
+                    RegisteredDetectionGateFragmentInputs(
+                        workflow_id=workflow_id,
+                        family=FAMILY,
+                        target=recording_target,
+                        repo=repo,
+                        run_root=run_root,
+                        source_detection_group_path=(
+                            native_module.outputs.canonical_group_path
+                        ),
+                        selection_run=geometry_selection_run,
+                        output_run=target_gate_run,
+                        upstream_job_keys=(native_module.outputs.terminal_job_key,),
+                        required_artifacts=(native_module.outputs.artifact_key,),
+                    )
+                )
+                jobs.extend(gate_module.fragment.jobs)
+                fragments.append(gate_module.fragment)
+                detection_module_fragments.append(gate_module.fragment)
+                postprocess_upstream = (gate_module.outputs.terminal_job_key,)
+                postprocess_artifacts = (gate_module.outputs.artifact_key,)
+                target_payload["registered_detection_gate_module"] = (
+                    gate_module.outputs.to_json()
+                )
             postprocess = build_recording_detection_postprocess_fragment(
                 RecordingDetectionPostprocessInputs(
                     workflow_id=workflow_id,
@@ -1086,14 +1230,14 @@ def build_plan(
                     quality_run=detect_quality_run,
                     refined_run=canonical_refined_run,
                     registered_gate_requirement=gate_requirement,
-                    registered_gate_run=gate_run,
+                    registered_gate_run=target_gate_run,
                     selection_policy_id=policy_id,
                     require_active_canonical_source=True,
                     source_publication_receipt=(
                         native_module.outputs.publication_receipt_path
                     ),
-                    upstream_job_keys=(native_module.outputs.terminal_job_key,),
-                    required_artifacts=(native_module.outputs.artifact_key,),
+                    upstream_job_keys=postprocess_upstream,
+                    required_artifacts=postprocess_artifacts,
                 )
             )
             jobs.extend(postprocess.fragment.jobs)
@@ -1123,8 +1267,8 @@ def build_plan(
                 "--result-json",
                 str(collection_receipt),
             ]
-            if gate_run is not None:
-                collection_command.extend(("--registered-gate-run", gate_run))
+            if target_gate_run is not None:
+                collection_command.extend(("--registered-gate-run", target_gate_run))
             collection_job = _job(
                 workflow_id=workflow_id,
                 repo=repo,
@@ -1145,21 +1289,20 @@ def build_plan(
             )
             jobs.append(collection_job)
             collection_artifact = f"finalized_refined_detection:{target_safe}"
-            fragments.append(
-                LsfWorkflowFragment(
-                    fragment_id=f"registered_refined_collection:{target_safe}",
-                    jobs=(collection_job,),
-                    requires=(postprocess.outputs.artifact_key,),
-                    provides=(collection_artifact,),
-                    metadata={
-                        "module": "registered_refined_clipped_collection",
-                        "source": postprocess.outputs.to_json(),
-                        "collection_id": collection_id,
-                        "slice_authority": "canonical_recording_refined_run",
-                        "selector_activation": False,
-                    },
-                )
+            collection_fragment = LsfWorkflowFragment(
+                fragment_id=f"registered_refined_collection:{target_safe}",
+                jobs=(collection_job,),
+                requires=(postprocess.outputs.artifact_key,),
+                provides=(collection_artifact,),
+                metadata={
+                    "module": "registered_refined_clipped_collection",
+                    "source": postprocess.outputs.to_json(),
+                    "collection_id": collection_id,
+                    "slice_authority": "canonical_recording_refined_run",
+                    "selector_activation": False,
+                },
             )
+            fragments.append(collection_fragment)
             detection_outputs = DetectionFragmentOutputs(
                 target_id=target.target_id,
                 collection_id=collection_id,
@@ -1189,6 +1332,14 @@ def build_plan(
                 "collection_id": collection_id,
                 "collection_receipt": str(collection_receipt),
             }
+            detection_module = DetectionWorkflowModule(
+                fragments=tuple(
+                    detection_module_fragments
+                    + [postprocess.fragment, collection_fragment]
+                ),
+                raw_outputs=raw_module.outputs,
+                outputs=detection_outputs,
+            )
         else:
             detection_module = build_detection_fragment(
                 detection_inputs,
@@ -1198,7 +1349,14 @@ def build_plan(
             fragments.extend(detection_module.fragments)
             detection_outputs = detection_module.outputs
         target_payload["detection_module"] = detection_outputs.to_json()
+        detection_modules.append(detection_module)
+        if scope == WORKFLOW_SCOPE_DETECTION:
+            target_terminal_keys.append(detection_outputs.terminal_job_key)
+            target_terminal_artifacts.append(detection_outputs.artifact_key)
+            continue
 
+        assert pose_binding is not None
+        assert subject_binding is not None
         storage_modules = None
         if not modern_registered_pipeline:
             strict_clip_inputs = tuple(
@@ -1255,8 +1413,7 @@ def build_plan(
                     canonical_run_id=native_canonical_run,
                     clips=strict_clip_inputs,
                     clipped_binding_path=(
-                        strict_storage_bundle
-                        / "clipped_refined_detection_binding.json"
+                        strict_storage_bundle / "clipped_refined_detection_binding.json"
                     ),
                     bundle_root=strict_storage_bundle,
                     refined_run_id=f"refined_detection_snapshot_{target_label}",
@@ -1298,9 +1455,7 @@ def build_plan(
             downstream_detection_artifact = (
                 storage_modules.storage.outputs.crop_artifact_key
             )
-            downstream_detection_authority = (
-                storage_modules.storage.outputs.to_json()
-            )
+            downstream_detection_authority = storage_modules.storage.outputs.to_json()
         else:
             target_payload["strict_detection_storage"] = None
         cache_array_key = f"cache_array:{target_safe}"
@@ -1958,13 +2113,14 @@ def build_plan(
                 expected_outputs=(validation_report,),
             )
         )
-        target_validation_keys.append(validation_key)
         crop_cache_artifact = f"crop_roi_cache:{target_safe}"
         raw_keypoints_artifact = f"raw_keypoints:{target_safe}"
         refined_keypoints_artifact = f"refined_keypoints:{target_safe}"
         raw_masks_artifact = f"raw_subject_masks:{target_safe}"
         refined_masks_artifact = f"refined_subject_masks:{target_safe}"
         validated_artifact = f"validated_analysis:{target_safe}"
+        target_terminal_keys.append(validation_key)
+        target_terminal_artifacts.append(validated_artifact)
         job_by_key = {job.job_key: job for job in jobs}
         mask_finalize_keys = list(
             dict.fromkeys((package_array_key, mask_import_key, mask_publish_key))
@@ -2045,6 +2201,38 @@ def build_plan(
             )
         )
 
+    if scope == WORKFLOW_SCOPE_DETECTION:
+        workflow = compose_detection_workflow(
+            workflow_id=workflow_id,
+            family=FAMILY,
+            modules=tuple(detection_modules),
+        )
+        return ClippedInferencePlan(
+            run_label=label,
+            workflow_id=workflow_id,
+            workflow_scope=scope,
+            repo=repo,
+            registry=registry_path,
+            run_root=run_root,
+            targets=tuple(targets),
+            target_plans=tuple(target_payloads),
+            model_bindings={"detection": detection_binding},
+            max_active_targets=max_active_targets,
+            cleanup_nrs_after_success=False,
+            resume_existing_detections=resume_existing_detections,
+            encoded_mask_packages=False,
+            subject_mask_publication_profile=subject_mask_publication_profile,
+            detect_array_concurrency=int(detect_array_concurrency),
+            gpu_array_concurrency=int(gpu_array_concurrency),
+            cache_array_concurrency=int(cache_array_concurrency),
+            mask_package_array_concurrency=int(mask_package_array_concurrency),
+            detect_refine_bundle_concurrency=int(detect_refine_bundle_concurrency),
+            registered_gate_requirement=gate_requirement,
+            registered_gate_run=gate_run,
+            selection_policy_id=policy_id,
+            lsf_workflow=workflow,
+        )
+
     campaign_job_start = len(jobs)
     registry_key = "registry_finalize"
     registry_report = run_root / "registry" / "reconcile.json"
@@ -2066,7 +2254,7 @@ def build_plan(
             stage="registry_finalize",
             command=registry_command,
             resources=cpu,
-            upstream=tuple(target_validation_keys),
+            upstream=tuple(target_terminal_keys),
             expected_outputs=(registry_report,),
         )
     )
@@ -2135,6 +2323,7 @@ def build_plan(
         family=FAMILY,
         fragments=tuple(fragments),
         metadata={
+            "workflow_scope": "full",
             "target_count": len(targets),
             "clip_count": sum(len(target["clips"]) for target in target_payloads),
             "model_bindings_are_exact": True,
@@ -2167,6 +2356,7 @@ def build_plan(
     return ClippedInferencePlan(
         run_label=label,
         workflow_id=workflow_id,
+        workflow_scope=scope,
         repo=repo,
         registry=registry_path,
         run_root=run_root,
@@ -2307,6 +2497,15 @@ def build_ssh_bsub_runner(submit_host: str) -> CommandRunner:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--workflow-scope",
+        choices=WORKFLOW_SCOPES,
+        default=WORKFLOW_SCOPE_FULL,
+        help=(
+            "Compose the full analysis DAG (default) or stop after the "
+            "finalized refined-detection collection."
+        ),
+    )
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--run-label", required=True)
     parser.add_argument("--run-root", required=True, type=Path)
@@ -2314,10 +2513,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--detection-set-id", required=True)
     parser.add_argument("--detection-run-id", required=True)
-    parser.add_argument("--pose-set-id", required=True)
-    parser.add_argument("--pose-run-id", required=True)
-    parser.add_argument("--subject-mask-set-id", required=True)
-    parser.add_argument("--subject-mask-run-id", required=True)
+    parser.add_argument("--pose-set-id", help="Required for --workflow-scope full.")
+    parser.add_argument("--pose-run-id", help="Required for --workflow-scope full.")
+    parser.add_argument(
+        "--subject-mask-set-id", help="Required for --workflow-scope full."
+    )
+    parser.add_argument(
+        "--subject-mask-run-id", help="Required for --workflow-scope full."
+    )
     parser.add_argument("--subject-mask-coverage-class", default="dense_all_components")
     parser.add_argument(
         "--subject-mask-component-coverage-key", default="body+eyes+swim_bladder"
@@ -2358,7 +2561,13 @@ def _parser() -> argparse.ArgumentParser:
         choices=tuple(sorted(REGISTERED_GATE_REQUIREMENTS)),
         default="off",
     )
-    parser.add_argument("--registered-gate-run")
+    parser.add_argument(
+        "--registered-gate-run",
+        help=(
+            "Consume an exact existing gate. Omit with requirement=required to "
+            "materialize a target-specific gate from each active geometry selection."
+        ),
+    )
     parser.add_argument(
         "--selection-policy-id",
         choices=("manual_review_only_v1", "corroborated_acquisition_v1"),
@@ -2405,6 +2614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=args.run_root,
         detection_set_id=args.detection_set_id,
         detection_run_id=args.detection_run_id,
+        workflow_scope=args.workflow_scope,
         pose_set_id=args.pose_set_id,
         pose_run_id=args.pose_run_id,
         subject_mask_set_id=args.subject_mask_set_id,
@@ -2436,6 +2646,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     summary = {
         "status": "submitted" if args.apply else "dry_run",
+        "workflow_scope": plan.workflow_scope,
         "plan_path": str(plan.run_root / "plan.json"),
         "lsf_plan_path": str(plan.run_root / "lsf_plan.json"),
         "target_count": len(plan.targets),

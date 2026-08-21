@@ -193,11 +193,20 @@ def project_registered_geometry_stages(
 
     def modern_selection(group: object) -> bool:
         record = group.attrs.get("selection_record")  # type: ignore[attr-defined]
-        if not isinstance(record, Mapping) or record.get("schema_version") != 2:
+        if not isinstance(record, Mapping):
             return False
         decision = record.get("decision")
-        return isinstance(decision, Mapping) and isinstance(
-            decision.get("comparison_binding"), Mapping
+        if not isinstance(decision, Mapping):
+            return False
+        if record.get("schema_version") == 2:
+            return isinstance(decision.get("comparison_binding"), Mapping)
+        selected = record.get("selected_candidate")
+        return (
+            record.get("schema_version") == 3
+            and decision.get("decision_source") == "manual_review"
+            and decision.get("comparison_binding") is None
+            and isinstance(selected, Mapping)
+            and selected.get("candidate_kind") == "palette_recording_image_fit"
         )
 
     selections = _complete_groups(
@@ -214,8 +223,18 @@ def project_registered_geometry_stages(
         predicate=lambda group: (
             _decode(group.attrs.get("schema_id"))  # type: ignore[attr-defined]
             == "palette.registered_detection_gate_run"
-            and group.attrs.get("selection_record_schema_version") == 2  # type: ignore[attr-defined]
-            and bool(_decode(group.attrs.get("comparison_run")))  # type: ignore[attr-defined]
+            and (
+                (
+                    group.attrs.get("selection_record_schema_version") == 2  # type: ignore[attr-defined]
+                    and bool(_decode(group.attrs.get("comparison_run")))  # type: ignore[attr-defined]
+                )
+                or (
+                    group.attrs.get("selection_record_schema_version") == 3  # type: ignore[attr-defined]
+                    and _decode(group.attrs.get("selection_decision_source"))  # type: ignore[attr-defined]
+                    == "manual_review"
+                    and not _decode(group.attrs.get("comparison_run"))  # type: ignore[attr-defined]
+                )
+            )
         ),
     )
 

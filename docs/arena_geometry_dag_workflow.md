@@ -72,8 +72,15 @@ The GPU probe then:
    relevant bytes; and
 7. atomically publishes the completed review-package directory.
 
-The probe does not traverse the video from frame zero and does not open or
-modify the analysis Zarr or registry.
+The fitter does not traverse the video from frame zero and does not open or
+modify the analysis Zarr or registry. The standalone
+`submit_recording_dish_rim_probe_bsub.sh` wrapper imports a successful review
+package into immutable, selector-ineligible
+`analysis/arena_geometry_fit_runs/<content-derived-run>` storage by default.
+Pass `--diagnostic-only` to retain only the external review package. Default
+persistence requires one explicit `--analysis-zarr`, or exactly one
+`zarr/*_analysis.zarr` below a clipped `--recording-dir`; missing or ambiguous
+targets fail before submission.
 
 ## Target manifest
 
@@ -179,6 +186,17 @@ artifacts before the separate
 `build_reviewed_arena_geometry_candidate_fragment` is used. That fragment
 binds the exact fit-review run and digest. Publishing the reviewed candidate
 still does not select it or apply it to detections.
+
+For a clipped fit, reviewed-candidate publication validates the singleton
+camera and continuous frame range against the analysis Zarr, rehashes the
+current `recording_clip_index.json` and Orange recording snapshot, and retains
+clip-local plus one-based recording-frame coordinates for every decoded frame.
+Its camera-native coordinate binding is the exact camera frame in the hashed
+recording snapshot; it does not synthesize a single-video metadata record for
+the collection. `rig_id`, `canvas_name`, and `arena_id` are read from the Zarr
+when present, or must be supplied together at approval time. The same path
+handles future single-camera rolling-clip recordings without recording-specific
+camera or clip-count constants.
 
 Operational selection and keyed detection-gate materialization exist as
 separate explicit workflow modules. The campaign registry refresh reports

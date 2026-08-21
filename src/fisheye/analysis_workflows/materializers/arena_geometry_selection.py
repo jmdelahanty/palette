@@ -47,10 +47,10 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 
-
 SELECTION_RECORD_SCHEMA_ID = "palette.arena_geometry_selection_record"
 SELECTION_RECORD_SCHEMA_VERSION = 2
 LEGACY_SELECTION_RECORD_SCHEMA_VERSION = 1
+MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION = 3
 SELECTION_RUN_SCHEMA_ID = "palette.arena_geometry_selection_run"
 SELECTION_RUN_SCHEMA_VERSION = 1
 SELECTION_RUNS_PARENT = "arena_geometry_selection"
@@ -58,6 +58,7 @@ SELECTION_PUBLISH_SCHEMA_ID = "palette.arena_geometry_selection_publish"
 SELECTION_ALGORITHM_VERSION = 1
 SELECTION_POLICY = "reviewed_candidate_exact_binding_v1"
 COMPARISON_BOUND_SELECTION_POLICY = "comparison_bound_reviewed_candidate_v2"
+MANUAL_PALETTE_SELECTION_POLICY = "manual_reviewed_palette_candidate_exact_binding_v3"
 SELECTION_POLICY_ATTR = "arena_geometry_selection_policy"
 SELECTION_GENERATION_ATTR = "arena_geometry_selection_generation"
 SELECTION_LEASE_ATTR = "arena_geometry_selection_lease"
@@ -186,9 +187,7 @@ def _comparison_snapshot(root: Any, comparison_run: str) -> dict[str, Any]:
         ],
         "evidence_outcome": record["decision"]["evidence_outcome"],
         "workflow_action": record["decision"]["workflow_action"],
-        "semantic_compatibility": record["observed_features"][
-            "semantic_compatibility"
-        ],
+        "semantic_compatibility": record["observed_features"]["semantic_compatibility"],
         "candidate_bindings": _canonical_copy(record["candidate_bindings"]),
     }
 
@@ -231,7 +230,9 @@ def build_arena_geometry_selection_plan(
             for binding in comparison["candidate_bindings"].values()
         }
         if candidate["candidate_id"] not in compared_candidates:
-            raise ValueError("Selected candidate is not bound by the comparison artifact.")
+            raise ValueError(
+                "Selected candidate is not bound by the comparison artifact."
+            )
         if source == "automatic_policy":
             if (
                 comparison["evidence_outcome"] != "corroborated_pass"
@@ -256,14 +257,19 @@ def build_arena_geometry_selection_plan(
             )
     elif source == "automatic_policy":
         raise ValueError("Automatic geometry selection requires a comparison artifact.")
-    schema_version = (
-        SELECTION_RECORD_SCHEMA_VERSION
-        if comparison is not None
-        else LEGACY_SELECTION_RECORD_SCHEMA_VERSION
-    )
-    selection_policy = (
-        COMPARISON_BOUND_SELECTION_POLICY if comparison is not None else SELECTION_POLICY
-    )
+    if comparison is not None:
+        schema_version = SELECTION_RECORD_SCHEMA_VERSION
+        selection_policy = COMPARISON_BOUND_SELECTION_POLICY
+    elif candidate["candidate_kind"] == PALETTE_CANDIDATE_KIND:
+        if source != "manual_review":
+            raise ValueError(
+                "A comparison-free Palette candidate requires explicit manual review."
+            )
+        schema_version = MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION
+        selection_policy = MANUAL_PALETTE_SELECTION_POLICY
+    else:
+        schema_version = LEGACY_SELECTION_RECORD_SCHEMA_VERSION
+        selection_policy = SELECTION_POLICY
     record = {
         "schema_id": SELECTION_RECORD_SCHEMA_ID,
         "schema_version": schema_version,
@@ -312,9 +318,7 @@ def build_arena_geometry_selection_plan(
             **(
                 {
                     "arena_geometry_comparison": comparison["run_name"],
-                    "comparison_record_sha256": comparison[
-                        "comparison_record_sha256"
-                    ],
+                    "comparison_record_sha256": comparison["comparison_record_sha256"],
                 }
                 if comparison is not None
                 else {}
@@ -340,6 +344,9 @@ def validate_arena_geometry_selection_record(record: Mapping[str, Any]) -> None:
     expected_policy = {
         LEGACY_SELECTION_RECORD_SCHEMA_VERSION: SELECTION_POLICY,
         SELECTION_RECORD_SCHEMA_VERSION: COMPARISON_BOUND_SELECTION_POLICY,
+        MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION: (
+            MANUAL_PALETTE_SELECTION_POLICY
+        ),
     }.get(schema_version)
     if (
         record.get("schema_id") != SELECTION_RECORD_SCHEMA_ID
@@ -372,14 +379,16 @@ def validate_arena_geometry_selection_record(record: Mapping[str, Any]) -> None:
             raise ValueError("Selection candidate lacks boundary_observation.")
         kind = selected.get("candidate_kind")
         if kind == ACQUISITION_CANDIDATE_KIND:
-            if not isinstance(selected.get("physical_inner_rim"), Mapping) or selected.get(
-                "observed_boundary"
-            ) is not None:
+            if (
+                not isinstance(selected.get("physical_inner_rim"), Mapping)
+                or selected.get("observed_boundary") is not None
+            ):
                 raise ValueError("Selected acquisition boundary semantics are invalid.")
         elif kind == PALETTE_CANDIDATE_KIND:
-            if not isinstance(selected.get("observed_boundary"), Mapping) or selected.get(
-                "physical_inner_rim"
-            ) is not None:
+            if (
+                not isinstance(selected.get("observed_boundary"), Mapping)
+                or selected.get("physical_inner_rim") is not None
+            ):
                 raise ValueError("Selected Palette boundary semantics are invalid.")
         else:
             raise ValueError("Selection candidate kind is unsupported.")
@@ -403,10 +412,17 @@ def validate_arena_geometry_selection_record(record: Mapping[str, Any]) -> None:
         ):
             if not str(comparison.get(name) or "").strip():
                 raise ValueError(f"Selection comparison binding lacks {name}.")
+    elif schema_version == MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION:
+        if selected.get("candidate_kind") != PALETTE_CANDIDATE_KIND:
+            raise ValueError("Version-3 selection requires a Palette candidate.")
+        if decision.get("decision_source") != "manual_review":
+            raise ValueError("Version-3 selection requires explicit manual review.")
+        if comparison is not None:
+            raise ValueError("Version-3 selection cannot claim comparison evidence.")
     if record.get("candidate_mutated") is not False:
         raise ValueError("Selection must not claim candidate mutation.")
     if record.get("legacy_dish_mask_projection_written") is not False:
-        raise ValueError("Version-1 selection cannot write a legacy projection.")
+        raise ValueError("Arena-geometry selection cannot write a legacy projection.")
 
 
 def _selection_attrs(plan: ArenaGeometrySelectionPlan) -> dict[str, Any]:
@@ -485,10 +501,14 @@ def _revalidate_selection_source(plan: ArenaGeometrySelectionPlan) -> dict[str, 
     comparison_audit: Mapping[str, Any] | None = None
     if plan.selection_record["schema_version"] == SELECTION_RECORD_SCHEMA_VERSION:
         if not isinstance(comparison_binding, Mapping):
-            raise RuntimeError("Comparison-bound selection lost its comparison binding.")
+            raise RuntimeError(
+                "Comparison-bound selection lost its comparison binding."
+            )
         current = _comparison_snapshot(root, str(comparison_binding["run_name"]))
         if current != comparison_binding:
-            raise RuntimeError("Comparison binding changed during selection publication.")
+            raise RuntimeError(
+                "Comparison binding changed during selection publication."
+            )
         comparison_audit = {
             "comparison_run": current["run_name"],
             "comparison_record_sha256": current["comparison_record_sha256"],
@@ -661,6 +681,7 @@ def publish_arena_geometry_selection(
 
 __all__ = [
     "ArenaGeometrySelectionPlan",
+    "MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION",
     "SELECTION_RUNS_PARENT",
     "build_arena_geometry_selection_plan",
     "publish_arena_geometry_selection",

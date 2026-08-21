@@ -6,6 +6,7 @@ VIDEO=""
 SUMMARY=""
 KEYFRAMES=""
 RECORDING_DIR=""
+ANALYSIS_ZARR=""
 PROBE_ID=""
 ACQUISITION_OBSERVATION=""
 OUTPUT_ROOT="/groups/johnson/johnsonlab/jeremy/diagnostics/recording_dish_rim_probes"
@@ -17,6 +18,7 @@ MEM_GB=32
 WALLTIME="1:00"
 GPU_RESOURCE="num=1:mode=shared:j_exclusive=no"
 SUBMIT=0
+DIAGNOSTIC_ONLY=0
 
 usage() {
   cat <<'USAGE'
@@ -26,9 +28,10 @@ Usage:
   submit_recording_dish_rim_probe_bsub.sh \
     --recording-dir PATH --probe-id ID [options]
 
-Render or submit one diagnostic-only, three-window dish-rim probe. The job
-decodes through PyNvVideoCodec on an LSF GPU worker and writes review PNGs plus
-immutable JSON reports. It never opens an analysis Zarr or registry.
+Render or submit one three-window dish-rim probe. The job decodes through
+PyNvVideoCodec on an LSF GPU worker, writes review PNGs plus immutable JSON
+reports, and by default persists the complete review attempt in the recording's
+analysis Zarr. It never publishes a reviewed candidate or updates a registry.
 
 Source (choose exactly one mode):
   --video PATH                   Native/full-frame Orange MP4
@@ -41,6 +44,9 @@ Required:
   --probe-id ID                  Immutable diagnostic identifier
 
 Options:
+  --analysis-zarr PATH           Target analysis Zarr. For --recording-dir,
+                                defaults to its one zarr/*_analysis.zarr
+  --diagnostic-only              Do not persist the attempt in an analysis Zarr
   --acquisition-observation P    Reveal-only Orange observation JSON; the blind
                                 Palette fit is frozen before this file is read
   --output-root PATH             Diagnostic root on shared storage
@@ -67,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --summary) SUMMARY="$2"; shift 2;;
     --keyframes) KEYFRAMES="$2"; shift 2;;
     --recording-dir) RECORDING_DIR="$2"; shift 2;;
+    --analysis-zarr) ANALYSIS_ZARR="$2"; shift 2;;
     --probe-id) PROBE_ID="$2"; shift 2;;
     --acquisition-observation) ACQUISITION_OBSERVATION="$2"; shift 2;;
     --output-root) OUTPUT_ROOT="$2"; shift 2;;
@@ -78,6 +85,7 @@ while [[ $# -gt 0 ]]; do
     --walltime) WALLTIME="$2"; shift 2;;
     --gpu-resource) GPU_RESOURCE="$2"; shift 2;;
     --submit) SUBMIT=1; shift;;
+    --diagnostic-only) DIAGNOSTIC_ONLY=1; shift;;
     -h|--help) usage; exit 0;;
     *) fail "unknown argument: $1";;
   esac
@@ -103,17 +111,45 @@ fi
 [[ "$PROBE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "unsafe --probe-id"
 [[ -z "$ACQUISITION_OBSERVATION" || -f "$ACQUISITION_OBSERVATION" ]] || \
   fail "acquisition observation not found: $ACQUISITION_OBSERVATION"
+if [[ "$DIAGNOSTIC_ONLY" == "1" ]]; then
+  [[ -z "$ANALYSIS_ZARR" ]] || \
+    fail "--diagnostic-only cannot be combined with --analysis-zarr"
+  PERSISTENCE_MODE="diagnostic_only"
+else
+  PERSISTENCE_MODE="persist_fit_review_attempt"
+  if [[ -z "$ANALYSIS_ZARR" ]]; then
+    if [[ "$SOURCE_MODE" == "clipped_recording" ]]; then
+      zarr_root="$RECORDING_DIR/zarr"
+    else
+      video_parent="$(dirname "$VIDEO")"
+      [[ "$(basename "$video_parent")" == "cams" ]] || \
+        fail "cannot infer a recording from --video; pass --analysis-zarr or --diagnostic-only"
+      zarr_root="$(dirname "$video_parent")/zarr"
+    fi
+    shopt -s nullglob
+    zarr_candidates=("$zarr_root"/*_analysis.zarr)
+    shopt -u nullglob
+    [[ "${#zarr_candidates[@]}" == "1" ]] || \
+      fail "default persistence requires exactly one *_analysis.zarr below $zarr_root; found ${#zarr_candidates[@]}"
+    ANALYSIS_ZARR="${zarr_candidates[0]}"
+  fi
+  [[ -d "$ANALYSIS_ZARR" && -f "$ANALYSIS_ZARR/zarr.json" ]] || \
+    fail "analysis Zarr not found or invalid: $ANALYSIS_ZARR"
+fi
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be positive"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be positive"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable"
 [[ -f "$PALETTE_REPO/src/fisheye/diagnostics/probe_recording_dish_rim_fit.py" ]] || \
   fail "Palette checkout lacks the dish-rim probe"
+[[ -f "$PALETTE_REPO/src/fisheye/utils/publish_arena_geometry_fit_review.py" ]] || \
+  fail "Palette checkout lacks fit-review persistence"
 [[ -z "$(git -C "$PALETTE_REPO" status --porcelain)" ]] || \
   fail "Palette checkout must be clean"
 
 RUN_DIR="${OUTPUT_ROOT}/${PROBE_ID}"
 ARTIFACT_DIR="${RUN_DIR}/artifacts"
 STATUS_FILE="${RUN_DIR}/status.txt"
+FIT_REVIEW_IMPORT_JSON="${RUN_DIR}/fit_review_import.json"
 SUBMISSION_FILE="${RUN_DIR}/submission.txt"
 JOB_SCRIPT="${RUN_DIR}/run_probe.sh"
 [[ ! -e "$RUN_DIR" ]] || fail "refusing existing probe directory: $RUN_DIR"
@@ -127,9 +163,12 @@ q_video="$(printf '%q' "$VIDEO")"
 q_summary="$(printf '%q' "$SUMMARY")"
 q_keyframes="$(printf '%q' "$KEYFRAMES")"
 q_recording_dir="$(printf '%q' "$RECORDING_DIR")"
+q_analysis_zarr="$(printf '%q' "$ANALYSIS_ZARR")"
+q_persistence_mode="$(printf '%q' "$PERSISTENCE_MODE")"
 q_observation="$(printf '%q' "$ACQUISITION_OBSERVATION")"
 q_artifacts="$(printf '%q' "$ARTIFACT_DIR")"
 q_status="$(printf '%q' "$STATUS_FILE")"
+q_fit_review_import="$(printf '%q' "$FIT_REVIEW_IMPORT_JSON")"
 q_expected="$(printf '%q' "$EXPECTED_COMMIT")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
@@ -142,9 +181,12 @@ VIDEO=${q_video}
 SUMMARY=${q_summary}
 KEYFRAMES=${q_keyframes}
 RECORDING_DIR=${q_recording_dir}
+ANALYSIS_ZARR=${q_analysis_zarr}
+PERSISTENCE_MODE=${q_persistence_mode}
 ACQUISITION_OBSERVATION=${q_observation}
 ARTIFACT_DIR=${q_artifacts}
 STATUS_FILE=${q_status}
+FIT_REVIEW_IMPORT_JSON=${q_fit_review_import}
 EXPECTED_COMMIT=${q_expected}
 
 [[ -n "\${LSB_JOBID:-}" ]] || { printf 'Refusing execution outside LSF.\n' >&2; exit 2; }
@@ -180,8 +222,29 @@ fi
 printf 'probe_command='; printf '%q ' "\${cmd[@]}"; printf '\n'
 set +e
 "\${cmd[@]}"
-payload_rc=\$?
+fit_rc=\$?
 set -e
+
+publication_rc=0
+if [[ "\${fit_rc}" == "0" && "\${PERSISTENCE_MODE}" == "persist_fit_review_attempt" ]]; then
+  publish_cmd=(
+    scripts/py -m fisheye.utils.publish_arena_geometry_fit_review
+    --zarr "\${ANALYSIS_ZARR}"
+    --review-package-dir "\${ARTIFACT_DIR}"
+    --scratch-root "\${TMPDIR:-/tmp}/palette-arena-geometry-fit-review-\${LSB_JOBID}"
+    --result-json "\${FIT_REVIEW_IMPORT_JSON}"
+    --apply
+  )
+  printf 'fit_review_publish_command='; printf '%q ' "\${publish_cmd[@]}"; printf '\n'
+  set +e
+  "\${publish_cmd[@]}"
+  publication_rc=\$?
+  set -e
+fi
+payload_rc="\${fit_rc}"
+if [[ "\${payload_rc}" == "0" && "\${publication_rc}" != "0" ]]; then
+  payload_rc="\${publication_rc}"
+fi
 
 status_tmp="\${STATUS_FILE}.tmp.\$\$"
 {
@@ -195,8 +258,13 @@ status_tmp="\${STATUS_FILE}.tmp.\$\$"
   printf 'summary=%s\n' "\${SUMMARY}"
   printf 'keyframes=%s\n' "\${KEYFRAMES}"
   printf 'recording_dir=%s\n' "\${RECORDING_DIR}"
+  printf 'persistence_mode=%s\n' "\${PERSISTENCE_MODE}"
+  printf 'analysis_zarr=%s\n' "\${ANALYSIS_ZARR}"
   printf 'artifact_dir=%s\n' "\${ARTIFACT_DIR}"
   printf 'fit_report=%s\n' "\${ARTIFACT_DIR}/fit_report.json"
+  printf 'fit_review_import_json=%s\n' "\${FIT_REVIEW_IMPORT_JSON}"
+  printf 'fit_returncode=%s\n' "\${fit_rc}"
+  printf 'publication_returncode=%s\n' "\${publication_rc}"
   printf 'payload_returncode=%s\n' "\${payload_rc}"
 } >"\${status_tmp}"
 mv "\${status_tmp}" "\${STATUS_FILE}"
@@ -225,6 +293,8 @@ printf 'video=%s\n' "$VIDEO"
 printf 'summary=%s\n' "$SUMMARY"
 printf 'keyframes=%s\n' "$KEYFRAMES"
 printf 'recording_dir=%s\n' "$RECORDING_DIR"
+printf 'persistence_mode=%s\n' "$PERSISTENCE_MODE"
+printf 'analysis_zarr=%s\n' "$ANALYSIS_ZARR"
 printf 'memory_request_mb_per_slot=%s\n' "$MEM_MB_PER_SLOT"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'artifact_dir=%s\n' "$ARTIFACT_DIR"

@@ -106,7 +106,10 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         invalidates=("registered_detection_gate",),
         artifact_families=("analysis/arena_geometry_selection",),
         category=RECORDING_METADATA,
-        description="Explicit immutable geometry selection bound to comparison evidence.",
+        description=(
+            "Explicit immutable geometry selection bound to comparison or manual-review "
+            "evidence."
+        ),
     ),
     StageSpec(
         id="registered_detection_gate",

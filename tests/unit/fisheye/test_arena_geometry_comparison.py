@@ -9,9 +9,16 @@ import pytest
 import zarr
 
 from fisheye.analysis_workflows.materializers import arena_geometry_candidates
-from fisheye.analysis_workflows.materializers import arena_geometry_comparison as comparison
+from fisheye.analysis_workflows.materializers import (
+    arena_geometry_comparison as comparison,
+)
 from fisheye.analysis_workflows.materializers import registered_detection_gate as gate
-from fisheye.analysis_workflows.materializers import arena_geometry_selection as selection
+from fisheye.analysis_workflows.materializers import (
+    arena_geometry_selection as selection,
+)
+from fisheye.registry.registered_geometry_readiness import (
+    project_registered_geometry_stages,
+)
 from fisheye.shared.json_safety import strict_json_dumps
 from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
 from fisheye.shared.zarr_io import open_zarr_root
@@ -48,9 +55,9 @@ def _archive_with_candidates(
     *,
     acquisition_edge_support_digest: str | None = None,
 ) -> tuple[Path, str, str]:
-    manifest_reader = lambda root, *, group_path, **_kwargs: dict(
-        root[group_path].attrs["run_manifest"]
-    )
+    def manifest_reader(root, *, group_path, **_kwargs):
+        return dict(root[group_path].attrs["run_manifest"])
+
     monkeypatch.setattr(
         comparison,
         "require_active_coordinate_canonical_detection",
@@ -61,12 +68,15 @@ def _archive_with_candidates(
         "require_active_coordinate_canonical_detection",
         manifest_reader,
     )
-    dimensions = lambda _manifest: CanonicalDetectionDimensions(
-        n_frames=3,
-        n_instances=3,
-        source_width=640,
-        source_height=480,
-    )
+
+    def dimensions(_manifest):
+        return CanonicalDetectionDimensions(
+            n_frames=3,
+            n_instances=3,
+            source_width=640,
+            source_height=480,
+        )
+
     monkeypatch.setattr(
         comparison,
         "canonical_detection_dimensions_from_manifest",
@@ -82,8 +92,10 @@ def _archive_with_candidates(
     parent = root.require_group("analysis").create_group(
         arena_geometry_candidates.CANDIDATE_RUNS_PARENT
     )
-    acquisition_record = arena_geometry_candidates.build_acquisition_geometry_candidate_record(
-        _bound_mask(), recovery_binding=_recovery_binding()
+    acquisition_record = (
+        arena_geometry_candidates.build_acquisition_geometry_candidate_record(
+            _bound_mask(), recovery_binding=_recovery_binding()
+        )
     )
     fit_report, montage = _palette_fit_inputs(tmp_path)
     if acquisition_edge_support_digest is not None:
@@ -135,18 +147,20 @@ def _archive_with_candidates(
         "_source_camera_candidate_binding",
         lambda *_args, **_kwargs: _palette_binding(),
     )
-    palette_record = arena_geometry_candidates.build_reviewed_palette_geometry_candidate_record(
-        source_zarr=archive,
-        fit_report_path=fit_report,
-        montage_path=montage,
-        review={
-            "status": "reviewer_accepted_for_offline_detection_gate_audit",
-            "reviewer": "reviewer@example.org",
-            "reviewed_at_utc": "2026-08-12T12:00:00Z",
-            "decision_source": "interactive_visual_review",
-            "reviewed_feature": "visible_dish_top_rim_edge",
-            "decision_scope": "candidate_and_detection_disagreement_audit_only",
-        },
+    palette_record = (
+        arena_geometry_candidates.build_reviewed_palette_geometry_candidate_record(
+            source_zarr=archive,
+            fit_report_path=fit_report,
+            montage_path=montage,
+            review={
+                "status": "reviewer_accepted_for_offline_detection_gate_audit",
+                "reviewer": "reviewer@example.org",
+                "reviewed_at_utc": "2026-08-12T12:00:00Z",
+                "decision_source": "interactive_visual_review",
+                "reviewed_feature": "visible_dish_top_rim_edge",
+                "decision_scope": "candidate_and_detection_disagreement_audit_only",
+            },
+        )
     )
     return (
         archive,
@@ -199,7 +213,9 @@ def _write_nested_detection_source(archive: Path) -> str:
         "component_units": ["normalized"] * 4,
     }
     instances.create_array("frame_indices", data=np.asarray([0, 1, 2], dtype=np.int32))
-    instances.create_array("instance_key", data=np.asarray([10, 20, 30], dtype=np.uint64))
+    instances.create_array(
+        "instance_key", data=np.asarray([10, 20, 30], dtype=np.uint64)
+    )
     return "detect_runs/detect_native"
 
 
@@ -432,7 +448,9 @@ def test_comparison_rejects_detection_source_with_wrong_pixel_authority(
     evidence["source_pixel_authority"] = authority
     root[detect_source].attrs["source_evidence"] = evidence
 
-    with pytest.raises(ValueError, match="exact persisted source-camera pixel authority"):
+    with pytest.raises(
+        ValueError, match="exact persisted source-camera pixel authority"
+    ):
         comparison.build_arena_geometry_comparison_plan(
             archive,
             acquisition_candidate_run=acquisition,
@@ -506,7 +524,9 @@ def test_selection_binds_exact_comparison_and_keeps_boundary_roles_distinct(
         "_comparison_snapshot",
         lambda *_args, **_kwargs: failed_binding,
     )
-    with pytest.raises(ValueError, match="failed geometry comparison cannot be overridden"):
+    with pytest.raises(
+        ValueError, match="failed geometry comparison cannot be overridden"
+    ):
         selection.build_arena_geometry_selection_plan(
             archive,
             candidate_run=acquisition,
@@ -524,6 +544,72 @@ def test_selection_binds_exact_comparison_and_keeps_boundary_roles_distinct(
             decision_reason="automatic",
             decision_source="automatic_policy",
         )
+
+
+def test_manual_palette_selection_is_explicit_and_gate_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, _acquisition, palette = _archive_with_candidates(tmp_path, monkeypatch)
+
+    selected = selection.build_arena_geometry_selection_plan(
+        archive,
+        candidate_run=palette,
+        selected_by="reviewer@example.org",
+        decision_reason="reviewed the fitted visible dish top rim",
+    )
+
+    record = selected.selection_record
+    assert record["schema_version"] == (
+        selection.MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION
+    )
+    assert record["selection_policy"] == selection.MANUAL_PALETTE_SELECTION_POLICY
+    assert record["decision"]["decision_source"] == "manual_review"
+    assert record["decision"]["comparison_binding"] is None
+    assert record["selected_candidate"]["candidate_kind"] == (
+        arena_geometry_candidates.PALETTE_CANDIDATE_KIND
+    )
+    assert record["selected_candidate"]["physical_inner_rim"] is None
+    assert record["selected_candidate"]["boundary_observation"]["role"] == (
+        "independent_recording_image_observation"
+    )
+
+    result = selection.publish_arena_geometry_selection(
+        selected,
+        scratch_root=tmp_path / "manual-selection-scratch",
+    )
+    assert result["published"] is True
+
+    root = open_zarr_root(archive, mode="r")
+    projected = project_registered_geometry_stages(
+        root=root,
+        analysis_group=root["analysis"],
+        common_details={},
+        raw_status="ok",
+        calibration_status="ok",
+        detect_status="ok",
+        detect_quality_status="missing",
+    )
+    by_step = {item.step_name: item for item in projected}
+    assert by_step["arena_geometry_selection"].status == "ok"
+    assert by_step["arena_geometry_selection"].run_name == selected.selection_id
+
+    source = _write_nested_detection_source(archive)
+    gate_plan = gate.build_registered_detection_gate_plan(
+        archive,
+        source_group_path=source,
+        selection_run=selected.selection_id,
+    )
+    assert gate_plan.selection_record["schema_version"] == (
+        selection.MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION
+    )
+
+    tampered = {
+        **record,
+        "decision": {**record["decision"], "comparison_binding": {"run_name": "fake"}},
+    }
+    with pytest.raises(ValueError, match="cannot claim comparison evidence"):
+        selection.validate_arena_geometry_selection_record(tampered)
 
 
 def test_comparison_bound_selection_gates_nested_canonical_detection(
