@@ -702,6 +702,28 @@ def _validate_payload(transform: DirectedTransformV2, values: np.ndarray) -> Non
         raise DirectedTransformV2Error("Affine bottom row must be exactly [0,0,1].")
 
 
+INVERSE_COMPOSITION_ATOL = 1e-9
+
+
+def _validate_inverse_pair(forward_values: Any, inverse_values: Any) -> None:
+    """Validate a persisted inverse without platform-dependent reinversion."""
+
+    forward = _matrix(forward_values)
+    inverse = _matrix(inverse_values)
+    identity = np.eye(3, dtype=np.float64)
+    for product in (forward @ inverse, inverse @ forward):
+        if not np.allclose(
+            product,
+            identity,
+            rtol=0.0,
+            atol=INVERSE_COMPOSITION_ATOL,
+            equal_nan=False,
+        ):
+            raise DirectedTransformV2Error(
+                "Persisted forward and inverse matrices do not compose to identity."
+            )
+
+
 def _validate(
     transform: DirectedTransformV2,
     *,
@@ -779,8 +801,7 @@ def _validate(
             raise DirectedTransformV2Error("Forward and inverse authorities differ.")
         if transform.source != forward.transform.target or transform.target != forward.transform.source:
             raise DirectedTransformV2Error("Inverse does not swap exact typed endpoints.")
-        if not np.array_equal(_matrix(values), np.linalg.inv(_matrix(forward.payload_values))):
-            raise DirectedTransformV2Error("Persisted inverse matrix is not exact.")
+        _validate_inverse_pair(forward.payload_values, values)
     return values
 
 
