@@ -351,6 +351,7 @@ def test_candidate_record_keeps_physical_rim_gate_and_selection_distinct() -> No
 
 def test_reviewed_palette_candidate_binds_clipped_collection_artifacts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recording = tmp_path / "recording"
     recording.mkdir()
@@ -378,6 +379,22 @@ def test_reviewed_palette_candidate_binds_clipped_collection_artifacts(
             "native_height_px": 480,
         }
     )
+    acquisition = SimpleNamespace(
+        record=SimpleNamespace(camera_id="2010093"),
+        record_ref=(
+            "/analysis/acquisition_camera_frames/2010093"
+            "@acquisition_camera_frame"
+        ),
+        record_sha256="f" * 64,
+        width=640,
+        height=480,
+        assert_verified=lambda: None,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_acquisition_camera_authority",
+        lambda *_args, **_kwargs: (object(), acquisition),
+    )
 
     record = mod.build_reviewed_palette_geometry_candidate_record(
         source_zarr=archive,
@@ -400,18 +417,53 @@ def test_reviewed_palette_candidate_binds_clipped_collection_artifacts(
 
     coordinate = record["coordinate_binding"]
     assert coordinate["source_camera_frame_authority_kind"] == (
-        "orange_recording_snapshot_coordinate_frame_v1"
+        mod.CLIPPED_ACQUISITION_FRAME_AUTHORITY_KIND
     )
-    assert (
-        coordinate["pixel_frame_record_sha256"]
-        == hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    assert coordinate["pixel_frame_record_ref"] == (
+        "/analysis/acquisition_camera_frames/2010093@acquisition_camera_frame"
     )
+    assert coordinate["pixel_frame_record_sha256"] == "f" * 64
     source = record["palette_fit_source"]
     assert source["source_mode"] == "clipped_recording"
     assert source["source_collection"]["recording_id"] == "clipped-recording"
+    assert source["source_collection"]["recording_geometry_snapshot_sha256"] == (
+        hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    )
     assert source["windows"]["early"]["frame_coordinate"] == (
         "one_based_recording_frame_id"
     )
+
+    legacy_record = json.loads(json.dumps(record))
+    legacy_coordinate = legacy_record["coordinate_binding"]
+    legacy_coordinate["source_camera_frame_authority_kind"] = (
+        mod.LEGACY_CLIPPED_SNAPSHOT_FRAME_AUTHORITY_KIND
+    )
+    legacy_coordinate["pixel_frame_record_ref"] = (
+        "/recording_geometry_snapshot/camera_runtime/2010093/"
+        "coordinate_frame@recording_snapshot_sha256"
+    )
+    legacy_coordinate["pixel_frame_record_sha256"] = hashlib.sha256(
+        snapshot.read_bytes()
+    ).hexdigest()
+    mod.validate_palette_geometry_candidate_record(legacy_record)
+
+    acquisition.width = 641
+    with pytest.raises(
+        RecordingGeometryError,
+        match="authority does not match the clipped recording snapshot",
+    ):
+        mod.build_reviewed_palette_geometry_candidate_record(
+            source_zarr=archive,
+            fit_report_path=fit_report,
+            montage_path=montage,
+            arena_binding={
+                "rig_id": "omnifin0",
+                "canvas_name": "shadow",
+                "arena_id": "arena_1",
+            },
+            review=record["review"],
+        )
+    acquisition.width = 640
 
     clip_index.write_text('{"recording_id":"changed"}\n', encoding="utf-8")
     with pytest.raises(RecordingGeometryError, match="index changed"):
