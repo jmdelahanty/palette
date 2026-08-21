@@ -33,11 +33,23 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.shared.acquisition_publication_status import (
+    CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+)
 from fisheye.shared.archive_identity import (
     ArchiveIdentity,
     ArchiveIdentityError,
     archive_identity,
     require_same_archive,
+)
+from fisheye.shared.clipped_video_collection import (
+    SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY,
+    SOURCE_VIDEO_COLLECTION_LAYOUT,
+    SOURCE_VIDEO_COLLECTION_LOCATOR_KIND,
+    SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID,
+    SOURCE_VIDEO_COLLECTION_SCHEMA_ID,
 )
 from fisheye.shared.coordinate_descriptor import PIXEL_CONVENTIONS
 from fisheye.shared.coordinate_identity import (
@@ -1750,6 +1762,302 @@ def _exact_posix_file_path(
     return path
 
 
+def _parse_clipped_collection_file_evidence(
+    value: Any,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    payload = _exact_fields(
+        value,
+        expected=frozenset({"relative_path", "sha256", "size_bytes", "mtime_ns"}),
+        field_name=field_name,
+    )
+    return {
+        "relative_path": _exact_posix_file_path(
+            payload["relative_path"],
+            field_name=f"{field_name}.relative_path",
+            absolute=False,
+        ),
+        "sha256": _sha256(payload["sha256"], field_name=f"{field_name}.sha256"),
+        "size_bytes": _exact_positive_int(
+            payload["size_bytes"], field_name=f"{field_name}.size_bytes"
+        ),
+        "mtime_ns": _exact_positive_int(
+            payload["mtime_ns"], field_name=f"{field_name}.mtime_ns"
+        ),
+    }
+
+
+def _parse_clipped_collection_fingerprint(
+    value: Any,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    payload = _exact_fields(
+        value,
+        expected=frozenset(
+            {"strategy", "value", "size_bytes", "mtime_ns", "relocation_stable"}
+        ),
+        field_name=field_name,
+    )
+    if payload["strategy"] != "stat_v1":
+        raise PixelFrameAuthorityError(f"{field_name}.strategy must be exact stat_v1.")
+    if payload["relocation_stable"] is not False:
+        raise PixelFrameAuthorityError(
+            f"{field_name}.relocation_stable must be exact false."
+        )
+    return {
+        "strategy": "stat_v1",
+        "value": _sha256(payload["value"], field_name=f"{field_name}.value"),
+        "size_bytes": _exact_positive_int(
+            payload["size_bytes"], field_name=f"{field_name}.size_bytes"
+        ),
+        "mtime_ns": _exact_positive_int(
+            payload["mtime_ns"], field_name=f"{field_name}.mtime_ns"
+        ),
+        "relocation_stable": False,
+    }
+
+
+def _parse_clipped_video_collection_metadata(value: Any) -> dict[str, Any]:
+    metadata = _exact_fields(
+        value,
+        expected=frozenset(
+            {
+                "schema_id",
+                "layout",
+                "camera_id",
+                "width",
+                "height",
+                "total_frames",
+                "fps",
+                "codec",
+                "pix_fmt",
+                "locator",
+                "collection",
+            }
+        ),
+        field_name="source_video_metadata",
+    )
+    if metadata["schema_id"] != SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID:
+        raise PixelFrameAuthorityError("Unsupported clipped source metadata schema_id.")
+    if metadata["layout"] != SOURCE_VIDEO_COLLECTION_LAYOUT:
+        raise PixelFrameAuthorityError("Unsupported clipped source metadata layout.")
+    camera_id = _required_text(
+        metadata["camera_id"], field_name="source_video_metadata.camera_id"
+    )
+    if _FRAME_ID_RE.fullmatch(camera_id) is None:
+        raise PixelFrameAuthorityError(
+            "source_video_metadata.camera_id must be one canonical path segment."
+        )
+    width = _exact_positive_int(
+        metadata["width"], field_name="source_video_metadata.width"
+    )
+    height = _exact_positive_int(
+        metadata["height"], field_name="source_video_metadata.height"
+    )
+    total_frames = _exact_positive_int(
+        metadata["total_frames"], field_name="source_video_metadata.total_frames"
+    )
+    fps_raw = metadata["fps"]
+    if isinstance(fps_raw, bool) or not isinstance(fps_raw, (int, float)):
+        raise PixelFrameAuthorityError("source_video_metadata.fps must be numeric.")
+    fps = float(fps_raw)
+    if not np.isfinite(fps) or fps <= 0:
+        raise PixelFrameAuthorityError("source_video_metadata.fps must be positive.")
+    for name in ("codec", "pix_fmt"):
+        if metadata[name] is not None:
+            _required_text(metadata[name], field_name=f"source_video_metadata.{name}")
+
+    locator = _exact_fields(
+        metadata["locator"],
+        expected=frozenset({"kind", "relative_path"}),
+        field_name="source_video_metadata.locator",
+    )
+    if locator["kind"] != SOURCE_VIDEO_COLLECTION_LOCATOR_KIND:
+        raise PixelFrameAuthorityError("Unsupported clipped collection locator kind.")
+    frame_index_relative = _exact_posix_file_path(
+        locator["relative_path"],
+        field_name="source_video_metadata.locator.relative_path",
+        absolute=False,
+    )
+
+    raw_collection = _exact_fields(
+        metadata["collection"],
+        expected=frozenset(
+            {
+                "schema_id",
+                "schema_version",
+                "fingerprint_strategy",
+                "recording_clip_index",
+                "recording_frame_index",
+                "recording_frame_index_manifest",
+                "members",
+                "collection_sha256",
+            }
+        ),
+        field_name="source_video_metadata.collection",
+    )
+    if (
+        raw_collection["schema_id"] != SOURCE_VIDEO_COLLECTION_SCHEMA_ID
+        or raw_collection["schema_version"] != 1
+        or raw_collection["fingerprint_strategy"]
+        != SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY
+    ):
+        raise PixelFrameAuthorityError("Unsupported clipped collection contract.")
+    file_evidence = {
+        name: _parse_clipped_collection_file_evidence(
+            raw_collection[name],
+            field_name=f"source_video_metadata.collection.{name}",
+        )
+        for name in (
+            "recording_clip_index",
+            "recording_frame_index",
+            "recording_frame_index_manifest",
+        )
+    }
+    if file_evidence["recording_frame_index"]["relative_path"] != frame_index_relative:
+        raise PixelFrameAuthorityError(
+            "Clipped collection locator and frame-index evidence disagree."
+        )
+    raw_members = raw_collection["members"]
+    if type(raw_members) is not list or not raw_members:
+        raise PixelFrameAuthorityError("Clipped collection requires source members.")
+    members: list[dict[str, Any]] = []
+    expected_start = 0
+    previous_clip_index = -1
+    seen_ids: set[str] = set()
+    seen_indices: set[int] = set()
+    for member_index, raw_member in enumerate(raw_members):
+        field = f"source_video_metadata.collection.members[{member_index}]"
+        member = _exact_fields(
+            raw_member,
+            expected=frozenset(
+                {
+                    "clip_id",
+                    "clip_index",
+                    "relative_path",
+                    "frame_count",
+                    "first_frame_index",
+                    "last_frame_index_inclusive",
+                    "width",
+                    "height",
+                    "fps",
+                    "codec",
+                    "pix_fmt",
+                    "file_fingerprint",
+                }
+            ),
+            field_name=field,
+        )
+        clip_id = _required_text(member["clip_id"], field_name=f"{field}.clip_id")
+        clip_index = member["clip_index"]
+        if type(clip_index) is not int or clip_index < 0:
+            raise PixelFrameAuthorityError(f"{field}.clip_index must be nonnegative.")
+        if clip_index <= previous_clip_index:
+            raise PixelFrameAuthorityError(
+                "Clipped collection members must be ordered by increasing clip_index."
+            )
+        previous_clip_index = clip_index
+        if clip_id in seen_ids or clip_index in seen_indices:
+            raise PixelFrameAuthorityError(
+                "Clipped collection member identity is duplicated."
+            )
+        seen_ids.add(clip_id)
+        seen_indices.add(clip_index)
+        frame_count = _exact_positive_int(
+            member["frame_count"], field_name=f"{field}.frame_count"
+        )
+        if (
+            type(member["first_frame_index"]) is not int
+            or member["first_frame_index"] != expected_start
+            or type(member["last_frame_index_inclusive"]) is not int
+            or member["last_frame_index_inclusive"] != expected_start + frame_count - 1
+        ):
+            raise PixelFrameAuthorityError(
+                "Clipped collection members must exactly tile the acquisition timeline."
+            )
+        member_fps_raw = member["fps"]
+        if isinstance(member_fps_raw, bool) or not isinstance(
+            member_fps_raw, (int, float)
+        ):
+            raise PixelFrameAuthorityError(f"{field}.fps must be numeric.")
+        member_fps = float(member_fps_raw)
+        if (
+            _exact_positive_int(member["width"], field_name=f"{field}.width") != width
+            or _exact_positive_int(member["height"], field_name=f"{field}.height")
+            != height
+            or not np.isfinite(member_fps)
+            or not np.isclose(member_fps, fps, rtol=0.0, atol=1e-6)
+        ):
+            raise PixelFrameAuthorityError(
+                "Clipped collection member geometry/frame rate is inconsistent."
+            )
+        for name in ("codec", "pix_fmt"):
+            if member[name] is not None:
+                _required_text(member[name], field_name=f"{field}.{name}")
+            if metadata[name] is not None and member[name] != metadata[name]:
+                raise PixelFrameAuthorityError(
+                    f"Clipped collection member {name} differs from collection metadata."
+                )
+        members.append(
+            {
+                "clip_id": clip_id,
+                "clip_index": clip_index,
+                "relative_path": _exact_posix_file_path(
+                    member["relative_path"],
+                    field_name=f"{field}.relative_path",
+                    absolute=False,
+                ),
+                "frame_count": frame_count,
+                "first_frame_index": expected_start,
+                "last_frame_index_inclusive": expected_start + frame_count - 1,
+                "width": width,
+                "height": height,
+                "fps": member_fps,
+                "codec": member["codec"],
+                "pix_fmt": member["pix_fmt"],
+                "file_fingerprint": _parse_clipped_collection_fingerprint(
+                    member["file_fingerprint"], field_name=f"{field}.file_fingerprint"
+                ),
+            }
+        )
+        expected_start += frame_count
+    if expected_start != total_frames:
+        raise PixelFrameAuthorityError(
+            "Clipped collection member coverage differs from total_frames."
+        )
+    collection_basis = {
+        "schema_id": SOURCE_VIDEO_COLLECTION_SCHEMA_ID,
+        "schema_version": 1,
+        "fingerprint_strategy": SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY,
+        **file_evidence,
+        "members": members,
+    }
+    collection_sha = _sha256(
+        raw_collection["collection_sha256"],
+        field_name="source_video_metadata.collection.collection_sha256",
+    )
+    if collection_sha != _mapping_sha256(collection_basis):
+        raise PixelFrameAuthorityError("Clipped collection digest is stale.")
+    return {
+        "schema_id": SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID,
+        "layout": SOURCE_VIDEO_COLLECTION_LAYOUT,
+        "camera_id": camera_id,
+        "width": width,
+        "height": height,
+        "total_frames": total_frames,
+        "fps": fps,
+        "codec": metadata["codec"],
+        "pix_fmt": metadata["pix_fmt"],
+        "locator": {
+            "kind": SOURCE_VIDEO_COLLECTION_LOCATOR_KIND,
+            "relative_path": frame_index_relative,
+        },
+        "collection": {**collection_basis, "collection_sha256": collection_sha},
+    }
+
+
 def parse_source_video_metadata(value: Any) -> dict[str, Any]:
     """Parse exact source metadata used as acquisition identity evidence."""
 
@@ -1758,6 +2066,8 @@ def parse_source_video_metadata(value: Any) -> dict[str, Any]:
             "Canonical acquisition authority requires source_video_metadata."
         )
     metadata = json.loads(_canonical_json(value))
+    if metadata.get("schema_id") == SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID:
+        return _parse_clipped_video_collection_metadata(metadata)
     if metadata.get("schema_id") != "palette.source_video_metadata.v2":
         raise PixelFrameAuthorityError(
             "Acquisition authority requires source_video_metadata v2."
@@ -2046,7 +2356,11 @@ def _acquisition_ownership_record(
             raise PixelFrameAuthorityError(
                 "External-video authority cannot claim a materialization receipt."
             )
-        mode = "external_video_v1"
+        mode = (
+            CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE
+            if metadata.get("schema_id") == SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID
+            else EXTERNAL_ACQUISITION_AUTHORITY_MODE
+        )
         frame_array = None
         frame_index = None
         import_operation = None
@@ -2117,7 +2431,7 @@ def _acquisition_ownership_record(
             raise PixelFrameAuthorityError(
                 "Acquisition source indices must be strictly increasing and in range."
             )
-        mode = "materialized_source_frames_v1"
+        mode = MATERIALIZED_ACQUISITION_AUTHORITY_MODE
         receipt = _require_verified_acquisition_materialization(
             materialization,
             root_node=root_node,
@@ -2182,12 +2496,19 @@ def parse_acquisition_import_ownership(
             "Unsupported acquisition ownership canonicalization."
         )
     mode = payload["mode"]
-    if mode not in {"external_video_v1", "materialized_source_frames_v1"}:
+    if mode not in {
+        CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+    }:
         raise PixelFrameAuthorityError("Unsupported acquisition ownership mode.")
     frame_array = payload["frame_array"]
     frame_index = payload["frame_index"]
     import_operation = payload["import_operation"]
-    if mode == "external_video_v1":
+    if mode in {
+        CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    }:
         if (
             frame_array is not None
             or frame_index is not None
@@ -2263,7 +2584,7 @@ def load_acquisition_import_ownership(
             frame_node=frame_node,
             frame_index_node=frame_index_node,
         )
-        if record.mode == "materialized_source_frames_v1"
+        if record.mode == MATERIALIZED_ACQUISITION_AUTHORITY_MODE
         else None
     )
     expected = _acquisition_ownership_record(
@@ -2419,11 +2740,14 @@ def load_persisted_acquisition_camera_authority(
 
     frame_node: Any | None = None
     frame_index_node: Any | None = None
-    if record.mode == "materialized_source_frames_v1":
+    if record.mode == MATERIALIZED_ACQUISITION_AUTHORITY_MODE:
         frame_node, frame_index_node = _resolve_materialized_acquisition_nodes(
             root_node
         )
-    elif record.mode != "external_video_v1":  # defensive after strict parse
+    elif record.mode not in {
+        CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    }:  # defensive after strict parse
         raise PixelFrameAuthorityError("Unsupported acquisition ownership mode.")
 
     ownership = load_acquisition_import_ownership(
@@ -2543,12 +2867,27 @@ def _acquisition_record(
         frame_array = None
         frame_index = None
         frame_count = source_total
-        frame_domain = {
-            "mode": "external_video_sequential_frame_index_v1",
-            "source": "source_video_metadata.total_frames",
-            "first_frame_index": 0,
-            "last_frame_index_inclusive": source_total - 1,
-        }
+        if ownership.record.mode == CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE:
+            collection = metadata["collection"]
+            frame_index_evidence = collection["recording_frame_index"]
+            frame_domain = {
+                "mode": "external_clipped_recording_frame_index_v1",
+                "source": "source_video_metadata.collection.recording_frame_index",
+                "first_frame_index": 0,
+                "last_frame_index_inclusive": source_total - 1,
+                "recording_frame_index_relative_path": frame_index_evidence[
+                    "relative_path"
+                ],
+                "recording_frame_index_sha256": frame_index_evidence["sha256"],
+                "collection_sha256": collection["collection_sha256"],
+            }
+        else:
+            frame_domain = {
+                "mode": "external_video_sequential_frame_index_v1",
+                "source": "source_video_metadata.total_frames",
+                "first_frame_index": 0,
+                "last_frame_index_inclusive": source_total - 1,
+            }
     else:
         try:
             extent = bind_array_reference_extent(frame_node, units="px")
@@ -2736,12 +3075,34 @@ def parse_acquisition_camera_frame(value: Any) -> AcquisitionCameraFrameRecord:
         )
     external = record.frame_array is None and record.frame_index is None
     if external:
-        if record.frame_count != record.source_total_frames or record.frame_domain != {
-            "mode": "external_video_sequential_frame_index_v1",
-            "source": "source_video_metadata.total_frames",
-            "first_frame_index": 0,
-            "last_frame_index_inclusive": record.source_total_frames - 1,
-        }:
+        if (
+            record.source_video_metadata.get("schema_id")
+            == SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID
+        ):
+            collection = record.source_video_metadata["collection"]
+            frame_index_evidence = collection["recording_frame_index"]
+            expected_frame_domain = {
+                "mode": "external_clipped_recording_frame_index_v1",
+                "source": "source_video_metadata.collection.recording_frame_index",
+                "first_frame_index": 0,
+                "last_frame_index_inclusive": record.source_total_frames - 1,
+                "recording_frame_index_relative_path": frame_index_evidence[
+                    "relative_path"
+                ],
+                "recording_frame_index_sha256": frame_index_evidence["sha256"],
+                "collection_sha256": collection["collection_sha256"],
+            }
+        else:
+            expected_frame_domain = {
+                "mode": "external_video_sequential_frame_index_v1",
+                "source": "source_video_metadata.total_frames",
+                "first_frame_index": 0,
+                "last_frame_index_inclusive": record.source_total_frames - 1,
+            }
+        if (
+            record.frame_count != record.source_total_frames
+            or record.frame_domain != expected_frame_domain
+        ):
             raise PixelFrameAuthorityError(
                 "External acquisition frame domain is invalid."
             )

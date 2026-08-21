@@ -1183,7 +1183,7 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
     ]
 
 
-def test_detection_scope_uses_same_composer_and_stops_at_finalized_collections(
+def test_detection_scope_converges_on_canonical_recording_snapshots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1208,21 +1208,30 @@ def test_detection_scope_uses_same_composer_and_stops_at_finalized_collections(
     assert set(plan.model_bindings) == {"detection"}
     assert plan.cleanup_nrs_after_success is False
     assert plan.lsf_workflow.metadata["workflow_scope"] == "detection_only"
-    assert len(jobs) == 12
+    assert len(jobs) == 8
     assert "registry_finalize" not in jobs
     assert not any(key.startswith("cache_array:") for key in jobs)
     assert not any(key.startswith("keypoints_array:") for key in jobs)
     assert not any(key.startswith("subject_masks_array:") for key in jobs)
     assert jobs[
         f"detect_artifact_array:{second_safe}"
-    ].dependency.upstream_job_keys == (f"detect_collection:{first_safe}",)
+    ].dependency.upstream_job_keys == (f"recording_detect_refine:{first_safe}",)
     fragments = {
         fragment["fragment_id"]: fragment
         for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
     }
     assert fragments[f"native_detection:{second_safe}"]["requires"] == [
-        f"finalized_detection_collection:{first_safe}"
+        f"canonical_refined_detection:{first_safe}"
     ]
+    assert plan.lsf_workflow.metadata["publication_authority"] == (
+        "canonical_recording_refined_snapshot"
+    )
+    assert plan.lsf_workflow.metadata["clip_slice_indexes_published"] is False
+    assert all(
+        output["publication_partition"] == "complete_recording_snapshot"
+        for output in plan.lsf_workflow.metadata["outputs"]
+    )
+    assert not any("collection" in key for key in jobs)
 
 
 def test_detection_scope_ignores_outputs_owned_only_by_full_scope(
@@ -1266,10 +1275,15 @@ def test_detection_scope_supports_required_registered_geometry(
         f"detect_native_publish:{target_safe}",
         f"recording_detect_quality:{target_safe}",
         f"recording_detect_refine:{target_safe}",
-        f"registered_refined_collection:{target_safe}",
     }
     assert "--registered-gate-run gate_exact_v1" in " ".join(
-        jobs[f"registered_refined_collection:{target_safe}"].command
+        jobs[f"recording_detect_refine:{target_safe}"].command
+    )
+    assert plan.target_plans[0]["detection_module"]["refined_group_path"].startswith(
+        "refined_detect_runs/"
+    )
+    assert (
+        plan.target_plans[0]["detection_module"]["clip_slice_index_published"] is False
     )
 
 

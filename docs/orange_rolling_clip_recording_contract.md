@@ -699,7 +699,7 @@ parquet_size: 22M
 
 ## Analysis-Zarr Shell Creator Utility
 
-Palette has an initial metadata-only shell creator for clipped recordings:
+Palette has a metadata-only shell creator for clipped recordings:
 
 ```bash
 scripts/py -m fisheye.utils.create_clipped_analysis_zarr \
@@ -713,9 +713,29 @@ The shell creator requires:
 - top-level `recording_frame_index_manifest.json`;
 - the manifest-referenced `recording_frame_index.parquet`.
 
-It writes structure and provenance only. It does not run detection, import model
-outputs, set stage `latest` aliases to real runs, update a registry, or write
-finalized workflow collections.
+It writes structure, provenance, and the canonical metadata-only acquisition
+authority. It does not run detection, import model outputs, set stage `latest`
+aliases to real runs, update a registry, or write finalized workflow
+collections.
+
+The importer requires exactly one camera stream per recording. Before the Zarr
+is created, it verifies that every indexed clip exists, that probed
+width/height/frame-rate/frame-count agree with the sidecars, and that the clip
+members tile `recording_frame_index.parquet` exactly once. It then publishes
+`external_clipped_videos_v1` under
+`analysis/acquisition_camera_frames/<camera_serial>`. This presents the same
+recording-wide acquisition-camera frame contract used by a single-video
+archive, while retaining distinct source evidence for the clip collection.
+
+Older clipped shells created before this publication step can be audited and
+repaired without copying or decoding video pixels:
+
+```bash
+scripts/py -m fisheye.utils.repair_clipped_analysis_acquisition_authority \
+  /path/to/<recording>_analysis.zarr
+
+# Repeat with --apply only after the dry-run reports would_publish.
+```
 
 Current shell layout:
 

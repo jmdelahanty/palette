@@ -22,8 +22,19 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import zarr
 
+from fisheye.shared.clipped_video_collection import (
+    build_clipped_video_collection_metadata,
+    clipped_video_collection_summary,
+)
+from fisheye.shared.import_video_metadata import (
+    publish_clipped_video_collection_acquisition_authority,
+)
 from fisheye.shared.zarr_run_completion import require_runs_parent
-from fisheye.shared.system_metadata import get_environment_summary, get_git_info, get_platform_info
+from fisheye.shared.system_metadata import (
+    get_environment_summary,
+    get_git_info,
+    get_platform_info,
+)
 
 
 MODULE_NAME = "fisheye.utils.create_clipped_analysis_zarr"
@@ -95,14 +106,18 @@ def _clip_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     if raw_rows is None:
         raw_rows = payload.get("camera_artifacts")
     if not isinstance(raw_rows, list):
-        raise ValueError("recording_clip_index JSON must include clips, rows, or camera_artifacts list")
+        raise ValueError(
+            "recording_clip_index JSON must include clips, rows, or camera_artifacts list"
+        )
 
     rows: list[dict[str, Any]] = []
     for raw in raw_rows:
         if not isinstance(raw, Mapping):
             raise ValueError("recording_clip_index row is not an object")
         if isinstance(raw.get("camera_artifacts"), list):
-            base = {key: value for key, value in raw.items() if key != "camera_artifacts"}
+            base = {
+                key: value for key, value in raw.items() if key != "camera_artifacts"
+            }
             for artifact in raw["camera_artifacts"]:
                 if not isinstance(artifact, Mapping):
                     raise ValueError("camera_artifacts item is not an object")
@@ -114,7 +129,9 @@ def _clip_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _metadata_summary_from_frame_index(frame_index_path: Path) -> dict[str, Any]:
     if not frame_index_path.exists():
-        raise FileNotFoundError(f"recording_frame_index.parquet not found: {frame_index_path}")
+        raise FileNotFoundError(
+            f"recording_frame_index.parquet not found: {frame_index_path}"
+        )
     parquet_file = pq.ParquetFile(frame_index_path)
     row_count = int(parquet_file.metadata.num_rows)
     table = pq.read_table(
@@ -128,7 +145,9 @@ def _metadata_summary_from_frame_index(frame_index_path: Path) -> dict[str, Any]
         ],
     ).combine_chunks()
     if table.num_rows == 0:
-        raise ValueError(f"recording_frame_index.parquet has zero rows: {frame_index_path}")
+        raise ValueError(
+            f"recording_frame_index.parquet has zero rows: {frame_index_path}"
+        )
     first = {name: table[name][0].as_py() for name in table.column_names}
     last_index = table.num_rows - 1
     last = {name: table[name][last_index].as_py() for name in table.column_names}
@@ -148,7 +167,9 @@ def _metadata_summary_from_frame_index(frame_index_path: Path) -> dict[str, Any]
 def _open_new_zarr(path: Path, *, overwrite: bool) -> zarr.Group:
     if path.exists():
         if not overwrite:
-            raise FileExistsError(f"Refusing to overwrite existing analysis Zarr: {path}")
+            raise FileExistsError(
+                f"Refusing to overwrite existing analysis Zarr: {path}"
+            )
         shutil.rmtree(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     return zarr.open_group(str(path), mode="w", zarr_format=3)
@@ -220,7 +241,9 @@ def _analysis_context_payload(source_zarr: Path) -> dict[str, Any]:
 
 
 def _canonical_value(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_json_default)
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), default=_json_default
+    )
 
 
 def _discover_analysis_context_source(
@@ -338,7 +361,11 @@ def _discover_analysis_context_source(
     # it, carry that independently with explicit provenance.
     if selected["experiment_setup"] is None:
         setup_source = next(
-            (payload for payload in payloads if payload["experiment_setup"] is not None),
+            (
+                payload
+                for payload in payloads
+                if payload["experiment_setup"] is not None
+            ),
             None,
         )
         if setup_source is not None:
@@ -360,7 +387,9 @@ def _copy_analysis_context(
         analysis_metadata = root["analysis_metadata"]
         analysis_metadata.attrs["dish_mask"] = dict(dish_mask)
         analysis_metadata.attrs["dish_mask_source_zarr"] = source_zarr
-        analysis_metadata.attrs["dish_mask_source_key"] = "analysis_metadata.attrs.dish_mask"
+        analysis_metadata.attrs["dish_mask_source_key"] = (
+            "analysis_metadata.attrs.dish_mask"
+        )
         analysis_metadata.attrs["dish_mask_copied_at_utc"] = copied_at
         analysis_metadata.attrs["dish_mask_copy_tool"] = MODULE_NAME
 
@@ -440,7 +469,9 @@ def _create_clip_group(
     video_path = _resolve_path(recording_dir, row.get("video_path"))
     metadata_path = _resolve_path(recording_dir, row.get("metadata_path"))
     keyframe_path = _optional_resolve_path(recording_dir, row.get("keyframe_path"))
-    clip_manifest_path = _optional_resolve_path(recording_dir, row.get("clip_manifest_path"))
+    clip_manifest_path = _optional_resolve_path(
+        recording_dir, row.get("clip_manifest_path")
+    )
     clip_directory = str(row.get("clip_directory") or f"clips/{clip_id}")
     clip_recording_folder = _resolve_path(recording_dir, clip_directory)
     source_attrs = {
@@ -451,7 +482,9 @@ def _create_clip_group(
         "video_path": str(video_path),
         "metadata_path": str(metadata_path),
         "keyframe_path": str(keyframe_path) if keyframe_path is not None else None,
-        "clip_manifest_path": str(clip_manifest_path) if clip_manifest_path is not None else None,
+        "clip_manifest_path": str(clip_manifest_path)
+        if clip_manifest_path is not None
+        else None,
         "clip_directory": clip_directory,
         "clip_recording_folder": str(clip_recording_folder),
         "first_recording_frame_id": row.get("first_recording_frame_id"),
@@ -502,34 +535,72 @@ def create_clipped_analysis_zarr(
         raise FileNotFoundError(f"Recording folder not found: {recording_path}")
     clip_index_path = recording_path / "recording_clip_index.json"
     if not clip_index_path.exists():
-        raise FileNotFoundError(f"recording_clip_index.json not found: {clip_index_path}")
+        raise FileNotFoundError(
+            f"recording_clip_index.json not found: {clip_index_path}"
+        )
     frame_manifest_path = recording_path / "recording_frame_index_manifest.json"
     if not frame_manifest_path.exists():
-        raise FileNotFoundError(f"recording_frame_index_manifest.json not found: {frame_manifest_path}")
+        raise FileNotFoundError(
+            f"recording_frame_index_manifest.json not found: {frame_manifest_path}"
+        )
 
     clip_index = _read_json(clip_index_path)
     if not isinstance(clip_index, Mapping):
-        raise ValueError(f"recording_clip_index.json is not an object: {clip_index_path}")
+        raise ValueError(
+            f"recording_clip_index.json is not an object: {clip_index_path}"
+        )
     frame_manifest = _read_json(frame_manifest_path)
     if not isinstance(frame_manifest, Mapping):
-        raise ValueError(f"recording_frame_index_manifest.json is not an object: {frame_manifest_path}")
+        raise ValueError(
+            f"recording_frame_index_manifest.json is not an object: {frame_manifest_path}"
+        )
     if frame_manifest.get("status") != "ok":
-        raise ValueError(f"recording frame index manifest is not ok: {frame_manifest_path}")
+        raise ValueError(
+            f"recording frame index manifest is not ok: {frame_manifest_path}"
+        )
 
     frame_index_path = _resolve_path(
         recording_path,
-        frame_manifest.get("recording_frame_index_path") or "recording_frame_index.parquet",
+        frame_manifest.get("recording_frame_index_path")
+        or "recording_frame_index.parquet",
     )
     frame_summary = _metadata_summary_from_frame_index(frame_index_path)
     rows = _clip_rows(clip_index)
     if not rows:
         raise ValueError(f"No clip rows found in {clip_index_path}")
-    clip_ids = sorted({str(row.get("clip_id") or f"clip_{int(row.get('clip_index') or 0):06d}") for row in rows})
-    camera_serials = sorted({str(row.get("camera_serial") or "") for row in rows if row.get("camera_serial")})
-    recording_id = str(clip_index.get("recording_id") or frame_manifest.get("recording_id") or recording_path.name)
-    session_id = str(clip_index.get("session_id") or frame_manifest.get("session_id") or recording_id)
-    zarr_path = Path(output_zarr).expanduser().resolve() if output_zarr else _default_output_zarr(recording_path)
+    clip_ids = sorted(
+        {
+            str(row.get("clip_id") or f"clip_{int(row.get('clip_index') or 0):06d}")
+            for row in rows
+        }
+    )
+    camera_serials = sorted(
+        {
+            str(row.get("camera_serial") or "")
+            for row in rows
+            if row.get("camera_serial")
+        }
+    )
+    recording_id = str(
+        clip_index.get("recording_id")
+        or frame_manifest.get("recording_id")
+        or recording_path.name
+    )
+    session_id = str(
+        clip_index.get("session_id") or frame_manifest.get("session_id") or recording_id
+    )
+    zarr_path = (
+        Path(output_zarr).expanduser().resolve()
+        if output_zarr
+        else _default_output_zarr(recording_path)
+    )
     shell_manifest_path = zarr_path.parent / f"{zarr_path.name}_shell_manifest.json"
+    acquisition_metadata = build_clipped_video_collection_metadata(
+        recording_path,
+        clip_index_path=clip_index_path,
+        frame_index_path=frame_index_path,
+        frame_manifest_path=frame_manifest_path,
+    )
     analysis_context = _discover_analysis_context_source(
         recording_path=recording_path,
         output_zarr=zarr_path,
@@ -565,11 +636,13 @@ def create_clipped_analysis_zarr(
         "clip_ids": clip_ids,
         "shell_manifest_path": str(shell_manifest_path) if write_manifest else None,
         "dish_mask_policy": _dish_mask_policy_attrs(camera_serials),
+        "acquisition_source": clipped_video_collection_summary(acquisition_metadata),
         "analysis_context_source": (
             {
                 "source_zarr": analysis_context["source_zarr"],
                 "has_dish_mask": analysis_context.get("dish_mask") is not None,
-                "has_experiment_setup": analysis_context.get("experiment_setup") is not None,
+                "has_experiment_setup": analysis_context.get("experiment_setup")
+                is not None,
                 "experiment_setup_source_zarr": analysis_context.get(
                     "experiment_setup_source_zarr"
                 ),
@@ -597,15 +670,20 @@ def create_clipped_analysis_zarr(
             "created_by": MODULE_NAME,
             "recording_id": recording_id,
             "session_id": session_id,
+            "camera_id": acquisition_metadata["camera_id"],
             "recording_name": recording_path.name,
             "recording_path": str(recording_path),
             "source_layout": "rolling_clips",
             "recording_clip_index_json": str(clip_index_path),
             "recording_frame_index_path": str(frame_index_path),
             "recording_frame_index_manifest_path": str(frame_manifest_path),
-            "recording_frame_index_schema": frame_manifest.get("frame_index_schema_version"),
+            "recording_frame_index_schema": frame_manifest.get(
+                "frame_index_schema_version"
+            ),
             "source_recording_frame_index_path": str(frame_index_path),
-            "source_frame_index_schema": frame_manifest.get("frame_index_schema_version"),
+            "source_frame_index_schema": frame_manifest.get(
+                "frame_index_schema_version"
+            ),
             "recording_frame_index_row_count": frame_summary["row_count"],
             "recording_frame_id_min": frame_summary["recording_frame_id_min"],
             "recording_frame_id_max": frame_summary["recording_frame_id_max"],
@@ -614,11 +692,14 @@ def create_clipped_analysis_zarr(
             "camera_serials": camera_serials,
             "has_raw_video": False,
             "raw_video_storage": "external_clips",
+            "source_video_metadata": acquisition_metadata,
             "experiment_context_status": "absent",
             "experiment_context_source": "none",
             "stimulus_runs_available": False,
             "git_info": get_git_info(),
-            "platform_info": get_platform_info(collect_ip=False, disk_path=str(zarr_path)),
+            "platform_info": get_platform_info(
+                collect_ip=False, disk_path=str(zarr_path)
+            ),
             "software_versions": env_summary.get("key_packages", {}),
             "environment": {
                 "type": env_summary.get("environment_type", "unknown"),
@@ -631,8 +712,16 @@ def create_clipped_analysis_zarr(
     _copy_analysis_context(root, analysis_context)
 
     clip_sources: list[dict[str, Any]] = []
-    for row in sorted(rows, key=lambda item: (int(item.get("clip_index") or 0), str(item.get("camera_serial") or ""))):
-        clip_sources.append(_create_clip_group(root=root, recording_dir=recording_path, row=row))
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            int(item.get("clip_index") or 0),
+            str(item.get("camera_serial") or ""),
+        ),
+    ):
+        clip_sources.append(
+            _create_clip_group(root=root, recording_dir=recording_path, row=row)
+        )
 
     clip_table_group = root["experiment_index"]["clip_table"]
     _set_attrs(
@@ -645,6 +734,9 @@ def create_clipped_analysis_zarr(
             "recording_clip_index_json": str(clip_index_path),
         },
     )
+    acquisition_publication = publish_clipped_video_collection_acquisition_authority(
+        root
+    )
 
     shell_manifest = {
         **planned,
@@ -655,6 +747,7 @@ def create_clipped_analysis_zarr(
         "host": socket.gethostname(),
         "pid": int(os.getpid()),
         "clip_sources": clip_sources,
+        "acquisition_authority": acquisition_publication,
         "frame_index_summary": frame_summary,
         "duration_seconds": (datetime.now(timezone.utc) - started).total_seconds(),
     }
@@ -689,7 +782,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable sibling training-Zarr discovery.",
     )
-    parser.add_argument("--no-manifest", action="store_true", help="Do not write the sibling shell manifest JSON.")
+    parser.add_argument(
+        "--no-manifest",
+        action="store_true",
+        help="Do not write the sibling shell manifest JSON.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -702,7 +799,9 @@ def _print_summary(result: Mapping[str, Any]) -> None:
     print(f"clip_count: {result.get('clip_count')}")
     print(f"clip_camera_row_count: {result.get('clip_camera_row_count')}")
     print(f"camera_serials: {result.get('camera_serials')}")
-    print(f"recording_frame_index_row_count: {result.get('recording_frame_index_row_count')}")
+    print(
+        f"recording_frame_index_row_count: {result.get('recording_frame_index_row_count')}"
+    )
     print(
         "recording_frame_id_range: "
         f"{result.get('recording_frame_id_min')}..{result.get('recording_frame_id_max')}"

@@ -137,6 +137,12 @@ recording frame domain as well as the native `width_px`/`height_px` extent.
 The planner records that co-resolution explicitly and never synthesizes a
 second pixel authority.
 
+That acquisition-camera record may be backed by `external_video_v1` for one
+long MP4 or by `external_clipped_videos_v1` for a collection whose members are
+bound to the exact recording frame index. Both modes expose the same typed
+recording timeline and source-camera pixel extent to the native assembler; the
+source evidence differs because the physical media differ.
+
 ## Deliberately Open
 
 This checkpoint does not activate the raw selector, mutate the registry, or
