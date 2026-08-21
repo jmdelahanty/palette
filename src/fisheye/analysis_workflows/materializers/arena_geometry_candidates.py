@@ -65,6 +65,12 @@ CANDIDATE_RUN_SCHEMA_ID = "palette.arena_geometry_candidate_run"
 CANDIDATE_RUN_SCHEMA_VERSION = 1
 ACQUISITION_CANDIDATE_KIND = "acquisition_registered_dish"
 PALETTE_CANDIDATE_KIND = "palette_recording_image_fit"
+CLIPPED_ACQUISITION_FRAME_AUTHORITY_KIND = (
+    "palette_acquisition_camera_frame_v1"
+)
+LEGACY_CLIPPED_SNAPSHOT_FRAME_AUTHORITY_KIND = (
+    "orange_recording_snapshot_coordinate_frame_v1"
+)
 # Compatibility export for callers written before Palette image candidates.
 CANDIDATE_KIND = ACQUISITION_CANDIDATE_KIND
 CANDIDATE_RUNS_PARENT = "arena_geometry_runs"
@@ -518,6 +524,20 @@ def _source_camera_candidate_binding(
             raise RecordingGeometryError(
                 "Clipped recording snapshot has an unsupported camera coordinate frame."
             )
+        _ownership, acquisition = load_persisted_acquisition_camera_authority(
+            root,
+            expected_camera_id=expected_camera_serial,
+        )
+        acquisition.assert_verified()
+        if (
+            acquisition.record.camera_id != expected_camera_serial
+            or acquisition.width != width
+            or acquisition.height != height
+        ):
+            raise RecordingGeometryError(
+                "Persisted acquisition camera authority does not match the clipped "
+                "recording snapshot."
+            )
         calibration = root.get("analysis/calibration")
         if calibration is not None:
             calibration_attrs = dict(calibration.attrs)
@@ -569,13 +589,10 @@ def _source_camera_candidate_binding(
             "native_width_px": width,
             "native_height_px": height,
             "source_camera_frame_authority_kind": (
-                "orange_recording_snapshot_coordinate_frame_v1"
+                CLIPPED_ACQUISITION_FRAME_AUTHORITY_KIND
             ),
-            "pixel_frame_record_ref": (
-                f"/recording_geometry_snapshot/camera_runtime/"
-                f"{expected_camera_serial}/coordinate_frame@recording_snapshot_sha256"
-            ),
-            "pixel_frame_record_sha256": snapshot_sha256,
+            "pixel_frame_record_ref": acquisition.record_ref,
+            "pixel_frame_record_sha256": acquisition.record_sha256,
         }
         collection = {
             "mode": "clipped_recording",
@@ -1205,7 +1222,12 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
             f"/analysis/coordinate_frames/source_camera/{arena['camera_serial']}"
             "/continuous@pixel_frame_authority"
         )
-    elif authority_kind == "orange_recording_snapshot_coordinate_frame_v1":
+    elif authority_kind == CLIPPED_ACQUISITION_FRAME_AUTHORITY_KIND:
+        expected_ref = (
+            f"/analysis/acquisition_camera_frames/{arena['camera_serial']}"
+            "@acquisition_camera_frame"
+        )
+    elif authority_kind == LEGACY_CLIPPED_SNAPSHOT_FRAME_AUTHORITY_KIND:
         expected_ref = (
             f"/recording_geometry_snapshot/camera_runtime/{arena['camera_serial']}"
             "/coordinate_frame@recording_snapshot_sha256"
@@ -1240,9 +1262,13 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
                 "Single-video Palette candidates require persisted pixel-frame authority."
             )
     elif source_mode == "clipped_recording":
-        if authority_kind != "orange_recording_snapshot_coordinate_frame_v1":
+        if authority_kind not in {
+            CLIPPED_ACQUISITION_FRAME_AUTHORITY_KIND,
+            LEGACY_CLIPPED_SNAPSHOT_FRAME_AUTHORITY_KIND,
+        }:
             raise RecordingGeometryError(
-                "Clipped Palette candidates require recording-snapshot frame authority."
+                "Clipped Palette candidates require persisted acquisition-camera "
+                "authority or the legacy recording-snapshot authority."
             )
         collection = _required_mapping(
             source.get("source_collection"),
@@ -2495,6 +2521,8 @@ __all__ = [
     "CANDIDATE_RUNS_PARENT",
     "CANDIDATE_RUN_SCHEMA_ID",
     "CANDIDATE_RUN_SCHEMA_VERSION",
+    "CLIPPED_ACQUISITION_FRAME_AUTHORITY_KIND",
+    "LEGACY_CLIPPED_SNAPSHOT_FRAME_AUTHORITY_KIND",
     "PUBLISH_ALGORITHM_VERSION",
     "PUBLISH_SCHEMA_ID",
     "PALETTE_CANDIDATE_KIND",
