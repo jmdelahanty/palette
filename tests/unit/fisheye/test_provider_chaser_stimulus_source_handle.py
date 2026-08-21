@@ -72,9 +72,9 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
         )
         nearest_column = np.argmin(filled[any_finite], axis=1)
         nearest_index[any_finite] = arrays["chasers/chaser_index"][nearest_column]
-        nearest_distance[any_finite] = filled[
-            any_finite, nearest_column
-        ].astype(np.float32)
+        nearest_distance[any_finite] = filled[any_finite, nearest_column].astype(
+            np.float32
+        )
     arrays["distances/nearest_chaser_index"] = nearest_index
     arrays["distances/nearest_distance_mm"] = nearest_distance
     authority = {
@@ -99,7 +99,10 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
             "temporal_authority": {"record_ref": "time", "record_sha256": "2" * 64},
             "surface_manifest": {"record_ref": "surface", "record_sha256": "3" * 64},
             "output_manifest": {"record_ref": "output", "record_sha256": "4" * 64},
-            "transform_manifest": {"record_ref": "transform", "record_sha256": "5" * 64},
+            "transform_manifest": {
+                "record_ref": "transform",
+                "record_sha256": "5" * 64,
+            },
             "source_camera_frame": {"frame_id": "camera-native"},
         },
         "stimulus_epoch": {
@@ -124,9 +127,7 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
                 "record_ref": "/@source_video_metadata",
                 "record_sha256": "8" * 64,
             },
-            "acquisition_frame_authority": {
-                "recording_id": candidate.recording_id
-            },
+            "acquisition_frame_authority": {"recording_id": candidate.recording_id},
         },
         "pixels_per_mm_projector": candidate.pixels_per_mm_projector,
         "temporal_join_policy": "preserve_unique_stimulus_frame_num_then_join_exact_source_acquisition_frame_index_v1",
@@ -135,14 +136,18 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
     candidate = replace(candidate, arrays=arrays, source_authority=authority)
     archive = tmp_path / "candidate.zarr"
     _materialize_local(candidate, local_zarr=archive)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     root.attrs["recording_id"] = candidate.recording_id
     consolidate_metadata_capture_expected_warnings(archive)
     return archive, candidate.run_name
 
 
 def _rewrite_manifest(archive: Path, run_name: str, mutate) -> None:
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     run = root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"]
     manifest = dict(run.attrs[MANIFEST_ATTR])
     payload = dict(manifest["payload"])
@@ -171,11 +176,6 @@ def test_deep_validation_hashes_each_declared_array_once(
     handle = load_provider_chaser_stimulus_source_handle(
         archive,
         run_name=run_name,
-        # The default published path intentionally performs one independent
-        # direct/consolidated deep validation per metadata view.  This test
-        # isolates one explicit deep pass so the duplicate verification hash
-        # cannot be hidden by that separate metadata-equivalence proof.
-        use_consolidated=False,
     )
 
     assert calls == len(handle.arrays)
@@ -245,7 +245,9 @@ def test_bare_run_name_rejects_selectors_traversal_and_nested_paths(
 
 def test_wrong_recording_identity_fails_closed(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     root.attrs["recording_id"] = "other-recording"
     consolidate_metadata_capture_expected_warnings(archive)
     with pytest.raises(ProviderChaserStimulusSourceHandleError, match="does not match"):
@@ -256,9 +258,9 @@ def test_legacy_string_fps_authority_is_rejected(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
 
     def replace_authority(payload: dict) -> None:
-        payload["source_authority"]["fps_authority"] = (
-            "acquisition.source_video_metadata.fps"
-        )
+        payload["source_authority"][
+            "fps_authority"
+        ] = "acquisition.source_video_metadata.fps"
 
     _rewrite_manifest(archive, run_name, replace_authority)
     with pytest.raises(
@@ -272,9 +274,7 @@ def test_fps_authority_must_bind_same_acquisition_frame_record(tmp_path: Path) -
     archive, run_name = _published_candidate(tmp_path)
 
     def replace_frame_digest(payload: dict) -> None:
-        payload["source_authority"]["fps_authority"][
-            "acquisition_frame_authority"
-        ] = {
+        payload["source_authority"]["fps_authority"]["acquisition_frame_authority"] = {
             "recording_id": "recording-1",
             "record_sha256": "9" * 64,
         }
@@ -289,7 +289,9 @@ def test_fps_authority_must_bind_same_acquisition_frame_record(tmp_path: Path) -
 
 def test_array_payload_tampering_is_rejected(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     run = root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"]
     run["samples/stimulus_frame_num"][0] = 99
     with pytest.raises(ProviderChaserStimulusSourceHandleError, match="content digest"):
@@ -298,10 +300,14 @@ def test_array_payload_tampering_is_rejected(tmp_path: Path) -> None:
 
 def test_stale_consolidated_metadata_is_rejected(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     run = root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"]
     run.attrs["row_axis"] = "acquisition_frames"
-    with pytest.raises(ProviderChaserStimulusSourceHandleError, match="direct/consolidated"):
+    with pytest.raises(
+        ProviderChaserStimulusSourceHandleError, match="direct/consolidated"
+    ):
         load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
 
 
@@ -349,7 +355,9 @@ def test_missing_or_extra_declarations_are_rejected(tmp_path: Path) -> None:
 
 def test_parent_selector_attribute_is_rejected(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     parent = root["analysis/provider_chaser_distance_candidate_runs"]
     parent.attrs["latest"] = run_name
     consolidate_metadata_capture_expected_warnings(archive)
@@ -360,7 +368,9 @@ def test_parent_selector_attribute_is_rejected(tmp_path: Path) -> None:
 def test_assert_current_rejects_post_seal_mutation(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
     handle = load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"][
         "samples/timestamp_ns"
     ][0] = 42

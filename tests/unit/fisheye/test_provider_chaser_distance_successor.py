@@ -19,7 +19,6 @@ from tests.unit.fisheye.test_chaser_relative_frame_storage import (
     _proxy_publication_binding,
 )
 
-
 _DIGEST = "a" * 64
 
 
@@ -136,7 +135,9 @@ def test_prepare_preserves_flat_axis_and_binds_proxy_and_denominators(monkeypatc
     assert prepared.manifest["temporal_alignment"]["temporal_alignment_class"] == (
         "controller_input_provenance_proxy"
     )
-    assert prepared.manifest["temporal_alignment"]["timestamp_matching_performed"] is False
+    assert (
+        prepared.manifest["temporal_alignment"]["timestamp_matching_performed"] is False
+    )
     assert prepared.manifest["denominators"] == {
         "unique_acquisition_frame_count": 3,
         "frame_x_chaser_relation_row_count": 6,
@@ -151,7 +152,10 @@ def test_prepare_preserves_flat_axis_and_binds_proxy_and_denominators(monkeypatc
         },
     }
     assert prepared.manifest["optional_fields"]["distance_mm_triple_present"] is True
-    assert all("content_sha256" in declaration for declaration in prepared.manifest["array_declarations"])
+    assert all(
+        "content_sha256" in declaration
+        for declaration in prepared.manifest["array_declarations"]
+    )
     assert all(not array.flags.writeable for array in prepared.arrays.values())
 
 
@@ -162,7 +166,9 @@ def test_prepare_non_mm_scale_produces_pixel_only_success(monkeypatch):
     prepared = successor.prepare_provider_chaser_distance_successor(handle)
 
     assert "distance_px" in prepared.arrays
-    assert not {"distance_mm", "distance_mm_valid", "distance_mm_reason_code"} & set(prepared.arrays)
+    assert not {"distance_mm", "distance_mm_valid", "distance_mm_reason_code"} & set(
+        prepared.arrays
+    )
     assert prepared.manifest["scale_policy"]["available"] is True
     assert prepared.manifest["scale_policy"]["unit"] == "px"
     assert prepared.manifest["scale_policy"]["mm_derivation_available"] is False
@@ -176,7 +182,9 @@ def test_prepare_absent_scale_produces_pixel_only_success(monkeypatch):
     prepared = successor.prepare_provider_chaser_distance_successor(handle)
 
     assert "distance_px" in prepared.arrays
-    assert not {"distance_mm", "distance_mm_valid", "distance_mm_reason_code"} & set(prepared.arrays)
+    assert not {"distance_mm", "distance_mm_valid", "distance_mm_reason_code"} & set(
+        prepared.arrays
+    )
     assert prepared.manifest["scale_policy"] == {
         "available": False,
         "unit": None,
@@ -198,9 +206,9 @@ def test_prepare_keeps_trial_triple_optional(monkeypatch):
 
 def test_prepare_rejects_legacy_coordinate_frame_vocabulary(monkeypatch):
     handle, view = _source()
-    handle.run_manifest["coordinate_policy"]["coordinate_frame"] = (
-        "source_camera_pixels"
-    )
+    handle.run_manifest["coordinate_policy"][
+        "coordinate_frame"
+    ] = "source_camera_pixels"
     monkeypatch.setattr(successor, "load_chaser_relative_distance_view", lambda _: view)
 
     with pytest.raises(
@@ -214,7 +222,9 @@ def test_schema_rejects_frame_evidence_that_is_not_repeated(monkeypatch):
     handle, view = _source()
     monkeypatch.setattr(successor, "load_chaser_relative_distance_view", lambda _: view)
     prepared = successor.build_provider_chaser_distance_successor(handle)
-    arrays = {name: np.array(values, copy=True) for name, values in prepared.arrays.items()}
+    arrays = {
+        name: np.array(values, copy=True) for name, values in prepared.arrays.items()
+    }
     arrays["acquisition_frame_id"][1] = 99
 
     with pytest.raises(ProviderChaserDistanceSchemaError, match="frame-level evidence"):
@@ -228,7 +238,9 @@ def test_schema_rejects_partial_mm_triple(monkeypatch):
     handle, view = _source()
     monkeypatch.setattr(successor, "load_chaser_relative_distance_view", lambda _: view)
     prepared = successor.build_provider_chaser_distance_successor(handle)
-    arrays = {name: np.array(values, copy=True) for name, values in prepared.arrays.items()}
+    arrays = {
+        name: np.array(values, copy=True) for name, values in prepared.arrays.items()
+    }
     del arrays["distance_mm_reason_code"]
 
     with pytest.raises(ProviderChaserDistanceSchemaError, match="distance_mm"):
@@ -264,7 +276,10 @@ def test_array_content_changes_bind_declaration_and_payload_digests(monkeypatch)
         for declaration in changed_declarations
         if declaration["path"] == "distance_px"
     )
-    assert changed_distance_declaration["content_sha256"] != original_distance_declaration["content_sha256"]
+    assert (
+        changed_distance_declaration["content_sha256"]
+        != original_distance_declaration["content_sha256"]
+    )
 
     changed_payload = prepared.to_json()
     changed_payload["array_declarations"] = changed_declarations

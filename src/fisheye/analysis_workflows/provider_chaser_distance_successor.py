@@ -49,7 +49,6 @@ from fisheye.shared.zarr.provider_chaser_distance_schema import (
     ProviderChaserDistanceDimensions,
 )
 
-
 PREPARED_PROVIDER_CHASER_DISTANCE_SCHEMA_ID = (
     "palette.analysis.provider_chaser_distance.prepared_successor"
 )
@@ -98,7 +97,9 @@ def _plain(value: Any) -> Any:
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        return MappingProxyType(
+            {str(key): _freeze(item) for key, item in value.items()}
+        )
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
@@ -158,9 +159,13 @@ def _record_from_context(
     return _plain(record)
 
 
-def _proxy_record(handle: Any, *, recording_id: str, n_frames: int, n_chasers: int) -> tuple[dict[str, Any], dict[str, Any]]:
+def _proxy_record(
+    handle: Any, *, recording_id: str, n_frames: int, n_chasers: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
     projection = dict(_record_from_context(handle, name="acquisition_projection"))
-    publication = dict(_record_from_context(handle, name="acquisition_projection_publication"))
+    publication = dict(
+        _record_from_context(handle, name="acquisition_projection_publication")
+    )
     try:
         validate_chaser_input_provenance_projection_binding(
             projection=projection,
@@ -218,7 +223,9 @@ def _scale_policy(handle: Any) -> tuple[dict[str, Any], float | None]:
             or not np.isfinite(float(pixels_per_unit))
             or float(pixels_per_unit) <= 0
         ):
-            _fail("Scale policy pixels_per_unit must be positive and finite when present.")
+            _fail(
+                "Scale policy pixels_per_unit must be positive and finite when present."
+            )
         result["pixels_per_unit"] = float(pixels_per_unit)
     result["available"] = True
     result["mm_derivation_available"] = unit == "mm"
@@ -231,7 +238,9 @@ def _scale_policy(handle: Any) -> tuple[dict[str, Any], float | None]:
 
 def _coordinate_policy(handle: Any) -> dict[str, Any]:
     manifest = getattr(handle, "run_manifest", None)
-    policy = manifest.get("coordinate_policy") if isinstance(manifest, Mapping) else None
+    policy = (
+        manifest.get("coordinate_policy") if isinstance(manifest, Mapping) else None
+    )
     if not isinstance(policy, Mapping):
         _fail("Verified source handle lacks its coordinate policy.")
     result = dict(policy)
@@ -306,7 +315,9 @@ def build_provider_chaser_distance_successor(
     )
     scale_policy, pixels_per_unit = _scale_policy(source_handle)
     coordinate_policy = _coordinate_policy(source_handle)
-    timing_policy = dict(getattr(source_handle, "run_manifest", {}).get("timing_policy", {}))
+    timing_policy = dict(
+        getattr(source_handle, "run_manifest", {}).get("timing_policy", {})
+    )
     source_authorities = getattr(source_handle, "source_authorities", None)
     if not isinstance(source_authorities, Mapping):
         _fail("Verified source handle lacks source provider authorities.")
@@ -336,45 +347,99 @@ def build_provider_chaser_distance_successor(
         if not np.allclose(
             distance_px[distance_px_valid], expected_distance, atol=5e-4, rtol=0.0
         ):
-            _fail("Source relative distance does not equal source-to-chaser pixel geometry.")
+            _fail(
+                "Source relative distance does not equal source-to-chaser pixel geometry."
+            )
     if np.any(distance_px_valid & (~source_position_valid | ~chaser_position_valid)):
         _fail("Source relative distance marks a row valid without valid positions.")
     arrays: dict[str, np.ndarray] = {
-        "acquisition_frame_id": _copy_readonly(_frame_rows(distance_view, "acquisition_frame_id")),
-        "track_sample_id": _copy_readonly(_frame_rows(distance_view, "track_sample_id")),
+        "acquisition_frame_id": _copy_readonly(
+            _frame_rows(distance_view, "acquisition_frame_id")
+        ),
+        "track_sample_id": _copy_readonly(
+            _frame_rows(distance_view, "track_sample_id")
+        ),
         "timestamp_ns": _copy_readonly(_frame_rows(distance_view, "timestamp_ns")),
-        "timestamp_valid": _copy_readonly(_frame_rows(distance_view, "timestamp_valid")),
-        "timestamp_reason_code": _copy_readonly(_frame_rows(distance_view, "timestamp_reason_code")),
-        "source_position_row_id": _copy_readonly(_frame_rows(distance_view, "fish_source_row_id")),
-        "source_position_row_valid": _copy_readonly(_frame_rows(distance_view, "fish_source_row_valid")),
-        "source_position_row_reason_code": _copy_readonly(_frame_rows(distance_view, "fish_source_row_reason_code")),
+        "timestamp_valid": _copy_readonly(
+            _frame_rows(distance_view, "timestamp_valid")
+        ),
+        "timestamp_reason_code": _copy_readonly(
+            _frame_rows(distance_view, "timestamp_reason_code")
+        ),
+        "source_position_row_id": _copy_readonly(
+            _frame_rows(distance_view, "fish_source_row_id")
+        ),
+        "source_position_row_valid": _copy_readonly(
+            _frame_rows(distance_view, "fish_source_row_valid")
+        ),
+        "source_position_row_reason_code": _copy_readonly(
+            _frame_rows(distance_view, "fish_source_row_reason_code")
+        ),
         "source_position_xy_px": _copy_readonly(source_position),
         "source_position_valid": _copy_readonly(source_position_valid),
-        "source_position_reason_code": _copy_readonly(_frame_rows(distance_view, "fish_position_reason_code")),
-        "fish_identity_code": _copy_readonly(_frame_rows(distance_view, "fish_identity_code")),
-        "selection_member": _copy_readonly(_frame_rows(distance_view, "selection_member")),
-        "acquisition_frame_delta": _copy_readonly(_frame_rows(distance_view, "acquisition_frame_delta")),
-        "timestamp_delta_ns": _copy_readonly(_frame_rows(distance_view, "timestamp_delta_ns")),
-        "chaser_position_row_id": _copy_readonly(_pair_rows(distance_view, "chaser_source_row_id")),
-        "chaser_position_row_valid": _copy_readonly(_pair_rows(distance_view, "chaser_source_row_valid")),
-        "chaser_position_row_reason_code": _copy_readonly(_pair_rows(distance_view, "chaser_source_row_reason_code")),
+        "source_position_reason_code": _copy_readonly(
+            _frame_rows(distance_view, "fish_position_reason_code")
+        ),
+        "fish_identity_code": _copy_readonly(
+            _frame_rows(distance_view, "fish_identity_code")
+        ),
+        "selection_member": _copy_readonly(
+            _frame_rows(distance_view, "selection_member")
+        ),
+        "acquisition_frame_delta": _copy_readonly(
+            _frame_rows(distance_view, "acquisition_frame_delta")
+        ),
+        "timestamp_delta_ns": _copy_readonly(
+            _frame_rows(distance_view, "timestamp_delta_ns")
+        ),
+        "chaser_position_row_id": _copy_readonly(
+            _pair_rows(distance_view, "chaser_source_row_id")
+        ),
+        "chaser_position_row_valid": _copy_readonly(
+            _pair_rows(distance_view, "chaser_source_row_valid")
+        ),
+        "chaser_position_row_reason_code": _copy_readonly(
+            _pair_rows(distance_view, "chaser_source_row_reason_code")
+        ),
         "chaser_position_xy_px": _copy_readonly(chaser_position),
         "chaser_position_valid": _copy_readonly(chaser_position_valid),
-        "chaser_position_reason_code": _copy_readonly(_pair_rows(distance_view, "chaser_position_reason_code")),
-        "chaser_identity_code": _copy_readonly(_pair_rows(distance_view, "chaser_identity_code")),
-        "chaser_behavior_role_code": _copy_readonly(_pair_rows(distance_view, "chaser_behavior_role_code")),
-        "chaser_behavior_role_valid": _copy_readonly(_pair_rows(distance_view, "chaser_behavior_role_valid")),
-        "chaser_behavior_role_reason_code": _copy_readonly(_pair_rows(distance_view, "chaser_behavior_role_reason_code")),
-        "chaser_occurrence_member": _copy_readonly(_pair_rows(distance_view, "chaser_occurrence_member")),
-        "nearest_chaser_member": _copy_readonly(_pair_rows(distance_view, "nearest_chaser_member")),
+        "chaser_position_reason_code": _copy_readonly(
+            _pair_rows(distance_view, "chaser_position_reason_code")
+        ),
+        "chaser_identity_code": _copy_readonly(
+            _pair_rows(distance_view, "chaser_identity_code")
+        ),
+        "chaser_behavior_role_code": _copy_readonly(
+            _pair_rows(distance_view, "chaser_behavior_role_code")
+        ),
+        "chaser_behavior_role_valid": _copy_readonly(
+            _pair_rows(distance_view, "chaser_behavior_role_valid")
+        ),
+        "chaser_behavior_role_reason_code": _copy_readonly(
+            _pair_rows(distance_view, "chaser_behavior_role_reason_code")
+        ),
+        "chaser_occurrence_member": _copy_readonly(
+            _pair_rows(distance_view, "chaser_occurrence_member")
+        ),
+        "nearest_chaser_member": _copy_readonly(
+            _pair_rows(distance_view, "nearest_chaser_member")
+        ),
         "row_valid": _copy_readonly(_pair_rows(distance_view, "row_valid")),
         "row_reason_code": _copy_readonly(_pair_rows(distance_view, "row_reason_code")),
-        "relative_transition_valid": _copy_readonly(_pair_rows(distance_view, "relative_transition_valid")),
-        "relative_transition_reason_code": _copy_readonly(_pair_rows(distance_view, "relative_transition_reason_code")),
-        "relative_vector_px_xy": _copy_readonly(_pair_rows(distance_view, "relative_vector_px_xy")),
+        "relative_transition_valid": _copy_readonly(
+            _pair_rows(distance_view, "relative_transition_valid")
+        ),
+        "relative_transition_reason_code": _copy_readonly(
+            _pair_rows(distance_view, "relative_transition_reason_code")
+        ),
+        "relative_vector_px_xy": _copy_readonly(
+            _pair_rows(distance_view, "relative_vector_px_xy")
+        ),
         "distance_px": _copy_readonly(distance_px),
         "distance_px_valid": _copy_readonly(distance_px_valid),
-        "distance_px_reason_code": _copy_readonly(_pair_rows(distance_view, "relative_px_reason_code")),
+        "distance_px_reason_code": _copy_readonly(
+            _pair_rows(distance_view, "relative_px_reason_code")
+        ),
     }
     if pixels_per_unit is not None:
         distance_mm = np.full(distance_px.shape, np.nan, dtype=np.float32)
@@ -406,7 +471,9 @@ def build_provider_chaser_distance_successor(
     denominators = {
         "unique_acquisition_frame_count": dimensions.n_frames,
         "frame_x_chaser_relation_row_count": dimensions.n_rows,
-        "valid_source_position_frame_count": int(np.count_nonzero(distance_view.frame_array("fish_position_valid"))),
+        "valid_source_position_frame_count": int(
+            np.count_nonzero(distance_view.frame_array("fish_position_valid"))
+        ),
         "valid_distance_relation_row_count": int(np.count_nonzero(distance_px_valid)),
         "native_stimulus_sample_count": native_sample_count,
         "selected_input_acquisition_frame_count": selected_input_frame_count,
@@ -460,15 +527,25 @@ def build_provider_chaser_distance_successor(
         "timing_policy": timing_policy,
         "temporal_alignment": {
             "policy_id": projection["policy_id"],
-            "temporal_alignment_requirement": projection["temporal_alignment_requirement"],
+            "temporal_alignment_requirement": projection[
+                "temporal_alignment_requirement"
+            ],
             "temporal_alignment_class": projection["temporal_alignment_class"],
-            "physical_presentation_verified": projection["physical_presentation_verified"],
-            "presentation_timestamp_available": projection["presentation_timestamp_available"],
-            "camera_presentation_clock_transform_available": projection["camera_presentation_clock_transform_available"],
+            "physical_presentation_verified": projection[
+                "physical_presentation_verified"
+            ],
+            "presentation_timestamp_available": projection[
+                "presentation_timestamp_available"
+            ],
+            "camera_presentation_clock_transform_available": projection[
+                "camera_presentation_clock_transform_available"
+            ],
             "camera_exposure_reference": projection["camera_exposure_reference"],
             "scientific_use_class": projection["scientific_use_class"],
             "source_projection_record_sha256": canonical_json_sha256(projection),
-            "source_projection_publication_record_sha256": canonical_json_sha256(publication),
+            "source_projection_publication_record_sha256": canonical_json_sha256(
+                publication
+            ),
             "timestamp_matching_performed": False,
         },
         "denominators": denominators,
@@ -481,12 +558,21 @@ def build_provider_chaser_distance_successor(
         "optional_fields": {
             "distance_mm_triple_present": all(
                 name in arrays
-                for name in ("distance_mm", "distance_mm_valid", "distance_mm_reason_code")
+                for name in (
+                    "distance_mm",
+                    "distance_mm_valid",
+                    "distance_mm_reason_code",
+                )
             ),
-            "trial_triple_present": all(name in arrays for name in ("trial_id", "trial_valid", "trial_reason_code")),
+            "trial_triple_present": all(
+                name in arrays
+                for name in ("trial_id", "trial_valid", "trial_reason_code")
+            ),
         },
         "array_declarations": _declarations(arrays),
-        "invariants": PROVIDER_CHASER_DISTANCE_SCHEMA_V1.as_manifest(dimensions=dimensions)["invariants"],
+        "invariants": PROVIDER_CHASER_DISTANCE_SCHEMA_V1.as_manifest(
+            dimensions=dimensions
+        )["invariants"],
     }
     payload["payload_digest"] = canonical_json_sha256(payload)
     return PreparedProviderChaserDistance(

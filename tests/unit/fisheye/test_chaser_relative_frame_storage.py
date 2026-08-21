@@ -88,9 +88,7 @@ def _result(*, body: bool = True, timestamps: bool = True, chasers: int = 2):
             behavior_roles=roles,
             xy=chaser_xy,
             valid=np.ones((n, chasers), dtype=bool),
-            source_row_index=np.arange(n * chasers, dtype=np.int64).reshape(
-                n, chasers
-            ),
+            source_row_index=np.arange(n * chasers, dtype=np.int64).reshape(n, chasers),
             authority=_authority("chaser-provider"),
             trial_ids=np.asarray(
                 [[0] * chasers, [0] * chasers, [1] * chasers], dtype=np.int64
@@ -283,9 +281,7 @@ def test_prepare_flattens_frame_major_and_validates_body_extension() -> None:
     )
     assert prepared.manifest["selector_eligible"] is False
     assert prepared.manifest["selection"] == "none"
-    assert prepared.manifest["metadata_policy"]["row_evidence"] == (
-        "typed_arrays_only"
-    )
+    assert prepared.manifest["metadata_policy"]["row_evidence"] == ("typed_arrays_only")
     assert not prepared.base_arrays["relative_distance_px"].flags.writeable
     assert all(
         array.dtype.kind not in {"O", "U", "S"}
@@ -294,7 +290,9 @@ def test_prepare_flattens_frame_major_and_validates_body_extension() -> None:
     )
 
 
-def test_proxy_projection_context_preserves_explicit_caveats_and_source_binding() -> None:
+def test_proxy_projection_context_preserves_explicit_caveats_and_source_binding() -> (
+    None
+):
     context = _context(acquisition_projection_record=_proxy_projection_record())
     prepared = prepare_chaser_relative_frame(
         _result_bound_to_proxy(context), context=context
@@ -307,9 +305,9 @@ def test_proxy_projection_context_preserves_explicit_caveats_and_source_binding(
     assert projection["physical_presentation_verified"] is False
     assert projection["behavioral_denominator"] == "unique_input_acquisition_frames"
     assert projection["missing_frame_rule"] == "no_carry_forward"
-    publication = prepared.manifest["context"][
-        "acquisition_projection_publication"
-    ]["record"]
+    publication = prepared.manifest["context"]["acquisition_projection_publication"][
+        "record"
+    ]
     assert publication["run_path"].endswith("/proxy_v1")
     assert publication["acquisition_projection_record_sha256"] == (
         canonical_json_sha256(projection)
@@ -346,9 +344,7 @@ def test_proxy_projection_context_rejects_semantic_or_source_tampering(
     replacement: dict[str, object], message: str
 ) -> None:
     with pytest.raises(ChaserRelativeFrameStorageError, match=message):
-        _context(
-            acquisition_projection_record=_proxy_projection_record(**replacement)
-        )
+        _context(acquisition_projection_record=_proxy_projection_record(**replacement))
 
 
 @pytest.mark.parametrize(
@@ -369,9 +365,7 @@ def test_proxy_projection_must_match_relative_frame_axes_and_complete_rows(
         acquisition_projection_record=_proxy_projection_record(**replacement)
     )
     with pytest.raises(ChaserRelativeFrameStorageError, match="does not match"):
-        prepare_chaser_relative_frame(
-            _result_bound_to_proxy(context), context=context
-        )
+        prepare_chaser_relative_frame(_result_bound_to_proxy(context), context=context)
 
 
 def test_proxy_projection_rejects_unbound_chaser_authority() -> None:
@@ -381,9 +375,7 @@ def test_proxy_projection_rejects_unbound_chaser_authority() -> None:
 
 
 def test_position_only_result_omits_body_extension() -> None:
-    prepared = prepare_chaser_relative_frame(
-        _result(body=False), context=_context()
-    )
+    prepared = prepare_chaser_relative_frame(_result(body=False), context=_context())
 
     assert prepared.body_arrays is None
     assert prepared.manifest["schema_binding"]["body_extension_present"] is False

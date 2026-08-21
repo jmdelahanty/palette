@@ -78,9 +78,7 @@ def test_strict_handle_reads_exact_consolidated_candidate(tmp_path: Path) -> Non
         expected_recording_id="recording-1",
     )
 
-    assert handle.run_path == (
-        f"{CHASER_INPUT_PROVENANCE_PROXY_PARENT_PATH}/proxy_v1"
-    )
+    assert handle.run_path == (f"{CHASER_INPUT_PROVENANCE_PROXY_PARENT_PATH}/proxy_v1")
     assert handle.selector_eligible is False
     assert handle.dimensions.n_frames == 3
     assert handle.dimensions.n_candidates == 5
@@ -90,12 +88,13 @@ def test_strict_handle_reads_exact_consolidated_candidate(tmp_path: Path) -> Non
     np.testing.assert_array_equal(handle.selected, [True, True, True])
     assert handle.selected_chaser_position_xy.shape == (3, 2, 2)
     assert handle.acquisition_frame_index.flags.writeable is False
-    assert handle.acquisition_projection_record[
-        "temporal_alignment_class"
-    ] == "controller_input_provenance_proxy"
-    assert handle.acquisition_projection_record[
-        "physical_presentation_verified"
-    ] is False
+    assert (
+        handle.acquisition_projection_record["temporal_alignment_class"]
+        == "controller_input_provenance_proxy"
+    )
+    assert (
+        handle.acquisition_projection_record["physical_presentation_verified"] is False
+    )
     binding = handle.publication_binding_record
     assert binding["run_path"] == handle.run_path
     assert binding["manifest_sha256"] == handle.manifest_sha256
@@ -129,7 +128,9 @@ def test_loader_rejects_wrong_recording_and_manifest_expectations(
     tmp_path: Path,
 ) -> None:
     archive = _published(tmp_path)
-    with pytest.raises(ChaserInputProvenanceProxySourceHandleError, match="expectation"):
+    with pytest.raises(
+        ChaserInputProvenanceProxySourceHandleError, match="expectation"
+    ):
         load_chaser_input_provenance_proxy_source_handle(
             archive,
             run_name="proxy_v1",

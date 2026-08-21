@@ -177,9 +177,7 @@ def _publish_proxy_bound(tmp_path, *, timestamps: bool = True):
     root = open_zarr_root(archive, mode="w-")
     root.attrs["recording_id"] = "recording-1"
     root.require_group(PARENT_PATH)
-    context = _storage_context(
-        acquisition_projection_record=_proxy_projection_record()
-    )
+    context = _storage_context(acquisition_projection_record=_proxy_projection_record())
     result = _result_bound_to_proxy(context)
     if not timestamps:
         result = replace(
@@ -339,9 +337,9 @@ def test_rejects_invalid_provenance(tmp_path):
     accepted = load_chaser_relative_frame_source_handle(
         archive, run_name="candidate-v1", expected_recording_id="recording-1"
     )
-    assert accepted.run_provenance["input_run_ids"]["prepared_chaser_relative_frame"] == (
-        accepted.run_manifest["payload_digest"]
-    )
+    assert accepted.run_provenance["input_run_ids"][
+        "prepared_chaser_relative_frame"
+    ] == (accepted.run_manifest["payload_digest"])
 
     run = _run_attrs(archive, mode="a")
     provenance = deepcopy(dict(run.attrs["run_provenance"]))
