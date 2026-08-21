@@ -251,6 +251,85 @@ def _palette_binding() -> tuple[dict[str, object], dict[str, str], dict[str, obj
     return coordinate, arena, source
 
 
+def _clipped_palette_fit_inputs(
+    recording: Path,
+) -> tuple[Path, Path, Path, Path]:
+    fit_report, montage = _palette_fit_inputs(recording)
+    clip_index = recording / "recording_clip_index.json"
+    clip_index.write_text('{"recording_id":"clipped-recording"}\n', encoding="utf-8")
+    snapshot = (
+        recording / "raw" / "recording_geometry_bundle" / "recording_snapshot.json"
+    )
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text(
+        json.dumps(
+            {
+                "camera_runtime": {
+                    "2010093": {
+                        "coordinate_frame": {
+                            "coordinate_space": "camera_native_pixels",
+                            "units": "pixels",
+                            "origin": {"name": "top_left_pixel"},
+                            "extent": {"width_px": 640, "height_px": 480},
+                        }
+                    }
+                }
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    report = json.loads(fit_report.read_text(encoding="utf-8"))
+    report["source"].update(
+        {
+            "mode": "clipped_recording",
+            "recording_dir": str(recording),
+            "recording_id": "clipped-recording",
+            "session_id": "clipped-session",
+            "recording_clip_index_path": str(clip_index),
+            "recording_clip_index_sha256": hashlib.sha256(
+                clip_index.read_bytes()
+            ).hexdigest(),
+            "recording_geometry_snapshot_path": str(snapshot),
+            "recording_geometry_snapshot_sha256": hashlib.sha256(
+                snapshot.read_bytes()
+            ).hexdigest(),
+            "clip_count": 1,
+            "sampled_clip_count": 1,
+            "sampled_clips": [],
+            "first_recording_frame_id": 1,
+            "last_recording_frame_id": 1000,
+            "source_binding": "test clipped collection",
+        }
+    )
+    for window in report["windows"].values():
+        frame_ids = [int(value) + 1 for value in window.pop("frame_indices")]
+        center_id = int(window.pop("center_frame")) + 1
+        window.update(
+            {
+                "center_recording_frame_id": center_id,
+                "recording_frame_ids": frame_ids,
+                "sampled_clip_ids": ["clip_000000"],
+            }
+        )
+        window["decoded_frames"] = [
+            {
+                "clip_id": "clip_000000",
+                "clip_index": 0,
+                "clip_local_frame_index": frame_id - 1,
+                "recording_frame_id": frame_id,
+                "video_path": str(recording / "clips/clip_000000/camera.mp4"),
+                "keyframe_path": str(
+                    recording / "clips/clip_000000/camera_keyframe.json"
+                ),
+                "decoded_frame_sha256": decoded["decoded_frame_sha256"],
+            }
+            for frame_id, decoded in zip(frame_ids, window["decoded_frames"])
+        ]
+    fit_report.write_text(json.dumps(report), encoding="utf-8")
+    return fit_report, montage, clip_index, snapshot
+
+
 def test_candidate_record_keeps_physical_rim_gate_and_selection_distinct() -> None:
     record = mod.build_acquisition_geometry_candidate_record(
         _bound_mask(),
@@ -268,6 +347,85 @@ def test_candidate_record_keeps_physical_rim_gate_and_selection_distinct() -> No
         "detection_gate_applied": False,
         "independent_palette_fit_required_before_operational_use": True,
     }
+
+
+def test_reviewed_palette_candidate_binds_clipped_collection_artifacts(
+    tmp_path: Path,
+) -> None:
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    fit_report, montage, clip_index, snapshot = _clipped_palette_fit_inputs(recording)
+    archive = recording / "zarr" / "recording_analysis.zarr"
+    root = zarr.open_group(str(archive), mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "recording_id": "clipped-recording",
+            "session_id": "clipped-session",
+            "camera_serials": ["2010093"],
+            "source_layout": "rolling_clips",
+            "clip_count": 1,
+            "recording_clip_index_json": str(clip_index),
+            "recording_frame_index_row_count": 1000,
+            "recording_frame_id_min": 1,
+            "recording_frame_id_max": 1000,
+        }
+    )
+    calibration = root.require_group("analysis/calibration")
+    calibration.attrs.update(
+        {
+            "active_camera_id": "2010093",
+            "native_width_px": 640,
+            "native_height_px": 480,
+        }
+    )
+
+    record = mod.build_reviewed_palette_geometry_candidate_record(
+        source_zarr=archive,
+        fit_report_path=fit_report,
+        montage_path=montage,
+        arena_binding={
+            "rig_id": "omnifin0",
+            "canvas_name": "shadow",
+            "arena_id": "arena_1",
+        },
+        review={
+            "status": "reviewer_accepted_for_offline_detection_gate_audit",
+            "reviewer": "reviewer@example.org",
+            "reviewed_at_utc": "2026-08-21T05:56:37Z",
+            "decision_source": "interactive_visual_review",
+            "reviewed_feature": "visible_dish_top_rim_edge",
+            "decision_scope": "candidate_and_detection_disagreement_audit_only",
+        },
+    )
+
+    coordinate = record["coordinate_binding"]
+    assert coordinate["source_camera_frame_authority_kind"] == (
+        "orange_recording_snapshot_coordinate_frame_v1"
+    )
+    assert (
+        coordinate["pixel_frame_record_sha256"]
+        == hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    )
+    source = record["palette_fit_source"]
+    assert source["source_mode"] == "clipped_recording"
+    assert source["source_collection"]["recording_id"] == "clipped-recording"
+    assert source["windows"]["early"]["frame_coordinate"] == (
+        "one_based_recording_frame_id"
+    )
+
+    clip_index.write_text('{"recording_id":"changed"}\n', encoding="utf-8")
+    with pytest.raises(RecordingGeometryError, match="index changed"):
+        mod.build_reviewed_palette_geometry_candidate_record(
+            source_zarr=archive,
+            fit_report_path=fit_report,
+            montage_path=montage,
+            arena_binding={
+                "rig_id": "omnifin0",
+                "canvas_name": "shadow",
+                "arena_id": "arena_1",
+            },
+            review=record["review"],
+        )
 
 
 def test_plan_producer_native_folder_candidate_without_recovery_receipt(
@@ -538,9 +696,7 @@ def test_palette_candidate_binds_post_freeze_acquisition_edge_support(
             "coordinate_space": "camera_native_pixels",
             "geometry": geometry,
             "source_observation_sha256": "a" * 64,
-            "windows": {
-                name: window_support for name in ("early", "middle", "late")
-            },
+            "windows": {name: window_support for name in ("early", "middle", "late")},
             "median_angular_edge_support_fraction": 0.92,
             "minimum_angular_edge_support_fraction": 0.92,
             "median_absolute_radial_offset_px": 0.4,

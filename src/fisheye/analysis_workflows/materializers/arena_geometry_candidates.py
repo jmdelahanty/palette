@@ -393,9 +393,206 @@ def _source_camera_candidate_binding(
     source_zarr: Path,
     *,
     expected_camera_serial: str,
+    fit_source: Mapping[str, Any] | None = None,
+    arena_binding: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str], Mapping[str, Any]]:
     root = open_zarr_root(source_zarr, mode="r")
     attrs = dict(root.attrs)
+    source_mode = str((fit_source or {}).get("mode") or "single_video")
+    if source_mode == "clipped_recording":
+        cameras = [str(value) for value in attrs.get("camera_serials", [])]
+        if cameras != [expected_camera_serial]:
+            raise RecordingGeometryError(
+                "Palette fit camera does not match the clipped analysis Zarr camera."
+            )
+        if attrs.get("source_layout") != "rolling_clips":
+            raise RecordingGeometryError(
+                "Clipped Palette fits require a rolling-clips analysis Zarr."
+            )
+        source = _required_mapping(fit_source, label="fit_report.source")
+        recording_id = _required_text(
+            source.get("recording_id"), label="fit_report.source.recording_id"
+        )
+        if str(attrs.get("recording_id") or "") != recording_id:
+            raise RecordingGeometryError(
+                "Palette fit recording does not match the clipped analysis Zarr."
+            )
+        clip_index_path = (
+            Path(
+                _required_text(
+                    attrs.get("recording_clip_index_json"),
+                    label="root.recording_clip_index_json",
+                )
+            )
+            .expanduser()
+            .resolve()
+        )
+        if not clip_index_path.is_file():
+            raise RecordingGeometryError(
+                f"Clipped recording index is missing: {clip_index_path}"
+            )
+        expected_clip_index_sha256 = _required_sha256(
+            source.get("recording_clip_index_sha256"),
+            label="fit_report.source.recording_clip_index_sha256",
+        ).removeprefix("sha256:")
+        if _file_sha256(clip_index_path) != expected_clip_index_sha256:
+            raise RecordingGeometryError(
+                "Clipped recording index changed after the Palette fit."
+            )
+        expected_frame_count = int(source.get("frame_count") or 0)
+        expected_first = int(source.get("first_recording_frame_id") or 0)
+        expected_last = int(source.get("last_recording_frame_id") or 0)
+        expected_clip_count = int(source.get("clip_count") or 0)
+        expected_session_id = _required_text(
+            source.get("session_id"), label="fit_report.source.session_id"
+        )
+        if (
+            expected_frame_count <= 0
+            or expected_last - expected_first + 1 != expected_frame_count
+            or expected_clip_count <= 0
+            or int(attrs.get("clip_count") or 0) != expected_clip_count
+            or str(attrs.get("session_id") or "") != expected_session_id
+            or int(attrs.get("recording_frame_index_row_count") or 0)
+            != expected_frame_count
+            or int(attrs.get("recording_frame_id_min") or 0) != expected_first
+            or int(attrs.get("recording_frame_id_max") or 0) != expected_last
+        ):
+            raise RecordingGeometryError(
+                "Palette fit frame domain does not match the clipped analysis Zarr."
+            )
+
+        recording_root = source_zarr.parent.parent.resolve()
+        snapshot_path = (
+            recording_root
+            / "raw"
+            / "recording_geometry_bundle"
+            / "recording_snapshot.json"
+        )
+        if not snapshot_path.is_file():
+            raise RecordingGeometryError(
+                f"Clipped recording geometry snapshot is missing: {snapshot_path}"
+            )
+        snapshot_sha256 = _file_sha256(snapshot_path)
+        if snapshot_sha256 != _required_sha256(
+            source.get("recording_geometry_snapshot_sha256"),
+            label="fit_report.source.recording_geometry_snapshot_sha256",
+        ).removeprefix("sha256:"):
+            raise RecordingGeometryError(
+                "Recording geometry snapshot changed after the Palette fit."
+            )
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecordingGeometryError(
+                "Clipped recording geometry snapshot is invalid JSON."
+            ) from exc
+        runtime = _required_mapping(
+            _required_mapping(snapshot, label="recording_snapshot").get(
+                "camera_runtime"
+            ),
+            label="recording_snapshot.camera_runtime",
+        )
+        camera_runtime = _required_mapping(
+            runtime.get(expected_camera_serial),
+            label=f"recording_snapshot.camera_runtime.{expected_camera_serial}",
+        )
+        frame = _required_mapping(
+            camera_runtime.get("coordinate_frame"),
+            label="recording_snapshot camera coordinate_frame",
+        )
+        extent = _required_mapping(
+            frame.get("extent"), label="recording_snapshot coordinate extent"
+        )
+        width = int(extent.get("width_px") or 0)
+        height = int(extent.get("height_px") or 0)
+        if (
+            width <= 0
+            or height <= 0
+            or frame.get("coordinate_space") != "camera_native_pixels"
+            or frame.get("units") != "pixels"
+            or _required_mapping(
+                frame.get("origin"), label="recording_snapshot coordinate origin"
+            ).get("name")
+            != "top_left_pixel"
+        ):
+            raise RecordingGeometryError(
+                "Clipped recording snapshot has an unsupported camera coordinate frame."
+            )
+        calibration = root.get("analysis/calibration")
+        if calibration is not None:
+            calibration_attrs = dict(calibration.attrs)
+            if (
+                str(calibration_attrs.get("active_camera_id") or "")
+                != expected_camera_serial
+                or int(calibration_attrs.get("native_width_px") or 0) != width
+                or int(calibration_attrs.get("native_height_px") or 0) != height
+            ):
+                raise RecordingGeometryError(
+                    "Imported calibration does not match the clipped camera frame."
+                )
+
+        requested_arena = dict(arena_binding or {})
+        arena = {
+            "rig_id": _required_text(
+                attrs.get("rig_id") or requested_arena.get("rig_id"),
+                label="clipped arena rig_id",
+            ),
+            "canvas_name": _required_text(
+                attrs.get("canvas_name") or requested_arena.get("canvas_name"),
+                label="clipped arena canvas_name",
+            ),
+            "arena_id": _required_text(
+                attrs.get("arena_id") or requested_arena.get("arena_id"),
+                label="clipped arena arena_id",
+            ),
+            "camera_serial": expected_camera_serial,
+        }
+        for name in ("rig_id", "canvas_name", "arena_id"):
+            root_value = attrs.get(name)
+            supplied_value = requested_arena.get(name)
+            if (
+                root_value is not None
+                and supplied_value is not None
+                and str(root_value) != str(supplied_value)
+            ):
+                raise RecordingGeometryError(
+                    f"Explicit clipped {name} conflicts with the analysis Zarr."
+                )
+        coordinate = {
+            "space_id": "source_camera_image_px",
+            "profile_id": "source_camera_image_px.top_left_y_down.v1",
+            "pixel_convention": "continuous",
+            "units": "px",
+            "origin": "top_left",
+            "positive_x": "right",
+            "positive_y": "down",
+            "native_width_px": width,
+            "native_height_px": height,
+            "source_camera_frame_authority_kind": (
+                "orange_recording_snapshot_coordinate_frame_v1"
+            ),
+            "pixel_frame_record_ref": (
+                f"/recording_geometry_snapshot/camera_runtime/"
+                f"{expected_camera_serial}/coordinate_frame@recording_snapshot_sha256"
+            ),
+            "pixel_frame_record_sha256": snapshot_sha256,
+        }
+        collection = {
+            "mode": "clipped_recording",
+            "recording_id": recording_id,
+            "recording_clip_index_path": str(clip_index_path),
+            "recording_clip_index_sha256": expected_clip_index_sha256,
+            "recording_geometry_snapshot_path": str(snapshot_path),
+            "recording_geometry_snapshot_sha256": snapshot_sha256,
+            "frame_count": expected_frame_count,
+            "first_recording_frame_id": expected_first,
+            "last_recording_frame_id": expected_last,
+        }
+        return coordinate, arena, collection
+    if source_mode != "single_video":
+        raise RecordingGeometryError(
+            f"Unsupported Palette fit source mode: {source_mode!r}."
+        )
     camera_serial = str(attrs.get("camera_id") or "")
     if camera_serial != expected_camera_serial:
         raise RecordingGeometryError(
@@ -452,6 +649,7 @@ def build_reviewed_palette_geometry_candidate_record(
     montage_path: str | Path | None = None,
     fit_review_run: str | None = None,
     review: Mapping[str, Any],
+    arena_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize one reviewed blind fit without reinterpreting acquisition geometry."""
 
@@ -508,6 +706,8 @@ def build_reviewed_palette_geometry_candidate_record(
     coordinate, arena, source_video_metadata = _source_camera_candidate_binding(
         zarr_path,
         expected_camera_serial=camera_serial,
+        fit_source=source,
+        arena_binding=arena_binding,
     )
     shape = _required_mapping(
         source.get("image_shape_px"), label="fit_report.source.image_shape_px"
@@ -523,21 +723,27 @@ def build_reviewed_palette_geometry_candidate_record(
         raise RecordingGeometryError(
             "Palette fit used an unsupported source pixel contract."
         )
-    if (
-        int(source.get("frame_count", 0))
-        != int(source_video_metadata.get("total_frames", 0))
-        or int(source.get("video_size_bytes", 0))
-        != int(
-            _required_mapping(
-                source_video_metadata.get("file_fingerprint"),
-                label="root.source_video_metadata.file_fingerprint",
-            ).get("size_bytes", 0)
-        )
-        or Path(str(source.get("video_path"))).name
-        != str(source_video_metadata.get("source_video"))
-    ):
+    source_mode = str(source.get("mode") or "single_video")
+    if source_mode == "single_video":
+        if (
+            int(source.get("frame_count", 0))
+            != int(source_video_metadata.get("total_frames", 0))
+            or int(source.get("video_size_bytes", 0))
+            != int(
+                _required_mapping(
+                    source_video_metadata.get("file_fingerprint"),
+                    label="root.source_video_metadata.file_fingerprint",
+                ).get("size_bytes", 0)
+            )
+            or Path(str(source.get("video_path"))).name
+            != str(source_video_metadata.get("source_video"))
+        ):
+            raise RecordingGeometryError(
+                "Palette fit source video does not match the analysis Zarr source identity."
+            )
+    elif source_mode != "clipped_recording":
         raise RecordingGeometryError(
-            "Palette fit source video does not match the analysis Zarr source identity."
+            f"Unsupported Palette fit source mode: {source_mode!r}."
         )
 
     consensus = _required_mapping(
@@ -660,19 +866,63 @@ def build_reviewed_palette_geometry_candidate_record(
             raise RecordingGeometryError(
                 f"Palette {name} decoded frame evidence is invalid."
             )
-        normalized_decoded_frames = [
-            {
-                "frame_index": int(item.get("frame_index")),
-                "decoded_frame_sha256": _required_sha256(
-                    item.get("decoded_frame_sha256"),
-                    label=f"fit_report.windows.{name}.decoded_frame_sha256",
-                ),
+        if source_mode == "single_video":
+            normalized_decoded_frames = [
+                {
+                    "frame_index": int(item.get("frame_index")),
+                    "decoded_frame_sha256": _required_sha256(
+                        item.get("decoded_frame_sha256"),
+                        label=f"fit_report.windows.{name}.decoded_frame_sha256",
+                    ),
+                }
+                for item in raw_decoded_frames
+            ]
+            frame_binding = {
+                "center_frame": int(window.get("center_frame")),
+                "frame_indices": [
+                    int(value) for value in window.get("frame_indices", [])
+                ],
             }
-            for item in raw_decoded_frames
-        ]
+        else:
+            normalized_decoded_frames = [
+                {
+                    "clip_id": _required_text(
+                        item.get("clip_id"),
+                        label=f"fit_report.windows.{name}.decoded_frame.clip_id",
+                    ),
+                    "clip_index": int(item.get("clip_index")),
+                    "clip_local_frame_index": int(item.get("clip_local_frame_index")),
+                    "recording_frame_id": int(item.get("recording_frame_id")),
+                    "video_path": _required_text(
+                        item.get("video_path"),
+                        label=f"fit_report.windows.{name}.decoded_frame.video_path",
+                    ),
+                    "keyframe_path": _required_text(
+                        item.get("keyframe_path"),
+                        label=f"fit_report.windows.{name}.decoded_frame.keyframe_path",
+                    ),
+                    "decoded_frame_sha256": _required_sha256(
+                        item.get("decoded_frame_sha256"),
+                        label=f"fit_report.windows.{name}.decoded_frame_sha256",
+                    ),
+                }
+                for item in raw_decoded_frames
+            ]
+            frame_binding = {
+                "frame_coordinate": "one_based_recording_frame_id",
+                "center_recording_frame_id": int(
+                    window.get("center_recording_frame_id")
+                ),
+                "recording_frame_ids": [
+                    int(value) for value in window.get("recording_frame_ids", [])
+                ],
+                "sampled_clip_ids": [
+                    _required_text(value, label=f"fit_report.windows.{name}.clip_id")
+                    for value in window.get("sampled_clip_ids", [])
+                ],
+            }
         normalized_windows[name] = {
-            "center_frame": int(window.get("center_frame")),
-            "frame_indices": [int(value) for value in window.get("frame_indices", [])],
+            **frame_binding,
             "decoded_luma_sequence_sha256": _required_sha256(
                 window.get("decoded_luma_sequence_sha256"),
                 label=f"fit_report.windows.{name}.decoded_luma_sequence_sha256",
@@ -702,7 +952,12 @@ def build_reviewed_palette_geometry_candidate_record(
             ),
             "frozen_candidates": normalized_candidates,
         }
-        if not normalized_windows[name]["frame_indices"]:
+        frame_values = (
+            normalized_windows[name].get("frame_indices")
+            if source_mode == "single_video"
+            else normalized_windows[name].get("recording_frame_ids")
+        )
+        if not frame_values:
             raise RecordingGeometryError(
                 f"Palette {name} fit has no source frame indices."
             )
@@ -772,7 +1027,7 @@ def build_reviewed_palette_geometry_candidate_record(
             "path": _required_text(reveal_ref, label="acquisition_reveal_ref"),
             "sha256": hashlib.sha256(reveal_bytes).hexdigest(),
         }
-    palette_fit_source = {
+    palette_fit_source: dict[str, Any] = {
         "fit_report_path": report_ref,
         "fit_report_sha256": report_sha256,
         "fit_report_schema_id": report.get("schema_id"),
@@ -783,11 +1038,6 @@ def build_reviewed_palette_geometry_candidate_record(
                 report.get("parameters"), label="fit_report.parameters"
             ).get("acquisition_geometry_available_to_fitter")
             is False
-        ),
-        "source_video_path": source.get("video_path"),
-        "source_video_size_bytes": int(source.get("video_size_bytes")),
-        "source_summary_sha256": _required_sha256(
-            source.get("summary_sha256"), label="fit_report.source.summary_sha256"
         ),
         "probe_declared_target_feature": report.get("target_feature"),
         "reviewed_semantic_correction": {
@@ -815,6 +1065,27 @@ def build_reviewed_palette_geometry_candidate_record(
         "acquisition_boundary_edge_support": acquisition_boundary_edge_support,
         "acquisition_reveal_binding": acquisition_reveal_binding,
     }
+    if source_mode == "single_video":
+        palette_fit_source.update(
+            {
+                "source_video_path": source.get("video_path"),
+                "source_video_size_bytes": int(source.get("video_size_bytes")),
+                "source_summary_sha256": _required_sha256(
+                    source.get("summary_sha256"),
+                    label="fit_report.source.summary_sha256",
+                ),
+            }
+        )
+    else:
+        source_collection = _canonical_copy(source)
+        palette_fit_source.update(
+            {
+                "source_mode": source_mode,
+                "source_collection": source_collection,
+                "source_collection_sha256": _payload_sha256(source_collection),
+                "validated_collection_binding": _canonical_copy(source_video_metadata),
+            }
+        )
     if embedded_evidence is not None:
         palette_fit_source.update(
             {
@@ -928,10 +1199,21 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
         coordinate.get("pixel_frame_record_sha256"),
         label="coordinate_binding.pixel_frame_record_sha256",
     )
-    expected_ref = (
-        f"/analysis/coordinate_frames/source_camera/{arena['camera_serial']}"
-        "/continuous@pixel_frame_authority"
-    )
+    authority_kind = coordinate.get("source_camera_frame_authority_kind")
+    if authority_kind is None:
+        expected_ref = (
+            f"/analysis/coordinate_frames/source_camera/{arena['camera_serial']}"
+            "/continuous@pixel_frame_authority"
+        )
+    elif authority_kind == "orange_recording_snapshot_coordinate_frame_v1":
+        expected_ref = (
+            f"/recording_geometry_snapshot/camera_runtime/{arena['camera_serial']}"
+            "/coordinate_frame@recording_snapshot_sha256"
+        )
+    else:
+        raise RecordingGeometryError(
+            "Palette candidate uses an unsupported source-camera frame authority."
+        )
     if coordinate.get("pixel_frame_record_ref") != expected_ref:
         raise RecordingGeometryError(
             "Palette candidate binds the wrong source-camera frame."
@@ -939,15 +1221,76 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
     source = _required_mapping(
         record.get("palette_fit_source"), label="palette_fit_source"
     )
-    for name in (
-        "fit_report_path",
-        "fit_method",
-        "source_video_path",
-        "review_montage_path",
-    ):
+    for name in ("fit_report_path", "fit_method", "review_montage_path"):
         _required_text(source.get(name), label=f"palette_fit_source.{name}")
-    for name in ("fit_report_sha256", "source_summary_sha256", "review_montage_sha256"):
+    for name in ("fit_report_sha256", "review_montage_sha256"):
         _required_sha256(source.get(name), label=f"palette_fit_source.{name}")
+    source_mode = str(source.get("source_mode") or "single_video")
+    if source_mode == "single_video":
+        _required_text(
+            source.get("source_video_path"),
+            label="palette_fit_source.source_video_path",
+        )
+        _required_sha256(
+            source.get("source_summary_sha256"),
+            label="palette_fit_source.source_summary_sha256",
+        )
+        if authority_kind is not None:
+            raise RecordingGeometryError(
+                "Single-video Palette candidates require persisted pixel-frame authority."
+            )
+    elif source_mode == "clipped_recording":
+        if authority_kind != "orange_recording_snapshot_coordinate_frame_v1":
+            raise RecordingGeometryError(
+                "Clipped Palette candidates require recording-snapshot frame authority."
+            )
+        collection = _required_mapping(
+            source.get("source_collection"),
+            label="palette_fit_source.source_collection",
+        )
+        if collection.get("mode") != "clipped_recording":
+            raise RecordingGeometryError(
+                "Palette clipped source collection has the wrong mode."
+            )
+        for name in (
+            "recording_id",
+            "camera_serial",
+            "recording_clip_index_path",
+            "recording_geometry_snapshot_path",
+        ):
+            _required_text(collection.get(name), label=f"source_collection.{name}")
+        for name in (
+            "recording_clip_index_sha256",
+            "recording_geometry_snapshot_sha256",
+        ):
+            _required_sha256(collection.get(name), label=f"source_collection.{name}")
+        if collection.get("camera_serial") != arena.get("camera_serial"):
+            raise RecordingGeometryError(
+                "Palette clipped source camera differs from its arena binding."
+            )
+        if _required_sha256(
+            source.get("source_collection_sha256"),
+            label="palette_fit_source.source_collection_sha256",
+        ).removeprefix("sha256:") != _payload_sha256(collection):
+            raise RecordingGeometryError(
+                "Palette clipped source collection digest is stale."
+            )
+        validated = _required_mapping(
+            source.get("validated_collection_binding"),
+            label="palette_fit_source.validated_collection_binding",
+        )
+        for name in (
+            "recording_clip_index_sha256",
+            "recording_geometry_snapshot_sha256",
+        ):
+            if validated.get(name) != collection.get(name):
+                raise RecordingGeometryError(
+                    "Palette clipped source validation does not match fit evidence."
+                )
+    else:
+        raise RecordingGeometryError(
+            f"Unsupported Palette candidate source mode: {source_mode!r}."
+        )
     review_storage = source.get("review_evidence_storage")
     if review_storage is not None:
         if review_storage != "embedded_zarr_fit_review_run_v1":
@@ -1086,15 +1429,42 @@ def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> Non
             raise RecordingGeometryError(
                 f"Palette {name} decoded frame evidence must be a list."
             )
-        expected_frames = [int(value) for value in window.get("frame_indices", [])]
-        observed_frames = [
-            int(
-                _required_mapping(item, label=f"{name}.decoded_frame").get(
-                    "frame_index"
+        frame_coordinate = str(
+            window.get("frame_coordinate") or "zero_based_video_frame_index"
+        )
+        if frame_coordinate == "zero_based_video_frame_index":
+            expected_frames = [int(value) for value in window.get("frame_indices", [])]
+            observed_frames = [
+                int(
+                    _required_mapping(item, label=f"{name}.decoded_frame").get(
+                        "frame_index"
+                    )
                 )
+                for item in decoded_frames
+            ]
+        elif frame_coordinate == "one_based_recording_frame_id":
+            expected_frames = [
+                int(value) for value in window.get("recording_frame_ids", [])
+            ]
+            observed_frames = [
+                int(
+                    _required_mapping(item, label=f"{name}.decoded_frame").get(
+                        "recording_frame_id"
+                    )
+                )
+                for item in decoded_frames
+            ]
+            for item in decoded_frames:
+                decoded = _required_mapping(item, label=f"{name}.decoded_frame")
+                _required_text(decoded.get("clip_id"), label=f"{name}.clip_id")
+                _required_text(decoded.get("video_path"), label=f"{name}.video_path")
+                _required_text(
+                    decoded.get("keyframe_path"), label=f"{name}.keyframe_path"
+                )
+        else:
+            raise RecordingGeometryError(
+                f"Palette {name} uses an unsupported frame coordinate."
             )
-            for item in decoded_frames
-        ]
         if decoded_frames and observed_frames != expected_frames:
             raise RecordingGeometryError(
                 f"Palette {name} decoded frame hashes do not cover source frames exactly."
@@ -1638,6 +2008,7 @@ def plan_reviewed_palette_geometry_candidate(
     fit_review_run: str | None = None,
     reviewer: str,
     reviewed_at_utc: str,
+    arena_binding: Mapping[str, Any] | None = None,
 ) -> ArenaGeometryCandidatePlan:
     """Plan a reviewed image-derived candidate without selecting or applying it."""
 
@@ -1656,6 +2027,7 @@ def plan_reviewed_palette_geometry_candidate(
         montage_path=montage_path,
         fit_review_run=fit_review_run,
         review=review,
+        arena_binding=arena_binding,
     )
     digest = _payload_sha256(record)
     candidate_id = f"arena-geometry-palette-{digest[:24]}"
@@ -1701,6 +2073,22 @@ def plan_reviewed_palette_geometry_candidate(
                 "path": reveal_binding["path"],
                 "sha256": reveal_binding["sha256"],
             }
+        )
+    collection = source.get("source_collection")
+    if isinstance(collection, Mapping):
+        input_artifacts.extend(
+            [
+                {
+                    "role": "clipped_recording_clip_index",
+                    "path": collection["recording_clip_index_path"],
+                    "sha256": collection["recording_clip_index_sha256"],
+                },
+                {
+                    "role": "clipped_recording_geometry_snapshot",
+                    "path": collection["recording_geometry_snapshot_path"],
+                    "sha256": collection["recording_geometry_snapshot_sha256"],
+                },
+            ]
         )
     provenance = build_writer_run_provenance(
         command="publish_reviewed_palette_geometry_candidate",
@@ -1924,6 +2312,10 @@ def _revalidate_candidate_sources(
                 source_zarr=plan.source_zarr,
                 fit_review_run=fit_review_run,
                 review=review,
+                arena_binding=_required_mapping(
+                    plan.candidate_record.get("arena_binding"),
+                    label="arena_binding",
+                ),
             )
             evidence = load_arena_geometry_fit_review_evidence(
                 plan.source_zarr,
@@ -1942,6 +2334,10 @@ def _revalidate_candidate_sources(
                     label="palette_fit_source.review_montage_path",
                 ),
                 review=review,
+                arena_binding=_required_mapping(
+                    plan.candidate_record.get("arena_binding"),
+                    label="arena_binding",
+                ),
             )
             current_report_sha256 = _file_sha256(plan.receipt_path)
             current_receipt_sha256 = current_report_sha256
