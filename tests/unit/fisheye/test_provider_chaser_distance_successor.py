@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 from fisheye.analysis_workflows.chaser_relative_distance_view import (
-    ChaserRelativeDistanceRegistries,
     ChaserRelativeDistanceView,
 )
 import fisheye.analysis_workflows.provider_chaser_distance_successor as successor
