@@ -27,7 +27,6 @@ from fisheye.cluster.clipped_detection import (
     RawDetectionFragmentOutputs,
     RawDetectionWorkflowModule,
     build_detection_fragment,
-    compose_detection_workflow,
 )
 from fisheye.cluster.clipped_detection_evidence import (
     ClipDetectionEvidenceInput,
@@ -822,6 +821,9 @@ def build_plan(
             raise FileNotFoundError(required)
     repo_commit = _repo_commit(repo)
     modern_registered_pipeline = gate_requirement != "off"
+    canonical_recording_pipeline = (
+        scope == WORKFLOW_SCOPE_DETECTION or modern_registered_pipeline
+    )
 
     detect_bindings: list[ModelBinding] = []
     pose_bindings: list[ModelBinding] = []
@@ -891,7 +893,7 @@ def build_plan(
 
     jobs: list[LsfJob] = []
     fragments: list[LsfWorkflowFragment] = []
-    detection_modules: list[DetectionWorkflowModule] = []
+    detection_scope_outputs: list[dict[str, Any]] = []
     target_payloads: list[dict[str, Any]] = []
     target_terminal_keys: list[str] = []
     target_terminal_artifacts: list[str] = []
@@ -956,7 +958,7 @@ def build_plan(
         subject_mask_bundle_id = f"subject_mask_bundle_{target_label}"
         canonical_refined_run = (
             f"refined_detect_native_{target_label}"
-            if modern_registered_pipeline
+            if canonical_recording_pipeline
             else None
         )
         materialize_registered_gate = (
@@ -1185,7 +1187,7 @@ def build_plan(
             refine_bundle_concurrency=detect_refine_bundle_concurrency,
         )
         target_payload["native_detection_module"] = native_module.outputs.to_json()
-        if modern_registered_pipeline:
+        if canonical_recording_pipeline:
             jobs.extend(native_module.fragment.jobs)
             fragments.append(native_module.fragment)
             assert canonical_refined_run is not None
@@ -1242,6 +1244,25 @@ def build_plan(
             )
             jobs.extend(postprocess.fragment.jobs)
             fragments.append(postprocess.fragment)
+            target_payload["canonical_refined_run_id"] = canonical_refined_run
+            target_payload["detect_quality_source_group_path"] = (
+                f"detect_runs/{native_canonical_run}"
+            )
+            target_payload["detect_quality_group_path"] = (
+                f"detect_quality_runs/{detect_quality_run}"
+            )
+            if scope == WORKFLOW_SCOPE_DETECTION:
+                canonical_outputs = {
+                    **postprocess.outputs.to_json(),
+                    "publication_authority": "canonical_recording_refined_snapshot",
+                    "clip_slice_index_published": False,
+                }
+                target_payload["detection_module"] = canonical_outputs
+                detection_scope_outputs.append(canonical_outputs)
+                target_terminal_keys.append(postprocess.outputs.terminal_job_key)
+                target_terminal_artifacts.append(postprocess.outputs.artifact_key)
+                continue
+
             collection_key = f"registered_refined_collection:{target_safe}"
             collection_receipt = (
                 run_root / "detection_collections" / f"{target_safe}.json"
@@ -1318,13 +1339,6 @@ def build_plan(
                 terminal_job_key=collection_key,
                 artifact_key=collection_artifact,
             )
-            target_payload["canonical_refined_run_id"] = canonical_refined_run
-            target_payload["detect_quality_source_group_path"] = (
-                f"detect_runs/{native_canonical_run}"
-            )
-            target_payload["detect_quality_group_path"] = (
-                f"detect_quality_runs/{detect_quality_run}"
-            )
             downstream_detection_terminal = collection_key
             downstream_detection_artifact = collection_artifact
             downstream_detection_authority = {
@@ -1349,7 +1363,6 @@ def build_plan(
             fragments.extend(detection_module.fragments)
             detection_outputs = detection_module.outputs
         target_payload["detection_module"] = detection_outputs.to_json()
-        detection_modules.append(detection_module)
         if scope == WORKFLOW_SCOPE_DETECTION:
             target_terminal_keys.append(detection_outputs.terminal_job_key)
             target_terminal_artifacts.append(detection_outputs.artifact_key)
@@ -2202,10 +2215,26 @@ def build_plan(
         )
 
     if scope == WORKFLOW_SCOPE_DETECTION:
-        workflow = compose_detection_workflow(
+        scope_jobs = tuple(job for fragment in fragments for job in fragment.jobs)
+        workflow = compose_lsf_workflow(
             workflow_id=workflow_id,
             family=FAMILY,
-            modules=tuple(detection_modules),
+            fragments=tuple(fragments),
+            metadata={
+                "workflow_scope": "detection_only",
+                "target_count": len(targets),
+                "publication_authority": "canonical_recording_refined_snapshot",
+                "clip_slice_indexes_published": False,
+                "outputs": detection_scope_outputs,
+                "scheduler_submission_count": len(scope_jobs),
+                "execution_task_count": sum(
+                    len(job.execution_group.tasks) if job.execution_group else 1
+                    for job in scope_jobs
+                ),
+                "array_submission_count": sum(
+                    1 for job in scope_jobs if job.execution_group is not None
+                ),
+            },
         )
         return ClippedInferencePlan(
             run_label=label,
@@ -2503,7 +2532,7 @@ def _parser() -> argparse.ArgumentParser:
         default=WORKFLOW_SCOPE_FULL,
         help=(
             "Compose the full analysis DAG (default) or stop after the "
-            "finalized refined-detection collection."
+            "canonical recording-level refined-detection snapshot."
         ),
     )
     parser.add_argument("--manifest", required=True, type=Path)

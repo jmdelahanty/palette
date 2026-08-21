@@ -28,16 +28,17 @@ ACQUISITION_AUTHORITY_NOT_PUBLISHED = "not_published_noncanonical_v1"
 
 MATERIALIZED_ACQUISITION_AUTHORITY_MODE = "materialized_source_frames_v1"
 EXTERNAL_ACQUISITION_AUTHORITY_MODE = "external_video_v1"
+CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE = "external_clipped_videos_v1"
 
-MATERIALIZED_ACQUISITION_PENDING_REASON = (
-    "verified_bytes_completion_in_progress"
-)
+MATERIALIZED_ACQUISITION_PENDING_REASON = "verified_bytes_completion_in_progress"
 MATERIALIZED_ACQUISITION_PUBLISHED_REASON = "completed_full_import_verified"
-EXTERNAL_ACQUISITION_PENDING_REASON = (
-    "external_authority_publication_in_progress"
+EXTERNAL_ACQUISITION_PENDING_REASON = "external_authority_publication_in_progress"
+EXTERNAL_ACQUISITION_PUBLISHED_REASON = "completed_external_video_authority_verified"
+CLIPPED_EXTERNAL_ACQUISITION_PENDING_REASON = (
+    "external_clipped_authority_publication_in_progress"
 )
-EXTERNAL_ACQUISITION_PUBLISHED_REASON = (
-    "completed_external_video_authority_verified"
+CLIPPED_EXTERNAL_ACQUISITION_PUBLISHED_REASON = (
+    "completed_external_clipped_authority_verified"
 )
 
 ACQUISITION_NONCANONICAL_REASON_CODES = frozenset(
@@ -55,12 +56,13 @@ MATERIALIZED_ACQUISITION_COMPLETION_SEMANTICS = (
 EXTERNAL_ACQUISITION_COMPLETION_SEMANTICS = (
     "published_only_after_external_ownership_frame_loadback_v1"
 )
+CLIPPED_EXTERNAL_ACQUISITION_COMPLETION_SEMANTICS = (
+    "published_only_after_clipped_collection_ownership_frame_loadback_v1"
+)
 NONCANONICAL_ACQUISITION_COMPLETION_SEMANTICS = (
     "no_canonical_acquisition_authority_published_v1"
 )
-ACQUISITION_AUTHORITY_RESUMPTION_POLICY = (
-    "retry_exact_archive_completion_idempotent_v1"
-)
+ACQUISITION_AUTHORITY_RESUMPTION_POLICY = "retry_exact_archive_completion_idempotent_v1"
 
 _CANONICAL_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.:+-]+$")
 _STATUS_FIELDS = frozenset(
@@ -194,6 +196,20 @@ def build_acquisition_authority_publication_status(
                 EXTERNAL_ACQUISITION_PUBLISHED_REASON,
                 EXTERNAL_ACQUISITION_COMPLETION_SEMANTICS,
             ),
+            (
+                CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+                ACQUISITION_AUTHORITY_PENDING,
+            ): (
+                CLIPPED_EXTERNAL_ACQUISITION_PENDING_REASON,
+                CLIPPED_EXTERNAL_ACQUISITION_COMPLETION_SEMANTICS,
+            ),
+            (
+                CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+                ACQUISITION_AUTHORITY_PUBLISHED,
+            ): (
+                CLIPPED_EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+                CLIPPED_EXTERNAL_ACQUISITION_COMPLETION_SEMANTICS,
+            ),
         }
         expected_pair = expected.get((authority_mode, status))
         if expected_pair is None:
@@ -238,7 +254,10 @@ def parse_acquisition_authority_publication_status(
         raise AcquisitionPublicationStatusError(
             "Unsupported acquisition publication resumption_policy."
         )
-    if type(value.get("status")) is not str or type(value.get("reason_code")) is not str:
+    if (
+        type(value.get("status")) is not str
+        or type(value.get("reason_code")) is not str
+    ):
         raise AcquisitionPublicationStatusError(
             "Acquisition publication status and reason_code must be exact strings."
         )
@@ -354,6 +373,10 @@ __all__ = [
     "ACQUISITION_NONCANONICAL_REASON_CODES",
     "AcquisitionAuthorityPublicationStatus",
     "AcquisitionPublicationStatusError",
+    "CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE",
+    "CLIPPED_EXTERNAL_ACQUISITION_COMPLETION_SEMANTICS",
+    "CLIPPED_EXTERNAL_ACQUISITION_PENDING_REASON",
+    "CLIPPED_EXTERNAL_ACQUISITION_PUBLISHED_REASON",
     "EXTERNAL_ACQUISITION_AUTHORITY_MODE",
     "EXTERNAL_ACQUISITION_COMPLETION_SEMANTICS",
     "EXTERNAL_ACQUISITION_PENDING_REASON",

@@ -9,6 +9,8 @@ from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PENDING,
     ACQUISITION_AUTHORITY_PUBLISHED,
     ACQUISITION_AUTHORITY_STATUS_ATTR,
+    CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    CLIPPED_EXTERNAL_ACQUISITION_PUBLISHED_REASON,
     EXTERNAL_ACQUISITION_AUTHORITY_MODE,
     EXTERNAL_ACQUISITION_PENDING_REASON,
     MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
@@ -44,9 +46,17 @@ def test_status_builder_and_parser_are_mode_and_type_strict() -> None:
         authority_mode=MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
         authority_path="analysis/acquisition_camera_frames/camera-1",
     )
-    assert parse_acquisition_authority_publication_status(
-        materialized.to_dict()
-    ) == materialized
+    assert (
+        parse_acquisition_authority_publication_status(materialized.to_dict())
+        == materialized
+    )
+    clipped = build_acquisition_authority_publication_status(
+        status=ACQUISITION_AUTHORITY_PUBLISHED,
+        reason_code=CLIPPED_EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+        authority_mode=CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        authority_path="analysis/acquisition_camera_frames/camera-1",
+    )
+    assert parse_acquisition_authority_publication_status(clipped.to_dict()) == clipped
 
     wrong_type = materialized.to_dict()
     wrong_type["schema_version"] = float(wrong_type["schema_version"])

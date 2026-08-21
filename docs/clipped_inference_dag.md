@@ -46,13 +46,18 @@ module by itself for a detection-only workflow. This keeps workflow scope
 (ordinary job, array, or bounded bundle).
 
 The operator-facing form is `--workflow-scope detection` on
-`scripts/run_clipped_inference_dag.sh`. It plans native clip detection,
-recording-order quality, refinement, and finalized collection publication for
-every target, then stops. Pose and subject-mask model identifiers are required
-only for the default `full` scope. Detection scope still honors
+`scripts/run_clipped_inference_dag.sh`. It plans native clip detection, binds
+the worker artifacts onto the canonical recording frame domain, and then uses
+the shared recording-level quality and refinement module. It publishes the
+same ordinary `detect_runs/<run>` and immutable
+`refined_detect_runs/<run>` snapshots used for whole-video input, then stops.
+It does not publish a finalized clip collection or `latest_collection`;
+physical clip ownership remains lineage and source evidence rather than a
+second scientific authority. Pose and subject-mask model identifiers are
+required only for the default `full` scope. Detection scope still honors
 `--max-active-targets`, but a later target waits for the earlier target's
-finalized detection collection instead of its full-analysis validation. It
-does not plan strict storage candidates, caches, keypoints, masks, registry
+canonical refined snapshot instead of its full-analysis validation. It does
+not plan strict storage candidates, caches, keypoints, masks, registry
 reconciliation, or NRS cleanup.
 
 ```bash

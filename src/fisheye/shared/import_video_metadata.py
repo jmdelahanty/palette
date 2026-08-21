@@ -16,6 +16,9 @@ from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PENDING,
     ACQUISITION_AUTHORITY_PUBLISHED,
     ACQUISITION_AUTHORITY_STATUS_ATTR,
+    CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    CLIPPED_EXTERNAL_ACQUISITION_PENDING_REASON,
+    CLIPPED_EXTERNAL_ACQUISITION_PUBLISHED_REASON,
     EXTERNAL_ACQUISITION_AUTHORITY_MODE,
     EXTERNAL_ACQUISITION_PENDING_REASON,
     EXTERNAL_ACQUISITION_PUBLISHED_REASON,
@@ -23,6 +26,9 @@ from fisheye.shared.acquisition_publication_status import (
     build_acquisition_authority_publication_status,
     parse_acquisition_authority_publication_status,
     stamp_acquisition_authority_publication_status,
+)
+from fisheye.shared.clipped_video_collection import (
+    SOURCE_VIDEO_COLLECTION_LAYOUT,
 )
 from fisheye.shared.encoder_tags import parse_encoder_comment
 from fisheye.shared.coordinate_surface_contract import (
@@ -33,7 +39,9 @@ from fisheye.shared.import_profile_contract import (
     IMPORT_PROFILE_SCHEMA_ID,
     PROFILE_METADATA_ONLY_ANALYSIS,
 )
-from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
+from fisheye.shared.import_source_fingerprint import (
+    optional_source_stat_fingerprint_attrs,
+)
 from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     load_persisted_acquisition_camera_authority,
@@ -51,7 +59,9 @@ SOURCE_VIDEO_COLORIMETRY_FIELDS = (
     "color_transfer",
     "color_primaries",
 )
-SOURCE_VIDEO_COLORIMETRY_ATTRS = tuple(f"video_{field}" for field in SOURCE_VIDEO_COLORIMETRY_FIELDS)
+SOURCE_VIDEO_COLORIMETRY_ATTRS = tuple(
+    f"video_{field}" for field in SOURCE_VIDEO_COLORIMETRY_FIELDS
+)
 VIDEO_METADATA_AUTHORITY_SCHEMA_ID = "palette.video_metadata_authority.v1"
 VIDEO_METADATA_AUTHORITY_SCHEMA_VERSION = 1
 
@@ -72,13 +82,21 @@ def _stream_colorimetry_attrs(stream: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _colorimetry_payload(meta: Dict[str, Any]) -> Dict[str, Any]:
-    payload = {attr: meta.get(attr) for attr in SOURCE_VIDEO_COLORIMETRY_ATTRS if meta.get(attr) not in (None, "")}
+    payload = {
+        attr: meta.get(attr)
+        for attr in SOURCE_VIDEO_COLORIMETRY_ATTRS
+        if meta.get(attr) not in (None, "")
+    }
     if payload and meta.get("source_video_colorimetry_source"):
-        payload["source_video_colorimetry_source"] = meta.get("source_video_colorimetry_source")
+        payload["source_video_colorimetry_source"] = meta.get(
+            "source_video_colorimetry_source"
+        )
     return payload
 
 
-def probe_video_colorimetry_attrs(video_path: Path, *, ffprobe_bin: str = "ffprobe") -> Dict[str, str]:
+def probe_video_colorimetry_attrs(
+    video_path: Path, *, ffprobe_bin: str = "ffprobe"
+) -> Dict[str, str]:
     """Return ffprobe stream colorimetry attrs for a source video.
 
     The returned fields describe the encoded source stream and are deliberately
@@ -316,9 +334,14 @@ def _probe_video(
         field_sources[name] = source_name
         if disagreements:
             crosscheck_disagreements[name] = disagreements
-    resolved["duration_seconds"] = float(resolved["total_frames"]) / float(resolved["fps"])
+    resolved["duration_seconds"] = float(resolved["total_frames"]) / float(
+        resolved["fps"]
+    )
     resolved["codec"] = str(
-        producer.get("codec") or ffprobe.get("codec") or opencv.get("fourcc") or "unknown"
+        producer.get("codec")
+        or ffprobe.get("codec")
+        or opencv.get("fourcc")
+        or "unknown"
     )
     resolved["pix_fmt"] = str(ffprobe.get("pix_fmt") or "unknown")
     format_tags = ffprobe.get("format_tags")
@@ -355,7 +378,9 @@ def _set_attr(attrs: Any, key: str, value: Any, *, overwrite: bool) -> bool:
     return False
 
 
-def _preview_updates(attrs: Any, payload: Dict[str, Any], *, overwrite: bool) -> Dict[str, Any]:
+def _preview_updates(
+    attrs: Any, payload: Dict[str, Any], *, overwrite: bool
+) -> Dict[str, Any]:
     updates: Dict[str, Any] = {}
     for key, value in payload.items():
         if value is None:
@@ -374,7 +399,9 @@ def _write_metadata(
     recording_path: str | Path | None = None,
 ) -> Dict[str, Any]:
     raw = root.require_group("raw_video")
-    has_arrays = any(name in raw for name in ("images_full", "images_ds", "images_ds_rgb"))
+    has_arrays = any(
+        name in raw for name in ("images_full", "images_ds", "images_ds_rgb")
+    )
     imported_frames = None
     if has_arrays:
         if "images_ds" in raw:
@@ -429,18 +456,27 @@ def _write_metadata(
         "import_timestamp": now,
         "import_purpose": import_purpose,
         "fps": meta.get("fps"),
-        "total_frames": imported_frames if imported_frames is not None else meta.get("total_frames"),
+        "total_frames": imported_frames
+        if imported_frames is not None
+        else meta.get("total_frames"),
         "source_video": meta.get("source_video"),
         "source_path": meta.get("source_path"),
         "original_resolution": (meta.get("height"), meta.get("width")),
         "video_codec": meta.get("codec"),
         "video_pix_fmt": meta.get("pix_fmt"),
-        "format_title": (meta.get("format_tags") or {}).get("title") if meta.get("format_tags") else None,
-        "format_comment": (meta.get("format_tags") or {}).get("comment") if meta.get("format_tags") else None,
-        "format_encoder": (meta.get("format_tags") or {}).get("encoder") if meta.get("format_tags") else None,
+        "format_title": (meta.get("format_tags") or {}).get("title")
+        if meta.get("format_tags")
+        else None,
+        "format_comment": (meta.get("format_tags") or {}).get("comment")
+        if meta.get("format_tags")
+        else None,
+        "format_encoder": (meta.get("format_tags") or {}).get("encoder")
+        if meta.get("format_tags")
+        else None,
         "format_tags": meta.get("format_tags"),
         "has_full_resolution": has_arrays and "images_full" in raw,
-        "has_downsampled": has_arrays and ("images_ds" in raw or "images_ds_rgb" in raw),
+        "has_downsampled": has_arrays
+        and ("images_ds" in raw or "images_ds_rgb" in raw),
     }
     raw_payload.update(_colorimetry_payload(meta))
     raw_payload.update(source_video_fingerprint_attrs)
@@ -477,8 +513,12 @@ def _write_metadata(
         "width": meta.get("width"),
         "height": meta.get("height"),
         "fps": meta.get("fps"),
-        "total_frames": imported_frames if imported_frames is not None else meta.get("total_frames"),
-        "n_frames": imported_frames if imported_frames is not None else meta.get("total_frames"),
+        "total_frames": imported_frames
+        if imported_frames is not None
+        else meta.get("total_frames"),
+        "n_frames": imported_frames
+        if imported_frames is not None
+        else meta.get("total_frames"),
         "duration_seconds": meta.get("duration_seconds"),
         "video_codec": meta.get("codec"),
         "video_pix_fmt": meta.get("pix_fmt"),
@@ -531,8 +571,16 @@ def publish_source_camera_pixel_frame_authorities(
     }
 
 
-def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, str]:
-    """Publish the canonical acquisition frame for a metadata-only archive.
+def _publish_external_acquisition_authority(
+    root: zarr.Group,
+    *,
+    authority_mode: str,
+    pending_reason: str,
+    published_reason: str,
+    expected_layout: str,
+    source_label: str,
+) -> dict[str, str]:
+    """Publish one canonical metadata-only acquisition frame.
 
     This boundary is intentionally external-video-only. A materialized
     ``raw_video/images_full`` archive must be finalized by its pixel writer with
@@ -561,17 +609,19 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
         or camera_id != camera_id.strip()
     ):
         raise PixelFrameAuthorityError(
-            "External-video acquisition authority requires exact recording_id "
+            f"{source_label} acquisition authority requires exact recording_id "
             "and camera_id root attrs from recording context."
         )
     try:
-        metadata = parse_source_video_metadata(
-            root.attrs.get("source_video_metadata")
-        )
+        metadata = parse_source_video_metadata(root.attrs.get("source_video_metadata"))
     except PixelFrameAuthorityError as exc:
         raise PixelFrameAuthorityError(
             "source_video_metadata must satisfy the exact acquisition source contract."
         ) from exc
+    if metadata.get("layout") != expected_layout:
+        raise PixelFrameAuthorityError(
+            f"source_video_metadata layout is not the expected {source_label} layout."
+        )
     if metadata.get("camera_id") != camera_id:
         raise PixelFrameAuthorityError(
             "source_video_metadata must carry the exact recording camera_id before "
@@ -579,7 +629,10 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
         )
     if "manifests" in raw:
         manifests = raw["manifests"]
-        if isinstance(manifests, zarr.Group) and "images_full_materialization" in manifests:
+        if (
+            isinstance(manifests, zarr.Group)
+            and "images_full_materialization" in manifests
+        ):
             raise PixelFrameAuthorityError(
                 "External-video authority cannot coexist with a materialization manifest."
             )
@@ -587,14 +640,14 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
     try:
         pending_status = build_acquisition_authority_publication_status(
             status=ACQUISITION_AUTHORITY_PENDING,
-            reason_code=EXTERNAL_ACQUISITION_PENDING_REASON,
-            authority_mode=EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            reason_code=pending_reason,
+            authority_mode=authority_mode,
             authority_path=authority_path,
         )
         published_status = build_acquisition_authority_publication_status(
             status=ACQUISITION_AUTHORITY_PUBLISHED,
-            reason_code=EXTERNAL_ACQUISITION_PUBLISHED_REASON,
-            authority_mode=EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            reason_code=published_reason,
+            authority_mode=authority_mode,
             authority_path=authority_path,
         )
         root_status_value = root.attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR)
@@ -616,23 +669,23 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
                 published_status,
             }:
                 raise AcquisitionPublicationStatusError(
-                    "Existing acquisition publication status conflicts with external mode."
+                    f"Existing acquisition publication status conflicts with {source_label} mode."
                 )
             existing_status = root_status
     except AcquisitionPublicationStatusError as exc:
         raise PixelFrameAuthorityError(
-            "External-video acquisition publication status is malformed or conflicting."
+            f"{source_label} acquisition publication status is malformed or conflicting."
         ) from exc
 
     analysis = root.require_group("analysis")
     authorities = analysis.require_group("acquisition_camera_frames")
     if any(name != camera_id for name in authorities.keys()):
         raise PixelFrameAuthorityError(
-            "External-video publication found another acquisition-camera authority."
+            f"{source_label} publication found another acquisition-camera authority."
         )
     if existing_status is None and camera_id in authorities:
         raise PixelFrameAuthorityError(
-            "Preexisting external acquisition authority without publication status "
+            f"Preexisting {source_label} acquisition authority without publication status "
             "is ambiguous and requires explicit repair."
         )
     authority_node = authorities.require_group(camera_id)
@@ -648,7 +701,7 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
             )
         except AcquisitionPublicationStatusError as exc:
             raise PixelFrameAuthorityError(
-                "External-video acquisition pending status could not be persisted."
+                f"{source_label} acquisition pending status could not be persisted."
             ) from exc
     ownership = stamp_acquisition_import_ownership(root, authority_node)
     frame = stamp_acquisition_camera_frame(
@@ -671,7 +724,7 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
         )
     except AcquisitionPublicationStatusError as exc:
         raise PixelFrameAuthorityError(
-            "External-video acquisition published status could not be persisted."
+            f"{source_label} acquisition published status could not be persisted."
         ) from exc
     return {
         "authority_path": authority_path,
@@ -681,6 +734,34 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
         "frame_record_sha256": frame.record_sha256,
         **source_camera_frames,
     }
+
+
+def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, str]:
+    """Publish the canonical acquisition frame for one external source video."""
+
+    return _publish_external_acquisition_authority(
+        root,
+        authority_mode=EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        pending_reason=EXTERNAL_ACQUISITION_PENDING_REASON,
+        published_reason=EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+        expected_layout="single_video",
+        source_label="external-video",
+    )
+
+
+def publish_clipped_video_collection_acquisition_authority(
+    root: zarr.Group,
+) -> dict[str, str]:
+    """Publish one recording-wide authority for an external clip collection."""
+
+    return _publish_external_acquisition_authority(
+        root,
+        authority_mode=CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        pending_reason=CLIPPED_EXTERNAL_ACQUISITION_PENDING_REASON,
+        published_reason=CLIPPED_EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+        expected_layout=SOURCE_VIDEO_COLLECTION_LAYOUT,
+        source_label="external-clipped-video",
+    )
 
 
 def probe_video_metadata(
