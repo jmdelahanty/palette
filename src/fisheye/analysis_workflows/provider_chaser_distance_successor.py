@@ -151,7 +151,11 @@ def _record_from_context(
         _fail(f"Verified source context {name!r} record is not an object.")
     if envelope["sha256"] != canonical_json_sha256(dict(record)):
         _fail(f"Verified source context {name!r} digest does not match its record.")
-    return record
+    # Loader-minted handles freeze JSON lists as tuples.  The producer
+    # validation contract is expressed in JSON-native list vocabulary, so
+    # thaw the bounded record before comparing it without changing its
+    # scientific contents.
+    return _plain(record)
 
 
 def _proxy_record(handle: Any, *, recording_id: str, n_frames: int, n_chasers: int) -> tuple[dict[str, Any], dict[str, Any]]:
