@@ -9,14 +9,98 @@ import pytest
 
 from fisheye.diagnostics.probe_recording_dish_rim_fit import (
     CircleFit,
+    _validate_probe_source_args,
+    build_clipped_keyframe_window_specs,
     build_keyframe_window_specs,
+    build_parser,
     consensus_circle,
     fit_dish_circle,
+    load_clipped_recording_source,
     load_declared_keyframes,
     render_acquisition_reveal,
     temporal_median,
     write_review_package,
 )
+
+
+def _write_clipped_recording_fixture(
+    tmp_path: Path,
+    *,
+    clip_count: int = 5,
+) -> Path:
+    recording_dir = tmp_path / "session_cam2010093"
+    rows = []
+    for clip_index in range(clip_count):
+        clip_id = f"clip_{clip_index:06d}"
+        clip_dir = recording_dir / "clips" / clip_id
+        clip_dir.mkdir(parents=True)
+        video_path = clip_dir / "camera.mp4"
+        keyframe_path = clip_dir / "camera_keyframe.json"
+        video_path.write_bytes(b"video")
+        keyframe_path.write_text(
+            json.dumps(
+                {
+                    "total_frames": 100,
+                    "fps": 10.0,
+                    "keyframe_frames": list(range(0, 100, 5)),
+                }
+            )
+        )
+        first = clip_index * 100 + 1
+        rows.append(
+            {
+                "session_id": "session",
+                "recording_id": recording_dir.name,
+                "source_layout": "rolling_clips",
+                "clip_id": clip_id,
+                "clip_index": clip_index,
+                "camera_serial": "2010093",
+                "status": "completed",
+                "recording_frame_id_gaps": 0,
+                "first_recording_frame_id": first,
+                "last_recording_frame_id": first + 99,
+                "frame_count": 100,
+                "video_path": str(video_path.relative_to(recording_dir)),
+                "keyframe_path": str(keyframe_path.relative_to(recording_dir)),
+            }
+        )
+    (recording_dir / "recording_clip_index.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "palette.orange_external_ipc_recording_clip_index.v1",
+                "schema_version": 1,
+                "recording_id": recording_dir.name,
+                "session_id": "session",
+                "source_layout": "rolling_clips",
+                "cameras": ["2010093"],
+                "row_count": len(rows),
+                "clip_count": len(rows),
+                "rows": rows,
+            }
+        )
+    )
+    geometry_dir = recording_dir / "raw" / "recording_geometry_bundle"
+    geometry_dir.mkdir(parents=True)
+    (geometry_dir / "recording_snapshot.json").write_text(
+        json.dumps(
+            {
+                "recording_id": "session",
+                "camera_runtime": {
+                    "2010093": {
+                        "coordinate_frame": {
+                            "image_shape": {"height": 4512, "width": 4512}
+                        },
+                        "runtime": {
+                            "frame_rate": 10.0,
+                            "height": 4512,
+                            "width": 4512,
+                        },
+                    }
+                },
+            }
+        )
+    )
+    return recording_dir
 
 
 def _synthetic_rim(
@@ -51,6 +135,93 @@ def test_keyframe_windows_use_only_declared_keyframes() -> None:
     )
     assert not set(specs[0].frame_indices) & set(specs[1].frame_indices)
     assert not set(specs[1].frame_indices) & set(specs[2].frame_indices)
+
+
+def test_clipped_windows_use_recording_clock_and_declared_clip_keyframes(
+    tmp_path: Path,
+) -> None:
+    recording_dir = _write_clipped_recording_fixture(tmp_path)
+
+    source = load_clipped_recording_source(recording_dir)
+    specs = build_clipped_keyframe_window_specs(
+        source,
+        max_keyframes_per_window=5,
+        span_seconds=3.0,
+    )
+
+    assert source.recording_id == recording_dir.name
+    assert source.camera_serial == "2010093"
+    assert source.frame_count == 500
+    assert source.fps == 10.0
+    assert (source.height, source.width) == (4512, 4512)
+    assert [spec.name for spec in specs] == ["early", "middle", "late"]
+    assert [spec.center_recording_frame_id for spec in specs] == [51, 251, 450]
+    assert [sorted({frame.clip_id for frame in spec.frames}) for spec in specs] == [
+        ["clip_000000"],
+        ["clip_000002"],
+        ["clip_000004"],
+    ]
+    assert all(
+        3 <= len(spec.frames) <= 5 and len(spec.frames) % 2 == 1 for spec in specs
+    )
+    for spec in specs:
+        for frame in spec.frames:
+            clip = source.clips[frame.clip_index]
+            assert frame.clip_local_frame_index in clip.keyframe_frames
+            assert (
+                frame.recording_frame_id
+                == clip.first_recording_frame_id + frame.clip_local_frame_index
+            )
+
+
+def test_clipped_source_rejects_recording_frame_discontinuity(tmp_path: Path) -> None:
+    recording_dir = _write_clipped_recording_fixture(tmp_path)
+    index_path = recording_dir / "recording_clip_index.json"
+    index = json.loads(index_path.read_text())
+    index["rows"][1]["first_recording_frame_id"] = 102
+    index["rows"][1]["last_recording_frame_id"] = 201
+    index_path.write_text(json.dumps(index))
+
+    with pytest.raises(ValueError, match="not continuous"):
+        load_clipped_recording_source(recording_dir)
+
+
+def test_clipped_source_rejects_multiple_camera_streams(tmp_path: Path) -> None:
+    recording_dir = _write_clipped_recording_fixture(tmp_path)
+    index_path = recording_dir / "recording_clip_index.json"
+    index = json.loads(index_path.read_text())
+    index["rows"][1]["camera_serial"] = "2010094"
+    index_path.write_text(json.dumps(index))
+
+    with pytest.raises(ValueError, match="exactly one camera stream"):
+        load_clipped_recording_source(recording_dir)
+
+
+def test_clipped_source_rejects_unrelated_geometry_snapshot(tmp_path: Path) -> None:
+    recording_dir = _write_clipped_recording_fixture(tmp_path)
+    snapshot_path = (
+        recording_dir / "raw" / "recording_geometry_bundle" / "recording_snapshot.json"
+    )
+    snapshot = json.loads(snapshot_path.read_text())
+    snapshot["recording_id"] = "another_session"
+    snapshot_path.write_text(json.dumps(snapshot))
+
+    with pytest.raises(ValueError, match="recording_id is inconsistent"):
+        load_clipped_recording_source(recording_dir)
+
+
+def test_probe_parser_enforces_source_specific_metadata(tmp_path: Path) -> None:
+    parser = build_parser()
+    clipped = parser.parse_args(
+        ["--recording-dir", str(tmp_path / "recording"), "--output-dir", "out"]
+    )
+    assert _validate_probe_source_args(clipped) == "clipped_recording"
+
+    incomplete_video = parser.parse_args(
+        ["--video", "video.mp4", "--output-dir", "out"]
+    )
+    with pytest.raises(ValueError, match="requires both"):
+        _validate_probe_source_args(incomplete_video)
 
 
 def test_declared_keyframe_summary_must_match_video_summary(tmp_path: Path) -> None:

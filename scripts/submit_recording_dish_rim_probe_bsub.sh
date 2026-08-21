@@ -4,6 +4,8 @@ umask 0002
 
 VIDEO=""
 SUMMARY=""
+KEYFRAMES=""
+RECORDING_DIR=""
 PROBE_ID=""
 ACQUISITION_OBSERVATION=""
 OUTPUT_ROOT="/groups/johnson/johnsonlab/jeremy/diagnostics/recording_dish_rim_probes"
@@ -18,16 +20,24 @@ SUBMIT=0
 
 usage() {
   cat <<'USAGE'
-Usage: submit_recording_dish_rim_probe_bsub.sh \
-  --video PATH --summary PATH --probe-id ID [options]
+Usage:
+  submit_recording_dish_rim_probe_bsub.sh \
+    --video PATH --summary PATH --keyframes PATH --probe-id ID [options]
+  submit_recording_dish_rim_probe_bsub.sh \
+    --recording-dir PATH --probe-id ID [options]
 
 Render or submit one diagnostic-only, three-window dish-rim probe. The job
 decodes through PyNvVideoCodec on an LSF GPU worker and writes review PNGs plus
 immutable JSON reports. It never opens an analysis Zarr or registry.
 
-Required:
+Source (choose exactly one mode):
   --video PATH                   Native/full-frame Orange MP4
   --summary PATH                 Matching Orange external summary JSON
+  --keyframes PATH               Matching encoder keyframe summary JSON
+  --recording-dir PATH           One-camera rolling-clips recording; discovers
+                                 clip videos/keyframes from its clip index
+
+Required:
   --probe-id ID                  Immutable diagnostic identifier
 
 Options:
@@ -55,6 +65,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --video) VIDEO="$2"; shift 2;;
     --summary) SUMMARY="$2"; shift 2;;
+    --keyframes) KEYFRAMES="$2"; shift 2;;
+    --recording-dir) RECORDING_DIR="$2"; shift 2;;
     --probe-id) PROBE_ID="$2"; shift 2;;
     --acquisition-observation) ACQUISITION_OBSERVATION="$2"; shift 2;;
     --output-root) OUTPUT_ROOT="$2"; shift 2;;
@@ -71,8 +83,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -f "$VIDEO" ]] || fail "video not found: $VIDEO"
-[[ -f "$SUMMARY" ]] || fail "summary not found: $SUMMARY"
+if [[ -n "$RECORDING_DIR" ]]; then
+  [[ -z "$VIDEO" && -z "$SUMMARY" && -z "$KEYFRAMES" ]] || \
+    fail "--recording-dir cannot be combined with --video, --summary, or --keyframes"
+  [[ -d "$RECORDING_DIR" ]] || fail "recording directory not found: $RECORDING_DIR"
+  [[ -f "$RECORDING_DIR/recording_clip_index.json" ]] || \
+    fail "recording clip index not found: $RECORDING_DIR/recording_clip_index.json"
+  SOURCE_MODE="clipped_recording"
+else
+  [[ -n "$VIDEO" ]] || fail "choose --recording-dir or provide --video"
+  [[ -n "$SUMMARY" ]] || fail "--summary is required with --video"
+  [[ -n "$KEYFRAMES" ]] || fail "--keyframes is required with --video"
+  [[ -f "$VIDEO" ]] || fail "video not found: $VIDEO"
+  [[ -f "$SUMMARY" ]] || fail "summary not found: $SUMMARY"
+  [[ -f "$KEYFRAMES" ]] || fail "keyframe summary not found: $KEYFRAMES"
+  SOURCE_MODE="single_video"
+fi
 [[ -n "$PROBE_ID" ]] || fail "--probe-id is required"
 [[ "$PROBE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "unsafe --probe-id"
 [[ -z "$ACQUISITION_OBSERVATION" || -f "$ACQUISITION_OBSERVATION" ]] || \
@@ -96,8 +122,11 @@ mkdir -p "$RUN_DIR"
 EXPECTED_COMMIT="$(git -C "$PALETTE_REPO" rev-parse HEAD)"
 MEM_MB_PER_SLOT=$(( (MEM_GB * 1024 + NCORES - 1) / NCORES ))
 q_repo="$(printf '%q' "$PALETTE_REPO")"
+q_source_mode="$(printf '%q' "$SOURCE_MODE")"
 q_video="$(printf '%q' "$VIDEO")"
 q_summary="$(printf '%q' "$SUMMARY")"
+q_keyframes="$(printf '%q' "$KEYFRAMES")"
+q_recording_dir="$(printf '%q' "$RECORDING_DIR")"
 q_observation="$(printf '%q' "$ACQUISITION_OBSERVATION")"
 q_artifacts="$(printf '%q' "$ARTIFACT_DIR")"
 q_status="$(printf '%q' "$STATUS_FILE")"
@@ -108,8 +137,11 @@ cat >"$JOB_SCRIPT" <<JOBSCRIPT
 set -euo pipefail
 umask 0002
 PALETTE_REPO=${q_repo}
+SOURCE_MODE=${q_source_mode}
 VIDEO=${q_video}
 SUMMARY=${q_summary}
+KEYFRAMES=${q_keyframes}
+RECORDING_DIR=${q_recording_dir}
 ACQUISITION_OBSERVATION=${q_observation}
 ARTIFACT_DIR=${q_artifacts}
 STATUS_FILE=${q_status}
@@ -130,11 +162,18 @@ export MKL_NUM_THREADS=1
 
 cmd=(
   scripts/py -m fisheye.diagnostics.probe_recording_dish_rim_fit
-  --video "\${VIDEO}"
-  --summary "\${SUMMARY}"
   --output-dir "\${ARTIFACT_DIR}"
   --gpu-id 0
 )
+if [[ "\${SOURCE_MODE}" == "clipped_recording" ]]; then
+  cmd+=(--recording-dir "\${RECORDING_DIR}")
+else
+  cmd+=(
+    --video "\${VIDEO}"
+    --summary "\${SUMMARY}"
+    --keyframes "\${KEYFRAMES}"
+  )
+fi
 if [[ -n "\${ACQUISITION_OBSERVATION}" ]]; then
   cmd+=(--acquisition-observation "\${ACQUISITION_OBSERVATION}")
 fi
@@ -151,7 +190,11 @@ status_tmp="\${STATUS_FILE}.tmp.\$\$"
   printf 'host=%s\n' "\$(hostname)"
   printf 'job_id=%s\n' "\${LSB_JOBID}"
   printf 'palette_commit=%s\n' "\${ACTUAL_COMMIT}"
+  printf 'source_mode=%s\n' "\${SOURCE_MODE}"
   printf 'video=%s\n' "\${VIDEO}"
+  printf 'summary=%s\n' "\${SUMMARY}"
+  printf 'keyframes=%s\n' "\${KEYFRAMES}"
+  printf 'recording_dir=%s\n' "\${RECORDING_DIR}"
   printf 'artifact_dir=%s\n' "\${ARTIFACT_DIR}"
   printf 'fit_report=%s\n' "\${ARTIFACT_DIR}/fit_report.json"
   printf 'payload_returncode=%s\n' "\${payload_rc}"
@@ -177,6 +220,11 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 printf 'mode=%s\n' "$([[ "$SUBMIT" == "1" ]] && printf submit || printf render-only)"
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'probe_id=%s\n' "$PROBE_ID"
+printf 'source_mode=%s\n' "$SOURCE_MODE"
+printf 'video=%s\n' "$VIDEO"
+printf 'summary=%s\n' "$SUMMARY"
+printf 'keyframes=%s\n' "$KEYFRAMES"
+printf 'recording_dir=%s\n' "$RECORDING_DIR"
 printf 'memory_request_mb_per_slot=%s\n' "$MEM_MB_PER_SLOT"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'artifact_dir=%s\n' "$ARTIFACT_DIR"

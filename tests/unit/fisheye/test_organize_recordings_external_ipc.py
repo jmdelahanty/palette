@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 import h5py
+import pytest
 
 from fisheye.utils import organize_recordings
 
@@ -57,7 +58,10 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
     _touch(crop_dir / f"Cam{camera}_crop_external_detach.csv", "frame_index\n0\n")
     _touch(crop_dir / f"Cam{camera}_crop_external_encode.csv", "frame_index\n0\n")
     _touch(crop_dir / f"Cam{camera}_crop_external_gop_routing.csv", "gop\n0\n")
-    _touch(batch / f"Cam{camera}_crop_meta.csv", "recording_frame_id,timestamp,timestamp_sys\n1,10,20\n")
+    _touch(
+        batch / f"Cam{camera}_crop_meta.csv",
+        "recording_frame_id,timestamp,timestamp_sys\n1,10,20\n",
+    )
     _touch(batch / f"Cam{camera}_crop_perf.csv", "metric,value\n")
     _touch(batch / f"Cam{camera}_crop_sidecar_perf.csv", "metric,value\n")
     _touch(batch / f"Cam{camera}_yolo_perf.csv", "metric,value\n")
@@ -77,9 +81,19 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
                     "backend": "external_ipc",
                     "role": "ingest_authoritative",
                     "output_kind": "full",
-                    "video": str(stale_root / "external_recorder" / f"Cam{camera}_external.mp4"),
-                    "metadata": str(stale_root / "external_recorder" / f"Cam{camera}_external_summary.json"),
-                    "keyframes": str(stale_root / "external_recorder" / f"Cam{camera}_external_keyframes.json"),
+                    "video": str(
+                        stale_root / "external_recorder" / f"Cam{camera}_external.mp4"
+                    ),
+                    "metadata": str(
+                        stale_root
+                        / "external_recorder"
+                        / f"Cam{camera}_external_summary.json"
+                    ),
+                    "keyframes": str(
+                        stale_root
+                        / "external_recorder"
+                        / f"Cam{camera}_external_keyframes.json"
+                    ),
                     "frame_count": 1,
                     "coordinate_space": "full_frame_pixels",
                 },
@@ -87,10 +101,22 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
                     "backend": "external_ipc",
                     "role": "sidecar",
                     "output_kind": "crop",
-                    "video": str(stale_root / "external_crop_recorder" / f"Cam{camera}_crop_external.mp4"),
+                    "video": str(
+                        stale_root
+                        / "external_crop_recorder"
+                        / f"Cam{camera}_crop_external.mp4"
+                    ),
                     "metadata": f"Cam{camera}_crop_meta.csv",
-                    "summary": str(stale_root / "external_crop_recorder" / f"Cam{camera}_crop_external_summary.json"),
-                    "keyframes": str(stale_root / "external_crop_recorder" / f"Cam{camera}_crop_external_keyframe.json"),
+                    "summary": str(
+                        stale_root
+                        / "external_crop_recorder"
+                        / f"Cam{camera}_crop_external_summary.json"
+                    ),
+                    "keyframes": str(
+                        stale_root
+                        / "external_crop_recorder"
+                        / f"Cam{camera}_crop_external_keyframe.json"
+                    ),
                     "perf": f"Cam{camera}_crop_perf.csv",
                     "sidecar_perf": f"Cam{camera}_crop_sidecar_perf.csv",
                     "frame_count": 1,
@@ -111,7 +137,9 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
     return batch
 
 
-def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: Path) -> None:
+def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(
+    tmp_path: Path,
+) -> None:
     batch = _make_external_ipc_batch(tmp_path)
     plans = organize_recordings._build_external_ipc_plans(
         batch,
@@ -139,12 +167,25 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: P
     ]
 
     derived_names = [item.dest_name for item in plan.derived_files]
-    assert "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_external.mp4" in derived_names
-    assert "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_meta.csv" in derived_names
-    assert "external_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_external_detach.csv" in derived_names
+    assert (
+        "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_external.mp4"
+        in derived_names
+    )
+    assert (
+        "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_meta.csv"
+        in derived_names
+    )
+    assert (
+        "external_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_external_detach.csv"
+        in derived_names
+    )
     assert "citrus/2026-05-29T18-11-16Z_threading_startup.json" in derived_names
-    assert all("shard" not in item.source.name for item in plan.cam_files + plan.derived_files)
-    assert all("shard" not in item.dest_name for item in plan.cam_files + plan.derived_files)
+    assert all(
+        "shard" not in item.source.name for item in plan.cam_files + plan.derived_files
+    )
+    assert all(
+        "shard" not in item.dest_name for item in plan.cam_files + plan.derived_files
+    )
 
     video_streams = plan.meta["video_streams"]
     assert video_streams["schema_id"] == "orange_runtime_video_streams_v1"
@@ -155,8 +196,13 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: P
     assert video_streams["streams"]["full"]["frame_clock_metadata"] == (
         "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv"
     )
-    assert video_streams["streams"]["crop"]["role"] == "runtime_derived_acquisition_input"
-    assert video_streams["streams"]["crop"]["video_pixel_coordinate_space"] == "crop_frame_pixels"
+    assert (
+        video_streams["streams"]["crop"]["role"] == "runtime_derived_acquisition_input"
+    )
+    assert (
+        video_streams["streams"]["crop"]["video_pixel_coordinate_space"]
+        == "crop_frame_pixels"
+    )
     assert (
         video_streams["streams"]["crop"]["blank_frame_policy"]
         == "encode_black_frame_when_no_detection"
@@ -210,7 +256,9 @@ def test_external_ipc_plan_keeps_full_metadata_summary_and_status_distinct(
     )
 
 
-def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(tmp_path: Path) -> None:
+def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(
+    tmp_path: Path,
+) -> None:
     batch = _make_external_ipc_batch(tmp_path)
     for h5_path in batch.rglob("*.h5"):
         h5_path.unlink()
@@ -243,17 +291,62 @@ def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(tmp_path: P
     ]
 
     derived_names = [item.dest_name for item in plan.derived_files]
-    assert "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_external.mp4" in derived_names
-    assert "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_meta.csv" in derived_names
+    assert (
+        "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_external.mp4"
+        in derived_names
+    )
+    assert (
+        "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_meta.csv"
+        in derived_names
+    )
 
     video_streams = plan.meta["video_streams"]
     assert video_streams["streams"]["full"]["frame_clock_metadata"] == (
         "cams/Cam2010093_2026_05_29_14_11_07_meta.csv"
     )
-    assert video_streams["streams"]["crop"]["video_pixel_coordinate_space"] == "crop_frame_pixels"
+    assert (
+        video_streams["streams"]["crop"]["video_pixel_coordinate_space"]
+        == "crop_frame_pixels"
+    )
 
 
-def test_external_ipc_recording_only_full_video_without_crop_meta_is_valid(tmp_path: Path) -> None:
+def test_external_ipc_recording_only_rolling_clips_fail_closed(tmp_path: Path) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    session_path = batch / "recording_session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    outputs = session.pop("recording_outputs")
+    session["mode"] = "rolling_clips"
+    session["clips"] = [
+        {"clip_id": "clip_000000", "clip_index": 0, "recording_outputs": outputs},
+        {"clip_id": "clip_000001", "clip_index": 1, "recording_outputs": outputs},
+    ]
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="one parent recording per camera stream"):
+        organize_recordings._build_external_ipc_recording_only_plans(
+            batch,
+            dest_root=tmp_path / "recordings",
+            rename_cams=True,
+        )
+
+
+def test_external_ipc_clip_start_never_uses_finalize_or_session_end() -> None:
+    session = {
+        "created_at_utc": "2026-08-06T23:13:38Z",
+        "updated_at_utc": "2026-08-08T02:25:38Z",
+        "stream": {"finished_at_utc": "2026-08-08T02:25:38Z"},
+    }
+    clip = {"finalized_at_utc": "2026-08-08T02:25:38Z"}
+
+    assert (
+        organize_recordings._external_ipc_clip_start_utc(session, clip)
+        == "2026-08-06T23:13:38Z"
+    )
+
+
+def test_external_ipc_recording_only_full_video_without_crop_meta_is_valid(
+    tmp_path: Path,
+) -> None:
     batch = _make_external_ipc_batch(tmp_path)
     session_path = batch / "recording_session.json"
     session = json.loads(session_path.read_text(encoding="utf-8"))
@@ -278,7 +371,9 @@ def test_external_ipc_recording_only_full_video_without_crop_meta_is_valid(tmp_p
     assert "crop" not in plan.meta["video_streams"]["streams"]
 
 
-def test_external_ipc_h5_plan_does_not_declare_missing_compat_clock_csv(tmp_path: Path) -> None:
+def test_external_ipc_h5_plan_does_not_declare_missing_compat_clock_csv(
+    tmp_path: Path,
+) -> None:
     batch = _make_external_ipc_batch(tmp_path)
     (batch / "Cam2010093_crop_meta.csv").unlink()
 
@@ -295,7 +390,9 @@ def test_external_ipc_h5_plan_does_not_declare_missing_compat_clock_csv(tmp_path
     assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
 
 
-def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, monkeypatch) -> None:
+def test_external_ipc_apply_writes_nested_sidecars_and_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
     batch = _make_external_ipc_batch(tmp_path)
     plans = organize_recordings._build_external_ipc_plans(
         batch,
@@ -340,11 +437,16 @@ def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, 
         dest / "derived" / "citrus" / "2026-05-29T18-11-16Z_threading_startup.json"
     ).exists()
 
-    manifest = json.loads((dest / "recording_manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (dest / "recording_manifest.json").read_text(encoding="utf-8")
+    )
     assert manifest["artifact_schema_id"] == "orange_external_ipc_single_clip_v1"
     assert manifest["recording_backend"] == "external_ipc"
     assert manifest["orange_session_id"] == "2026_05_29_14_11_07"
-    assert "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv" in manifest["files"]["cams"]
+    assert (
+        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv"
+        in manifest["files"]["cams"]
+    )
     assert (
         "derived/external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_external.mp4"
         in manifest["files"]["derived"]
@@ -352,7 +454,9 @@ def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, 
     assert manifest["video_streams"]["streams"]["crop"]["stream_id"] == "2010093_crop"
 
 
-def test_external_ipc_plan_lifts_manifest_context_from_h5_and_runtime_snapshot(tmp_path: Path) -> None:
+def test_external_ipc_plan_lifts_manifest_context_from_h5_and_runtime_snapshot(
+    tmp_path: Path,
+) -> None:
     batch_root = tmp_path / "staging" / "2026_06_14_17_11_56"
     citrus_root = batch_root / "citrus"
     citrus_root.mkdir(parents=True)

@@ -188,7 +188,9 @@ def _augment_h5_manifest_context(h5: h5py.File, meta: Dict[str, Any]) -> None:
             "protocol_name",
             protocol_snapshot.attrs.get("protocol_name"),
         )
-        protocol_definition = _read_h5_json_object(h5, "protocol_snapshot/protocol_definition_json")
+        protocol_definition = _read_h5_json_object(
+            h5, "protocol_snapshot/protocol_definition_json"
+        )
         if protocol_definition:
             _set_meta_if_present(
                 meta,
@@ -217,7 +219,9 @@ def _augment_h5_manifest_context(h5: h5py.File, meta: Dict[str, Any]) -> None:
 
     arena_config = _read_h5_json_object(h5, "calibration_snapshot/arena_config_json")
     if arena_config:
-        _set_meta_if_present(meta, "dish_design", _dish_design_from_arena_config(arena_config))
+        _set_meta_if_present(
+            meta, "dish_design", _dish_design_from_arena_config(arena_config)
+        )
 
 
 def _read_camera_context(h5_path: Path) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -387,9 +391,8 @@ def _load_video_only_rows(
             )
             row["source_video"] = str(source_video)
 
-            optional_camera_csv = (
-                row.get("source_camera_metadata_csv")
-                or row.get("camera_metadata_csv")
+            optional_camera_csv = row.get("source_camera_metadata_csv") or row.get(
+                "camera_metadata_csv"
             )
             if optional_camera_csv:
                 resolved_csv = _resolve_video_only_source_path(
@@ -427,7 +430,9 @@ def _build_video_only_plan(
     if optional_camera_csv:
         camera_csv_path = Path(optional_camera_csv).expanduser().resolve()
         if rename_cams and camera_id:
-            cam_files.append(PlannedFile(camera_csv_path, f"Cam{camera_id}_{session_tag}_meta.csv"))
+            cam_files.append(
+                PlannedFile(camera_csv_path, f"Cam{camera_id}_{session_tag}_meta.csv")
+            )
         else:
             cam_files.append(PlannedFile(camera_csv_path, camera_csv_path.name))
 
@@ -467,7 +472,14 @@ def _build_video_only_plan(
     )
     for shared_names, dest_name in (
         (("ptp_sync_summary.json",), "ptp_sync_summary.json"),
-        (("recording_snapshot.json", "recording_snapshot", "recording_snapshot_runtime.json"), "recording_snapshot_runtime.json"),
+        (
+            (
+                "recording_snapshot.json",
+                "recording_snapshot",
+                "recording_snapshot_runtime.json",
+            ),
+            "recording_snapshot_runtime.json",
+        ),
     ):
         shared_path = _first_existing(
             [root / name for root in shared_roots for name in shared_names]
@@ -764,7 +776,9 @@ def _external_ipc_video_streams_payload(
                     "detection_w",
                     "detection_h",
                 ],
-                "blank_frame_policy": _pick_stream_value(crop_output, "blank_frame_policy"),
+                "blank_frame_policy": _pick_stream_value(
+                    crop_output, "blank_frame_policy"
+                ),
                 "selection_policy": _pick_stream_value(crop_output, "selection_policy"),
                 "width": _pick_stream_value(crop_output, "width"),
                 "height": _pick_stream_value(crop_output, "height"),
@@ -773,7 +787,9 @@ def _external_ipc_video_streams_payload(
                 "codec": _pick_stream_value(crop_output, "codec"),
                 "container": _pick_stream_value(crop_output, "container"),
                 "encoded_format": _pick_stream_value(crop_output, "encoded_format"),
-                "pixel_source_format": _pick_stream_value(crop_output, "pixel_source_format"),
+                "pixel_source_format": _pick_stream_value(
+                    crop_output, "pixel_source_format"
+                ),
             }
         )
         streams["crop"] = crop_stream
@@ -815,9 +831,18 @@ def _append_external_ipc_batch_context(
         ("_citrus_transfer_complete.json", "transfer_complete.json"),
         ("orange_local_control.events.jsonl", "orange_local_control.events.jsonl"),
         ("external_recorder_contract.json", "external_recorder_contract.json"),
-        ("external_crop_recorder_contract.json", "external_crop_recorder_contract.json"),
-        ("external_recorder_supervisor_plan.json", "external_recorder_supervisor_plan.json"),
-        ("external_crop_recorder_supervisor_plan.json", "external_crop_recorder_supervisor_plan.json"),
+        (
+            "external_crop_recorder_contract.json",
+            "external_crop_recorder_contract.json",
+        ),
+        (
+            "external_recorder_supervisor_plan.json",
+            "external_recorder_supervisor_plan.json",
+        ),
+        (
+            "external_crop_recorder_supervisor_plan.json",
+            "external_crop_recorder_supervisor_plan.json",
+        ),
     ):
         shared_path = batch_root / shared_name
         if shared_path.exists():
@@ -1221,16 +1246,11 @@ def _external_ipc_clip_start_utc(
 ) -> Optional[str]:
     candidates: List[object] = []
     if isinstance(clip, dict):
-        candidates.extend(
-            [
-                clip.get("started_at_utc"),
-                clip.get("finalized_at_utc"),
-            ]
-        )
+        candidates.append(clip.get("started_at_utc"))
     stream = session.get("stream")
     if isinstance(stream, dict):
-        candidates.extend([stream.get("started_at_utc"), stream.get("finished_at_utc")])
-    candidates.extend([session.get("created_at_utc"), session.get("updated_at_utc")])
+        candidates.append(stream.get("started_at_utc"))
+    candidates.append(session.get("created_at_utc"))
     for candidate in candidates:
         value = _normalize_attr(candidate)
         if value:
@@ -1337,14 +1357,19 @@ def _build_external_ipc_recording_only_plans(
         for clip, _camera_id, _outputs in entries
         if isinstance(clip, dict) and clip.get("clip_id")
     }
-    include_clip_id = len(clip_ids) > 1
-    session_id = _sanitize_for_filename(str(session.get("session_id") or source_root.name))
+    if len(clip_ids) > 1:
+        raise ValueError(
+            "External IPC rolling clips must be organized as one parent recording "
+            "per camera stream, with all clips nested under that camera recording; "
+            "clips must not become independent recording IDs. Repair already-split "
+            "outputs with fisheye.utils.consolidate_external_ipc_rolling_recordings."
+        )
+    session_id = _sanitize_for_filename(
+        str(session.get("session_id") or source_root.name)
+    )
     plans: List[RecordingPlan] = []
     for clip, camera_id, outputs in entries:
         name_parts = [session_id]
-        clip_id = _normalize_attr(clip.get("clip_id")) if isinstance(clip, dict) else None
-        if include_clip_id and clip_id:
-            name_parts.append(_sanitize_for_filename(clip_id))
         name_parts.append(f"Cam{camera_id}")
         recording_name = "_".join(name_parts)
         plans.append(
@@ -1384,7 +1409,11 @@ def _build_external_ipc_plans(
 
 
 def _choose_session_tag(meta: Dict[str, Any], h5_path: Path) -> str:
-    return meta.get("session_uuid") or meta.get("session_start_iso8601_utc") or h5_path.stem
+    return (
+        meta.get("session_uuid")
+        or meta.get("session_start_iso8601_utc")
+        or h5_path.stem
+    )
 
 
 def _build_plan(
@@ -1421,11 +1450,18 @@ def _build_plan(
     # while H5 files live below ``citrus/``. Copy shared context into every
     # recording because one batch can contain several arena/H5 recordings.
     for source_names, dest_name in (
-        (("recording_snapshot.json", "recording_snapshot"), "recording_snapshot_runtime.json"),
+        (
+            ("recording_snapshot.json", "recording_snapshot"),
+            "recording_snapshot_runtime.json",
+        ),
         (("ptp_sync_summary.json",), "ptp_sync_summary.json"),
     ):
         source = _first_existing(
-            [root / source_name for root in search_roots for source_name in source_names]
+            [
+                root / source_name
+                for root in search_roots
+                for source_name in source_names
+            ]
         )
         if source is not None:
             raw_files.append(PlannedFile(source, dest_name, action="copy"))
@@ -1464,7 +1500,8 @@ def _build_plan(
         ]
         for pattern in derived_patterns:
             derived_files.extend(
-                PlannedFile(path, path.name) for path in sorted(pattern.parent.glob(pattern.name))
+                PlannedFile(path, path.name)
+                for path in sorted(pattern.parent.glob(pattern.name))
             )
     else:
         missing.append("camera_id (missing in H5 attrs)")
@@ -1496,7 +1533,11 @@ def _format_recording_summary(plan: RecordingPlan) -> List[str]:
     lines.append(f"  camera_id: {camera_label}")
     if plan.cam_files:
         cam_names = ", ".join(
-            f"{file.source.name} -> {file.dest_name}" if file.source.name != file.dest_name else file.source.name
+            (
+                f"{file.source.name} -> {file.dest_name}"
+                if file.source.name != file.dest_name
+                else file.source.name
+            )
             for file in plan.cam_files
         )
         lines.append(f"  cam files: {cam_names}")
@@ -1642,7 +1683,9 @@ def _write_manifest(
         "source_dir": str(plan.source_dir),
         "files": files,
         "hevc_keyframe_flags": plan.keyframe_checks if plan.keyframe_checks else None,
-        "recording_snapshot": f"derived/{snapshot_path.name}" if snapshot_path.exists() else None,
+        "recording_snapshot": (
+            f"derived/{snapshot_path.name}" if snapshot_path.exists() else None
+        ),
         "recording_geometry_bundle": geometry_bundle,
         "preflight": default_preflight_payload(),
     }
@@ -1844,7 +1887,9 @@ def _apply_plan(
                 src = planned.source
                 should_copy = planned.action == "copy"
                 if planned.action not in {"move", "copy"}:
-                    record_warning(f"Unknown planned file action '{planned.action}' for {src}")
+                    record_warning(
+                        f"Unknown planned file action '{planned.action}' for {src}"
+                    )
                     continue
                 if not should_copy and src in moved:
                     record_warning(f"Skipping duplicate source: {src}")
@@ -1892,7 +1937,9 @@ def _apply_plan(
                         session_uuid=session_uuid,
                         logger=logger,
                     )
-                    check = plan.keyframe_checks.get(f"{folder_name}/{planned.dest_name}", {})
+                    check = plan.keyframe_checks.get(
+                        f"{folder_name}/{planned.dest_name}", {}
+                    )
                     if bool(check.get("needs_fix", False)):
                         check_message = str(check.get("message", "")).strip()
                         record_warning(
@@ -2092,11 +2139,23 @@ def _persist_preflight_to_manifest(
     if not isinstance(existing_preflight, dict):
         existing_preflight = {}
 
-    existing_video = existing_preflight.get("video") if isinstance(existing_preflight.get("video"), dict) else None
-    existing_h5 = existing_preflight.get("h5") if isinstance(existing_preflight.get("h5"), dict) else None
+    existing_video = (
+        existing_preflight.get("video")
+        if isinstance(existing_preflight.get("video"), dict)
+        else None
+    )
+    existing_h5 = (
+        existing_preflight.get("h5")
+        if isinstance(existing_preflight.get("h5"), dict)
+        else None
+    )
     payload["preflight"] = build_manifest_preflight_payload(
         checked_at_utc=_utc_now(),
-        video=video_result.manifest_payload if video_result is not None else existing_video,
+        video=(
+            video_result.manifest_payload
+            if video_result is not None
+            else existing_video
+        ),
         h5=h5_result.manifest_payload if h5_result is not None else existing_h5,
     )
 
@@ -2174,12 +2233,20 @@ def _run_video_diagnostics_for_plan(
         )
 
     recording = next(
-        (item for item in report.recordings if item.recording_root == str(plan.dest_dir)),
+        (
+            item
+            for item in report.recordings
+            if item.recording_root == str(plan.dest_dir)
+        ),
         None,
     )
-    media_status = str(recording.media_status if recording is not None else report.overall_status)
+    media_status = str(
+        recording.media_status if recording is not None else report.overall_status
+    )
     tooling_status = str(recording.tooling_status if recording is not None else "skip")
-    scanned = int(recording.item_count if recording is not None else report.summary.scanned)
+    scanned = int(
+        recording.item_count if recording is not None else report.summary.scanned
+    )
     finding_codes = _diagnostic_finding_codes(
         [finding for item in report.items for finding in item.findings]
     )
@@ -2203,13 +2270,19 @@ def _run_video_diagnostics_for_plan(
     warnings: List[str] = []
     if scanned == 0:
         status = PRECHECK_WARN
-        warnings.append(f"Video diagnostics for {plan.name}: no videos found under {plan.dest_dir}")
+        warnings.append(
+            f"Video diagnostics for {plan.name}: no videos found under {plan.dest_dir}"
+        )
         media_payload_status = PRECHECK_NOT_RUN
     else:
         media_payload_status = media_status
         if media_status == PRECHECK_FAIL:
             status = PRECHECK_FAIL
-        elif media_status in {PRECHECK_WARN, "error"} or tooling_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"}:
+        elif media_status in {PRECHECK_WARN, "error"} or tooling_status in {
+            PRECHECK_WARN,
+            PRECHECK_FAIL,
+            "error",
+        }:
             status = PRECHECK_WARN
         if status in {PRECHECK_WARN, PRECHECK_FAIL}:
             warnings.append(
@@ -2303,7 +2376,11 @@ def _run_h5_diagnostics_for_plan(
     warnings: List[str] = []
     if report.core_status == PRECHECK_FAIL:
         status = PRECHECK_FAIL
-    elif report.core_status in {PRECHECK_WARN, "error"} or report.optional_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"} or report.tooling_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"}:
+    elif (
+        report.core_status in {PRECHECK_WARN, "error"}
+        or report.optional_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"}
+        or report.tooling_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"}
+    ):
         status = PRECHECK_WARN
 
     if status in {PRECHECK_WARN, PRECHECK_FAIL}:
@@ -2344,7 +2421,9 @@ def main() -> int:
             "(defaults to PALETTE_STAGING_ROOT or /nvme1/staging)."
         ),
     )
-    default_dest_root = Path(os.environ.get("PALETTE_RECORDINGS_ROOT", "/nvme1/recordings"))
+    default_dest_root = Path(
+        os.environ.get("PALETTE_RECORDINGS_ROOT", "/nvme1/recordings")
+    )
     parser.add_argument(
         "--dest-root",
         type=Path,
@@ -2510,20 +2589,32 @@ def main() -> int:
             print("--require-done is not supported with --video-only.", file=sys.stderr)
             return 1
         if args.run_h5_diagnostics:
-            print("--run-h5-diagnostics is not supported with --video-only.", file=sys.stderr)
+            print(
+                "--run-h5-diagnostics is not supported with --video-only.",
+                file=sys.stderr,
+            )
             return 1
         if args.external_ipc:
             print("--external-ipc is not supported with --video-only.", file=sys.stderr)
             return 1
         if args.external_ipc_recording_only:
-            print("--external-ipc-recording-only is not supported with --video-only.", file=sys.stderr)
+            print(
+                "--external-ipc-recording-only is not supported with --video-only.",
+                file=sys.stderr,
+            )
             return 1
 
     if args.external_ipc_recording_only and args.run_h5_diagnostics:
-        print("--run-h5-diagnostics is not supported with --external-ipc-recording-only.", file=sys.stderr)
+        print(
+            "--run-h5-diagnostics is not supported with --external-ipc-recording-only.",
+            file=sys.stderr,
+        )
         return 1
     if args.external_ipc_recording_only and args.external_ipc:
-        print("--external-ipc and --external-ipc-recording-only are mutually exclusive.", file=sys.stderr)
+        print(
+            "--external-ipc and --external-ipc-recording-only are mutually exclusive.",
+            file=sys.stderr,
+        )
         return 1
     if args.num_dishes is not None and args.num_dishes < 1:
         print("--num-dishes must be at least 1.", file=sys.stderr)
@@ -2533,7 +2624,10 @@ def main() -> int:
         return 1
 
     if (args.run_video_diagnostics or args.run_h5_diagnostics) and not args.apply:
-        print("--run-video-diagnostics and --run-h5-diagnostics require --apply.", file=sys.stderr)
+        print(
+            "--run-video-diagnostics and --run-h5-diagnostics require --apply.",
+            file=sys.stderr,
+        )
         return 1
 
     effective_write_manifest = bool(
@@ -2610,12 +2704,16 @@ def main() -> int:
         plans: List[RecordingPlan]
         if args.video_only:
             try:
-                rows = _load_video_only_rows(args.metadata_csv.expanduser().resolve(), source_root=source_path)
+                rows = _load_video_only_rows(
+                    args.metadata_csv.expanduser().resolve(), source_root=source_path
+                )
             except Exception as exc:
                 print(f"Failed to read metadata CSV: {exc}", file=sys.stderr)
                 return 1
             plans = [
-                _build_video_only_plan(row, dest_root=args.dest_root, rename_cams=args.rename_cams)
+                _build_video_only_plan(
+                    row, dest_root=args.dest_root, rename_cams=args.rename_cams
+                )
                 for row in rows
             ]
             print(f"Found {len(plans)} video-only recording(s) from metadata CSV.")
@@ -2627,7 +2725,10 @@ def main() -> int:
                     rename_cams=args.rename_cams,
                 )
             except Exception as exc:
-                print(f"Failed to build external_ipc recording-only plan: {exc}", file=sys.stderr)
+                print(
+                    f"Failed to build external_ipc recording-only plan: {exc}",
+                    file=sys.stderr,
+                )
                 return 1
             print(f"Found {len(plans)} external_ipc recording-only video recording(s).")
         elif args.external_ipc or _looks_like_external_ipc_batch(source_path):
@@ -2653,16 +2754,24 @@ def main() -> int:
 
             if snapshot_path is not None:
                 if not snapshot_path.exists():
-                    print(f"Snapshot path does not exist: {snapshot_path}", file=sys.stderr)
+                    print(
+                        f"Snapshot path does not exist: {snapshot_path}",
+                        file=sys.stderr,
+                    )
                 else:
                     try:
-                        snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                        snapshot_payload = json.loads(
+                            snapshot_path.read_text(encoding="utf-8")
+                        )
                     except Exception as exc:
                         print(f"Failed to read snapshot JSON: {exc}", file=sys.stderr)
                         snapshot_payload = None
                     else:
                         if not isinstance(snapshot_payload, dict):
-                            print("Snapshot JSON must be an object at the top level.", file=sys.stderr)
+                            print(
+                                "Snapshot JSON must be an object at the top level.",
+                                file=sys.stderr,
+                            )
                             snapshot_payload = None
         else:
             h5_files = _find_h5_files(source_path, args.recursive)
@@ -2687,16 +2796,24 @@ def main() -> int:
 
             if snapshot_path is not None:
                 if not snapshot_path.exists():
-                    print(f"Snapshot path does not exist: {snapshot_path}", file=sys.stderr)
+                    print(
+                        f"Snapshot path does not exist: {snapshot_path}",
+                        file=sys.stderr,
+                    )
                 else:
                     try:
-                        snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                        snapshot_payload = json.loads(
+                            snapshot_path.read_text(encoding="utf-8")
+                        )
                     except Exception as exc:
                         print(f"Failed to read snapshot JSON: {exc}", file=sys.stderr)
                         snapshot_payload = None
                     else:
                         if not isinstance(snapshot_payload, dict):
-                            print("Snapshot JSON must be an object at the top level.", file=sys.stderr)
+                            print(
+                                "Snapshot JSON must be an object at the top level.",
+                                file=sys.stderr,
+                            )
                             snapshot_payload = None
 
             plans = [
@@ -2766,11 +2883,17 @@ def main() -> int:
                 warnings.extend(cleanup_warnings)
                 if logger:
                     for warning in cleanup_warnings:
-                        logger.log("warning", batch_source=str(source_path), message=warning)
+                        logger.log(
+                            "warning", batch_source=str(source_path), message=warning
+                        )
             if args.cleanup_staging:
                 # Snapshot names kept as safety net — normally moved to raw/
                 # by _build_plan, but may remain if no H5 was found.
-                ignore_names = {"TRANSFER_DONE", "recording_snapshot.json", "recording_snapshot"}
+                ignore_names = {
+                    "TRANSFER_DONE",
+                    "recording_snapshot.json",
+                    "recording_snapshot",
+                }
                 ignore_names.update(args.cleanup_ignore)
                 cleanup_warnings = _cleanup_staging_dirs(
                     source_path,
@@ -2781,7 +2904,9 @@ def main() -> int:
                 warnings.extend(cleanup_warnings)
                 if logger:
                     for warning in cleanup_warnings:
-                        logger.log("warning", batch_source=str(source_path), message=warning)
+                        logger.log(
+                            "warning", batch_source=str(source_path), message=warning
+                        )
             if args.run_video_diagnostics or args.run_h5_diagnostics:
                 print("\nRunning post-organize diagnostics:")
                 for plan in plans:
@@ -2816,9 +2941,19 @@ def main() -> int:
                             "preflight_written",
                             recording_name=plan.name,
                             session_uuid=plan.meta.get("session_uuid"),
-                            manifest_path=str(plan.dest_dir / "recording_manifest.json"),
-                            video_status=(video_result.manifest_payload.get("status") if video_result else None),
-                            h5_status=(h5_result.manifest_payload.get("status") if h5_result else None),
+                            manifest_path=str(
+                                plan.dest_dir / "recording_manifest.json"
+                            ),
+                            video_status=(
+                                video_result.manifest_payload.get("status")
+                                if video_result
+                                else None
+                            ),
+                            h5_status=(
+                                h5_result.manifest_payload.get("status")
+                                if h5_result
+                                else None
+                            ),
                         )
             if warnings:
                 print("\nWarnings:")

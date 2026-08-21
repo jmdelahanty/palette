@@ -80,6 +80,29 @@ def test_target_manifest_preserves_exact_recording_bound_sources(
     assert target.acquisition_observation_path == paths["observation"].resolve()
 
 
+def test_target_manifest_accepts_clipped_recording_metadata_source(
+    tmp_path: Path,
+) -> None:
+    paths = _target_files(tmp_path)
+    (paths["recording"] / "recording_clip_index.json").write_text("{}\n")
+    row = _manifest_row(paths)
+    for field in ("video", "summary", "keyframes"):
+        row.pop(field)
+    manifest = tmp_path / "targets.json"
+    manifest.write_text(
+        json.dumps({"schema": TARGET_MANIFEST_SCHEMA, "targets": [row]})
+    )
+
+    (target,) = load_target_manifest(manifest)
+
+    assert target.video_path is None
+    assert target.summary_path is None
+    assert target.keyframe_path is None
+    assert target.probe_source().to_json()["source_kind"] == (
+        "recording_level_clipped_collection"
+    )
+
+
 def test_target_manifest_accepts_producer_native_folder_without_recovery_receipt(
     tmp_path: Path,
 ) -> None:
@@ -118,6 +141,19 @@ def test_target_manifest_rejects_source_outside_recording(tmp_path: Path) -> Non
     )
 
     with pytest.raises(ValueError, match="must belong to the recording"):
+        load_target_manifest(manifest)
+
+
+def test_target_manifest_rejects_partial_whole_video_source(tmp_path: Path) -> None:
+    paths = _target_files(tmp_path)
+    row = _manifest_row(paths)
+    row.pop("summary")
+    manifest = tmp_path / "targets.json"
+    manifest.write_text(
+        json.dumps({"schema": TARGET_MANIFEST_SCHEMA, "targets": [row]})
+    )
+
+    with pytest.raises(ValueError, match="requires video, summary, and keyframe"):
         load_target_manifest(manifest)
 
 

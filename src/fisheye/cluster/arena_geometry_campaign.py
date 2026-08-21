@@ -72,10 +72,10 @@ class ArenaGeometryTarget:
     recording_id: str
     recording_dir: Path
     analysis_zarr: Path
-    video_path: Path
-    summary_path: Path
-    keyframe_path: Path
-    recovery_receipt_path: Path | None
+    video_path: Path | None = None
+    summary_path: Path | None = None
+    keyframe_path: Path | None = None
+    recovery_receipt_path: Path | None = None
     acquisition_observation_path: Path | None = None
     geometry_source: str = "recovery-receipt"
     geometry_camera_serial: str | None = None
@@ -102,21 +102,28 @@ class ArenaGeometryTarget:
         object.__setattr__(self, "recording_id", recording_id)
         object.__setattr__(self, "recording_dir", recording)
         object.__setattr__(self, "analysis_zarr", analysis)
-        object.__setattr__(
-            self,
-            "video_path",
-            _contained_file(self.video_path, recording, label="source video"),
+        probe_source = ArenaGeometryProbeSource(
+            video_path=self.video_path,
+            summary_path=self.summary_path,
+            keyframe_path=self.keyframe_path,
+            recording_dir=(
+                recording
+                if all(
+                    value is None
+                    for value in (
+                        self.video_path,
+                        self.summary_path,
+                        self.keyframe_path,
+                    )
+                )
+                else None
+            ),
+            acquisition_observation_path=self.acquisition_observation_path,
         )
-        object.__setattr__(
-            self,
-            "summary_path",
-            _contained_file(self.summary_path, recording, label="source summary"),
-        )
-        object.__setattr__(
-            self,
-            "keyframe_path",
-            _contained_file(self.keyframe_path, recording, label="keyframe summary"),
-        )
+        validate_recording_level_probe_source(recording, probe_source)
+        object.__setattr__(self, "video_path", probe_source.video_path)
+        object.__setattr__(self, "summary_path", probe_source.summary_path)
+        object.__setattr__(self, "keyframe_path", probe_source.keyframe_path)
         geometry_source = str(self.geometry_source).strip()
         if geometry_source not in {
             "producer-folder",
@@ -178,14 +185,14 @@ class ArenaGeometryTarget:
                     label="acquisition rim observation",
                 ),
             )
-        validate_recording_level_probe_source(
-            recording,
-            ArenaGeometryProbeSource(
-                video_path=self.video_path,
-                summary_path=self.summary_path,
-                keyframe_path=self.keyframe_path,
-                acquisition_observation_path=self.acquisition_observation_path,
-            ),
+
+    def probe_source(self) -> ArenaGeometryProbeSource:
+        return ArenaGeometryProbeSource(
+            video_path=self.video_path,
+            summary_path=self.summary_path,
+            keyframe_path=self.keyframe_path,
+            recording_dir=(self.recording_dir if self.video_path is None else None),
+            acquisition_observation_path=self.acquisition_observation_path,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -194,9 +201,14 @@ class ArenaGeometryTarget:
             "recording_id": self.recording_id,
             "recording_dir": str(self.recording_dir),
             "analysis_zarr": str(self.analysis_zarr),
-            "video": str(self.video_path),
-            "summary": str(self.summary_path),
-            "keyframes": str(self.keyframe_path),
+            "probe_source": self.probe_source().to_json(),
+            "video": str(self.video_path) if self.video_path is not None else None,
+            "summary": (
+                str(self.summary_path) if self.summary_path is not None else None
+            ),
+            "keyframes": (
+                str(self.keyframe_path) if self.keyframe_path is not None else None
+            ),
             "geometry_source": self.geometry_source,
             "geometry_camera_serial": self.geometry_camera_serial,
             "geometry_arena_id": self.geometry_arena_id,
@@ -231,15 +243,18 @@ def load_target_manifest(path: Path) -> tuple[ArenaGeometryTarget, ...]:
         observation = row.get("acquisition_observation")
         recovery = row.get("recovery_receipt")
         citrus_h5 = row.get("citrus_h5")
+        video = row.get("video")
+        summary = row.get("summary")
+        keyframes = row.get("keyframes")
         targets.append(
             ArenaGeometryTarget(
                 target_id=str(row.get("target_id") or recording_dir.name),
                 recording_id=str(row.get("recording_id") or ""),
                 recording_dir=recording_dir,
                 analysis_zarr=Path(str(row.get("analysis_zarr") or "")),
-                video_path=Path(str(row.get("video") or "")),
-                summary_path=Path(str(row.get("summary") or "")),
-                keyframe_path=Path(str(row.get("keyframes") or "")),
+                video_path=Path(str(video)) if video else None,
+                summary_path=Path(str(summary)) if summary else None,
+                keyframe_path=Path(str(keyframes)) if keyframes else None,
                 recovery_receipt_path=(Path(str(recovery)) if recovery else None),
                 acquisition_observation_path=(
                     Path(str(observation)) if observation else None
@@ -367,12 +382,7 @@ def build_plan(
                 geometry_camera_serial=target.geometry_camera_serial,
                 geometry_arena_id=target.geometry_arena_id,
                 citrus_h5_path=target.citrus_h5_path,
-                source=ArenaGeometryProbeSource(
-                    video_path=target.video_path,
-                    summary_path=target.summary_path,
-                    keyframe_path=target.keyframe_path,
-                    acquisition_observation_path=(target.acquisition_observation_path),
-                ),
+                source=target.probe_source(),
                 repo=resolved_repo,
                 run_root=resolved_run_root,
                 registry_path=resolved_registry,

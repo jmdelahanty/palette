@@ -98,35 +98,78 @@ def _validate_probe_summary(path: Path) -> None:
         raise ValueError(f"Source summary has no camera serial: {path}")
 
 
+def _require_clipped_recording(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"Clipped recording directory not found: {resolved}")
+    index_path = resolved / "recording_clip_index.json"
+    if not index_path.is_file():
+        raise FileNotFoundError(f"Recording clip index not found: {index_path}")
+    return resolved
+
+
 @dataclass(frozen=True)
 class ArenaGeometryProbeSource:
-    """Exact whole-recording source used for the recording-level fit.
+    """Exact whole-video or clipped source used for the recording-level fit.
 
     Downstream processing may be clipped or whole-recording.  Geometry remains
-    one recording-level artifact in either case; this source is the canonical
-    full-frame recording evidence from which it is estimated.
+    one recording-level artifact in either case. A clipped source is the entire
+    indexed camera stream, never an individual clip.
     """
 
-    video_path: Path
-    summary_path: Path
-    keyframe_path: Path
+    video_path: Path | None = None
+    summary_path: Path | None = None
+    keyframe_path: Path | None = None
     acquisition_observation_path: Path | None = None
+    recording_dir: Path | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "video_path", _require_file(self.video_path, label="source video")
+        whole_video_fields = (
+            self.video_path,
+            self.summary_path,
+            self.keyframe_path,
         )
-        object.__setattr__(
-            self,
-            "summary_path",
-            _require_file(self.summary_path, label="source summary"),
+        has_clipped_source = self.recording_dir is not None
+        has_any_whole_video_source = any(
+            value is not None for value in whole_video_fields
         )
-        _validate_probe_summary(self.summary_path)
-        object.__setattr__(
-            self,
-            "keyframe_path",
-            _require_file(self.keyframe_path, label="keyframe summary"),
-        )
+        if has_clipped_source == has_any_whole_video_source:
+            raise ValueError(
+                "Choose exactly one arena-geometry probe source: a clipped "
+                "recording directory or a whole video with both sidecars."
+            )
+        if has_clipped_source:
+            assert self.recording_dir is not None
+            object.__setattr__(
+                self,
+                "recording_dir",
+                _require_clipped_recording(self.recording_dir),
+            )
+        else:
+            if any(value is None for value in whole_video_fields):
+                raise ValueError(
+                    "Whole-video arena geometry requires video, summary, and "
+                    "keyframe paths."
+                )
+            assert self.video_path is not None
+            assert self.summary_path is not None
+            assert self.keyframe_path is not None
+            object.__setattr__(
+                self,
+                "video_path",
+                _require_file(self.video_path, label="source video"),
+            )
+            object.__setattr__(
+                self,
+                "summary_path",
+                _require_file(self.summary_path, label="source summary"),
+            )
+            _validate_probe_summary(self.summary_path)
+            object.__setattr__(
+                self,
+                "keyframe_path",
+                _require_file(self.keyframe_path, label="keyframe summary"),
+            )
         if self.acquisition_observation_path is not None:
             object.__setattr__(
                 self,
@@ -138,6 +181,19 @@ class ArenaGeometryProbeSource:
             )
 
     def to_json(self) -> dict[str, Any]:
+        if self.recording_dir is not None:
+            return {
+                "source_kind": "recording_level_clipped_collection",
+                "recording_dir": str(self.recording_dir),
+                "recording_clip_index": str(
+                    self.recording_dir / "recording_clip_index.json"
+                ),
+                "acquisition_observation_path": (
+                    str(self.acquisition_observation_path)
+                    if self.acquisition_observation_path is not None
+                    else None
+                ),
+            }
         return {
             "source_kind": "recording_level_whole_video",
             "video_path": str(self.video_path),
@@ -158,6 +214,24 @@ def validate_recording_level_probe_source(
     """Require one native recording video and its exact organized sidecars."""
 
     recording = recording_dir.expanduser().resolve()
+    if source.recording_dir is not None:
+        if source.recording_dir != recording:
+            raise ValueError(
+                "Arena-geometry clipped source must be the target recording directory."
+            )
+        if source.acquisition_observation_path is not None:
+            try:
+                source.acquisition_observation_path.relative_to(recording)
+            except ValueError as exc:
+                raise ValueError(
+                    "Arena-geometry acquisition rim observation must belong to "
+                    "the target recording."
+                ) from exc
+        return
+
+    assert source.video_path is not None
+    assert source.summary_path is not None
+    assert source.keyframe_path is not None
     source_paths = {
         "source video": source.video_path,
         "source summary": source.summary_path,
@@ -172,7 +246,7 @@ def validate_recording_level_probe_source(
             path.relative_to(recording)
         except ValueError as exc:
             raise ValueError(
-                f"Arena-geometry {label} must belong to the target recording."
+                f"Arena-geometry {label} must belong to the recording."
             ) from exc
 
     camera_dir = (recording / "cams").resolve()
@@ -501,12 +575,6 @@ def _plan_review_target(
         "scripts/py",
         "-m",
         "fisheye.diagnostics.probe_recording_dish_rim_fit",
-        "--video",
-        str(inputs.source.video_path),
-        "--summary",
-        str(inputs.source.summary_path),
-        "--keyframes",
-        str(inputs.source.keyframe_path),
         "--output-dir",
         str(review_dir),
         "--max-keyframes-per-window",
@@ -516,6 +584,22 @@ def _plan_review_target(
         "--coarse-max-dimension-px",
         str(int(inputs.coarse_max_dimension_px)),
     ]
+    if inputs.source.recording_dir is not None:
+        probe_command.extend(("--recording-dir", str(inputs.source.recording_dir)))
+    else:
+        assert inputs.source.video_path is not None
+        assert inputs.source.summary_path is not None
+        assert inputs.source.keyframe_path is not None
+        probe_command.extend(
+            (
+                "--video",
+                str(inputs.source.video_path),
+                "--summary",
+                str(inputs.source.summary_path),
+                "--keyframes",
+                str(inputs.source.keyframe_path),
+            )
+        )
     if inputs.source.acquisition_observation_path is not None:
         probe_command.extend(
             (

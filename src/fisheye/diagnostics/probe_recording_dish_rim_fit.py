@@ -15,6 +15,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import socket
 import tempfile
@@ -38,6 +39,7 @@ TARGET_FEATURE = "dish_inner_rim_water_side_edge"
 TARGET_PLANE = "dish_top_rim"
 WINDOW_NAMES = ("early", "middle", "late")
 WINDOW_FRACTIONS = (0.10, 0.50, 0.90)
+CLIPPED_INDEX_SCHEMA_ID = "palette.orange_external_ipc_recording_clip_index.v1"
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,54 @@ class WindowSpec:
     frame_indices: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class ClipVideoSource:
+    clip_id: str
+    clip_index: int
+    camera_serial: str
+    video_path: Path
+    keyframe_path: Path
+    first_recording_frame_id: int
+    last_recording_frame_id: int
+    frame_count: int
+    fps: float
+    keyframe_frames: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ClippedRecordingSource:
+    recording_dir: Path
+    clip_index_path: Path
+    recording_id: str
+    session_id: str
+    camera_serial: str
+    first_recording_frame_id: int
+    last_recording_frame_id: int
+    frame_count: int
+    fps: float
+    width: int
+    height: int
+    clips: tuple[ClipVideoSource, ...]
+
+
+@dataclass(frozen=True)
+class ClippedFrameRef:
+    clip_id: str
+    clip_index: int
+    video_path: Path
+    keyframe_path: Path
+    clip_local_frame_index: int
+    recording_frame_id: int
+
+
+@dataclass(frozen=True)
+class ClippedWindowSpec:
+    name: str
+    fraction: float
+    center_recording_frame_id: int
+    frames: tuple[ClippedFrameRef, ...]
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -166,6 +216,265 @@ def load_declared_keyframes(
     if frames[0] < 0 or frames[-1] >= int(expected_frame_count):
         raise ValueError("keyframe frame numbers escape the source frame domain")
     return frames
+
+
+def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid {label} JSON {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must contain a JSON object: {path}")
+    return payload
+
+
+def _resolve_recording_file(
+    recording_dir: Path,
+    value: Any,
+    *,
+    field: str,
+) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"clipped index row has no {field}")
+    raw = Path(value)
+    candidate = raw if raw.is_absolute() else recording_dir / raw
+    resolved = candidate.expanduser().resolve()
+    if resolved != recording_dir and recording_dir not in resolved.parents:
+        raise ValueError(f"clipped index {field} escapes recording directory: {value}")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"clipped index {field} does not exist: {resolved}")
+    return resolved
+
+
+def _recording_camera_properties(
+    recording_dir: Path,
+    *,
+    recording_id: str,
+    session_id: str,
+    camera_serial: str,
+) -> tuple[int, int, float]:
+    snapshot_path = (
+        recording_dir / "raw" / "recording_geometry_bundle" / "recording_snapshot.json"
+    )
+    snapshot = _load_json_object(snapshot_path, label="recording geometry snapshot")
+    snapshot_recording_id = str(snapshot.get("recording_id") or "")
+    expected_recording_ids = {recording_id, session_id}
+    if snapshot_recording_id not in expected_recording_ids:
+        raise ValueError(
+            "recording geometry snapshot recording_id is inconsistent: "
+            f"expected_one_of={sorted(expected_recording_ids)!r}, "
+            f"observed={snapshot_recording_id!r}"
+        )
+    runtime_by_camera = snapshot.get("camera_runtime")
+    camera = (
+        runtime_by_camera.get(camera_serial)
+        if isinstance(runtime_by_camera, Mapping)
+        else None
+    )
+    if not isinstance(camera, Mapping):
+        raise ValueError(
+            f"camera {camera_serial} is absent from recording geometry snapshot: {snapshot_path}"
+        )
+    coordinate_frame = camera.get("coordinate_frame")
+    image_shape = (
+        coordinate_frame.get("image_shape")
+        if isinstance(coordinate_frame, Mapping)
+        else None
+    )
+    runtime = camera.get("runtime")
+    height = int(
+        (image_shape.get("height") if isinstance(image_shape, Mapping) else 0)
+        or (runtime.get("height") if isinstance(runtime, Mapping) else 0)
+        or camera.get("height")
+        or 0
+    )
+    width = int(
+        (image_shape.get("width") if isinstance(image_shape, Mapping) else 0)
+        or (runtime.get("width") if isinstance(runtime, Mapping) else 0)
+        or camera.get("width")
+        or 0
+    )
+    frame_rate = float(
+        (runtime.get("frame_rate") if isinstance(runtime, Mapping) else 0.0) or 0.0
+    )
+    if height <= 0 or width <= 0:
+        raise ValueError(
+            f"camera {camera_serial} has no positive image shape in {snapshot_path}"
+        )
+    if not math.isfinite(frame_rate) or frame_rate <= 0:
+        raise ValueError(
+            f"camera {camera_serial} has no positive frame rate in {snapshot_path}"
+        )
+    return height, width, frame_rate
+
+
+def load_clipped_recording_source(
+    recording_dir: str | Path,
+) -> ClippedRecordingSource:
+    """Load and fail-closed validate one camera's rolling-clip source."""
+
+    root = Path(recording_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"clipped recording directory not found: {root}")
+    index_path = root / "recording_clip_index.json"
+    index = _load_json_object(index_path, label="recording clip index")
+    raw_rows = index.get("rows")
+    if not isinstance(raw_rows, list) or not raw_rows:
+        raise ValueError(f"recording clip index has no rows: {index_path}")
+    if any(not isinstance(row, Mapping) for row in raw_rows):
+        raise ValueError(
+            f"recording clip index contains a non-object row: {index_path}"
+        )
+    rows = [dict(row) for row in raw_rows]
+    if int(index.get("row_count") or -1) != len(rows):
+        raise ValueError(
+            f"recording clip index row_count is inconsistent: {index_path}"
+        )
+    if str(index.get("schema_id") or "") != CLIPPED_INDEX_SCHEMA_ID:
+        raise ValueError(f"unsupported recording clip index schema: {index_path}")
+    if int(index.get("schema_version") or 0) != 1:
+        raise ValueError(f"unsupported recording clip index version: {index_path}")
+    if str(index.get("source_layout") or "") != "rolling_clips":
+        raise ValueError(f"recording clip index is not rolling_clips: {index_path}")
+
+    cameras = sorted({str(row.get("camera_serial") or "") for row in rows})
+    if len(cameras) != 1 or not cameras[0].isdigit():
+        raise ValueError(
+            f"clipped dish-rim fitting requires exactly one camera stream; observed {cameras}"
+        )
+    camera_serial = cameras[0]
+    declared_cameras = index.get("cameras")
+    if declared_cameras is not None and [str(value) for value in declared_cameras] != [
+        camera_serial
+    ]:
+        raise ValueError(
+            f"recording clip index camera declaration is inconsistent: {index_path}"
+        )
+    recording_id = str(index.get("recording_id") or root.name)
+    if recording_id != root.name:
+        raise ValueError(
+            f"recording clip index recording_id {recording_id!r} does not match {root.name!r}"
+        )
+    session_id = str(index.get("session_id") or recording_id)
+    height, width, recording_fps = _recording_camera_properties(
+        root,
+        recording_id=recording_id,
+        session_id=session_id,
+        camera_serial=camera_serial,
+    )
+
+    clips: list[ClipVideoSource] = []
+    seen_clip_ids: set[str] = set()
+    seen_clip_indices: set[int] = set()
+    fps_values: set[float] = set()
+    previous_last: int | None = None
+    for row in sorted(rows, key=lambda item: int(item.get("clip_index") or 0)):
+        clip_id = str(row.get("clip_id") or "")
+        clip_index = int(row.get("clip_index") or 0)
+        if not re.fullmatch(r"clip_[0-9]{6}", clip_id):
+            raise ValueError(f"invalid clip_id in {index_path}: {clip_id!r}")
+        if clip_id != f"clip_{clip_index:06d}":
+            raise ValueError(
+                f"clip_id and clip_index disagree in {index_path}: "
+                f"{clip_id!r}, {clip_index}"
+            )
+        if str(row.get("camera_serial") or "") != camera_serial:
+            raise ValueError(f"clip camera disagrees with recording: {clip_id}")
+        if str(row.get("recording_id") or "") != recording_id:
+            raise ValueError(f"clip recording_id disagrees with recording: {clip_id}")
+        if str(row.get("session_id") or "") != session_id:
+            raise ValueError(f"clip session_id disagrees with recording: {clip_id}")
+        if clip_id in seen_clip_ids or clip_index in seen_clip_indices:
+            raise ValueError(f"duplicate clip identity in {index_path}: {clip_id}")
+        seen_clip_ids.add(clip_id)
+        seen_clip_indices.add(clip_index)
+        if row.get("status") not in (None, "completed"):
+            raise ValueError(f"clip is not completed: {clip_id}")
+        if row.get("recording_frame_id_gaps") not in (None, 0, "0", [], {}):
+            raise ValueError(f"clip reports recording-frame gaps: {clip_id}")
+
+        first = int(row.get("first_recording_frame_id") or 0)
+        last = int(row.get("last_recording_frame_id") or 0)
+        frame_count = int(row.get("frame_count") or 0)
+        if first <= 0 or last < first or frame_count != last - first + 1:
+            raise ValueError(f"clip has an invalid dense frame range: {clip_id}")
+        if previous_last is not None and first != previous_last + 1:
+            raise ValueError(
+                f"recording frame ranges are not continuous before {clip_id}: "
+                f"previous_last={previous_last}, first={first}"
+            )
+        previous_last = last
+        video_path = _resolve_recording_file(
+            root,
+            row.get("video_path") or row.get("video"),
+            field=f"{clip_id}.video_path",
+        )
+        keyframe_path = _resolve_recording_file(
+            root,
+            row.get("keyframe_path") or row.get("keyframes"),
+            field=f"{clip_id}.keyframe_path",
+        )
+        keyframe_payload = _load_json_object(
+            keyframe_path, label=f"{clip_id} keyframe summary"
+        )
+        fps = float(keyframe_payload.get("fps") or 0.0)
+        keyframes = load_declared_keyframes(
+            keyframe_path,
+            expected_frame_count=frame_count,
+            expected_fps=recording_fps,
+        )
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError(f"clip has an invalid frame rate: {clip_id}")
+        fps_values.add(fps)
+        clips.append(
+            ClipVideoSource(
+                clip_id=clip_id,
+                clip_index=clip_index,
+                camera_serial=camera_serial,
+                video_path=video_path,
+                keyframe_path=keyframe_path,
+                first_recording_frame_id=first,
+                last_recording_frame_id=last,
+                frame_count=frame_count,
+                fps=fps,
+                keyframe_frames=keyframes,
+            )
+        )
+
+    declared_clip_count = int(index.get("clip_count") or -1)
+    if declared_clip_count != len(clips):
+        raise ValueError(
+            f"recording clip index clip_count is inconsistent: {index_path}"
+        )
+    if len(fps_values) != 1:
+        raise ValueError(
+            f"clipped recording has inconsistent frame rates: {sorted(fps_values)}"
+        )
+    if not math.isclose(
+        next(iter(fps_values)), recording_fps, rel_tol=0.0, abs_tol=1e-9
+    ):
+        raise ValueError(
+            "clipped recording frame rate disagrees with recording geometry"
+        )
+    first = clips[0].first_recording_frame_id
+    last = clips[-1].last_recording_frame_id
+    frame_count = sum(clip.frame_count for clip in clips)
+    if frame_count != last - first + 1:
+        raise ValueError("clipped recording frame ranges are not globally dense")
+    return ClippedRecordingSource(
+        recording_dir=root,
+        clip_index_path=index_path,
+        recording_id=recording_id,
+        session_id=session_id,
+        camera_serial=camera_serial,
+        first_recording_frame_id=first,
+        last_recording_frame_id=last,
+        frame_count=frame_count,
+        fps=recording_fps,
+        width=width,
+        height=height,
+        clips=tuple(clips),
+    )
 
 
 def build_keyframe_window_specs(
@@ -229,6 +538,82 @@ def build_keyframe_window_specs(
             )
         occupied.update(selected)
         specs.append(WindowSpec(name, float(fraction), center, selected))
+    return tuple(specs)
+
+
+def build_clipped_keyframe_window_specs(
+    source: ClippedRecordingSource,
+    *,
+    max_keyframes_per_window: int = 21,
+    span_seconds: float = 5.0,
+    fractions: Sequence[float] = WINDOW_FRACTIONS,
+) -> tuple[ClippedWindowSpec, ...]:
+    """Select declared keyframes over one continuous clipped-recording clock."""
+
+    if max_keyframes_per_window < 3:
+        raise ValueError("max_keyframes_per_window must be at least three")
+    if not math.isfinite(span_seconds) or span_seconds <= 0:
+        raise ValueError("span_seconds must be finite and positive")
+    if len(fractions) != len(WINDOW_NAMES):
+        raise ValueError(f"exactly {len(WINDOW_NAMES)} window fractions are required")
+
+    half_span = 0.5 * span_seconds * source.fps
+    occupied: set[tuple[str, int]] = set()
+    specs: list[ClippedWindowSpec] = []
+    for name, fraction in zip(WINDOW_NAMES, fractions, strict=True):
+        if not math.isfinite(float(fraction)) or not 0.0 < float(fraction) < 1.0:
+            raise ValueError("window fractions must lie strictly between zero and one")
+        center = source.first_recording_frame_id + int(
+            round(float(fraction) * (source.frame_count - 1))
+        )
+        lower = math.ceil(center - half_span)
+        upper = math.floor(center + half_span)
+        available: list[ClippedFrameRef] = []
+        for clip in source.clips:
+            if (
+                clip.last_recording_frame_id < lower
+                or clip.first_recording_frame_id > upper
+            ):
+                continue
+            for local_index in clip.keyframe_frames:
+                recording_frame_id = clip.first_recording_frame_id + local_index
+                if lower <= recording_frame_id <= upper:
+                    available.append(
+                        ClippedFrameRef(
+                            clip_id=clip.clip_id,
+                            clip_index=clip.clip_index,
+                            video_path=clip.video_path,
+                            keyframe_path=clip.keyframe_path,
+                            clip_local_frame_index=local_index,
+                            recording_frame_id=recording_frame_id,
+                        )
+                    )
+        available.sort(key=lambda item: item.recording_frame_id)
+        if len(available) < 3:
+            raise ValueError(f"{name} window contains fewer than three keyframes")
+        count = min(int(max_keyframes_per_window), len(available))
+        if count % 2 == 0:
+            count -= 1
+        positions = np.rint(np.linspace(0, len(available) - 1, count)).astype(np.int64)
+        selected = tuple(available[int(position)] for position in positions)
+        identities = {(item.clip_id, item.clip_local_frame_index) for item in selected}
+        if len(identities) != len(selected):
+            raise RuntimeError(f"{name} clipped keyframe sampling produced duplicates")
+        overlap = occupied.intersection(identities)
+        if overlap:
+            clip_id, local_index = sorted(overlap)[0]
+            raise ValueError(
+                f"temporal keyframe windows overlap at {clip_id} frame {local_index}"
+            )
+        occupied.update(identities)
+        specs.append(
+            ClippedWindowSpec(
+                name=name,
+                fraction=float(fraction),
+                center_recording_frame_id=center,
+                frames=selected,
+            )
+        )
     return tuple(specs)
 
 
@@ -533,9 +918,7 @@ def consensus_circle(fits: Sequence[CircleFit]) -> CircleFit:
             np.median([fit.median_radial_gradient for fit in fits])
         ),
         candidate_count=sum(fit.candidate_count for fit in fits),
-        radial_residual_px=float(
-            np.median([fit.radial_residual_px for fit in fits])
-        ),
+        radial_residual_px=float(np.median([fit.radial_residual_px for fit in fits])),
         selected_candidate_id=None,
         selection_reason="median_of_window_selected_candidates_v1",
     )
@@ -692,6 +1075,136 @@ def decode_keyframe_window_medians_pynvvc(
         "elapsed_seconds": time.perf_counter() - started,
         "demuxer_frame_rate": float(demuxer.FrameRate()),
         "codec": str(demuxer.GetNvCodecId()),
+    }
+    return medians, frame_hashes, metadata
+
+
+def decode_clipped_keyframe_window_medians_pynvvc(
+    specs: Sequence[ClippedWindowSpec],
+    *,
+    expected_shape_hw: tuple[int, int],
+    expected_fps: float,
+    gpu_id: int,
+) -> tuple[dict[str, np.ndarray], dict[str, str], dict[str, Any]]:
+    """Decode recording-wide window samples from their owning clip videos."""
+
+    try:
+        import PyNvVideoCodec as nvc  # type: ignore
+        import torch
+    except Exception as exc:  # pragma: no cover - cluster environment dependent
+        raise RuntimeError(
+            f"PyNvVideoCodec CUDA decode dependencies are unavailable: {exc}"
+        ) from exc
+
+    source_height, source_width = expected_shape_hw
+    demuxers: dict[Path, Any] = {}
+    source_metadata: dict[Path, dict[str, Any]] = {}
+
+    def demuxer_for(path: Path) -> Any:
+        demuxer = demuxers.get(path)
+        if demuxer is not None:
+            return demuxer
+        demuxer = nvc.CreateDemuxer(filename=str(path))
+        observed_shape = (int(demuxer.Height()), int(demuxer.Width()))
+        if observed_shape != expected_shape_hw:
+            raise RuntimeError(
+                "clip video dimensions disagree with recording geometry: "
+                f"video={path}, observed={observed_shape}, expected={expected_shape_hw}"
+            )
+        observed_fps = float(demuxer.FrameRate())
+        if not math.isclose(observed_fps, expected_fps, rel_tol=0.0, abs_tol=1e-9):
+            raise RuntimeError(
+                "clip video frame rate disagrees with keyframe metadata: "
+                f"video={path}, observed={observed_fps}, expected={expected_fps}"
+            )
+        demuxers[path] = demuxer
+        source_metadata[path] = {
+            "video_path": str(path),
+            "frame_rate": observed_fps,
+            "codec": str(demuxer.GetNvCodecId()),
+            "height": observed_shape[0],
+            "width": observed_shape[1],
+        }
+        return demuxer
+
+    def materialize(frame: Any) -> np.ndarray:
+        tensor = torch.from_dlpack(frame)
+        result = (
+            tensor[:source_height, :]
+            .contiguous()
+            .cpu()
+            .numpy()
+            .astype(np.uint8, copy=True)
+        )
+        del tensor
+        return result
+
+    medians: dict[str, np.ndarray] = {}
+    frame_hashes: dict[str, str] = {}
+    seeks: list[dict[str, Any]] = []
+    started = time.perf_counter()
+    for spec in specs:
+        stack = np.empty(
+            (len(spec.frames), source_height, source_width), dtype=np.uint8
+        )
+        hasher = hashlib.sha256()
+        for row, reference in enumerate(spec.frames):
+            demuxer = demuxer_for(reference.video_path)
+            decoder = nvc.CreateDecoder(
+                gpuid=int(gpu_id),
+                codec=demuxer.GetNvCodecId(),
+                usedevicememory=True,
+            )
+            frame, proof = decode_one_frame_from_preceding_keyframe(
+                demuxer=demuxer,
+                decoder=decoder,
+                target_frame_index=reference.clip_local_frame_index,
+                materialize_frame=materialize,
+            )
+            if proof["target_packet_number"] != 1:
+                raise RuntimeError(
+                    f"declared keyframe {reference.clip_id}:"
+                    f"{reference.clip_local_frame_index} did not resolve as the first seek packet"
+                )
+            if frame.shape != (source_height, source_width):
+                raise RuntimeError(
+                    f"decoded keyframe has unexpected shape {frame.shape}: {reference}"
+                )
+            stack[row] = frame
+            frame_bytes = frame.tobytes(order="C")
+            frame_sha256 = _sha256_bytes(frame_bytes)
+            hasher.update(frame_bytes)
+            seeks.append(
+                {
+                    **proof,
+                    "window": spec.name,
+                    "clip_id": reference.clip_id,
+                    "clip_index": reference.clip_index,
+                    "video_path": str(reference.video_path),
+                    "keyframe_path": str(reference.keyframe_path),
+                    "clip_local_frame_index": reference.clip_local_frame_index,
+                    "recording_frame_id": reference.recording_frame_id,
+                    "decoded_frame_sha256": frame_sha256,
+                }
+            )
+            del decoder, frame
+        medians[spec.name] = temporal_median(stack)
+        frame_hashes[spec.name] = hasher.hexdigest()
+
+    packet_counts = [
+        int(item["packets_submitted_through_target_output"]) for item in seeks
+    ]
+    metadata = {
+        "backend": "pynvvc_luma_clipped_declared_keyframes_only",
+        "gpu_id": int(gpu_id),
+        "requested_frame_count": len(seeks),
+        "seek_count": len(seeks),
+        "decoded_packet_count_total": sum(packet_counts),
+        "decoded_packet_count_max_per_seek": max(packet_counts),
+        "seeks": seeks,
+        "elapsed_seconds": time.perf_counter() - started,
+        "source_video_count": len(demuxers),
+        "source_videos": [source_metadata[path] for path in sorted(source_metadata)],
     }
     return medians, frame_hashes, metadata
 
@@ -893,17 +1406,125 @@ def write_review_package(output_dir: Path, *, acquisition_revealed: bool) -> Pat
     return receipt_path
 
 
+def _clipped_source_report(
+    source: ClippedRecordingSource,
+    specs: Sequence[ClippedWindowSpec],
+) -> dict[str, Any]:
+    geometry_snapshot_path = (
+        source.recording_dir
+        / "raw"
+        / "recording_geometry_bundle"
+        / "recording_snapshot.json"
+    )
+    sampled_by_clip: dict[str, ClipVideoSource] = {}
+    clips_by_id = {clip.clip_id: clip for clip in source.clips}
+    for spec in specs:
+        for frame in spec.frames:
+            sampled_by_clip[frame.clip_id] = clips_by_id[frame.clip_id]
+    sampled_clips = []
+    for clip_id in sorted(sampled_by_clip):
+        clip = sampled_by_clip[clip_id]
+        video_stat = clip.video_path.stat()
+        sampled_clips.append(
+            {
+                "clip_id": clip.clip_id,
+                "clip_index": clip.clip_index,
+                "first_recording_frame_id": clip.first_recording_frame_id,
+                "last_recording_frame_id": clip.last_recording_frame_id,
+                "frame_count": clip.frame_count,
+                "video_path": str(clip.video_path),
+                "video_size_bytes": video_stat.st_size,
+                "video_mtime_ns": video_stat.st_mtime_ns,
+                "keyframe_summary_path": str(clip.keyframe_path),
+                "keyframe_summary_sha256": _sha256_file(clip.keyframe_path),
+                "declared_keyframe_count": len(clip.keyframe_frames),
+            }
+        )
+    return {
+        "mode": "clipped_recording",
+        "recording_dir": str(source.recording_dir),
+        "recording_id": source.recording_id,
+        "session_id": source.session_id,
+        "recording_clip_index_path": str(source.clip_index_path),
+        "recording_clip_index_sha256": _sha256_file(source.clip_index_path),
+        "recording_geometry_snapshot_path": str(geometry_snapshot_path),
+        "recording_geometry_snapshot_sha256": _sha256_file(geometry_snapshot_path),
+        "camera_serial": source.camera_serial,
+        "clip_count": len(source.clips),
+        "sampled_clip_count": len(sampled_clips),
+        "sampled_clips": sampled_clips,
+        "first_recording_frame_id": source.first_recording_frame_id,
+        "last_recording_frame_id": source.last_recording_frame_id,
+        "frame_count": source.frame_count,
+        "fps": source.fps,
+        "image_shape_px": {"height": source.height, "width": source.width},
+        "pixel_contract": "orange.camera.mono8.full_frame.v1",
+        "source_binding": (
+            "recording_clip_index plus per-clip declared keyframe summaries and "
+            "decoded-frame hashes"
+        ),
+    }
+
+
+def _window_sampling_report(
+    spec: WindowSpec | ClippedWindowSpec,
+    *,
+    decode: Mapping[str, Any],
+) -> dict[str, Any]:
+    decoded = [item for item in decode["seeks"] if item["window"] == spec.name]
+    if isinstance(spec, WindowSpec):
+        return {
+            "fraction": spec.fraction,
+            "center_frame": spec.center_frame,
+            "frame_indices": list(spec.frame_indices),
+            "decoded_frames": [
+                {
+                    "frame_index": int(item["target_frame_index"]),
+                    "decoded_frame_sha256": item["decoded_frame_sha256"],
+                }
+                for item in decoded
+            ],
+        }
+    return {
+        "fraction": spec.fraction,
+        "center_recording_frame_id": spec.center_recording_frame_id,
+        "recording_frame_ids": [frame.recording_frame_id for frame in spec.frames],
+        "sampled_clip_ids": sorted({frame.clip_id for frame in spec.frames}),
+        "decoded_frames": [
+            {
+                "clip_id": item["clip_id"],
+                "clip_index": item["clip_index"],
+                "video_path": item["video_path"],
+                "keyframe_path": item["keyframe_path"],
+                "clip_local_frame_index": item["clip_local_frame_index"],
+                "recording_frame_id": item["recording_frame_id"],
+                "decoded_frame_sha256": item["decoded_frame_sha256"],
+            }
+            for item in decoded
+        ],
+    }
+
+
+def _validate_probe_source_args(args: argparse.Namespace) -> str:
+    has_video = args.video is not None
+    has_recording = args.recording_dir is not None
+    if has_video == has_recording:
+        raise ValueError("choose exactly one source mode: --video or --recording-dir")
+    if has_recording:
+        if args.summary is not None or args.keyframes is not None:
+            raise ValueError(
+                "--summary and --keyframes belong to --video mode; clipped mode "
+                "discovers them from recording_clip_index.json"
+            )
+        return "clipped_recording"
+    if args.summary is None or args.keyframes is None:
+        raise ValueError("--video mode requires both --summary and --keyframes")
+    return "single_video"
+
+
 def run_probe(args: argparse.Namespace) -> Path:
-    video_path = Path(args.video).expanduser().resolve()
-    summary_path = Path(args.summary).expanduser().resolve()
-    keyframe_path = Path(args.keyframes).expanduser().resolve()
+    source_mode = _validate_probe_source_args(args)
     output_dir = Path(args.output_dir).expanduser().resolve()
-    if not video_path.is_file():
-        raise FileNotFoundError(video_path)
-    if not summary_path.is_file():
-        raise FileNotFoundError(summary_path)
-    if not keyframe_path.is_file():
-        raise FileNotFoundError(keyframe_path)
     if output_dir.exists():
         raise FileExistsError(f"refusing existing output directory: {output_dir}")
     output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -912,25 +1533,74 @@ def run_probe(args: argparse.Namespace) -> Path:
     )
 
     try:
-        frame_count, fps, width, height, camera_serial = _load_summary(summary_path)
-        declared_keyframes = load_declared_keyframes(
-            keyframe_path,
-            expected_frame_count=frame_count,
-            expected_fps=fps,
-        )
-        specs = build_keyframe_window_specs(
-            frame_count=frame_count,
-            fps=fps,
-            keyframe_frames=declared_keyframes,
-            max_keyframes_per_window=args.max_keyframes_per_window,
-            span_seconds=args.span_seconds,
-        )
-        composites, frame_hashes, decode = decode_keyframe_window_medians_pynvvc(
-            video_path,
-            specs,
-            expected_shape_hw=(height, width),
-            gpu_id=args.gpu_id,
-        )
+        if source_mode == "single_video":
+            video_path = Path(args.video).expanduser().resolve()
+            summary_path = Path(args.summary).expanduser().resolve()
+            keyframe_path = Path(args.keyframes).expanduser().resolve()
+            if not video_path.is_file():
+                raise FileNotFoundError(video_path)
+            if not summary_path.is_file():
+                raise FileNotFoundError(summary_path)
+            if not keyframe_path.is_file():
+                raise FileNotFoundError(keyframe_path)
+            frame_count, fps, width, height, camera_serial = _load_summary(summary_path)
+            declared_keyframes = load_declared_keyframes(
+                keyframe_path,
+                expected_frame_count=frame_count,
+                expected_fps=fps,
+            )
+            specs: tuple[WindowSpec, ...] | tuple[ClippedWindowSpec, ...] = (
+                build_keyframe_window_specs(
+                    frame_count=frame_count,
+                    fps=fps,
+                    keyframe_frames=declared_keyframes,
+                    max_keyframes_per_window=args.max_keyframes_per_window,
+                    span_seconds=args.span_seconds,
+                )
+            )
+            composites, frame_hashes, decode = decode_keyframe_window_medians_pynvvc(
+                video_path,
+                specs,
+                expected_shape_hw=(height, width),
+                gpu_id=args.gpu_id,
+            )
+            source_report = {
+                "mode": "single_video",
+                "video_path": str(video_path),
+                "video_size_bytes": video_path.stat().st_size,
+                "video_mtime_ns": video_path.stat().st_mtime_ns,
+                "video_sha256": _sha256_file(video_path),
+                "summary_path": str(summary_path),
+                "summary_sha256": _sha256_file(summary_path),
+                "keyframe_summary_path": str(keyframe_path),
+                "keyframe_summary_sha256": _sha256_file(keyframe_path),
+                "declared_keyframe_count": len(declared_keyframes),
+                "camera_serial": camera_serial,
+                "frame_count": frame_count,
+                "fps": fps,
+                "image_shape_px": {"height": height, "width": width},
+                "pixel_contract": "orange.camera.mono8.full_frame.v1",
+            }
+            sampling_policy = "declared_keyframes_only"
+        else:
+            clipped_source = load_clipped_recording_source(args.recording_dir)
+            specs = build_clipped_keyframe_window_specs(
+                clipped_source,
+                max_keyframes_per_window=args.max_keyframes_per_window,
+                span_seconds=args.span_seconds,
+            )
+            composites, frame_hashes, decode = (
+                decode_clipped_keyframe_window_medians_pynvvc(
+                    specs,
+                    expected_shape_hw=(clipped_source.height, clipped_source.width),
+                    expected_fps=clipped_source.fps,
+                    gpu_id=args.gpu_id,
+                )
+            )
+            source_report = _clipped_source_report(clipped_source, specs)
+            sampling_policy = (
+                "recording_clip_index_declared_keyframes_on_continuous_recording_clock"
+            )
 
         windows: dict[str, Any] = {}
         fits: list[CircleFit] = []
@@ -966,18 +1636,8 @@ def run_probe(args: argparse.Namespace) -> Path:
                 },
             }
             windows[spec.name] = {
-                "fraction": spec.fraction,
-                "center_frame": spec.center_frame,
-                "frame_indices": list(spec.frame_indices),
+                **_window_sampling_report(spec, decode=decode),
                 "decoded_luma_sequence_sha256": frame_hashes[spec.name],
-                "decoded_frames": [
-                    {
-                        "frame_index": int(item["target_frame_index"]),
-                        "decoded_frame_sha256": item["decoded_frame_sha256"],
-                    }
-                    for item in decode["seeks"]
-                    if item["window"] == spec.name
-                ],
                 "composite_pixel_sha256": _sha256_bytes(composite.tobytes(order="C")),
                 "fit": fit.to_json(),
                 "files": files,
@@ -994,8 +1654,7 @@ def run_probe(args: argparse.Namespace) -> Path:
                 - min(fit.center_y_px for fit in fits)
             ),
             "radius_range": float(
-                max(fit.radius_px for fit in fits)
-                - min(fit.radius_px for fit in fits)
+                max(fit.radius_px for fit in fits) - min(fit.radius_px for fit in fits)
             ),
         }
         report = {
@@ -1007,27 +1666,17 @@ def run_probe(args: argparse.Namespace) -> Path:
             "fit_method": FIT_METHOD,
             "target_feature": TARGET_FEATURE,
             "target_plane": TARGET_PLANE,
-            "source": {
-                "video_path": str(video_path),
-                "video_size_bytes": video_path.stat().st_size,
-                "video_mtime_ns": video_path.stat().st_mtime_ns,
-                "video_sha256": _sha256_file(video_path),
-                "summary_path": str(summary_path),
-                "summary_sha256": _sha256_file(summary_path),
-                "keyframe_summary_path": str(keyframe_path),
-                "keyframe_summary_sha256": _sha256_file(keyframe_path),
-                "declared_keyframe_count": len(declared_keyframes),
-                "camera_serial": camera_serial,
-                "frame_count": frame_count,
-                "fps": fps,
-                "image_shape_px": {"height": height, "width": width},
-                "pixel_contract": "orange.camera.mono8.full_frame.v1",
-            },
+            "source": source_report,
             "parameters": {
-                "sampling_policy": "declared_keyframes_only",
+                "sampling_policy": sampling_policy,
                 "max_keyframes_per_window": args.max_keyframes_per_window,
                 "actual_keyframes_per_window": {
-                    spec.name: len(spec.frame_indices) for spec in specs
+                    spec.name: (
+                        len(spec.frame_indices)
+                        if isinstance(spec, WindowSpec)
+                        else len(spec.frames)
+                    )
+                    for spec in specs
                 },
                 "span_seconds_per_window": args.span_seconds,
                 "window_fractions": list(WINDOW_FRACTIONS),
@@ -1088,9 +1737,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate blind early/middle/late dish-rim fit diagnostics."
     )
-    parser.add_argument("--video", type=Path, required=True)
-    parser.add_argument("--summary", type=Path, required=True)
-    parser.add_argument("--keyframes", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--video", type=Path)
+    source.add_argument(
+        "--recording-dir",
+        type=Path,
+        help=(
+            "One-camera rolling-clips recording. Video and keyframe paths are "
+            "resolved from recording_clip_index.json."
+        ),
+    )
+    parser.add_argument("--summary", type=Path)
+    parser.add_argument("--keyframes", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--acquisition-observation",
@@ -1112,7 +1770,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        _validate_probe_source_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     report = run_probe(args)
     print(json.dumps({"status": "complete", "fit_report": str(report)}, sort_keys=True))
     return 0

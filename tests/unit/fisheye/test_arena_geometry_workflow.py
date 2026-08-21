@@ -124,6 +124,48 @@ def test_pre_review_fragment_is_recording_level_and_stops_before_selection(
     assert workflow.metadata["human_review_barrier"] is True
 
 
+def test_pre_review_fragment_accepts_one_recording_level_clipped_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture_paths(tmp_path)
+    (paths["recording"] / "recording_clip_index.json").write_text("{}\n")
+    candidate_path = paths["analysis"] / "analysis" / "arena_geometry_runs" / "a"
+    monkeypatch.setattr(
+        arena_geometry_review,
+        "plan_recovered_acquisition_geometry_candidate",
+        lambda **_: SimpleNamespace(
+            candidate_id="arena-geometry-acquisition-a",
+            target_run_path=candidate_path,
+        ),
+    )
+
+    module = build_arena_geometry_review_fragment(
+        ArenaGeometryReviewFragmentInputs(
+            workflow_id="geometry_clipped",
+            target_id="recording_a",
+            recording_dir=paths["recording"],
+            analysis_zarr=paths["analysis"],
+            recovery_receipt_path=paths["receipt"],
+            source=ArenaGeometryProbeSource(
+                recording_dir=paths["recording"],
+                acquisition_observation_path=paths["observation"],
+            ),
+            repo=paths["repo"],
+            run_root=tmp_path / "run",
+        )
+    )
+
+    probe_command = " ".join(module.fragment.jobs[1].command)
+    assert "--recording-dir" in probe_command
+    assert str(paths["recording"].resolve()) in probe_command
+    assert "--video" not in probe_command
+    assert "--summary" not in probe_command
+    assert "--keyframes" not in probe_command
+    assert module.fragment.metadata["source"]["source_kind"] == (
+        "recording_level_clipped_collection"
+    )
+
+
 def test_pre_review_fragment_uses_producer_native_folder_without_recovery_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

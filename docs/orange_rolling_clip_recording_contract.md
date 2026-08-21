@@ -433,9 +433,12 @@ This separation keeps the clipped layout manageable:
 
 ## Recommended Analysis Zarr Shape
 
-Represent clips as children of one recording/session, not as independent
-recording rows. The recommended physical layout is one parent analysis Zarr per
-recording, with clip-local run groups inside that parent store.
+Represent clips as children of one camera-stream recording, not as independent
+recording rows. A multi-camera acquisition session therefore produces one
+recording root per camera, all sharing the Orange `session_id`. Each camera
+recording owns every clip for that stream and exactly one parent analysis Zarr,
+with clip-local run groups inside that store. Do not combine all camera streams
+into one Palette recording root, and do not create one Zarr per clip.
 
 Clip-local groups are the primary compute and import target. A clip job can
 own `clips/<clip_id>/cameras/<camera_serial>/<run_family>/<run_name>` without
@@ -491,9 +494,9 @@ outputs using explicit fields:
 - source video path or source clip id
 
 Do not make each clip a separate `recording_id` in the registry. A clip is a
-child artifact of one recording/session. Registry projections may add clip
-tables or views, but the biological/experimental recording identity remains the
-parent recording.
+child artifact of one camera-stream recording. Registry projections may add
+clip tables or views, while `session_id` groups the sibling camera recordings
+that came from the same acquisition session.
 
 Do not make one giant global array the primary active-write target for long
 recordings. Global arrays can be generated later as exports or compatibility
