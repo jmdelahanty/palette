@@ -112,7 +112,21 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
         "total_frames": candidate.total_frames,
         "stimulus_sample_count": 4,
         "fps": candidate.fps,
-        "fps_authority": {"recording_id": candidate.recording_id},
+        "fps_authority": {
+            "schema_id": "palette.provider_chaser_distance_fps_authority",
+            "schema_version": 1,
+            "recording_id": candidate.recording_id,
+            "camera_id": "camera-1",
+            "fps": candidate.fps,
+            "source_field": "source_video_metadata.fps",
+            "source_video_metadata": {
+                "record_ref": "/@source_video_metadata",
+                "record_sha256": "8" * 64,
+            },
+            "acquisition_frame_authority": {
+                "recording_id": candidate.recording_id
+            },
+        },
         "pixels_per_mm_projector": candidate.pixels_per_mm_projector,
         "temporal_join_policy": "preserve_unique_stimulus_frame_num_then_join_exact_source_acquisition_frame_index_v1",
         "numeric_transform": "source_camera_to_selected_canvas_then_inverse_arena_to_canvas_v1",
@@ -207,6 +221,41 @@ def test_wrong_recording_identity_fails_closed(tmp_path: Path) -> None:
     root.attrs["recording_id"] = "other-recording"
     consolidate_metadata_capture_expected_warnings(archive)
     with pytest.raises(ProviderChaserStimulusSourceHandleError, match="does not match"):
+        load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
+
+
+def test_legacy_string_fps_authority_is_rejected(tmp_path: Path) -> None:
+    archive, run_name = _published_candidate(tmp_path)
+
+    def replace_authority(payload: dict) -> None:
+        payload["source_authority"]["fps_authority"] = (
+            "acquisition.source_video_metadata.fps"
+        )
+
+    _rewrite_manifest(archive, run_name, replace_authority)
+    with pytest.raises(
+        ProviderChaserStimulusSourceHandleError,
+        match="fps_authority must be a string-keyed mapping",
+    ):
+        load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
+
+
+def test_fps_authority_must_bind_same_acquisition_frame_record(tmp_path: Path) -> None:
+    archive, run_name = _published_candidate(tmp_path)
+
+    def replace_frame_digest(payload: dict) -> None:
+        payload["source_authority"]["fps_authority"][
+            "acquisition_frame_authority"
+        ] = {
+            "recording_id": "recording-1",
+            "record_sha256": "9" * 64,
+        }
+
+    _rewrite_manifest(archive, run_name, replace_frame_digest)
+    with pytest.raises(
+        ProviderChaserStimulusSourceHandleError,
+        match="FPS and acquisition-frame authorities disagree",
+    ):
         load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
 
 

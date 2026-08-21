@@ -373,9 +373,69 @@ def _validate_authorities(
         raise ProviderChaserStimulusSourceHandleError(
             "source_authority.acquisition_frame_authority is missing."
         )
-    if not isinstance(authority.get("fps_authority"), Mapping):
+    fps_authority = _require_mapping(
+        authority.get("fps_authority"), field="source_authority.fps_authority"
+    )
+    if set(fps_authority) != {
+        "schema_id",
+        "schema_version",
+        "recording_id",
+        "camera_id",
+        "fps",
+        "source_field",
+        "source_video_metadata",
+        "acquisition_frame_authority",
+    }:
         raise ProviderChaserStimulusSourceHandleError(
-            "source_authority.fps_authority is missing."
+            "source_authority.fps_authority has missing or extra fields."
+        )
+    if (
+        fps_authority.get("schema_id") != writer.FPS_AUTHORITY_SCHEMA_ID
+        or fps_authority.get("schema_version")
+        != writer.FPS_AUTHORITY_SCHEMA_VERSION
+        or fps_authority.get("recording_id") != recording_id
+        or fps_authority.get("source_field") != "source_video_metadata.fps"
+    ):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority.fps_authority identity is invalid."
+        )
+    camera_id = fps_authority.get("camera_id")
+    if type(camera_id) is not str or not camera_id or camera_id != camera_id.strip():
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority.fps_authority.camera_id is invalid."
+        )
+    fps = authority.get("fps")
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not np.isfinite(float(fps))
+        or float(fps) <= 0
+        or fps_authority.get("fps") != fps
+    ):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority FPS and its exact authority disagree."
+        )
+    metadata_authority = _require_mapping(
+        fps_authority.get("source_video_metadata"),
+        field="source_authority.fps_authority.source_video_metadata",
+    )
+    if set(metadata_authority) != {"record_ref", "record_sha256"} or (
+        metadata_authority.get("record_ref") != "/@source_video_metadata"
+    ):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority FPS metadata authority is invalid."
+        )
+    _require_digest(
+        metadata_authority.get("record_sha256"),
+        field="source_authority.fps_authority.source_video_metadata.record_sha256",
+    )
+    fps_frame_authority = _require_mapping(
+        fps_authority.get("acquisition_frame_authority"),
+        field="source_authority.fps_authority.acquisition_frame_authority",
+    )
+    if dict(fps_frame_authority) != dict(authority["acquisition_frame_authority"]):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority FPS and acquisition-frame authorities disagree."
         )
     for name in ("total_frames", "stimulus_sample_count"):
         value = authority.get(name)

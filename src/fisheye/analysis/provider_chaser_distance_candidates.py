@@ -31,7 +31,6 @@ from fisheye.analysis.chaser_distance_coordinate_publication import (
     _apply_homography,
     _frame_pointer,
     _identity_component,
-    _positive_fps,
 )
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceWindow,
@@ -93,6 +92,8 @@ PARENT_PATH = "analysis/provider_chaser_distance_candidate_runs"
 METHOD = "explicit_subject_position_to_chaser_distance_candidate"
 METHOD_VERSION = 1
 PUBLICATION_POLICY = "atomic_complete_selector_ineligible_no_selector_mutation_v1"
+FPS_AUTHORITY_SCHEMA_ID = "palette.provider_chaser_distance_fps_authority"
+FPS_AUTHORITY_SCHEMA_VERSION = 1
 MISSING_SOURCE_ROW = -1
 MISSING_FAILURE_REASON = np.iinfo(np.uint16).max
 _SELECTOR_ATTRS = frozenset(
@@ -113,6 +114,35 @@ class ProviderChaserDistanceCandidateError(ValueError):
 
 def _fail(message: str) -> None:
     raise ProviderChaserDistanceCandidateError(message)
+
+
+def _provider_fps_authority(acquisition: Any) -> tuple[float, Mapping[str, Any]]:
+    """Bind nominal FPS to the exact acquisition metadata and frame authority."""
+
+    metadata = acquisition.record.source_video_metadata
+    raw_fps = metadata.get("fps")
+    if isinstance(raw_fps, bool) or not isinstance(raw_fps, (int, float)):
+        _fail("Provider chaser distance requires numeric source_video_metadata.fps.")
+    fps = float(raw_fps)
+    if not np.isfinite(fps) or fps <= 0:
+        _fail("Provider chaser distance requires positive source_video_metadata.fps.")
+    metadata_sha256 = canonical_json_sha256(dict(metadata))
+    if metadata_sha256 != acquisition.record.source_video_metadata_sha256:
+        _fail("Acquisition source-video metadata digest is stale.")
+    authority = {
+        "schema_id": FPS_AUTHORITY_SCHEMA_ID,
+        "schema_version": FPS_AUTHORITY_SCHEMA_VERSION,
+        "recording_id": acquisition.record.recording_id,
+        "camera_id": acquisition.record.camera_id,
+        "fps": fps,
+        "source_field": "source_video_metadata.fps",
+        "source_video_metadata": {
+            "record_ref": "/@source_video_metadata",
+            "record_sha256": metadata_sha256,
+        },
+        "acquisition_frame_authority": _frame_pointer(acquisition),
+    }
+    return fps, authority
 
 
 def _controlled_run_path(value: object, *, parent: str, label: str) -> str:
@@ -599,7 +629,7 @@ def build_provider_chaser_distance_candidate(
         or float(ppm) <= 0
     ):
         _fail("Selected stimulus calibration lacks positive projector pixels/mm.")
-    fps, fps_authority = _positive_fps(root, acquisition)
+    fps, fps_authority = _provider_fps_authority(acquisition)
 
     sample_count = sample_acquisition.size
     distance_px = np.full((sample_count, chaser_indices.size), np.nan, dtype=np.float32)

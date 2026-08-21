@@ -16,6 +16,7 @@ from fisheye.analysis.provider_chaser_distance_candidates import (
     _controlled_run_path,
     _dense_fish_positions,
     _materialize_local,
+    _provider_fps_authority,
     _stimulus_sample_positions,
     _summary,
     validate_provider_chaser_distance_candidate,
@@ -157,6 +158,44 @@ def test_exact_paths_reject_selector_and_noncanonical_spellings() -> None:
                 parent="analysis/stimulus_runs",
                 label="stimulus",
             )
+
+
+def test_fps_authority_binds_exact_acquisition_metadata_and_frame_record() -> None:
+    metadata = {
+        "schema_id": "palette.source_video_metadata.v2",
+        "fps": 100.0,
+    }
+    metadata_sha256 = candidate_module.canonical_json_sha256(metadata)
+    acquisition = SimpleNamespace(
+        record=SimpleNamespace(
+            recording_id="recording-1",
+            camera_id="camera-1",
+            source_video_metadata=metadata,
+            source_video_metadata_sha256=metadata_sha256,
+        ),
+        record_ref="analysis/acquisition/source_camera_frame",
+        record_sha256="a" * 64,
+    )
+
+    fps, authority = _provider_fps_authority(acquisition)
+
+    assert fps == 100.0
+    assert authority == {
+        "schema_id": "palette.provider_chaser_distance_fps_authority",
+        "schema_version": 1,
+        "recording_id": "recording-1",
+        "camera_id": "camera-1",
+        "fps": 100.0,
+        "source_field": "source_video_metadata.fps",
+        "source_video_metadata": {
+            "record_ref": "/@source_video_metadata",
+            "record_sha256": metadata_sha256,
+        },
+        "acquisition_frame_authority": {
+            "record_ref": "analysis/acquisition/source_camera_frame",
+            "record_sha256": "a" * 64,
+        },
+    }
 
 
 def test_dense_provider_positions_preserve_exact_lineage_and_invalid_rows() -> None:
