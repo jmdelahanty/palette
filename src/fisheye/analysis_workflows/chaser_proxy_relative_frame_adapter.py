@@ -411,7 +411,9 @@ def prepare_proxy_relative_frame(
         field="native acquisition_frame_authority",
     )
     if acquisition_pointer != {
-        "record_ref": timing.clock_run_path,
+        "record_ref": (
+            f"/{timing.clock_run_path.lstrip('/')}@acquisition_camera_frame"
+        ),
         "record_sha256": timing.clock_record_sha256,
     }:
         _fail("Native provider and recording timing use different frame domains.")

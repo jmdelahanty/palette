@@ -86,7 +86,10 @@ class _Native:
             "metadata_equivalence": None,
         },
         "acquisition_frame_authority": {
-            "record_ref": "analysis/acquisition_frame_clock_runs/clock-v1",
+            "record_ref": (
+                "/analysis/acquisition_frame_clock_runs/clock-v1"
+                "@acquisition_camera_frame"
+            ),
             "record_sha256": "a" * 64,
         },
         "total_frames": 4,
