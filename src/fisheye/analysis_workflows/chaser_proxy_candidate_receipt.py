@@ -37,11 +37,142 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.chaser_proxy_candidate_workflow_receipt"
-RECEIPT_SCHEMA_VERSION = 1
+# Version 2 adds the bounded source-loader authority table.  Version 1
+# receipts remain valid historical deep-audit records but are intentionally
+# ineligible for receipt-backed loading because they do not bind declarations
+# or completion/metadata evidence.
+RECEIPT_SCHEMA_VERSION = 2
+_SHA256_HEX = frozenset("0123456789abcdef")
+_SELECTOR_NAMES = frozenset(
+    {
+        "latest",
+        "latest_complete",
+        "latest_pending",
+        "authoritative_run",
+        "active",
+        "active_run",
+        "current",
+        "current_run",
+        "default",
+        "default_run",
+        "selected",
+        "selected_run",
+    }
+)
 
 
 class ChaserProxyCandidateReceiptError(ValueError):
     """Raised when one candidate chain or receipt is incomplete or stale."""
+
+
+def _plain(value: Any) -> Any:
+    """Return JSON-native values from a handle's frozen authority records."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _plain(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(child) for child in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _digest(value: object, *, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in _SHA256_HEX for character in value)
+    ):
+        raise ChaserProxyCandidateReceiptError(
+            f"{field} must be one lowercase SHA-256 digest."
+        )
+    return value
+
+
+def _exact_path(value: object, *, prefix: str, field: str) -> str:
+    if type(value) is not str or not value.startswith(prefix):
+        raise ChaserProxyCandidateReceiptError(
+            f"{field} must name one exact child of {prefix!r}."
+        )
+    name = value[len(prefix) :]
+    if not name or "/" in name or name in {".", ".."} or name in _SELECTOR_NAMES:
+        raise ChaserProxyCandidateReceiptError(
+            f"{field} must name one concrete run, not a selector or path."
+        )
+    return value
+
+
+def _mapping(value: object, *, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or any(type(key) is not str for key in value):
+        raise ChaserProxyCandidateReceiptError(f"{field} must be one JSON object.")
+    return value
+
+
+def _strict_temporal_caveats(value: object) -> dict[str, Any]:
+    caveats = dict(_mapping(value, field="relative_frame.temporal_caveats"))
+    expected = {
+        "physical_presentation_verified": False,
+        "presentation_timestamp_available": False,
+        "camera_presentation_clock_transform_available": False,
+        "camera_exposure_reference": "unknown",
+        "scientific_use_class": "exploratory_controller_input_provenance_proxy",
+    }
+    if caveats != expected:
+        raise ChaserProxyCandidateReceiptError(
+            "Receipt temporal proxy caveats are missing, changed, or optimistic."
+        )
+    return caveats
+
+
+def _strict_array_declarations(value: object) -> list[dict[str, Any]]:
+    raw = value
+    if not isinstance(raw, list) or not raw:
+        raise ChaserProxyCandidateReceiptError(
+            "relative_frame.array_declarations must be a non-empty list."
+        )
+    result: list[dict[str, Any]] = []
+    paths: set[str] = set()
+    for index, declaration in enumerate(raw):
+        item = dict(_mapping(declaration, field=f"array_declarations[{index}]"))
+        if set(item) != {"path", "dtype", "shape", "content_sha256"}:
+            raise ChaserProxyCandidateReceiptError(
+                "Receipt array declarations must contain exactly path, dtype, "
+                "shape, and content_sha256."
+            )
+        path = item["path"]
+        if (
+            type(path) is not str
+            or not path
+            or path in paths
+            or path.count("/") != 1
+            or path.split("/", 1)[0] not in {"base", "body"}
+        ):
+            raise ChaserProxyCandidateReceiptError(
+                f"Receipt array declaration path is invalid: {path!r}."
+            )
+        shape = item["shape"]
+        if (
+            not isinstance(shape, list)
+            or any(type(size) is not int or size < 0 for size in shape)
+        ):
+            raise ChaserProxyCandidateReceiptError(
+                f"Receipt array declaration shape is invalid for {path!r}."
+            )
+        if type(item["dtype"]) is not str or not item["dtype"]:
+            raise ChaserProxyCandidateReceiptError(
+                f"Receipt array declaration dtype is invalid for {path!r}."
+            )
+        _digest(item["content_sha256"], field=f"{path}.content_sha256")
+        paths.add(path)
+        result.append(item)
+    expected_order = sorted(path for path in paths if path.startswith("base/")) + sorted(
+        path for path in paths if path.startswith("body/")
+    )
+    if [item["path"] for item in result] != expected_order:
+        raise ChaserProxyCandidateReceiptError(
+            "Receipt array declarations are not in canonical base/body order."
+        )
+    return result
 
 
 def _commit(value: object) -> str:
@@ -227,6 +358,16 @@ def build_chaser_proxy_candidate_receipt(
             "manifest_sha256": proxy.manifest_sha256,
             "projection_sha256": proxy.acquisition_projection_record_sha256,
             "verification_digest": proxy.verification_digest,
+            "publication_binding": _plain(proxy.publication_binding_record),
+            "source_run_path": proxy.acquisition_projection_record[
+                "source_run_path"
+            ],
+            "source_manifest_sha256": proxy.acquisition_projection_record[
+                "source_manifest_sha256"
+            ],
+            "source_verification_digest": proxy.acquisition_projection_record[
+                "source_verification_digest"
+            ],
             "selector_eligible": False,
             "selection": "none",
         },
@@ -238,6 +379,19 @@ def build_chaser_proxy_candidate_receipt(
             "selector_eligible": False,
             "selection": "none",
             "body_extension_present": relative.body_available,
+            "completion": _plain(relative.completion_authority),
+            "metadata_equivalence": _plain(relative.metadata_equivalence),
+            "array_declarations": _plain(relative.manifest["array_declarations"]),
+            "timing_policy": _plain(relative.manifest["timing_policy"]),
+            "temporal_caveats": {
+                "physical_presentation_verified": False,
+                "presentation_timestamp_available": False,
+                "camera_presentation_clock_transform_available": False,
+                "camera_exposure_reference": "unknown",
+                "scientific_use_class": (
+                    "exploratory_controller_input_provenance_proxy"
+                ),
+            },
         },
         "applicability_plan": applicability.as_envelope(),
         "production_authority": False,
@@ -315,6 +469,267 @@ def validate_chaser_proxy_candidate_receipt(
     return receipt
 
 
+def validate_chaser_proxy_candidate_receipt_for_source_load(
+    receipt: object,
+    *,
+    expected_analysis_zarr: str | Path | None = None,
+    expected_recording_id: str | None = None,
+) -> Mapping[str, Any]:
+    """Validate only the sealed receipt contract needed by a bounded source load.
+
+    This intentionally does not reopen any dependency and does not call
+    :func:`validate_chaser_proxy_candidate_receipt`.  The latter remains the
+    explicit deep-audit validator that recomputes the entire dependency chain.
+    The source loader validates the current relative-frame metadata and reads
+    its arrays once after this bounded receipt envelope has passed.
+    """
+
+    if not isinstance(receipt, Mapping):
+        raise ChaserProxyCandidateReceiptError("Candidate receipt must be one object.")
+    body = dict(receipt)
+    digest = body.pop("record_sha256", None)
+    _digest(digest, field="record_sha256")
+    if digest != canonical_json_sha256(body):
+        raise ChaserProxyCandidateReceiptError("Candidate receipt digest is stale.")
+    required = {
+        "schema_id",
+        "schema_version",
+        "status",
+        "analysis_zarr",
+        "recording_id",
+        "analysis_profile_path",
+        "software_authority",
+        "native_source",
+        "input_provenance_proxy",
+        "relative_frame",
+        "applicability_plan",
+        "production_authority",
+        "registry_update",
+        "production_selector_activation",
+        "scientific_use_class",
+        "physical_presentation_verified",
+    }
+    if set(body) != required:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt has missing or unexpected bounded-load fields."
+        )
+    if (
+        body["schema_id"] != RECEIPT_SCHEMA_ID
+        or body["schema_version"] != RECEIPT_SCHEMA_VERSION
+        or body["status"] != "complete_selector_ineligible_candidate_chain"
+        or body["production_authority"] is not False
+        or body["registry_update"] is not False
+        or body["production_selector_activation"] is not False
+        or body["scientific_use_class"]
+        != "exploratory_controller_input_provenance_proxy"
+        or body["physical_presentation_verified"] is not False
+    ):
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt identity or non-production state is invalid."
+        )
+    if type(body["recording_id"]) is not str or not body["recording_id"].strip():
+        raise ChaserProxyCandidateReceiptError("Candidate receipt recording_id is invalid.")
+    if expected_recording_id is not None and body["recording_id"] != expected_recording_id:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt recording_id differs from the requested recording."
+        )
+    archive_text = body["analysis_zarr"]
+    if type(archive_text) is not str or not archive_text:
+        raise ChaserProxyCandidateReceiptError("Candidate receipt analysis_zarr is invalid.")
+    archive = str(Path(archive_text).expanduser().resolve())
+    if archive != archive_text:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt analysis_zarr is not the canonical absolute archive path."
+        )
+    if expected_analysis_zarr is not None and archive != str(
+        Path(expected_analysis_zarr).expanduser().resolve()
+    ):
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt names another analysis archive."
+        )
+    if type(body["analysis_profile_path"]) is not str or not body["analysis_profile_path"]:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt analysis_profile_path is invalid."
+        )
+    software = _mapping(body["software_authority"], field="software_authority")
+    if set(software) != {"repository", "commit"} or software["repository"] != "palette":
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt has invalid software authority."
+        )
+    _commit(software["commit"])
+
+    native = _mapping(body["native_source"], field="native_source")
+    if set(native) != {"run_path", "manifest_sha256", "verification_digest"}:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt native source authority is incomplete."
+        )
+    _exact_path(
+        native["run_path"],
+        prefix="analysis/provider_chaser_distance_candidate_runs/",
+        field="native_source.run_path",
+    )
+    _digest(native["manifest_sha256"], field="native_source.manifest_sha256")
+    _digest(native["verification_digest"], field="native_source.verification_digest")
+
+    proxy = _mapping(body["input_provenance_proxy"], field="input_provenance_proxy")
+    proxy_required = {
+        "run_path",
+        "manifest_sha256",
+        "projection_sha256",
+        "verification_digest",
+        "publication_binding",
+        "source_run_path",
+        "source_manifest_sha256",
+        "source_verification_digest",
+        "selector_eligible",
+        "selection",
+    }
+    if set(proxy) != proxy_required:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt proxy authority is incomplete."
+        )
+    _exact_path(
+        proxy["run_path"],
+        prefix="analysis/chaser_input_provenance_proxy_runs/",
+        field="input_provenance_proxy.run_path",
+    )
+    for field in (
+        "manifest_sha256",
+        "projection_sha256",
+        "verification_digest",
+        "source_manifest_sha256",
+        "source_verification_digest",
+    ):
+        _digest(proxy[field], field=f"input_provenance_proxy.{field}")
+    _exact_path(
+        proxy["source_run_path"],
+        prefix="analysis/provider_chaser_distance_candidate_runs/",
+        field="input_provenance_proxy.source_run_path",
+    )
+    if proxy["selector_eligible"] is not False or proxy["selection"] != "none":
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt proxy is not selector-ineligible with selection=none."
+        )
+    publication = _mapping(
+        proxy["publication_binding"],
+        field="input_provenance_proxy.publication_binding",
+    )
+    if publication.get("run_path") != proxy["run_path"] or publication.get(
+        "manifest_sha256"
+    ) != proxy["manifest_sha256"]:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt proxy publication binding is stale."
+        )
+    if publication.get("selector_eligible") is not False or publication.get(
+        "selection"
+    ) != "none":
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt proxy publication binding is selectable."
+        )
+
+    relative = _mapping(body["relative_frame"], field="relative_frame")
+    relative_required = {
+        "run_path",
+        "manifest_sha256",
+        "payload_digest",
+        "verification_digest",
+        "selector_eligible",
+        "selection",
+        "body_extension_present",
+        "completion",
+        "metadata_equivalence",
+        "array_declarations",
+        "timing_policy",
+        "temporal_caveats",
+    }
+    if set(relative) != relative_required:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt relative-frame authority is incomplete."
+        )
+    _exact_path(
+        relative["run_path"],
+        prefix="analysis/chaser_relative_frame_runs/",
+        field="relative_frame.run_path",
+    )
+    for field in ("manifest_sha256", "payload_digest", "verification_digest"):
+        _digest(relative[field], field=f"relative_frame.{field}")
+    if relative["selector_eligible"] is not False or relative["selection"] != "none":
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt relative frame is not selector-ineligible with selection=none."
+        )
+    if type(relative["body_extension_present"]) is not bool:
+        raise ChaserProxyCandidateReceiptError(
+            "relative_frame.body_extension_present must be an exact boolean."
+        )
+    completion = dict(_mapping(relative["completion"], field="relative_frame.completion"))
+    if set(completion) != {"contract", "status", "epoch"}:
+        raise ChaserProxyCandidateReceiptError(
+            "relative_frame.completion must declare contract, status, and epoch."
+        )
+    if completion["contract"] != "palette.zarr_run_completion.v1" or completion[
+        "status"
+    ] != "complete" or type(completion["epoch"]) is not int or completion["epoch"] < 2:
+        raise ChaserProxyCandidateReceiptError(
+            "relative_frame.completion is not a strict provenance-bearing completion."
+        )
+    metadata = dict(
+        _mapping(relative["metadata_equivalence"], field="relative_frame.metadata_equivalence")
+    )
+    if set(metadata) != {
+        "schema_id",
+        "schema_version",
+        "subtree_path",
+        "node_count",
+        "group_count",
+        "array_count",
+        "declarations_sha256",
+    }:
+        raise ChaserProxyCandidateReceiptError(
+            "relative_frame.metadata_equivalence is incomplete."
+        )
+    if metadata["schema_id"] != "palette.zarr.metadata_equivalence" or metadata[
+        "schema_version"
+    ] != 1 or metadata["subtree_path"] != relative["run_path"]:
+        raise ChaserProxyCandidateReceiptError(
+            "relative_frame.metadata_equivalence is bound to another subtree."
+        )
+    for field in ("node_count", "group_count", "array_count"):
+        if type(metadata[field]) is not int or metadata[field] < 1:
+            raise ChaserProxyCandidateReceiptError(
+                f"relative_frame.metadata_equivalence.{field} is invalid."
+            )
+    _digest(
+        metadata["declarations_sha256"],
+        field="relative_frame.metadata_equivalence.declarations_sha256",
+    )
+    _strict_array_declarations(relative["array_declarations"])
+    timing = _mapping(relative["timing_policy"], field="relative_frame.timing_policy")
+    if timing.get("timestamp_field") is not None:
+        raise ChaserProxyCandidateReceiptError(
+            "Receipt timing policy claims a camera timestamp for the proxy path."
+        )
+    _strict_temporal_caveats(relative["temporal_caveats"])
+    if proxy["source_run_path"] != native["run_path"] or proxy[
+        "source_manifest_sha256"
+    ] != native["manifest_sha256"] or proxy["source_verification_digest"] != native[
+        "verification_digest"
+    ]:
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt proxy/native source binding is inconsistent."
+        )
+    if body["recording_id"] != publication.get("recording_id"):
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt recording identity is inconsistent."
+        )
+    # Metadata-equivalence receipts intentionally do not carry recording_id;
+    # accept that omission while rejecting a contradictory future extension.
+    if metadata.get("recording_id") not in (None, body["recording_id"]):
+        raise ChaserProxyCandidateReceiptError(
+            "Candidate receipt metadata recording identity is inconsistent."
+        )
+    return receipt
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("analysis_zarr", type=Path)
@@ -355,4 +770,5 @@ __all__ = [
     "ChaserProxyCandidateReceiptError",
     "build_chaser_proxy_candidate_receipt",
     "validate_chaser_proxy_candidate_receipt",
+    "validate_chaser_proxy_candidate_receipt_for_source_load",
 ]

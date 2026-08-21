@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from copy import deepcopy
 
 import numpy as np
@@ -90,7 +91,7 @@ def _context() -> ChaserRelativeFramePublicationContext:
     )
 
 
-def _prepared(*, body: bool = True):
+def _prepared(*, body: bool = True, timestamps: bool = True):
     n_frames = 3
     keys = AcquisitionFrameKeys(
         recording_id="recording-1",
@@ -98,7 +99,9 @@ def _prepared(*, body: bool = True):
         track_sample_id=np.asarray([20, 21, 22], dtype=np.int64),
         row_axis_authority_id="camera-rows-v1",
         row_axis_authority_digest="camera-rows-digest",
-        timestamp_ns=np.asarray([100, 200, 300], dtype=np.int64),
+        timestamp_ns=(
+            np.asarray([100, 200, 300], dtype=np.int64) if timestamps else None
+        ),
     )
     fish_xy = np.asarray([[1, 1], [2, 2], [3, 3]], dtype=np.float64)
     chaser_xy = fish_xy[:, None, :] + np.asarray([[[3.0, 4.0]]])
@@ -152,12 +155,12 @@ def _prepared(*, body: bool = True):
     return prepare_chaser_relative_frame(result, context=_context())
 
 
-def _publish(tmp_path, *, body: bool = True):
+def _publish(tmp_path, *, body: bool = True, timestamps: bool = True):
     archive = tmp_path / "analysis.zarr"
     root = open_zarr_root(archive, mode="w-")
     root.attrs["recording_id"] = "recording-1"
     root.require_group(PARENT_PATH)
-    prepared = _prepared(body=body)
+    prepared = _prepared(body=body, timestamps=timestamps)
     materialize_chaser_relative_frame(
         archive,
         prepared=prepared,
@@ -169,7 +172,7 @@ def _publish(tmp_path, *, body: bool = True):
     return archive
 
 
-def _publish_proxy_bound(tmp_path):
+def _publish_proxy_bound(tmp_path, *, timestamps: bool = True):
     archive = tmp_path / "analysis.zarr"
     root = open_zarr_root(archive, mode="w-")
     root.attrs["recording_id"] = "recording-1"
@@ -177,8 +180,19 @@ def _publish_proxy_bound(tmp_path):
     context = _storage_context(
         acquisition_projection_record=_proxy_projection_record()
     )
+    result = _result_bound_to_proxy(context)
+    if not timestamps:
+        result = replace(
+            result,
+            frame_keys=replace(result.frame_keys, timestamp_ns=None),
+            timing_policy=replace(
+                result.timing_policy,
+                timestamp_field=None,
+                policy_id="acquisition_frame_domain_without_camera_timestamps_v1",
+            ),
+        )
     prepared = prepare_chaser_relative_frame(
-        _result_bound_to_proxy(context),
+        result,
         context=context,
     )
     materialize_chaser_relative_frame(

@@ -16,6 +16,7 @@ def _fake_sources() -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
             "analysis/provider_chaser_distance_candidate_runs/native-v1"
         ),
         "source_manifest_sha256": "a" * 64,
+        "source_verification_digest": "e" * 64,
         "policy_id": "latest_logged_cpu_state_per_input_acquisition_proxy_v1",
     }
     publication = {"run_path": "analysis/chaser_input_provenance_proxy_runs/proxy-v1"}
@@ -64,7 +65,29 @@ def _fake_sources() -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
             "timing_policy": {
                 "policy_id": receipt.TIMING_POLICY_ID,
                 "timestamp_field": None,
-            }
+            },
+            "array_declarations": [
+                {
+                    "path": "base/timestamp_valid",
+                    "dtype": "|b1",
+                    "shape": [2],
+                    "content_sha256": "2" * 64,
+                }
+            ],
+        },
+        completion_authority={
+            "contract": "palette.zarr_run_completion.v1",
+            "status": "complete",
+            "epoch": 2,
+        },
+        metadata_equivalence={
+            "schema_id": "palette.zarr.metadata_equivalence",
+            "schema_version": 1,
+            "subtree_path": "analysis/chaser_relative_frame_runs/relative-v1",
+            "node_count": 2,
+            "group_count": 1,
+            "array_count": 1,
+            "declarations_sha256": "3" * 64,
         },
         base_array=lambda name: np.zeros(2, dtype=bool),
     )
