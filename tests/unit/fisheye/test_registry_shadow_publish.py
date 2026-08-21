@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -65,6 +66,14 @@ def test_shadow_publication_preserves_backup_and_atomically_publishes(
     assert publication.source_sha256 != publication.published_sha256
     assert publication.mutation_result["updated_count"] == 1
     assert publication.source_validation.integrity_check == "ok"
+    assert publication.source_validation.sqlite_runtime_version == (
+        sqlite3.sqlite_version
+    )
+    assert publication.source_validation.sqlite_python_module_version == (
+        sqlite3.version
+    )
+    assert publication.source_validation.python_executable == sys.executable
+    assert publication.source_validation.validation_backend == "python_stdlib_sqlite3"
     assert publication.published_validation.integrity_check == "ok"
     assert not list(tmp_path.glob(".registry.sqlite.publish_tmp.*"))
 
