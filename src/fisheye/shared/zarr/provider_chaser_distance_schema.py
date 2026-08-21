@@ -442,7 +442,10 @@ _ARRAYS: tuple[tuple[str, ArrayContract], ...] = (
             dtype=FLOAT32,
             shape=_N,
             axes=_ROW_AXIS,
-            description="Euclidean source-to-chaser distance derived from pixels_per_unit in millimetres.",
+            description=(
+                "Optional Euclidean source-to-chaser distance derived from an "
+                "authoritative pixels_per_unit scale whose exact unit is millimetres."
+            ),
             units="mm",
             coordinate_space="source_camera_calibrated_xy",
         ),
@@ -454,7 +457,10 @@ _ARRAYS: tuple[tuple[str, ArrayContract], ...] = (
             dtype=BOOL,
             shape=_N,
             axes=_ROW_AXIS,
-            description="Whether distance_mm is valid; requires an authoritative mm scale.",
+            description=(
+                "Optional validity for distance_mm; requires the complete "
+                "distance_mm triple and an authoritative mm scale."
+            ),
         ),
     ),
     (
@@ -502,7 +508,10 @@ _ARRAYS: tuple[tuple[str, ArrayContract], ...] = (
 
 _ARRAY_NAMES = frozenset(name for name, _ in _ARRAYS)
 _OPTIONAL_TRIAL = frozenset({"trial_id", "trial_valid", "trial_reason_code"})
-_REQUIRED_ARRAY_NAMES = _ARRAY_NAMES - _OPTIONAL_TRIAL
+_OPTIONAL_DISTANCE_MM = frozenset(
+    {"distance_mm", "distance_mm_valid", "distance_mm_reason_code"}
+)
+_REQUIRED_ARRAY_NAMES = _ARRAY_NAMES - _OPTIONAL_TRIAL - _OPTIONAL_DISTANCE_MM
 
 PROVIDER_CHASER_DISTANCE_ARRAY_CONTRACTS = ArrayContractCatalog(
     contract for _, contract in _ARRAYS
@@ -690,9 +699,15 @@ def _validate_invariants(
         ("row_valid", "row_reason_code"),
         ("relative_transition_valid", "relative_transition_reason_code"),
         ("distance_px_valid", "distance_px_reason_code"),
-        ("distance_mm_valid", "distance_mm_reason_code"),
     ):
         _validate_validity_reason(arrays, valid_path=valid_path, reason_path=reason_path, issues=issues)
+    if _OPTIONAL_DISTANCE_MM <= arrays.keys():
+        _validate_validity_reason(
+            arrays,
+            valid_path="distance_mm_valid",
+            reason_path="distance_mm_reason_code",
+            issues=issues,
+        )
     if "trial_id" in arrays:
         _validate_validity_reason(arrays, valid_path="trial_valid", reason_path="trial_reason_code", issues=issues)
 
@@ -703,19 +718,26 @@ def _validate_invariants(
         ("chaser_position_xy_px", "chaser_position_valid"),
         ("relative_vector_px_xy", "distance_px_valid"),
         ("distance_px", "distance_px_valid"),
-        ("distance_mm", "distance_mm_valid"),
     ):
         _validate_float_validity(arrays, value_path=value_path, valid_path=valid_path, issues=issues)
+    if _OPTIONAL_DISTANCE_MM <= arrays.keys():
+        _validate_float_validity(
+            arrays,
+            value_path="distance_mm",
+            valid_path="distance_mm_valid",
+            issues=issues,
+        )
     if np.any(arrays["source_position_valid"] & ~arrays["source_position_row_valid"]):
         issues.append(_issue("position_without_source_row", "source_position_valid", "valid source positions require valid source row identities."))
     if np.any(arrays["chaser_position_valid"] & ~arrays["chaser_position_row_valid"]):
         issues.append(_issue("position_without_chaser_row", "chaser_position_valid", "valid chaser positions require valid chaser row identities."))
     if np.any(arrays["distance_px_valid"] & (~arrays["source_position_valid"] | ~arrays["chaser_position_valid"])):
         issues.append(_issue("distance_without_positions", "distance_px_valid", "valid distances require valid source and chaser positions."))
-    if not np.array_equal(arrays["distance_mm_valid"], arrays["distance_px_valid"]):
-        issues.append(_issue("mm_validity_mismatch", "distance_mm_valid", "mm validity must match pixel validity after an authoritative mm scale is bound."))
-    if not np.array_equal(arrays["distance_mm_reason_code"], arrays["distance_px_reason_code"]):
-        issues.append(_issue("mm_reason_mismatch", "distance_mm_reason_code", "mm and pixel distance reason codes must agree."))
+    if _OPTIONAL_DISTANCE_MM <= arrays.keys():
+        if not np.array_equal(arrays["distance_mm_valid"], arrays["distance_px_valid"]):
+            issues.append(_issue("mm_validity_mismatch", "distance_mm_valid", "mm validity must match pixel validity after an authoritative mm scale is bound."))
+        if not np.array_equal(arrays["distance_mm_reason_code"], arrays["distance_px_reason_code"]):
+            issues.append(_issue("mm_reason_mismatch", "distance_mm_reason_code", "mm and pixel distance reason codes must agree."))
     comparable = arrays["distance_px_valid"]
     if np.any(comparable):
         expected = np.linalg.norm(
@@ -755,6 +777,15 @@ class ProviderChaserDistanceSchema:
         missing = _REQUIRED_ARRAY_NAMES - observed
         if missing:
             issues.append(_issue("missing_array", "arrays", f"missing required arrays: {sorted(missing)!r}."))
+        distance_mm_present = observed & _OPTIONAL_DISTANCE_MM
+        if distance_mm_present and distance_mm_present != _OPTIONAL_DISTANCE_MM:
+            issues.append(
+                _issue(
+                    "partial_distance_mm",
+                    "distance_mm",
+                    "distance_mm, distance_mm_valid, and distance_mm_reason_code must be supplied together.",
+                )
+            )
         optional_present = observed & _OPTIONAL_TRIAL
         if optional_present and optional_present != _OPTIONAL_TRIAL:
             issues.append(_issue("partial_trial", "trial_id", "trial_id, trial_valid, and trial_reason_code must be supplied together."))
@@ -797,7 +828,9 @@ class ProviderChaserDistanceSchema:
                 "source_position_row_id": "original_provider_row_identity_not_output_row_number",
                 "coordinate_space": _PIXEL_SPACE,
                 "invalid_float_values": "NaN",
-                "distance_mm": "distance_px_divided_by_authoritative_pixels_per_mm",
+                "distance_px": "always_required",
+                "distance_mm": "optional_atomic_triple_only_when_bound_scale_unit_is_mm",
+                "optional_distance_mm": "distance_mm_distance_mm_valid_distance_mm_reason_code_are_one_atomic_triple",
                 "optional_trial": "trial_id_trial_valid_trial_reason_code_are_one_atomic_triple",
                 "temporal": "controller_input_provenance_proxy_is_not_display_presentation",
                 "production": "selector_ineligible_and_non_production",

@@ -39,6 +39,7 @@ from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
     CHASER_RELATIVE_FRAME_SOURCE_HANDLE_SCHEMA_ID,
     CHASER_RELATIVE_FRAME_SOURCE_HANDLE_SCHEMA_VERSION,
 )
+from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.provider_chaser_distance_schema import (
     PROVIDER_CHASER_DISTANCE_LAYOUT,
@@ -187,28 +188,41 @@ def _proxy_record(handle: Any, *, recording_id: str, n_frames: int, n_chasers: i
     return projection, publication
 
 
-def _scale_policy(handle: Any) -> dict[str, Any]:
+def _scale_policy(handle: Any) -> tuple[dict[str, Any], float | None]:
     manifest = getattr(handle, "run_manifest", None)
     if not isinstance(manifest, Mapping):
         _fail("Verified source handle lacks its run manifest.")
     policy = manifest.get("scale_policy")
+    if policy is None:
+        return {
+            "available": False,
+            "unit": None,
+            "mm_derivation_available": False,
+            "authority": None,
+        }, None
     if not isinstance(policy, Mapping):
-        _fail("Provider chaser-distance successor requires a scale policy.")
+        _fail("Source scale_policy must be an object when present.")
     result = dict(policy)
-    if result.get("unit") != "mm":
-        _fail("Provider chaser-distance successor requires an explicit millimetre scale.")
-    pixels_per_unit = result.get("pixels_per_unit")
-    if (
-        isinstance(pixels_per_unit, bool)
-        or not isinstance(pixels_per_unit, (int, float))
-        or not np.isfinite(float(pixels_per_unit))
-        or float(pixels_per_unit) <= 0
-    ):
-        _fail("Scale policy must provide positive finite pixels_per_unit in mm.")
     for name in ("policy_id", "scale_authority_id", "scale_digest", "unit"):
         _text(result.get(name), field=f"scale_policy.{name}")
-    result["pixels_per_unit"] = float(pixels_per_unit)
-    return result
+    unit = result["unit"]
+    pixels_per_unit = result.get("pixels_per_unit")
+    if pixels_per_unit is not None:
+        if (
+            isinstance(pixels_per_unit, bool)
+            or not isinstance(pixels_per_unit, (int, float))
+            or not np.isfinite(float(pixels_per_unit))
+            or float(pixels_per_unit) <= 0
+        ):
+            _fail("Scale policy pixels_per_unit must be positive and finite when present.")
+        result["pixels_per_unit"] = float(pixels_per_unit)
+    result["available"] = True
+    result["mm_derivation_available"] = unit == "mm"
+    if unit != "mm":
+        return result, None
+    if pixels_per_unit is None:
+        _fail("Millimetre scale policy must provide positive finite pixels_per_unit.")
+    return result, float(pixels_per_unit)
 
 
 def _coordinate_policy(handle: Any) -> dict[str, Any]:
@@ -235,6 +249,7 @@ def _declarations(arrays: Mapping[str, np.ndarray]) -> list[dict[str, Any]]:
             "path": name,
             "dtype": array.dtype.str,
             "shape": [int(value) for value in array.shape],
+            "content_sha256": array_values_sha256(array),
         }
         for name, array in sorted(arrays.items())
     ]
@@ -285,7 +300,7 @@ def build_provider_chaser_distance_successor(
         n_frames=dimensions.n_frames,
         n_chasers=dimensions.n_chasers,
     )
-    scale_policy = _scale_policy(source_handle)
+    scale_policy, pixels_per_unit = _scale_policy(source_handle)
     coordinate_policy = _coordinate_policy(source_handle)
     timing_policy = dict(getattr(source_handle, "run_manifest", {}).get("timing_policy", {}))
     source_authorities = getattr(source_handle, "source_authorities", None)
@@ -320,12 +335,6 @@ def build_provider_chaser_distance_successor(
             _fail("Source relative distance does not equal source-to-chaser pixel geometry.")
     if np.any(distance_px_valid & (~source_position_valid | ~chaser_position_valid)):
         _fail("Source relative distance marks a row valid without valid positions.")
-    distance_mm = np.full(distance_px.shape, np.nan, dtype=np.float32)
-    distance_mm[distance_px_valid] = (
-        distance_px[distance_px_valid].astype(np.float64)
-        / scale_policy["pixels_per_unit"]
-    ).astype(np.float32)
-
     arrays: dict[str, np.ndarray] = {
         "acquisition_frame_id": _copy_readonly(_frame_rows(distance_view, "acquisition_frame_id")),
         "track_sample_id": _copy_readonly(_frame_rows(distance_view, "track_sample_id")),
@@ -362,10 +371,21 @@ def build_provider_chaser_distance_successor(
         "distance_px": _copy_readonly(distance_px),
         "distance_px_valid": _copy_readonly(distance_px_valid),
         "distance_px_reason_code": _copy_readonly(_pair_rows(distance_view, "relative_px_reason_code")),
-        "distance_mm": _copy_readonly(distance_mm),
-        "distance_mm_valid": _copy_readonly(distance_px_valid),
-        "distance_mm_reason_code": _copy_readonly(_pair_rows(distance_view, "relative_px_reason_code")),
     }
+    if pixels_per_unit is not None:
+        distance_mm = np.full(distance_px.shape, np.nan, dtype=np.float32)
+        distance_mm[distance_px_valid] = (
+            distance_px[distance_px_valid].astype(np.float64) / pixels_per_unit
+        ).astype(np.float32)
+        arrays.update(
+            {
+                "distance_mm": _copy_readonly(distance_mm),
+                "distance_mm_valid": _copy_readonly(distance_px_valid),
+                "distance_mm_reason_code": _copy_readonly(
+                    _pair_rows(distance_view, "relative_px_reason_code")
+                ),
+            }
+        )
     for name in ("trial_id", "trial_valid", "trial_reason_code"):
         if name in distance_view.pair_arrays:
             arrays[name] = _copy_readonly(_pair_rows(distance_view, name))
@@ -374,6 +394,11 @@ def build_provider_chaser_distance_successor(
 
     native_sample_count = int(projection["native_sample_count"])
     selected_input_frame_count = int(projection["selected_acquisition_frame_count"])
+    native_sample_multiplicity = (
+        float(native_sample_count / dimensions.n_frames)
+        if dimensions.n_frames
+        else None
+    )
     denominators = {
         "unique_acquisition_frame_count": dimensions.n_frames,
         "frame_x_chaser_relation_row_count": dimensions.n_rows,
@@ -381,6 +406,11 @@ def build_provider_chaser_distance_successor(
         "valid_distance_relation_row_count": int(np.count_nonzero(distance_px_valid)),
         "native_stimulus_sample_count": native_sample_count,
         "selected_input_acquisition_frame_count": selected_input_frame_count,
+        "native_sample_multiplicity": {
+            "numerator": "native_stimulus_sample_count",
+            "denominator": "unique_acquisition_frame_count",
+            "ratio": native_sample_multiplicity,
+        },
     }
     source_manifest_sha256 = _text(
         getattr(source_handle, "manifest_sha256", None),
@@ -407,6 +437,7 @@ def build_provider_chaser_distance_successor(
         "selection": "none",
         "production_authority": False,
         "production_selector_activation": False,
+        "registry_update": False,
         "computation_id": COMPUTATION_ID,
         "schema_binding": {
             "schema_id": PROVIDER_CHASER_DISTANCE_SCHEMA_ID,
@@ -444,6 +475,10 @@ def build_provider_chaser_distance_successor(
             "native_sample_rows_preserved_in_source": True,
         },
         "optional_fields": {
+            "distance_mm_triple_present": all(
+                name in arrays
+                for name in ("distance_mm", "distance_mm_valid", "distance_mm_reason_code")
+            ),
             "trial_triple_present": all(name in arrays for name in ("trial_id", "trial_valid", "trial_reason_code")),
         },
         "array_declarations": _declarations(arrays),
