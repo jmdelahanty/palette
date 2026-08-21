@@ -457,7 +457,7 @@ def _validate_declarations(
     run: Any,
     *,
     payload: Mapping[str, Any],
-) -> tuple[dict[str, np.ndarray], list[Mapping[str, Any]]]:
+) -> tuple[dict[str, np.ndarray], list[Mapping[str, Any]], dict[str, str]]:
     raw_declarations = payload.get("arrays")
     if not isinstance(raw_declarations, list) or not raw_declarations:
         raise ProviderChaserStimulusSourceHandleError(
@@ -512,6 +512,7 @@ def _validate_declarations(
             f"missing={missing}, extra={extra}."
         )
     arrays: dict[str, np.ndarray] = {}
+    verified_digests: dict[str, str] = {}
     for declaration in declarations:
         path = str(declaration["path"])
         value = _readonly_snapshot(_array_node(run, path), path=path)
@@ -524,7 +525,8 @@ def _validate_declarations(
                 f"Provider candidate array {path!r} content digest differs from its declaration."
             )
         arrays[path] = value
-    return arrays, declarations
+        verified_digests[path] = str(declaration["sha256"])
+    return arrays, declarations, verified_digests
 
 
 def _validate_native_layout(
@@ -913,7 +915,9 @@ def _load_once(
         )
     authority = _validate_authorities(manifest["payload"], recording_id=recording_id)
     provenance = _validate_provenance(run, source_authority=authority)
-    arrays, _declarations = _validate_declarations(run, payload=manifest["payload"])
+    arrays, _declarations, verified_array_digests = _validate_declarations(
+        run, payload=manifest["payload"]
+    )
     total_frames = int(authority["total_frames"])
     dimensions, registries = _validate_native_layout(
         arrays, total_frames=total_frames, authority=authority
@@ -924,7 +928,10 @@ def _load_once(
         "run_path": exact_run_path,
         "recording_id": recording_id,
         "manifest_sha256": manifest_sha256,
-        "arrays": {path: sha256_array(value) for path, value in sorted(arrays.items())},
+        "arrays": {
+            path: verified_array_digests[path]
+            for path in sorted(verified_array_digests)
+        },
         "dimensions": {
             "total_frames": dimensions.total_frames,
             "n_samples": dimensions.n_samples,

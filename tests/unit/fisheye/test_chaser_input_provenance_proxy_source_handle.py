@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import fisheye.analysis_workflows.chaser_input_provenance_proxy_source_handle as proxy_handle_module
+import fisheye.shared.zarr.chaser_input_provenance_proxy_schema as proxy_schema_module
 from fisheye.analysis_workflows.chaser_input_provenance_proxy_source_handle import (
     ChaserInputProvenanceProxySourceHandle,
     ChaserInputProvenanceProxySourceHandleError,
@@ -35,6 +37,37 @@ def _published(tmp_path: Path) -> Path:
         run_name="proxy_v1",
     )
     return archive
+
+
+def test_deep_validation_hashes_each_declared_array_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _published(tmp_path)
+    calls = 0
+    original_hash = proxy_schema_module.array_values_sha256
+
+    def counted_hash(value: object) -> str:
+        nonlocal calls
+        calls += 1
+        return original_hash(value)
+
+    def unexpected_duplicate_hash(value: object) -> str:
+        raise AssertionError("the verification document must reuse declaration hashes")
+
+    monkeypatch.setattr(proxy_schema_module, "array_values_sha256", counted_hash)
+    monkeypatch.setattr(
+        proxy_handle_module,
+        "array_values_sha256",
+        unexpected_duplicate_hash,
+        raising=False,
+    )
+
+    handle = load_chaser_input_provenance_proxy_source_handle(
+        archive,
+        run_name="proxy_v1",
+    )
+
+    assert calls == len(handle.arrays)
 
 
 def test_strict_handle_reads_exact_consolidated_candidate(tmp_path: Path) -> None:

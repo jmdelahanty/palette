@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import zarr
 
+import fisheye.analysis_workflows.provider_chaser_stimulus_source_handle as provider_handle_module
 from tests.unit.fisheye.test_provider_chaser_distance_candidates import _candidate
 from fisheye.analysis.provider_chaser_distance_candidates import (
     MANIFEST_ATTR,
@@ -151,6 +152,33 @@ def _rewrite_manifest(archive: Path, run_name: str, mutate) -> None:
     run.attrs[MANIFEST_ATTR] = manifest
     run.attrs[MANIFEST_DIGEST_ATTR] = manifest["payload_digest"]
     consolidate_metadata_capture_expected_warnings(archive)
+
+
+def test_deep_validation_hashes_each_declared_array_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, run_name = _published_candidate(tmp_path)
+    calls = 0
+    original_hash = provider_handle_module.sha256_array
+
+    def counted_hash(value: object) -> str:
+        nonlocal calls
+        calls += 1
+        return original_hash(value)
+
+    monkeypatch.setattr(provider_handle_module, "sha256_array", counted_hash)
+
+    handle = load_provider_chaser_stimulus_source_handle(
+        archive,
+        run_name=run_name,
+        # The default published path intentionally performs one independent
+        # direct/consolidated deep validation per metadata view.  This test
+        # isolates one explicit deep pass so the duplicate verification hash
+        # cannot be hidden by that separate metadata-equivalence proof.
+        use_consolidated=False,
+    )
+
+    assert calls == len(handle.arrays)
 
 
 def test_published_writer_contract_fixture_exposes_native_samples_without_camera_deduplication(

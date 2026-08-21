@@ -16,7 +16,6 @@ from fisheye.analysis_workflows.materializers.chaser_input_provenance_proxy impo
     MANIFEST_ATTR,
     MANIFEST_DIGEST_ATTR,
 )
-from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.shared.zarr.chaser_input_provenance_proxy_schema import (
     CHASER_INPUT_PROVENANCE_PROXY_LAYOUT,
@@ -344,6 +343,10 @@ def load_chaser_input_provenance_proxy_source_handle(
         n_candidates=int(dimensions_record["candidate"]),
         n_chasers=int(dimensions_record["chaser"]),
     )
+    verified_array_digests = {
+        str(declaration["path"]): str(declaration["content_sha256"])
+        for declaration in normalized_manifest["array_declarations"]
+    }
     verification = {
         "schema_id": SOURCE_HANDLE_SCHEMA_ID,
         "schema_version": SOURCE_HANDLE_SCHEMA_VERSION,
@@ -351,7 +354,8 @@ def load_chaser_input_provenance_proxy_source_handle(
         "recording_id": recording_id,
         "manifest_sha256": manifest_sha256,
         "arrays": {
-            name: array_values_sha256(value) for name, value in sorted(arrays.items())
+            name: verified_array_digests[name]
+            for name in sorted(verified_array_digests)
         },
         "metadata_equivalence": equivalence.to_json(),
         "selector_eligible": False,
