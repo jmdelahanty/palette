@@ -347,6 +347,30 @@ def _validate_persistent_run(
     }
 
 
+def _compact_persistent_validation(validation: Mapping[str, Any]) -> dict[str, Any]:
+    """Return bounded evidence suitable for an atomic publication receipt.
+
+    ``_validate_persistent_run`` returns the loaded arrays because readers need
+    them after validation.  Atomic publication receipts are metadata, however,
+    and must never embed those row-level payloads.  The manifest digest binds
+    the full array declarations and their one-time content hashes; readable
+    array paths, counts, and row cardinality are sufficient here.
+    """
+
+    arrays = validation.get("arrays")
+    if not isinstance(arrays, Mapping):
+        _fail("Persistent validation did not return its exact array mapping.")
+    return {
+        "valid": validation.get("valid") is True,
+        "manifest_sha256": validation.get("manifest_sha256"),
+        "run_path": validation.get("run_path"),
+        "array_count": validation.get("array_count"),
+        "row_count": validation.get("row_count"),
+        "array_paths": sorted(str(path) for path in arrays),
+        "row_evidence_storage": "zarr_arrays_not_publication_metadata",
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderChaserDistancePublicationPlan:
     """All immutable inputs needed for one selector-ineligible publication."""
@@ -587,10 +611,12 @@ def publish_provider_chaser_distance_run(
         parent_snapshot: dict[str, Any] | None = None
 
         def validate(path: Path) -> Mapping[str, Any]:
-            return _validate_persistent_run(
-                path,
-                expected_manifest=plan.manifest,
-                expected_run_path=plan.run_path,
+            return _compact_persistent_validation(
+                _validate_persistent_run(
+                    path,
+                    expected_manifest=plan.manifest,
+                    expected_run_path=plan.run_path,
+                )
             )
 
         def prepare_parents(root: Any) -> tuple[Any]:

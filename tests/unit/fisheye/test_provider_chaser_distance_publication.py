@@ -17,6 +17,7 @@ from fisheye.analysis_workflows.provider_chaser_distance_publication import (
     load_provider_chaser_distance_source_handle,
     publish_provider_chaser_distance_run,
 )
+from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.utils import materialize_provider_chaser_distance as cli_module
 from tests.unit.fisheye.test_chaser_relative_frame_source_handle import (
     _publish_proxy_bound,
@@ -109,6 +110,35 @@ def test_output_declarations_are_hashed_once_and_not_by_publisher_validation(
     assert result["selector_eligible"] is False
     assert result["selection"] == "none"
     assert result["registry_update"] is False
+
+
+def test_atomic_publication_receipt_keeps_row_evidence_in_arrays(
+    tmp_path: Path,
+) -> None:
+    archive, _receipt, plan = _plan(tmp_path)
+
+    publish_provider_chaser_distance_run(plan, scratch_root=tmp_path / "scratch")
+
+    root = open_zarr_root(archive, mode="r", use_consolidated=False)
+    run = root[plan.run_path]
+    publication = dict(run.attrs["cluster_output_staging"])
+    expected_paths = sorted(plan.prepared.arrays)
+    for field in (
+        "local_validation",
+        "temporary_validation",
+        "pre_pointer_validation",
+        "final_validation",
+    ):
+        validation = publication[field]
+        assert "arrays" not in validation
+        assert validation["array_paths"] == expected_paths
+        assert validation["array_count"] == len(expected_paths)
+        assert validation["row_count"] == plan.prepared.dimensions.n_rows
+        assert (
+            validation["row_evidence_storage"]
+            == "zarr_arrays_not_publication_metadata"
+        )
+    assert len(json.dumps(publication)) < 100_000
 
 
 def test_published_reader_is_bounded_and_deep_audit_is_explicit(
