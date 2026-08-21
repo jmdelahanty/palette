@@ -7,6 +7,10 @@ import numpy as np
 import pytest
 
 from fisheye.detection.clipped_native_binding import ClippedDetectionArtifactMember
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
+    canonical_detection_manifest_digest_from_publication_payload,
+)
 from fisheye.utils import assemble_clipped_native_detection as assembler
 
 
@@ -73,15 +77,27 @@ def test_assembler_binds_then_publishes_one_coordinate_v3_run(
         return SimpleNamespace(
             output_path=kwargs["destination"],
             run_id=kwargs["run_id"],
-            receipt={"native_run_manifest_schema_version": 3},
+            receipt={
+                "status": "complete",
+                "run_id": kwargs["run_id"],
+                "native_run_manifest_schema_version": 3,
+                "publication_selector_eligible": True,
+                "run_manifest_digest": "4" * 64,
+            },
         )
 
     def fake_publish(**kwargs):
         calls["publish_kwargs"] = kwargs
         return {
+            "schema_id": NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
+            "schema_version": 1,
             "status": "complete",
             "group_path": "detect_runs/detect_native",
+            "run_id": "detect_native",
+            "native_run_manifest_schema_version": 3,
             "selector_eligible": True,
+            "selector_activation": "complete",
+            "run_manifest_digest": "4" * 64,
             "registry_updated": False,
         }
 
@@ -120,6 +136,10 @@ def test_assembler_binds_then_publishes_one_coordinate_v3_run(
     assert result["canonical_group_path"] == "detect_runs/detect_native"
     assert result["native_run_manifest_schema_version"] == 3
     assert result["logical_schema_version"] == 1
+    assert canonical_detection_manifest_digest_from_publication_payload(
+        result,
+        expected_group_path="detect_runs/detect_native",
+    ) == "4" * 64
     bound = calls["bound"]
     assert bound.dimensions.n_instances == 2
     assert calls["candidate_kwargs"]["source_frame_authority"] == frame_authority

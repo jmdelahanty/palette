@@ -23,17 +23,14 @@ from fisheye.analysis_workflows.native_canonical_detection_publication import (
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_ID,
+    CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_VERSION,
+    canonical_detection_manifest_digest_from_publication_payload,
 )
 from fisheye.utils.run_detection_artifact import (
     FRAME_MAPPING_MODE_CHOICES,
     FRAME_MAPPING_MODE_INDEXED,
 )
-
-
-CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_ID = (
-    "palette.clipped_detection.native_assembly"
-)
-CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_VERSION = 1
 
 
 def _model_digests(run_provenance: Mapping[str, Any]) -> set[str]:
@@ -188,6 +185,14 @@ def assemble_and_publish_clipped_native_detection(
         "selector_eligible": True,
         "registry_updated": False,
     }
+    resolved_digest = canonical_detection_manifest_digest_from_publication_payload(
+        result,
+        expected_group_path=str(publication["group_path"]),
+    )
+    if resolved_digest != candidate.receipt.get("run_manifest_digest"):
+        raise RuntimeError(
+            "Clipped assembly receipt does not preserve the published manifest digest."
+        )
     if result_json is not None:
         write_json_atomic(result_json.expanduser().resolve(), result)
     return result
