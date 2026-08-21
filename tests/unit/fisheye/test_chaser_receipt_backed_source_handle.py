@@ -146,7 +146,7 @@ def test_deep_loader_remains_explicitly_hashing(tmp_path: Path, monkeypatch) -> 
     )
     assert handle.verification_mode == "deep_audit"
     assert handle.receipt_digest is None
-    assert calls
+    assert len(calls) == len(handle.manifest["array_declarations"])
 
 
 @pytest.mark.parametrize(

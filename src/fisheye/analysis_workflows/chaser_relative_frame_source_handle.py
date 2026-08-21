@@ -1044,18 +1044,13 @@ def load_chaser_relative_frame_source_handle(
         "recording_id": recording_id,
         "manifest_sha256": manifest_digest,
         "payload_digest": manifest["payload_digest"],
+        # _validate_declarations_and_arrays has already recomputed and checked
+        # every declared content digest.  Reuse those verified declarations in
+        # the audit document instead of rereading and hashing every array a
+        # second time.
         "arrays": {
-            path: array_values_sha256(value)
-            for path, value in sorted(
-                {
-                    **{f"base/{key}": value for key, value in base_arrays.items()},
-                    **(
-                        {}
-                        if body_arrays is None
-                        else {f"body/{key}": value for key, value in body_arrays.items()}
-                    ),
-                }.items()
-            )
+            declaration["path"]: declaration["content_sha256"]
+            for declaration in manifest["array_declarations"]
         },
         "metadata_equivalence": equivalence_payload,
         "selector_eligible": False,
