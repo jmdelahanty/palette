@@ -6,17 +6,16 @@
 > `docs/production_dag_recording_layout_design.md`.
 
 `fisheye.cluster.clipped_inference` composes one immutable LSF workflow for a
-clipped recording cohort. It covers detection, detection refinement, finalized
-collection creation, flat ROI cache construction, proxy crop binding,
-keypoints, keypoint refinement, subject-mask inference, refined subject masks,
-content validation, registry reconciliation, and optional NRS cleanup.
+clipped recording cohort. Its default `full` scope covers detection, detection
+refinement, finalized collection creation, flat ROI cache construction, proxy
+crop binding, keypoints, keypoint refinement, subject-mask inference, refined
+subject masks, content validation, registry reconciliation, and optional NRS
+cleanup. The same entry point also exposes a `detection` composition scope.
 
 This full DAG is the registry-backed default-processing orchestrator, not the
-only supported execution surface. Detection-only, cache-only, keypoint-only,
-mask-only, refinement-only, recovery, and validation workflows remain
-first-class operator entry points. Their stage runners and artifact contracts
-are the reusable units composed by this DAG. A user should not need to launch
-the complete DAG to run or rerun one stage.
+only supported execution surface. Its stage runners and artifact contracts are
+the reusable units composed by the planner. A user does not need a second CLI
+or the complete analysis graph to run the detection subgraph.
 
 Scheduler packaging is independent of workflow scope. One explicitly selected
 work unit may be one ordinary LSF job. Repeated same-resource work should use an
@@ -45,6 +44,35 @@ terminal dependency. `compose_detection_workflow(...)` can compose the same
 module by itself for a detection-only workflow. This keeps workflow scope
 (detection-only versus full analysis) separate from scheduler packaging
 (ordinary job, array, or bounded bundle).
+
+The operator-facing form is `--workflow-scope detection` on
+`scripts/run_clipped_inference_dag.sh`. It plans native clip detection,
+recording-order quality, refinement, and finalized collection publication for
+every target, then stops. Pose and subject-mask model identifiers are required
+only for the default `full` scope. Detection scope still honors
+`--max-active-targets`, but a later target waits for the earlier target's
+finalized detection collection instead of its full-analysis validation. It
+does not plan strict storage candidates, caches, keypoints, masks, registry
+reconciliation, or NRS cleanup.
+
+```bash
+scripts/run_clipped_inference_dag.sh \
+  --workflow-scope detection \
+  --manifest /path/to/clipped_targets.json \
+  --run-label clipped_detection_v001 \
+  --run-root /path/to/immutable_run_root \
+  --detection-set-id DETECTION_SET \
+  --detection-run-id DETECTION_RUN \
+  --dry-run
+```
+
+Registered dish geometry remains part of this same composition. With
+`--registered-gate-requirement required`, planning pins each target's active
+complete arena-geometry selection, then inserts the keyed gate materializer
+between native detection publication and refinement. The resulting gate run is
+target-specific and immutable. `--registered-gate-run GATE_RUN` instead pins an
+already materialized exact gate. Both forms fail closed if their authority is
+unavailable.
 
 For each target, the v2 plan composes native artifact-first detection, legacy
 refinement over those same artifact rows, strict recording snapshot
@@ -93,17 +121,17 @@ operator interfaces remain unchanged and are now visible as separate
 composition capabilities.
 
 Selected arena geometry and registered gating are available as independent
-layout-neutral fragments in `fisheye.cluster.arena_geometry`. They are not yet
-silently inserted into this default recipe. A future required-gating policy
-must wire the exact `analysis/detection_gate_runs/<run>` output into detection
-postprocessing and validate ordered `instance_key` equality before refinement;
-optional or absent geometry must remain an explicit workflow policy.
+layout-neutral fragments in `fisheye.cluster.arena_geometry`. The explicit
+registered-gate options wire an exact `analysis/detection_gate_runs/<run>`
+authority into recording-level detection postprocessing; optional or absent
+geometry remains an explicit workflow policy.
 
 The target manifest schema is `palette.clipped_inference_targets.v1`. Every
 target must pin its registry `recording_id`, recording directory, and canonical
-analysis Zarr. The command also requires exact registry set and run identifiers
-for detection, pose, and subject-mask models. Planning verifies the registered
-paths and model SHA-256 values and refuses output collisions.
+analysis Zarr. Detection model set and run identifiers are always required;
+pose and subject-mask identifiers are required in `full` scope. Planning
+verifies every model used by the selected scope by path and SHA-256 and refuses
+collisions only for outputs that scope will create.
 
 If a campaign stops after its detection artifacts were atomically imported,
 `--resume-existing-detections` permits a new immutable run root to reuse those
@@ -228,11 +256,12 @@ must never satisfy this contract.
 
 The manifest always contains a nonempty `targets` list. A one-recording run is
 therefore a one-item campaign, while a multi-recording run expands this same
-subgraph for every item. `--max-active-targets` bounds recording concurrency by
-gating a later target's detection jobs on an earlier target's successful
-validation; it does not select a different workflow implementation. Each
-target may declare `expected_subject_count` (default `1`) for its quality
-policy.
+subgraph for every item. `--max-active-targets` bounds recording concurrency.
+In full scope it gates a later target's detection jobs on an earlier target's
+successful analysis validation; in detection scope it gates on the earlier
+target's finalized detection collection. It does not select a different
+workflow implementation. Each target may declare `expected_subject_count`
+(default `1`) for its quality policy.
 
 Every proxy crop run also carries the full-resolution source-video dimension
 contract: `source_video_width`, `source_video_height`, `width`, and `height`.

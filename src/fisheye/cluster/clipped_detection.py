@@ -774,7 +774,9 @@ def build_detection_fragment(
         )
     expected_raw_paths = tuple(unit.detect_group_path for unit in inputs.work_units)
     if raw_module.outputs.target_id != inputs.target_id:
-        raise ValueError("Raw and postprocess detection modules target different recordings.")
+        raise ValueError(
+            "Raw and postprocess detection modules target different recordings."
+        )
     if raw_module.outputs.raw_detection_group_paths != expected_raw_paths:
         raise ValueError(
             "Raw detection outputs do not match the postprocess source groups."
@@ -1020,6 +1022,7 @@ def compose_detection_workflow(
 
     if not modules:
         raise ValueError("A detection-only workflow requires at least one module.")
+    jobs = tuple(job for module in modules for job in module.jobs)
     return compose_lsf_workflow(
         workflow_id=workflow_id,
         family=family,
@@ -1031,6 +1034,23 @@ def compose_detection_workflow(
             "workflow_scope": "detection_only",
             "target_count": len(modules),
             "outputs": [module.outputs.to_json() for module in modules],
+            "scheduler_submission_count": len(jobs),
+            "execution_task_count": sum(
+                len(job.execution_group.tasks) if job.execution_group else 1
+                for job in jobs
+            ),
+            "array_submission_count": sum(
+                1
+                for job in jobs
+                if job.execution_group is not None
+                and job.execution_group.mode is LsfExecutionMode.ARRAY
+            ),
+            "bundle_submission_count": sum(
+                1
+                for job in jobs
+                if job.execution_group is not None
+                and job.execution_group.mode is LsfExecutionMode.BUNDLE
+            ),
         },
     )
 
