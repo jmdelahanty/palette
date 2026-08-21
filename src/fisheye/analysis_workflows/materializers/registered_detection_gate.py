@@ -19,6 +19,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis_workflows.materializers.arena_geometry_selection import (
+    MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION,
     SELECTION_RECORD_SCHEMA_VERSION,
     SELECTION_RUNS_PARENT,
     validate_arena_geometry_selection_record,
@@ -53,7 +54,6 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
     require_runs_parent,
 )
-
 
 GATE_RUN_SCHEMA_ID = "palette.registered_detection_gate_run"
 GATE_RUN_SCHEMA_VERSION = 1
@@ -385,7 +385,10 @@ def build_registered_detection_gate_plan(
         raise ValueError(
             "Detection source and selected geometry native extents disagree."
         )
-    if selection["selection_record"]["schema_version"] == SELECTION_RECORD_SCHEMA_VERSION:
+    if selection["selection_record"]["schema_version"] in {
+        SELECTION_RECORD_SCHEMA_VERSION,
+        MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION,
+    }:
         if (
             source["source_pixel_frame_record_ref"]
             != selection["pixel_frame_record_ref"]
@@ -393,7 +396,7 @@ def build_registered_detection_gate_plan(
             != selection["pixel_frame_record_sha256"]
         ):
             raise ValueError(
-                "Modern comparison-bound geometry and detection source do not share "
+                "Modern boundary-aware geometry and detection source do not share "
                 "the exact persisted source-camera pixel authority."
             )
     outer = _effective_shard_rows(shard_rows, inner_rows)
@@ -429,9 +432,7 @@ def build_registered_detection_gate_plan(
         width_px=source["width_px"],
         height_px=source["height_px"],
         source_pixel_frame_record_ref=source["source_pixel_frame_record_ref"],
-        source_pixel_frame_record_sha256=source[
-            "source_pixel_frame_record_sha256"
-        ],
+        source_pixel_frame_record_sha256=source["source_pixel_frame_record_sha256"],
         selection_run=selection["run_name"],
         selection_record_sha256=selection["selection_record_sha256"],
         selection_record=selection["selection_record"],
@@ -814,9 +815,7 @@ def validate_registered_detection_gate_consumption(
         "inside": inside,
         "gate_run": run_name,
         "gate_group_path": path,
-        "gate_decoded_array_sha256": _canonical_copy(
-            attrs["decoded_array_sha256"]
-        ),
+        "gate_decoded_array_sha256": _canonical_copy(attrs["decoded_array_sha256"]),
         "source_detection_group_path": plan.source_group_path,
         "source_detection_signature": plan.source_signature,
         "selection_run": plan.selection_run,
