@@ -588,7 +588,7 @@ def publish_crop_geometry_production_candidate(
                     source.arrays["source_detections/instance_key"][...],
                     dtype=np.uint64,
                 ),
-                require_comparison_bound_selection=True,
+                require_modern_operational_selection=True,
                 allow_selector_ineligible_source=explicit_refined_source,
             )
             current_gate.pop("inside", None)

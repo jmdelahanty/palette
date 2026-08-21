@@ -244,6 +244,15 @@ def test_gate_publishes_keyed_sharded_decisions_without_mutating_raw_detection(
             require_comparison_bound_selection=True,
         )
 
+    with pytest.raises(ValueError, match="modern operational selection"):
+        gate.validate_registered_detection_gate_consumption(
+            archive,
+            source_group_path=source_path,
+            gate_run=plan.output_run,
+            expected_instance_keys=np.asarray([10, 20, 30], dtype=np.uint64),
+            require_modern_operational_selection=True,
+        )
+
 
 def test_gate_can_revalidate_explicit_selector_ineligible_source_candidate(
     monkeypatch: pytest.MonkeyPatch,

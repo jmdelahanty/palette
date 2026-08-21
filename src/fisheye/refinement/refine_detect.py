@@ -522,7 +522,7 @@ def _apply_registered_detection_gate(
             source_group_path=source_detect_path,
             gate_run=str(gate_run),
             expected_instance_keys=raw_instance_keys,
-            require_comparison_bound_selection=True,
+            require_modern_operational_selection=True,
         )
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"

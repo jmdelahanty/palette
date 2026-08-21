@@ -76,7 +76,9 @@ def test_publication_receipt_resolves_exact_active_v3_digest(tmp_path: Path) -> 
     receipt.write_text(
         json.dumps(
             {
-                "schema_id": "palette.native_canonical_detection_publication",
+                "schema_id": (
+                    canonical.NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID
+                ),
                 "schema_version": 1,
                 "status": "complete",
                 "group_path": "detect_runs/detect-canonical-v3",
@@ -109,6 +111,56 @@ def test_publication_receipt_resolves_exact_active_v3_digest(tmp_path: Path) -> 
         canonical.resolve_expected_canonical_detection_manifest_digest(
             expected_group_path="detect_runs/detect-canonical-v3",
             publication_receipt_path=receipt,
+        )
+
+
+def test_clipped_assembly_receipt_resolves_nested_active_v3_digest(
+    tmp_path: Path,
+) -> None:
+    run_id = "detect-canonical-v3"
+    group_path = f"detect_runs/{run_id}"
+    digest = "e" * 64
+    publication = {
+        "schema_id": canonical.NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
+        "schema_version": 1,
+        "status": "complete",
+        "group_path": group_path,
+        "run_id": run_id,
+        "native_run_manifest_schema_version": 3,
+        "selector_eligible": True,
+        "selector_activation": "complete",
+        "run_manifest_digest": digest,
+    }
+    payload = {
+        "schema_id": canonical.CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_ID,
+        "schema_version": 1,
+        "status": "complete",
+        "canonical_group_path": group_path,
+        "native_run_manifest_schema_version": 3,
+        "selector_eligible": True,
+        "candidate": {
+            "status": "complete",
+            "run_id": run_id,
+            "native_run_manifest_schema_version": 3,
+            "publication_selector_eligible": True,
+            "run_manifest_digest": digest,
+        },
+        "publication": publication,
+    }
+    receipt = tmp_path / "clipped-publication.json"
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert canonical.canonical_detection_manifest_digest_from_publication_receipt(
+        receipt,
+        expected_group_path=group_path,
+    ) == digest
+
+    payload["candidate"]["run_manifest_digest"] = "f" * 64
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="digests differ"):
+        canonical.canonical_detection_manifest_digest_from_publication_receipt(
+            receipt,
+            expected_group_path=group_path,
         )
 
 

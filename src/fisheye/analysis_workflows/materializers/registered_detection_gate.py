@@ -18,6 +18,9 @@ from typing import Any, Mapping
 import numpy as np
 import zarr
 
+from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
+    PALETTE_CANDIDATE_KIND,
+)
 from fisheye.analysis_workflows.materializers.arena_geometry_selection import (
     MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION,
     SELECTION_RECORD_SCHEMA_VERSION,
@@ -752,9 +755,15 @@ def validate_registered_detection_gate_consumption(
     gate_run: str,
     expected_instance_keys: np.ndarray,
     require_comparison_bound_selection: bool = False,
+    require_modern_operational_selection: bool = False,
     allow_selector_ineligible_source: bool = False,
 ) -> dict[str, Any]:
     """Validate and load one exact gate for fail-closed refinement consumption."""
+
+    if type(require_comparison_bound_selection) is not bool:
+        raise TypeError("require_comparison_bound_selection must be an exact bool.")
+    if type(require_modern_operational_selection) is not bool:
+        raise TypeError("require_modern_operational_selection must be an exact bool.")
 
     archive = Path(source_zarr).expanduser().resolve()
     run_name = _safe_name(gate_run, label="gate_run")
@@ -784,6 +793,28 @@ def validate_registered_detection_gate_consumption(
     ):
         raise ValueError(
             "Configured registered geometry requires a comparison-bound version-2 "
+            "selection; legacy selection evidence is not operationally sufficient."
+        )
+    decision = plan.selection_record["decision"]
+    selected_candidate = plan.selection_record["selected_candidate"]
+    comparison_bound_v2 = (
+        plan.selection_record.get("schema_version") == SELECTION_RECORD_SCHEMA_VERSION
+        and isinstance(comparison, Mapping)
+    )
+    reviewed_palette_v3 = (
+        plan.selection_record.get("schema_version")
+        == MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION
+        and decision.get("decision_source") == "manual_review"
+        and comparison is None
+        and selected_candidate.get("candidate_kind") == PALETTE_CANDIDATE_KIND
+    )
+    if require_modern_operational_selection and not (
+        comparison_bound_v2 or reviewed_palette_v3
+    ):
+        raise ValueError(
+            "Configured registered geometry requires a modern operational selection: "
+            "either a comparison-bound "
+            "version-2 selection or an explicitly reviewed Palette version-3 "
             "selection; legacy selection evidence is not operationally sufficient."
         )
     report = validate_registered_detection_gate_run(

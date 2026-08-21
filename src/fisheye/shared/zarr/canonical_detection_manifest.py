@@ -76,6 +76,17 @@ CANONICAL_DETECTION_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
 CANONICAL_DETECTION_METADATA_DIGEST_SCOPE = (
     "normalized_group_and_array_declarations_excluding_attributes"
 )
+NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID = (
+    "palette.native_canonical_detection.production_publication"
+)
+NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_VERSION = 1
+CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_ID = (
+    "palette.clipped_detection.native_assembly"
+)
+CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_VERSION = 1
+_LEGACY_NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID = (
+    "palette.native_canonical_detection_publication"
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _LEGACY_SOURCE_ARRAY_PATHS = (
@@ -1261,6 +1272,80 @@ def require_active_coordinate_canonical_detection(
     return manifest
 
 
+def canonical_detection_manifest_digest_from_publication_payload(
+    payload: Mapping[str, Any],
+    *,
+    expected_group_path: str,
+) -> str:
+    """Resolve one canonical-v3 digest from a direct or clipped publication."""
+
+    expected_path = str(expected_group_path).strip().strip("/")
+    parts = tuple(part for part in expected_path.split("/") if part)
+    if len(parts) != 2 or parts[0] != "detect_runs":
+        raise ValueError(
+            "Expected canonical detection group must be detect_runs/<run>."
+        )
+    receipt: Mapping[str, Any] = payload
+    clipped_candidate: Mapping[str, Any] | None = None
+    if payload.get("schema_id") == CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_ID:
+        publication = payload.get("publication")
+        candidate = payload.get("candidate")
+        if (
+            payload.get("schema_version")
+            != CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_VERSION
+            or payload.get("status") != "complete"
+            or payload.get("canonical_group_path") != expected_path
+            or payload.get("native_run_manifest_schema_version")
+            != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            or payload.get("selector_eligible") is not True
+            or not isinstance(publication, Mapping)
+            or not isinstance(candidate, Mapping)
+            or candidate.get("status") != "complete"
+            or candidate.get("run_id") != parts[1]
+            or candidate.get("native_run_manifest_schema_version")
+            != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            or candidate.get("publication_selector_eligible") is not True
+        ):
+            raise ValueError(
+                "Clipped canonical detection assembly receipt is not one complete, "
+                "active canonical-v3 publication for the expected source."
+            )
+        receipt = publication
+        clipped_candidate = candidate
+
+    if (
+        receipt.get("schema_id")
+        not in {
+            NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
+            _LEGACY_NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
+        }
+        or receipt.get("schema_version")
+        != NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_VERSION
+        or receipt.get("status") != "complete"
+        or receipt.get("group_path") != expected_path
+        or receipt.get("run_id") != parts[1]
+        or receipt.get("native_run_manifest_schema_version")
+        != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        or receipt.get("selector_eligible") is not True
+        or receipt.get("selector_activation") != "complete"
+    ):
+        raise ValueError(
+            "Canonical detection publication receipt is not one complete, active "
+            "canonical-v3 publication for the expected source."
+        )
+    digest = _require_sha256(
+        receipt.get("run_manifest_digest"),
+        name="publication receipt run_manifest_digest",
+    )
+    if clipped_candidate is not None and clipped_candidate.get(
+        "run_manifest_digest"
+    ) != digest:
+        raise ValueError(
+            "Clipped detection candidate and canonical publication digests differ."
+        )
+    return digest
+
+
 def canonical_detection_manifest_digest_from_publication_receipt(
     receipt_path: str | Path,
     *,
@@ -1277,31 +1362,9 @@ def canonical_detection_manifest_digest_from_publication_receipt(
         ) from exc
     if not isinstance(payload, Mapping):
         raise ValueError("Canonical detection publication receipt must be an object.")
-    expected_path = str(expected_group_path).strip().strip("/")
-    parts = tuple(part for part in expected_path.split("/") if part)
-    if len(parts) != 2 or parts[0] != "detect_runs":
-        raise ValueError(
-            "Expected canonical detection group must be detect_runs/<run>."
-        )
-    if (
-        payload.get("schema_id")
-        != "palette.native_canonical_detection_publication"
-        or payload.get("schema_version") != 1
-        or payload.get("status") != "complete"
-        or payload.get("group_path") != expected_path
-        or payload.get("run_id") != parts[1]
-        or payload.get("native_run_manifest_schema_version")
-        != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
-        or payload.get("selector_eligible") is not True
-        or payload.get("selector_activation") != "complete"
-    ):
-        raise ValueError(
-            "Canonical detection publication receipt is not one complete, active "
-            "canonical-v3 publication for the expected source."
-        )
-    return _require_sha256(
-        payload.get("run_manifest_digest"),
-        name="publication receipt run_manifest_digest",
+    return canonical_detection_manifest_digest_from_publication_payload(
+        payload,
+        expected_group_path=expected_group_path,
     )
 
 
@@ -1343,6 +1406,11 @@ __all__ = [
     "CANONICAL_DETECTION_METADATA_DIGEST_SCOPE",
     "CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE",
     "CANONICAL_DETECTION_RUN_MANIFEST_PERSISTED_PATH",
+    "CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_ID",
+    "CLIPPED_NATIVE_DETECTION_ASSEMBLY_SCHEMA_VERSION",
+    "NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID",
+    "NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_VERSION",
+    "canonical_detection_manifest_digest_from_publication_payload",
     "canonical_detection_manifest_digest_from_publication_receipt",
     "CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID",
     "build_canonical_detection_run_manifest",
