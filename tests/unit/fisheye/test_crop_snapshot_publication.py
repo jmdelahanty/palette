@@ -172,7 +172,10 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
         source_video_path=tmp_path / "camera.mp4",
     )
     _wire_authorities(monkeypatch, source, pixels)
-    def gate_validator(*_args, **_kwargs):
+    gate_calls = {}
+
+    def gate_validator(*_args, **kwargs):
+        gate_calls.update(kwargs)
         return {
             "inside": np.ones(
                 source.dimensions.n_source_detections,
@@ -199,6 +202,8 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
 
     assert result["registered_gate_applied"] is True
     assert result["source_refined_run_id"] == source.run_id
+    assert gate_calls["require_modern_operational_selection"] is True
+    assert "require_comparison_bound_selection" not in gate_calls
     root = zarr.open_group(
         str(source.archive_path), mode="r", use_consolidated=False
     )

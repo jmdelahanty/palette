@@ -277,7 +277,10 @@ def test_registered_gate_modes_are_explicit_and_fail_closed(
             gate_run=None,
         )
 
-    def valid_gate(*_args, **_kwargs):
+    gate_calls = {}
+
+    def valid_gate(*_args, **kwargs):
+        gate_calls.update(kwargs)
         return {
             "inside": np.asarray([True, False, True]),
             "gate_run": "gate_exact",
@@ -303,6 +306,8 @@ def test_registered_gate_modes_are_explicit_and_fail_closed(
     assert gated_labels.tolist() == [0, 6, 0]
     assert applied["status"] == "applied"
     assert applied["rejected_count"] == 1
+    assert gate_calls["require_modern_operational_selection"] is True
+    assert "require_comparison_bound_selection" not in gate_calls
     assert _filtered_reason_from_quality_label(6) == (
         "outside_registered_detection_gate"
     )
