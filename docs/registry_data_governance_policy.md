@@ -206,12 +206,28 @@ Recommended cron entry:
 0 2 * * * cd /home/delahantyj@hhmi.org/gitrepos/palette && scripts/backup_palette_registry.sh >> /home/delahantyj@hhmi.org/palette_registry_backup.log 2>&1
 ```
 
-The backup script verifies that the source registry exists and is non-empty,
-uses SQLite's `.backup` command, runs the complete `PRAGMA integrity_check` and
-`PRAGMA foreign_key_check` on both source and backup, and refuses to report
-success for a missing or zero-byte backup. `quick_check` is insufficient here:
-on 2026-08-13 it returned `ok` for a registry whose secondary indexes failed
-the complete integrity check.
+The backup script delegates to `scripts/py -m fisheye.utils.registry_backup`.
+The Python SQLite backup API and the complete `PRAGMA integrity_check` and
+`PRAGMA foreign_key_check` acceptance gates therefore use the same SQLite
+runtime as Palette's registry writers. The receipt records the SQLite engine
+version, Python sqlite module version, interpreter path, source and backup
+hashes, and both validations. The command refuses active SQLite sidecars,
+coordinates through the registry writer lock, rejects a source byte change
+during backup, and refuses to report success for a missing or zero-byte backup.
+`quick_check` is insufficient here: on 2026-08-13 it returned `ok` for a
+registry whose secondary indexes failed the complete integrity check.
+
+Independent registry acceptance uses the same runtime-bound validator:
+
+```bash
+scripts/py -m fisheye.utils.registry_integrity \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --result-json /durable/operations/registry_integrity.json
+```
+
+A separately installed `sqlite3` command-line binary may be used only for
+supplementary diagnostics. Its verdict is not Palette acceptance evidence and
+must never override the `scripts/py` runtime that performs registry writes.
 
 Shared-filesystem mutation must use a local shadow copy and atomic publication,
 not in-place SQLite writes from an LSF compute node. The safe rescan form is:
