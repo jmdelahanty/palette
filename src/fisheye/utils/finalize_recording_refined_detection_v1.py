@@ -74,6 +74,12 @@ _SELECTOR_ATTRIBUTES = (
     "authoritative_run",
     "authoritative_refined_run",
 )
+_COMPARISON_BOUND_SELECTION_RECORD_SCHEMA_VERSION = 2
+_MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION = 3
+_MANUAL_PALETTE_SELECTION_POLICY = (
+    "manual_reviewed_palette_candidate_exact_binding_v3"
+)
+_MANUAL_REVIEW_FINALIZATION_POLICY_ID = "manual_review_only_v1"
 
 
 def _require_scratch_root(path: Path) -> Path:
@@ -167,6 +173,47 @@ def _validate_gate_binding(
     }:
         raise ValueError("if_available finalization has an unknown gate disposition.")
     return dict(normalized)
+
+
+def _validate_gate_policy_binding(
+    gate_evidence: Mapping[str, object],
+    *,
+    configured_policy_id: str,
+) -> None:
+    if gate_evidence.get("applied") is not True:
+        return
+
+    comparison_policy_id = str(
+        gate_evidence.get("comparison_policy_id") or ""
+    ).strip()
+    if comparison_policy_id:
+        if (
+            gate_evidence.get("selection_record_schema_version")
+            != _COMPARISON_BOUND_SELECTION_RECORD_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Comparison policy is not bound by a version-2 selection record."
+            )
+        observed_policy_id = comparison_policy_id
+    elif (
+        gate_evidence.get("selection_record_schema_version")
+        == _MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION
+        and gate_evidence.get("selection_decision_source") == "manual_review"
+        and gate_evidence.get("selection_policy")
+        == _MANUAL_PALETTE_SELECTION_POLICY
+        and not str(gate_evidence.get("comparison_run") or "").strip()
+    ):
+        observed_policy_id = _MANUAL_REVIEW_FINALIZATION_POLICY_ID
+    else:
+        raise ValueError(
+            "Applied registered gate lacks a supported selection-policy binding."
+        )
+
+    if observed_policy_id != configured_policy_id:
+        raise ValueError(
+            "Configured selection policy differs from the policy bound to the "
+            "consumed registered gate."
+        )
 
 
 def _prepare_refined_parent(root: zarr.Group) -> tuple[zarr.Group, ...]:
@@ -328,13 +375,10 @@ def finalize_recording_refined_detection_v1(
         requirement=registered_gate_requirement,
         expected_gate_run=registered_gate_run,
     )
-    if gate_evidence.get("applied") is True and gate_evidence.get(
-        "comparison_policy_id"
-    ) != policy_id:
-        raise ValueError(
-            "Configured selection policy differs from the comparison policy bound "
-            "to the consumed registered gate."
-        )
+    _validate_gate_policy_binding(
+        gate_evidence,
+        configured_policy_id=policy_id,
+    )
     transition = build_refined_detection_transition(
         working,
         n_frames=dimensions.n_frames,

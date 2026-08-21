@@ -706,6 +706,44 @@ def test_write_curated_refined_detect_surfaces_uses_detect_frame_source_dimensio
     assert refined["source_detections"]["bbox_norm_coords"].chunks == (1, 4)
 
 
+def test_write_curated_refined_detect_surfaces_uses_clipped_source_video_metadata() -> None:
+    root = _build_root()
+    del root.attrs["width"]
+    del root.attrs["height"]
+    root.attrs["source_video_metadata"] = {
+        "schema_id": "palette.source_video_collection_metadata.v1",
+        "layout": "clipped_video_collection",
+        "width": 4512,
+        "height": 4512,
+        "total_frames": 5,
+    }
+
+    refined = root["refined_detect_runs/refined_detect_001"]
+    write_curated_refined_detect_surfaces(
+        root,  # type: ignore[arg-type]
+        refined_run_name="refined_detect_001",
+        instance_frame_indices=np.asarray([1], dtype=np.int32),
+        instance_bbox_norm_coords=np.asarray(
+            [[0.5, 0.5, 0.25, 0.25]], dtype=np.float64
+        ),
+        instance_source_kind_labels=np.asarray(["raw_detect"], dtype=object),
+        instance_reason_labels=np.asarray(["clean"], dtype=object),
+        instance_source_detect_row_index=np.asarray([0], dtype=np.int32),
+        source_detection_source_detect_row_index=np.asarray([0], dtype=np.int32),
+        source_detection_frame_indices=np.asarray([1], dtype=np.int32),
+        source_detection_bbox_norm_coords=np.asarray(
+            [[0.5, 0.5, 0.25, 0.25]], dtype=np.float64
+        ),
+        source_detection_decision_labels=np.asarray(["accepted"], dtype=object),
+        source_detection_reason_labels=np.asarray(["clean"], dtype=object),
+    )
+
+    np.testing.assert_allclose(
+        refined["instances"]["bbox_img_xyxy"][:],
+        np.asarray([[1692.0, 1692.0, 2820.0, 2820.0]], dtype=np.float64),
+    )
+
+
 def test_write_curated_refined_detect_surfaces_uses_bound_detect_frame_counts_before_root_total() -> None:
     root = _FakeGroup()
     root.attrs["width"] = 4512
