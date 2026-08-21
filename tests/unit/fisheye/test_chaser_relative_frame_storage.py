@@ -101,7 +101,7 @@ def _result(*, body: bool = True, timestamps: bool = True, chasers: int = 2):
         occurrence_membership=np.ones((n, chasers), dtype=bool),
         coordinate_policy=CoordinatePolicy(
             coordinate_authority_id="camera-native-v1",
-            coordinate_frame="source_camera_pixels",
+            coordinate_frame="source_camera_continuous_pixel_xy",
         ),
         scale_policy=ScalePolicy(
             scale_authority_id="scale-v1",

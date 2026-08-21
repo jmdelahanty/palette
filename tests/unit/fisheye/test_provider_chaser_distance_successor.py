@@ -68,7 +68,7 @@ def _source(
         "coordinate_policy": {
             "policy_id": "source_camera_y_down_v1",
             "coordinate_authority_id": "camera-native-v1",
-            "coordinate_frame": "source_camera_pixels",
+            "coordinate_frame": "source_camera_continuous_pixel_xy",
             "origin": "top_left",
             "x_axis_direction": "right",
             "y_axis_direction": "down",
@@ -194,6 +194,20 @@ def test_prepare_keeps_trial_triple_optional(monkeypatch):
 
     assert not {"trial_id", "trial_valid", "trial_reason_code"} & set(prepared.arrays)
     assert prepared.manifest["optional_fields"]["trial_triple_present"] is False
+
+
+def test_prepare_rejects_legacy_coordinate_frame_vocabulary(monkeypatch):
+    handle, view = _source()
+    handle.run_manifest["coordinate_policy"]["coordinate_frame"] = (
+        "source_camera_pixels"
+    )
+    monkeypatch.setattr(successor, "load_chaser_relative_distance_view", lambda _: view)
+
+    with pytest.raises(
+        successor.ProviderChaserDistanceSuccessorError,
+        match="coordinate_frame",
+    ):
+        successor.prepare_provider_chaser_distance_successor(handle)
 
 
 def test_schema_rejects_frame_evidence_that_is_not_repeated(monkeypatch):

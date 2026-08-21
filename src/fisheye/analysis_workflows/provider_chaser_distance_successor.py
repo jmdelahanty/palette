@@ -236,7 +236,7 @@ def _coordinate_policy(handle: Any) -> dict[str, Any]:
         _fail("Verified source handle lacks its coordinate policy.")
     result = dict(policy)
     expected = {
-        "coordinate_frame": "source_camera_pixels",
+        "coordinate_frame": "source_camera_continuous_pixel_xy",
         "origin": "top_left",
         "x_axis_direction": "right",
         "y_axis_direction": "down",
