@@ -378,7 +378,7 @@ extension.
 
 - [x] Add a provider-neutral read-only distance view over the validated common
       relative-frame publication without collapsing the complete chaser axis.
-- [ ] Publish the sealed provider-aware chaser-distance successor with generic
+- [x] Publish the sealed provider-aware chaser-distance successor with generic
       `source_position_*` lineage.
 - [ ] Migrate quadrant and radial occupancy to exact composable selections.
 - [ ] Migrate near-field occupancy v2 with valid-time entry denominators,
@@ -524,12 +524,15 @@ extension.
       selectors.
 - [x] A provider-neutral distance view can consume the validated relative-frame
       handle while retaining every chaser and exact frame-level lineage.
+- [x] Selector-ineligible, sealed, receipt-backed detection-bbox-centroid and
+      keypoint-triad chaser-distance canaries now exercise the generic
+      `source_position_*` publication and bounded reader.
 - [x] The recording explorer exposes read-only provider-aware bout-response rows
       and exact heading-bound egocentric bearing.
 - [x] Typed position, body-frame, tracking, timing, and provider-motion
       foundations exist, including explicit mixed-modality compatibility.
-- [ ] The provider-aware chaser-distance candidate is not a sealed production
-      base and no provider has been promoted for GoodBatBadBat.
+- [ ] No position provider has been promoted for GoodBatBadBat; multi-recording,
+      camera-stratified coverage and downstream-bias evidence remains required.
 - [ ] Near-field, response-regime, trial, escape, gaze, and visualization
       surfaces have not yet migrated to the new composable provider contracts.
 - [ ] Plot recipes, recording-local discovery, registry projection, full cohort
@@ -559,6 +562,44 @@ production Zarr, selector, registry, or archive was changed.
 Standard profile-runner integration, downstream module publication, registry
 projection, selector promotion, and required CI remain open before this branch
 is merge-ready or production-authoritative.
+
+### Implementation checkpoint: 2026-08-21
+
+Commit `bda296db0180cc6a1cffe4d4be89c7fa5f039075` was deployed through a
+commit-pinned cluster worktree and used to publish two selector-ineligible
+GoodBatBadBat canaries:
+
+- `provider_chaser_distance_detection_bbox_centroid_canary_20260821_v2`
+- `provider_chaser_distance_keypoint_triad_canary_20260821_v2`
+
+LSF jobs `153531902` and `153531903` succeeded. Each publication contains
+149,946 frames, two chasers, 299,892 rows, and 38 arrays. Neither publication
+updated a selector, registry, or production authority. The detection and
+keypoint manifest digests are respectively
+`df5ed6cc3b43f7672898a4cbee006266be0dca7ee25774209d5b91d316127710`
+and `5f4f6131e6cd48c495b61f739276c5a873e6b5c0cf50f73433717863bd265b7e`.
+
+The compact-validation correction is effective: the run metadata files are
+63,795 and 63,559 bytes, every atomic validation checkpoint declares row
+evidence in Zarr arrays, and none embeds an `arrays` object. Consolidating both
+runs increased the canonical root metadata by only 220,141 bytes. Both ordinary
+readers succeeded with dense hashing deliberately disabled, while explicit
+deep audits independently recomputed and passed all 38 declared output hashes.
+
+The canaries preserve identical frame, fish, track, chaser, and chaser-position
+lineage. Detection provides 148,963 valid source-position frames; keypoint
+triad provides 146,412, all of which overlap detection. Across those common
+frames, the median source-position difference is 6.56 px, the 95th percentile
+is 22.37 px, and nearest-chaser identity agrees for 99.943% of frames. This is
+bounded single-recording canary evidence only. It neither averages providers
+nor promotes a default; broader camera-, state-, and recording-stratified
+validation remains open.
+
+The failed oversized v1 publication attempts were archived with an inventory
+and whole-file digest before their canonical children were removed. They are
+not selector-visible evidence and must not be used as source authorities.
+Required CI has not run for `bda296db`; the branch and canaries therefore remain
+incomplete and non-production-authoritative under the integration contract.
 
 The producer audit establishes that a physical temporal projection from native
 stimulus states to camera exposures is unsupported for current recordings.
