@@ -166,7 +166,10 @@ def test_clipped_validator_post_cleanup_mode_requires_all_caches_absent() -> Non
 
 
 def _target(
-    tmp_path: Path, name: str = "sleepyfish_cam2010093"
+    tmp_path: Path,
+    name: str = "sleepyfish_cam2010093",
+    *,
+    finalized_refined_detect_run: str | None = None,
 ) -> workflow.CampaignTarget:
     recording = tmp_path / "recordings" / name
     zarr = recording / "zarr" / f"{name}_analysis.zarr"
@@ -179,6 +182,7 @@ def _target(
         recording_id=f"{name}:zfixture",
         recording_dir=recording,
         analysis_zarr=zarr,
+        finalized_refined_detect_run=finalized_refined_detect_run,
     )
 
 
@@ -297,7 +301,15 @@ def _build_fixture_plan(
     )
     (repo / "configs" / "fisheye" / "default.yaml").write_text("{}\n", encoding="utf-8")
     targets = tuple(
-        _target(tmp_path, f"sleepyfish_cam{2010093 + index}")
+        _target(
+            tmp_path,
+            f"sleepyfish_cam{2010093 + index}",
+            finalized_refined_detect_run=(
+                f"finalized_refined_cam{2010093 + index}"
+                if workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+                else None
+            ),
+        )
         for index in range(target_count)
     )
     targets_by_recording = {
@@ -381,6 +393,26 @@ def _build_fixture_plan(
             work_unit_count=work_unit_count,
         ),
     )
+    if workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM:
+        monkeypatch.setattr(
+            workflow,
+            "_clipped_layout_work_units",
+            lambda target, **_kwargs: list(
+                _detection_plan(
+                    target,
+                    "downstream_layout",
+                    work_unit_count=work_unit_count,
+                )["work_units"]
+            ),
+        )
+        monkeypatch.setattr(
+            workflow,
+            "_refined_clip_crop_row_intervals",
+            lambda **_kwargs: {
+                (index, f"clip_{index:06d}"): (index * 100, (index + 1) * 100)
+                for index in range(work_unit_count)
+            },
+        )
     if resume_existing_detections:
         monkeypatch.setattr(
             workflow,
@@ -431,6 +463,56 @@ def test_detection_work_units_allow_single_indexed_clip() -> None:
     )
 
     assert ordered == [work_unit]
+
+
+def test_downstream_clip_rows_bind_finalized_recording_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _target(
+        tmp_path,
+        finalized_refined_detect_run="finalized_refined_v1",
+    )
+    instances = {
+        "frame_indices": np.asarray([0, 1, 2, 3], dtype=np.int32),
+        "source_acquisition_frame_index": np.asarray([0, 1, 2, 3], dtype=np.int64),
+    }
+    bound = SimpleNamespace(
+        run_id="finalized_refined_v1",
+        run_group=SimpleNamespace(
+            attrs={
+                "status": "complete",
+                "finalized_recording_authority": True,
+                "immutable_snapshot": True,
+                "registered_detection_gate_requirement": "required",
+                "registered_detection_gate": {
+                    "status": "applied",
+                    "applied": True,
+                    "ordered_instance_key_coverage_exact": True,
+                },
+            }
+        ),
+        instances_group=instances,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "bind_refined_detection_crop_source",
+        lambda *_args, **_kwargs: bound,
+    )
+
+    intervals = workflow._refined_clip_crop_row_intervals(
+        target=target,
+        refined_run_name="finalized_refined_v1",
+        frame_intervals={
+            (0, "clip_000000"): (0, 2),
+            (1, "clip_000001"): (2, 4),
+        },
+    )
+
+    assert intervals == {
+        (0, "clip_000000"): (0, 2),
+        (1, "clip_000001"): (2, 4),
+    }
 
 
 def test_detection_work_units_require_exact_once_only_index_coverage() -> None:
@@ -1343,6 +1425,128 @@ def test_detection_scope_cli_does_not_require_downstream_model_arguments() -> No
     assert args.workflow_scope == workflow.WORKFLOW_SCOPE_DETECTION
     assert args.pose_set_id is None
     assert args.subject_mask_set_id is None
+
+
+def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DOWNSTREAM,
+    )
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+
+    assert plan.workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+    assert set(plan.model_bindings) == {"pose", "subject_masks"}
+    assert plan.cleanup_nrs_after_success is False
+    assert plan.lsf_workflow.metadata["workflow_scope"] == (
+        "downstream_from_finalized_detection"
+    )
+    assert plan.lsf_workflow.metadata["selector_activation"] is False
+    assert set(jobs) == {
+        f"acquisition_crop_ledger:{target_safe}",
+        f"hybrid_crop:{target_safe}",
+        f"keypoints_array:{target_safe}",
+        f"subject_masks_array:{target_safe}",
+        f"keypoint_finalize:{target_safe}",
+        f"keypoint_refine:{target_safe}",
+        f"mask_package_array:{target_safe}",
+        f"mask_publish:{target_safe}",
+        f"validate:{target_safe}",
+    }
+    assert not any("detect_artifact" in key for key in jobs)
+    assert not any(key.startswith("cache_array:") for key in jobs)
+    assert not any(key.startswith("proxy:") for key in jobs)
+    assert "registry_finalize" not in jobs
+    assert jobs[f"keypoints_array:{target_safe}"].resources.queue == "gpu_t4"
+    assert jobs[f"subject_masks_array:{target_safe}"].resources.queue == "gpu_l4"
+
+    hybrid_run = str(target["hybrid_crop_run"])
+    hybrid_command = " ".join(jobs[f"hybrid_crop:{target_safe}"].command)
+    assert "build_hybrid_acquisition_offline_crop_run" in hybrid_command
+    assert f"--run-name {hybrid_run}" in hybrid_command
+    assert "--refined-detect-run finalized_refined_cam2010093" in hybrid_command
+
+    keypoint_tasks = _execution_tasks(jobs[f"keypoints_array:{target_safe}"])
+    mask_tasks = _execution_tasks(jobs[f"subject_masks_array:{target_safe}"])
+    for index, clip in enumerate(target["clips"]):
+        clip_id = str(clip["clip_id"])
+        keypoint = " ".join(
+            keypoint_tasks[f"keypoints:{target_safe}:{clip_id}"].command
+        )
+        mask = " ".join(mask_tasks[f"subject_masks:{target_safe}:{clip_id}"].command)
+        expected_range = (
+            f"--source-crop-row-start {index * 100} "
+            f"--source-crop-row-stop {(index + 1) * 100}"
+        )
+        assert f"--crop-run {hybrid_run}" in keypoint
+        assert expected_range in keypoint
+        assert "--roi-cache-manifest" not in keypoint
+        assert "--roi-cache-policy never" in keypoint
+        assert f"--crop-run {hybrid_run}" in mask
+        assert expected_range in mask
+        assert "--direct-crop-provider" in mask
+        assert "--roi-cache-staging-dir" not in mask
+
+    finalize = " ".join(jobs[f"keypoint_finalize:{target_safe}"].command)
+    assert f"--target-crop-run {hybrid_run}" in finalize
+    assert "merge_clipped_proxy_crop_runs" not in finalize
+
+
+def test_downstream_scope_materializes_without_a_detection_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DOWNSTREAM,
+    )
+
+    payload = workflow.materialize_plan_bundle(plan)
+
+    assert payload["workflow_scope"] == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+    evidence = json.loads(
+        Path(plan.target_plans[0]["detection_plan_path"]).read_text(encoding="utf-8")
+    )
+    assert evidence["schema"] == "palette.clipped_downstream_layout_plan.v1"
+    assert evidence["external_refined_detect_run"] == ("finalized_refined_cam2010093")
+
+
+def test_downstream_scope_cli_does_not_require_detection_model_arguments() -> None:
+    args = workflow._parser().parse_args(
+        [
+            "--workflow-scope",
+            "downstream",
+            "--manifest",
+            "targets.json",
+            "--run-label",
+            "downstream_only",
+            "--run-root",
+            "run",
+            "--pose-set-id",
+            "pose_set",
+            "--pose-run-id",
+            "pose_run",
+            "--subject-mask-set-id",
+            "mask_set",
+            "--subject-mask-run-id",
+            "mask_run",
+            "--dry-run",
+        ]
+    )
+
+    assert args.workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+    assert args.detection_set_id is None
+    assert args.detection_run_id is None
 
 
 def test_keypoint_recovery_reuses_cache_and_raw_masks(

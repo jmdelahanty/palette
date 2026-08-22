@@ -132,3 +132,52 @@ def test_staged_inference_writes_failed_receipt_and_cleans_scratch(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["status"] == "failed"
     assert receipt["error_type"] == "RuntimeError"
+
+
+def test_direct_crop_provider_forwards_row_partition_without_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_path = tmp_path / "receipts" / "worker.json"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        staged.infer_unet_subject_masks,
+        "main",
+        lambda arguments: calls.append(arguments),
+    )
+
+    def fake_evidence(arguments: list[str]) -> dict[str, object]:
+        return {
+            "attempt_id": arguments[arguments.index("--attempt-id") + 1],
+            "source_crop_run": "crop_hybrid_recording",
+        }
+
+    monkeypatch.setattr(staged, "_completed_run_evidence", fake_evidence)
+
+    staged.main(
+        [
+            "--direct-crop-provider",
+            "--worker-receipt-json",
+            str(receipt_path),
+            str(tmp_path / "recording_analysis.zarr"),
+            "--run-name",
+            "clip_001",
+            "--output-parent",
+            "subject_mask_shard_runs",
+            "--crop-run",
+            "crop_hybrid_recording",
+            "--source-crop-row-start",
+            "100",
+            "--source-crop-row-stop",
+            "200",
+        ]
+    )
+
+    assert len(calls) == 1
+    assert "--roi-cache-manifest" not in calls[0]
+    assert calls[0][calls[0].index("--source-crop-row-start") + 1] == "100"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "complete"
+    assert receipt["pixel_source_mode"] == "direct_crop_provider"
+    assert receipt["staging_dir"] is None

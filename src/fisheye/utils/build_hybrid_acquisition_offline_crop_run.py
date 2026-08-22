@@ -26,6 +26,8 @@ import zarr
 
 from fisheye.shared.acquisition_crop_stream_ledger import (
     ACQUISITION_CROP_LEDGER_RUNS_GROUP,
+    ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION,
+    ACQUISITION_CROP_SOURCE_PROFILE_SINGLE,
     validate_current_acquisition_crop_stream_ledger,
 )
 from fisheye.shared.batch_logging import utc_now as _utc_now
@@ -168,15 +170,113 @@ def _ledger_crop_video_path(ledger_group: zarr.Group) -> Path:
     return path
 
 
+def _ledger_source_profile(ledger_group: zarr.Group) -> str:
+    return str(
+        ledger_group.attrs.get("source_profile")
+        or ACQUISITION_CROP_SOURCE_PROFILE_SINGLE
+    )
+
+
+def _bound_collection_media_identity(
+    raw: Mapping[str, Any],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    path_text = str(raw.get("resolved_path") or raw.get("path") or "").strip()
+    if not path_text:
+        raise ValueError(f"{label} lacks a source path.")
+    path = Path(path_text).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} not found: {path}")
+    strategy = str(raw.get("strategy") or "").strip()
+    fingerprint = str(raw.get("fingerprint") or "").strip()
+    try:
+        declared_size = int(raw.get("size_bytes"))
+        declared_mtime = int(raw.get("mtime_ns"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} lacks its declared stat media identity.") from exc
+    if strategy != "stat_v1" or len(fingerprint) != 64:
+        raise ValueError(f"{label} lacks a valid stat_v1 media fingerprint.")
+    observed = path.stat()
+    if (
+        int(observed.st_size) != declared_size
+        or int(observed.st_mtime_ns) != declared_mtime
+    ):
+        raise ValueError(f"{label} changed after ledger publication.")
+    return {
+        "path": str(path),
+        "strategy": strategy,
+        "fingerprint": fingerprint,
+        "size_bytes": declared_size,
+        "mtime_ns": declared_mtime,
+    }
+
+
+def _ledger_collection_media_members(
+    ledger_group: zarr.Group,
+) -> list[dict[str, Any]]:
+    raw_members = ledger_group.attrs.get("source_media_members")
+    if not isinstance(raw_members, list) or not raw_members:
+        raise ValueError("Collection crop ledger lacks its source media member table.")
+    members: list[dict[str, Any]] = []
+    expected_first = 1
+    for expected_index, raw in enumerate(raw_members):
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                "Collection crop ledger member table contains a non-object."
+            )
+        member_index = int(raw.get("member_index", -1))
+        first_frame_id = int(raw.get("first_recording_frame_id", -1))
+        last_frame_id = int(raw.get("last_recording_frame_id", -1))
+        frame_count = int(raw.get("frame_count", -1))
+        if member_index != expected_index:
+            raise ValueError(
+                "Collection crop ledger member indices are not contiguous."
+            )
+        if (
+            first_frame_id != expected_first
+            or last_frame_id - first_frame_id + 1 != frame_count
+        ):
+            raise ValueError(
+                "Collection crop ledger frame intervals are not contiguous."
+            )
+        crop_raw = raw.get("crop_video")
+        full_raw = raw.get("full_video")
+        if not isinstance(crop_raw, Mapping) or not isinstance(full_raw, Mapping):
+            raise ValueError(f"Collection member {member_index} lacks bound media.")
+        members.append(
+            {
+                "member_index": member_index,
+                "clip_index": int(raw.get("clip_index", member_index)),
+                "clip_id": str(raw.get("clip_id") or ""),
+                "first_recording_frame_id": first_frame_id,
+                "last_recording_frame_id": last_frame_id,
+                "frame_count": frame_count,
+                "crop_video": _bound_collection_media_identity(
+                    crop_raw, label=f"Collection member {member_index} crop video"
+                ),
+                "full_video": _bound_collection_media_identity(
+                    full_raw, label=f"Collection member {member_index} full video"
+                ),
+            }
+        )
+        expected_first = last_frame_id + 1
+    return members
+
+
 def _ledger_roi_shape(ledger_group: zarr.Group) -> tuple[int, int]:
     contract = ledger_group.attrs.get("source_stream_contract")
     if not isinstance(contract, Mapping):
-        raise ValueError("Canonical acquisition crop ledger lacks source_stream_contract.")
+        raise ValueError(
+            "Canonical acquisition crop ledger lacks source_stream_contract."
+        )
     try:
         width = int(contract.get("width"))
         height = int(contract.get("height"))
     except (TypeError, ValueError) as exc:
-        raise ValueError("Canonical crop stream width/height are not integers.") from exc
+        raise ValueError(
+            "Canonical crop stream width/height are not integers."
+        ) from exc
     if width <= 0 or height <= 0:
         raise ValueError("Canonical crop stream width/height must be positive.")
     return height, width
@@ -382,9 +482,7 @@ def _require_approved_refined_input(
         selected = str(
             parent.attrs.get(REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE) or ""
         ).strip()
-        authority = parent.attrs.get(
-            REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE
-        )
+        authority = parent.attrs.get(REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE)
         if selected == str(run_name) and isinstance(authority, Mapping):
             errors = validate_refined_detection_authority_provenance(authority)
             intended_use = (
@@ -875,6 +973,249 @@ def _write_supplemental_cache(
     return manifest
 
 
+def _write_supplemental_cache_collection(
+    *,
+    zarr_path: Path,
+    run_name: str,
+    members: Sequence[Mapping[str, Any]],
+    member_indices: np.ndarray,
+    frame_indices: np.ndarray,
+    manifest_path: Path,
+    roi_coordinates_full: np.ndarray,
+    roi_shape: tuple[int, int],
+    video_shape: tuple[int, int],
+    decode_mode: str,
+    decode_chunk_frames: int,
+    overwrite: bool,
+) -> dict[str, Any]:
+    """Materialize one flat supplemental cache from several full-video clips."""
+
+    import torch
+
+    manifest_path = manifest_path.expanduser().resolve()
+    bin_path = manifest_path.with_suffix(".bin")
+    if manifest_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Supplemental ROI cache manifest exists: {manifest_path}"
+        )
+    if bin_path.exists() and not overwrite:
+        raise FileExistsError(f"Supplemental ROI cache payload exists: {bin_path}")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    frame_values = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    member_values = np.asarray(member_indices, dtype=np.int32).reshape(-1)
+    origins = np.asarray(roi_coordinates_full, dtype=np.int32).reshape(-1, 2)
+    if (
+        member_values.shape != frame_values.shape
+        or origins.shape[0] != frame_values.shape[0]
+    ):
+        raise ValueError("Collection supplemental cache inputs are not row aligned.")
+    if np.any(member_values < 0):
+        raise ValueError(
+            "Collection supplemental rows must resolve to a full-video member."
+        )
+    member_by_index = {int(member["member_index"]): member for member in members}
+    unknown = sorted(set(int(value) for value in member_values) - set(member_by_index))
+    if unknown:
+        raise ValueError(f"Unknown full-video collection member indices: {unknown}")
+
+    row_stride = int(roi_shape[0]) * int(roi_shape[1])
+    rows_written_mask = np.zeros(frame_values.shape[0], dtype=bool)
+    timing: dict[str, Any] = {
+        "decode_seconds": 0.0,
+        "crop_write_seconds": 0.0,
+        "decoded_frames": 0,
+        "member_reports": [],
+    }
+    started = time.perf_counter()
+    with bin_path.open("w+b") as handle:
+        handle.truncate(int(row_stride * frame_values.shape[0]))
+        for member_index in sorted(set(int(value) for value in member_values)):
+            member = member_by_index[member_index]
+            output_rows = np.flatnonzero(member_values == member_index).astype(np.int64)
+            first_zero_based = int(member["first_recording_frame_id"]) - 1
+            local_frames = frame_values[output_rows] - first_zero_based
+            if np.any(local_frames < 0) or np.any(
+                local_frames >= int(member["frame_count"])
+            ):
+                raise ValueError(
+                    f"Supplemental rows fall outside collection member {member_index}."
+                )
+            frame_to_rows: dict[int, list[int]] = {}
+            for output_row, local_frame in zip(output_rows, local_frames):
+                frame_to_rows.setdefault(int(local_frame), []).append(int(output_row))
+            requested_mode = _choose_decode_mode(
+                str(decode_mode), np.unique(local_frames)
+            )
+            member_started = time.perf_counter()
+            decoder = None
+            effective_mode = requested_mode
+            fallback_error: str | None = None
+            try:
+                if requested_mode == "indexed":
+                    try:
+                        decoder = _open_indexed_decoder(
+                            Path(str(member["full_video"]["path"]))
+                        )
+                        source_height, source_width = _decoder_dimensions(decoder)
+                        if (source_height, source_width) != tuple(video_shape):
+                            raise ValueError(
+                                "Collection full-video dimensions do not match metadata."
+                            )
+                        requested = sorted(frame_to_rows)
+                        for start in range(
+                            0, len(requested), max(1, int(decode_chunk_frames))
+                        ):
+                            frame_batch = requested[
+                                start : start + max(1, int(decode_chunk_frames))
+                            ]
+                            decode_started = time.perf_counter()
+                            decoded = decoder.get_batch_frames_by_index(frame_batch)
+                            timing["decode_seconds"] += float(
+                                time.perf_counter() - decode_started
+                            )
+                            timing["decoded_frames"] += len(decoded)
+                            if len(decoded) != len(frame_batch):
+                                raise RuntimeError(
+                                    "Indexed collection decode returned the wrong frame count."
+                                )
+                            for local_frame, frame in zip(frame_batch, decoded):
+                                write_started = time.perf_counter()
+                                _write_cache_rows(
+                                    handle=handle,
+                                    frame_tensor=torch.from_dlpack(frame),
+                                    rows=frame_to_rows[local_frame],
+                                    roi_coordinates_full=origins,
+                                    roi_shape=roi_shape,
+                                    video_shape=video_shape,
+                                    row_stride=row_stride,
+                                    rows_written_mask=rows_written_mask,
+                                )
+                                timing["crop_write_seconds"] += float(
+                                    time.perf_counter() - write_started
+                                )
+                    except Exception as exc:
+                        _close_decoder(decoder)
+                        decoder = None
+                        if decode_mode == "indexed":
+                            raise
+                        fallback_error = f"{exc.__class__.__name__}: {exc}"
+                        effective_mode = "sequential"
+                if effective_mode == "sequential":
+                    decoder = _open_sequential_reader(
+                        Path(str(member["full_video"]["path"]))
+                    )
+                    source_height, source_width = _decoder_dimensions(decoder)
+                    if (source_height, source_width) != tuple(video_shape):
+                        raise ValueError(
+                            "Collection full-video dimensions do not match metadata."
+                        )
+                    frame_iter = decoder.iter_frames()
+                    for local_frame in range(max(frame_to_rows) + 1):
+                        decode_started = time.perf_counter()
+                        frame = next(frame_iter)
+                        timing["decode_seconds"] += float(
+                            time.perf_counter() - decode_started
+                        )
+                        timing["decoded_frames"] += 1
+                        rows = frame_to_rows.get(local_frame)
+                        if rows:
+                            write_started = time.perf_counter()
+                            _write_cache_rows(
+                                handle=handle,
+                                frame_tensor=frame,
+                                rows=rows,
+                                roi_coordinates_full=origins,
+                                roi_shape=roi_shape,
+                                video_shape=video_shape,
+                                row_stride=row_stride,
+                                rows_written_mask=rows_written_mask,
+                            )
+                            timing["crop_write_seconds"] += float(
+                                time.perf_counter() - write_started
+                            )
+            finally:
+                _close_decoder(decoder)
+            member_report = {
+                "member_index": member_index,
+                "clip_id": member.get("clip_id"),
+                "row_count": int(output_rows.shape[0]),
+                "decode_mode_effective": effective_mode,
+                "duration_seconds": float(time.perf_counter() - member_started),
+            }
+            if fallback_error is not None:
+                member_report["indexed_fallback_error"] = fallback_error
+            timing["member_reports"].append(member_report)
+    if not np.all(rows_written_mask):
+        raise RuntimeError(
+            "Collection supplemental cache write missed "
+            f"{int(np.count_nonzero(~rows_written_mask))} rows."
+        )
+    timing["total_seconds"] = float(time.perf_counter() - started)
+
+    total_bytes = int(frame_values.shape[0]) * row_stride
+    pixel_contract = orange_mono_pynvvc_luma_pixel_contract(
+        source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+    )
+    manifest = {
+        "schema": FLAT_ROI_CACHE_SCHEMA,
+        "layout": FLAT_ROI_CACHE_LAYOUT,
+        "cache_complete": True,
+        "cache_key": f"{run_name}:offline_collection_supplement:{frame_values.shape[0]}",
+        "manifest_path": str(manifest_path),
+        "created_at_utc": _utc_now(),
+        "source": {
+            "archive_path": str(zarr_path),
+            "crop_run_name": str(run_name),
+            "source_crop_storage_mode": "geometry_only",
+            "frame_source_kind": "source_video_collection",
+            "member_count": len(members),
+            "members": [
+                {
+                    "member_index": int(member["member_index"]),
+                    "clip_id": member.get("clip_id"),
+                    "first_recording_frame_id": int(member["first_recording_frame_id"]),
+                    "frame_count": int(member["frame_count"]),
+                    "full_video": dict(member["full_video"]),
+                }
+                for member in members
+            ],
+            "row_count": int(frame_values.shape[0]),
+        },
+        "array": {
+            "bin_path": bin_path.name,
+            "dtype": "uint8",
+            "shape": [
+                int(frame_values.shape[0]),
+                int(roi_shape[0]),
+                int(roi_shape[1]),
+            ],
+            "order": "C",
+            "row_stride_bytes": row_stride,
+            "total_bytes": total_bytes,
+            "sha256": None,
+        },
+        "builder": {
+            "module": __name__,
+            "decode_backend_requested": "pynvvc_luma",
+            "decode_backend_effective": "pynvvc_luma",
+            "decode_mode_requested": str(decode_mode),
+            "decode_mode_effective": "per_member",
+            "decode_chunk_frames": int(decode_chunk_frames),
+            "pixel_contract": pixel_contract,
+            "pixel_contract_name": pixel_contract.get("name"),
+            "timing": timing,
+        },
+    }
+    tmp_path = manifest_path.with_suffix(".tmp.json")
+    tmp_path.write_text(
+        json.dumps(_json_safe(manifest), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, manifest_path)
+    return manifest
+
+
 def _default_manifest_path(recording_dir: Path, zarr_path: Path, run_name: str) -> Path:
     zarr_stem = zarr_path.name.removesuffix(".zarr")
     return (
@@ -921,7 +1262,9 @@ def _prepare_canonical_ledger_hybrid_payload(
     ).reshape(-1)
     ledger_rows = int(ledger_frames.shape[0])
     if np.unique(ledger_frames).shape[0] != ledger_rows:
-        raise ValueError("Canonical acquisition crop ledger frame indices are duplicated.")
+        raise ValueError(
+            "Canonical acquisition crop ledger frame indices are duplicated."
+        )
     ledger_frame_ids = np.asarray(
         ledger_group["source_recording_frame_ids"][:], dtype=np.int64
     ).reshape(-1)
@@ -931,6 +1274,20 @@ def _prepare_canonical_ledger_hybrid_payload(
     ledger_video_frames = np.asarray(
         ledger_group["source_crop_video_frame_indices"][:], dtype=np.int64
     ).reshape(-1)
+    ledger_crop_member_indices = (
+        np.asarray(
+            ledger_group["source_crop_video_member_indices"][:], dtype=np.int32
+        ).reshape(-1)
+        if "source_crop_video_member_indices" in ledger_group
+        else np.full(ledger_rows, -1, dtype=np.int32)
+    )
+    ledger_full_member_indices = (
+        np.asarray(
+            ledger_group["source_full_video_member_indices"][:], dtype=np.int32
+        ).reshape(-1)
+        if "source_full_video_member_indices" in ledger_group
+        else np.full(ledger_rows, -1, dtype=np.int32)
+    )
     ledger_local_frames = np.asarray(
         ledger_group["source_crop_local_frame_ids"][:], dtype=np.int64
     ).reshape(-1)
@@ -948,6 +1305,8 @@ def _prepare_canonical_ledger_hybrid_payload(
         "source_recording_frame_ids": ledger_frame_ids,
         "source_crop_meta_row_indices": ledger_meta_rows,
         "source_crop_video_frame_indices": ledger_video_frames,
+        "source_crop_video_member_indices": ledger_crop_member_indices,
+        "source_full_video_member_indices": ledger_full_member_indices,
         "source_crop_local_frame_ids": ledger_local_frames,
         "has_detection": ledger_has_detection,
         "blank_frame": ledger_blank,
@@ -970,7 +1329,9 @@ def _prepare_canonical_ledger_hybrid_payload(
     ).reshape(-1)
     refined_rows = int(refined_frames.shape[0])
     refined_keys = np.asarray(refined_payload.get("instance_key"))
-    if refined_keys.shape != (refined_rows,) or refined_keys.dtype != np.dtype(np.uint64):
+    if refined_keys.shape != (refined_rows,) or refined_keys.dtype != np.dtype(
+        np.uint64
+    ):
         raise ValueError(
             "Refined detection instance_key must have exact uint64 shape "
             f"({refined_rows},)."
@@ -1092,16 +1453,14 @@ def _prepare_canonical_ledger_hybrid_payload(
         ROUTING_REASON_CODE_MAP["acquisition_crop_selected"],
         dtype=np.int8,
     )
-    reason_codes[~has_frame_match] = ROUTING_REASON_CODE_MAP[
-        "acquisition_crop_missing"
-    ]
+    reason_codes[~has_frame_match] = ROUTING_REASON_CODE_MAP["acquisition_crop_missing"]
     reason_codes[np.logical_and(has_frame_match, ~frame_identity_agrees)] = (
         ROUTING_REASON_CODE_MAP["frame_identity_mismatch"]
     )
     eligible_prefix = np.logical_and(has_frame_match, frame_identity_agrees)
-    reason_codes[np.logical_and(eligible_prefix, matched_blank)] = ROUTING_REASON_CODE_MAP[
-        "blank_acquisition_crop"
-    ]
+    reason_codes[np.logical_and(eligible_prefix, matched_blank)] = (
+        ROUTING_REASON_CODE_MAP["blank_acquisition_crop"]
+    )
     reason_codes[
         np.logical_and.reduce((eligible_prefix, ~matched_blank, ~matched_has_detection))
     ] = ROUTING_REASON_CODE_MAP["acquisition_no_detection"]
@@ -1152,7 +1511,9 @@ def _prepare_canonical_ledger_hybrid_payload(
     if refined_row_ids.shape != (refined_rows,) or source_detect_rows.shape != (
         refined_rows,
     ):
-        raise ValueError("Refined row lineage arrays do not match the reviewed row count.")
+        raise ValueError(
+            "Refined row lineage arrays do not match the reviewed row count."
+        )
 
     provider_crop_xywh = np.column_stack((roi_origins, roi_sizes)).astype(np.float64)
     combined: dict[str, np.ndarray | dict[str, int]] = {
@@ -1171,6 +1532,12 @@ def _prepare_canonical_ledger_hybrid_payload(
         "source_acquisition_crop_row_indices": matched_rows,
         "source_crop_video_frame_indices": _matched_values(
             "source_crop_video_frame_indices", dtype=np.int64, fill=-1
+        ),
+        "source_crop_video_member_indices": _matched_values(
+            "source_crop_video_member_indices", dtype=np.int32, fill=-1
+        ),
+        "source_full_video_member_indices": _matched_values(
+            "source_full_video_member_indices", dtype=np.int32, fill=-1
         ),
         "source_crop_local_frame_ids": _matched_values(
             "source_crop_local_frame_ids", dtype=np.int64, fill=-1
@@ -1193,9 +1560,7 @@ def _prepare_canonical_ledger_hybrid_payload(
         "source_pixel_kind_codes": np.where(
             video_mask,
             SOURCE_PIXEL_KIND_CODE_MAP["acquisition_crop_video"],
-            SOURCE_PIXEL_KIND_CODE_MAP[
-                "offline_full_frame_supplemental_flat_cache"
-            ],
+            SOURCE_PIXEL_KIND_CODE_MAP["offline_full_frame_supplemental_flat_cache"],
         ).astype(np.int8),
         "crop_state_codes": np.where(
             video_mask,
@@ -1286,8 +1651,7 @@ def _prepare_hybrid_payload(
     ).reshape(-1, 4)
     if refined_bbox_norm.shape != (refined_rows, 4):
         raise ValueError(
-            "Refined bbox_norm_coords must have exact shape "
-            f"({refined_rows}, 4)."
+            f"Refined bbox_norm_coords must have exact shape ({refined_rows}, 4)."
         )
     refined_bbox_img, _refined_centers = derive_canonical_detection_geometry(
         refined_bbox_norm,
@@ -1403,9 +1767,7 @@ def _prepare_hybrid_payload(
     ).reshape(-1, 4)
     if np.any(video_mask):
         source_crop_xywh[video_mask] = video_crop_xywh[matched_online_rows[video_mask]]
-    source_acquisition_crop_xywh = np.full(
-        (refined_rows, 4), np.nan, dtype=np.float64
-    )
+    source_acquisition_crop_xywh = np.full((refined_rows, 4), np.nan, dtype=np.float64)
     if np.any(video_mask):
         source_acquisition_crop_xywh[video_mask] = video_crop_xywh[
             matched_online_rows[video_mask]
@@ -1583,6 +1945,8 @@ def build_hybrid_acquisition_offline_crop_run(
     root = zarr.open_group(
         str(archive_path), mode="a" if apply else "r", use_consolidated=False
     )
+    acquisition_source_profile = ACQUISITION_CROP_SOURCE_PROFILE_SINGLE
+    collection_members: list[dict[str, Any]] | None = None
     if acquisition_source_mode == "canonical_ledger":
         (
             acquisition_group,
@@ -1595,7 +1959,12 @@ def build_hybrid_acquisition_offline_crop_run(
         crop_parent = root.get("crop_runs")
         if crop_parent is None and apply:
             crop_parent = require_runs_parent(root, "crop_runs")
-        acquisition_crop_video_path = _ledger_crop_video_path(acquisition_group)
+        acquisition_source_profile = _ledger_source_profile(acquisition_group)
+        if acquisition_source_profile == ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION:
+            collection_members = _ledger_collection_media_members(acquisition_group)
+            acquisition_crop_video_path = None
+        else:
+            acquisition_crop_video_path = _ledger_crop_video_path(acquisition_group)
         roi_shape = _ledger_roi_shape(acquisition_group)
     else:
         crop_parent, acquisition_group, resolved_acquisition_run = _resolve_crop_run(
@@ -1628,22 +1997,57 @@ def build_hybrid_acquisition_offline_crop_run(
         run_name=refined_detect_run,
     )
     frame_height, frame_width = resolve_full_frame_shape(root)
-    full_video_path = _resolve_source_video_path(
-        root=root,
-        recording_dir=resolved_recording_dir,
-        explicit=Path(source_video_path) if source_video_path is not None else None,
-    )
+    if collection_members is not None:
+        if source_video_path is not None:
+            raise ValueError(
+                "--source-video-path cannot replace a bound full-video clip collection."
+            )
+        full_video_path = None
+    else:
+        full_video_path = _resolve_source_video_path(
+            root=root,
+            recording_dir=resolved_recording_dir,
+            explicit=Path(source_video_path) if source_video_path is not None else None,
+        )
     if acquisition_source_mode == "canonical_ledger":
-        full_video_identity = _bound_stat_media_identity(
-            path=full_video_path,
-            attrs=root.attrs,
-            label="Full-frame source video",
-        )
-        crop_video_identity = _bound_stat_media_identity(
-            path=acquisition_crop_video_path,
-            attrs=acquisition_group.attrs,
-            label="Acquisition crop video",
-        )
+        if collection_members is not None:
+            full_video_identity = {
+                "strategy": "ordered_stat_v1_collection",
+                "member_count": len(collection_members),
+                "members": [
+                    {
+                        "member_index": member["member_index"],
+                        "clip_id": member["clip_id"],
+                        **member["full_video"],
+                    }
+                    for member in collection_members
+                ],
+            }
+            crop_video_identity = {
+                "strategy": "ordered_stat_v1_collection",
+                "member_count": len(collection_members),
+                "members": [
+                    {
+                        "member_index": member["member_index"],
+                        "clip_id": member["clip_id"],
+                        **member["crop_video"],
+                    }
+                    for member in collection_members
+                ],
+            }
+        else:
+            assert full_video_path is not None
+            assert acquisition_crop_video_path is not None
+            full_video_identity = _bound_stat_media_identity(
+                path=full_video_path,
+                attrs=root.attrs,
+                label="Full-frame source video",
+            )
+            crop_video_identity = _bound_stat_media_identity(
+                path=acquisition_crop_video_path,
+                attrs=acquisition_group.attrs,
+                label="Acquisition crop video",
+            )
         payload = _prepare_canonical_ledger_hybrid_payload(
             root=root,
             ledger_group=acquisition_group,
@@ -1655,8 +2059,22 @@ def build_hybrid_acquisition_offline_crop_run(
         )
         routing_policy_id = PRODUCTION_ROUTING_POLICY_ID
         crop_policy_id = PRODUCTION_CROP_POLICY_ID
+        if collection_members is not None:
+            full_member_indices = np.asarray(
+                payload["source_full_video_member_indices"], dtype=np.int32
+            )
+            if np.any(full_member_indices < 0):
+                raise ValueError(
+                    "Every refined detection row must match the frame-complete "
+                    "collection ledger before hybrid routing."
+                )
     else:
-        full_video_identity = {"path": str(full_video_path), "strategy": "legacy_unbound"}
+        assert full_video_path is not None
+        assert acquisition_crop_video_path is not None
+        full_video_identity = {
+            "path": str(full_video_path),
+            "strategy": "legacy_unbound",
+        }
         crop_video_identity = {
             "path": str(acquisition_crop_video_path),
             "strategy": "legacy_unbound",
@@ -1673,8 +2091,7 @@ def build_hybrid_acquisition_offline_crop_run(
             payload["source_pixel_kind_codes"], dtype=np.int8
         )
         payload["routing_reason_codes"] = np.where(
-            legacy_pixel_kinds
-            == SOURCE_PIXEL_KIND_CODE_MAP["acquisition_crop_video"],
+            legacy_pixel_kinds == SOURCE_PIXEL_KIND_CODE_MAP["acquisition_crop_video"],
             ROUTING_REASON_CODE_MAP["acquisition_crop_selected"],
             ROUTING_REASON_CODE_MAP["legacy_instance_key_not_matched"],
         ).astype(np.int8)
@@ -1691,6 +2108,7 @@ def build_hybrid_acquisition_offline_crop_run(
         "schema_version": 1,
         "crop_run": str(resolved_run_name),
         "acquisition_source_mode": acquisition_source_mode,
+        "acquisition_source_profile": acquisition_source_profile,
         "acquisition_source_run": str(resolved_acquisition_run),
         "acquisition_ledger_record_sha256": resolved_acquisition_record_sha256,
         "refined_detect_run": str(resolved_refined_run),
@@ -1723,6 +2141,14 @@ def build_hybrid_acquisition_offline_crop_run(
                 "crop_state_codes",
                 "supplemental_cache_row_indices",
             )
+        }
+        | {
+            name: _array_sha256(np.asarray(payload[name]))
+            for name in (
+                "source_crop_video_member_indices",
+                "source_full_video_member_indices",
+            )
+            if name in payload
         },
     }
     provider_record_sha256 = _canonical_json_sha256(provider_rowset_record)
@@ -1739,8 +2165,13 @@ def build_hybrid_acquisition_offline_crop_run(
         "status": "dry_run" if not apply else "planned",
         "zarr_path": str(archive_path),
         "recording_dir": str(resolved_recording_dir),
-        "source_video_path": str(full_video_path),
-        "source_crop_video_path": str(acquisition_crop_video_path),
+        "source_video_path": str(full_video_path) if full_video_path else None,
+        "source_crop_video_path": (
+            str(acquisition_crop_video_path) if acquisition_crop_video_path else None
+        ),
+        "source_media_member_count": (
+            len(collection_members) if collection_members is not None else 1
+        ),
         "acquisition_source_mode": acquisition_source_mode,
         "acquisition_crop_run": str(resolved_acquisition_run),
         "acquisition_ledger_record_sha256": resolved_acquisition_record_sha256,
@@ -1781,23 +2212,46 @@ def build_hybrid_acquisition_offline_crop_run(
 
     supplemental_manifest: dict[str, Any] | None = None
     if offline_rows.size:
-        supplemental_manifest = _write_supplemental_cache(
-            zarr_path=archive_path,
-            run_name=resolved_run_name,
-            video_path=full_video_path,
-            manifest_path=manifest_path,
-            frame_indices=np.asarray(payload["frame_indices"], dtype=np.int64)[
-                offline_rows
-            ],
-            roi_coordinates_full=np.asarray(
-                payload["roi_coordinates_full"], dtype=np.int32
-            )[offline_rows],
-            roi_shape=roi_shape,
-            video_shape=(int(frame_height), int(frame_width)),
-            decode_mode=str(decode_mode),
-            decode_chunk_frames=int(decode_chunk_frames),
-            overwrite=bool(overwrite),
-        )
+        if collection_members is not None:
+            supplemental_manifest = _write_supplemental_cache_collection(
+                zarr_path=archive_path,
+                run_name=resolved_run_name,
+                members=collection_members,
+                member_indices=np.asarray(
+                    payload["source_full_video_member_indices"], dtype=np.int32
+                )[offline_rows],
+                frame_indices=np.asarray(payload["frame_indices"], dtype=np.int64)[
+                    offline_rows
+                ],
+                manifest_path=manifest_path,
+                roi_coordinates_full=np.asarray(
+                    payload["roi_coordinates_full"], dtype=np.int32
+                )[offline_rows],
+                roi_shape=roi_shape,
+                video_shape=(int(frame_height), int(frame_width)),
+                decode_mode=str(decode_mode),
+                decode_chunk_frames=int(decode_chunk_frames),
+                overwrite=bool(overwrite),
+            )
+        else:
+            assert full_video_path is not None
+            supplemental_manifest = _write_supplemental_cache(
+                zarr_path=archive_path,
+                run_name=resolved_run_name,
+                video_path=full_video_path,
+                manifest_path=manifest_path,
+                frame_indices=np.asarray(payload["frame_indices"], dtype=np.int64)[
+                    offline_rows
+                ],
+                roi_coordinates_full=np.asarray(
+                    payload["roi_coordinates_full"], dtype=np.int32
+                )[offline_rows],
+                roi_shape=roi_shape,
+                video_shape=(int(frame_height), int(frame_width)),
+                decode_mode=str(decode_mode),
+                decode_chunk_frames=int(decode_chunk_frames),
+                overwrite=bool(overwrite),
+            )
 
     group = crop_parent.create_group(resolved_run_name)
     mark_run_started(group, run_name=resolved_run_name, stage="crop")
@@ -1812,6 +2266,8 @@ def build_hybrid_acquisition_offline_crop_run(
             "source_crop_meta_row_indices",
             "source_acquisition_crop_row_indices",
             "source_crop_video_frame_indices",
+            "source_crop_video_member_indices",
+            "source_full_video_member_indices",
             "source_crop_local_frame_ids",
             "source_acquisition_crop_xywh",
             "source_crop_xywh",
@@ -1853,8 +2309,14 @@ def build_hybrid_acquisition_offline_crop_run(
             "roi_pixel_contract": hybrid_pixel_contract,
             "decode_backend": "pynvvc_luma",
             "decode_mode_requested": str(decode_mode),
-            "source_video_path": str(full_video_path),
-            "source_crop_video_path": str(acquisition_crop_video_path),
+            "source_video_path": str(full_video_path) if full_video_path else None,
+            "source_crop_video_path": (
+                str(acquisition_crop_video_path)
+                if acquisition_crop_video_path
+                else None
+            ),
+            "source_media_profile": acquisition_source_profile,
+            "source_media_members": collection_members,
             "source_full_frame_media_identity": full_video_identity,
             "source_acquisition_crop_media_identity": crop_video_identity,
             "source_acquisition_mode": acquisition_source_mode,
@@ -1874,9 +2336,7 @@ def build_hybrid_acquisition_offline_crop_run(
             "source_refined_detect_run": str(resolved_refined_run),
             "source_refined_run_id": str(resolved_refined_run),
             "source_refined_manifest_digest": refined_manifest_digest,
-            "source_refined_logical_content_digest": (
-                refined_logical_content_digest
-            ),
+            "source_refined_logical_content_digest": (refined_logical_content_digest),
             "source_refined_detection_selection_mode": refined_selection_mode,
             "source_registered_detection_gate_requirement": refined_group.attrs.get(
                 "registered_detection_gate_requirement"
@@ -1892,6 +2352,8 @@ def build_hybrid_acquisition_offline_crop_run(
             "routing_reason_code_map": ROUTING_REASON_CODE_MAP,
             "detection_source_code_map": DETECTION_SOURCE_CODE_MAP,
             "source_crop_video_frame_indices_semantics": "zero_based_frame_index_in_acquisition_crop_video_when_a_frame-ledger_row_exists_or_-1_when_missing",
+            "source_crop_video_member_indices_semantics": "member_index_in_source_media_members_for_acquisition_crop_video_rows_or_-1_for_single_video_sources",
+            "source_full_video_member_indices_semantics": "member_index_in_source_media_members_for_supplemental_full_video_rows_or_-1_for_single_video_sources",
             "source_acquisition_crop_row_indices_semantics": "row_index_in_source_acquisition_ledger_or_legacy_crop_run_or_-1_when_missing",
             "supplemental_cache_row_indices_semantics": "row_index_in_supplemental_flat_roi_cache_or_-1_for_acquisition_video_rows",
             "roi_coordinates_full_coordinate_space": "source_image_xy",
@@ -1938,6 +2400,7 @@ def build_hybrid_acquisition_offline_crop_run(
                 "run_name": resolved_run_name,
                 "decode_mode": str(decode_mode),
                 "acquisition_source_mode": acquisition_source_mode,
+                "acquisition_source_profile": acquisition_source_profile,
                 "routing_policy_id": routing_policy_id,
                 "crop_policy_id": crop_policy_id,
                 "context_margin_px": float(context_margin_px),
@@ -1945,7 +2408,8 @@ def build_hybrid_acquisition_offline_crop_run(
             },
             inputs={
                 "zarr_path": str(archive_path),
-                "source_video_path": str(full_video_path),
+                "source_video_path": str(full_video_path) if full_video_path else None,
+                "source_media_members": collection_members,
                 "source_acquisition_run": str(resolved_acquisition_run),
                 "source_acquisition_ledger_record_sha256": (
                     resolved_acquisition_record_sha256

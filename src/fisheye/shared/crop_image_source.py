@@ -785,6 +785,52 @@ class _AcquisitionCropVideoFrameReader:
         self._source_width = None
 
 
+def _collection_crop_video_readers(
+    crop_group: zarr.Group,
+) -> dict[int, _AcquisitionCropVideoFrameReader]:
+    raw_members = crop_group.attrs.get("source_media_members")
+    if not isinstance(raw_members, list) or not raw_members:
+        raise ValueError(
+            "Acquisition crop-video collection lacks source_media_members provenance."
+        )
+    readers: dict[int, _AcquisitionCropVideoFrameReader] = {}
+    for expected_index, raw in enumerate(raw_members):
+        if not isinstance(raw, Mapping):
+            raise ValueError("Crop-video collection member must be an object.")
+        member_index = int(raw.get("member_index", -1))
+        if member_index != expected_index:
+            raise ValueError("Crop-video collection member indices are not contiguous.")
+        media = raw.get("crop_video")
+        if not isinstance(media, Mapping):
+            raise ValueError(
+                f"Crop-video collection member {member_index} lacks crop media."
+            )
+        path_text = str(media.get("path") or media.get("resolved_path") or "").strip()
+        if not path_text:
+            raise ValueError(
+                f"Crop-video collection member {member_index} lacks a media path."
+            )
+        path = Path(path_text).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Acquisition crop-video collection member not found: {path}"
+            )
+        try:
+            expected_size = int(media.get("size_bytes"))
+            expected_mtime = int(media.get("mtime_ns"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Crop-video collection member {member_index} lacks stat identity."
+            ) from exc
+        stat = path.stat()
+        if stat.st_size != expected_size or stat.st_mtime_ns != expected_mtime:
+            raise ValueError(
+                f"Crop-video collection member {member_index} changed after publication."
+            )
+        readers[member_index] = _AcquisitionCropVideoFrameReader(path)
+    return readers
+
+
 @dataclass
 class CropImageSource:
     """Read ROI pixels from a crop run regardless of storage mode."""
@@ -826,9 +872,11 @@ class CropImageSource:
     _images_full: object | None = None
     _external_reader: _ExternalFrameReader | None = None
     crop_video_frame_indices: np.ndarray | None = None
+    crop_video_member_indices: np.ndarray | None = None
     source_pixel_kind_codes: np.ndarray | None = None
     supplemental_cache_row_indices: np.ndarray | None = None
     _acquisition_crop_reader: _AcquisitionCropVideoFrameReader | None = None
+    _acquisition_crop_readers: dict[int, _AcquisitionCropVideoFrameReader] | None = None
     _supplemental_flat_cache: object | None = None
 
     @classmethod
@@ -847,6 +895,8 @@ class CropImageSource:
         source_video_path_override: str | Path | None = None,
         source_video_frame_offset: int = 0,
         source_video_frame_count: int | None = None,
+        source_crop_row_start: int | None = None,
+        source_crop_row_stop: int | None = None,
         console: Any | None = None,
     ) -> "CropImageSource":
         normalized_cache_policy = _normalize_roi_cache_policy(roi_cache_policy)
@@ -876,8 +926,7 @@ class CropImageSource:
             raise ValueError("source_video_frame_count must be positive when provided.")
         if video_frame_offset != 0 and video_frame_count is None:
             raise ValueError(
-                "A nonzero source_video_frame_offset requires "
-                "source_video_frame_count."
+                "A nonzero source_video_frame_offset requires source_video_frame_count."
             )
         if (
             video_frame_offset != 0 or video_frame_count is not None
@@ -888,6 +937,10 @@ class CropImageSource:
         if video_override is not None and not video_override.is_file():
             raise FileNotFoundError(
                 f"Source-video path override does not exist: {video_override}"
+            )
+        if (source_crop_row_start is None) != (source_crop_row_stop is None):
+            raise ValueError(
+                "source_crop_row_start and source_crop_row_stop must be provided together."
             )
         if crop_run is None and manifest_path is not None:
             crop_run = crop_run_name_from_manifest(manifest_path)
@@ -924,10 +977,12 @@ class CropImageSource:
 
         roi_images = crop_group.get("roi_images")
         crop_video_frame_indices = None
+        crop_video_member_indices = None
         source_pixel_kind_codes = None
         supplemental_cache_row_indices = None
         supplemental_flat_cache = None
         acquisition_crop_reader = None
+        acquisition_crop_readers = None
         if storage_mode == "materialized":
             if video_override is not None:
                 raise ValueError(
@@ -976,15 +1031,6 @@ class CropImageSource:
                         "source_video_path_override cannot replace an acquisition "
                         "crop-video authority."
                     )
-                crop_video_path = (
-                    crop_group.attrs.get("source_crop_video_path")
-                    or crop_group.attrs.get("source_video_path")
-                    or crop_group.attrs.get("video_source_path")
-                )
-                if not crop_video_path:
-                    raise ValueError(
-                        "Acquisition crop-video crop run requires source_crop_video_path provenance."
-                    )
                 crop_video_frame_indices_arr = crop_group.get(
                     "source_crop_video_frame_indices"
                 )
@@ -1000,6 +1046,45 @@ class CropImageSource:
                         "source_crop_video_frame_indices length "
                         f"{crop_video_frame_indices.shape[0]} does not match roi count {total_rois}"
                     )
+                crop_video_member_indices_arr = crop_group.get(
+                    "source_crop_video_member_indices"
+                )
+                if crop_video_member_indices_arr is not None:
+                    crop_video_member_indices = np.asarray(
+                        crop_video_member_indices_arr[:], dtype=np.int32
+                    )
+                    if crop_video_member_indices.shape[0] != total_rois:
+                        raise ValueError(
+                            "source_crop_video_member_indices length "
+                            f"{crop_video_member_indices.shape[0]} does not match roi count {total_rois}"
+                        )
+                    acquisition_crop_readers = _collection_crop_video_readers(
+                        crop_group
+                    )
+                    invalid_members = np.logical_and(
+                        crop_video_member_indices >= 0,
+                        ~np.isin(
+                            crop_video_member_indices,
+                            np.asarray(
+                                sorted(acquisition_crop_readers), dtype=np.int32
+                            ),
+                        ),
+                    )
+                    if np.any(invalid_members):
+                        raise ValueError(
+                            "source_crop_video_member_indices references an unknown collection member."
+                        )
+                    crop_video_path = None
+                else:
+                    crop_video_path = (
+                        crop_group.attrs.get("source_crop_video_path")
+                        or crop_group.attrs.get("source_video_path")
+                        or crop_group.attrs.get("video_source_path")
+                    )
+                    if not crop_video_path:
+                        raise ValueError(
+                            "Acquisition crop-video crop run requires source_crop_video_path provenance."
+                        )
                 source_pixel_kind_codes_arr = crop_group.get("source_pixel_kind_codes")
                 if source_pixel_kind_codes_arr is not None:
                     source_pixel_kind_codes = np.asarray(
@@ -1081,13 +1166,16 @@ class CropImageSource:
                                     "PyNvVC luma pixel contract."
                                 )
                 frame_source_kind = "acquisition_crop_video"
-                frame_source_path = str(crop_video_path)
+                frame_source_path = (
+                    str(crop_video_path) if crop_video_path is not None else None
+                )
                 frame_shape = roi_shape
                 images_full = None
                 external_reader = None
-                acquisition_crop_reader = _AcquisitionCropVideoFrameReader(
-                    Path(frame_source_path)
-                )
+                if crop_video_path is not None:
+                    acquisition_crop_reader = _AcquisitionCropVideoFrameReader(
+                        Path(str(crop_video_path))
+                    )
                 live_acceleration_effective = "pynvvc_luma"
                 live_acceleration_fallback_reason = None
             elif manifest_path is not None:
@@ -1273,15 +1361,28 @@ class CropImageSource:
                 external_reader if storage_mode == "geometry_only" else None
             ),
             crop_video_frame_indices=crop_video_frame_indices,
+            crop_video_member_indices=crop_video_member_indices,
             source_pixel_kind_codes=source_pixel_kind_codes,
             supplemental_cache_row_indices=supplemental_cache_row_indices,
             _acquisition_crop_reader=(
                 acquisition_crop_reader if storage_mode == "geometry_only" else None
             ),
+            _acquisition_crop_readers=(
+                acquisition_crop_readers if storage_mode == "geometry_only" else None
+            ),
             _supplemental_flat_cache=(
                 supplemental_flat_cache if storage_mode == "geometry_only" else None
             ),
         )
+        if source_crop_row_start is not None and source_crop_row_stop is not None:
+            start = int(source_crop_row_start)
+            stop = int(source_crop_row_stop)
+            if start < 0 or stop <= start or stop > source.total_rois:
+                raise ValueError(
+                    f"Invalid source crop-row interval [{start}, {stop}) for "
+                    f"{source.total_rois} rows."
+                )
+            source._select_source_crop_rows(np.arange(start, stop, dtype=np.int64))
         if manifest_path is not None:
             source._activate_flat_bin_cache(
                 manifest_path=manifest_path,
@@ -1298,6 +1399,36 @@ class CropImageSource:
                 console=console,
             )
         return source
+
+    def _select_source_crop_rows(self, rows: np.ndarray) -> None:
+        """Restrict a live source to an ordered global crop-row partition."""
+
+        selected = np.asarray(rows, dtype=np.int64).reshape(-1)
+        original_rows = self.total_rois
+        if selected.size == 0 or selected.min() < 0 or selected.max() >= original_rows:
+            raise ValueError("Selected source crop rows are empty or out of bounds.")
+        if not np.array_equal(selected, np.sort(np.unique(selected))):
+            raise ValueError("Selected source crop rows must be unique and ascending.")
+        if self._roi_images is not None:
+            raise ValueError(
+                "Direct crop-row interval selection is supported only for live "
+                "geometry-only providers."
+            )
+        self.roi_coordinates_full = np.asarray(
+            self.roi_coordinates_full[selected], dtype=np.int32
+        )
+        self.frame_indices = np.asarray(self.frame_indices[selected], dtype=np.int64)
+        for name in (
+            "crop_video_frame_indices",
+            "crop_video_member_indices",
+            "source_pixel_kind_codes",
+            "supplemental_cache_row_indices",
+        ):
+            values = getattr(self, name)
+            if values is not None:
+                setattr(self, name, np.asarray(values[selected]))
+        self.source_crop_row_ids = selected.copy()
+        self.roi_read_mode = f"{self.roi_read_mode}_crop_row_partition"
 
     @classmethod
     def open_work_package(
@@ -1516,9 +1647,8 @@ class CropImageSource:
         target_order = np.argsort(target_keys, kind="stable")
         sorted_target_keys = target_keys[target_order]
         positions = np.searchsorted(sorted_target_keys, source_keys)
-        if (
-            np.any(positions >= sorted_target_keys.size)
-            or not np.array_equal(sorted_target_keys[positions], source_keys)
+        if np.any(positions >= sorted_target_keys.size) or not np.array_equal(
+            sorted_target_keys[positions], source_keys
         ):
             raise ValueError(
                 "Geometry crop does not contain every consumed pixel-source instance_key."
@@ -1570,9 +1700,10 @@ class CropImageSource:
         if "source_crop_xywh" not in source_group:
             raise ValueError("Pixel-source crop lacks source_crop_xywh placement.")
         source_xywh = np.asarray(source_group["source_crop_xywh"][source_rows])
-        if source_xywh.shape != (self.total_rois, 4) or not np.isfinite(
-            source_xywh
-        ).all():
+        if (
+            source_xywh.shape != (self.total_rois, 4)
+            or not np.isfinite(source_xywh).all()
+        ):
             raise ValueError("Pixel-source source_crop_xywh is not finite [N,4].")
         normalized_source_xywh = source_xywh.astype(np.float32, copy=False)
         target_xywh = np.asarray(target_group["source_crop_xywh"][target_rows])
@@ -1762,9 +1893,8 @@ class CropImageSource:
         self, roi_indices: np.ndarray
     ) -> np.ndarray:
         if (
-            self._acquisition_crop_reader is None
-            or self.crop_video_frame_indices is None
-        ):
+            self._acquisition_crop_reader is None and not self._acquisition_crop_readers
+        ) or self.crop_video_frame_indices is None:
             raise RuntimeError(
                 "No acquisition crop-video reader available for crop run."
             )
@@ -1779,27 +1909,42 @@ class CropImageSource:
             video_positions = np.arange(roi_indices.size, dtype=np.int64)
             supplemental_positions = np.zeros(0, dtype=np.int64)
 
-        frame_cache: dict[int, np.ndarray] = {}
+        frame_cache: dict[tuple[int, int], np.ndarray] = {}
         for batch_idx in video_positions:
-            video_frame_idx = self.crop_video_frame_indices[
-                int(roi_indices[int(batch_idx)])
-            ]
+            crop_row = int(roi_indices[int(batch_idx)])
+            video_frame_idx = self.crop_video_frame_indices[crop_row]
             video_frame_idx_int = int(video_frame_idx)
             if video_frame_idx_int < 0:
                 raise ValueError(
                     "Acquisition crop-video source row points at a negative "
                     f"source_crop_video_frame_indices value for crop row {int(roi_indices[int(batch_idx)])}."
                 )
-            frame = frame_cache.get(video_frame_idx_int)
+            if self.crop_video_member_indices is None:
+                member_index = -1
+                reader = self._acquisition_crop_reader
+            else:
+                member_index = int(self.crop_video_member_indices[crop_row])
+                if member_index < 0:
+                    raise ValueError(
+                        "Acquisition crop-video source row points at a negative "
+                        f"source_crop_video_member_indices value for crop row {crop_row}."
+                    )
+                reader = (self._acquisition_crop_readers or {}).get(member_index)
+            if reader is None:
+                raise RuntimeError(
+                    f"No acquisition crop-video reader exists for member {member_index}."
+                )
+            cache_key = (member_index, video_frame_idx_int)
+            frame = frame_cache.get(cache_key)
             if frame is None:
-                frame = self._acquisition_crop_reader.read_frame(video_frame_idx_int)
+                frame = reader.read_frame(video_frame_idx_int)
                 if frame.shape[:2] != (roi_h, roi_w):
                     raise ValueError(
                         "Acquisition crop-video frame shape "
                         f"{frame.shape[:2]} does not match crop run ROI shape {(roi_h, roi_w)} "
                         f"for frame {video_frame_idx_int}."
                     )
-                frame_cache[video_frame_idx_int] = frame
+                frame_cache[cache_key] = frame
             batch[batch_idx] = frame
 
         if supplemental_positions.size:
@@ -2257,3 +2402,6 @@ class CropImageSource:
             self._external_reader.close()
         if self._acquisition_crop_reader is not None:
             self._acquisition_crop_reader.close()
+        if self._acquisition_crop_readers is not None:
+            for reader in self._acquisition_crop_readers.values():
+                reader.close()

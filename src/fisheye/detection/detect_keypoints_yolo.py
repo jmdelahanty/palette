@@ -1769,6 +1769,8 @@ def detect_keypoints_yolo(
     roi_cache_manifest: Optional[Path] = None,
     roi_cache_expected_archive_path: Optional[Path] = None,
     roi_work_package_manifest: Optional[Path] = None,
+    source_crop_row_start: Optional[int] = None,
+    source_crop_row_stop: Optional[int] = None,
     roi_cache_source_tier: Optional[str] = None,
     roi_cache_staged_to_node_scratch: bool = False,
     roi_cache_staging_details: Optional[Dict[str, Any]] = None,
@@ -1829,6 +1831,19 @@ def detect_keypoints_yolo(
         raise ValueError(
             "roi_cache_manifest and roi_work_package_manifest are mutually exclusive."
         )
+    if (source_crop_row_start is None) != (source_crop_row_stop is None):
+        raise ValueError(
+            "source_crop_row_start and source_crop_row_stop must be provided together."
+        )
+    if source_crop_row_start is not None:
+        if roi_work_package_manifest is not None or roi_cache_manifest is not None:
+            raise ValueError(
+                "Direct crop-row partitions cannot be combined with a cache or work package."
+            )
+        if output_parent_name != "keypoint_shard_runs":
+            raise ValueError(
+                "Direct crop-row partitions must write keypoint_shard_runs outputs."
+            )
     if (
         roi_cache_expected_archive_path is not None
         and roi_cache_manifest is None
@@ -1984,6 +1999,8 @@ def detect_keypoints_yolo(
             roi_cache_dir=roi_cache_dir,
             roi_cache_manifest=roi_cache_manifest,
             roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+            source_crop_row_start=source_crop_row_start,
+            source_crop_row_stop=source_crop_row_stop,
             console=console,
         )
     boundary = _ACTIVE_KEYPOINT_ATTEMPT.get()
@@ -3421,6 +3438,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
     )
+    parser.add_argument("--source-crop-row-start", type=int, default=None)
+    parser.add_argument("--source-crop-row-stop", type=int, default=None)
     parser.add_argument(
         "--roi-cache-expected-archive-path",
         type=Path,
@@ -3536,6 +3555,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_manifest=args.roi_cache_manifest,
         roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
         roi_work_package_manifest=args.roi_work_package_manifest,
+        source_crop_row_start=args.source_crop_row_start,
+        source_crop_row_stop=args.source_crop_row_stop,
         roi_cache_source_tier=args.roi_cache_source_tier,
         roi_cache_staged_to_node_scratch=bool(args.roi_cache_staged_to_node_scratch),
         input_mode=args.input_mode,
