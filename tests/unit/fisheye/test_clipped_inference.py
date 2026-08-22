@@ -639,6 +639,11 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
         f"subject_masks:{target_safe}:{clip_id}"
     ]
     subject_mask_command = list(subject_mask_task.command)
+    keypoint_command = list(
+        _execution_tasks(keypoint_array)[f"keypoints:{target_safe}:{clip_id}"].command
+    )
+    coordinate_mode = keypoint_command.index("--coordinate-contract-mode") + 1
+    assert keypoint_command[coordinate_mode] == "legacy_noncanonical"
     assert "fisheye.cluster.subject_masks.staged_inference" in subject_mask_command
     assert "--roi-cache-staging-dir" in subject_mask_command
     assert "--worker-receipt-json" in subject_mask_command
@@ -1488,6 +1493,7 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
         )
         assert f"--crop-run {hybrid_run}" in keypoint
         assert expected_range in keypoint
+        assert "--coordinate-contract-mode legacy_noncanonical" in keypoint
         assert "--roi-cache-manifest" not in keypoint
         assert "--roi-cache-policy never" in keypoint
         assert f"--crop-run {hybrid_run}" in mask
@@ -1562,7 +1568,16 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         ),
     )
     source_plan = tmp_path / "source_plan.json"
-    _write_json(source_plan, source.to_json())
+    source_payload = source.to_json()
+    source_keypoint_job = next(
+        job
+        for job in source_payload["lsf_workflow"]["jobs"]
+        if job["job_key"].startswith("keypoints_array:")
+    )
+    legacy_command = source_keypoint_job["execution_group"]["tasks"][0]["command"]
+    legacy_flag = legacy_command.index("--coordinate-contract-mode")
+    del legacy_command[legacy_flag : legacy_flag + 2]
+    _write_json(source_plan, source_payload)
     monkeypatch.setattr(
         recovery,
         "prepare_keypoint_recovery",
@@ -1603,7 +1618,39 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     ]
     assert any(str(recovery_root) in value for value in keypoint_task.command)
     assert all(str(source.run_root) not in value for value in keypoint_task.command)
+    coordinate_mode = keypoint_task.command.index("--coordinate-contract-mode") + 1
+    assert keypoint_task.command[coordinate_mode] == "legacy_noncanonical"
     assert plan.payload["targets"] == source.to_json()["targets"]
+
+
+def test_keypoint_recovery_rejects_canonical_collection_shard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_payload = source.to_json()
+    source_keypoint_job = next(
+        job
+        for job in source_payload["lsf_workflow"]["jobs"]
+        if job["job_key"].startswith("keypoints_array:")
+    )
+    command = source_keypoint_job["execution_group"]["tasks"][0]["command"]
+    coordinate_mode = command.index("--coordinate-contract-mode") + 1
+    command[coordinate_mode] = "canonical"
+    source_plan = tmp_path / "source_canonical_plan.json"
+    _write_json(source_plan, source_payload)
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+    )
+
+    with pytest.raises(ValueError, match="incompatible coordinate contract"):
+        recovery.build_plan(
+            source_plan_path=source_plan,
+            run_root=tmp_path / "canonical_recovery",
+            recovery_label="canonical_keypoint_recovery",
+        )
 
 
 def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
@@ -1611,12 +1658,29 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_target = source.target_plans[0]
     source_plan = tmp_path / "source_receipt_plan.json"
     _write_json(source_plan, source.to_json())
     monkeypatch.setattr(
         recovery,
         "prepare_keypoint_recovery",
-        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "clip_count": 22,
+            "targets": [
+                {
+                    "target_id": source_target["target_id"],
+                    "clips": [
+                        {
+                            "clip_id": "clip_000000",
+                            "raw_subject_mask_action": (
+                                "remove_failed_and_rerun"
+                            ),
+                        }
+                    ],
+                }
+            ],
+        },
     )
 
     plan = recovery.build_plan(
@@ -1625,14 +1689,28 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
         recovery_label="sleepyfish_receipt_keypoint_recovery",
     )
     jobs = {job.job_key: job for job in plan.workflow.jobs}
-    target = source.target_plans[0]
+    target = source_target
     target_safe = workflow.safe_component(
         str(target["target_id"]), default="target", max_length=56
     )
     package_key = f"mask_package_array:{target_safe}"
     publish_key = f"mask_publish:{target_safe}"
+    mask_key = f"subject_masks_array:{target_safe}"
+    refine_key = f"keypoint_refine:{target_safe}"
 
     assert f"mask_import:{target_safe}" not in jobs
+    assert mask_key in jobs
+    assert set(_execution_tasks(jobs[mask_key])) == {
+        f"subject_masks:{target_safe}:clip_000000"
+    }
+    assert jobs[mask_key].dependency.upstream_job_keys == (
+        "prepare_keypoint_recovery",
+    )
+    assert jobs[package_key].dependency.upstream_job_keys == (
+        refine_key,
+        mask_key,
+    )
+    assert plan.workflow.metadata["recovered_raw_subject_mask_count"] == 1
     assert publish_key in jobs
     assert jobs[publish_key].dependency.upstream_job_keys == (package_key,)
     assert "fisheye.cluster.subject_masks.publish_receipt_composed_bundle" in (
@@ -1641,6 +1719,41 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     assert jobs[f"validate:{target_safe}"].dependency.upstream_job_keys == (
         publish_key,
     )
+
+
+def test_keypoint_recovery_supports_downstream_plan_and_repo_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DOWNSTREAM,
+    )
+    source_plan = tmp_path / "source_downstream_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 2},
+    )
+    deployment = tmp_path / "locked_deployment"
+
+    plan = recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "downstream_recovery",
+        recovery_label="sleepyfish_downstream_keypoint_recovery",
+        repo=deployment,
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+
+    assert len(jobs) == 7
+    assert "registry_finalize" not in jobs
+    assert "nrs_cleanup" not in jobs
+    assert plan.repo == deployment.resolve()
+    assert plan.payload["repo"] == str(deployment.resolve())
+    assert all(str(deployment.resolve()) in job.command for job in jobs.values())
 
 
 def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
