@@ -1831,7 +1831,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-writer-5ff2509b8049b595",
-            "schema-writer-7c5ff4c0ca730e95"
+            "schema-writer-645d14a9e7d86fa8"
           ],
           "shape": "(total_rois,)"
         },
@@ -2347,8 +2347,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-6c87fa2db2bbdf13",
-            "schema-writer-92a82f58d6349d71"
+            "schema-writer-92a82f58d6349d71",
+            "schema-writer-a0aa674479230eeb"
           ],
           "shape": "(total_rois,)"
         },
@@ -2519,8 +2519,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-37442d3bf897653f",
-            "schema-writer-3e7d6614f2350e8d"
+            "schema-writer-3e7d6614f2350e8d",
+            "schema-writer-9f8e851899e890c6"
           ],
           "shape": "(total_rois,)"
         },
@@ -2922,7 +2922,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-writer-b202c062263bc4e9",
-            "schema-writer-d2bbe2dda73d2c5b"
+            "schema-writer-d2e35635ee4b6c56"
           ],
           "shape": "(total_rois,)"
         },
@@ -2955,7 +2955,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-writer-50f2f0a7abdf5196",
-            "schema-writer-964365e6eb157dbc"
+            "schema-writer-e057a5741a74784b"
           ],
           "shape": "(total_rois,)"
         },
@@ -3460,7 +3460,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-75b34a3da0f040fe"
+            "schema-writer-461637e54396bd49"
           ],
           "shape": "shape(np.bincount(frame_indices, minlength=total_frames).astype('i4', copy=False) if frame_indices.size > 0 else np.zeros(total_frames, dtype='i4'))"
         },
@@ -3977,7 +3977,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-writer-3295a6fbebd18b37",
-            "schema-writer-8c75ad4ec04467f4"
+            "schema-writer-571acab479730260"
           ],
           "shape": "(total_rois,)"
         },
@@ -4095,7 +4095,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-3f00eaed75e568da",
+            "schema-writer-5174e43bb29c1356",
             "schema-writer-87f9f207039d2029",
             "schema-writer-b3faffb3dedb104a"
           ],
@@ -4167,9 +4167,9 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-8268dcd482b07d70",
             "schema-writer-9b9fc5744f57be77",
-            "schema-writer-af4a01a4aa6949a1"
+            "schema-writer-af4a01a4aa6949a1",
+            "schema-writer-c0d1a3360a36e919"
           ],
           "shape": "(total_rois,)"
         },
@@ -4617,7 +4617,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-24dfa12d2baf083d"
+            "schema-writer-65e1df1e7eca1b93"
           ],
           "shape": "(total_rois, int(n_keypoints))"
         },
@@ -4671,7 +4671,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-81e9a89af42f454f"
+            "schema-writer-2159b642427b1a99"
           ],
           "shape": "(total_rois, int(n_keypoints), 2)"
         },
@@ -4719,7 +4719,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-d51a0f489fe7d006"
+            "schema-writer-11cd22e853e13045"
           ],
           "shape": "(total_rois, int(n_keypoints), 2)"
         },
@@ -4767,7 +4767,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-9d2384b8799d5deb"
+            "schema-writer-5fa781a97ad6803e"
           ],
           "shape": "(total_rois, int(n_keypoints), 2)"
         },
@@ -5646,7 +5646,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-740d3dd1bfbe66d1"
+            "schema-writer-0a560639de87a248"
           ],
           "shape": "shape(build_frame_keypoint_counts(frame_indices, persisted_pose_success, frame_axis_len=int(frame_counts_total.shape[0]), keypoint_count=n_keypoints))"
         },
@@ -5691,7 +5691,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-a7db9246117fbd60"
+            "schema-writer-a89b8c853f914f05"
           ],
           "shape": "shape(np.bincount(frame_indices, minlength=total_frames).astype('i4', copy=False) if frame_indices.size > 0 else np.zeros(total_frames, dtype='i4'))"
         },
@@ -7319,7 +7319,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-0ff26fabff9091d1"
+            "schema-writer-51504b9e9589997e"
           ],
           "shape": "shape(source_frames)"
         },
@@ -7640,7 +7640,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-bff448abb7df4c86"
+            "schema-writer-88339b334ac6c4ec"
           ],
           "shape": "shape(source_placement)"
         },
@@ -35043,8 +35043,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 855,
-      "occurrence_id": "schema-writer-9d2384b8799d5deb",
+      "line": 856,
+      "occurrence_id": "schema-writer-5fa781a97ad6803e",
       "path_pattern": "<group>/keypoints_roi",
       "required": null,
       "shape_expression": "(total_rois, int(n_keypoints), 2)",
@@ -35056,7 +35056,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f6544afc62c10934"
+      "writer_site_id": "writer-5a7d6286aa9f27ba"
     },
     {
       "access_pattern": "windowed",
@@ -35077,8 +35077,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 864,
-      "occurrence_id": "schema-writer-81e9a89af42f454f",
+      "line": 865,
+      "occurrence_id": "schema-writer-2159b642427b1a99",
       "path_pattern": "<group>/keypoints_img",
       "required": null,
       "shape_expression": "(total_rois, int(n_keypoints), 2)",
@@ -35090,7 +35090,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f1ea88bd187ffebc"
+      "writer_site_id": "writer-302fc1bf8d328762"
     },
     {
       "access_pattern": "windowed",
@@ -35111,8 +35111,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 873,
-      "occurrence_id": "schema-writer-d51a0f489fe7d006",
+      "line": 874,
+      "occurrence_id": "schema-writer-11cd22e853e13045",
       "path_pattern": "<group>/keypoints_norm",
       "required": null,
       "shape_expression": "(total_rois, int(n_keypoints), 2)",
@@ -35124,7 +35124,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d8f9cc106a0c3087"
+      "writer_site_id": "writer-07d405978ba92e7f"
     },
     {
       "access_pattern": "unclassified",
@@ -35145,8 +35145,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 882,
-      "occurrence_id": "schema-writer-8c75ad4ec04467f4",
+      "line": 883,
+      "occurrence_id": "schema-writer-571acab479730260",
       "path_pattern": "<group>/heading",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35158,7 +35158,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-c6be89f8ae8dd7f4"
+      "writer_site_id": "writer-95da6e48a9637b89"
     },
     {
       "access_pattern": "unclassified",
@@ -35179,8 +35179,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 891,
-      "occurrence_id": "schema-writer-7c5ff4c0ca730e95",
+      "line": 892,
+      "occurrence_id": "schema-writer-645d14a9e7d86fa8",
       "path_pattern": "<group>/confidence",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35192,7 +35192,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-bd62fb08d904ab95"
+      "writer_site_id": "writer-373b66667661b114"
     },
     {
       "access_pattern": "windowed",
@@ -35213,8 +35213,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 900,
-      "occurrence_id": "schema-writer-24dfa12d2baf083d",
+      "line": 901,
+      "occurrence_id": "schema-writer-65e1df1e7eca1b93",
       "path_pattern": "<group>/keypoint_confidences",
       "required": null,
       "shape_expression": "(total_rois, int(n_keypoints))",
@@ -35226,7 +35226,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-421cadef42aae341"
+      "writer_site_id": "writer-5820a23f9e93cb22"
     },
     {
       "access_pattern": "unclassified",
@@ -35247,8 +35247,8 @@
       "dtype_expression": "'bool'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 909,
-      "occurrence_id": "schema-writer-37442d3bf897653f",
+      "line": 910,
+      "occurrence_id": "schema-writer-9f8e851899e890c6",
       "path_pattern": "<group>/detection_success",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35260,7 +35260,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-68d70786915d5cd5"
+      "writer_site_id": "writer-1792deaaab160a0f"
     },
     {
       "access_pattern": "unclassified",
@@ -35281,8 +35281,8 @@
       "dtype_expression": "'u1'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 918,
-      "occurrence_id": "schema-writer-30fc7f20b7c687cc",
+      "line": 919,
+      "occurrence_id": "schema-writer-e290b97aad357259",
       "path_pattern": "<group>/pose_failure_codes",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35294,7 +35294,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9daf1ef92b37e678"
+      "writer_site_id": "writer-ef2414dd5df12110"
     },
     {
       "access_pattern": "unclassified",
@@ -35315,8 +35315,8 @@
       "dtype_expression": "'f4'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 929,
-      "occurrence_id": "schema-writer-0aee1ac84cc13a2a",
+      "line": 930,
+      "occurrence_id": "schema-writer-4d9281fe619e0e32",
       "path_pattern": "<group>/pose_bbox_xyxy_roi",
       "required": null,
       "shape_expression": "(total_rois, 4)",
@@ -35328,7 +35328,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-3fa8a6d8a23e0575"
+      "writer_site_id": "writer-ceedcd3681d176ba"
     },
     {
       "access_pattern": "unclassified",
@@ -35349,8 +35349,8 @@
       "dtype_expression": "'f4'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 938,
-      "occurrence_id": "schema-writer-b322efcf1f0f6d92",
+      "line": 939,
+      "occurrence_id": "schema-writer-aba0f36ae5f9c181",
       "path_pattern": "<group>/pose_bbox_xyxy_img",
       "required": null,
       "shape_expression": "(total_rois, 4)",
@@ -35362,7 +35362,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-33bd3fd6d399912e"
+      "writer_site_id": "writer-4a519a3088790d01"
     },
     {
       "access_pattern": "unclassified",
@@ -35383,8 +35383,8 @@
       "dtype_expression": "'f4'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 947,
-      "occurrence_id": "schema-writer-ff4a59b8c3e420e7",
+      "line": 948,
+      "occurrence_id": "schema-writer-f71d6bbe60e4ceee",
       "path_pattern": "<group>/pose_bbox_xyxy_norm",
       "required": null,
       "shape_expression": "(total_rois, 4)",
@@ -35396,7 +35396,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-4757361d28e68a77"
+      "writer_site_id": "writer-79b959bea8114382"
     },
     {
       "access_pattern": "unclassified",
@@ -35417,8 +35417,8 @@
       "dtype_expression": "'bool'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 956,
-      "occurrence_id": "schema-writer-3f00eaed75e568da",
+      "line": 957,
+      "occurrence_id": "schema-writer-5174e43bb29c1356",
       "path_pattern": "<group>/heading_finite",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35430,7 +35430,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-251ea66a9775f20e"
+      "writer_site_id": "writer-f1a1deb584876518"
     },
     {
       "access_pattern": "unclassified",
@@ -35451,8 +35451,8 @@
       "dtype_expression": "'bool'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 965,
-      "occurrence_id": "schema-writer-8268dcd482b07d70",
+      "line": 966,
+      "occurrence_id": "schema-writer-c0d1a3360a36e919",
       "path_pattern": "<group>/heading_usable",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35464,7 +35464,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-16c3369cde50bac1"
+      "writer_site_id": "writer-168cd6461380de16"
     },
     {
       "access_pattern": "unclassified",
@@ -35485,8 +35485,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 974,
-      "occurrence_id": "schema-writer-964365e6eb157dbc",
+      "line": 975,
+      "occurrence_id": "schema-writer-e057a5741a74784b",
       "path_pattern": "<group>/effective_threshold",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35498,7 +35498,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e3821e447dbc92a7"
+      "writer_site_id": "writer-fc8c65ac25b68697"
     },
     {
       "access_pattern": "unclassified",
@@ -35519,8 +35519,8 @@
       "dtype_expression": "'f8'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 983,
-      "occurrence_id": "schema-writer-d2bbe2dda73d2c5b",
+      "line": 984,
+      "occurrence_id": "schema-writer-d2e35635ee4b6c56",
       "path_pattern": "<group>/effective_se2_radius",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35532,7 +35532,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-920be554e6822635"
+      "writer_site_id": "writer-444e63f47e720e4a"
     },
     {
       "access_pattern": "windowed",
@@ -35553,8 +35553,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 2228,
-      "occurrence_id": "schema-writer-0ff26fabff9091d1",
+      "line": 2236,
+      "occurrence_id": "schema-writer-51504b9e9589997e",
       "path_pattern": "<zarr-root:str(zarr_path)>/<run_path>/source_acquisition_frame_index",
       "required": null,
       "shape_expression": "shape(source_frames)",
@@ -35566,7 +35566,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-fb09d841c5cdada4"
+      "writer_site_id": "writer-b570ac69e704dae1"
     },
     {
       "access_pattern": "unclassified",
@@ -35587,8 +35587,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 2235,
-      "occurrence_id": "schema-writer-bff448abb7df4c86",
+      "line": 2243,
+      "occurrence_id": "schema-writer-88339b334ac6c4ec",
       "path_pattern": "<zarr-root:str(zarr_path)>/<run_path>/source_crop_xywh",
       "required": null,
       "shape_expression": "shape(source_placement)",
@@ -35600,7 +35600,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-8a8a1fd7da5b2fc3"
+      "writer_site_id": "writer-187297ff61301153"
     },
     {
       "access_pattern": "unclassified",
@@ -35621,8 +35621,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 2301,
-      "occurrence_id": "schema-writer-a7db9246117fbd60",
+      "line": 2309,
+      "occurrence_id": "schema-writer-a89b8c853f914f05",
       "path_pattern": "<zarr-root:str(zarr_path)>/<run_path>/n_rois",
       "required": null,
       "shape_expression": "shape(np.bincount(frame_indices, minlength=total_frames).astype('i4', copy=False) if frame_indices.size > 0 else np.zeros(total_frames, dtype='i4'))",
@@ -35634,7 +35634,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d51d3ea9ebde2ad5"
+      "writer_site_id": "writer-5aab1d601d5cf338"
     },
     {
       "access_pattern": "windowed",
@@ -35655,8 +35655,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 2312,
-      "occurrence_id": "schema-writer-75b34a3da0f040fe",
+      "line": 2320,
+      "occurrence_id": "schema-writer-461637e54396bd49",
       "path_pattern": "<zarr-root:str(zarr_path)>/<run_path>/frame_counts",
       "required": null,
       "shape_expression": "shape(np.bincount(frame_indices, minlength=total_frames).astype('i4', copy=False) if frame_indices.size > 0 else np.zeros(total_frames, dtype='i4'))",
@@ -35668,7 +35668,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-ce33aa30a5a1c14d"
+      "writer_site_id": "writer-f1dcd1ecc44f0abe"
     },
     {
       "access_pattern": "unclassified",
@@ -35689,8 +35689,8 @@
       "dtype_expression": "'i1'",
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 2339,
-      "occurrence_id": "schema-writer-6c87fa2db2bbdf13",
+      "line": 2347,
+      "occurrence_id": "schema-writer-a0aa674479230eeb",
       "path_pattern": "<zarr-root:str(zarr_path)>/<run_path>/detection_source",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -35702,7 +35702,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e474f3e70240eacb"
+      "writer_site_id": "writer-e31a8981da9d7cd7"
     },
     {
       "access_pattern": "windowed",
@@ -35723,8 +35723,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/detection/detect_keypoints_yolo.py",
-      "line": 2703,
-      "occurrence_id": "schema-writer-740d3dd1bfbe66d1",
+      "line": 2711,
+      "occurrence_id": "schema-writer-0a560639de87a248",
       "path_pattern": "<zarr-root:str(zarr_path)>/<run_path>/n_keypoints",
       "required": null,
       "shape_expression": "shape(build_frame_keypoint_counts(frame_indices, persisted_pose_success, frame_axis_len=int(frame_counts_total.shape[0]), keypoint_count=n_keypoints))",
@@ -35736,7 +35736,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-6adbe84c32741937"
+      "writer_site_id": "writer-c6c7b2bf35bc54b3"
     },
     {
       "access_pattern": "windowed",
