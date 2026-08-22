@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -85,6 +85,90 @@ def _require_sha256(value: object, *, label: str) -> str:
     ):
         raise ValueError(f"{label} must be a lowercase SHA-256 digest.")
     return digest
+
+
+def _require_positive_dimension(value: object, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a positive integer.")
+    try:
+        dimension = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer.") from exc
+    if dimension <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return dimension
+
+
+def resolve_hybrid_crop_source_frame_shape(
+    group: Any,
+    *,
+    run_id: str,
+) -> tuple[int, int] | None:
+    """Return signed hybrid source dimensions as ``(height, width)``.
+
+    Non-hybrid crop runs return ``None``. A run that claims either half of the
+    hybrid identity must satisfy the complete provider-record contract, and its
+    top-level dimension authority must exactly match the canonical signed
+    record before dimensions are exposed to a consumer.
+    """
+
+    attrs = group.attrs
+    schema_id = str(attrs.get("schema_id") or "")
+    source_pixels = str(attrs.get("source_pixels") or "")
+    hybrid_source = SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME
+    if schema_id != HYBRID_CROP_RUN_SCHEMA_ID and source_pixels != hybrid_source:
+        return None
+    if schema_id != HYBRID_CROP_RUN_SCHEMA_ID or source_pixels != hybrid_source:
+        raise ValueError("Hybrid crop run identity is incomplete.")
+
+    provider_digest = _require_sha256(
+        attrs.get("provider_record_sha256"),
+        label="provider_record_sha256",
+    )
+    record = attrs.get("provider_record")
+    if not isinstance(record, Mapping):
+        raise ValueError("Hybrid crop run lacks its provider_record object.")
+    if canonical_json_sha256(record) != provider_digest:
+        raise ValueError("Hybrid crop run provider_record digest is invalid.")
+    if (
+        record.get("schema_id") != "palette.roi_pixel_provider_record.v1"
+        or record.get("schema_version") != 1
+    ):
+        raise ValueError("Hybrid crop run provider_record schema is unsupported.")
+    if str(record.get("crop_run") or "") != str(run_id):
+        raise ValueError("Hybrid crop run provider_record binds a different run.")
+
+    authority = attrs.get("source_full_frame_shape_authority")
+    record_authority = record.get("frame_shape_authority")
+    if not isinstance(authority, Mapping) or not isinstance(
+        record_authority, Mapping
+    ):
+        raise ValueError("Hybrid crop run lacks signed full-frame shape authority.")
+    if dict(authority) != dict(record_authority):
+        raise ValueError(
+            "Hybrid crop run full-frame shape authority differs from its signed record."
+        )
+    height = _require_positive_dimension(
+        authority.get("height"), label="Hybrid source height"
+    )
+    width = _require_positive_dimension(
+        authority.get("width"), label="Hybrid source width"
+    )
+    frame_shape = record.get("frame_shape")
+    if (
+        not isinstance(frame_shape, Sequence)
+        or isinstance(frame_shape, (str, bytes))
+        or len(frame_shape) != 2
+        or [
+            _require_positive_dimension(frame_shape[0], label="Hybrid frame height"),
+            _require_positive_dimension(frame_shape[1], label="Hybrid frame width"),
+        ]
+        != [height, width]
+    ):
+        raise ValueError(
+            "Hybrid crop run frame_shape differs from its signed dimension authority."
+        )
+    return height, width
 
 
 def _content_arrays(
@@ -303,5 +387,6 @@ __all__ = [
     "HYBRID_CROP_SIGNATURE_SCHEMA_VERSION",
     "HybridCropProviderIdentity",
     "build_hybrid_crop_provider_identity",
+    "resolve_hybrid_crop_source_frame_shape",
     "validate_hybrid_crop_signed_identity",
 ]

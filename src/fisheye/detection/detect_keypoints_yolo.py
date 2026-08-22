@@ -36,6 +36,7 @@ from ..registry.db import RegistryPaths
 from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
+from ..shared.hybrid_crop_provider import resolve_hybrid_crop_source_frame_shape
 from ..shared.zarr.crop_consumer import strict_crop_source_dimensions
 from ..shared.zarr.training_crop_materialization import (
     bind_training_crop_materialization,
@@ -1399,6 +1400,12 @@ def _resolve_full_image_shape(
                     "authority."
                 )
             return (strict_height, strict_width), strict_frames
+        hybrid_shape = resolve_hybrid_crop_source_frame_shape(
+            crop_group,
+            run_id=crop_run_id,
+        )
+        if hybrid_shape is not None:
+            return hybrid_shape, total_frames
 
     width_names = (
         "video_width",
@@ -1425,7 +1432,8 @@ def _resolve_full_image_shape(
         raise ValueError(
             "Unable to determine full-resolution image dimensions. "
             "Expected raw_video/images_full, root video_width/video_height attrs, "
-            "strict crop-v2 source-pixel authority, or crop-run width/height attrs."
+            "strict crop-v2 source-pixel authority, signed hybrid provider "
+            "authority, or crop-run width/height attrs."
         )
     return (int(img_h), int(img_w)), total_frames
 
