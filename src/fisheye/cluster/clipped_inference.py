@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
+
 from fisheye.cluster.arena_geometry import (
     RegisteredDetectionGateFragmentInputs,
     build_registered_detection_gate_fragment,
@@ -91,6 +93,9 @@ from fisheye.registry.model_resolution import (
     resolve_recording_id,
     verify_deployment_artifact_content,
 )
+from fisheye.shared.zarr.refined_detection_crop_source import (
+    bind_refined_detection_crop_source,
+)
 from fisheye.utils.plan_clipped_detect_refine_workflow import (
     build_plan as build_detection_plan,
 )
@@ -103,7 +108,12 @@ TARGET_MANIFEST_SCHEMA = "palette.clipped_inference_targets.v1"
 FAMILY = "clipped_inference"
 WORKFLOW_SCOPE_FULL = "full"
 WORKFLOW_SCOPE_DETECTION = "detection"
-WORKFLOW_SCOPES = (WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DETECTION)
+WORKFLOW_SCOPE_DOWNSTREAM = "downstream"
+WORKFLOW_SCOPES = (
+    WORKFLOW_SCOPE_FULL,
+    WORKFLOW_SCOPE_DETECTION,
+    WORKFLOW_SCOPE_DOWNSTREAM,
+)
 DEFAULT_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
 DEFAULT_REGISTRY = Path(
     "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
@@ -127,6 +137,7 @@ class CampaignTarget:
     recording_dir: Path
     analysis_zarr: Path
     expected_subject_count: int = 1
+    finalized_refined_detect_run: str | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -135,6 +146,7 @@ class CampaignTarget:
             "recording_dir": str(self.recording_dir),
             "analysis_zarr": str(self.analysis_zarr),
             "expected_subject_count": int(self.expected_subject_count),
+            "finalized_refined_detect_run": self.finalized_refined_detect_run,
         }
 
 
@@ -261,6 +273,9 @@ def load_target_manifest(path: Path) -> tuple[CampaignTarget, ...]:
                 recording_dir=recording_dir,
                 analysis_zarr=analysis_zarr,
                 expected_subject_count=expected_subject_count,
+                finalized_refined_detect_run=(
+                    str(row.get("finalized_refined_detect_run") or "").strip() or None
+                ),
             )
         )
     if len({target.target_id for target in targets}) != len(targets):
@@ -411,6 +426,47 @@ def _refuse_output_collisions(
 ) -> None:
     zarr = Path(str(target_plan["analysis_zarr"]))
     outputs: list[Path] = []
+    if workflow_scope == WORKFLOW_SCOPE_DOWNSTREAM:
+        for clip in target_plan["clips"]:
+            outputs.extend(
+                [
+                    zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"]),
+                    zarr
+                    / "subject_mask_shard_runs"
+                    / str(clip["subject_mask_shard_run"]),
+                ]
+            )
+        outputs.extend(
+            [
+                zarr / "crop_runs" / str(target_plan["hybrid_crop_run"]),
+                zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
+                zarr
+                / "refined_keypoints_runs"
+                / str(target_plan["refined_keypoint_run"]),
+                zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
+                zarr
+                / "refined_subject_masks_runs"
+                / str(target_plan["refined_subject_mask_run"]),
+                zarr
+                / "subject_mask_quality_runs"
+                / str(target_plan["subject_mask_quality_run"]),
+                zarr
+                / "subject_mask_cache_runs"
+                / str(target_plan["subject_mask_cache_run"]),
+                zarr
+                / "subject_mask_bundle_runs"
+                / str(target_plan["subject_mask_bundle_id"]),
+                Path(str(target_plan["hybrid_supplemental_manifest"])),
+                Path(str(target_plan["package_dir"])),
+            ]
+        )
+        collisions = [path for path in outputs if path.exists()]
+        if collisions:
+            raise FileExistsError(
+                "Planned immutable outputs already exist: "
+                + ", ".join(str(path) for path in collisions)
+            )
+        return
     for clip in target_plan["clips"]:
         if not allow_existing_detections:
             outputs.append(zarr / str(clip["detect_group_path"]))
@@ -495,6 +551,103 @@ def _read_strict_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
 
 
+def _clipped_layout_work_units(
+    target: CampaignTarget,
+    *,
+    camera_serial: str,
+) -> list[dict[str, Any]]:
+    payload = _read_strict_json(target.recording_dir / "recording_clip_index.json")
+    raw_rows = payload.get("rows") if isinstance(payload, Mapping) else None
+    if not isinstance(raw_rows, list):
+        raise ValueError("recording_clip_index.json has no rows array.")
+    work_units: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("camera_serial") or "").strip() != str(camera_serial):
+            continue
+        clip_index = int(raw.get("clip_index", -1))
+        clip_id = str(raw.get("clip_id") or f"clip_{clip_index:06d}")
+        video_value = raw.get("video_path") or raw.get("video")
+        video_path = Path(str(video_value or "")).expanduser()
+        if not video_path.is_absolute():
+            video_path = target.recording_dir / video_path
+        video_path = video_path.resolve()
+        if clip_index < 0 or not video_path.is_file():
+            raise ValueError(f"Invalid clipped work unit {clip_id!r}.")
+        work_units.append(
+            {
+                "work_unit_id": f"{target.recording_id}_{clip_id}_cam{camera_serial}",
+                "clip_id": clip_id,
+                "clip_index": clip_index,
+                "camera_serial": str(camera_serial),
+                "frame_count": int(raw.get("frame_count")),
+                "source": {"video_path": str(video_path)},
+            }
+        )
+    work_units.sort(key=lambda unit: int(unit["clip_index"]))
+    if not work_units:
+        raise ValueError(f"No clipped work units found for camera {camera_serial}.")
+    return work_units
+
+
+def _refined_clip_crop_row_intervals(
+    *,
+    target: CampaignTarget,
+    refined_run_name: str,
+    frame_intervals: Mapping[tuple[int, str], tuple[int, int]],
+) -> dict[tuple[int, str], tuple[int, int]]:
+    bound = bind_refined_detection_crop_source(
+        target.analysis_zarr,
+        run_id=refined_run_name,
+        allow_selector_ineligible_benchmark=True,
+    )
+    attrs = bound.run_group.attrs
+    gate = attrs.get("registered_detection_gate")
+    if (
+        bound.run_id != refined_run_name
+        or attrs.get("status") != "complete"
+        or attrs.get("finalized_recording_authority") is not True
+        or attrs.get("immutable_snapshot") is not True
+        or attrs.get("registered_detection_gate_requirement") != "required"
+        or not isinstance(gate, Mapping)
+        or gate.get("status") != "applied"
+        or gate.get("applied") is not True
+        or gate.get("ordered_instance_key_coverage_exact") is not True
+    ):
+        raise ValueError(
+            f"refined_detect_runs/{refined_run_name} is not a complete gated "
+            "immutable recording authority."
+        )
+    instances = bound.instances_group
+    frames = np.asarray(instances["frame_indices"][:], dtype=np.int64).reshape(-1)
+    acquisition_frames = np.asarray(
+        instances["source_acquisition_frame_index"][:], dtype=np.int64
+    ).reshape(-1)
+    if not np.array_equal(frames, acquisition_frames):
+        raise ValueError(
+            "Finalized refined rows disagree with acquisition-frame identity."
+        )
+    if frames.size and np.any(frames[1:] < frames[:-1]):
+        raise ValueError("Finalized refined detection rows are not recording ordered.")
+    intervals: dict[tuple[int, str], tuple[int, int]] = {}
+    cursor = 0
+    for key, (frame_start, frame_stop) in sorted(
+        frame_intervals.items(), key=lambda item: item[1][0]
+    ):
+        row_start = int(np.searchsorted(frames, int(frame_start), side="left"))
+        row_stop = int(np.searchsorted(frames, int(frame_stop), side="left"))
+        if row_start != cursor:
+            raise ValueError("Refined detection clip partitions are not contiguous.")
+        intervals[key] = (row_start, row_stop)
+        cursor = row_stop
+    if cursor != int(frames.shape[0]):
+        raise ValueError(
+            "Refined detection rows extend outside clipped frame intervals."
+        )
+    return intervals
+
+
 def _active_arena_geometry_selection(analysis_zarr: Path) -> str:
     parent = analysis_zarr / "analysis" / "arena_geometry_selection"
     metadata = _read_strict_json(parent / "zarr.json")
@@ -518,6 +671,776 @@ def _active_arena_geometry_selection(analysis_zarr: Path) -> str:
     if str(run_attrs.get("selection_id") or "") != latest:
         raise ValueError("Active arena geometry selection identity disagrees.")
     return latest
+
+
+@dataclass(frozen=True)
+class _DownstreamTargetPipeline:
+    jobs: tuple[LsfJob, ...]
+    fragments: tuple[LsfWorkflowFragment, ...]
+    terminal_job_key: str
+    terminal_artifact_key: str
+
+
+def _build_downstream_target_pipeline(
+    *,
+    workflow_id: str,
+    repo: Path,
+    repo_commit: str,
+    registry_path: Path,
+    run_root: Path,
+    target: CampaignTarget,
+    target_safe: str,
+    target_payload: dict[str, Any],
+    pose_binding: ModelBinding,
+    subject_binding: ModelBinding,
+    subject_mask_coverage_class: str,
+    subject_mask_component_coverage_key: str,
+    subject_mask_label_schema_id: str,
+    subject_mask_publication_profile: str,
+    encoded_mask_packages: bool,
+    gpu_array_concurrency: int,
+    mask_package_array_concurrency: int,
+    keypoint_gpu_queue: str,
+    subject_mask_gpu_queue: str,
+    cpu: LsfResources,
+    final_cpu: LsfResources,
+    import_cpu: LsfResources,
+    cache_gpu: LsfResources,
+    upstream_job_keys: tuple[str, ...],
+    required_artifacts: tuple[str, ...],
+) -> _DownstreamTargetPipeline:
+    """Compose downstream analysis from one exact recording-level refined run."""
+
+    if target.finalized_refined_detect_run is None:
+        raise ValueError("Downstream target has no finalized refined-detection run.")
+    clips = list(target_payload["clips"])
+    hybrid_crop_run = str(target_payload["hybrid_crop_run"])
+    keypoint_run = str(target_payload["keypoint_run"])
+    refined_keypoint_run = str(target_payload["refined_keypoint_run"])
+    subject_mask_run = str(target_payload["subject_mask_run"])
+    refined_subject_mask_run = str(target_payload["refined_subject_mask_run"])
+    refined_subject_mask_draft_run = str(
+        target_payload["refined_subject_mask_draft_run"]
+    )
+    subject_mask_quality_run = str(target_payload["subject_mask_quality_run"])
+    subject_mask_cache_run = str(target_payload["subject_mask_cache_run"])
+    subject_mask_bundle_id = str(target_payload["subject_mask_bundle_id"])
+    global_mask_grid_manifest = Path(str(target_payload["global_mask_grid_manifest"]))
+    supplemental_manifest = Path(str(target_payload["hybrid_supplemental_manifest"]))
+    source_run_path = f"refined_detect_runs/{target.finalized_refined_detect_run}"
+
+    jobs: list[LsfJob] = []
+    fragments: list[LsfWorkflowFragment] = []
+    ledger_key = f"acquisition_crop_ledger:{target_safe}"
+    ledger_report = run_root / "ledger" / f"{target_safe}.jsonl"
+    ledger_job = _job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=ledger_key,
+        stage="acquisition_crop_ledger",
+        command=(
+            "scripts/py",
+            "-m",
+            "fisheye.utils.backfill_acquisition_video_stream_inventory",
+            str(target.recording_dir),
+            "--apply",
+            "--output-jsonl",
+            str(ledger_report),
+        ),
+        resources=cpu,
+        upstream=upstream_job_keys,
+        expected_outputs=(ledger_report,),
+    )
+    jobs.append(ledger_job)
+    ledger_artifact = f"acquisition_crop_ledger:{target_safe}"
+    fragments.append(
+        LsfWorkflowFragment(
+            fragment_id=f"acquisition_crop_ledger:{target_safe}",
+            jobs=(ledger_job,),
+            requires=required_artifacts,
+            provides=(ledger_artifact,),
+            metadata={
+                "module": "acquisition_crop_ledger",
+                "target_id": target.target_id,
+                "recording_layout": "rolling_clip_collection_v1",
+                "publication_authority": "one_recording_level_canonical_ledger",
+            },
+        )
+    )
+
+    hybrid_key = f"hybrid_crop:{target_safe}"
+    hybrid_report = run_root / "hybrid_crop" / f"{target_safe}.json"
+    hybrid_job = _job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=hybrid_key,
+        stage="hybrid_crop_provider",
+        command=(
+            "scripts/py",
+            "-m",
+            "fisheye.utils.build_hybrid_acquisition_offline_crop_run",
+            str(target.analysis_zarr),
+            "--refined-detect-run",
+            target.finalized_refined_detect_run,
+            "--run-name",
+            hybrid_crop_run,
+            "--recording-dir",
+            str(target.recording_dir),
+            "--supplemental-manifest-path",
+            str(supplemental_manifest),
+            "--decode-mode",
+            "indexed",
+            "--apply",
+            "--output-json",
+            str(hybrid_report),
+        ),
+        resources=cache_gpu,
+        upstream=(ledger_key,),
+        expected_outputs=(
+            target.analysis_zarr / "crop_runs" / hybrid_crop_run / "zarr.json",
+            hybrid_report,
+        ),
+    )
+    jobs.append(hybrid_job)
+    hybrid_artifact = f"hybrid_crop_provider:{target_safe}"
+    fragments.append(
+        LsfWorkflowFragment(
+            fragment_id=f"hybrid_crop_provider:{target_safe}",
+            jobs=(hybrid_job,),
+            requires=(ledger_artifact,),
+            provides=(hybrid_artifact,),
+            metadata={
+                "module": "hybrid_crop_provider",
+                "target_id": target.target_id,
+                "source_refined_detect_run": target.finalized_refined_detect_run,
+                "crop_run": hybrid_crop_run,
+                "crop_authority": "one_signed_recording_level_provider",
+                "selector_activation": False,
+            },
+        )
+    )
+
+    keypoint_array_key = f"keypoints_array:{target_safe}"
+    subject_mask_array_key = f"subject_masks_array:{target_safe}"
+    keypoint_tasks: list[LsfExecutionTask] = []
+    mask_tasks: list[LsfExecutionTask] = []
+    for clip in clips:
+        clip_id = str(clip["clip_id"])
+        row_start = int(clip["crop_row_start"])
+        row_stop = int(clip["crop_row_stop"])
+        keypoint_command = [
+            "scripts/py",
+            "-m",
+            "fisheye.utils.run_keypoints_with_registry_model",
+            "--recording-dir",
+            str(target.recording_dir),
+            "--output",
+            str(target.analysis_zarr),
+            "--registry",
+            str(registry_path),
+            "--set-id",
+            pose_binding.set_id,
+            "--model-run-id",
+            pose_binding.run_id,
+            "--require-unique",
+            "--run-name",
+            str(clip["keypoint_shard_run"]),
+            "--output-parent",
+            "keypoint_shard_runs",
+            "--crop-run",
+            hybrid_crop_run,
+            "--source-crop-row-start",
+            str(row_start),
+            "--source-crop-row-stop",
+            str(row_stop),
+            "--roi-cache-policy",
+            "never",
+            "--pose-schema",
+            "traditional_v2",
+            "--batch-size",
+            "256",
+            "--device",
+            "0",
+            "--keypoint-roi-shard-rows",
+            "131072",
+            "--keypoint-frame-shard-rows",
+            "131072",
+            "--progress-jsonl",
+            str(run_root / "progress" / f"keypoints_{target_safe}_{clip_id}.jsonl"),
+        ]
+        keypoint_tasks.append(
+            _execution_task(
+                run_root=run_root,
+                task_key=f"keypoints:{target_safe}:{clip_id}",
+                stage="keypoints",
+                command=keypoint_command,
+                expected_outputs=(
+                    target.analysis_zarr
+                    / "keypoint_shard_runs"
+                    / str(clip["keypoint_shard_run"])
+                    / "zarr.json",
+                ),
+                array_indexed=True,
+            )
+        )
+
+        mask_worker_receipt = (
+            run_root / "receipts" / f"subject_masks_{target_safe}_{clip_id}.json"
+        )
+        mask_command = [
+            "scripts/py",
+            "-m",
+            "fisheye.cluster.subject_masks.staged_inference",
+            "--direct-crop-provider",
+            "--worker-receipt-json",
+            str(mask_worker_receipt),
+            str(target.analysis_zarr),
+            "--resolve-model-from-registry",
+            "--registry",
+            str(registry_path),
+            "--model-set-id",
+            subject_binding.set_id,
+            "--model-run-id",
+            subject_binding.run_id,
+            "--model-coverage-class",
+            subject_mask_coverage_class,
+            "--model-component-coverage-key",
+            subject_mask_component_coverage_key,
+            "--model-label-schema-id",
+            subject_mask_label_schema_id,
+            "--model-require-unique",
+            "--run-name",
+            str(clip["subject_mask_shard_run"]),
+            "--output-parent",
+            "subject_mask_shard_runs",
+            "--crop-run",
+            hybrid_crop_run,
+            "--source-crop-row-start",
+            str(row_start),
+            "--source-crop-row-stop",
+            str(row_stop),
+            "--source-collection-id",
+            target.finalized_refined_detect_run,
+            "--source-collection-path",
+            source_run_path,
+            "--source-clip-id",
+            clip_id,
+            "--source-clip-index",
+            str(clip["clip_index"]),
+            "--source-work-unit-id",
+            str(clip["work_unit_id"]),
+            "--roi-cache-policy",
+            "never",
+            "--batch-size",
+            "128",
+            "--device",
+            "0",
+            "--mask-probs-dtype",
+            "uint8",
+            "--mask-probs-chunk-rois",
+            "32",
+            "--mask-probs-shard-rois",
+            "2048",
+            "--no-write-masks-roi",
+            "--async-output",
+            "--output-queue-size",
+            "2",
+            "--no-progress",
+            "--defer-registry-status",
+        ]
+        mask_tasks.append(
+            _execution_task(
+                run_root=run_root,
+                task_key=f"subject_masks:{target_safe}:{clip_id}",
+                stage="subject_mask_inference",
+                command=mask_command,
+                expected_outputs=(
+                    target.analysis_zarr
+                    / "subject_mask_shard_runs"
+                    / str(clip["subject_mask_shard_run"])
+                    / "zarr.json",
+                    mask_worker_receipt,
+                ),
+                array_indexed=True,
+            )
+        )
+
+    keypoint_array_job = _task_group_job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=keypoint_array_key,
+        stage="keypoints",
+        tasks=keypoint_tasks,
+        mode=LsfExecutionMode.ARRAY,
+        max_concurrent=gpu_array_concurrency,
+        resources=LsfResources(
+            queue=keypoint_gpu_queue,
+            ncores=8,
+            mem_gb=48,
+            gpus=1,
+            walltime="4:00",
+        ),
+        upstream=(hybrid_key,),
+    )
+    mask_array_job = _task_group_job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=subject_mask_array_key,
+        stage="subject_mask_inference",
+        tasks=mask_tasks,
+        mode=LsfExecutionMode.ARRAY,
+        max_concurrent=gpu_array_concurrency,
+        resources=LsfResources(
+            queue=subject_mask_gpu_queue,
+            ncores=8,
+            mem_gb=48,
+            gpus=1,
+            walltime="4:00",
+        ),
+        upstream=(hybrid_key,),
+    )
+    jobs.extend((keypoint_array_job, mask_array_job))
+
+    keypoint_finalize_key = f"keypoint_finalize:{target_safe}"
+    finalize_keypoints = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.finalize_keypoint_shards",
+        str(target.analysis_zarr),
+        "--target-crop-run",
+        hybrid_crop_run,
+        "--output-run",
+        keypoint_run,
+        "--json",
+    ]
+    for clip in clips:
+        finalize_keypoints.extend(["--shard-run", str(clip["keypoint_shard_run"])])
+    keypoint_finalize_job = _job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=keypoint_finalize_key,
+        stage="keypoint_finalize",
+        command=finalize_keypoints,
+        resources=final_cpu,
+        upstream=(keypoint_array_key,),
+        expected_outputs=(
+            target.analysis_zarr / "keypoints_runs" / keypoint_run / "zarr.json",
+        ),
+    )
+    keypoint_refine_key = f"keypoint_refine:{target_safe}"
+    keypoint_refine_job = _job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=keypoint_refine_key,
+        stage="keypoint_refine",
+        command=(
+            "scripts/py",
+            "-m",
+            "fisheye.refinement.refine_keypoints",
+            str(target.analysis_zarr),
+            "--keypoint-run",
+            keypoint_run,
+            "--run-name",
+            refined_keypoint_run,
+            "--chunk-size",
+            "2048",
+            "--scheduler",
+            "threads",
+            "--num-workers",
+            "4",
+            "--no-post-audit",
+        ),
+        resources=cpu,
+        upstream=(keypoint_finalize_key,),
+        expected_outputs=(
+            target.analysis_zarr
+            / "refined_keypoints_runs"
+            / refined_keypoint_run
+            / "zarr.json",
+        ),
+    )
+    jobs.extend((keypoint_finalize_job, keypoint_refine_job))
+    raw_keypoints_artifact = f"raw_keypoints:{target_safe}"
+    refined_keypoints_artifact = f"refined_keypoints:{target_safe}"
+    raw_masks_artifact = f"raw_subject_masks:{target_safe}"
+    fragments.extend(
+        (
+            LsfWorkflowFragment(
+                fragment_id=f"keypoints:{target_safe}",
+                jobs=(
+                    keypoint_array_job,
+                    keypoint_finalize_job,
+                    keypoint_refine_job,
+                ),
+                requires=(hybrid_artifact,),
+                provides=(raw_keypoints_artifact, refined_keypoints_artifact),
+                metadata={
+                    "module": "keypoints",
+                    "target_id": target.target_id,
+                    "work_partition": "clip_crop_row_intervals",
+                    "crop_run": hybrid_crop_run,
+                },
+            ),
+            LsfWorkflowFragment(
+                fragment_id=f"subject_mask_inference:{target_safe}",
+                jobs=(mask_array_job,),
+                requires=(hybrid_artifact,),
+                provides=(raw_masks_artifact,),
+                metadata={
+                    "module": "subject_mask_inference",
+                    "target_id": target.target_id,
+                    "work_partition": "clip_crop_row_intervals",
+                    "crop_run": hybrid_crop_run,
+                },
+            ),
+        )
+    )
+
+    mask_grid_key: str | None = None
+    if encoded_mask_packages:
+        mask_grid_key = f"mask_grid:{target_safe}"
+        jobs.append(
+            _job(
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=mask_grid_key,
+                stage="subject_mask_global_chunk_grid",
+                command=(
+                    "scripts/py",
+                    "-m",
+                    "fisheye.utils.prepare_refined_subject_mask_chunk_grid",
+                    "--zarr",
+                    str(target.analysis_zarr),
+                    "--crop-run",
+                    hybrid_crop_run,
+                    "--output-manifest",
+                    str(global_mask_grid_manifest),
+                    "--mask-label",
+                    "subject_body",
+                    "--mask-label",
+                    "eye_left",
+                    "--mask-label",
+                    "eye_right",
+                    "--mask-label",
+                    "swim_bladder",
+                    "--mask-height",
+                    "512",
+                    "--mask-width",
+                    "512",
+                    "--dense-mask-row-chunk",
+                    "128",
+                    "--json",
+                ),
+                resources=cpu,
+                upstream=(keypoint_finalize_key,),
+                expected_outputs=(global_mask_grid_manifest,),
+            )
+        )
+
+    package_array_key = f"mask_package_array:{target_safe}"
+    package_tasks: list[LsfExecutionTask] = []
+    for clip in clips:
+        clip_id = str(clip["clip_id"])
+        package_command = [
+            "scripts/py",
+            "-m",
+            "fisheye.utils.finalize_subject_mask_clip_package",
+            "--source-zarr",
+            str(target.analysis_zarr),
+            "--subject-shard-run",
+            str(clip["subject_mask_shard_run"]),
+            "--target-crop-run",
+            hybrid_crop_run,
+            "--refined-run",
+            str(clip["refined_mask_package_run"]),
+            "--package-path",
+            str(clip["package_path"]),
+            "--component",
+            "subject_body",
+            "--component",
+            "eyes_union",
+            "--component",
+            "swim_bladder",
+            "--chunk-size",
+            "256",
+            "--metric-level",
+            "cheap",
+            "--mask-storage",
+            "dense_and_bitpacked",
+            "--dense-mask-row-chunk",
+            "128",
+            "--execution-backend",
+            "process_shards",
+            "--num-workers",
+            "8",
+            "--postcompute-backend",
+            "process_shards",
+            "--postcompute-num-workers",
+            "8",
+            "--postcompute-chunk-size",
+            "256",
+            "--assignment-keypoint-group",
+            "refined_keypoints_runs",
+            "--assignment-keypoints-run",
+            refined_keypoint_run,
+            "--no-write-component-contours",
+            "--require-production-proof",
+            "--json",
+        ]
+        if (
+            subject_mask_publication_profile
+            == SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED
+        ):
+            package_command.extend(
+                [
+                    "--publication-evidence-producer-commit",
+                    repo_commit,
+                    "--work-unit-id",
+                    str(clip["work_unit_id"]),
+                    "--work-unit-index",
+                    str(clip["work_unit_index"]),
+                    "--source-clip-id",
+                    clip_id,
+                    "--source-clip-index",
+                    str(clip["clip_index"]),
+                    "--global-frame-start",
+                    str(clip["frame_start"]),
+                    "--global-frame-stop",
+                    str(clip["frame_stop"]),
+                    "--quality-compute-workers",
+                    "4",
+                ]
+            )
+        if encoded_mask_packages:
+            package_command.extend(
+                [
+                    "--global-mask-grid-manifest",
+                    str(global_mask_grid_manifest),
+                    "--encoded-mask-copy-workers",
+                    "8",
+                ]
+            )
+        package_tasks.append(
+            _execution_task(
+                run_root=run_root,
+                task_key=f"mask_package:{target_safe}:{clip_id}",
+                stage="subject_mask_refine_package",
+                command=package_command,
+                expected_outputs=(Path(str(clip["package_path"])),),
+                array_indexed=True,
+            )
+        )
+    package_upstream = [subject_mask_array_key, keypoint_refine_key]
+    if mask_grid_key is not None:
+        package_upstream.append(mask_grid_key)
+    package_array_job = _task_group_job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=package_array_key,
+        stage="subject_mask_refine_package",
+        tasks=package_tasks,
+        mode=LsfExecutionMode.ARRAY,
+        max_concurrent=mask_package_array_concurrency,
+        resources=final_cpu,
+        upstream=tuple(package_upstream),
+    )
+    jobs.append(package_array_job)
+
+    mask_import_key = f"mask_import:{target_safe}"
+    mask_import_job: LsfJob | None = None
+    if subject_mask_publication_profile == SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK:
+        mask_import_command = [
+            "scripts/py",
+            "-m",
+            "fisheye.utils.import_refined_subject_mask_clip_packages",
+            "--zarr",
+            str(target.analysis_zarr),
+            "--output-run",
+            refined_subject_mask_draft_run,
+            "--expected-target-crop-run",
+            hybrid_crop_run,
+            "--array-copy-workers",
+            "8",
+            "--encoded-copy-workers",
+            "32",
+            "--require-production-proof",
+            "--json",
+        ]
+        for clip in clips:
+            mask_import_command.extend(["--package", str(clip["package_path"])])
+        mask_import_job = _job(
+            workflow_id=workflow_id,
+            repo=repo,
+            run_root=run_root,
+            job_key=mask_import_key,
+            stage="subject_mask_collection_import",
+            command=mask_import_command,
+            resources=import_cpu,
+            upstream=(package_array_key,),
+            expected_outputs=(
+                target.analysis_zarr
+                / "refined_subject_masks_runs"
+                / refined_subject_mask_draft_run
+                / "zarr.json",
+            ),
+        )
+        jobs.append(mask_import_job)
+    else:
+        mask_import_key = package_array_key
+
+    mask_publish_key = f"mask_publish:{target_safe}"
+    receipt_composed = (
+        subject_mask_publication_profile == SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED
+    )
+    mask_publish_output = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "palette_subject_mask_bundle_outputs"
+    )
+    mask_quality_scratch = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "palette_subject_mask_quality"
+    )
+    mask_publish_command = [
+        "scripts/py",
+        "-m",
+        (
+            "fisheye.cluster.subject_masks.publish_receipt_composed_bundle"
+            if receipt_composed
+            else "fisheye.cluster.subject_masks.publish_recording_bundle"
+        ),
+        "--analysis-zarr",
+        str(target.analysis_zarr),
+        "--crop-run",
+        hybrid_crop_run,
+        "--raw-run",
+        subject_mask_run,
+        "--refined-run",
+        refined_subject_mask_run,
+        "--quality-run",
+        subject_mask_quality_run,
+        "--cache-run",
+        subject_mask_cache_run,
+        "--bundle-id",
+        subject_mask_bundle_id,
+        "--local-output-root",
+        mask_publish_output,
+        "--quality-scratch-root",
+        mask_quality_scratch,
+        "--json",
+    ]
+    if receipt_composed:
+        mask_publish_command.extend(["--producer-commit", repo_commit])
+        for clip in clips:
+            mask_publish_command.extend(
+                ["--refined-package", str(clip["package_path"])]
+            )
+    else:
+        mask_publish_command.extend(
+            [
+                "--draft-zarr",
+                str(target.analysis_zarr),
+                "--raw-draft-parent",
+                "subject_mask_shard_runs",
+                "--refined-draft-run",
+                refined_subject_mask_draft_run,
+            ]
+        )
+    for clip in clips:
+        mask_publish_command.extend(
+            ["--raw-draft-run", str(clip["subject_mask_shard_run"])]
+        )
+    mask_publish_job = _job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=mask_publish_key,
+        stage="subject_mask_collection_publication",
+        command=mask_publish_command,
+        resources=import_cpu,
+        upstream=(mask_import_key,),
+        cleanup_paths=(mask_publish_output, mask_quality_scratch),
+        expected_outputs=(
+            target.analysis_zarr
+            / "subject_mask_bundle_runs"
+            / subject_mask_bundle_id
+            / "zarr.json",
+        ),
+    )
+    jobs.append(mask_publish_job)
+    mask_fragment_jobs: list[LsfJob] = [package_array_job]
+    if mask_import_job is not None:
+        mask_fragment_jobs.append(mask_import_job)
+    mask_fragment_jobs.append(mask_publish_job)
+    refined_masks_artifact = f"refined_subject_masks:{target_safe}"
+    fragments.append(
+        LsfWorkflowFragment(
+            fragment_id=f"subject_mask_refinement:{target_safe}",
+            jobs=tuple(mask_fragment_jobs),
+            requires=(raw_masks_artifact, refined_keypoints_artifact),
+            provides=(refined_masks_artifact,),
+            metadata={
+                "module": "subject_mask_refinement",
+                "target_id": target.target_id,
+                "crop_run": hybrid_crop_run,
+                "selector_activation": False,
+            },
+        )
+    )
+
+    validation_key = f"validate:{target_safe}"
+    validation_report = run_root / "validation" / f"{target_safe}.json"
+    validation_job = _job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=validation_key,
+        stage="validation",
+        command=(
+            "scripts/py",
+            "-m",
+            "fisheye.cluster.clipped_inference_validate",
+            "--plan",
+            str(run_root / "plan.json"),
+            "--target-id",
+            target.target_id,
+            "--output-json",
+            str(validation_report),
+        ),
+        resources=final_cpu,
+        upstream=(mask_publish_key,),
+        expected_outputs=(validation_report,),
+    )
+    jobs.append(validation_job)
+    validated_artifact = f"validated_analysis:{target_safe}"
+    fragments.append(
+        LsfWorkflowFragment(
+            fragment_id=f"analysis_validation:{target_safe}",
+            jobs=(validation_job,),
+            requires=(refined_keypoints_artifact, refined_masks_artifact),
+            provides=(validated_artifact,),
+            metadata={
+                "module": "analysis_validation",
+                "target_id": target.target_id,
+                "source_refined_detect_run": target.finalized_refined_detect_run,
+                "crop_run": hybrid_crop_run,
+                "selector_activation": False,
+            },
+        )
+    )
+    return _DownstreamTargetPipeline(
+        jobs=tuple(jobs),
+        fragments=tuple(fragments),
+        terminal_job_key=validation_key,
+        terminal_artifact_key=validated_artifact,
+    )
 
 
 def _artifact_backed_detection_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -730,8 +1653,8 @@ def build_plan(
     repo: Path,
     registry_path: Path,
     run_root: Path,
-    detection_set_id: str,
-    detection_run_id: str,
+    detection_set_id: str | None = None,
+    detection_run_id: str | None = None,
     pose_set_id: str | None = None,
     pose_run_id: str | None = None,
     subject_mask_set_id: str | None = None,
@@ -753,6 +1676,8 @@ def build_plan(
     cache_array_concurrency: int = 2,
     mask_package_array_concurrency: int = 4,
     detect_refine_bundle_concurrency: int = 4,
+    keypoint_gpu_queue: str = "gpu_t4",
+    subject_mask_gpu_queue: str = "gpu_l4",
     registered_gate_requirement: str = "off",
     registered_gate_run: str | None = None,
     selection_policy_id: str = "manual_review_only_v1",
@@ -773,19 +1698,45 @@ def build_plan(
         for name, value in downstream_model_ids.items()
         if not str(value or "").strip()
     )
-    if scope == WORKFLOW_SCOPE_FULL and missing_downstream_ids:
+    if (
+        scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+        and missing_downstream_ids
+    ):
         raise ValueError(
-            "Full workflow scope requires exact downstream model identifiers: "
+            "Full/downstream workflow scope requires exact downstream model identifiers: "
             + ", ".join(missing_downstream_ids)
         )
     if (
-        scope == WORKFLOW_SCOPE_FULL
+        scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
         and subject_mask_publication_profile not in SUBJECT_MASK_PUBLICATION_PROFILES
     ):
         raise ValueError(
             "Unsupported subject-mask publication profile: "
             f"{subject_mask_publication_profile!r}."
         )
+    if scope != WORKFLOW_SCOPE_DOWNSTREAM and (
+        not str(detection_set_id or "").strip()
+        or not str(detection_run_id or "").strip()
+    ):
+        raise ValueError(
+            "Detection/full workflow scope requires exact detection model identifiers."
+        )
+    if scope == WORKFLOW_SCOPE_DOWNSTREAM:
+        missing_runs = [
+            target.target_id
+            for target in targets
+            if not target.finalized_refined_detect_run
+        ]
+        if missing_runs:
+            raise ValueError(
+                "Downstream workflow scope requires finalized_refined_detect_run "
+                "for every target: " + ", ".join(missing_runs)
+            )
+        if resume_existing_detections:
+            raise ValueError(
+                "Downstream scope consumes an exact finalized detection run; "
+                "--resume-existing-detections is not applicable."
+            )
     gate_requirement = str(registered_gate_requirement).strip()
     if gate_requirement not in REGISTERED_GATE_REQUIREMENTS:
         raise ValueError(
@@ -809,6 +1760,12 @@ def build_plan(
             "Workflow bundle sizes and concurrency limits must be positive: "
             f"{concurrency_values}"
         )
+    for queue_name, queue_value in (
+        ("keypoint_gpu_queue", keypoint_gpu_queue),
+        ("subject_mask_gpu_queue", subject_mask_gpu_queue),
+    ):
+        if queue_value not in {"gpu_l4", "gpu_t4"}:
+            raise ValueError(f"{queue_name} must be gpu_l4 or gpu_t4.")
     label = safe_component(run_label, default="clipped_inference", max_length=72)
     workflow_id = label
     repo = repo.expanduser().resolve()
@@ -833,16 +1790,17 @@ def build_plan(
             recording_id=target.recording_id,
             analysis_zarr=target.analysis_zarr,
         )
-        detect_bindings.append(
-            _resolve_ranked_binding(
-                registry_path=registry_path,
-                target=target,
-                task="detect",
-                set_id=detection_set_id,
-                run_id=detection_run_id,
+        if scope != WORKFLOW_SCOPE_DOWNSTREAM:
+            detect_bindings.append(
+                _resolve_ranked_binding(
+                    registry_path=registry_path,
+                    target=target,
+                    task="detect",
+                    set_id=str(detection_set_id),
+                    run_id=str(detection_run_id),
+                )
             )
-        )
-        if scope == WORKFLOW_SCOPE_FULL:
+        if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}:
             pose = resolve_pose_model_binding(
                 registry_path=registry_path,
                 recording_id=target.recording_id,
@@ -859,10 +1817,12 @@ def build_plan(
             )
             _verify_binding(pose_binding)
             pose_bindings.append(pose_binding)
-    detection_binding = _assert_same_binding("detection", detect_bindings)
+    detection_binding = (
+        _assert_same_binding("detection", detect_bindings) if detect_bindings else None
+    )
     pose_binding = (
         _assert_same_binding("pose", pose_bindings)
-        if scope == WORKFLOW_SCOPE_FULL
+        if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
         else None
     )
     subject_binding = (
@@ -874,7 +1834,7 @@ def build_plan(
             component_coverage_key=subject_mask_component_coverage_key,
             label_schema_id=subject_mask_label_schema_id,
         )
-        if scope == WORKFLOW_SCOPE_FULL
+        if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
         else None
     )
 
@@ -921,17 +1881,34 @@ def build_plan(
         package_dir = package_root.expanduser().resolve() / label / target_safe
         global_mask_grid_manifest = package_dir / "global_mask_chunk_grid.json"
         detection_plan_path = run_root / "targets" / target_safe / "detection_plan.json"
-        detection_plan = _artifact_backed_detection_plan(
-            build_detection_plan(
-                target.recording_dir,
-                analysis_zarr=target.analysis_zarr,
-                model=detection_binding.path,
-                config=config_path,
-                workflow_id=target_label,
-                output_dir=run_root / "targets" / target_safe / "detection_artifacts",
+        if scope == WORKFLOW_SCOPE_DOWNSTREAM:
+            work_units = _clipped_layout_work_units(
+                target, camera_serial=authority.camera_serial
             )
-        )
-        work_units = list(detection_plan["work_units"])
+            detection_plan = {
+                "schema": "palette.clipped_downstream_layout_plan.v1",
+                "workflow_id": target_label,
+                "recording_id": target.recording_id,
+                "analysis_zarr": str(target.analysis_zarr),
+                "external_refined_detect_run": target.finalized_refined_detect_run,
+                "work_units": work_units,
+            }
+        else:
+            assert detection_binding is not None
+            detection_plan = _artifact_backed_detection_plan(
+                build_detection_plan(
+                    target.recording_dir,
+                    analysis_zarr=target.analysis_zarr,
+                    model=detection_binding.path,
+                    config=config_path,
+                    workflow_id=target_label,
+                    output_dir=run_root
+                    / "targets"
+                    / target_safe
+                    / "detection_artifacts",
+                )
+            )
+            work_units = list(detection_plan["work_units"])
         if {str(unit["camera_serial"]) for unit in work_units} != {
             authority.camera_serial
         }:
@@ -939,7 +1916,12 @@ def build_plan(
                 "Detection plan camera differs from acquisition authority."
             )
 
-        merged_proxy = f"crop_proxy_{target_label}_collection"
+        hybrid_crop_run = f"crop_hybrid_{target_label}"
+        merged_proxy = (
+            hybrid_crop_run
+            if scope == WORKFLOW_SCOPE_DOWNSTREAM
+            else f"crop_proxy_{target_label}_collection"
+        )
         native_canonical_run = f"detect_native_{target_label}"
         strict_storage_bundle = (
             target.recording_dir.parent
@@ -1010,14 +1992,30 @@ def build_plan(
                     "camera_serial": str(unit["camera_serial"]),
                     "work_unit_id": str(unit["work_unit_id"]),
                     "video_path": str(unit["source"]["video_path"]),
-                    "detect_run": str(unit["run_names"]["detect"]),
-                    "detect_group_path": str(
-                        unit["zarr_paths"]["detect_target_group_path"]
+                    "detect_run": (
+                        str(unit["run_names"]["detect"])
+                        if "run_names" in unit
+                        else None
                     ),
-                    "quality_run": str(unit["run_names"]["detect_quality"]),
-                    "refined_detect_run": str(unit["run_names"]["refined_detect"]),
-                    "refined_detect_group_path": str(
-                        unit["zarr_paths"]["refined_group_path"]
+                    "detect_group_path": (
+                        str(unit["zarr_paths"]["detect_target_group_path"])
+                        if "zarr_paths" in unit
+                        else None
+                    ),
+                    "quality_run": (
+                        str(unit["run_names"]["detect_quality"])
+                        if "run_names" in unit
+                        else None
+                    ),
+                    "refined_detect_run": (
+                        str(unit["run_names"]["refined_detect"])
+                        if "run_names" in unit
+                        else target.finalized_refined_detect_run
+                    ),
+                    "refined_detect_group_path": (
+                        str(unit["zarr_paths"]["refined_group_path"])
+                        if "zarr_paths" in unit
+                        else f"refined_detect_runs/{target.finalized_refined_detect_run}"
                     ),
                     "cache_manifest": str(manifest),
                     "cache_row_index": str(
@@ -1033,6 +2031,26 @@ def build_plan(
                     "package_path": str(package_dir / f"{clip}.tar.gz"),
                 }
             )
+            if scope == WORKFLOW_SCOPE_DOWNSTREAM:
+                for legacy_cache_key in (
+                    "cache_manifest",
+                    "cache_row_index",
+                    "proxy_crop_run",
+                    "alias_manifest",
+                ):
+                    clips[-1].pop(legacy_cache_key)
+        if scope == WORKFLOW_SCOPE_DOWNSTREAM:
+            assert target.finalized_refined_detect_run is not None
+            crop_row_intervals = _refined_clip_crop_row_intervals(
+                target=target,
+                refined_run_name=target.finalized_refined_detect_run,
+                frame_intervals=frame_intervals,
+            )
+            for clip in clips:
+                key = (int(clip["clip_index"]), str(clip["clip_id"]))
+                crop_row_start, crop_row_stop = crop_row_intervals[key]
+                clip["crop_row_start"] = crop_row_start
+                clip["crop_row_stop"] = crop_row_stop
         recording_target = clipped_recording_target(
             target_id=target.target_id,
             recording_id=target.recording_id,
@@ -1064,6 +2082,23 @@ def build_plan(
             "package_dir": str(package_dir),
             "global_mask_grid_manifest": str(global_mask_grid_manifest),
             "merged_proxy_crop_run": merged_proxy,
+            "hybrid_crop_run": (
+                hybrid_crop_run if scope == WORKFLOW_SCOPE_DOWNSTREAM else None
+            ),
+            "hybrid_supplemental_manifest": (
+                str(
+                    target.recording_dir
+                    / "derived"
+                    / "roi_cache"
+                    / hybrid_crop_run
+                    / (
+                        f"{target.analysis_zarr.name.removesuffix('.zarr')}__"
+                        f"{hybrid_crop_run}.supplemental.flat_roi_cache.json"
+                    )
+                )
+                if scope == WORKFLOW_SCOPE_DOWNSTREAM
+                else None
+            ),
             "keypoint_run": keypoint_run,
             "refined_keypoint_run": refined_keypoint_run,
             "subject_mask_run": subject_mask_run,
@@ -1086,7 +2121,7 @@ def build_plan(
             workflow_scope=scope,
             allow_existing_detections=resume_existing_detections,
         )
-        if resume_existing_detections:
+        if resume_existing_detections and scope != WORKFLOW_SCOPE_DOWNSTREAM:
             target_payload["detection_resume_preflight"] = [
                 _validate_existing_detection_for_resume(
                     target=target,
@@ -1107,6 +2142,55 @@ def build_plan(
             gate_artifacts = (
                 target_terminal_artifacts[target_index - max_active_targets],
             )
+        if scope == WORKFLOW_SCOPE_DOWNSTREAM:
+            assert pose_binding is not None
+            assert subject_binding is not None
+            target_payload["detection_module"] = {
+                "target_id": target.target_id,
+                "source": "external_finalized_recording_refined_detection",
+                "refined_group_path": (
+                    f"refined_detect_runs/{target.finalized_refined_detect_run}"
+                ),
+                "authority_required": (
+                    "complete_gated_immutable_recording_authority_v1"
+                ),
+                "clip_slice_index_published": False,
+                "publication_partition": "complete_recording_snapshot",
+            }
+            downstream = _build_downstream_target_pipeline(
+                workflow_id=workflow_id,
+                repo=repo,
+                repo_commit=repo_commit,
+                registry_path=registry_path,
+                run_root=run_root,
+                target=target,
+                target_safe=target_safe,
+                target_payload=target_payload,
+                pose_binding=pose_binding,
+                subject_binding=subject_binding,
+                subject_mask_coverage_class=subject_mask_coverage_class,
+                subject_mask_component_coverage_key=(
+                    subject_mask_component_coverage_key
+                ),
+                subject_mask_label_schema_id=subject_mask_label_schema_id,
+                subject_mask_publication_profile=(subject_mask_publication_profile),
+                encoded_mask_packages=encoded_mask_packages,
+                gpu_array_concurrency=gpu_array_concurrency,
+                mask_package_array_concurrency=mask_package_array_concurrency,
+                keypoint_gpu_queue=keypoint_gpu_queue,
+                subject_mask_gpu_queue=subject_mask_gpu_queue,
+                cpu=cpu,
+                final_cpu=final_cpu,
+                import_cpu=import_cpu,
+                cache_gpu=cache_gpu,
+                upstream_job_keys=gate,
+                required_artifacts=gate_artifacts,
+            )
+            jobs.extend(downstream.jobs)
+            fragments.extend(downstream.fragments)
+            target_terminal_keys.append(downstream.terminal_job_key)
+            target_terminal_artifacts.append(downstream.terminal_artifact_key)
+            continue
         native_module = build_native_detection_fragment(
             NativeDetectionFragmentInputs(
                 workflow_id=workflow_id,
@@ -2214,6 +3298,68 @@ def build_plan(
             )
         )
 
+    if scope == WORKFLOW_SCOPE_DOWNSTREAM:
+        scope_jobs = tuple(job for fragment in fragments for job in fragment.jobs)
+        workflow = compose_lsf_workflow(
+            workflow_id=workflow_id,
+            family=FAMILY,
+            fragments=tuple(fragments),
+            metadata={
+                "workflow_scope": "downstream_from_finalized_detection",
+                "target_count": len(targets),
+                "clip_count": sum(len(target["clips"]) for target in target_payloads),
+                "publication_authority": ("recording_level_hybrid_crop_provider"),
+                "clip_partitions_are_scheduler_work_only": True,
+                "selector_activation": False,
+                "model_bindings_are_exact": True,
+                "gpu_queues": {
+                    "keypoints": keypoint_gpu_queue,
+                    "subject_masks": subject_mask_gpu_queue,
+                },
+                "scheduler_submission_count": len(scope_jobs),
+                "execution_task_count": sum(
+                    len(job.execution_group.tasks) if job.execution_group else 1
+                    for job in scope_jobs
+                ),
+                "array_submission_count": sum(
+                    1
+                    for job in scope_jobs
+                    if job.execution_group is not None
+                    and job.execution_group.mode is LsfExecutionMode.ARRAY
+                ),
+            },
+        )
+        assert pose_binding is not None
+        assert subject_binding is not None
+        return ClippedInferencePlan(
+            run_label=label,
+            workflow_id=workflow_id,
+            workflow_scope=scope,
+            repo=repo,
+            registry=registry_path,
+            run_root=run_root,
+            targets=tuple(targets),
+            target_plans=tuple(target_payloads),
+            model_bindings={
+                "pose": pose_binding,
+                "subject_masks": subject_binding,
+            },
+            max_active_targets=max_active_targets,
+            cleanup_nrs_after_success=False,
+            resume_existing_detections=False,
+            encoded_mask_packages=encoded_mask_packages,
+            subject_mask_publication_profile=subject_mask_publication_profile,
+            detect_array_concurrency=int(detect_array_concurrency),
+            gpu_array_concurrency=int(gpu_array_concurrency),
+            cache_array_concurrency=int(cache_array_concurrency),
+            mask_package_array_concurrency=int(mask_package_array_concurrency),
+            detect_refine_bundle_concurrency=int(detect_refine_bundle_concurrency),
+            registered_gate_requirement=gate_requirement,
+            registered_gate_run=gate_run,
+            selection_policy_id=policy_id,
+            lsf_workflow=workflow,
+        )
+
     if scope == WORKFLOW_SCOPE_DETECTION:
         scope_jobs = tuple(job for fragment in fragments for job in fragment.jobs)
         workflow = compose_lsf_workflow(
@@ -2444,6 +3590,9 @@ def materialize_plan_bundle(plan: ClippedInferencePlan) -> dict[str, Any]:
         "progress",
         "targets",
         "cache_jobs",
+        "ledger",
+        "hybrid_crop",
+        "receipts",
         "validation",
         "registry",
         "cleanup",
@@ -2460,17 +3609,33 @@ def materialize_plan_bundle(plan: ClippedInferencePlan) -> dict[str, Any]:
             for item in plan.targets
             if item.target_id == target_payload["target_id"]
         )
-        detection_binding = plan.model_bindings["detection"]
-        detection_plan = _artifact_backed_detection_plan(
-            build_detection_plan(
-                target.recording_dir,
-                analysis_zarr=target.analysis_zarr,
-                model=detection_binding.path,
-                config=plan.repo / "configs" / "fisheye" / "yolo_detect_config.yaml",
-                workflow_id=str(target_payload["target_label"]),
-                output_dir=target_dir / "detection_artifacts",
+        if plan.workflow_scope == WORKFLOW_SCOPE_DOWNSTREAM:
+            authority = target_payload["native_detection_authority"]
+            detection_plan = {
+                "schema": "palette.clipped_downstream_layout_plan.v1",
+                "workflow_id": str(target_payload["target_label"]),
+                "recording_id": target.recording_id,
+                "analysis_zarr": str(target.analysis_zarr),
+                "external_refined_detect_run": (target.finalized_refined_detect_run),
+                "work_units": _clipped_layout_work_units(
+                    target,
+                    camera_serial=str(authority["camera_serial"]),
+                ),
+            }
+        else:
+            detection_binding = plan.model_bindings["detection"]
+            detection_plan = _artifact_backed_detection_plan(
+                build_detection_plan(
+                    target.recording_dir,
+                    analysis_zarr=target.analysis_zarr,
+                    model=detection_binding.path,
+                    config=(
+                        plan.repo / "configs" / "fisheye" / "yolo_detect_config.yaml"
+                    ),
+                    workflow_id=str(target_payload["target_label"]),
+                    output_dir=target_dir / "detection_artifacts",
+                )
             )
-        )
         write_json_snapshot(target_dir / "detection_plan.json", detection_plan)
     write_json_snapshot(plan_path, payload)
     write_json_snapshot(lsf_path, plan.lsf_workflow.to_json())
@@ -2531,8 +3696,9 @@ def _parser() -> argparse.ArgumentParser:
         choices=WORKFLOW_SCOPES,
         default=WORKFLOW_SCOPE_FULL,
         help=(
-            "Compose the full analysis DAG (default) or stop after the "
-            "canonical recording-level refined-detection snapshot."
+            "Compose the full analysis DAG (default), stop after canonical "
+            "recording-level refined detections, or start downstream analysis "
+            "from an exact finalized refined-detection run."
         ),
     )
     parser.add_argument("--manifest", required=True, type=Path)
@@ -2540,15 +3706,27 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-root", required=True, type=Path)
     parser.add_argument("--repo", type=Path, default=DEFAULT_REPO)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
-    parser.add_argument("--detection-set-id", required=True)
-    parser.add_argument("--detection-run-id", required=True)
-    parser.add_argument("--pose-set-id", help="Required for --workflow-scope full.")
-    parser.add_argument("--pose-run-id", help="Required for --workflow-scope full.")
     parser.add_argument(
-        "--subject-mask-set-id", help="Required for --workflow-scope full."
+        "--detection-set-id",
+        help="Required for full and detection workflow scopes.",
     )
     parser.add_argument(
-        "--subject-mask-run-id", help="Required for --workflow-scope full."
+        "--detection-run-id",
+        help="Required for full and detection workflow scopes.",
+    )
+    parser.add_argument(
+        "--pose-set-id", help="Required for full and downstream workflow scopes."
+    )
+    parser.add_argument(
+        "--pose-run-id", help="Required for full and downstream workflow scopes."
+    )
+    parser.add_argument(
+        "--subject-mask-set-id",
+        help="Required for full and downstream workflow scopes.",
+    )
+    parser.add_argument(
+        "--subject-mask-run-id",
+        help="Required for full and downstream workflow scopes.",
     )
     parser.add_argument("--subject-mask-coverage-class", default="dense_all_components")
     parser.add_argument(
@@ -2585,6 +3763,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-array-concurrency", type=int, default=2)
     parser.add_argument("--mask-package-array-concurrency", type=int, default=4)
     parser.add_argument("--detect-refine-bundle-concurrency", type=int, default=4)
+    parser.add_argument(
+        "--keypoint-gpu-queue",
+        choices=("gpu_t4", "gpu_l4"),
+        default="gpu_t4",
+        help="GPU queue for downstream keypoint clip arrays.",
+    )
+    parser.add_argument(
+        "--subject-mask-gpu-queue",
+        choices=("gpu_l4", "gpu_t4"),
+        default="gpu_l4",
+        help="GPU queue for downstream subject-mask clip arrays.",
+    )
     parser.add_argument(
         "--registered-gate-requirement",
         choices=tuple(sorted(REGISTERED_GATE_REQUIREMENTS)),
@@ -2664,6 +3854,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         cache_array_concurrency=args.cache_array_concurrency,
         mask_package_array_concurrency=args.mask_package_array_concurrency,
         detect_refine_bundle_concurrency=args.detect_refine_bundle_concurrency,
+        keypoint_gpu_queue=args.keypoint_gpu_queue,
+        subject_mask_gpu_queue=args.subject_mask_gpu_queue,
         registered_gate_requirement=args.registered_gate_requirement,
         registered_gate_run=args.registered_gate_run,
         selection_policy_id=args.selection_policy_id,

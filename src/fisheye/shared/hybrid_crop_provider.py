@@ -51,6 +51,10 @@ _CONTENT_COMPONENTS: tuple[tuple[str, Any, tuple[int, ...]], ...] = (
     ("source_refined_row_ids", np.int64, ()),
     ("supplemental_cache_row_indices", np.int64, ()),
 )
+_COLLECTION_CONTENT_COMPONENTS: tuple[tuple[str, Any, tuple[int, ...]], ...] = (
+    ("source_crop_video_member_indices", np.int32, ()),
+    ("source_full_video_member_indices", np.int32, ()),
+)
 
 
 @dataclass(frozen=True)
@@ -76,7 +80,9 @@ class HybridCropProviderIdentity:
 
 def _require_sha256(value: object, *, label: str) -> str:
     digest = str(value).strip()
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
         raise ValueError(f"{label} must be a lowercase SHA-256 digest.")
     return digest
 
@@ -98,6 +104,23 @@ def _content_arrays(
                 f"{expected}, got {values.shape}."
             )
         content[name] = values
+    collection_names = [name for name, _dtype, _shape in _COLLECTION_CONTENT_COMPONENTS]
+    collection_present = [name in arrays for name in collection_names]
+    if any(collection_present) and not all(collection_present):
+        raise ValueError(
+            "Hybrid collection provider identity requires both crop-video and "
+            "full-video member index arrays."
+        )
+    if all(collection_present):
+        for name, dtype, trailing_shape in _COLLECTION_CONTENT_COMPONENTS:
+            values = np.asarray(arrays[name], dtype=dtype)
+            expected = (row_count, *trailing_shape)
+            if tuple(values.shape) != expected:
+                raise ValueError(
+                    f"Hybrid crop provider identity {name!r} must have shape "
+                    f"{expected}, got {values.shape}."
+                )
+            content[name] = values
     return content
 
 
@@ -193,20 +216,41 @@ def validate_hybrid_crop_signed_identity(
     )
     if str(group.attrs.get("schema_id") or "") != HYBRID_CROP_RUN_SCHEMA_ID:
         raise ValueError("Hybrid crop run schema identity is incompatible.")
-    if str(group.attrs.get("source_pixels") or "") != SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME:
+    if (
+        str(group.attrs.get("source_pixels") or "")
+        != SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME
+    ):
         raise ValueError("Hybrid crop run source-pixel identity is incompatible.")
     if str(group.attrs.get("provider_record_sha256") or "") != expected_provider:
-        raise ValueError("Hybrid crop signed identity binds a different provider record.")
+        raise ValueError(
+            "Hybrid crop signed identity binds a different provider record."
+        )
 
     routing_policy = str(group.attrs.get("source_pixel_routing_policy") or "").strip()
     crop_policy = str(group.attrs.get("crop_policy_id") or "").strip()
-    required_arrays = ("instance_key", "source_row_signature", *[item[0] for item in _CONTENT_COMPONENTS])
+    required_arrays = (
+        "instance_key",
+        "source_row_signature",
+        *[item[0] for item in _CONTENT_COMPONENTS],
+    )
     missing = [name for name in required_arrays if name not in group]
     if missing:
         raise ValueError(
             "Hybrid crop signed identity lacks required arrays: " + ", ".join(missing)
         )
-    arrays = {name: group[name][:] for name in required_arrays if name != "source_row_signature"}
+    arrays = {
+        name: group[name][:]
+        for name in required_arrays
+        if name != "source_row_signature"
+    }
+    collection_names = [name for name, _dtype, _shape in _COLLECTION_CONTENT_COMPONENTS]
+    collection_present = [name in group for name in collection_names]
+    if any(collection_present) and not all(collection_present):
+        raise ValueError(
+            "Hybrid collection signed identity has an incomplete member-index binding."
+        )
+    if all(collection_present):
+        arrays.update({name: group[name][:] for name in collection_names})
     identity = build_hybrid_crop_provider_identity(
         arrays,
         provider_record_sha256=expected_provider,

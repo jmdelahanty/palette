@@ -17,6 +17,8 @@ from typing import Any
 import zarr
 
 from fisheye.shared.acquisition_crop_stream_ledger import (
+    ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION,
+    publish_acquisition_crop_stream_collection_ledger,
     publish_acquisition_crop_stream_ledger,
 )
 from fisheye.shared.import_video_metadata import probe_video_colorimetry_attrs
@@ -86,7 +88,9 @@ def _resolve_relative(recording_dir: Path, value: Any) -> Path | None:
 
 
 def _infer_status_path(summary_value: Any) -> str | None:
-    if not isinstance(summary_value, str) or not summary_value.endswith("_summary.json"):
+    if not isinstance(summary_value, str) or not summary_value.endswith(
+        "_summary.json"
+    ):
         return None
     return f"{summary_value[: -len('_summary.json')]}_status.json"
 
@@ -147,7 +151,10 @@ def _file_availability(
                 entry["size_bytes"] = int(path.stat().st_size)
             except OSError:
                 warnings.append(f"{field}_stat_failed")
-            if field in {"metadata", "frame_clock_metadata"} and path.suffix.lower() == ".csv":
+            if (
+                field in {"metadata", "frame_clock_metadata"}
+                and path.suffix.lower() == ".csv"
+            ):
                 row_count = _count_csv_data_rows(path)
                 if row_count is None:
                     warnings.append(f"{field}_row_count_failed")
@@ -224,7 +231,9 @@ def _stream_inventory(
     required_missing: list[str] = []
     if not files.get("video", {}).get("exists"):
         required_missing.append("video")
-    if stream.get("output_kind") == "crop" and not files.get("metadata", {}).get("exists"):
+    if stream.get("output_kind") == "crop" and not files.get("metadata", {}).get(
+        "exists"
+    ):
         required_missing.append("metadata")
 
     expected_frames = _expected_frame_count(stream)
@@ -267,7 +276,90 @@ def build_acquisition_video_stream_inventory(
 
     video_streams = manifest.get("video_streams")
     if not isinstance(video_streams, Mapping):
-        return None
+        rolling = manifest.get("rolling_clip_streams")
+        if not isinstance(rolling, Mapping):
+            return None
+        index_value = rolling.get("recording_clip_index") or manifest.get(
+            "recording_clip_index"
+        )
+        index_path = _resolve_relative(recording_dir, index_value)
+        index_payload = (
+            _load_json_object(index_path)
+            if index_path is not None and index_path.is_file()
+            else None
+        )
+        camera_id = str(manifest.get("camera_id") or "").strip()
+        camera_range = (
+            index_payload.get("camera_ranges", {}).get(camera_id, {})
+            if isinstance(index_payload, Mapping)
+            and isinstance(index_payload.get("camera_ranges"), Mapping)
+            else {}
+        )
+        member_count = int(camera_range.get("clip_count") or 0)
+        frame_count = int(camera_range.get("total_frame_count") or 0)
+        index_file = {
+            "path": str(index_value or ""),
+            "exists": bool(index_path is not None and index_path.is_file()),
+            "size_bytes": (
+                int(index_path.stat().st_size)
+                if index_path is not None and index_path.is_file()
+                else None
+            ),
+        }
+        availability = (
+            "ok"
+            if index_file["exists"] and member_count > 0
+            else "missing_required_file"
+        )
+        collection_contract = {
+            "source_profile": ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION,
+            "output_kind": "crop",
+            "frame_clock": "recording_frame_id",
+            "camera_id": camera_id,
+            "member_count": member_count,
+            "frame_count": frame_count,
+            "recording_clip_index": str(index_value or ""),
+        }
+        stream_payloads = {
+            "crop": {
+                "stream_key": "crop",
+                "availability_status": availability,
+                "required_missing": []
+                if availability == "ok"
+                else ["recording_clip_index"],
+                "warnings": [],
+                "files": {"recording_clip_index": index_file},
+                "contract": collection_contract,
+            },
+            "full": {
+                "stream_key": "full",
+                "availability_status": availability,
+                "required_missing": []
+                if availability == "ok"
+                else ["recording_clip_index"],
+                "warnings": [],
+                "files": {"recording_clip_index": index_file},
+                "contract": {
+                    **collection_contract,
+                    "output_kind": "full",
+                },
+            },
+        }
+        return {
+            "schema_id": ACQUISITION_VIDEO_STREAMS_SCHEMA_ID,
+            "schema_version": 1,
+            "source_schema_id": rolling.get("schema_id"),
+            "source_frame_clock": rolling.get("frame_clock"),
+            "source_profile": ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION,
+            "recording_manifest_path": str(recording_dir / "recording_manifest.json"),
+            "recording_dir": str(recording_dir),
+            "imported_at_utc": imported_at_utc or _utc_now_iso(),
+            "inventory_status": availability,
+            "stream_count": len(stream_payloads),
+            "stream_keys": sorted(stream_payloads),
+            "crop_stream_available": availability == "ok",
+            "streams": stream_payloads,
+        }
     streams = video_streams.get("streams")
     if not isinstance(streams, Mapping):
         return None
@@ -276,7 +368,9 @@ def build_acquisition_video_stream_inventory(
     for stream_key, stream in sorted(streams.items()):
         if not isinstance(stream_key, str) or not isinstance(stream, Mapping):
             continue
-        stream_payloads[stream_key] = _stream_inventory(recording_dir, stream_key, stream)
+        stream_payloads[stream_key] = _stream_inventory(
+            recording_dir, stream_key, stream
+        )
 
     if not stream_payloads:
         return None
@@ -357,12 +451,23 @@ def write_acquisition_video_stream_inventory(
         _put_attrs(stream_group, stream_payload)
         if stream_key == "crop":
             try:
-                publication = publish_acquisition_crop_stream_ledger(
-                    stream_group,
-                    recording_dir,
-                    manifest,
-                    imported_at_utc=str(inventory["imported_at_utc"]),
-                )
+                if (
+                    inventory.get("source_profile")
+                    == ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION
+                ):
+                    publication = publish_acquisition_crop_stream_collection_ledger(
+                        stream_group,
+                        recording_dir,
+                        manifest,
+                        imported_at_utc=str(inventory["imported_at_utc"]),
+                    )
+                else:
+                    publication = publish_acquisition_crop_stream_ledger(
+                        stream_group,
+                        recording_dir,
+                        manifest,
+                        imported_at_utc=str(inventory["imported_at_utc"]),
+                    )
             except Exception as exc:
                 _put_attrs(
                     stream_group,
