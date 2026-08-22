@@ -43,6 +43,7 @@ from fisheye.shared.hybrid_crop_provider import (
     HYBRID_CROP_RUN_SCHEMA_ID,
     build_hybrid_crop_provider_identity,
 )
+from fisheye.shared.import_video_metadata import probe_ffprobe_video_metadata
 from fisheye.shared.refined_detect_curation import (
     extract_present_curated_rows,
     resolve_curated_refined_detect_run,
@@ -262,6 +263,88 @@ def _ledger_collection_media_members(
         )
         expected_first = last_frame_id + 1
     return members
+
+
+def _resolve_full_frame_shape_for_source(
+    root: zarr.Group,
+    *,
+    collection_members: Sequence[Mapping[str, Any]] | None,
+) -> tuple[tuple[int, int], dict[str, Any]]:
+    """Resolve and bind the full-frame shape for one media source profile."""
+
+    if collection_members is None:
+        height, width = resolve_full_frame_shape(root)
+        return (height, width), {
+            "authority": "zarr_full_frame_shape_v1",
+            "height": int(height),
+            "width": int(width),
+        }
+
+    observations: list[dict[str, Any]] = []
+    for member in collection_members:
+        member_index = int(member.get("member_index", -1))
+        full_video = member.get("full_video")
+        if not isinstance(full_video, Mapping):
+            raise ValueError(
+                f"Collection member {member_index} lacks bound full-video media."
+            )
+        path_text = str(full_video.get("path") or "").strip()
+        fingerprint = str(full_video.get("fingerprint") or "").strip()
+        if not path_text or len(fingerprint) != 64:
+            raise ValueError(
+                f"Collection member {member_index} lacks its bound full-video identity."
+            )
+        metadata = probe_ffprobe_video_metadata(Path(path_text))
+        try:
+            width = int(metadata.get("width"))
+            height = int(metadata.get("height"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "ffprobe did not resolve positive full-frame dimensions for "
+                f"collection member {member_index}."
+            ) from exc
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                "ffprobe did not resolve positive full-frame dimensions for "
+                f"collection member {member_index}."
+            )
+        observations.append(
+            {
+                "member_index": member_index,
+                "clip_id": str(member.get("clip_id") or ""),
+                "full_video_fingerprint": fingerprint,
+                "width": width,
+                "height": height,
+            }
+        )
+
+    shapes = sorted({(int(row["height"]), int(row["width"])) for row in observations})
+    if len(shapes) != 1:
+        raise ValueError(
+            "Bound full-video collection members disagree on full-frame shape: "
+            f"{shapes}."
+        )
+    height, width = shapes[0]
+    try:
+        declared_height, declared_width = resolve_full_frame_shape(root)
+    except ValueError:
+        declared_shape = None
+    else:
+        declared_shape = [int(declared_height), int(declared_width)]
+        if (declared_height, declared_width) != (height, width):
+            raise ValueError(
+                "Bound full-video collection shape disagrees with Zarr full-frame "
+                "metadata: "
+                f"ffprobe={(height, width)}, zarr={(declared_height, declared_width)}."
+            )
+    return (height, width), {
+        "authority": "bound_collection_full_video_ffprobe_v1",
+        "height": int(height),
+        "width": int(width),
+        "member_count": len(observations),
+        "member_observations_sha256": _canonical_json_sha256(observations),
+        "declared_zarr_shape": declared_shape,
+    }
 
 
 def _ledger_roi_shape(ledger_group: zarr.Group) -> tuple[int, int]:
@@ -1996,7 +2079,13 @@ def build_hybrid_acquisition_offline_crop_run(
         root=root,
         run_name=refined_detect_run,
     )
-    frame_height, frame_width = resolve_full_frame_shape(root)
+    (
+        (frame_height, frame_width),
+        frame_shape_authority,
+    ) = _resolve_full_frame_shape_for_source(
+        root,
+        collection_members=collection_members,
+    )
     if collection_members is not None:
         if source_video_path is not None:
             raise ValueError(
@@ -2122,6 +2211,7 @@ def build_hybrid_acquisition_offline_crop_run(
         "context_margin_px": float(context_margin_px),
         "roi_shape": [int(roi_shape[0]), int(roi_shape[1])],
         "frame_shape": [int(frame_height), int(frame_width)],
+        "frame_shape_authority": frame_shape_authority,
         "row_count": int(np.asarray(payload["instance_key"]).shape[0]),
         "rowset_array_sha256": {
             name: _array_sha256(np.asarray(payload[name]))
@@ -2183,6 +2273,7 @@ def build_hybrid_acquisition_offline_crop_run(
         "supplemental_manifest_path": str(manifest_path),
         "roi_shape": [int(roi_shape[0]), int(roi_shape[1])],
         "frame_shape": [int(frame_height), int(frame_width)],
+        "frame_shape_authority": frame_shape_authority,
         "decode_mode_requested": str(decode_mode),
         "decode_chunk_frames": int(decode_chunk_frames),
         "routing_policy_id": routing_policy_id,
@@ -2317,6 +2408,7 @@ def build_hybrid_acquisition_offline_crop_run(
             ),
             "source_media_profile": acquisition_source_profile,
             "source_media_members": collection_members,
+            "source_full_frame_shape_authority": frame_shape_authority,
             "source_full_frame_media_identity": full_video_identity,
             "source_acquisition_crop_media_identity": crop_video_identity,
             "source_acquisition_mode": acquisition_source_mode,
@@ -2401,6 +2493,7 @@ def build_hybrid_acquisition_offline_crop_run(
                 "decode_mode": str(decode_mode),
                 "acquisition_source_mode": acquisition_source_mode,
                 "acquisition_source_profile": acquisition_source_profile,
+                "frame_shape_authority": frame_shape_authority,
                 "routing_policy_id": routing_policy_id,
                 "crop_policy_id": crop_policy_id,
                 "context_margin_px": float(context_margin_px),
