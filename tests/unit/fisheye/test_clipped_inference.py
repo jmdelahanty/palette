@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -639,6 +640,11 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
         f"subject_masks:{target_safe}:{clip_id}"
     ]
     subject_mask_command = list(subject_mask_task.command)
+    keypoint_command = list(
+        _execution_tasks(keypoint_array)[f"keypoints:{target_safe}:{clip_id}"].command
+    )
+    coordinate_mode = keypoint_command.index("--coordinate-contract-mode") + 1
+    assert keypoint_command[coordinate_mode] == "legacy_noncanonical"
     assert "fisheye.cluster.subject_masks.staged_inference" in subject_mask_command
     assert "--roi-cache-staging-dir" in subject_mask_command
     assert "--worker-receipt-json" in subject_mask_command
@@ -679,6 +685,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     assert all(
         f"PYTHONPATH={plan.repo / 'src'}" in job.command
+        and f"PALETTE_PYTHON={Path(sys.executable).resolve()}" in job.command
         and str(plan.repo / "scripts" / "py") in job.command
         for job in jobs.values()
     )
@@ -1106,7 +1113,7 @@ def test_detection_fragment_split_preserves_pre_split_job_contract() -> None:
     # split. Fragment metadata is intentionally excluded; all executable job
     # commands, resources, dependencies, task envelopes, and outputs are in it.
     assert hashlib.sha256(encoded.encode("utf-8")).hexdigest() == (
-        "183693e320e885eda3cf56293383797fce7b7e1411054c9b006275abbb1c9b85"
+        "3a4017df847c878c662ee832b3a38a43b8cf0eff4750bee20191f12defd2c1e4"
     )
 
 
@@ -1488,6 +1495,7 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
         )
         assert f"--crop-run {hybrid_run}" in keypoint
         assert expected_range in keypoint
+        assert "--coordinate-contract-mode legacy_noncanonical" in keypoint
         assert "--roi-cache-manifest" not in keypoint
         assert "--roi-cache-policy never" in keypoint
         assert f"--crop-run {hybrid_run}" in mask
@@ -1562,7 +1570,16 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         ),
     )
     source_plan = tmp_path / "source_plan.json"
-    _write_json(source_plan, source.to_json())
+    source_payload = source.to_json()
+    source_keypoint_job = next(
+        job
+        for job in source_payload["lsf_workflow"]["jobs"]
+        if job["job_key"].startswith("keypoints_array:")
+    )
+    legacy_command = source_keypoint_job["execution_group"]["tasks"][0]["command"]
+    legacy_flag = legacy_command.index("--coordinate-contract-mode")
+    del legacy_command[legacy_flag : legacy_flag + 2]
+    _write_json(source_plan, source_payload)
     monkeypatch.setattr(
         recovery,
         "prepare_keypoint_recovery",
@@ -1603,7 +1620,39 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     ]
     assert any(str(recovery_root) in value for value in keypoint_task.command)
     assert all(str(source.run_root) not in value for value in keypoint_task.command)
+    coordinate_mode = keypoint_task.command.index("--coordinate-contract-mode") + 1
+    assert keypoint_task.command[coordinate_mode] == "legacy_noncanonical"
     assert plan.payload["targets"] == source.to_json()["targets"]
+
+
+def test_keypoint_recovery_rejects_canonical_collection_shard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_payload = source.to_json()
+    source_keypoint_job = next(
+        job
+        for job in source_payload["lsf_workflow"]["jobs"]
+        if job["job_key"].startswith("keypoints_array:")
+    )
+    command = source_keypoint_job["execution_group"]["tasks"][0]["command"]
+    coordinate_mode = command.index("--coordinate-contract-mode") + 1
+    command[coordinate_mode] = "canonical"
+    source_plan = tmp_path / "source_canonical_plan.json"
+    _write_json(source_plan, source_payload)
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+    )
+
+    with pytest.raises(ValueError, match="incompatible coordinate contract"):
+        recovery.build_plan(
+            source_plan_path=source_plan,
+            run_root=tmp_path / "canonical_recovery",
+            recovery_label="canonical_keypoint_recovery",
+        )
 
 
 def test_keypoint_recovery_republishes_receipt_composed_mask_packages(

@@ -133,6 +133,41 @@ def _replace_run_root(
     return tuple(str(value).replace(old, new) for value in command)
 
 
+def _recovery_keypoint_command(
+    command: Sequence[str],
+    *,
+    prior_run_root: Path,
+    recovery_run_root: Path,
+) -> tuple[str, ...]:
+    """Upgrade a prior collection-shard command to the required source label."""
+
+    updated = list(
+        _replace_run_root(
+            command,
+            prior_run_root=prior_run_root,
+            recovery_run_root=recovery_run_root,
+        )
+    )
+    module = "fisheye.utils.run_keypoints_with_registry_model"
+    if module not in updated or "--output-parent" not in updated:
+        raise ValueError("Prior keypoint recovery task is not a registry shard command.")
+    output_parent_index = updated.index("--output-parent") + 1
+    if output_parent_index >= len(updated) or updated[output_parent_index] != (
+        "keypoint_shard_runs"
+    ):
+        raise ValueError("Keypoint recovery requires keypoint_shard_runs output.")
+    flag = "--coordinate-contract-mode"
+    if flag in updated:
+        value_index = updated.index(flag) + 1
+        if value_index >= len(updated) or updated[value_index] != "legacy_noncanonical":
+            raise ValueError(
+                "Keypoint recovery shard has an incompatible coordinate contract."
+            )
+    else:
+        updated.extend((flag, "legacy_noncanonical"))
+    return tuple(updated)
+
+
 def build_plan(
     *,
     source_plan_path: Path,
@@ -202,7 +237,7 @@ def build_plan(
             clip_id = str(clip["clip_id"])
             key = f"keypoints:{target_safe}:{clip_id}"
             prior = prior_by_key[key]
-            command = _replace_run_root(
+            command = _recovery_keypoint_command(
                 _inner_command(prior),
                 prior_run_root=prior_run_root,
                 recovery_run_root=run_root,
