@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -29,13 +28,6 @@ def chain_commands(commands: Sequence[Sequence[str]]) -> tuple[str, ...]:
     return ("bash", "-lc", " && ".join(shell_join(command) for command in commands))
 
 
-def _palette_python_environment() -> tuple[str, str]:
-    """Pin the planner's Palette interpreter for execution-host stability."""
-
-    python_bin = str(Path(sys.executable).resolve())
-    return python_bin, f"PALETTE_PYTHON={python_bin}"
-
-
 def build_job(
     *,
     workflow_id: str,
@@ -54,7 +46,6 @@ def build_job(
 
     safe = safe_component(job_key.replace(":", "_"), default="job", max_length=110)
     deployed_pythonpath = str(repo / "src")
-    palette_python, palette_python_env = _palette_python_environment()
     runtime_command = build_runtime_command(
         command,
         status_path_template=run_root / "status" / f"{safe}.{RUNTIME_JOB_ID_TOKEN}.json",
@@ -65,14 +56,10 @@ def build_job(
         cwd=repo,
         cleanup_path_templates=cleanup_paths,
         expected_output_templates=tuple(str(path) for path in expected_outputs),
-        environment_overrides={
-            "PYTHONPATH": deployed_pythonpath,
-            "PALETTE_PYTHON": palette_python,
-        },
+        environment_overrides={"PYTHONPATH": deployed_pythonpath},
         python_launcher=(
             "env",
             f"PYTHONPATH={deployed_pythonpath}",
-            palette_python_env,
             str(repo / "scripts" / "py"),
         ),
     )
@@ -135,7 +122,6 @@ def build_task_group_job(
 
     safe = safe_component(job_key.replace(":", "_"), default="job", max_length=110)
     deployed_pythonpath = str(repo / "src")
-    _palette_python, palette_python_env = _palette_python_environment()
     task_tuple = tuple(tasks)
     group = LsfExecutionGroup(
         mode=mode,
@@ -158,7 +144,6 @@ def build_task_group_job(
     command = (
         "env",
         f"PYTHONPATH={deployed_pythonpath}",
-        palette_python_env,
         *bundle_thread_env,
         str(repo / "scripts" / "py"),
         "-m",

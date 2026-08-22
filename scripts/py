@@ -30,15 +30,32 @@ if [[ -n "${PALETTE_PYTHON:-}" ]]; then
   run_python "$PALETTE_PYTHON" "$@"
 fi
 
-for candidate in \
-  "$HOME/miniconda3/envs/palette-py311/bin/python" \
+python_candidates=(
+  "$HOME/miniconda3/envs/palette-py311/bin/python"
   "$HOME/miniforge3/envs/palette-py311/bin/python"
-do
+)
+
+palette_account_home=""
+if command -v getent >/dev/null 2>&1; then
+  palette_account_name="$(id -un)"
+  palette_passwd_entry="$(getent passwd "$palette_account_name" || true)"
+  if [[ -n "$palette_passwd_entry" ]]; then
+    IFS=: read -r _ _ _ _ _ palette_account_home _ <<< "$palette_passwd_entry"
+  fi
+fi
+if [[ -n "$palette_account_home" && "$palette_account_home" != "$HOME" ]]; then
+  python_candidates+=(
+    "$palette_account_home/miniconda3/envs/palette-py311/bin/python"
+    "$palette_account_home/miniforge3/envs/palette-py311/bin/python"
+  )
+fi
+
+for candidate in "${python_candidates[@]}"; do
   if [[ -x "$candidate" ]]; then
     run_python "$candidate" "$@"
   fi
 done
 
-echo "Could not find palette-py311 Python under \$HOME/miniconda3 or \$HOME/miniforge3." >&2
+echo "Could not find palette-py311 Python under \$HOME or the account home." >&2
 echo "Set PALETTE_PYTHON=/path/to/python or create the palette-py311 env." >&2
 exit 127

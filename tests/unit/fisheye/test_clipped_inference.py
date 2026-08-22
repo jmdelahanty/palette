@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -685,7 +684,6 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     assert all(
         f"PYTHONPATH={plan.repo / 'src'}" in job.command
-        and f"PALETTE_PYTHON={Path(sys.executable).resolve()}" in job.command
         and str(plan.repo / "scripts" / "py") in job.command
         for job in jobs.values()
     )
@@ -1113,7 +1111,7 @@ def test_detection_fragment_split_preserves_pre_split_job_contract() -> None:
     # split. Fragment metadata is intentionally excluded; all executable job
     # commands, resources, dependencies, task envelopes, and outputs are in it.
     assert hashlib.sha256(encoded.encode("utf-8")).hexdigest() == (
-        "3a4017df847c878c662ee832b3a38a43b8cf0eff4750bee20191f12defd2c1e4"
+        "183693e320e885eda3cf56293383797fce7b7e1411054c9b006275abbb1c9b85"
     )
 
 

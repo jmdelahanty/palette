@@ -1,8 +1,9 @@
 """Prepare a failed clipped DAG for recovery from its keypoint stage.
 
-Dry-run is the default. Apply mode repairs source-video dimensions on the
-planned proxy crop runs and removes only the exact incomplete keypoint shard
-groups created by the failed campaign.
+Dry-run is the default. Apply mode repairs historical proxy crop dimensions
+when needed, preserves a signed recording-level hybrid provider when present,
+and removes only the exact incomplete keypoint shard groups created by the
+failed campaign.
 """
 
 from __future__ import annotations
@@ -12,10 +13,16 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import zarr
 
 from fisheye.cluster.clipped_inference import SUPPORTED_PLAN_SCHEMAS
+from fisheye.shared.hybrid_crop_provider import HYBRID_CROP_RUN_SCHEMA_ID
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.roi_pixel_contract import (
+    SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.utils.repair_clipped_proxy_crop_contract import (
     repair_clipped_proxy_crop_contract,
@@ -82,6 +89,86 @@ def _matching_model_artifact(
     )
 
 
+def _signed_hybrid_crop_report(
+    crop_parent: zarr.Group,
+    *,
+    target: Mapping[str, Any],
+    clips: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    run_name = str(target.get("hybrid_crop_run") or "").strip()
+    if not run_name or run_name not in crop_parent:
+        raise RuntimeError(f"Signed hybrid crop provider is missing: {run_name!r}")
+    group = crop_parent[run_name]
+    attrs = dict(group.attrs)
+    if attrs.get("palette_run_completion_status") != "complete":
+        raise RuntimeError(f"Hybrid crop provider is not complete: {run_name}")
+    if attrs.get("palette_run_name") != run_name:
+        raise RuntimeError(f"Hybrid crop provider run identity mismatch: {run_name}")
+    if attrs.get("schema_id") != HYBRID_CROP_RUN_SCHEMA_ID:
+        raise RuntimeError(f"Hybrid crop provider schema mismatch: {run_name}")
+    if attrs.get("source_pixels") != SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME:
+        raise RuntimeError(f"Hybrid crop source-pixel identity mismatch: {run_name}")
+
+    expected_refined = str(target.get("finalized_refined_detect_run") or "").strip()
+    if not expected_refined or attrs.get("source_refined_detect_run") != expected_refined:
+        raise RuntimeError(f"Hybrid crop refined-detection identity mismatch: {run_name}")
+    record = attrs.get("provider_record")
+    observed_digest = str(attrs.get("provider_record_sha256") or "").strip()
+    if not isinstance(record, Mapping):
+        raise RuntimeError(f"Hybrid crop provider record is missing: {run_name}")
+    if canonical_json_sha256(record) != observed_digest:
+        raise RuntimeError(f"Hybrid crop provider record digest is invalid: {run_name}")
+    if record.get("schema_id") != "palette.roi_pixel_provider_record.v1":
+        raise RuntimeError(f"Hybrid crop provider record schema mismatch: {run_name}")
+    if record.get("crop_run") != run_name:
+        raise RuntimeError(f"Hybrid crop provider record binds another run: {run_name}")
+    if record.get("refined_detect_run") != expected_refined:
+        raise RuntimeError(f"Hybrid crop provider record binds another detection: {run_name}")
+    crop_signature = attrs.get("crop_signature")
+    if not isinstance(crop_signature, Mapping) or crop_signature.get(
+        "provider_record_sha256"
+    ) != observed_digest:
+        raise RuntimeError(f"Hybrid crop signed identity is stale: {run_name}")
+
+    if "instance_key" not in group:
+        raise RuntimeError(f"Hybrid crop instance identity is missing: {run_name}")
+    row_count = int(group["instance_key"].shape[0])
+    if int(record.get("row_count") or -1) != row_count:
+        raise RuntimeError(f"Hybrid crop provider row count is stale: {run_name}")
+    cursor = 0
+    partitions: list[dict[str, Any]] = []
+    for clip in clips:
+        start = int(clip.get("crop_row_start") or 0)
+        stop = int(clip.get("crop_row_stop") or 0)
+        if start != cursor or stop <= start:
+            raise RuntimeError(
+                "Hybrid crop clip row partitions are not contiguous at "
+                f"{clip.get('clip_id')!r}: {start}:{stop}, expected start {cursor}."
+            )
+        partitions.append(
+            {
+                "clip_id": str(clip["clip_id"]),
+                "crop_row_start": start,
+                "crop_row_stop": stop,
+                "crop_row_count": stop - start,
+            }
+        )
+        cursor = stop
+    if cursor != row_count:
+        raise RuntimeError(
+            f"Hybrid crop clip partitions cover {cursor} rows, expected {row_count}."
+        )
+    return {
+        "mode": "signed_recording_level_hybrid_provider",
+        "crop_run": run_name,
+        "provider_record_sha256": observed_digest,
+        "source_refined_detect_run": expected_refined,
+        "row_count": row_count,
+        "source_pixels": attrs["source_pixels"],
+        "clip_partitions": partitions,
+    }
+
+
 def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = _read_json(plan_path)
     if (
@@ -107,27 +194,45 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
         clips = target.get("clips")
         if not isinstance(clips, list) or not clips:
             raise ValueError(f"Target {target.get('target_id')!r} has no clips.")
-        # The merged proxy is intentionally created by keypoint finalization,
-        # after every per-clip keypoint shard succeeds.  A failed keypoint
-        # branch therefore normally has only the per-clip proxies available.
-        proxy_runs = [str(clip["proxy_crop_run"]) for clip in clips]
-        repair = repair_clipped_proxy_crop_contract(
-            zarr_path,
-            crop_runs=proxy_runs,
-            apply=False,
-        )
-        if repair.get("status") != "ok" or int(repair.get("blocked_crop_run_count") or 0):
-            raise RuntimeError(
-                "Proxy crop repair preflight failed: "
-                + json.dumps(repair, sort_keys=True, default=str)
-            )
-        repairs_by_run = {
-            str(item["crop_run"]): item
-            for item in repair.get("crop_runs", [])
-            if isinstance(item, Mapping) and item.get("crop_run")
-        }
+        hybrid_mode = str(payload.get("workflow_scope") or "") == "downstream"
         root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
         crop_parent = root["crop_runs"]
+        crop_authority: dict[str, Any]
+        repair: Mapping[str, Any] | None
+        repairs_by_run: dict[str, Mapping[str, Any]]
+        if hybrid_mode:
+            crop_authority = _signed_hybrid_crop_report(
+                crop_parent,
+                target=target,
+                clips=clips,
+            )
+            repair = None
+            repairs_by_run = {}
+        else:
+            # The merged proxy is intentionally created by keypoint
+            # finalization after every per-clip keypoint shard succeeds.
+            proxy_runs = [str(clip["proxy_crop_run"]) for clip in clips]
+            repair = repair_clipped_proxy_crop_contract(
+                zarr_path,
+                crop_runs=proxy_runs,
+                apply=False,
+            )
+            if repair.get("status") != "ok" or int(
+                repair.get("blocked_crop_run_count") or 0
+            ):
+                raise RuntimeError(
+                    "Proxy crop repair preflight failed: "
+                    + json.dumps(repair, sort_keys=True, default=str)
+                )
+            repairs_by_run = {
+                str(item["crop_run"]): item
+                for item in repair.get("crop_runs", [])
+                if isinstance(item, Mapping) and item.get("crop_run")
+            }
+            crop_authority = {
+                "mode": "per_clip_proxy_crop_runs",
+                "crop_runs": proxy_runs,
+            }
         keypoint_parent = root.get("keypoint_shard_runs")
         latest = dict(keypoint_parent.attrs) if keypoint_parent is not None else {}
         planned_keypoint_runs = {str(clip["keypoint_shard_run"]) for clip in clips}
@@ -140,40 +245,91 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
         clip_reports: list[dict[str, Any]] = []
         for clip in clips:
             clip_id = str(clip["clip_id"])
-            proxy_run = str(clip["proxy_crop_run"])
-            proxy = crop_parent[proxy_run]
-            proxy_attrs = _attrs_with_repairs(proxy, repairs_by_run.get(proxy_run, {}))
-            width = _positive_int(
-                proxy_attrs.get("source_video_width") or proxy_attrs.get("width")
-            )
-            height = _positive_int(
-                proxy_attrs.get("source_video_height") or proxy_attrs.get("height")
-            )
-            if width is None or height is None:
-                raise RuntimeError(f"Proxy dimensions remain unresolved for {proxy_run}.")
-
-            cache_manifest = Path(str(clip["cache_manifest"])).expanduser().resolve()
-            alias_manifest = Path(str(clip["alias_manifest"])).expanduser().resolve()
-            if not cache_manifest.is_file() or not alias_manifest.is_file():
-                raise FileNotFoundError(f"Cache manifest or alias is missing for {clip_id}.")
-            cache_rows = _manifest_row_count(cache_manifest)
+            if hybrid_mode:
+                crop_run = str(target["hybrid_crop_run"])
+                row_start = int(clip["crop_row_start"])
+                row_stop = int(clip["crop_row_stop"])
+                source_rows = row_stop - row_start
+                alias_manifest = None
+                expected_collection = str(target["finalized_refined_detect_run"])
+            else:
+                crop_run = str(clip["proxy_crop_run"])
+                proxy = crop_parent[crop_run]
+                proxy_attrs = _attrs_with_repairs(
+                    proxy, repairs_by_run.get(crop_run, {})
+                )
+                width = _positive_int(
+                    proxy_attrs.get("source_video_width") or proxy_attrs.get("width")
+                )
+                height = _positive_int(
+                    proxy_attrs.get("source_video_height") or proxy_attrs.get("height")
+                )
+                if width is None or height is None:
+                    raise RuntimeError(
+                        f"Proxy dimensions remain unresolved for {crop_run}."
+                    )
+                cache_manifest = (
+                    Path(str(clip["cache_manifest"])).expanduser().resolve()
+                )
+                alias_manifest = (
+                    Path(str(clip["alias_manifest"])).expanduser().resolve()
+                )
+                if not cache_manifest.is_file() or not alias_manifest.is_file():
+                    raise FileNotFoundError(
+                        f"Cache manifest or alias is missing for {clip_id}."
+                    )
+                source_rows = _manifest_row_count(cache_manifest)
+                expected_collection = str(target["collection_id"])
 
             mask_run = str(clip["subject_mask_shard_run"])
             raw_mask = root["subject_mask_shard_runs"][mask_run]
             if raw_mask.attrs.get("palette_run_completion_status") != "complete":
                 raise RuntimeError(f"Raw subject-mask shard is not complete: {mask_run}")
-            if raw_mask.attrs.get("source_crop_run") != proxy_run:
+            if raw_mask.attrs.get("source_crop_run") != crop_run:
                 raise RuntimeError(f"Raw subject-mask crop identity mismatch: {mask_run}")
-            if raw_mask.attrs.get("source_collection_id") != target["collection_id"]:
+            if raw_mask.attrs.get("source_collection_id") != expected_collection:
                 raise RuntimeError(f"Raw subject-mask collection identity mismatch: {mask_run}")
-            if raw_mask.attrs.get("source_roi_cache_alias_manifest") != str(alias_manifest):
-                raise RuntimeError(f"Raw subject-mask cache identity mismatch: {mask_run}")
+            if hybrid_mode:
+                if raw_mask.attrs.get("source_collection_path") != (
+                    f"refined_detect_runs/{expected_collection}"
+                ):
+                    raise RuntimeError(
+                        f"Raw subject-mask collection path mismatch: {mask_run}"
+                    )
+                for attr, expected in (
+                    ("source_clip_id", clip_id),
+                    ("source_clip_index", int(clip["clip_index"])),
+                    ("source_work_unit_id", str(clip["work_unit_id"])),
+                ):
+                    if raw_mask.attrs.get(attr) != expected:
+                        raise RuntimeError(
+                            f"Raw subject-mask {attr} mismatch: {mask_run}"
+                        )
+                if "source_crop_row_ids" not in raw_mask:
+                    raise RuntimeError(
+                        f"Raw subject-mask crop-row identity is missing: {mask_run}"
+                    )
+                observed_rows = np.asarray(
+                    raw_mask["source_crop_row_ids"][:], dtype=np.int64
+                )
+                expected_rows = np.arange(row_start, row_stop, dtype=np.int64)
+                if not np.array_equal(observed_rows, expected_rows):
+                    raise RuntimeError(
+                        f"Raw subject-mask crop-row identity mismatch: {mask_run}"
+                    )
+            elif raw_mask.attrs.get("source_roi_cache_alias_manifest") != str(
+                alias_manifest
+            ):
+                raise RuntimeError(
+                    f"Raw subject-mask cache identity mismatch: {mask_run}"
+                )
             if "mask_probs_roi" not in raw_mask:
                 raise RuntimeError(f"Raw subject-mask probabilities are missing: {mask_run}")
             mask_rows = int(raw_mask["mask_probs_roi"].shape[0])
-            if mask_rows != cache_rows:
+            if mask_rows != source_rows:
                 raise RuntimeError(
-                    f"Raw subject-mask row count mismatch for {clip_id}: {mask_rows} != {cache_rows}"
+                    "Raw subject-mask row count mismatch for "
+                    f"{clip_id}: {mask_rows} != {source_rows}"
                 )
             if not _matching_model_artifact(
                 raw_mask.attrs.get("run_provenance"),
@@ -200,19 +356,32 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
             package = Path(str(clip["package_path"])).expanduser().resolve()
             if package.exists():
                 raise FileExistsError(f"Refined-mask package already exists: {package}")
-            clip_reports.append(
-                {
-                    "clip_id": clip_id,
-                    "proxy_crop_run": proxy_run,
-                    "source_video_width": width,
-                    "source_video_height": height,
-                    "cache_rows": cache_rows,
-                    "raw_subject_mask_run": mask_run,
-                    "raw_subject_mask_rows": mask_rows,
-                    "keypoint_shard_run": keypoint_run,
-                    "keypoint_action": keypoint_action,
-                }
-            )
+            clip_report = {
+                "clip_id": clip_id,
+                "crop_run": crop_run,
+                "source_rows": source_rows,
+                "raw_subject_mask_run": mask_run,
+                "raw_subject_mask_rows": mask_rows,
+                "keypoint_shard_run": keypoint_run,
+                "keypoint_action": keypoint_action,
+            }
+            if hybrid_mode:
+                clip_report.update(
+                    {
+                        "crop_row_start": row_start,
+                        "crop_row_stop": row_stop,
+                    }
+                )
+            else:
+                clip_report.update(
+                    {
+                        "proxy_crop_run": crop_run,
+                        "source_video_width": width,
+                        "source_video_height": height,
+                        "cache_rows": source_rows,
+                    }
+                )
+            clip_reports.append(clip_report)
 
         downstream = (
             ("keypoints_runs", str(target["keypoint_run"])),
@@ -227,9 +396,12 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
                 "target_id": str(target["target_id"]),
                 "analysis_zarr": str(zarr_path),
                 "proxy_repair": repair,
+                "crop_authority": crop_authority,
                 "merged_proxy_crop_run": str(target["merged_proxy_crop_run"]),
                 "merged_proxy_status": (
-                    "present"
+                    "reused_signed_hybrid_provider"
+                    if hybrid_mode
+                    else "present"
                     if str(target["merged_proxy_crop_run"]) in crop_parent
                     else "will_create_during_keypoint_finalize"
                 ),
@@ -257,14 +429,20 @@ def prepare_keypoint_recovery(
         for report in reports:
             target = targets_by_id[str(report["target_id"])]
             zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
-            proxy_runs = [str(clip["proxy_crop_run"]) for clip in target["clips"]]
-            applied_repair = repair_clipped_proxy_crop_contract(
-                zarr_path,
-                crop_runs=proxy_runs,
-                apply=True,
-            )
-            if applied_repair.get("status") != "ok":
-                raise RuntimeError(f"Proxy repair apply failed for {report['target_id']}")
+            hybrid_mode = str(payload.get("workflow_scope") or "") == "downstream"
+            if not hybrid_mode:
+                proxy_runs = [
+                    str(clip["proxy_crop_run"]) for clip in target["clips"]
+                ]
+                applied_repair = repair_clipped_proxy_crop_contract(
+                    zarr_path,
+                    crop_runs=proxy_runs,
+                    apply=True,
+                )
+                if applied_repair.get("status") != "ok":
+                    raise RuntimeError(
+                        f"Proxy repair apply failed for {report['target_id']}"
+                    )
             root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
             parent = require_runs_parent(root, "keypoint_shard_runs")
             selected = {
