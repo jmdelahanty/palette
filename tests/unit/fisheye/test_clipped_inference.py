@@ -1721,6 +1721,41 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     )
 
 
+def test_keypoint_recovery_supports_downstream_plan_and_repo_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DOWNSTREAM,
+    )
+    source_plan = tmp_path / "source_downstream_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 2},
+    )
+    deployment = tmp_path / "locked_deployment"
+
+    plan = recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "downstream_recovery",
+        recovery_label="sleepyfish_downstream_keypoint_recovery",
+        repo=deployment,
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+
+    assert len(jobs) == 7
+    assert "registry_finalize" not in jobs
+    assert "nrs_cleanup" not in jobs
+    assert plan.repo == deployment.resolve()
+    assert plan.payload["repo"] == str(deployment.resolve())
+    assert all(str(deployment.resolve()) in job.command for job in jobs.values())
+
+
 def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

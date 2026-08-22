@@ -213,6 +213,7 @@ def build_plan(
     source_plan_path: Path,
     run_root: Path,
     recovery_label: str,
+    repo: Path | None = None,
 ) -> KeypointRecoveryPlan:
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
@@ -230,7 +231,9 @@ def build_plan(
     if not isinstance(targets, list) or not targets or not isinstance(prior_jobs, list):
         raise ValueError("Source plan requires targets and an LSF workflow.")
     label = safe_component(recovery_label, default="keypoint_recovery", max_length=72)
-    repo = Path(str(source["repo"])).expanduser().resolve()
+    repo = (
+        repo if repo is not None else Path(str(source["repo"]))
+    ).expanduser().resolve()
     registry = Path(str(source["registry"])).expanduser().resolve()
     prior_run_root = Path(str(source["run_root"])).expanduser().resolve()
     prior_by_key = _prior_jobs_by_task_key(prior_jobs)
@@ -534,30 +537,35 @@ def build_plan(
         )
         validation_keys.append(validation_key)
 
-    registry_report = run_root / "registry" / "reconcile.json"
-    registry_prior = prior_by_key["registry_finalize"]
-    jobs.append(
-        _job(
-            workflow_id=label,
-            repo=repo,
-            run_root=run_root,
-            job_key="registry_finalize",
-            stage="registry_finalize",
-            command=(
-                "scripts/py",
-                "-m",
-                "fisheye.cluster.clipped_inference_registry_finalize",
-                "--plan",
-                str(run_root / "plan.json"),
-                "--output-json",
-                str(registry_report),
-            ),
-            resources=_resources(registry_prior),
-            upstream=tuple(validation_keys),
-            expected_outputs=(registry_report,),
+    if "registry_finalize" in prior_by_key:
+        registry_report = run_root / "registry" / "reconcile.json"
+        registry_prior = prior_by_key["registry_finalize"]
+        jobs.append(
+            _job(
+                workflow_id=label,
+                repo=repo,
+                run_root=run_root,
+                job_key="registry_finalize",
+                stage="registry_finalize",
+                command=(
+                    "scripts/py",
+                    "-m",
+                    "fisheye.cluster.clipped_inference_registry_finalize",
+                    "--plan",
+                    str(run_root / "plan.json"),
+                    "--output-json",
+                    str(registry_report),
+                ),
+                resources=_resources(registry_prior),
+                upstream=tuple(validation_keys),
+                expected_outputs=(registry_report,),
+            )
         )
-    )
     if bool(source.get("cleanup_nrs_after_success")):
+        if "registry_finalize" not in prior_by_key:
+            raise ValueError(
+                "Source plan requests NRS cleanup without registry finalization."
+            )
         cleanup_prior = prior_by_key["nrs_cleanup"]
         jobs.append(
             _job(
@@ -657,6 +665,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-plan", required=True, type=Path)
     parser.add_argument("--run-root", required=True, type=Path)
     parser.add_argument("--recovery-label", required=True)
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        help="Commit-pinned Palette checkout used to execute recovery jobs.",
+    )
     parser.add_argument("--submit-host", default="login1-citrus-poller")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
@@ -667,6 +680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_plan_path=args.source_plan,
         run_root=args.run_root,
         recovery_label=args.recovery_label,
+        repo=args.repo,
     )
     result = (
         apply_plan(plan, submit_host=args.submit_host)
