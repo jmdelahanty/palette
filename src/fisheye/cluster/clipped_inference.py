@@ -174,6 +174,7 @@ class ClippedInferencePlan:
     workflow_id: str
     workflow_scope: str
     repo: Path
+    palette_commit: str
     registry: Path
     run_root: Path
     targets: tuple[CampaignTarget, ...]
@@ -201,6 +202,7 @@ class ClippedInferencePlan:
             "workflow_id": self.workflow_id,
             "workflow_scope": self.workflow_scope,
             "repo": str(self.repo),
+            "palette_commit": self.palette_commit,
             "registry": str(self.registry),
             "run_root": str(self.run_root),
             "target_count": len(self.targets),
@@ -1522,7 +1524,8 @@ def _repo_commit(repo: Path) -> str:
         text=True,
         capture_output=True,
     ).stdout.strip()
-    if len(commit) != 40:
+    commit = commit.lower()
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise ValueError("Palette repo did not resolve one full commit SHA.")
     return commit
 
@@ -3340,6 +3343,7 @@ def build_plan(
             workflow_id=workflow_id,
             workflow_scope=scope,
             repo=repo,
+            palette_commit=repo_commit,
             registry=registry_path,
             run_root=run_root,
             targets=tuple(targets),
@@ -3391,6 +3395,7 @@ def build_plan(
             workflow_id=workflow_id,
             workflow_scope=scope,
             repo=repo,
+            palette_commit=repo_commit,
             registry=registry_path,
             run_root=run_root,
             targets=tuple(targets),
@@ -3537,6 +3542,7 @@ def build_plan(
         workflow_id=workflow_id,
         workflow_scope=scope,
         repo=repo,
+        palette_commit=repo_commit,
         registry=registry_path,
         run_root=run_root,
         targets=tuple(targets),

@@ -1449,6 +1449,8 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
 
     assert plan.workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+    assert plan.palette_commit == "c" * 40
+    assert plan.to_json()["palette_commit"] == "c" * 40
     assert set(plan.model_bindings) == {"pose", "subject_masks"}
     assert plan.cleanup_nrs_after_success is False
     assert plan.lsf_workflow.metadata["workflow_scope"] == (
@@ -1583,6 +1585,7 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         "prepare_keypoint_recovery",
         lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
     )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
 
     recovery_root = tmp_path / "recovery"
     plan = recovery.build_plan(
@@ -1644,6 +1647,7 @@ def test_keypoint_recovery_rejects_canonical_collection_shard(
         "prepare_keypoint_recovery",
         lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
     )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
 
     with pytest.raises(ValueError, match="incompatible coordinate contract"):
         recovery.build_plan(
@@ -1682,6 +1686,7 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
             ],
         },
     )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
 
     plan = recovery.build_plan(
         source_plan_path=source_plan,
@@ -1739,12 +1744,26 @@ def test_keypoint_recovery_supports_downstream_plan_and_repo_override(
         lambda *_args, **_kwargs: {"status": "ok", "clip_count": 2},
     )
     deployment = tmp_path / "locked_deployment"
+    deployment_commit = "d" * 40
+    monkeypatch.setattr(
+        recovery, "_repo_commit", lambda _repo: deployment_commit
+    )
+
+    with pytest.raises(ValueError, match="does not match the exact HEAD"):
+        recovery.build_plan(
+            source_plan_path=source_plan,
+            run_root=tmp_path / "mismatched_recovery",
+            recovery_label="sleepyfish_mismatched_recovery",
+            repo=deployment,
+            palette_commit="e" * 40,
+        )
 
     plan = recovery.build_plan(
         source_plan_path=source_plan,
         run_root=tmp_path / "downstream_recovery",
         recovery_label="sleepyfish_downstream_keypoint_recovery",
         repo=deployment,
+        palette_commit=deployment_commit,
     )
     jobs = {job.job_key: job for job in plan.workflow.jobs}
 
@@ -1753,6 +1772,8 @@ def test_keypoint_recovery_supports_downstream_plan_and_repo_override(
     assert "nrs_cleanup" not in jobs
     assert plan.repo == deployment.resolve()
     assert plan.payload["repo"] == str(deployment.resolve())
+    assert plan.payload["palette_commit"] == deployment_commit
+    assert plan.workflow.metadata["palette_commit"] == deployment_commit
     assert all(str(deployment.resolve()) in job.command for job in jobs.values())
 
 
