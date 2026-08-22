@@ -133,6 +133,46 @@ def _replace_run_root(
     return tuple(str(value).replace(old, new) for value in command)
 
 
+def _recovery_expected_outputs(
+    prior: Mapping[str, Any],
+    *,
+    prior_run_root: Path,
+    recovery_run_root: Path,
+) -> tuple[Path, ...]:
+    outputs = prior.get("expected_outputs")
+    if not isinstance(outputs, list) or not outputs:
+        raise ValueError(f"Prior task has no expected outputs: {prior.get('job_key')}")
+    old = str(prior_run_root)
+    new = str(recovery_run_root)
+    return tuple(Path(str(value).replace(old, new)) for value in outputs)
+
+
+def _raw_masks_to_recover(
+    preflight: Mapping[str, Any], *, target_id: str
+) -> set[str]:
+    targets = preflight.get("targets")
+    if not isinstance(targets, list):
+        return set()
+    target = next(
+        (
+            item
+            for item in targets
+            if isinstance(item, Mapping) and str(item.get("target_id")) == target_id
+        ),
+        None,
+    )
+    clips = target.get("clips") if isinstance(target, Mapping) else None
+    if not isinstance(clips, list):
+        return set()
+    return {
+        str(clip["clip_id"])
+        for clip in clips
+        if isinstance(clip, Mapping)
+        and clip.get("clip_id")
+        and clip.get("raw_subject_mask_action") != "reuse_complete"
+    }
+
+
 def _recovery_keypoint_command(
     command: Sequence[str],
     *,
@@ -199,6 +239,7 @@ def build_plan(
         raise RuntimeError("Keypoint recovery preflight did not pass.")
 
     jobs: list[LsfJob] = []
+    raw_mask_recovery_count = 0
     preparation_key = "prepare_keypoint_recovery"
     preparation_report = run_root / "recovery" / "preparation.json"
     jobs.append(
@@ -231,6 +272,56 @@ def build_plan(
             str(target["target_id"]), default="target", max_length=56
         )
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
+        raw_mask_clip_ids = _raw_masks_to_recover(
+            preflight,
+            target_id=str(target["target_id"]),
+        )
+        mask_array_key: str | None = None
+        if raw_mask_clip_ids:
+            mask_tasks: list[LsfExecutionTask] = []
+            mask_priors: list[Mapping[str, Any]] = []
+            for clip in target["clips"]:
+                clip_id = str(clip["clip_id"])
+                if clip_id not in raw_mask_clip_ids:
+                    continue
+                key = f"subject_masks:{target_safe}:{clip_id}"
+                prior = prior_by_key[key]
+                mask_tasks.append(
+                    _execution_task(
+                        run_root=run_root,
+                        task_key=key,
+                        stage="subject_mask_inference",
+                        command=_replace_run_root(
+                            _inner_command(prior),
+                            prior_run_root=prior_run_root,
+                            recovery_run_root=run_root,
+                        ),
+                        expected_outputs=_recovery_expected_outputs(
+                            prior,
+                            prior_run_root=prior_run_root,
+                            recovery_run_root=run_root,
+                        ),
+                        array_indexed=True,
+                    )
+                )
+                mask_priors.append(prior)
+            mask_array_key = f"subject_masks_array:{target_safe}"
+            jobs.append(
+                _task_group_job(
+                    workflow_id=label,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=mask_array_key,
+                    stage="subject_mask_inference",
+                    tasks=mask_tasks,
+                    mode=LsfExecutionMode.ARRAY,
+                    max_concurrent=_prior_group_limit(mask_priors[0], default=4),
+                    resources=_resources(mask_priors[0]),
+                    upstream=(preparation_key,),
+                )
+            )
+            raw_mask_recovery_count += len(mask_tasks)
+
         keypoint_tasks: list[LsfExecutionTask] = []
         keypoint_priors: list[Mapping[str, Any]] = []
         for clip in target["clips"]:
@@ -322,6 +413,9 @@ def build_plan(
                 ),
             )
         )
+        package_upstream = [refine_key]
+        if mask_array_key is not None:
+            package_upstream.append(mask_array_key)
 
         package_tasks: list[LsfExecutionTask] = []
         package_priors: list[Mapping[str, Any]] = []
@@ -356,7 +450,7 @@ def build_plan(
                 mode=LsfExecutionMode.ARRAY,
                 max_concurrent=_prior_group_limit(package_priors[0], default=4),
                 resources=_resources(package_priors[0]),
-                upstream=(refine_key,),
+                upstream=tuple(package_upstream),
             )
         )
 
@@ -491,6 +585,7 @@ def build_plan(
             "recovery_schema": RECOVERY_SCHEMA,
             "source_plan": str(source_plan_path),
             "reused_completed_raw_subject_masks": True,
+            "recovered_raw_subject_mask_count": raw_mask_recovery_count,
             "reused_completed_roi_caches": True,
         },
     )

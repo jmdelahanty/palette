@@ -215,6 +215,7 @@ def test_prepare_keypoint_recovery_reuses_signed_hybrid_crop_provider(
     mask.attrs.update(
         {
             "palette_run_completion_status": "complete",
+            "palette_run_name": mask_name,
             "source_crop_run": hybrid_name,
             "source_collection_id": refined_run,
             "source_collection_path": f"refined_detect_runs/{refined_run}",
@@ -290,10 +291,21 @@ def test_prepare_keypoint_recovery_reuses_signed_hybrid_crop_provider(
     assert target["crop_authority"]["provider_record_sha256"] == provider_digest
     assert target["clips"][0]["crop_row_start"] == 0
     assert target["clips"][0]["crop_row_stop"] == 3
+    assert target["clips"][0]["raw_subject_mask_action"] == "reuse_complete"
+
+    mask.attrs["palette_run_completion_status"] = "failed"
+    failed = prepare_keypoint_recovery(plan_path, apply=False)
+
+    assert failed["subject_mask_rerun_count"] == 1
+    assert failed["targets"][0]["clips"][0]["raw_subject_mask_action"] == (
+        "remove_failed_and_rerun"
+    )
 
     applied = prepare_keypoint_recovery(plan_path, apply=True)
 
     assert applied["removed_incomplete_keypoint_group_count"] == 1
+    assert applied["removed_failed_subject_mask_group_count"] == 1
     reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     assert hybrid_name in reopened["crop_runs"]
     assert keypoint_name not in reopened["keypoint_shard_runs"]
+    assert mask_name not in reopened["subject_mask_shard_runs"]

@@ -1658,12 +1658,29 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_target = source.target_plans[0]
     source_plan = tmp_path / "source_receipt_plan.json"
     _write_json(source_plan, source.to_json())
     monkeypatch.setattr(
         recovery,
         "prepare_keypoint_recovery",
-        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "clip_count": 22,
+            "targets": [
+                {
+                    "target_id": source_target["target_id"],
+                    "clips": [
+                        {
+                            "clip_id": "clip_000000",
+                            "raw_subject_mask_action": (
+                                "remove_failed_and_rerun"
+                            ),
+                        }
+                    ],
+                }
+            ],
+        },
     )
 
     plan = recovery.build_plan(
@@ -1672,14 +1689,28 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
         recovery_label="sleepyfish_receipt_keypoint_recovery",
     )
     jobs = {job.job_key: job for job in plan.workflow.jobs}
-    target = source.target_plans[0]
+    target = source_target
     target_safe = workflow.safe_component(
         str(target["target_id"]), default="target", max_length=56
     )
     package_key = f"mask_package_array:{target_safe}"
     publish_key = f"mask_publish:{target_safe}"
+    mask_key = f"subject_masks_array:{target_safe}"
+    refine_key = f"keypoint_refine:{target_safe}"
 
     assert f"mask_import:{target_safe}" not in jobs
+    assert mask_key in jobs
+    assert set(_execution_tasks(jobs[mask_key])) == {
+        f"subject_masks:{target_safe}:clip_000000"
+    }
+    assert jobs[mask_key].dependency.upstream_job_keys == (
+        "prepare_keypoint_recovery",
+    )
+    assert jobs[package_key].dependency.upstream_job_keys == (
+        refine_key,
+        mask_key,
+    )
+    assert plan.workflow.metadata["recovered_raw_subject_mask_count"] == 1
     assert publish_key in jobs
     assert jobs[publish_key].dependency.upstream_job_keys == (package_key,)
     assert "fisheye.cluster.subject_masks.publish_receipt_composed_bundle" in (

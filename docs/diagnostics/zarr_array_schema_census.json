@@ -284,7 +284,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-31ad6c3f804b04e1"
+            "schema-writer-6db83f5d00c71590"
           ],
           "shape": "(total_rois, n_channels)"
         },
@@ -465,7 +465,7 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-4ffddd37b525db04"
+            "schema-writer-77ab2207178bc199"
           ],
           "shape": "(n_channels,)"
         },
@@ -994,7 +994,7 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-9b71b03fa655582a"
+            "schema-writer-10989c8ac4a20405"
           ],
           "shape": "(total_rois, n_channels)"
         },
@@ -1087,7 +1087,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-714f7d24f22b9cb4"
+            "schema-writer-dd332d552ff658af"
           ],
           "shape": "(total_rois, n_channels, 4)"
         },
@@ -1394,7 +1394,7 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-e21d7d3787926def"
+            "schema-writer-9ff562085ccbea2e"
           ],
           "shape": "(total_rois, n_channels)"
         },
@@ -1480,7 +1480,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-b8a9a9ba28268fd7"
+            "schema-writer-f84901e28921b0a5"
           ],
           "shape": "(total_rois, n_channels, 2)"
         },
@@ -2409,7 +2409,7 @@
         {
           "dtype": "int8",
           "occurrence_ids": [
-            "schema-writer-e7c829b5b2725df5"
+            "schema-writer-2d1b3e346644b0dc"
           ],
           "shape": "(total_rois,)"
         },
@@ -4448,7 +4448,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-cd48e57ba5ef66c1"
+            "schema-writer-f322cfd2ee6ed4ae"
           ],
           "shape": "shape(selected['instance_key'])"
         },
@@ -5023,7 +5023,7 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-73b0f5ef13720d17"
+            "schema-writer-a5f14130e827ce1b"
           ],
           "shape": "(total_rois, n_channels)"
         },
@@ -5118,8 +5118,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-36101678d477b7f5",
-            "schema-writer-9dddc6777636ce29"
+            "schema-writer-152f22b3fa1c17ec",
+            "schema-writer-753db6e300e65bb4"
           ],
           "shape": "(total_rois, n_channels, height, width)"
         },
@@ -5141,7 +5141,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-85232691178f475a"
+            "schema-writer-74cd867a2c9e3832"
           ],
           "shape": "shape"
         },
@@ -5288,7 +5288,7 @@
         {
           "dtype": "uint8",
           "occurrence_ids": [
-            "schema-writer-97eeb49eeb61f0eb"
+            "schema-writer-23f704d51cd7a666"
           ],
           "shape": "(total_rois, n_channels, height, width)"
         },
@@ -6206,7 +6206,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-7914c2bb096108f3"
+            "schema-writer-ff39310f833bf01c"
           ],
           "shape": "(total_rois, n_channels)"
         },
@@ -7312,7 +7312,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-9803d554060f0ba4"
+            "schema-writer-7b65350e6db20a8e"
           ],
           "shape": "shape(selected['source_acquisition_frame_index'])"
         },
@@ -7511,7 +7511,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-12b383e1b147ced7"
+            "schema-writer-52a83439387c7d95"
           ],
           "shape": "shape(selected['source_crop_row_ids'])"
         },
@@ -7612,7 +7612,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-2d506c5fb2cae012"
+            "schema-writer-795b8f7a65c7a8f4"
           ],
           "shape": "shape(np.ascontiguousarray(selected['source_crop_xywh']))"
         },
@@ -7633,7 +7633,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-b491e0f4a696359c"
+            "schema-writer-329551cddce238ed"
           ],
           "shape": "shape(selected['source_crop_xywh'])"
         },
@@ -39871,8 +39871,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 1108,
-      "occurrence_id": "schema-writer-12b383e1b147ced7",
+      "line": 1109,
+      "occurrence_id": "schema-writer-52a83439387c7d95",
       "path_pattern": "<run_group>/source_crop_row_ids",
       "required": null,
       "shape_expression": "shape(selected['source_crop_row_ids'])",
@@ -39884,7 +39884,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5c5ffe3635909ea8"
+      "writer_site_id": "writer-dd77ed19c5e5080b"
     },
     {
       "access_pattern": "unclassified",
@@ -39905,8 +39905,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 1114,
-      "occurrence_id": "schema-writer-cd48e57ba5ef66c1",
+      "line": 1115,
+      "occurrence_id": "schema-writer-f322cfd2ee6ed4ae",
       "path_pattern": "<run_group>/instance_key",
       "required": null,
       "shape_expression": "shape(selected['instance_key'])",
@@ -39918,7 +39918,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-bc8ca32e26d7743d"
+      "writer_site_id": "writer-41e968f97b107726"
     },
     {
       "access_pattern": "windowed",
@@ -39939,8 +39939,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 1120,
-      "occurrence_id": "schema-writer-9803d554060f0ba4",
+      "line": 1121,
+      "occurrence_id": "schema-writer-7b65350e6db20a8e",
       "path_pattern": "<run_group>/source_acquisition_frame_index",
       "required": null,
       "shape_expression": "shape(selected['source_acquisition_frame_index'])",
@@ -39952,7 +39952,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-6869a1c850344ddb"
+      "writer_site_id": "writer-7929e459c3a92ca7"
     },
     {
       "access_pattern": "unclassified",
@@ -39973,8 +39973,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 1127,
-      "occurrence_id": "schema-writer-2d506c5fb2cae012",
+      "line": 1128,
+      "occurrence_id": "schema-writer-795b8f7a65c7a8f4",
       "path_pattern": "<run_group>/source_crop_xywh",
       "required": null,
       "shape_expression": "shape(np.ascontiguousarray(selected['source_crop_xywh']))",
@@ -39986,7 +39986,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-0b1d83aea3d01d35"
+      "writer_site_id": "writer-9c8208614f3173d6"
     },
     {
       "access_pattern": "unclassified",
@@ -40007,8 +40007,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 1224,
-      "occurrence_id": "schema-writer-b491e0f4a696359c",
+      "line": 1225,
+      "occurrence_id": "schema-writer-329551cddce238ed",
       "path_pattern": "<run_group>/source_crop_xywh",
       "required": null,
       "shape_expression": "shape(selected['source_crop_xywh'])",
@@ -40020,7 +40020,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-4e34bf9e8e769ac8"
+      "writer_site_id": "writer-20c8b36cf900405d"
     },
     {
       "access_pattern": "per_row",
@@ -40041,8 +40041,8 @@
       "dtype_expression": "source.dtype",
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2515,
-      "occurrence_id": "schema-writer-85232691178f475a",
+      "line": 2545,
+      "occurrence_id": "schema-writer-74cd867a2c9e3832",
       "path_pattern": "<run_group>/mask_probs_roi",
       "required": null,
       "shape_expression": "shape",
@@ -40054,7 +40054,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-41eee4feb2b48b6b"
+      "writer_site_id": "writer-6697fb4da07636b8"
     },
     {
       "access_pattern": "per_row",
@@ -40075,8 +40075,8 @@
       "dtype_expression": "np.uint8",
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2638,
-      "occurrence_id": "schema-writer-97eeb49eeb61f0eb",
+      "line": 2668,
+      "occurrence_id": "schema-writer-23f704d51cd7a666",
       "path_pattern": "<run_group>/masks_roi",
       "required": null,
       "shape_expression": "(total_rois, n_channels, height, width)",
@@ -40088,7 +40088,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-044656b42fd80061"
+      "writer_site_id": "writer-f9fd4bed6263fc2e"
     },
     {
       "access_pattern": "per_row",
@@ -40109,8 +40109,8 @@
       "dtype_expression": "stored_prob_dtype",
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2649,
-      "occurrence_id": "schema-writer-9dddc6777636ce29",
+      "line": 2679,
+      "occurrence_id": "schema-writer-152f22b3fa1c17ec",
       "path_pattern": "<run_group>/mask_probs_roi",
       "required": null,
       "shape_expression": "(total_rois, n_channels, height, width)",
@@ -40122,7 +40122,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-bcf2098fb559bae6"
+      "writer_site_id": "writer-a4ec9fa03bb9b27d"
     },
     {
       "access_pattern": "per_row",
@@ -40143,8 +40143,8 @@
       "dtype_expression": "stored_prob_dtype",
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2660,
-      "occurrence_id": "schema-writer-36101678d477b7f5",
+      "line": 2690,
+      "occurrence_id": "schema-writer-753db6e300e65bb4",
       "path_pattern": "<run_group>/mask_probs_roi",
       "required": null,
       "shape_expression": "(total_rois, n_channels, height, width)",
@@ -40156,7 +40156,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-8941cba3b69c678e"
+      "writer_site_id": "writer-8880553a4313f35e"
     },
     {
       "access_pattern": "unclassified",
@@ -40177,8 +40177,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2687,
-      "occurrence_id": "schema-writer-4ffddd37b525db04",
+      "line": 2717,
+      "occurrence_id": "schema-writer-77ab2207178bc199",
       "path_pattern": "<run_group>/available_channels",
       "required": null,
       "shape_expression": "(n_channels,)",
@@ -40190,7 +40190,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-89a3c580f4cffa4b"
+      "writer_site_id": "writer-e3ef7c068bcb82b4"
     },
     {
       "access_pattern": "unclassified",
@@ -40211,8 +40211,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2877,
-      "occurrence_id": "schema-writer-7914c2bb096108f3",
+      "line": 2907,
+      "occurrence_id": "schema-writer-ff39310f833bf01c",
       "path_pattern": "<run_group>/metrics/prob_max",
       "required": null,
       "shape_expression": "(total_rois, n_channels)",
@@ -40224,7 +40224,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7142ffa29d66e4c1"
+      "writer_site_id": "writer-a9a405172e3824ab"
     },
     {
       "access_pattern": "unclassified",
@@ -40245,8 +40245,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2880,
-      "occurrence_id": "schema-writer-73b0f5ef13720d17",
+      "line": 2910,
+      "occurrence_id": "schema-writer-a5f14130e827ce1b",
       "path_pattern": "<run_group>/metrics/mask_present",
       "required": null,
       "shape_expression": "(total_rois, n_channels)",
@@ -40258,7 +40258,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e9f888b35a8463a4"
+      "writer_site_id": "writer-7f35cdffab35a010"
     },
     {
       "access_pattern": "unclassified",
@@ -40279,8 +40279,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2886,
-      "occurrence_id": "schema-writer-31ad6c3f804b04e1",
+      "line": 2916,
+      "occurrence_id": "schema-writer-6db83f5d00c71590",
       "path_pattern": "<run_group>/metrics/area_px",
       "required": null,
       "shape_expression": "(total_rois, n_channels)",
@@ -40292,7 +40292,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-526ba13c9631e072"
+      "writer_site_id": "writer-0596a77aced37100"
     },
     {
       "access_pattern": "unclassified",
@@ -40313,8 +40313,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2889,
-      "occurrence_id": "schema-writer-b8a9a9ba28268fd7",
+      "line": 2919,
+      "occurrence_id": "schema-writer-f84901e28921b0a5",
       "path_pattern": "<run_group>/metrics/centroid_xy",
       "required": null,
       "shape_expression": "(total_rois, n_channels, 2)",
@@ -40326,7 +40326,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-20cb53d5caacd618"
+      "writer_site_id": "writer-38526926e21b6a1d"
     },
     {
       "access_pattern": "unclassified",
@@ -40347,8 +40347,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2895,
-      "occurrence_id": "schema-writer-e21d7d3787926def",
+      "line": 2925,
+      "occurrence_id": "schema-writer-9ff562085ccbea2e",
       "path_pattern": "<run_group>/metrics/centroid_valid",
       "required": null,
       "shape_expression": "(total_rois, n_channels)",
@@ -40360,7 +40360,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-27e7a2da17bb1459"
+      "writer_site_id": "writer-b4a2cb4e8082d880"
     },
     {
       "access_pattern": "unclassified",
@@ -40381,8 +40381,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2901,
-      "occurrence_id": "schema-writer-714f7d24f22b9cb4",
+      "line": 2931,
+      "occurrence_id": "schema-writer-dd332d552ff658af",
       "path_pattern": "<run_group>/metrics/bbox_xyxy",
       "required": null,
       "shape_expression": "(total_rois, n_channels, 4)",
@@ -40394,7 +40394,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-100ed81f33890cc7"
+      "writer_site_id": "writer-a9853cce7b6996b4"
     },
     {
       "access_pattern": "unclassified",
@@ -40415,8 +40415,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 2907,
-      "occurrence_id": "schema-writer-9b71b03fa655582a",
+      "line": 2937,
+      "occurrence_id": "schema-writer-10989c8ac4a20405",
       "path_pattern": "<run_group>/metrics/bbox_valid",
       "required": null,
       "shape_expression": "(total_rois, n_channels)",
@@ -40428,7 +40428,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5e653bbb3484836c"
+      "writer_site_id": "writer-7594ed7116b3c628"
     },
     {
       "access_pattern": "unclassified",
@@ -40449,8 +40449,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/segmentation/infer_unet_subject_masks.py",
-      "line": 3714,
-      "occurrence_id": "schema-writer-e7c829b5b2725df5",
+      "line": 3744,
+      "occurrence_id": "schema-writer-2d1b3e346644b0dc",
       "path_pattern": "<boundary.require_owned_run()>/detection_source",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -40462,7 +40462,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-0de818f1bf8797fe"
+      "writer_site_id": "writer-9c74b5d2e3f8da51"
     },
     {
       "access_pattern": "unclassified",

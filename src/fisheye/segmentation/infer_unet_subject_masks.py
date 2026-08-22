@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -1958,7 +1959,7 @@ def _subject_mask_scientific_documents(
     )
 
 
-def _resolve_subject_mask_attempt_lineage(
+def _resolve_subject_mask_attempt_lineage_once(
     *,
     parent: zarr.Group,
     current_run_name: str,
@@ -2063,6 +2064,35 @@ def _resolve_subject_mask_attempt_lineage(
         "supersedes": supersedes_evidence,
         "lineage_policy": "explicit_terminal_sibling_binding_v1",
     }
+
+
+def _resolve_subject_mask_attempt_lineage(
+    *,
+    parent: zarr.Group,
+    current_run_name: str,
+    scientific_identity: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    retry_of_attempt_id: str | None,
+    supersedes_run: str | None,
+) -> dict[str, object]:
+    """Retry read-only sibling discovery across transient NFS ESTALE faults."""
+
+    delays = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+    for retry_index in range(len(delays) + 1):
+        try:
+            return _resolve_subject_mask_attempt_lineage_once(
+                parent=parent,
+                current_run_name=current_run_name,
+                scientific_identity=scientific_identity,
+                attempt=attempt,
+                retry_of_attempt_id=retry_of_attempt_id,
+                supersedes_run=supersedes_run,
+            )
+        except OSError as exc:
+            if exc.errno != errno.ESTALE or retry_index == len(delays):
+                raise
+            time.sleep(delays[retry_index])
+    raise AssertionError("unreachable subject-mask lineage retry state")
 
 
 def _subject_mask_stage_path(

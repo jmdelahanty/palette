@@ -241,6 +241,15 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
                 raise RuntimeError(
                     f"Refusing to remove keypoint shard selected by {pointer}: {latest[pointer]}"
                 )
+        mask_parent = root.get("subject_mask_shard_runs")
+        mask_latest = dict(mask_parent.attrs) if mask_parent is not None else {}
+        planned_mask_runs = {str(clip["subject_mask_shard_run"]) for clip in clips}
+        for pointer in ("latest", "latest_complete"):
+            if mask_latest.get(pointer) in planned_mask_runs:
+                raise RuntimeError(
+                    "Refusing recovery because a planned raw mask shard is "
+                    f"selected by {pointer}: {mask_latest[pointer]}"
+                )
 
         clip_reports: list[dict[str, Any]] = []
         for clip in clips:
@@ -282,61 +291,94 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
                 expected_collection = str(target["collection_id"])
 
             mask_run = str(clip["subject_mask_shard_run"])
-            raw_mask = root["subject_mask_shard_runs"][mask_run]
-            if raw_mask.attrs.get("palette_run_completion_status") != "complete":
-                raise RuntimeError(f"Raw subject-mask shard is not complete: {mask_run}")
-            if raw_mask.attrs.get("source_crop_run") != crop_run:
-                raise RuntimeError(f"Raw subject-mask crop identity mismatch: {mask_run}")
-            if raw_mask.attrs.get("source_collection_id") != expected_collection:
-                raise RuntimeError(f"Raw subject-mask collection identity mismatch: {mask_run}")
-            if hybrid_mode:
-                if raw_mask.attrs.get("source_collection_path") != (
-                    f"refined_detect_runs/{expected_collection}"
-                ):
-                    raise RuntimeError(
-                        f"Raw subject-mask collection path mismatch: {mask_run}"
-                    )
-                for attr, expected in (
-                    ("source_clip_id", clip_id),
-                    ("source_clip_index", int(clip["clip_index"])),
-                    ("source_work_unit_id", str(clip["work_unit_id"])),
-                ):
-                    if raw_mask.attrs.get(attr) != expected:
+            raw_mask_action = "rerun_absent"
+            mask_rows: int | None = None
+            if mask_parent is not None and mask_run in mask_parent:
+                raw_mask = mask_parent[mask_run]
+                completion = str(
+                    raw_mask.attrs.get("palette_run_completion_status") or ""
+                )
+                if completion == "failed":
+                    if raw_mask.attrs.get("palette_run_name") != mask_run:
                         raise RuntimeError(
-                            f"Raw subject-mask {attr} mismatch: {mask_run}"
+                            f"Failed raw subject-mask identity mismatch: {mask_run}"
                         )
-                if "source_crop_row_ids" not in raw_mask:
+                    raw_mask_action = "remove_failed_and_rerun"
+                elif completion != "complete":
                     raise RuntimeError(
-                        f"Raw subject-mask crop-row identity is missing: {mask_run}"
+                        "Raw subject-mask shard is neither complete nor failed: "
+                        f"{mask_run}"
                     )
-                observed_rows = np.asarray(
-                    raw_mask["source_crop_row_ids"][:], dtype=np.int64
-                )
-                expected_rows = np.arange(row_start, row_stop, dtype=np.int64)
-                if not np.array_equal(observed_rows, expected_rows):
-                    raise RuntimeError(
-                        f"Raw subject-mask crop-row identity mismatch: {mask_run}"
-                    )
-            elif raw_mask.attrs.get("source_roi_cache_alias_manifest") != str(
-                alias_manifest
-            ):
-                raise RuntimeError(
-                    f"Raw subject-mask cache identity mismatch: {mask_run}"
-                )
-            if "mask_probs_roi" not in raw_mask:
-                raise RuntimeError(f"Raw subject-mask probabilities are missing: {mask_run}")
-            mask_rows = int(raw_mask["mask_probs_roi"].shape[0])
-            if mask_rows != source_rows:
-                raise RuntimeError(
-                    "Raw subject-mask row count mismatch for "
-                    f"{clip_id}: {mask_rows} != {source_rows}"
-                )
-            if not _matching_model_artifact(
-                raw_mask.attrs.get("run_provenance"),
-                expected_path=expected_model_path,
-                expected_sha256=expected_model_sha,
-            ):
-                raise RuntimeError(f"Raw subject-mask model identity mismatch: {mask_run}")
+                else:
+                    raw_mask_action = "reuse_complete"
+                    if raw_mask.attrs.get("source_crop_run") != crop_run:
+                        raise RuntimeError(
+                            f"Raw subject-mask crop identity mismatch: {mask_run}"
+                        )
+                    if raw_mask.attrs.get("source_collection_id") != (
+                        expected_collection
+                    ):
+                        raise RuntimeError(
+                            "Raw subject-mask collection identity mismatch: "
+                            f"{mask_run}"
+                        )
+                    if hybrid_mode:
+                        if raw_mask.attrs.get("source_collection_path") != (
+                            f"refined_detect_runs/{expected_collection}"
+                        ):
+                            raise RuntimeError(
+                                "Raw subject-mask collection path mismatch: "
+                                f"{mask_run}"
+                            )
+                        for attr, expected in (
+                            ("source_clip_id", clip_id),
+                            ("source_clip_index", int(clip["clip_index"])),
+                            ("source_work_unit_id", str(clip["work_unit_id"])),
+                        ):
+                            if raw_mask.attrs.get(attr) != expected:
+                                raise RuntimeError(
+                                    f"Raw subject-mask {attr} mismatch: {mask_run}"
+                                )
+                        if "source_crop_row_ids" not in raw_mask:
+                            raise RuntimeError(
+                                "Raw subject-mask crop-row identity is missing: "
+                                f"{mask_run}"
+                            )
+                        observed_rows = np.asarray(
+                            raw_mask["source_crop_row_ids"][:], dtype=np.int64
+                        )
+                        expected_rows = np.arange(
+                            row_start, row_stop, dtype=np.int64
+                        )
+                        if not np.array_equal(observed_rows, expected_rows):
+                            raise RuntimeError(
+                                "Raw subject-mask crop-row identity mismatch: "
+                                f"{mask_run}"
+                            )
+                    elif raw_mask.attrs.get(
+                        "source_roi_cache_alias_manifest"
+                    ) != str(alias_manifest):
+                        raise RuntimeError(
+                            f"Raw subject-mask cache identity mismatch: {mask_run}"
+                        )
+                    if "mask_probs_roi" not in raw_mask:
+                        raise RuntimeError(
+                            f"Raw subject-mask probabilities are missing: {mask_run}"
+                        )
+                    mask_rows = int(raw_mask["mask_probs_roi"].shape[0])
+                    if mask_rows != source_rows:
+                        raise RuntimeError(
+                            "Raw subject-mask row count mismatch for "
+                            f"{clip_id}: {mask_rows} != {source_rows}"
+                        )
+                    if not _matching_model_artifact(
+                        raw_mask.attrs.get("run_provenance"),
+                        expected_path=expected_model_path,
+                        expected_sha256=expected_model_sha,
+                    ):
+                        raise RuntimeError(
+                            f"Raw subject-mask model identity mismatch: {mask_run}"
+                        )
 
             keypoint_run = str(clip["keypoint_shard_run"])
             keypoint_action = "absent"
@@ -362,6 +404,7 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
                 "source_rows": source_rows,
                 "raw_subject_mask_run": mask_run,
                 "raw_subject_mask_rows": mask_rows,
+                "raw_subject_mask_action": raw_mask_action,
                 "keypoint_shard_run": keypoint_run,
                 "keypoint_action": keypoint_action,
             }
@@ -420,7 +463,8 @@ def prepare_keypoint_recovery(
 ) -> dict[str, Any]:
     plan_path = plan_path.expanduser().resolve()
     payload, reports = _inspect_plan(plan_path)
-    removed: list[str] = []
+    removed_keypoints: list[str] = []
+    removed_masks: list[str] = []
     if apply:
         targets_by_id = {
             str(target["target_id"]): target
@@ -444,6 +488,35 @@ def prepare_keypoint_recovery(
                         f"Proxy repair apply failed for {report['target_id']}"
                     )
             root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+            mask_parent = require_runs_parent(root, "subject_mask_shard_runs")
+            selected_masks = {
+                str(clip["subject_mask_shard_run"])
+                for clip in target["clips"]
+                if clip.get("subject_mask_shard_run")
+            }
+            for run_name in sorted(selected_masks):
+                if run_name not in mask_parent:
+                    continue
+                run = mask_parent[run_name]
+                completion = str(
+                    run.attrs.get("palette_run_completion_status") or ""
+                )
+                if completion == "complete":
+                    continue
+                if completion != "failed" or run.attrs.get(
+                    "palette_run_name"
+                ) != run_name:
+                    raise RuntimeError(
+                        f"Raw subject-mask shard became unsafe to remove: {run_name}"
+                    )
+                del mask_parent[run_name]
+                removed_masks.append(
+                    f"{zarr_path}/subject_mask_shard_runs/{run_name}"
+                )
+            for pointer in ("latest_pending",):
+                if mask_parent.attrs.get(pointer) in selected_masks:
+                    del mask_parent.attrs[pointer]
+
             parent = require_runs_parent(root, "keypoint_shard_runs")
             selected = {
                 str(clip["keypoint_shard_run"])
@@ -456,7 +529,9 @@ def prepare_keypoint_recovery(
                 if parent[run_name].attrs.get("palette_run_completion_status") == "complete":
                     raise RuntimeError(f"Keypoint shard became complete during recovery: {run_name}")
                 del parent[run_name]
-                removed.append(f"{zarr_path}/keypoint_shard_runs/{run_name}")
+                removed_keypoints.append(
+                    f"{zarr_path}/keypoint_shard_runs/{run_name}"
+                )
             if parent.attrs.get("latest_pending") in selected:
                 del parent.attrs["latest_pending"]
 
@@ -469,8 +544,15 @@ def prepare_keypoint_recovery(
         "apply": bool(apply),
         "target_count": len(reports),
         "clip_count": sum(len(report["clips"]) for report in reports),
-        "removed_incomplete_keypoint_group_count": len(removed),
-        "removed_incomplete_keypoint_groups": removed,
+        "removed_incomplete_keypoint_group_count": len(removed_keypoints),
+        "removed_incomplete_keypoint_groups": removed_keypoints,
+        "removed_failed_subject_mask_group_count": len(removed_masks),
+        "removed_failed_subject_mask_groups": removed_masks,
+        "subject_mask_rerun_count": sum(
+            clip["raw_subject_mask_action"] != "reuse_complete"
+            for report in reports
+            for clip in report["clips"]
+        ),
         "targets": reports,
     }
     if output_path is not None:
