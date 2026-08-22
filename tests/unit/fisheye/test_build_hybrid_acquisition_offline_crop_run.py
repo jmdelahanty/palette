@@ -12,6 +12,7 @@ from fisheye.utils.build_hybrid_acquisition_offline_crop_run import (
     ROUTING_REASON_CODE_MAP,
     _prepare_canonical_ledger_hybrid_payload,
     _prepare_hybrid_payload,
+    _resolve_full_frame_shape_for_source,
     build_hybrid_acquisition_offline_crop_run,
 )
 from fisheye.shared.acquisition_crop_stream_ledger import (
@@ -571,6 +572,81 @@ def test_canonical_collection_ledger_propagates_exact_media_members(
     np.testing.assert_allclose(
         np.asarray(payload["source_crop_xywh"])[0], [100, 100, 384, 384]
     )
+
+
+def test_collection_full_frame_shape_probes_every_bound_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "shape.zarr"), mode="w")
+    members = []
+    observed_paths = []
+    for index in range(2):
+        path = tmp_path / f"clip_{index}.mp4"
+        path.write_bytes(b"video")
+        members.append(
+            {
+                "member_index": index,
+                "clip_id": f"clip_{index:06d}",
+                "full_video": {
+                    "path": str(path),
+                    "fingerprint": str(index) * 64,
+                },
+            }
+        )
+
+    def _probe(path: Path) -> dict[str, int]:
+        observed_paths.append(Path(path))
+        return {"width": 2048, "height": 2048}
+
+    monkeypatch.setattr(mod, "probe_ffprobe_video_metadata", _probe)
+    shape, authority = _resolve_full_frame_shape_for_source(
+        root,
+        collection_members=members,
+    )
+
+    assert shape == (2048, 2048)
+    assert observed_paths == [
+        tmp_path / "clip_0.mp4",
+        tmp_path / "clip_1.mp4",
+    ]
+    assert authority["authority"] == "bound_collection_full_video_ffprobe_v1"
+    assert authority["member_count"] == 2
+    assert authority["declared_zarr_shape"] is None
+    assert len(authority["member_observations_sha256"]) == 64
+
+
+def test_collection_full_frame_shape_rejects_member_disagreement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "shape.zarr"), mode="w")
+    members = []
+    for index in range(2):
+        path = tmp_path / f"clip_{index}.mp4"
+        path.write_bytes(b"video")
+        members.append(
+            {
+                "member_index": index,
+                "clip_id": f"clip_{index:06d}",
+                "full_video": {
+                    "path": str(path),
+                    "fingerprint": str(index) * 64,
+                },
+            }
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "probe_ffprobe_video_metadata",
+        lambda path: {
+            "width": 2048 if Path(path).stem.endswith("0") else 1920,
+            "height": 2048 if Path(path).stem.endswith("0") else 1080,
+        },
+    )
+
+    with pytest.raises(ValueError, match="disagree on full-frame shape"):
+        _resolve_full_frame_shape_for_source(root, collection_members=members)
 
 
 def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
