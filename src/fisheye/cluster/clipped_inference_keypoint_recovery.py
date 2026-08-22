@@ -12,6 +12,7 @@ from fisheye.cluster.clipped_inference import (
     FAMILY,
     PLAN_SCHEMA,
     SUPPORTED_PLAN_SCHEMAS,
+    _repo_commit,
     build_ssh_bsub_runner,
 )
 from fisheye.cluster.clipped_lsf import (
@@ -214,6 +215,7 @@ def build_plan(
     run_root: Path,
     recovery_label: str,
     repo: Path | None = None,
+    palette_commit: str | None = None,
 ) -> KeypointRecoveryPlan:
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
@@ -234,6 +236,16 @@ def build_plan(
     repo = (
         repo if repo is not None else Path(str(source["repo"]))
     ).expanduser().resolve()
+    actual_palette_commit = _repo_commit(repo)
+    requested_palette_commit = str(palette_commit or "").strip().lower()
+    if (
+        requested_palette_commit
+        and requested_palette_commit != actual_palette_commit
+    ):
+        raise ValueError(
+            "Requested palette_commit does not match the exact HEAD at repo."
+        )
+    palette_commit = actual_palette_commit
     registry = Path(str(source["registry"])).expanduser().resolve()
     prior_run_root = Path(str(source["run_root"])).expanduser().resolve()
     prior_by_key = _prior_jobs_by_task_key(prior_jobs)
@@ -595,6 +607,7 @@ def build_plan(
             "reused_completed_raw_subject_masks": True,
             "recovered_raw_subject_mask_count": raw_mask_recovery_count,
             "reused_completed_roi_caches": True,
+            "palette_commit": palette_commit,
         },
     )
     payload = {
@@ -604,6 +617,7 @@ def build_plan(
         "workflow_id": label,
         "run_root": str(run_root),
         "repo": str(repo),
+        "palette_commit": palette_commit,
         "registry": str(registry),
         "recovery": {
             "schema": RECOVERY_SCHEMA,
@@ -670,6 +684,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="Commit-pinned Palette checkout used to execute recovery jobs.",
     )
+    parser.add_argument(
+        "--palette-commit",
+        help="Expected full Git HEAD of the commit-pinned Palette checkout.",
+    )
     parser.add_argument("--submit-host", default="login1-citrus-poller")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
@@ -681,6 +699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=args.run_root,
         recovery_label=args.recovery_label,
         repo=args.repo,
+        palette_commit=args.palette_commit,
     )
     result = (
         apply_plan(plan, submit_host=args.submit_host)
