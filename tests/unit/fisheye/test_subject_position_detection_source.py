@@ -415,6 +415,25 @@ def test_schema_invalid_detection_row_fails_closed(monkeypatch):
         )
 
 
+def test_float32_boundary_box_is_validated_in_persisted_arithmetic(monkeypatch):
+    root, geometry, values = _fixture()
+    values["bbox_norm_coords"][0] = np.array(
+        [0.725, 0.985546875, 0.0328125, 0.02890625],
+        dtype="<f4",
+    )
+    assert values["bbox_norm_coords"][0, 1] + values["bbox_norm_coords"][
+        0, 3
+    ] * np.float32(0.5) == np.float32(1.0)
+    _install(monkeypatch, geometry, values)
+
+    source = detection_source.load_persisted_detection_position_source(
+        root,
+        "detect_runs/canonical_v1",
+    )
+
+    np.testing.assert_array_equal(source.observation_validity, [True, True])
+
+
 def test_invalid_or_stale_selector_is_not_bypassed(monkeypatch):
     root, geometry, values = _fixture()
     _install(monkeypatch, geometry, values)
