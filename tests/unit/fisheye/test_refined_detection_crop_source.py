@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -177,6 +178,101 @@ def test_selector_ineligible_source_requires_explicit_benchmark_boundary(
         source.instances_group["frame_row_offsets"][:],
         [0, 2, 2, 3, 4],
     )
+
+
+def test_finalized_explicit_child_can_bind_from_mutable_unconsolidated_archive(
+    tmp_path: Path,
+) -> None:
+    publication = _publication(tmp_path)
+    root = zarr.open_group(
+        str(publication.output_path),
+        mode="a",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    run = root[f"refined_detect_runs/{RUN_ID}"]
+    run.attrs["immutable_snapshot"] = True
+    run.attrs["finalized_recording_authority"] = True
+
+    root_metadata_path = publication.output_path / "zarr.json"
+    root_metadata = json.loads(root_metadata_path.read_text(encoding="utf-8"))
+    assert root_metadata.pop("consolidated_metadata", None) is not None
+    root_metadata_path.write_text(
+        json.dumps(root_metadata, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RefinedDetectionCropSourceError,
+        match="lacks root consolidated_metadata",
+    ):
+        bind_refined_detection_crop_source(
+            publication.output_path,
+            run_id=RUN_ID,
+            allow_selector_ineligible_benchmark=True,
+        )
+
+    source = bind_refined_detection_crop_source(
+        publication.output_path,
+        run_id=RUN_ID,
+        allow_selector_ineligible_benchmark=True,
+        allow_mutable_archive_direct_metadata=True,
+    )
+    assert source.run_id == RUN_ID
+    assert source.manifest["payload"]["publication"]["metadata_state"] == (
+        "direct_and_consolidated_validated"
+    )
+
+
+def test_mutable_archive_direct_metadata_requires_finalized_explicit_child(
+    tmp_path: Path,
+) -> None:
+    publication = _publication(tmp_path)
+
+    with pytest.raises(
+        RefinedDetectionCropSourceError,
+        match="immutable, finalized, selector-ineligible",
+    ):
+        bind_refined_detection_crop_source(
+            publication.output_path,
+            run_id=RUN_ID,
+            allow_selector_ineligible_benchmark=True,
+            allow_mutable_archive_direct_metadata=True,
+        )
+
+
+def test_mutable_archive_mode_does_not_bypass_malformed_consolidated_metadata(
+    tmp_path: Path,
+) -> None:
+    publication = _publication(tmp_path)
+    root = zarr.open_group(
+        str(publication.output_path),
+        mode="a",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    run = root[f"refined_detect_runs/{RUN_ID}"]
+    run.attrs["immutable_snapshot"] = True
+    run.attrs["finalized_recording_authority"] = True
+
+    root_metadata_path = publication.output_path / "zarr.json"
+    root_metadata = json.loads(root_metadata_path.read_text(encoding="utf-8"))
+    root_metadata["consolidated_metadata"] = {}
+    root_metadata_path.write_text(
+        json.dumps(root_metadata, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RefinedDetectionCropSourceError,
+        match="consolidated metadata envelope is invalid",
+    ):
+        bind_refined_detection_crop_source(
+            publication.output_path,
+            run_id=RUN_ID,
+            allow_selector_ineligible_benchmark=True,
+            allow_mutable_archive_direct_metadata=True,
+        )
 
 
 def test_approved_analysis_authority_is_resolved_without_latest_fallback(

@@ -308,6 +308,7 @@ def _rebind_authorities(
             archive,
             run_id=source.run_id,
             allow_selector_ineligible_benchmark=True,
+            allow_mutable_archive_direct_metadata=True,
         )
         if explicit_refined_source
         else bind_refined_detection_crop_source(archive)
@@ -519,6 +520,7 @@ def publish_crop_geometry_production_candidate(
             archive,
             run_id=str(source_refined_run_id).strip(),
             allow_selector_ineligible_benchmark=True,
+            allow_mutable_archive_direct_metadata=True,
         )
         if explicit_refined_source
         else bind_refined_detection_crop_source(archive)
