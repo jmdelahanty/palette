@@ -749,6 +749,7 @@ def _upgrade_workers_to_coordinate_science_v2(
     worker_crop_run: str = "crop_001",
     bind_crop_manifest: bool = True,
     signed_hybrid_signature: Mapping[str, object] | None = None,
+    include_partition_contract: bool = True,
 ) -> None:
     root = zarr.open_group(str(draft_path), mode="a", use_consolidated=False)
     crop = root["crop_runs/crop_001"]
@@ -795,8 +796,10 @@ def _upgrade_workers_to_coordinate_science_v2(
                 "source_clip_index": start // 2,
                 "source_work_unit_id": f"pytest_collection:clip_{start}",
                 "source_shard_id": f"clip_{start}",
-                "collection_partition_contract": _collection_partition_contract(
-                    start, stop
+                "collection_partition_contract": (
+                    _collection_partition_contract(start, stop)
+                    if include_partition_contract
+                    else None
                 ),
             },
             pixels={
@@ -1900,3 +1903,153 @@ def test_two_clip_proof_import_flows_into_atomic_recording_bundle(
         ][:],
         np.arange(4, dtype=np.int64),
     )
+
+
+def test_recording_bundle_reconciles_science_v2_workers_without_partition_contract(
+    tmp_path: Path,
+) -> None:
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_a": slice(0, 2), "raw_clip_b": slice(2, 4)},
+        refined_slices={
+            "refined_clip_a": slice(0, 2),
+            "refined_clip_b": slice(2, 4),
+        },
+    )
+    _install_crop_v2(draft)
+    _upgrade_workers_to_coordinate_science_v2(
+        draft,
+        include_partition_contract=False,
+    )
+    analysis = tmp_path / "analysis_legacy_partition_reconciliation.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "crop_manifest_test"
+    _install_source_camera_authorities(root, archive_path=analysis)
+    _install_crop_v2(analysis)
+    work_units = (
+        {
+            "work_unit_id": "pytest_collection:clip_0",
+            "work_unit_index": 0,
+            "source_clip_id": "clip_0",
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": 2,
+            "row_start": 0,
+            "row_stop": 2,
+        },
+        {
+            "work_unit_id": "pytest_collection:clip_2",
+            "work_unit_index": 1,
+            "source_clip_id": "clip_2",
+            "source_clip_index": 1,
+            "frame_start": 2,
+            "frame_stop": 4,
+            "row_start": 2,
+            "row_stop": 4,
+        },
+    )
+
+    result = publish_recording_subject_mask_bundle(
+        analysis_zarr=analysis,
+        draft_zarr=draft,
+        crop_run="crop_001",
+        raw_draft_parent="subject_mask_shard_runs",
+        raw_draft_run="raw_clip_a",
+        raw_draft_runs=("raw_clip_a", "raw_clip_b"),
+        refined_draft_run="refined_clip_a",
+        refined_draft_runs=("refined_clip_a", "refined_clip_b"),
+        raw_run="raw_legacy_partition_reconciliation",
+        refined_run="refined_legacy_partition_reconciliation",
+        quality_run="quality_legacy_partition_reconciliation",
+        bundle_id="bundle_legacy_partition_reconciliation",
+        local_output_root=tmp_path / "legacy_partition_outputs",
+        quality_scratch_root=tmp_path / "legacy_partition_quality",
+        expected_work_units=work_units,
+    )
+
+    assert result["status"] == "complete"
+    receipt = json.loads(
+        (
+            analysis
+            / "subject_mask_runs"
+            / "raw_legacy_partition_reconciliation"
+            / "source_validation_receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["payload"]["producer_evidence"]["context"][
+        "legacy_worker_partition_reconciliation"
+    ] == {
+        "policy": ("scientific_identity_v2_missing_partition_contract_reconciled_v1"),
+        "worker_count": 2,
+        "canonical_frame_membership_validated": True,
+    }
+
+
+def test_recording_bundle_rejects_legacy_worker_outside_authoritative_frame_window(
+    tmp_path: Path,
+) -> None:
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_a": slice(0, 2), "raw_clip_b": slice(2, 4)},
+        refined_slices={
+            "refined_clip_a": slice(0, 2),
+            "refined_clip_b": slice(2, 4),
+        },
+    )
+    _install_crop_v2(draft)
+    _upgrade_workers_to_coordinate_science_v2(
+        draft,
+        include_partition_contract=False,
+    )
+    draft_root = zarr.open_group(str(draft), mode="a", use_consolidated=False)
+    draft_root["crop_runs/crop_001/source_acquisition_frame_index"][1] = 2
+    analysis = tmp_path / "analysis_legacy_frame_window_rejected.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "crop_manifest_test"
+    _install_source_camera_authorities(root, archive_path=analysis)
+    _install_crop_v2(analysis)
+
+    with pytest.raises(
+        ValueError,
+        match="acquisition frames differ from an authoritative work-unit",
+    ):
+        publish_recording_subject_mask_bundle(
+            analysis_zarr=analysis,
+            draft_zarr=draft,
+            crop_run="crop_001",
+            raw_draft_parent="subject_mask_shard_runs",
+            raw_draft_run="raw_clip_a",
+            raw_draft_runs=("raw_clip_a", "raw_clip_b"),
+            refined_draft_run="refined_clip_a",
+            refined_draft_runs=("refined_clip_a", "refined_clip_b"),
+            raw_run="raw_legacy_frame_window_rejected",
+            refined_run="refined_legacy_frame_window_rejected",
+            quality_run="quality_legacy_frame_window_rejected",
+            bundle_id="bundle_legacy_frame_window_rejected",
+            local_output_root=tmp_path / "legacy_frame_window_outputs",
+            quality_scratch_root=tmp_path / "legacy_frame_window_quality",
+            expected_work_units=(
+                {
+                    "work_unit_id": "pytest_collection:clip_0",
+                    "work_unit_index": 0,
+                    "source_clip_id": "clip_0",
+                    "source_clip_index": 0,
+                    "frame_start": 0,
+                    "frame_stop": 2,
+                    "row_start": 0,
+                    "row_stop": 2,
+                },
+                {
+                    "work_unit_id": "pytest_collection:clip_2",
+                    "work_unit_index": 1,
+                    "source_clip_id": "clip_2",
+                    "source_clip_index": 1,
+                    "frame_start": 2,
+                    "frame_stop": 4,
+                    "row_start": 2,
+                    "row_stop": 4,
+                },
+            ),
+        )
