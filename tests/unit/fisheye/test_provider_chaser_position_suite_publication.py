@@ -184,10 +184,13 @@ def test_atomic_receipt_contains_only_bounded_array_evidence(tmp_path: Path) -> 
         validation = publication[field]
         assert "arrays" not in validation
         assert validation["array_count"] == len(plan.prepared.arrays)
+        assert validation["array_path_count"] == len(plan.prepared.arrays)
+        assert len(validation["array_paths_sha256"]) == 64
+        assert validation["readable_array_declarations"].endswith(".array_declarations")
         assert validation["row_evidence_storage"] == (
             "typed_zarr_arrays_not_publication_metadata_v1"
         )
-    assert len(json.dumps(publication)) < 150_000
+    assert len(json.dumps(publication)) < 30_000
 
 
 def test_bounded_reader_does_not_hash_and_deep_audit_is_explicit(

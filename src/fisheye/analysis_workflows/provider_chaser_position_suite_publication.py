@@ -978,6 +978,7 @@ def _compact_validation(validation: Mapping[str, Any]) -> dict[str, Any]:
     arrays = validation.get("arrays")
     if not isinstance(arrays, Mapping):
         _fail("Persistent validation did not return exact arrays.")
+    array_paths = sorted(str(path) for path in arrays)
     return {
         "valid": validation.get("valid") is True,
         "manifest_sha256": validation.get("manifest_sha256"),
@@ -985,7 +986,9 @@ def _compact_validation(validation: Mapping[str, Any]) -> dict[str, Any]:
         "array_count": validation.get("array_count"),
         "total_table_row_count": validation.get("total_table_row_count"),
         "table_row_counts": validation.get("table_row_counts"),
-        "array_paths": sorted(arrays),
+        "array_path_count": len(array_paths),
+        "array_paths_sha256": canonical_json_sha256(array_paths),
+        "readable_array_declarations": f"{MANIFEST_ATTR}.array_declarations",
         "row_evidence_storage": "typed_zarr_arrays_not_publication_metadata_v1",
     }
 

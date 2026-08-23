@@ -84,8 +84,10 @@ Run attributes contain only bounded metadata:
 
 Row dictionaries are never copied into attributes, manifests, atomic
 publication receipts, or consolidated root metadata. The immutable manifest is
-limited to 256 KiB. Atomic receipts contain only array paths, counts, table row
-counts, and manifest identity.
+limited to 256 KiB. Atomic receipts contain counts, table row counts, manifest
+identity, and a digest of the array-path list; the manifest remains the single
+readable declaration of those paths instead of repeating the list for every
+publication phase.
 
 ## Publication and reads
 
