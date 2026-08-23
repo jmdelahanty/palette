@@ -10,7 +10,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pyarrow.parquet as pq
 
-from fisheye.cluster.clipped_inference import SUPPORTED_PLAN_SCHEMAS
+from fisheye.cluster.clipped_inference import (
+    SUPPORTED_PLAN_SCHEMAS,
+    assignment_keypoint_binding,
+)
 from fisheye.cluster.lsf import write_json_snapshot
 from fisheye.cluster.whole_recording_analysis_validate import (
     _require_complete_run,
@@ -597,17 +600,28 @@ def validate_target(
     keypoints = _require_complete_run(
         root, "keypoints_runs", str(target["keypoint_run"])
     )
-    refined_keypoints = _require_complete_run(
-        root, "refined_keypoints_runs", str(target["refined_keypoint_run"])
-    )
     keypoint_identity, keypoint_keys = _instance_key_values(
         keypoints,
         label=f"keypoints_runs/{target['keypoint_run']}",
     )
-    refined_keypoint_identity, refined_keypoint_keys = _instance_key_values(
-        refined_keypoints,
-        label=f"refined_keypoints_runs/{target['refined_keypoint_run']}",
-    )
+    assignment_group, assignment_run = assignment_keypoint_binding(target)
+    if assignment_group == "keypoints_runs":
+        assignment_keypoints = keypoints
+        assignment_keypoint_identity = keypoint_identity
+        assignment_keypoint_keys = keypoint_keys
+        refined_keypoints = None
+        refined_keypoint_identity = None
+    elif assignment_group == "refined_keypoints_runs":
+        refined_keypoints = _require_complete_run(
+            root, "refined_keypoints_runs", assignment_run
+        )
+        refined_keypoint_identity, refined_keypoint_keys = _instance_key_values(
+            refined_keypoints,
+            label=f"refined_keypoints_runs/{assignment_run}",
+        )
+        assignment_keypoints = refined_keypoints
+        assignment_keypoint_identity = refined_keypoint_identity
+        assignment_keypoint_keys = refined_keypoint_keys
     expected_rows = int(keypoint_identity["row_count"])
     clip_count = len(target["clips"])
     cache_validation_mode = (
@@ -620,7 +634,10 @@ def validate_target(
     )
     row_counts_to_check = [
         ("refined detections", detection_rows),
-        ("refined keypoints", int(refined_keypoint_identity["row_count"])),
+        (
+            "assignment keypoints",
+            int(assignment_keypoint_identity["row_count"]),
+        ),
     ]
     if not downstream_mode and cleaned_cache_count == 0:
         row_counts_to_check.append(("flat ROI caches", cache_rows))
@@ -629,10 +646,10 @@ def validate_target(
             raise RuntimeError(
                 f"{label} row count {count} != keypoint row count {expected_rows}."
             )
-    for label, values in (
-        ("keypoints", keypoint_keys),
-        ("refined keypoints", refined_keypoint_keys),
-    ):
+    keypoint_orders = [("keypoints", keypoint_keys)]
+    if assignment_keypoints is not keypoints:
+        keypoint_orders.append(("assignment keypoints", assignment_keypoint_keys))
+    for label, values in keypoint_orders:
         if not np.array_equal(values, detection_keys):
             raise RuntimeError(
                 f"{label} instance_key order does not exactly match selected refined detections."
@@ -669,10 +686,14 @@ def validate_target(
         crop_acquisition_frames,
         minlength=recording_frame_count,
     ).astype(np.int64, copy=False)
-    for label, run in (
-        (f"keypoints_runs/{target['keypoint_run']}", keypoints),
-        (f"refined_keypoints_runs/{target['refined_keypoint_run']}", refined_keypoints),
-    ):
+    keypoint_runs_to_check = [
+        (f"keypoints_runs/{target['keypoint_run']}", keypoints)
+    ]
+    if assignment_keypoints is not keypoints:
+        keypoint_runs_to_check.append(
+            (f"{assignment_group}/{assignment_run}", assignment_keypoints)
+        )
+    for label, run in keypoint_runs_to_check:
         _require_exact_vector(
             _required_vector(run, "frame_indices", label=label),
             crop_frames,
@@ -692,10 +713,7 @@ def validate_target(
             or refined_masks.attrs.get("assignment_keypoint_run")
         ),
     )
-    expected_assignment = (
-        "refined_keypoints_runs",
-        str(target["refined_keypoint_run"]),
-    )
+    expected_assignment = (assignment_group, assignment_run)
     if assignment != expected_assignment:
         raise RuntimeError(
             f"Refined-mask keypoint assignment mismatch: {assignment!r} != {expected_assignment!r}."
@@ -720,10 +738,7 @@ def validate_target(
         dtype=np.int64,
     )
     frame_count_reports: dict[str, Any] = {}
-    for label, run in (
-        (f"keypoints_runs/{target['keypoint_run']}", keypoints),
-        (f"refined_keypoints_runs/{target['refined_keypoint_run']}", refined_keypoints),
-    ):
+    for label, run in keypoint_runs_to_check:
         report, _counts = _validate_run_frame_counts(
             run,
             label=label,
@@ -786,6 +801,7 @@ def validate_target(
         "crop_proxy": crop_identity,
         "keypoints": keypoint_identity,
         "refined_keypoints": refined_keypoint_identity,
+        "assignment_keypoints": assignment_keypoint_identity,
         "raw_subject_masks": raw_mask_reports,
         "refined_subject_masks": refined_report,
         "refined_subject_mask_identity": refined_mask_identity,

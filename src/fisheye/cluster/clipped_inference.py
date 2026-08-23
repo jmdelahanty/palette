@@ -130,6 +130,30 @@ SUBJECT_MASK_PUBLICATION_PROFILES = (
 )
 
 
+def assignment_keypoint_binding(target: Mapping[str, Any]) -> tuple[str, str]:
+    """Resolve modern canonical assignment or historical refined compatibility."""
+
+    group = str(target.get("assignment_keypoint_group") or "refined_keypoints_runs")
+    run = str(
+        target.get("assignment_keypoints_run")
+        or target.get("assignment_keypoint_run")
+        or target.get("refined_keypoint_run")
+        or ""
+    )
+    if group not in {"keypoints_runs", "refined_keypoints_runs"}:
+        raise RuntimeError(
+            f"Unsupported subject-mask assignment keypoint group: {group!r}."
+        )
+    if not run:
+        raise RuntimeError("Subject-mask assignment keypoint run is missing.")
+    if group == "keypoints_runs" and run != str(target.get("keypoint_run") or ""):
+        raise RuntimeError(
+            "Canonical keypoint assignment run does not match keypoint_run: "
+            f"{run!r} != {target.get('keypoint_run')!r}."
+        )
+    return group, run
+
+
 @dataclass(frozen=True)
 class CampaignTarget:
     target_id: str
@@ -442,9 +466,6 @@ def _refuse_output_collisions(
             [
                 zarr / "crop_runs" / str(target_plan["hybrid_crop_run"]),
                 zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
-                zarr
-                / "refined_keypoints_runs"
-                / str(target_plan["refined_keypoint_run"]),
                 zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
                 zarr
                 / "refined_subject_masks_runs"
@@ -512,9 +533,6 @@ def _refuse_output_collisions(
             [
                 zarr / "crop_runs" / str(target_plan["merged_proxy_crop_run"]),
                 zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
-                zarr
-                / "refined_keypoints_runs"
-                / str(target_plan["refined_keypoint_run"]),
                 zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
                 zarr
                 / "refined_subject_masks_runs"
@@ -741,7 +759,6 @@ def _build_downstream_target_pipeline(
     clips = list(target_payload["clips"])
     hybrid_crop_run = str(target_payload["hybrid_crop_run"])
     keypoint_run = str(target_payload["keypoint_run"])
-    refined_keypoint_run = str(target_payload["refined_keypoint_run"])
     subject_mask_run = str(target_payload["subject_mask_run"])
     refined_subject_mask_run = str(target_payload["refined_subject_mask_run"])
     refined_subject_mask_draft_run = str(
@@ -1083,42 +1100,8 @@ def _build_downstream_target_pipeline(
             target.analysis_zarr / "keypoints_runs" / keypoint_run / "zarr.json",
         ),
     )
-    keypoint_refine_key = f"keypoint_refine:{target_safe}"
-    keypoint_refine_job = _job(
-        workflow_id=workflow_id,
-        repo=repo,
-        run_root=run_root,
-        job_key=keypoint_refine_key,
-        stage="keypoint_refine",
-        command=(
-            "scripts/py",
-            "-m",
-            "fisheye.refinement.refine_keypoints",
-            str(target.analysis_zarr),
-            "--keypoint-run",
-            keypoint_run,
-            "--run-name",
-            refined_keypoint_run,
-            "--chunk-size",
-            "2048",
-            "--scheduler",
-            "threads",
-            "--num-workers",
-            "4",
-            "--no-post-audit",
-        ),
-        resources=cpu,
-        upstream=(keypoint_finalize_key,),
-        expected_outputs=(
-            target.analysis_zarr
-            / "refined_keypoints_runs"
-            / refined_keypoint_run
-            / "zarr.json",
-        ),
-    )
-    jobs.extend((keypoint_finalize_job, keypoint_refine_job))
-    raw_keypoints_artifact = f"raw_keypoints:{target_safe}"
-    refined_keypoints_artifact = f"refined_keypoints:{target_safe}"
+    jobs.append(keypoint_finalize_job)
+    canonical_keypoints_artifact = f"canonical_keypoints:{target_safe}"
     raw_masks_artifact = f"raw_subject_masks:{target_safe}"
     fragments.extend(
         (
@@ -1128,10 +1111,9 @@ def _build_downstream_target_pipeline(
                     keypoint_preflight_job,
                     keypoint_array_job,
                     keypoint_finalize_job,
-                    keypoint_refine_job,
                 ),
                 requires=(hybrid_artifact,),
-                provides=(raw_keypoints_artifact, refined_keypoints_artifact),
+                provides=(canonical_keypoints_artifact,),
                 metadata={
                     "module": "keypoints",
                     "target_id": target.target_id,
@@ -1139,6 +1121,9 @@ def _build_downstream_target_pipeline(
                     "crop_run": hybrid_crop_run,
                     "finalization_mapping_mode": "direct_same_crop_row_ids",
                     "expected_target_crop_rows": expected_target_crop_rows,
+                    "assignment_keypoint_group": "keypoints_runs",
+                    "assignment_keypoints_run": keypoint_run,
+                    "keypoint_refinement_mode": "canonical_passthrough_v1",
                 },
             ),
             LsfWorkflowFragment(
@@ -1241,9 +1226,9 @@ def _build_downstream_target_pipeline(
             "--postcompute-chunk-size",
             "256",
             "--assignment-keypoint-group",
-            "refined_keypoints_runs",
+            "keypoints_runs",
             "--assignment-keypoints-run",
-            refined_keypoint_run,
+            keypoint_run,
             "--no-write-component-contours",
             "--require-production-proof",
             "--json",
@@ -1291,7 +1276,7 @@ def _build_downstream_target_pipeline(
                 array_indexed=True,
             )
         )
-    package_upstream = [subject_mask_array_key, keypoint_refine_key]
+    package_upstream = [subject_mask_array_key, keypoint_finalize_key]
     if mask_grid_key is not None:
         package_upstream.append(mask_grid_key)
     package_array_job = _task_group_job(
@@ -1438,13 +1423,15 @@ def _build_downstream_target_pipeline(
         LsfWorkflowFragment(
             fragment_id=f"subject_mask_refinement:{target_safe}",
             jobs=tuple(mask_fragment_jobs),
-            requires=(raw_masks_artifact, refined_keypoints_artifact),
+            requires=(raw_masks_artifact, canonical_keypoints_artifact),
             provides=(refined_masks_artifact,),
             metadata={
                 "module": "subject_mask_refinement",
                 "target_id": target.target_id,
                 "crop_run": hybrid_crop_run,
                 "selector_activation": False,
+                "assignment_keypoint_group": "keypoints_runs",
+                "assignment_keypoints_run": keypoint_run,
             },
         )
     )
@@ -1478,7 +1465,7 @@ def _build_downstream_target_pipeline(
         LsfWorkflowFragment(
             fragment_id=f"analysis_validation:{target_safe}",
             jobs=(validation_job,),
-            requires=(refined_keypoints_artifact, refined_masks_artifact),
+            requires=(canonical_keypoints_artifact, refined_masks_artifact),
             provides=(validated_artifact,),
             metadata={
                 "module": "analysis_validation",
@@ -2161,6 +2148,9 @@ def build_plan(
                 else "identity_rebase"
             ),
             "refined_keypoint_run": refined_keypoint_run,
+            "assignment_keypoint_group": "keypoints_runs",
+            "assignment_keypoints_run": keypoint_run,
+            "keypoint_refinement_mode": "canonical_passthrough_v1",
             "subject_mask_run": subject_mask_run,
             "refined_subject_mask_run": refined_subject_mask_run,
             "refined_subject_mask_draft_run": refined_subject_mask_draft_run,
@@ -2929,43 +2919,6 @@ def build_plan(
                 ),
             )
         )
-        keypoint_refine_key = f"keypoint_refine:{target_safe}"
-        keypoint_refine = [
-            "scripts/py",
-            "-m",
-            "fisheye.refinement.refine_keypoints",
-            str(target.analysis_zarr),
-            "--keypoint-run",
-            keypoint_run,
-            "--run-name",
-            refined_keypoint_run,
-            "--chunk-size",
-            "2048",
-            "--scheduler",
-            "threads",
-            "--num-workers",
-            "4",
-            "--no-post-audit",
-        ]
-        jobs.append(
-            _job(
-                workflow_id=workflow_id,
-                repo=repo,
-                run_root=run_root,
-                job_key=keypoint_refine_key,
-                stage="keypoint_refine",
-                command=keypoint_refine,
-                resources=cpu,
-                upstream=(keypoint_finalize_key,),
-                expected_outputs=(
-                    target.analysis_zarr
-                    / "refined_keypoints_runs"
-                    / refined_keypoint_run
-                    / "zarr.json",
-                ),
-            )
-        )
-
         mask_grid_key: str | None = None
         if encoded_mask_packages:
             mask_grid_key = f"mask_grid:{target_safe}"
@@ -3053,9 +3006,9 @@ def build_plan(
                 "--postcompute-chunk-size",
                 "256",
                 "--assignment-keypoint-group",
-                "refined_keypoints_runs",
+                "keypoints_runs",
                 "--assignment-keypoints-run",
-                refined_keypoint_run,
+                keypoint_run,
                 "--no-write-component-contours",
                 "--require-production-proof",
                 "--json",
@@ -3103,7 +3056,7 @@ def build_plan(
                     array_indexed=True,
                 )
             )
-        package_upstream = [subject_mask_array_key, keypoint_refine_key]
+        package_upstream = [subject_mask_array_key, keypoint_finalize_key]
         if mask_grid_key is not None:
             package_upstream.append(mask_grid_key)
         jobs.append(
@@ -3273,8 +3226,7 @@ def build_plan(
             )
         )
         crop_cache_artifact = f"crop_roi_cache:{target_safe}"
-        raw_keypoints_artifact = f"raw_keypoints:{target_safe}"
-        refined_keypoints_artifact = f"refined_keypoints:{target_safe}"
+        canonical_keypoints_artifact = f"canonical_keypoints:{target_safe}"
         raw_masks_artifact = f"raw_subject_masks:{target_safe}"
         refined_masks_artifact = f"refined_subject_masks:{target_safe}"
         validated_artifact = f"validated_analysis:{target_safe}"
@@ -3309,15 +3261,17 @@ def build_plan(
                     jobs=(
                         job_by_key[keypoint_array_key],
                         job_by_key[keypoint_finalize_key],
-                        job_by_key[keypoint_refine_key],
                     ),
                     requires=(crop_cache_artifact,),
-                    provides=(raw_keypoints_artifact, refined_keypoints_artifact),
+                    provides=(canonical_keypoints_artifact,),
                     metadata={
                         "module": "keypoints",
                         "target_id": target.target_id,
                         "recording_layout": "clipped_collection",
-                        "terminal_job_key": keypoint_refine_key,
+                        "terminal_job_key": keypoint_finalize_key,
+                        "assignment_keypoint_group": "keypoints_runs",
+                        "assignment_keypoints_run": keypoint_run,
+                        "keypoint_refinement_mode": "canonical_passthrough_v1",
                     },
                 ),
                 LsfWorkflowFragment(
@@ -3336,19 +3290,21 @@ def build_plan(
                 LsfWorkflowFragment(
                     fragment_id=f"subject_mask_refinement:{target_safe}",
                     jobs=tuple(job_by_key[key] for key in mask_finalize_keys),
-                    requires=(raw_masks_artifact, refined_keypoints_artifact),
+                    requires=(raw_masks_artifact, canonical_keypoints_artifact),
                     provides=(refined_masks_artifact,),
                     metadata={
                         "module": "subject_mask_refinement",
                         "target_id": target.target_id,
                         "recording_layout": "clipped_collection",
                         "terminal_job_key": mask_publish_key,
+                        "assignment_keypoint_group": "keypoints_runs",
+                        "assignment_keypoints_run": keypoint_run,
                     },
                 ),
                 LsfWorkflowFragment(
                     fragment_id=f"analysis_validation:{target_safe}",
                     jobs=(job_by_key[validation_key],),
-                    requires=(refined_keypoints_artifact, refined_masks_artifact),
+                    requires=(canonical_keypoints_artifact, refined_masks_artifact),
                     provides=(validated_artifact,),
                     metadata={
                         "module": "analysis_validation",

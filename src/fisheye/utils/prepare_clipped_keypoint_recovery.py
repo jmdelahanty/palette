@@ -16,7 +16,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import zarr
 
-from fisheye.cluster.clipped_inference import SUPPORTED_PLAN_SCHEMAS
+from fisheye.cluster.clipped_inference import (
+    SUPPORTED_PLAN_SCHEMAS,
+    assignment_keypoint_binding,
+)
 from fisheye.shared.hybrid_crop_provider import HYBRID_CROP_RUN_SCHEMA_ID
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.roi_pixel_contract import (
@@ -426,12 +429,21 @@ def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
                 )
             clip_reports.append(clip_report)
 
-        downstream = (
+        downstream = [
             ("keypoints_runs", str(target["keypoint_run"])),
-            ("refined_keypoints_runs", str(target["refined_keypoint_run"])),
             ("refined_subject_masks_runs", str(target["refined_subject_mask_run"])),
-        )
-        collisions = [f"{parent}/{name}" for parent, name in downstream if parent in root and name in root[parent]]
+        ]
+        assignment_group, assignment_run = assignment_keypoint_binding(target)
+        if assignment_group == "refined_keypoints_runs":
+            downstream.insert(
+                1,
+                ("refined_keypoints_runs", assignment_run),
+            )
+        collisions = [
+            f"{parent}/{name}"
+            for parent, name in downstream
+            if parent in root and name in root[parent]
+        ]
         if collisions:
             raise FileExistsError("Downstream recovery outputs already exist: " + ", ".join(collisions))
         reports.append(
