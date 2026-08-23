@@ -40,7 +40,6 @@ from fisheye.shared.zarr.array_contracts import (
     ArrayContractCatalog,
 )
 
-
 RAW_SUBJECT_MASK_UINT8_SCHEMA_ID = "palette.stage.subject_mask_probabilities_uint8"
 RAW_SUBJECT_MASK_FLOAT16_SCHEMA_ID = "palette.stage.subject_mask_probabilities_float16"
 RAW_SUBJECT_MASK_SCHEMA_VERSION = 1
@@ -50,6 +49,115 @@ SUBJECT_MASK_LAYOUT = "recording_observations_with_frame_row_offsets_v1"
 
 _CONTENT_SCAN_TARGET_BYTES = 8 * 1024 * 1024
 _COMPONENT_LABEL = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class SubjectMaskComponentSchema:
+    """Named component membership and requiredness for one mask schema."""
+
+    schema_id: str
+    schema_version: int
+    labels: tuple[str, ...]
+    required_labels: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        schema_id = str(self.schema_id).strip()
+        labels = tuple(str(label).strip() for label in self.labels)
+        required = tuple(str(label).strip() for label in self.required_labels)
+        if not schema_id:
+            raise ValueError("Subject-mask component schema_id is required.")
+        if type(self.schema_version) is not int or self.schema_version <= 0:
+            raise ValueError("Subject-mask component schema_version must be positive.")
+        if not labels:
+            raise ValueError("At least one subject-mask component is required.")
+        if len(labels) != len(set(labels)):
+            raise ValueError("Subject-mask component labels must be unique.")
+        for label in labels:
+            if not _COMPONENT_LABEL.fullmatch(label):
+                raise ValueError(
+                    "Subject-mask component labels must match ^[a-z][a-z0-9_]*$."
+                )
+        if len(required) != len(set(required)):
+            raise ValueError("Required subject-mask component labels must be unique.")
+        unknown = set(required).difference(labels)
+        if unknown:
+            raise ValueError(
+                "Required subject-mask components are absent from the schema: "
+                + ", ".join(sorted(unknown))
+            )
+        object.__setattr__(self, "schema_id", schema_id)
+        object.__setattr__(self, "labels", labels)
+        object.__setattr__(self, "required_labels", required)
+
+    @property
+    def optional_labels(self) -> tuple[str, ...]:
+        required = set(self.required_labels)
+        return tuple(label for label in self.labels if label not in required)
+
+    def as_manifest(self) -> dict[str, object]:
+        return {
+            "schema_id": self.schema_id,
+            "schema_version": self.schema_version,
+            "labels": list(self.labels),
+            "required_labels": list(self.required_labels),
+            "optional_labels": list(self.optional_labels),
+            "requiredness_policy": "declared_component_schema_v1",
+        }
+
+
+SUBJECT_V1_UNION_COMPONENT_SCHEMA = SubjectMaskComponentSchema(
+    schema_id="subject_v1_union",
+    schema_version=1,
+    labels=("subject_body", "eyes_union", "swim_bladder"),
+    required_labels=("subject_body", "eyes_union", "swim_bladder"),
+)
+SUBJECT_V1_LR_COMPONENT_SCHEMA = SubjectMaskComponentSchema(
+    schema_id="subject_v1_lr",
+    schema_version=1,
+    labels=("subject_body", "eye_left", "eye_right", "swim_bladder"),
+    required_labels=("subject_body", "eye_left", "eye_right", "swim_bladder"),
+)
+SUBJECT_MASK_COMPONENT_SCHEMAS = {
+    schema.schema_id: schema
+    for schema in (
+        SUBJECT_V1_UNION_COMPONENT_SCHEMA,
+        SUBJECT_V1_LR_COMPONENT_SCHEMA,
+    )
+}
+
+
+def resolve_subject_mask_component_schema(
+    *,
+    schema_id: str | None,
+    labels: tuple[str, ...],
+) -> SubjectMaskComponentSchema:
+    """Resolve exact persisted labels to one named requiredness contract."""
+
+    normalized_labels = tuple(str(label).strip() for label in labels)
+    normalized_id = str(schema_id or "").strip()
+    if normalized_id:
+        schema = SUBJECT_MASK_COMPONENT_SCHEMAS.get(normalized_id)
+        if schema is None:
+            raise ValueError(
+                f"Unsupported subject-mask component schema_id {normalized_id!r}."
+            )
+        if normalized_labels != schema.labels:
+            raise ValueError(
+                f"Subject-mask labels {normalized_labels!r} do not match "
+                f"{normalized_id!r}: {schema.labels!r}."
+            )
+        return schema
+    matches = [
+        schema
+        for schema in SUBJECT_MASK_COMPONENT_SCHEMAS.values()
+        if normalized_labels == schema.labels
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "Persisted subject-mask labels do not resolve to exactly one component "
+            f"schema: {normalized_labels!r}."
+        )
+    return matches[0]
 
 
 class SubjectMaskProbabilityEncoding(str, Enum):
@@ -612,10 +720,9 @@ class RawSubjectMaskSchema:
             encoded = _rows(probabilities, start, stop)
             if self.encoding is SubjectMaskProbabilityEncoding.LINEAR_UINT8_0_255:
                 decoded = encoded.astype(np.float32) / np.float32(255.0)
-                expected_prob_max = (
-                    np.max(encoded, axis=(2, 3)).astype(np.float32, copy=False)
-                    / np.float32(255.0)
-                )
+                expected_prob_max = np.max(encoded, axis=(2, 3)).astype(
+                    np.float32, copy=False
+                ) / np.float32(255.0)
             else:
                 decoded = encoded.astype(np.float32)
                 expected_prob_max = np.max(decoded, axis=(2, 3)).astype(
@@ -872,8 +979,12 @@ __all__ = [
     "REFINED_SUBJECT_MASK_CORE_SCHEMA_ID",
     "REFINED_SUBJECT_MASK_CORE_SCHEMA_V1",
     "REFINED_SUBJECT_MASK_CORE_SCHEMA_VERSION",
+    "SUBJECT_MASK_COMPONENT_SCHEMAS",
+    "SUBJECT_V1_LR_COMPONENT_SCHEMA",
+    "SUBJECT_V1_UNION_COMPONENT_SCHEMA",
     "RawSubjectMaskSchema",
     "RefinedSubjectMaskCoreSchema",
+    "SubjectMaskComponentSchema",
     "SubjectMaskComponentRegistry",
     "SubjectMaskDimensions",
     "SubjectMaskProbabilityEncoding",
@@ -881,4 +992,5 @@ __all__ = [
     "SubjectMaskSchemaIssue",
     "derive_subject_mask_frame_row_offsets",
     "derive_subject_mask_metrics",
+    "resolve_subject_mask_component_schema",
 ]

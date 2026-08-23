@@ -16,6 +16,9 @@ from fisheye.cluster.clipped_inference import (
 )
 from fisheye.cluster.lsf import write_json_snapshot
 from fisheye.cluster.whole_recording_analysis_validate import (
+    _aggregate_component_completeness,
+    _component_completeness_report,
+    _component_presence_report,
     _require_complete_run,
     _validate_raw_masks,
     _validate_refined_masks,
@@ -33,7 +36,7 @@ from fisheye.shared.zarr.subject_mask_schema import (
     derive_subject_mask_frame_row_offsets,
 )
 
-REPORT_SCHEMA = "palette.clipped_inference_target_validation.v1"
+REPORT_SCHEMA = "palette.clipped_inference_target_validation.v2"
 VALIDATION_ROW_CHUNK = 131_072
 
 
@@ -302,6 +305,88 @@ def _cache_validation_mode(*, cleaned_cache_count: int, clip_count: int) -> str:
             f"{cleaned}/{total} manifests are absent."
         )
     return "post_cleanup_all_absent" if cleaned == total else "live_payloads"
+
+
+def _refined_clip_component_presence(
+    run: Any,
+    *,
+    clips: Sequence[Mapping[str, Any]],
+    raw_mask_reports: Sequence[Mapping[str, Any]],
+    component_schema: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    labels = tuple(str(label) for label in component_schema.get("labels", ()))
+    required_labels = tuple(
+        str(label) for label in component_schema.get("required_labels", ())
+    )
+    if not labels or not required_labels:
+        raise RuntimeError(
+            "Refined subject-mask component schema lacks labels or required_labels."
+        )
+    metrics = run.get("metrics/mask_present")
+    if metrics is None:
+        raise RuntimeError("Refined run is missing metrics/mask_present.")
+    shape = tuple(int(value) for value in metrics.shape)
+    if len(shape) != 2 or shape[1] != len(labels):
+        raise RuntimeError(
+            "Refined metrics/mask_present does not match its component schema: "
+            f"{shape!r} versus (*, {len(labels)})."
+        )
+    if len(clips) != len(raw_mask_reports):
+        raise RuntimeError("Clip and raw subject-mask report counts differ.")
+
+    reports: list[dict[str, Any]] = []
+    cursor = 0
+    for clip, raw_report in zip(clips, raw_mask_reports, strict=True):
+        clip_id = str(clip.get("clip_id") or "")
+        raw_identity = raw_report.get("instance_key")
+        if not isinstance(raw_identity, Mapping):
+            raise RuntimeError(f"Raw mask report lacks instance identity: {clip_id}")
+        row_count = int(raw_identity.get("row_count") or 0)
+        if row_count <= 0:
+            raise RuntimeError(f"Raw mask report has no rows: {clip_id}")
+        start = int(clip.get("crop_row_start", cursor))
+        stop = int(clip.get("crop_row_stop", start + row_count))
+        if start != cursor or stop != start + row_count or stop > shape[0]:
+            raise RuntimeError(
+                f"Refined mask clip interval is not exact for {clip_id}: "
+                f"{start}:{stop}, expected {cursor}:{cursor + row_count}."
+            )
+        present = np.asarray(metrics[start:stop], dtype=bool)
+        if present.shape != (row_count, len(labels)):
+            raise RuntimeError(
+                f"Refined mask clip metrics have invalid shape for {clip_id}: "
+                f"{present.shape!r}."
+            )
+        counts = present.sum(axis=0, dtype=np.int64)
+        presence = _component_presence_report(
+            labels,
+            counts > 0,
+            required_labels=required_labels,
+        )
+        reports.append(
+            {
+                "clip_id": clip_id,
+                "row_start": start,
+                "row_stop": stop,
+                "row_count": row_count,
+                "mask_present_counts": {
+                    label: int(value)
+                    for label, value in zip(labels, counts, strict=True)
+                },
+                "component_presence_policy": presence,
+                "component_completeness": _component_completeness_report(
+                    presence,
+                    None,
+                ),
+            }
+        )
+        cursor = stop
+    if cursor != shape[0]:
+        raise RuntimeError(
+            "Refined mask clip intervals do not cover the recording exactly: "
+            f"{cursor}/{shape[0]} rows."
+        )
+    return reports
 
 
 def validate_target(
@@ -769,6 +854,39 @@ def validate_target(
         raise RuntimeError(
             f"Refined-mask row count {refined_report['shape'][0]} != keypoint row count {expected_rows}."
         )
+    refined_component_schema = refined_report.get("component_schema")
+    if not isinstance(refined_component_schema, Mapping):
+        raise RuntimeError("Refined mask report lacks its component schema.")
+    refined_clip_reports = _refined_clip_component_presence(
+        refined_masks,
+        clips=target["clips"],
+        raw_mask_reports=raw_mask_reports,
+        component_schema=refined_component_schema,
+    )
+    completeness_entries: list[dict[str, Any]] = []
+    for raw_report in raw_mask_reports:
+        completeness_entries.append(
+            {
+                "stage": "raw_subject_masks",
+                "clip_id": str(raw_report["clip_id"]),
+                "report": raw_report,
+            }
+        )
+    for clip_report in refined_clip_reports:
+        completeness_entries.append(
+            {
+                "stage": "refined_subject_masks",
+                "clip_id": str(clip_report["clip_id"]),
+                "report": clip_report,
+            }
+        )
+    completeness_entries.append(
+        {
+            "stage": "refined_subject_masks_recording",
+            "report": refined_report,
+        }
+    )
+    component_completeness = _aggregate_component_completeness(completeness_entries)
     quality_run_name = str(target["subject_mask_quality_run"])
     _require_complete_run(root, "subject_mask_quality_runs", quality_run_name)
     bundle_id = str(target["subject_mask_bundle_id"])
@@ -804,6 +922,8 @@ def validate_target(
         "assignment_keypoints": assignment_keypoint_identity,
         "raw_subject_masks": raw_mask_reports,
         "refined_subject_masks": refined_report,
+        "refined_subject_mask_clip_presence": refined_clip_reports,
+        "subject_mask_component_completeness": component_completeness,
         "refined_subject_mask_identity": refined_mask_identity,
         "frame_counts": frame_count_reports,
         "refined_subject_mask_contract": contract,

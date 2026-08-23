@@ -69,6 +69,22 @@ Operational note:
 
 Readers must never infer channel meaning from channel index alone.
 
+### Component requiredness and completeness
+
+The named `subject_v1_union` and `subject_v1_lr` component schemas currently
+declare every listed component required. Requiredness is part of the named mask
+schema; validators must not assign it from component-name heuristics. A future
+schema that permits optional components must use a distinct schema identity or
+version and declare those optional components explicitly.
+
+For a canonical inference output, every required component must also be marked
+available by `available_channels`. A required component marked unavailable is a
+schema/authority violation. A required component that is available but has no
+positive masks is different: the artifact remains structurally publishable,
+and validation records a non-blocking scientific-completeness failure for the
+affected run or clip. Consumers may gate their own analyses on that completeness
+status without conflating it with storage corruption or publication validity.
+
 ## Evolution Policy
 
 This contract is intended to support three different runtime shapes over time:

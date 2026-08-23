@@ -61,13 +61,29 @@ def _complete_group(**attrs) -> FakeGroup:  # noqa: ANN003
 def _root() -> FakeGroup:
     raw_probabilities = np.full((4, 3, 2, 2), 128, dtype=np.uint8)
     raw = _complete_group(
+        label_schema_id="subject_v1_union",
         mask_labels=list(mod.RAW_LABELS),
     )
     raw["mask_probs_roi"] = FakeArray(raw_probabilities)
+    raw["available_channels"] = FakeArray(np.ones((3,), dtype=bool))
     raw["metrics"] = FakeGroup({"mask_present": FakeArray(np.ones((4, 3), dtype=bool))})
 
     refined = _complete_group(
         mask_labels=list(mod.REFINED_LABELS),
+        component_registry={
+            "schema_id": "palette.subject_mask.component_registry",
+            "schema_version": 1,
+            "labels": list(mod.REFINED_LABELS),
+        },
+        logical_schema={
+            "schema_id": "palette.stage.refined_subject_mask_dense_core",
+            "schema_version": 1,
+            "components": {
+                "schema_id": "palette.subject_mask.component_registry",
+                "schema_version": 1,
+                "labels": list(mod.REFINED_LABELS),
+            },
+        },
         assignment_keypoint_group="refined_keypoints_runs",
         assignment_keypoints_run="refined_keypoints_test",
         sampled_component_contours_status="computed",
@@ -75,6 +91,7 @@ def _root() -> FakeGroup:
         component_contours_requested=False,
     )
     refined["masks_roi"] = FakeArray(np.ones((4, 4, 2, 2), dtype=np.uint8))
+    refined["available_channels"] = FakeArray(np.ones((4,), dtype=bool))
     refined["metrics"] = FakeGroup(
         {"mask_present": FakeArray(np.ones((4, 4), dtype=bool))}
     )
@@ -143,6 +160,19 @@ def test_validate_analysis_plan_checks_exact_dense_outputs(tmp_path: Path) -> No
     assert target["raw_masks"]["dtype"] == "uint8"
     assert target["refined_masks"]["sample_unique_values"] == [1]
     assert target["refined_masks"]["authoritative_surface"] == "masks_roi"
+    assert target["refined_masks"]["component_schema"]["resolution_basis"] == (
+        "exact_component_labels"
+    )
+    assert (
+        target["refined_masks"]["component_schema"]["component_registry_present"]
+        is True
+    )
+    assert (
+        target["refined_masks"]["component_schema"]["logical_schema_components_present"]
+        is True
+    )
+    assert target["subject_mask_component_completeness"]["status"] == "passed"
+    assert report["component_completeness_status"] == "passed"
 
 
 def test_read_rows_uses_explicit_slices_for_zarr_orthogonal_indexing() -> None:
@@ -160,7 +190,7 @@ def test_read_rows_uses_explicit_slices_for_zarr_orthogonal_indexing() -> None:
     )
 
 
-def test_validate_analysis_plan_fails_on_all_zero_required_raw_component(
+def test_validate_analysis_plan_reports_all_zero_required_raw_component(
     tmp_path: Path,
 ) -> None:
     plan_path = tmp_path / "plan.json"
@@ -169,6 +199,7 @@ def test_validate_analysis_plan_fails_on_all_zero_required_raw_component(
     raw = root["subject_mask_runs"]["subject_masks_test"]
     values = raw["mask_probs_roi"].values
     values[:, 0, :, :] = 0
+    raw["metrics"]["mask_present"].values[:, 0] = False
 
     report = mod.validate_analysis_plan(
         plan_path,
@@ -176,12 +207,17 @@ def test_validate_analysis_plan_fails_on_all_zero_required_raw_component(
         contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
     )
 
-    assert report["status"] == "invalid"
-    assert report["invalid_count"] == 1
-    assert "subject_body" in report["targets"][0]["error"]["message"]
+    assert report["status"] == "ok"
+    assert report["invalid_count"] == 0
+    target = report["targets"][0]
+    assert target["raw_masks"]["component_presence_policy"][
+        "missing_required_components"
+    ] == ["subject_body"]
+    assert target["subject_mask_component_completeness"]["status"] == "failed"
+    assert report["component_completeness_status"] == "failed"
 
 
-def test_validate_analysis_plan_reports_absent_optional_raw_component(
+def test_validate_analysis_plan_reports_absent_required_raw_component(
     tmp_path: Path,
 ) -> None:
     plan_path = tmp_path / "plan.json"
@@ -200,15 +236,19 @@ def test_validate_analysis_plan_reports_absent_optional_raw_component(
     assert report["status"] == "ok"
     raw_report = report["targets"][0]["raw_masks"]
     assert raw_report["mask_present_counts"]["swim_bladder"] == 0
-    assert raw_report["component_presence_policy"]["absent_optional_components"] == [
+    assert raw_report["component_schema"]["schema_id"] == "subject_v1_union"
+    assert raw_report["component_presence_policy"]["optional_components"] == []
+    assert raw_report["component_presence_policy"]["missing_required_components"] == [
         "swim_bladder"
     ]
     assert raw_report["sample_component_presence_policy"][
-        "absent_optional_components"
+        "missing_required_components"
     ] == ["swim_bladder"]
+    assert raw_report["component_completeness"]["status"] == "failed"
+    assert raw_report["component_completeness"]["publication_blocking"] is False
 
 
-def test_validate_analysis_plan_fails_on_absent_required_raw_masks(
+def test_validate_analysis_plan_notes_metric_absence_without_invalidating(
     tmp_path: Path,
 ) -> None:
     plan_path = tmp_path / "plan.json"
@@ -223,11 +263,20 @@ def test_validate_analysis_plan_fails_on_absent_required_raw_masks(
         contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
     )
 
-    assert report["status"] == "invalid"
-    assert "subject_body" in report["targets"][0]["error"]["message"]
+    assert report["status"] == "ok"
+    completeness = report["targets"][0]["subject_mask_component_completeness"]
+    assert completeness["status"] == "failed"
+    assert completeness["failures"] == [
+        {
+            "stage": "raw_subject_masks",
+            "code": "required_component_has_no_present_masks",
+            "scope": "all_rows",
+            "component": "subject_body",
+        }
+    ]
 
 
-def test_validate_analysis_plan_reports_absent_optional_refined_component(
+def test_validate_analysis_plan_reports_absent_required_refined_component(
     tmp_path: Path,
 ) -> None:
     plan_path = tmp_path / "plan.json"
@@ -246,15 +295,17 @@ def test_validate_analysis_plan_reports_absent_optional_refined_component(
     assert report["status"] == "ok"
     refined_report = report["targets"][0]["refined_masks"]
     assert refined_report["mask_present_counts"]["swim_bladder"] == 0
+    assert refined_report["component_schema"]["schema_id"] == "subject_v1_lr"
     assert refined_report["component_presence_policy"][
-        "absent_optional_components"
+        "missing_required_components"
     ] == ["swim_bladder"]
     assert refined_report["sample_component_presence_policy"][
-        "absent_optional_components"
+        "missing_required_components"
     ] == ["swim_bladder"]
+    assert refined_report["component_completeness"]["status"] == "failed"
 
 
-def test_validate_analysis_plan_fails_on_absent_required_refined_component(
+def test_validate_analysis_plan_notes_required_refined_component_absence(
     tmp_path: Path,
 ) -> None:
     plan_path = tmp_path / "plan.json"
@@ -270,8 +321,49 @@ def test_validate_analysis_plan_fails_on_absent_required_refined_component(
         contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
     )
 
+    assert report["status"] == "ok"
+    completeness = report["targets"][0]["subject_mask_component_completeness"]
+    assert completeness["status"] == "failed"
+    assert completeness["failures"][0]["component"] == "subject_body"
+
+
+def test_validate_analysis_plan_fails_when_required_schema_channel_unavailable(
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path)
+    root = _root()
+    raw = root["subject_mask_runs"]["subject_masks_test"]
+    raw["available_channels"].values[2] = False
+
+    report = mod.validate_analysis_plan(
+        plan_path,
+        open_root_fn=lambda *_args, **_kwargs: root,
+        contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
+    )
+
     assert report["status"] == "invalid"
-    assert "subject_body" in report["targets"][0]["error"]["message"]
+    assert "swim_bladder" in report["targets"][0]["error"]["message"]
+    assert "marked unavailable" in report["targets"][0]["error"]["message"]
+
+
+def test_validate_analysis_plan_fails_on_mask_schema_label_mismatch(
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path)
+    root = _root()
+    raw = root["subject_mask_runs"]["subject_masks_test"]
+    raw.attrs["mask_labels"] = ["subject_body", "eyes_union", "unknown_component"]
+
+    report = mod.validate_analysis_plan(
+        plan_path,
+        open_root_fn=lambda *_args, **_kwargs: root,
+        contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
+    )
+
+    assert report["status"] == "invalid"
+    assert "do not match" in report["targets"][0]["error"]["message"]
 
 
 def test_validate_analysis_plan_requires_authoritative_dense_masks(
