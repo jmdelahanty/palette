@@ -140,8 +140,20 @@ def refined_detection_metadata_declaration_maps(
     *,
     run_id: str,
     plans: RefinedDetectionStoragePlanSet,
+    allow_missing_root_consolidated: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Extract direct and archive-root consolidated declarations for one run."""
+    """Extract direct and archive-root consolidated declarations for one run.
+
+    ``allow_missing_root_consolidated`` is reserved for an immutable,
+    selector-ineligible child inside an actively mutable archive.  In that
+    lifecycle, callers validate the current direct declarations against the
+    child's persisted publication digest by supplying the direct tree as the
+    equivalent historical consolidated tree.  An existing but malformed or
+    stale consolidated envelope still fails closed.
+    """
+
+    if type(allow_missing_root_consolidated) is not bool:
+        raise TypeError("allow_missing_root_consolidated must be an exact bool.")
 
     relative_paths = (
         "",
@@ -160,6 +172,21 @@ def refined_detection_metadata_declaration_maps(
     archive_root = _read_strict_json(output_path / "zarr.json")
     envelope = archive_root.get("consolidated_metadata")
     if not isinstance(envelope, Mapping):
+        if allow_missing_root_consolidated and envelope is None:
+            run_attributes = direct[""].get("attributes")
+            if not isinstance(run_attributes, Mapping) or (
+                run_attributes.get("immutable_snapshot") is not True
+                or run_attributes.get("finalized_recording_authority") is not True
+                or run_attributes.get("stage_selector_eligible") is not False
+            ):
+                raise ValueError(
+                    "Direct-only metadata validation requires an immutable, "
+                    "finalized, selector-ineligible refined run."
+                )
+            return direct, {
+                relative: dict(declaration)
+                for relative, declaration in direct.items()
+            }
         raise ValueError("Snapshot archive lacks root consolidated_metadata.")
     if envelope.get("kind") != "inline" or envelope.get("must_understand") is not False:
         raise ValueError("Snapshot consolidated metadata envelope is invalid.")
