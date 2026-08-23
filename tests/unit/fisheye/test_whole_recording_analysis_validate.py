@@ -55,9 +55,7 @@ class FakeGroup(dict):
 
 
 def _complete_group(**attrs) -> FakeGroup:  # noqa: ANN003
-    return FakeGroup(
-        attrs={"palette_run_completion_status": "complete", **attrs}
-    )
+    return FakeGroup(attrs={"palette_run_completion_status": "complete", **attrs})
 
 
 def _root() -> FakeGroup:
@@ -66,9 +64,7 @@ def _root() -> FakeGroup:
         mask_labels=list(mod.RAW_LABELS),
     )
     raw["mask_probs_roi"] = FakeArray(raw_probabilities)
-    raw["metrics"] = FakeGroup(
-        {"mask_present": FakeArray(np.ones((4, 3), dtype=bool))}
-    )
+    raw["metrics"] = FakeGroup({"mask_present": FakeArray(np.ones((4, 3), dtype=bool))})
 
     refined = _complete_group(
         mask_labels=list(mod.REFINED_LABELS),
@@ -90,9 +86,7 @@ def _root() -> FakeGroup:
     )
     return FakeGroup(
         {
-            "keypoints_runs": FakeGroup(
-                {"keypoints_test": _complete_group()}
-            ),
+            "keypoints_runs": FakeGroup({"keypoints_test": _complete_group()}),
             "refined_keypoints_runs": FakeGroup(
                 {"refined_keypoints_test": _complete_group()}
             ),
@@ -166,13 +160,15 @@ def test_read_rows_uses_explicit_slices_for_zarr_orthogonal_indexing() -> None:
     )
 
 
-def test_validate_analysis_plan_fails_on_all_zero_raw_component(tmp_path: Path) -> None:
+def test_validate_analysis_plan_fails_on_all_zero_required_raw_component(
+    tmp_path: Path,
+) -> None:
     plan_path = tmp_path / "plan.json"
     _write_plan(plan_path)
     root = _root()
     raw = root["subject_mask_runs"]["subject_masks_test"]
     values = raw["mask_probs_roi"].values
-    values[:, 2, :, :] = 0
+    values[:, 0, :, :] = 0
 
     report = mod.validate_analysis_plan(
         plan_path,
@@ -182,18 +178,44 @@ def test_validate_analysis_plan_fails_on_all_zero_raw_component(tmp_path: Path) 
 
     assert report["status"] == "invalid"
     assert report["invalid_count"] == 1
-    assert "swim_bladder" in report["targets"][0]["error"]["message"]
+    assert "subject_body" in report["targets"][0]["error"]["message"]
 
 
-def test_validate_analysis_plan_requires_authoritative_dense_masks(
+def test_validate_analysis_plan_reports_absent_optional_raw_component(
     tmp_path: Path,
 ) -> None:
     plan_path = tmp_path / "plan.json"
     _write_plan(plan_path)
     root = _root()
-    del root["refined_subject_masks_runs"]["refined_subject_masks_test"][
-        "masks_roi"
+    raw = root["subject_mask_runs"]["subject_masks_test"]
+    raw["mask_probs_roi"].values[:, 2, :, :] = 0
+    raw["metrics"]["mask_present"].values[:, 2] = False
+
+    report = mod.validate_analysis_plan(
+        plan_path,
+        open_root_fn=lambda *_args, **_kwargs: root,
+        contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
+    )
+
+    assert report["status"] == "ok"
+    raw_report = report["targets"][0]["raw_masks"]
+    assert raw_report["mask_present_counts"]["swim_bladder"] == 0
+    assert raw_report["component_presence_policy"]["absent_optional_components"] == [
+        "swim_bladder"
     ]
+    assert raw_report["sample_component_presence_policy"][
+        "absent_optional_components"
+    ] == ["swim_bladder"]
+
+
+def test_validate_analysis_plan_fails_on_absent_required_raw_masks(
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path)
+    root = _root()
+    raw = root["subject_mask_runs"]["subject_masks_test"]
+    raw["metrics"]["mask_present"].values[:, 0] = False
 
     report = mod.validate_analysis_plan(
         plan_path,
@@ -202,6 +224,69 @@ def test_validate_analysis_plan_requires_authoritative_dense_masks(
     )
 
     assert report["status"] == "invalid"
-    assert "authoritative dense masks_roi" in report["targets"][0]["error"][
-        "message"
-    ]
+    assert "subject_body" in report["targets"][0]["error"]["message"]
+
+
+def test_validate_analysis_plan_reports_absent_optional_refined_component(
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path)
+    root = _root()
+    refined = root["refined_subject_masks_runs"]["refined_subject_masks_test"]
+    refined["masks_roi"].values[:, 3, :, :] = 0
+    refined["metrics"]["mask_present"].values[:, 3] = False
+
+    report = mod.validate_analysis_plan(
+        plan_path,
+        open_root_fn=lambda *_args, **_kwargs: root,
+        contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
+    )
+
+    assert report["status"] == "ok"
+    refined_report = report["targets"][0]["refined_masks"]
+    assert refined_report["mask_present_counts"]["swim_bladder"] == 0
+    assert refined_report["component_presence_policy"][
+        "absent_optional_components"
+    ] == ["swim_bladder"]
+    assert refined_report["sample_component_presence_policy"][
+        "absent_optional_components"
+    ] == ["swim_bladder"]
+
+
+def test_validate_analysis_plan_fails_on_absent_required_refined_component(
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path)
+    root = _root()
+    refined = root["refined_subject_masks_runs"]["refined_subject_masks_test"]
+    refined["masks_roi"].values[:, 0, :, :] = 0
+    refined["metrics"]["mask_present"].values[:, 0] = False
+
+    report = mod.validate_analysis_plan(
+        plan_path,
+        open_root_fn=lambda *_args, **_kwargs: root,
+        contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
+    )
+
+    assert report["status"] == "invalid"
+    assert "subject_body" in report["targets"][0]["error"]["message"]
+
+
+def test_validate_analysis_plan_requires_authoritative_dense_masks(
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path)
+    root = _root()
+    del root["refined_subject_masks_runs"]["refined_subject_masks_test"]["masks_roi"]
+
+    report = mod.validate_analysis_plan(
+        plan_path,
+        open_root_fn=lambda *_args, **_kwargs: root,
+        contract_validator_fn=lambda *_args, **_kwargs: {"valid": True},
+    )
+
+    assert report["status"] == "invalid"
+    assert "authoritative dense masks_roi" in report["targets"][0]["error"]["message"]

@@ -28,6 +28,8 @@ from fisheye.utils.validate_refined_subject_mask_contract import (
 REPORT_SCHEMA = "palette.whole_recording_analysis_validation.v1"
 RAW_LABELS = ("subject_body", "eyes_union", "swim_bladder")
 REFINED_LABELS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
+RAW_REQUIRED_PRESENT_LABELS = ("subject_body",)
+REFINED_REQUIRED_PRESENT_LABELS = ("subject_body",)
 
 
 def _labels(value: object) -> tuple[str, ...]:
@@ -53,6 +55,43 @@ def _read_rows(array: Any, row_indices: np.ndarray) -> np.ndarray:
     if oindex is not None:
         return np.asarray(oindex[selection_key])
     return np.asarray(array[selection_key])
+
+
+def _component_presence_report(
+    labels: tuple[str, ...],
+    present: np.ndarray,
+    *,
+    required_labels: tuple[str, ...],
+) -> dict[str, Any]:
+    required = set(required_labels)
+    unknown_required = required.difference(labels)
+    if unknown_required:
+        raise RuntimeError(
+            "Component presence policy references unknown labels: "
+            + ", ".join(sorted(unknown_required))
+        )
+    values = np.asarray(present, dtype=bool)
+    if values.shape != (len(labels),):
+        raise RuntimeError(
+            "Component presence summary has invalid shape: "
+            f"{values.shape!r} versus {(len(labels),)!r}."
+        )
+    missing_required = [
+        label
+        for label, is_present in zip(labels, values, strict=True)
+        if label in required and not bool(is_present)
+    ]
+    absent_optional = [
+        label
+        for label, is_present in zip(labels, values, strict=True)
+        if label not in required and not bool(is_present)
+    ]
+    return {
+        "required_components": [label for label in labels if label in required],
+        "optional_components": [label for label in labels if label not in required],
+        "missing_required_components": missing_required,
+        "absent_optional_components": absent_optional,
+    }
 
 
 def _require_complete_run(root: Any, parent_name: str, run_name: str) -> Any:
@@ -99,14 +138,15 @@ def _validate_raw_masks(
     component_max = sampled.reshape(sampled.shape[0], sampled.shape[1], -1).max(
         axis=(0, 2)
     )
-    if np.any(component_max <= 1):
+    sample_presence = _component_presence_report(
+        labels,
+        component_max > 1,
+        required_labels=RAW_REQUIRED_PRESENT_LABELS,
+    )
+    if sample_presence["missing_required_components"]:
         raise RuntimeError(
-            "Sampled encoded probabilities are empty or binary for components: "
-            + ", ".join(
-                label
-                for label, maximum in zip(labels, component_max, strict=True)
-                if int(maximum) <= 1
-            )
+            "Sampled encoded probabilities are empty or binary for required "
+            "components: " + ", ".join(sample_presence["missing_required_components"])
         )
     metrics = run.get("metrics/mask_present")
     if metrics is None:
@@ -118,8 +158,16 @@ def _validate_raw_masks(
             f"{present.shape!r} versus {(shape[0], len(labels))!r}."
         )
     present_counts = present.sum(axis=0, dtype=np.int64)
-    if np.any(present_counts <= 0):
-        raise RuntimeError("At least one raw component has no present masks.")
+    component_presence = _component_presence_report(
+        labels,
+        present_counts > 0,
+        required_labels=RAW_REQUIRED_PRESENT_LABELS,
+    )
+    if component_presence["missing_required_components"]:
+        raise RuntimeError(
+            "Required raw components have no present masks: "
+            + ", ".join(component_presence["missing_required_components"])
+        )
     return {
         "shape": list(shape),
         "dtype": str(np.dtype(probabilities.dtype)),
@@ -132,6 +180,8 @@ def _validate_raw_masks(
             label: int(value)
             for label, value in zip(labels, present_counts, strict=True)
         },
+        "component_presence_policy": component_presence,
+        "sample_component_presence_policy": sample_presence,
     }
 
 
@@ -159,14 +209,15 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
     sampled_present = sampled.reshape(sampled.shape[0], sampled.shape[1], -1).any(
         axis=(0, 2)
     )
-    if not np.all(sampled_present):
+    sample_presence = _component_presence_report(
+        labels,
+        sampled_present,
+        required_labels=REFINED_REQUIRED_PRESENT_LABELS,
+    )
+    if sample_presence["missing_required_components"]:
         raise RuntimeError(
-            "Sampled refined masks are empty for components: "
-            + ", ".join(
-                label
-                for label, is_present in zip(labels, sampled_present, strict=True)
-                if not bool(is_present)
-            )
+            "Sampled refined masks are empty for required components: "
+            + ", ".join(sample_presence["missing_required_components"])
         )
     metrics = run.get("metrics/mask_present")
     if metrics is None:
@@ -178,8 +229,16 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
             f"{present.shape!r} versus {(shape[0], len(labels))!r}."
         )
     present_counts = present.sum(axis=0, dtype=np.int64)
-    if np.any(present_counts <= 0):
-        raise RuntimeError("At least one refined component has no present masks.")
+    component_presence = _component_presence_report(
+        labels,
+        present_counts > 0,
+        required_labels=REFINED_REQUIRED_PRESENT_LABELS,
+    )
+    if component_presence["missing_required_components"]:
+        raise RuntimeError(
+            "Required refined components have no present masks: "
+            + ", ".join(component_presence["missing_required_components"])
+        )
     return {
         "shape": list(shape),
         "dtype": str(np.dtype(masks.dtype)),
@@ -193,6 +252,8 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
             label: int(value)
             for label, value in zip(labels, present_counts, strict=True)
         },
+        "component_presence_policy": component_presence,
+        "sample_component_presence_policy": sample_presence,
         "authoritative_surface": "masks_roi",
     }
 
