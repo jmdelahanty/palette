@@ -74859,13 +74859,13 @@
     "array_spec_declaration_count": 450,
     "array_spec_unique_leaf_name_count": 270,
     "array_spec_unique_signature_count": 343,
-    "direct_zarr_api_site_count": 649,
-    "dynamic_or_unresolved_writer_site_count": 340,
+    "direct_zarr_api_site_count": 651,
+    "dynamic_or_unresolved_writer_site_count": 342,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 227,
+    "parsed_writer_candidate_module_count": 229,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 629,
-    "scanned_python_module_count": 1548,
+    "scanned_python_module_count": 1562,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -74877,15 +74877,15 @@
       "reader_required_array_declaration": 102,
       "writer_observed_schema": 1292
     },
-    "writer_site_count": 1632,
-    "writer_site_with_chunks_expression_count": 719,
+    "writer_site_count": 1634,
+    "writer_site_with_chunks_expression_count": 721,
     "writer_site_with_codec_expression_count": 15,
     "writer_site_with_shards_expression_count": 17,
     "writer_site_with_stage_classification_count": 489,
-    "writer_site_without_dtype_evidence_count": 995,
+    "writer_site_without_dtype_evidence_count": 997,
     "writer_site_without_shape_evidence_count": 162,
     "writer_sites_by_status": {
-      "current": 1497,
+      "current": 1499,
       "unclear": 135
     },
     "writer_sites_by_surface": {
@@ -74895,7 +74895,7 @@
       "legacy": 49,
       "migration_or_maintenance": 47,
       "production": 1225,
-      "publication": 68,
+      "publication": 70,
       "training": 180
     },
     "writer_wrapper_call_site_count": 982
