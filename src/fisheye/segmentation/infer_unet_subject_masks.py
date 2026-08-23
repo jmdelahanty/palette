@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import errno
 import hashlib
 import json
 import os
@@ -66,6 +65,7 @@ from ..shared.subject_mask_attempt import (
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
 )
+from ..shared.transient_io import retry_read_only_estale
 from ..shared.subject_mask_worker_receipt import (
     RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     build_subject_mask_worker_semantic_receipt,
@@ -2077,22 +2077,17 @@ def _resolve_subject_mask_attempt_lineage(
 ) -> dict[str, object]:
     """Retry read-only sibling discovery across transient NFS ESTALE faults."""
 
-    delays = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
-    for retry_index in range(len(delays) + 1):
-        try:
-            return _resolve_subject_mask_attempt_lineage_once(
-                parent=parent,
-                current_run_name=current_run_name,
-                scientific_identity=scientific_identity,
-                attempt=attempt,
-                retry_of_attempt_id=retry_of_attempt_id,
-                supersedes_run=supersedes_run,
-            )
-        except OSError as exc:
-            if exc.errno != errno.ESTALE or retry_index == len(delays):
-                raise
-            time.sleep(delays[retry_index])
-    raise AssertionError("unreachable subject-mask lineage retry state")
+    return retry_read_only_estale(
+        lambda: _resolve_subject_mask_attempt_lineage_once(
+            parent=parent,
+            current_run_name=current_run_name,
+            scientific_identity=scientific_identity,
+            attempt=attempt,
+            retry_of_attempt_id=retry_of_attempt_id,
+            supersedes_run=supersedes_run,
+        ),
+        sleep=time.sleep,
+    )
 
 
 def _subject_mask_stage_path(

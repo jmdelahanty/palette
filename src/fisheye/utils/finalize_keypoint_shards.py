@@ -171,6 +171,11 @@ class CropRebase:
     target_crop_group: zarr.Group
     target_row_ids: np.ndarray
     source_crop_runs: tuple[str, ...]
+    mapping_mode: str
+
+
+DIRECT_SAME_CROP_MAPPING_MODE = "direct_same_crop_row_ids"
+IDENTITY_REBASE_MAPPING_MODE = "identity_rebase"
 
 
 def _utc_now() -> str:
@@ -436,6 +441,43 @@ def _resolve_crop_rebase(root: zarr.Group, shards: Sequence[Shard], target_crop_
     if crop_parent is None or target_crop_run not in crop_parent:
         raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
     target_group = crop_parent[target_crop_run]
+
+    # A target run is not automatically a rebase authority. Modern clipped
+    # inference partitions one recording-level hybrid crop and every shard
+    # already stores row IDs in that exact crop. Preserve those direct IDs;
+    # requiring legacy clip/local-frame identity arrays here would invent a
+    # cross-crop translation that neither occurred nor is needed.
+    if all(shard.source_crop_run == target_crop_run for shard in shards):
+        target_total = int(target_group["frame_indices"].shape[0])
+        direct_chunks: list[np.ndarray] = []
+        source_crop_runs: list[str] = []
+        for shard in shards:
+            source_crop_runs.append(shard.source_crop_run)
+            source_rows = _as_array(shard.group, SOURCE_CROP_ROW_IDS_ARRAY).astype(
+                np.int64,
+                copy=False,
+            ).reshape(-1)
+            if source_rows.size and (
+                int(source_rows.min()) < 0 or int(source_rows.max()) >= target_total
+            ):
+                raise ValueError(
+                    f"{KEYPOINT_SHARD_PARENT}/{shard.name} has source_crop_row_ids "
+                    f"outside crop_runs/{target_crop_run}."
+                )
+            direct_chunks.append(source_rows)
+        target_rows = (
+            np.concatenate(direct_chunks, axis=0)
+            if direct_chunks
+            else np.zeros(0, dtype=np.int64)
+        )
+        return CropRebase(
+            target_crop_run=str(target_crop_run),
+            target_crop_group=target_group,
+            target_row_ids=target_rows,
+            source_crop_runs=tuple(source_crop_runs),
+            mapping_mode=DIRECT_SAME_CROP_MAPPING_MODE,
+        )
+
     missing_target = [name for name in CROP_REBASE_IDENTITY_ARRAYS if name not in target_group]
     if missing_target:
         raise ValueError(f"target crop run crop_runs/{target_crop_run} missing identity arrays: {missing_target}")
@@ -483,7 +525,56 @@ def _resolve_crop_rebase(root: zarr.Group, shards: Sequence[Shard], target_crop_
         target_crop_group=target_group,
         target_row_ids=target_rows,
         source_crop_runs=tuple(source_crop_runs),
+        mapping_mode=IDENTITY_REBASE_MAPPING_MODE,
     )
+
+
+def preflight_same_crop_keypoint_finalization_target(
+    *,
+    zarr_path: str | Path,
+    target_crop_run: str,
+    expected_row_count: int | None = None,
+) -> dict[str, Any]:
+    """Validate a future same-crop shard finalization before GPU submission."""
+
+    archive = Path(zarr_path).expanduser().resolve()
+    root = open_zarr_root(archive, mode="r")
+    crop_group = root.get(f"crop_runs/{target_crop_run}")
+    if crop_group is None:
+        raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
+    if "frame_indices" not in crop_group:
+        raise ValueError(
+            f"crop_runs/{target_crop_run} is missing required array 'frame_indices'."
+        )
+    frame_indices = crop_group["frame_indices"]
+    if frame_indices.ndim != 1:
+        raise ValueError(
+            f"crop_runs/{target_crop_run}/frame_indices must be 1D, "
+            f"got shape {frame_indices.shape}."
+        )
+    row_count = int(frame_indices.shape[0])
+    if expected_row_count is not None and row_count != int(expected_row_count):
+        raise ValueError(
+            f"crop_runs/{target_crop_run} has {row_count} rows; "
+            f"the planned clip partition expects {int(expected_row_count)}."
+        )
+    keys = _validated_instance_keys(
+        crop_group,
+        label=f"crop_runs/{target_crop_run}",
+        expected_rows=row_count,
+        require_unique=True,
+    )
+    return {
+        "ok": True,
+        "status": "validated",
+        "zarr_path": str(archive),
+        "target_crop_run": str(target_crop_run),
+        "target_crop_path": f"crop_runs/{target_crop_run}",
+        "mapping_mode": DIRECT_SAME_CROP_MAPPING_MODE,
+        "row_count": row_count,
+        "instance_key_dtype": str(keys.dtype),
+        "instance_key_unique_count": int(np.unique(keys).shape[0]),
+    }
 
 
 def _apply_crop_rebase(row_arrays: dict[str, np.ndarray], rebase: CropRebase | None) -> dict[str, np.ndarray]:
@@ -681,6 +772,7 @@ def finalize_keypoint_shards(
         "source_crop_runs": source_crop_runs,
         "source_keypoint_shard_crop_runs": source_shard_crop_runs,
         "target_crop_run": target_crop_run,
+        "source_crop_mapping_mode": rebase.mapping_mode if rebase is not None else None,
         "total_rois": total_rows,
         "identity_validation": identity_validation,
         "sort_policy": "source_crop_row_ids_stable_ascending",
@@ -744,8 +836,20 @@ def finalize_keypoint_shards(
                 "source_crop_run": source_crop_run,
                 "source_crop_runs": source_crop_runs,
                 "source_keypoint_shard_crop_runs": source_shard_crop_runs,
-                "source_crop_rebase_target_run": rebase.target_crop_run if rebase is not None else None,
-                "source_crop_rebased_from_shards": rebase is not None,
+                "source_crop_mapping_target_run": (
+                    rebase.target_crop_run if rebase is not None else None
+                ),
+                "source_crop_rebase_target_run": (
+                    rebase.target_crop_run
+                    if rebase is not None
+                    and rebase.mapping_mode == IDENTITY_REBASE_MAPPING_MODE
+                    else None
+                ),
+                "source_crop_mapping_mode": rebase.mapping_mode if rebase is not None else None,
+                "source_crop_rebased_from_shards": (
+                    rebase is not None
+                    and rebase.mapping_mode == IDENTITY_REBASE_MAPPING_MODE
+                ),
                 "source_kind": "keypoint_shard_collection_finalizer",
                 "finalized_from_keypoint_shards": True,
                 "stage_selector_eligible": True,
@@ -771,6 +875,9 @@ def finalize_keypoint_shards(
                     "shard_runs": [shard.name for shard in shards],
                     "output_run": resolved_output_run,
                     "target_crop_run": target_crop_run,
+                    "source_crop_mapping_mode": (
+                        rebase.mapping_mode if rebase is not None else None
+                    ),
                     "overwrite": bool(overwrite),
                     "row_shard_rows": int(row_shard_rows),
                     "frame_shard_rows": int(frame_shard_rows),
@@ -785,6 +892,9 @@ def finalize_keypoint_shards(
                 "shard_runs": [shard.name for shard in shards],
                 "output_run": resolved_output_run,
                 "target_crop_run": target_crop_run,
+                "source_crop_mapping_mode": (
+                    rebase.mapping_mode if rebase is not None else None
+                ),
                 "sort_policy": "source_crop_row_ids_stable_ascending",
                 "row_identity_mode": "instance_key",
                 "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
@@ -832,6 +942,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output run.")
     parser.add_argument("--dry-run", action="store_true", help="Validate and summarize without writing.")
     parser.add_argument(
+        "--preflight-target-only",
+        action="store_true",
+        help=(
+            "Validate that --target-crop-run can receive direct same-crop shard "
+            "row IDs, without requiring shards or writing output."
+        ),
+    )
+    parser.add_argument(
+        "--expected-target-row-count",
+        type=int,
+        help="Optional exact target row count required by --preflight-target-only.",
+    )
+    parser.add_argument(
         "--row-shard-rows",
         type=int,
         default=DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS,
@@ -853,16 +976,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.shard_runs_file is not None:
         shard_runs.extend(_load_shard_names_from_file(args.shard_runs_file.expanduser()))
     try:
-        result = finalize_keypoint_shards(
-            zarr_path=args.zarr_path,
-            shard_runs=shard_runs,
-            output_run=args.output_run,
-            target_crop_run=args.target_crop_run,
-            overwrite=bool(args.overwrite),
-            dry_run=bool(args.dry_run),
-            row_shard_rows=int(args.row_shard_rows),
-            frame_shard_rows=int(args.frame_shard_rows),
-        )
+        if args.preflight_target_only:
+            if not args.target_crop_run:
+                raise ValueError("--preflight-target-only requires --target-crop-run.")
+            if shard_runs or args.output_run or args.overwrite or args.dry_run:
+                raise ValueError(
+                    "--preflight-target-only cannot be combined with shard/output write options."
+                )
+            result = preflight_same_crop_keypoint_finalization_target(
+                zarr_path=args.zarr_path,
+                target_crop_run=args.target_crop_run,
+                expected_row_count=args.expected_target_row_count,
+            )
+        else:
+            if args.expected_target_row_count is not None:
+                raise ValueError(
+                    "--expected-target-row-count requires --preflight-target-only."
+                )
+            result = finalize_keypoint_shards(
+                zarr_path=args.zarr_path,
+                shard_runs=shard_runs,
+                output_run=args.output_run,
+                target_crop_run=args.target_crop_run,
+                overwrite=bool(args.overwrite),
+                dry_run=bool(args.dry_run),
+                row_shard_rows=int(args.row_shard_rows),
+                frame_shard_rows=int(args.frame_shard_rows),
+            )
     except Exception as exc:
         if args.json:
             print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
@@ -872,7 +1012,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json:
         print(json.dumps(json_ready(result), indent=2, sort_keys=True))
     else:
-        print(f"{result['status']}: {result['output_path']} ({result['total_rois']} rows)")
+        if args.preflight_target_only:
+            print(
+                f"{result['status']}: {result['target_crop_path']} "
+                f"({result['row_count']} rows)"
+            )
+        else:
+            print(f"{result['status']}: {result['output_path']} ({result['total_rois']} rows)")
     return 0
 
 

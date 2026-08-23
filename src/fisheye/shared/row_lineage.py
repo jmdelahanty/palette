@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.instance_keys import INSTANCE_KEY_ARRAY
+from fisheye.shared.transient_io import retry_read_only_estale
 from fisheye.shared.zarr.chunk_profiles import (
     CRIMSON_LINEAGE_PRELOAD_ARRAYS,
     create_geometry_preload_array,
@@ -104,10 +105,13 @@ def validate_row_lineage_array(
 
 
 def _read_array(source_group: zarr.Group, name: str) -> tuple[object, np.ndarray] | None:
-    source_arr = source_group.get(name)
-    if source_arr is None:
-        return None
-    return source_arr, np.asarray(source_arr[:])
+    def read() -> tuple[object, np.ndarray] | None:
+        source_arr = source_group.get(name)
+        if source_arr is None:
+            return None
+        return source_arr, np.asarray(source_arr[:])
+
+    return retry_read_only_estale(read)
 
 
 def _as_array(value: object | None) -> np.ndarray | None:
@@ -380,10 +384,12 @@ def copy_selected_crop_row_lineage_arrays(
     total_rois = int(rows.shape[0])
     copied: list[str] = []
     missing: list[str] = []
-    selected_frames = np.asarray(crop_group["frame_indices"][rows], dtype=np.int64)
+    selected_frames = retry_read_only_estale(
+        lambda: np.asarray(crop_group["frame_indices"][rows], dtype=np.int64)
+    )
 
     for name in requested_names:
-        source_array = crop_group.get(name)
+        source_array = retry_read_only_estale(lambda: crop_group.get(name))
         if name == SOURCE_CROP_ROW_IDS_ARRAY:
             data = rows
             source_array = None
@@ -412,12 +418,12 @@ def copy_selected_crop_row_lineage_arrays(
                     f"Crop lineage array {name!r} has {source_array.shape[0]} rows, "
                     f"expected {crop_row_count}."
                 )
-            data = np.asarray(source_array[rows])
+            data = retry_read_only_estale(lambda: np.asarray(source_array[rows]))
         else:
             if source_array is None:
                 missing.append(name)
                 continue
-            data = np.asarray(source_array[:])
+            data = retry_read_only_estale(lambda: np.asarray(source_array[:]))
 
         validate_row_lineage_array(name, np.asarray(data), total_rois=total_rois)
         _write_array(

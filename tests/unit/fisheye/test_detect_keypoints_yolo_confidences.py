@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -18,6 +19,7 @@ from fisheye.detection.detect_keypoints_yolo import (
     _extract_keypoint_confidences,
     _extract_pose_bbox_xyxy_roi,
     _prepare_model_inputs,
+    _preflight_noncanonical_coordinate_domains,
     _resolve_model_max_stride,
     _require_model_result_coordinate_contract,
     _require_prepared_model_input_contract,
@@ -651,6 +653,77 @@ def _patch_keypoint_writer_dependencies(monkeypatch, model_path) -> None:
     )
     monkeypatch.setattr(yolo_mod, "_emit_keypoint_step_status", lambda **_kwargs: None)
     model_path.write_bytes(b"fake")
+
+
+def test_noncanonical_coordinate_preflight_retries_transient_estale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def flaky_shape(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise OSError(errno.ESTALE, "stale file handle")
+        return (16, 24), 7
+
+    monkeypatch.setattr(yolo_mod, "_resolve_full_image_shape", flaky_shape)
+    monkeypatch.setattr(yolo_mod.time, "sleep", sleeps.append)
+
+    result = _preflight_noncanonical_coordinate_domains(
+        object(),
+        object(),
+        crop_run_id="crop_hybrid",
+        frame_indices=np.array([0, 1], dtype=np.int64),
+    )
+
+    assert result == ((16, 24), 7)
+    assert calls == 3
+    assert sleeps == [0.1, 0.25]
+
+
+def test_noncanonical_coordinate_failure_precedes_shard_run_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_keypoint_count_fixture(tmp_path, "missing_dimensions")
+    root = zarr.open_group(store=str(zarr_path), mode="a", use_consolidated=False)
+    del root.attrs["video_width"]
+    del root.attrs["video_height"]
+    model_path = tmp_path / "missing_dimensions.pt"
+
+    with monkeypatch.context() as patch:
+        _patch_keypoint_writer_dependencies(patch, model_path)
+        with pytest.raises(
+            ValueError,
+            match="Unable to determine full-resolution image dimensions",
+        ):
+            detect_keypoints_yolo(
+                zarr_path,
+                model_path,
+                run_provenance=build_writer_run_provenance(
+                    command="unit-keypoint-writer",
+                    params={"model_path": model_path},
+                ),
+                run_name="keypoint_shard_001",
+                output_parent="keypoint_shard_runs",
+                pose_schema="traditional_v3",
+                batch_size=8,
+                imgsz=8,
+                input_mode="numpy-list",
+                coordinate_contract_mode="legacy_noncanonical",
+                keypoint_roi_shard_rows=8,
+                keypoint_frame_shard_rows=8,
+                registry=None,
+            )
+
+    reopened = zarr.open_group(
+        store=str(zarr_path),
+        mode="r",
+        use_consolidated=False,
+    )
+    assert "keypoint_shard_runs" not in reopened
 
 
 def _patch_canonical_writer_dependencies(

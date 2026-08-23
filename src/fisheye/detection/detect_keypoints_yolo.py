@@ -97,6 +97,7 @@ from ..shared.run_provenance import (
     build_run_provenance,
 )
 from ..shared.type_conversions import normalize_attr
+from ..shared.transient_io import retry_read_only_estale
 from ..shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
@@ -1445,6 +1446,32 @@ def _resolve_crop_run_frame_count_from_domains(root: zarr.Group, crop_group: zar
         return None
 
 
+def _preflight_noncanonical_coordinate_domains(
+    root: zarr.Group,
+    crop_group: zarr.Group,
+    *,
+    crop_run_id: str,
+    frame_indices: np.ndarray,
+) -> tuple[tuple[int, int], int]:
+    """Resolve read-only coordinate domains before creating a shard run."""
+
+    def resolve() -> tuple[tuple[int, int], int]:
+        full_img_shape, total_frames = _resolve_full_image_shape(
+            root,
+            crop_group,
+            crop_run_id=crop_run_id,
+        )
+        if total_frames is None:
+            total_frames = _resolve_crop_run_frame_count_from_domains(root, crop_group)
+        if total_frames is None:
+            total_frames = (
+                int(frame_indices.max() + 1) if frame_indices.size > 0 else 0
+            )
+        return full_img_shape, int(total_frames)
+
+    return retry_read_only_estale(resolve, sleep=time.sleep)
+
+
 def _tensor_input_blocker(
     batch: np.ndarray,
     *,
@@ -2154,6 +2181,19 @@ def detect_keypoints_yolo(
         model_stride=model_stride,
     )
 
+    # Collection shards use the legacy noncanonical coordinate adapter until
+    # they are finalized against the recording-level crop authority. Resolve
+    # every required read-only coordinate domain before creating any output
+    # group, so metadata faults cannot leave a failed/incomplete shard behind.
+    noncanonical_coordinate_preflight: tuple[tuple[int, int], int] | None = None
+    if canonical_crop_source is None:
+        noncanonical_coordinate_preflight = _preflight_noncanonical_coordinate_domains(
+            root,
+            crop_group,
+            crop_run_id=latest_crop,
+            frame_indices=frame_indices,
+        )
+
     run_parent, run_group, resolved_run_name = _prepare_run_group_for_parent(
         root,
         run_name,
@@ -2283,19 +2323,11 @@ def detect_keypoints_yolo(
             keypoint_coordinate_context.source.crop_geometry.source_geometry.frame_evidence.acquisition_frame.record.source_total_frames
         )
     else:
-        full_img_shape, total_frames = _resolve_full_image_shape(
-            root,
-            crop_group,
-            crop_run_id=latest_crop,
-        )
+        if noncanonical_coordinate_preflight is None:
+            raise AssertionError("missing noncanonical coordinate preflight")
+        full_img_shape, total_frames = noncanonical_coordinate_preflight
 
     norm_factor = np.array([full_img_shape[1], full_img_shape[0]], dtype="f8")
-
-    if total_frames is None:
-        total_frames = _resolve_crop_run_frame_count_from_domains(root, crop_group)
-
-    if total_frames is None:
-        total_frames = int(frame_indices.max() + 1) if frame_indices.size > 0 else 0
 
     if "frame_counts" in lineage_result.copied:
         frame_counts_total = run_group["frame_counts"][:].astype("i4", copy=False)

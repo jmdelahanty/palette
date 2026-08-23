@@ -1460,6 +1460,7 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     assert set(jobs) == {
         f"acquisition_crop_ledger:{target_safe}",
         f"hybrid_crop:{target_safe}",
+        f"keypoint_finalize_preflight:{target_safe}",
         f"keypoints_array:{target_safe}",
         f"subject_masks_array:{target_safe}",
         f"keypoint_finalize:{target_safe}",
@@ -1480,6 +1481,22 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     assert "build_hybrid_acquisition_offline_crop_run" in hybrid_command
     assert f"--run-name {hybrid_run}" in hybrid_command
     assert "--refined-detect-run finalized_refined_cam2010093" in hybrid_command
+
+    preflight_key = f"keypoint_finalize_preflight:{target_safe}"
+    preflight = " ".join(jobs[preflight_key].command)
+    assert jobs[preflight_key].dependency.upstream_job_keys == (
+        f"hybrid_crop:{target_safe}",
+    )
+    assert jobs[f"keypoints_array:{target_safe}"].dependency.upstream_job_keys == (
+        preflight_key,
+    )
+    assert "fisheye.utils.finalize_keypoint_shards" in preflight
+    assert f"--target-crop-run {hybrid_run}" in preflight
+    assert "--preflight-target-only" in preflight
+    assert "--expected-target-row-count 200" in preflight
+    assert target["keypoint_finalization_mapping_mode"] == (
+        "direct_same_crop_row_ids"
+    )
 
     keypoint_tasks = _execution_tasks(jobs[f"keypoints_array:{target_safe}"])
     mask_tasks = _execution_tasks(jobs[f"subject_masks_array:{target_safe}"])
@@ -1506,6 +1523,24 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     finalize = " ".join(jobs[f"keypoint_finalize:{target_safe}"].command)
     assert f"--target-crop-run {hybrid_run}" in finalize
     assert "merge_clipped_proxy_crop_runs" not in finalize
+
+
+def test_downstream_crop_row_partition_rejects_gap_before_job_planning() -> None:
+    with pytest.raises(ValueError, match="starts at 101, expected 100"):
+        workflow._planned_crop_row_count(
+            [
+                {
+                    "clip_id": "clip_000000",
+                    "crop_row_start": 0,
+                    "crop_row_stop": 100,
+                },
+                {
+                    "clip_id": "clip_000001",
+                    "crop_row_start": 101,
+                    "crop_row_stop": 200,
+                },
+            ]
+        )
 
 
 def test_downstream_scope_materializes_without_a_detection_model(

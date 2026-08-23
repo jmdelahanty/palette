@@ -546,6 +546,29 @@ def _refuse_output_collisions(
         )
 
 
+def _planned_crop_row_count(clips: Sequence[Mapping[str, Any]]) -> int:
+    """Require clip row intervals to form one exact recording-row partition."""
+
+    expected_start = 0
+    for position, clip in enumerate(clips):
+        clip_id = str(clip.get("clip_id") or f"clip[{position}]")
+        row_start = int(clip["crop_row_start"])
+        row_stop = int(clip["crop_row_stop"])
+        if row_stop < row_start:
+            raise ValueError(
+                f"Clip {clip_id!r} has reversed crop row interval "
+                f"[{row_start}, {row_stop})."
+            )
+        if row_start != expected_start:
+            raise ValueError(
+                "Clip crop row intervals must be contiguous, non-overlapping, and "
+                f"recording-ordered; clip {clip_id!r} starts at {row_start}, "
+                f"expected {expected_start}."
+            )
+        expected_start = row_stop
+    return expected_start
+
+
 def _read_strict_json(path: Path) -> Any:
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON constant {value!r}")
@@ -826,6 +849,30 @@ def _build_downstream_target_pipeline(
 
     keypoint_array_key = f"keypoints_array:{target_safe}"
     subject_mask_array_key = f"subject_masks_array:{target_safe}"
+    keypoint_preflight_key = f"keypoint_finalize_preflight:{target_safe}"
+    expected_target_crop_rows = _planned_crop_row_count(clips)
+    keypoint_preflight_job = _job(
+        workflow_id=workflow_id,
+        repo=repo,
+        run_root=run_root,
+        job_key=keypoint_preflight_key,
+        stage="keypoint_finalize_preflight",
+        command=(
+            "scripts/py",
+            "-m",
+            "fisheye.utils.finalize_keypoint_shards",
+            str(target.analysis_zarr),
+            "--target-crop-run",
+            hybrid_crop_run,
+            "--preflight-target-only",
+            "--expected-target-row-count",
+            str(expected_target_crop_rows),
+            "--json",
+        ),
+        resources=cpu,
+        upstream=(hybrid_key,),
+    )
+    jobs.append(keypoint_preflight_job)
     keypoint_tasks: list[LsfExecutionTask] = []
     mask_tasks: list[LsfExecutionTask] = []
     for clip in clips:
@@ -987,7 +1034,7 @@ def _build_downstream_target_pipeline(
             gpus=1,
             walltime="4:00",
         ),
-        upstream=(hybrid_key,),
+        upstream=(keypoint_preflight_key,),
     )
     mask_array_job = _task_group_job(
         workflow_id=workflow_id,
@@ -1078,6 +1125,7 @@ def _build_downstream_target_pipeline(
             LsfWorkflowFragment(
                 fragment_id=f"keypoints:{target_safe}",
                 jobs=(
+                    keypoint_preflight_job,
                     keypoint_array_job,
                     keypoint_finalize_job,
                     keypoint_refine_job,
@@ -1089,6 +1137,8 @@ def _build_downstream_target_pipeline(
                     "target_id": target.target_id,
                     "work_partition": "clip_crop_row_intervals",
                     "crop_run": hybrid_crop_run,
+                    "finalization_mapping_mode": "direct_same_crop_row_ids",
+                    "expected_target_crop_rows": expected_target_crop_rows,
                 },
             ),
             LsfWorkflowFragment(
@@ -2105,6 +2155,11 @@ def build_plan(
                 else None
             ),
             "keypoint_run": keypoint_run,
+            "keypoint_finalization_mapping_mode": (
+                "direct_same_crop_row_ids"
+                if scope == WORKFLOW_SCOPE_DOWNSTREAM
+                else "identity_rebase"
+            ),
             "refined_keypoint_run": refined_keypoint_run,
             "subject_mask_run": subject_mask_run,
             "refined_subject_mask_run": refined_subject_mask_run,
