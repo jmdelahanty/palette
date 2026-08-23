@@ -702,8 +702,13 @@ def build_comparison(
                     "relative_semantic_binding": semantics[label],
                     "candidate_epoch_binding": epoch_bindings[label],
                     "temporal_alignment": temporal[label],
+                    "frame_count": int(handle.n_frames),
+                    "chaser_count": int(handle.n_chasers),
                     "valid_source_position_frame_count": int(
                         np.count_nonzero(arrays[label]["source_position_valid"])
+                    ),
+                    "valid_source_position_fraction": float(
+                        np.mean(arrays[label]["source_position_valid"])
                     ),
                 }
                 for label, handle in handles.items()
