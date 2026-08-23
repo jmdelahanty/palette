@@ -322,6 +322,70 @@ def _rebind_authorities(
     return observed
 
 
+def _registered_gate_source_allows_selector_ineligible(
+    *,
+    archive: Path,
+    source: BoundRefinedDetectionCropSource,
+    gate_evidence: Mapping[str, Any],
+) -> bool:
+    """Select the strict raw-detection authority mode from persisted lineage."""
+
+    source_identity = source.manifest["payload"].get("source_detection")
+    if not isinstance(source_identity, Mapping) or (
+        source_identity.get("authority_kind") != "canonical_run"
+    ):
+        raise RuntimeError(
+            "Finalized refined source lacks one canonical raw-detection identity."
+        )
+    run_id = str(source_identity.get("run_id") or "").strip()
+    expected_path = f"detect_runs/{run_id}"
+    evidence_path = str(
+        gate_evidence.get("source_detection_group_path")
+        or gate_evidence.get("source_detection_path")
+        or ""
+    ).strip()
+    if not run_id or evidence_path != expected_path:
+        raise RuntimeError(
+            "Finalized refined and registered-gate raw-detection identities differ."
+        )
+
+    root = open_zarr_root(archive, mode="r", use_consolidated=False)
+    try:
+        detection = root[expected_path]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Finalized refined raw-detection source is missing: {expected_path}"
+        ) from exc
+    manifest = detection.attrs.get("run_manifest")
+    if not isinstance(manifest, Mapping) or (
+        manifest.get("payload_digest")
+        != source_identity.get("run_manifest_digest")
+    ):
+        raise RuntimeError(
+            "Finalized refined raw-detection manifest identity changed."
+        )
+    payload = manifest.get("payload")
+    publication = payload.get("publication") if isinstance(payload, Mapping) else None
+    manifest_eligible = (
+        publication.get("stage_selector_eligible")
+        if isinstance(publication, Mapping)
+        else None
+    )
+    run_eligible = detection.attrs.get("stage_selector_eligible")
+    if manifest_eligible is True and run_eligible is True:
+        return False
+    if (
+        manifest_eligible is False
+        and run_eligible is False
+        and detection.attrs.get("production_candidate") is True
+    ):
+        return True
+    raise RuntimeError(
+        "Finalized refined raw-detection source is neither an active authority "
+        "nor an exact selector-ineligible production candidate."
+    )
+
+
 def _mark_local_production_candidate(
     run: Any,
     *,
@@ -578,6 +642,13 @@ def publish_crop_geometry_production_candidate(
                     "Applied registered geometry requires an explicit current-gate "
                     "validator at the crop publication boundary."
                 )
+            allow_selector_ineligible_gate_source = (
+                _registered_gate_source_allows_selector_ineligible(
+                    archive=archive,
+                    source=source,
+                    gate_evidence=gate_evidence,
+                )
+            )
             current_gate = registered_gate_validator(
                 archive,
                 source_group_path=str(
@@ -591,7 +662,9 @@ def publish_crop_geometry_production_candidate(
                     dtype=np.uint64,
                 ),
                 require_modern_operational_selection=True,
-                allow_selector_ineligible_source=explicit_refined_source,
+                allow_selector_ineligible_source=(
+                    allow_selector_ineligible_gate_source
+                ),
             )
             current_gate.pop("inside", None)
             mismatched = [
