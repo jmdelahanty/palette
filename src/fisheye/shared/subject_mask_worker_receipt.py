@@ -66,6 +66,12 @@ SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_ID = (
     "palette.subject_mask.recording_common_scientific_authority"
 )
 SUBJECT_MASK_RECORDING_COMMON_AUTHORITY_SCHEMA_VERSION = 1
+SUBJECT_MASK_LEGACY_PARTITION_RECONCILIATION_CONTEXT_KEY = (
+    "legacy_worker_partition_reconciliation"
+)
+SUBJECT_MASK_LEGACY_PARTITION_RECONCILIATION_POLICY = (
+    "scientific_identity_v2_missing_partition_contract_reconciled_v1"
+)
 SUBJECT_MASK_ASSIGNMENT_KEYPOINT_COLLECTION_SCHEMA_ID = (
     "palette.subject_mask.assignment_keypoint_collection"
 )
@@ -169,6 +175,31 @@ def _normalize_expected_work_units(
             "Expected subject-mask work units do not cover the complete recording."
         )
     return result
+
+
+def _validate_expected_work_unit_frame_membership(
+    frame_row_offsets: Any,
+    *,
+    work_units: Sequence[Mapping[str, object]],
+) -> None:
+    """Reconcile canonical crop rows with every authoritative frame window."""
+
+    offsets = np.ascontiguousarray(np.asarray(frame_row_offsets, dtype=np.int64))
+    for unit in work_units:
+        row_start = int(unit["row_start"])
+        row_stop = int(unit["row_stop"])
+        frame_start = int(unit["frame_start"])
+        frame_stop = int(unit["frame_stop"])
+        if (
+            offsets.ndim != 1
+            or frame_stop >= offsets.shape[0]
+            or int(offsets[frame_start]) != row_start
+            or int(offsets[frame_stop]) != row_stop
+        ):
+            raise ValueError(
+                "Canonical crop acquisition frames differ from an authoritative "
+                "work-unit frame window."
+            )
 
 
 def _refined_source_binding(
@@ -351,9 +382,7 @@ def _recording_common_scientific_authority(
         normalized_inference = dict(inference)
         if "eye_assignment_contract" in normalized_inference:
             normalized_inference["eye_assignment_contract"] = assignment
-        component_sources = normalized_inference.get(
-            "component_sources_and_policies"
-        )
+        component_sources = normalized_inference.get("component_sources_and_policies")
         if isinstance(component_sources, Mapping):
             worker_local_component_fields = {
                 "assignment_summary",
@@ -736,6 +765,7 @@ def validate_recording_subject_mask_assembly_identity(
             ):
                 raise ValueError("Refined raw-producer binding changed.")
     cursor = 0
+    legacy_missing_partition_workers = 0
     for worker_index, worker in enumerate(workers):
         if not isinstance(worker, dict) or set(worker) != {
             "global_row_interval",
@@ -855,7 +885,12 @@ def validate_recording_subject_mask_assembly_identity(
                     raise ValueError(
                         "Raw worker identity differs from its authoritative work unit."
                     )
-                if (
+                if partition is None:
+                    # Scientific identity v2 intentionally allowed this contract to
+                    # be absent. Current assemblies accept those immutable workers
+                    # only with an explicit recording-level reconciliation proof.
+                    legacy_missing_partition_workers += 1
+                elif (
                     not isinstance(partition_collection, Mapping)
                     or not isinstance(partition_window, Mapping)
                     or not isinstance(partition_rows, Mapping)
@@ -879,6 +914,23 @@ def validate_recording_subject_mask_assembly_identity(
         cursor = int(stop)
     if cursor != int(n_rois):
         raise ValueError("Recording assembly does not cover every ROI row.")
+    if current and stage == "raw_subject_mask":
+        reconciliation = canonical["context"].get(
+            SUBJECT_MASK_LEGACY_PARTITION_RECONCILIATION_CONTEXT_KEY
+        )
+        expected_reconciliation = (
+            {
+                "policy": SUBJECT_MASK_LEGACY_PARTITION_RECONCILIATION_POLICY,
+                "worker_count": legacy_missing_partition_workers,
+                "canonical_frame_membership_validated": True,
+            }
+            if legacy_missing_partition_workers
+            else None
+        )
+        if reconciliation != expected_reconciliation:
+            raise ValueError(
+                "Legacy raw-worker partition reconciliation proof is absent or stale."
+            )
     return canonical
 
 
@@ -1147,6 +1199,10 @@ def build_recording_subject_mask_source_receipt(
             n_frames=dimensions.n_frames,
             n_rois=dimensions.n_rois,
         )
+        _validate_expected_work_unit_frame_membership(
+            arrays["frame_row_offsets"],
+            work_units=normalized_work_units,
+        )
         nonempty_count = sum(
             int(unit["row_stop"]) > int(unit["row_start"])
             for unit in normalized_work_units
@@ -1302,6 +1358,42 @@ def build_recording_subject_mask_source_receipt(
         worker_bindings[0]["scientific_identity"],
         stage_kind=stage,
     )
+    assembly_context_value = _strict_copy(
+        dict(assembly_context or {}), name="recording assembly context"
+    )
+    if current_contract and stage == "raw_subject_mask":
+        missing_partition_workers = sum(
+            worker["scientific_identity"]["payload"]["crop"].get(
+                "collection_partition_contract"
+            )
+            is None
+            for worker in worker_bindings
+        )
+        reconciliation = (
+            {
+                "policy": SUBJECT_MASK_LEGACY_PARTITION_RECONCILIATION_POLICY,
+                "worker_count": missing_partition_workers,
+                "canonical_frame_membership_validated": True,
+            }
+            if missing_partition_workers
+            else None
+        )
+        existing_reconciliation = assembly_context_value.get(
+            SUBJECT_MASK_LEGACY_PARTITION_RECONCILIATION_CONTEXT_KEY
+        )
+        if (
+            existing_reconciliation is not None
+            and existing_reconciliation != reconciliation
+        ):
+            raise ValueError(
+                "Recording assembly context reserves the legacy partition "
+                "reconciliation field."
+            )
+        if reconciliation is not None:
+            assembly_context_value[
+                SUBJECT_MASK_LEGACY_PARTITION_RECONCILIATION_CONTEXT_KEY
+            ] = reconciliation
+
     assembly_identity: dict[str, object] = {
         "schema_id": SUBJECT_MASK_RECORDING_ASSEMBLY_IDENTITY_SCHEMA_ID,
         "schema_version": (
@@ -1312,9 +1404,7 @@ def build_recording_subject_mask_source_receipt(
         "kind": str(kind),
         "source_run_path": str(source_run_path).strip().strip("/"),
         "row_policy": "ordered_contiguous_real_work_units_v1",
-        "context": _strict_copy(
-            dict(assembly_context or {}), name="recording assembly context"
-        ),
+        "context": assembly_context_value,
         "common_scientific_authority": common_authority,
         "workers": worker_bindings,
     }
