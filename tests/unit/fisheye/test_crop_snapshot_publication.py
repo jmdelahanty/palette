@@ -36,6 +36,18 @@ class _BoundPixels:
     fail_on_verification: int | None = None
     verification_count: int = 0
 
+    @property
+    def source_video_paths(self) -> tuple[Path, ...]:
+        return (self.source_video_path,)
+
+    @property
+    def source_index_paths(self) -> tuple[Path, ...]:
+        return ()
+
+    @property
+    def binding_document(self) -> dict[str, str]:
+        return {"provider_profile": "published_external_full_frame_video_v1"}
+
     def assert_verified(self) -> None:
         self.verification_count += 1
         if self.verification_count == self.fail_on_verification:
@@ -344,6 +356,12 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
     assert result["selector_eligible"] is False
     assert result["registry_updated"] is False
     assert result["storage_profile_id"] == "published_http_v1"
+    assert result["source_video_path"] == str(tmp_path / "camera.mp4")
+    assert result["source_video_paths"] == [str(tmp_path / "camera.mp4")]
+    assert result["source_index_paths"] == []
+    assert result["source_pixel_provider_profile"] == (
+        "published_external_full_frame_video_v1"
+    )
     assert result["validation"] == {
         "local_errors": [],
         "published_errors": [],

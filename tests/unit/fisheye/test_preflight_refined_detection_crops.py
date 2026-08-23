@@ -41,6 +41,11 @@ def test_preflight_reports_exact_zero_padding_without_zarr_writes(
     pixels = _VerifiedPixels(
         binding_document_digest="c" * 64,
         source_video_path=tmp_path / "source.mp4",
+        source_video_paths=(tmp_path / "source.mp4",),
+        source_index_paths=(),
+        binding_document={
+            "provider_profile": "published_external_full_frame_video_v1"
+        },
         pixel_authority=_Manifest(value={"schema_id": "pixel"}),
     )
     dimensions = _Manifest(
@@ -109,6 +114,16 @@ def test_preflight_reports_exact_zero_padding_without_zarr_writes(
     assert result["crop_zarr_writes"] is False
     assert result["selector_activation"] == "none"
     assert result["registry_updated"] is False
+    assert result["pixel_authority"]["source_video_path"] == str(
+        tmp_path / "source.mp4"
+    )
+    assert result["pixel_authority"]["source_video_paths"] == [
+        str(tmp_path / "source.mp4")
+    ]
+    assert result["pixel_authority"]["source_index_paths"] == []
+    assert result["pixel_authority"]["provider_profile"] == (
+        "published_external_full_frame_video_v1"
+    )
     assert bind_calls[0][1] == {
         "run_id": "refined_v2",
         "allow_selector_ineligible_benchmark": True,

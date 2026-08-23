@@ -131,12 +131,13 @@ acquisition frame domain, dimensions, decoded `uint8` grayscale semantics, and
 the digest of the external authority manifest. The shadow publisher accepts a
 typed, already-proven authority.
 
-There are two maintained base pixel-source families plus an explicit hybrid;
+There are three maintained base pixel-source families plus an explicit hybrid;
 none is a fallback for another:
 
 | Source family | Pixel domain | Required lineage |
 | --- | --- | --- |
 | Full-frame camera video | Decode the full camera frame, then apply each persisted integer crop window and padding rule. | Camera-frame identity, full-frame video authority, crop policy, and `roi_coordinates_full`/`roi_sizes_full`. |
+| Recording-wide clipped full-frame videos | Route each acquisition frame through the exact persisted recording-frame index to one clip-local frame, decode that full camera frame, then apply the persisted crop window and padding rule. | Camera-frame identity, clipped collection digest, three indexed mapping artifacts, ordered member fingerprints and complete frame tiling, crop policy, and `roi_coordinates_full`/`roi_sizes_full`. |
 | Acquisition crop video | Decode the already-cropped Orange video frame directly. | Crop-video frame index, recording-frame mapping, crop-meta row, full-frame `source_crop_xywh`, and any explicit supplemental-row routing. |
 | Hybrid acquisition/full-frame | Route each row explicitly to acquisition crop video or a full-frame-derived supplemental cache. | Both authority bindings plus `source_pixel_kind_codes` and the corresponding source-row index. |
 
@@ -175,18 +176,21 @@ preferred publication envelope once the acquisition stream has a complete
 digest-bound authority record.
 
 `bind_refined_crop_source_pixel_authority()` is the future-facing strict
-authority binder for a single external full-frame source video. It reopens the
-direct archive metadata, requires the mirrored acquisition publication state to be
-`published_canonical_v1` in `external_video_v1` mode, reloads the sealed import
-ownership and acquisition-camera frame, resolves the exact source-video
-locator, and recomputes the live `stat_v1` fingerprint. It then binds the
-`orange_mono_pynvvc_luma_uint8_v1` full-frame decode policy into the crop
-authority digest. Recording identity, camera identity, `F`, width, and height
-must exactly match the refined handoff. Materialized source arrays, acquisition
-crop videos, and clipped collections intentionally require separate typed
-authority binders. Acquisition crop video is a maintained current source; its
-separate binder reflects different lineage, not legacy status. These are
-contract boundaries, not compatibility adapters:
+dispatcher for published external source pixels. It reopens the direct archive
+metadata, reloads the sealed import ownership and acquisition-camera frame, and
+selects only the exact published mode. `external_video_v1` resolves one source
+video and recomputes its live `stat_v1` fingerprint.
+`external_clipped_videos_v1` verifies the recording-wide collection digest,
+content hashes for the clip index, frame index, and frame-index manifest, live
+`stat_v1` fingerprints for every encoded member, and gap-free ordered coverage
+of the full acquisition timeline. It binds the distinct
+`orange_mono_pynvvc_luma_uint8_clipped_collection_v1` routing/decode profile;
+it does not pretend that a collection is one source-video path. Recording
+identity, camera identity, `F`, width, and height must exactly match the refined
+handoff in either mode. Materialized source arrays and acquisition crop videos
+still require their separate typed authorities. Acquisition crop video is a
+maintained current source; its separate binder reflects different lineage, not
+legacy status. These are contract boundaries, not compatibility adapters:
 they do not probe dtypes, translate aliases, infer identities, or fall back to
 another source.
 

@@ -16,6 +16,7 @@ from fisheye.shared.acquisition_publication_status import (
 from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
 )
+from fisheye.shared.zarr.crop_pixel_authority import bind_crop_pixel_authority
 from fisheye.cluster.native_detection_authority import load_native_archive_authority
 from fisheye.utils.build_recording_frame_index import build_recording_frame_index
 from fisheye.utils.create_clipped_analysis_zarr import create_clipped_analysis_zarr
@@ -200,6 +201,30 @@ def test_create_clipped_analysis_zarr_writes_shell_layout(tmp_path: Path) -> Non
     assert camera_group["detect_runs"].attrs["latest"] is None
     assert camera_group["detect_runs"].attrs["scope"] == "clip_camera"
     assert root["experiment_index"]["clip_table"].attrs["row_count"] == 2
+
+
+def test_created_clipped_archive_binds_as_crop_pixel_authority(tmp_path: Path) -> None:
+    root_dir = tmp_path / "rec_a"
+    _write_clipped_recording(root_dir)
+    output_zarr = root_dir / "zarr" / "rec_a_analysis.zarr"
+    create_clipped_analysis_zarr(root_dir, output_zarr=output_zarr)
+
+    bound = bind_crop_pixel_authority(
+        output_zarr,
+        expected_recording_identity="rec_a",
+        expected_camera_identity="2010093",
+        expected_n_frames=5,
+        expected_source_width=640,
+        expected_source_height=640,
+    )
+
+    assert bound.source_video_path is None
+    assert len(bound.source_video_paths) == 2
+    assert len(bound.source_index_paths) == 3
+    assert bound.binding_document["provider_profile"] == (
+        "published_external_clipped_video_collection_v1"
+    )
+    bound.assert_verified()
 
 
 def test_repair_clipped_analysis_authority_dry_run_apply_and_idempotence(

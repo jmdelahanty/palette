@@ -11,7 +11,7 @@ from typing import Sequence
 from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.crop_pixel_authority import (
-    bind_external_video_crop_pixel_authority,
+    bind_crop_pixel_authority,
 )
 from fisheye.shared.zarr.crop_schema import (
     CropGeometryPolicy,
@@ -72,7 +72,7 @@ def publish_clipped_crop_geometry_v2(
     )
     lineage = refined.manifest["payload"]["snapshot_lineage"]
     recording_identity = lineage["manual_instance_key_allocator"]["recording_identity"]
-    pixels = bind_external_video_crop_pixel_authority(
+    pixels = bind_crop_pixel_authority(
         analysis_zarr,
         expected_recording_identity=recording_identity,
         expected_camera_identity=camera_id,
