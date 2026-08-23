@@ -380,9 +380,15 @@ extension.
       relative-frame publication without collapsing the complete chaser axis.
 - [x] Publish the sealed provider-aware chaser-distance successor with generic
       `source_position_*` lineage.
-- [ ] Migrate quadrant and radial occupancy to exact composable selections.
-- [ ] Migrate near-field occupancy v2 with valid-time entry denominators,
-      hysteresis, complete-visit dwell, and censoring unchanged.
+- [x] Implement selector-ineligible quadrant and moving-chaser radial occupancy
+      over exact caller-role-bound half-open epoch selections, one sealed
+      position provider, and one reviewed circular geometry/scale authority.
+      Sealed analysis-Zarr publication and profile-runner integration remain
+      open.
+- [x] Implement the selector-ineligible near-field position suite with the
+      maintained valid-time entry denominator, invalid-gap reset, hysteresis,
+      complete-visit dwell, and boundary/gap censoring semantics unchanged.
+      Persisted visit-membership arrays remain Phase 5 work.
 - [ ] Migrate epoch behavior summary v2 to explicit selections and provider
       motion.
 - [ ] Migrate response regimes with distinct fish and chaser separation
@@ -534,10 +540,18 @@ extension.
       and exact heading-bound egocentric bearing.
 - [x] Typed position, body-frame, tracking, timing, and provider-motion
       foundations exist, including explicit mixed-modality compatibility.
-- [ ] No position provider has been promoted for GoodBatBadBat; multi-recording,
-      camera-stratified coverage and downstream-bias evidence remains required.
-- [ ] Near-field, response-regime, trial, escape, gaze, and visualization
-      surfaces have not yet migrated to the new composable provider contracts.
+- [x] A timestamped GoodBatBadBat decision retains
+      `detection_bbox_centroid.v1` as the current position-provider default,
+      based on an eight-recording, four-camera comparison. This is not a
+      body-frame/heading promotion and no production selector has been
+      activated.
+- [x] A single-recording selector-ineligible position suite now exercises
+      exact pre/training/post distance CDF, quadrant, moving-chaser radial,
+      near-field, and aggressive-minus-inert products from the detection
+      provider.
+- [ ] Response-regime, persisted visit membership, trial, escape, gaze, and
+      immutable visualization recipes have not yet migrated to the new
+      composable provider contracts.
 - [ ] Plot recipes, recording-local discovery, registry projection, full cohort
       products, and production profile readiness remain open.
 - [ ] Required CI and integration remain separate gates for the implementation
@@ -620,6 +634,60 @@ require explicit sample/frame multiplicity counts and a declared denominator.
 The current path-by-path behavior, producer verdict, proxy boundary, and
 statistical risks are recorded in
 [`chaser_stimulus_camera_temporal_projection_audit_2026-08-20.md`](chaser_stimulus_camera_temporal_projection_audit_2026-08-20.md).
+
+### Implementation checkpoint: 2026-08-23 position-only suite
+
+Commits `ac3103910bacc11a5bd12ac11fc26e87781f66f3` and
+`8ba71230f8a9acbe2652f3e8b8a7d1b7094457ea` add a pure provider-aware
+position suite and an atomic operational canary publisher. The suite requires:
+
+- one exact selector-ineligible sealed provider-chaser-distance run;
+- the exact epoch-v2 authority already bound by that provider source;
+- explicit caller bindings from source window IDs to analysis roles;
+- one exact reviewed arena-geometry selection and native-camera frame;
+- one exact physical camera scale; and
+- exactly one explicitly named treatment and baseline chaser role for paired
+  role contrasts.
+
+It computes exact half-open pre/training/post summaries, distance CDFs,
+native-camera/+Y-down quadrant occupancy, area-corrected moving-chaser radial
+occupancy, arena radius/wall distance, valid-time near-zone occupancy and
+hysteresis entries, and treatment-minus-baseline scalar/radial contrasts. It
+contains no motion, heading, body-frame, bout, gaze, trial, or escape inference.
+
+The reviewed GoodBatBadBat canary is:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_canary_20260823_v2`
+
+- artifact-manifest SHA-256:
+  `02de7583e6210c00a269a19505ac1c11d4efe5706ec22bc44308507fb3221910`;
+- software commit:
+  `8ba71230f8a9acbe2652f3e8b8a7d1b7094457ea` (clean worktree);
+- source provider: `detection_bbox_centroid.v1`;
+- source provider manifest SHA-256:
+  `7caac391aed297ba215a763eb08fa315f7be23f7fb95508a4c42cab63de038ce`;
+- selected geometry record SHA-256:
+  `4eac1c3560463db623f8ad1e7182e0b30cbbbe0679d4fe23cecb3501832e2884`;
+- disposition: selector-ineligible operational evidence, with no analysis-Zarr,
+  registry, or production-authority mutation.
+
+All eleven v2 artifacts independently revalidated against their manifest. The
+first immutable v1 canary remains as audit evidence; visual review found that
+its legacy 2--20 mm CDF ladder truncated the displayed distribution. V2 fixes
+that presentation policy by deriving the full CDF threshold axis from the
+selected arena radius plus the maximum bound chaser-center radius; it does not
+alter the underlying per-epoch metrics.
+
+The canary also records a strict equivalence policy for the stimulus-scoped and
+recording-scoped physical-frame records. Only their path-scoped `frame_id` and
+selected-evidence `record_ref` may differ. Camera identity, source-camera pixel
+authority, selected-evidence digest, coordinate semantics, scale, and physical
+extent must remain identical.
+
+Focused validation passed `27` tests covering the new suite, provider distance
+comparison, and fixed arena-grid authority. Required CI has not run. Full-cohort
+position-suite canaries, sealed analysis-Zarr publication, profile/registry
+projection, and production integration remain open.
 
 ## Explicit non-goals for the first implementation
 

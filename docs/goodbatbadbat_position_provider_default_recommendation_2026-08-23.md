@@ -109,8 +109,16 @@ shows all of the following:
 
 ## Next authorized scientific implementation
 
-Build selector-ineligible provider-aware position-only canaries using the
-explicit detection provider for radial position, quadrant occupancy,
-near-chaser occupancy, aggressive-versus-inert comparisons, and exact
-pre/training/post summaries. Provider-aware motion, bouts, body-frame, gaze,
-trial, and escape products remain separate later phases.
+The first selector-ineligible provider-aware position-only canary is complete
+at
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_canary_20260823_v2`
+(artifact-manifest SHA-256
+`02de7583e6210c00a269a19505ac1c11d4efe5706ec22bc44308507fb3221910`).
+It exercises the explicit detection provider for radial position, quadrant
+occupancy, near-chaser occupancy, aggressive-versus-inert comparisons, and
+exact pre/training/post summaries without changing a selector or registry.
+
+The next authorized scientific step is a bounded multi-camera cohort canary,
+followed by a separate decision about sealed analysis-Zarr publication and
+profile integration. Provider-aware motion, bouts, body-frame, gaze, trial,
+and escape products remain separate later phases.
