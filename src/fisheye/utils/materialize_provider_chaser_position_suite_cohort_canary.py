@@ -43,7 +43,7 @@ from fisheye.utils.materialize_provider_chaser_position_suite_canary import (  #
 
 
 SCHEMA_ID = "palette.provider_chaser_position_suite_cohort_canary"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TASK_SCHEMA_ID = f"{SCHEMA_ID}.task"
 TASK_SCHEMA_VERSION = 1
 SELECTION_POLICY_ID = "earliest_latest_eligible_recording_per_arena_v1"
@@ -745,6 +745,17 @@ def build_cohort_canary(
             "recording_summary": recording_rows,
             "recording_level_distribution_summary": distributions,
             "recording_level_role_contrast_summary": contrast_distributions,
+            "cohort_plot_policies": {
+                "recording_metric_panels": "one_value_per_recording_v1",
+                "radial_summary": {
+                    "policy_id": "complete_recording_support_only_v1",
+                    "required_recording_count": len(recording_rows),
+                    "reason": (
+                        "Do not extend a cohort curve into radial tail bins that are "
+                        "supported by only a subset of selected recordings."
+                    ),
+                },
+            },
             "temporal_caveat": (
                 "Controller-input-provenance proxy only; state presentation time and "
                 "camera exposure alignment are unavailable. Cohort aggregation uses "
@@ -815,6 +826,8 @@ def _plot_recording_metric(
 
 def _plot_radial_summary(report: Mapping[str, Any], path: Path) -> None:
     rows = report["_radial_summary"]
+    policy = report["cohort_plot_policies"]["radial_summary"]
+    required_recording_count = int(policy["required_recording_count"])
     fig, axes = plt.subplots(3, 1, figsize=(11, 12), constrained_layout=True)
     for ax, epoch in zip(axes, ("pre", "training", "post"), strict=True):
         for role in ("aggressive", "inert"):
@@ -824,6 +837,8 @@ def _plot_radial_summary(report: Mapping[str, Any], path: Path) -> None:
                 if row["analysis_role"] == epoch
                 and row["behavior_role"] == role
                 and row["selection_index_geometric_p50"] is not None
+                and row["selection_index_geometric_recording_count"]
+                == required_recording_count
             ]
             x = np.asarray(
                 [0.5 * (row["bin_start_mm"] + row["bin_end_mm"]) for row in present]
@@ -839,7 +854,10 @@ def _plot_radial_summary(report: Mapping[str, Any], path: Path) -> None:
         ax.grid(alpha=0.2)
         ax.legend()
     axes[-1].set_xlabel("fish–chaser distance (mm)")
-    fig.suptitle("Recording-balanced moving-chaser radial occupancy")
+    fig.suptitle(
+        "Recording-balanced moving-chaser radial occupancy\n"
+        f"median and IQR; complete {required_recording_count}-recording support only"
+    )
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
