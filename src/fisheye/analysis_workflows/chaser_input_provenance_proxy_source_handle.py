@@ -16,7 +16,6 @@ from fisheye.analysis_workflows.materializers.chaser_input_provenance_proxy impo
     MANIFEST_ATTR,
     MANIFEST_DIGEST_ATTR,
 )
-from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.shared.zarr.chaser_input_provenance_proxy_schema import (
     CHASER_INPUT_PROVENANCE_PROXY_LAYOUT,
@@ -37,7 +36,6 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
 )
-
 
 SOURCE_HANDLE_SCHEMA_ID = "palette.chaser_input_provenance_proxy_source_handle"
 SOURCE_HANDLE_SCHEMA_VERSION = 1
@@ -140,7 +138,9 @@ class ChaserInputProvenanceProxySourceHandle:
     _expected_recording_id: str | None = field(repr=False, compare=False)
     _verification_seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _HANDLE_SEAL:
             _fail("Proxy source handles can only be minted by their strict loader.")
         for name, value in values.items():
@@ -209,9 +209,7 @@ class ChaserInputProvenanceProxySourceHandle:
             "temporal_alignment_class": projection["temporal_alignment_class"],
             "source_run_path": projection["source_run_path"],
             "source_manifest_sha256": projection["source_manifest_sha256"],
-            "source_verification_digest": projection[
-                "source_verification_digest"
-            ],
+            "source_verification_digest": projection["source_verification_digest"],
             "n_frames": self.dimensions.n_frames,
             "n_candidates": self.dimensions.n_candidates,
             "n_chasers": self.dimensions.n_chasers,
@@ -278,8 +276,7 @@ def load_chaser_input_provenance_proxy_source_handle(
     attrs = dict(run.attrs)
     if (
         attrs.get("schema_id") != CHASER_INPUT_PROVENANCE_PROXY_SCHEMA_ID
-        or attrs.get("schema_version")
-        != CHASER_INPUT_PROVENANCE_PROXY_SCHEMA_VERSION
+        or attrs.get("schema_version") != CHASER_INPUT_PROVENANCE_PROXY_SCHEMA_VERSION
         or attrs.get("layout") != CHASER_INPUT_PROVENANCE_PROXY_LAYOUT
     ):
         _fail("Proxy run schema identity is invalid.")
@@ -301,7 +298,10 @@ def load_chaser_input_provenance_proxy_source_handle(
     )
     if canonical_json_sha256(manifest) != manifest_sha256:
         _fail("Proxy run manifest digest is stale.")
-    if expected_manifest_sha256 is not None and manifest_sha256 != expected_manifest_sha256:
+    if (
+        expected_manifest_sha256 is not None
+        and manifest_sha256 != expected_manifest_sha256
+    ):
         _fail("Proxy run manifest differs from the expected digest.")
     publication_manifest = {
         key: value for key, value in manifest.items() if key != "prepared_candidate"
@@ -344,6 +344,10 @@ def load_chaser_input_provenance_proxy_source_handle(
         n_candidates=int(dimensions_record["candidate"]),
         n_chasers=int(dimensions_record["chaser"]),
     )
+    verified_array_digests = {
+        str(declaration["path"]): str(declaration["content_sha256"])
+        for declaration in normalized_manifest["array_declarations"]
+    }
     verification = {
         "schema_id": SOURCE_HANDLE_SCHEMA_ID,
         "schema_version": SOURCE_HANDLE_SCHEMA_VERSION,
@@ -351,7 +355,8 @@ def load_chaser_input_provenance_proxy_source_handle(
         "recording_id": recording_id,
         "manifest_sha256": manifest_sha256,
         "arrays": {
-            name: array_values_sha256(value) for name, value in sorted(arrays.items())
+            name: verified_array_digests[name]
+            for name in sorted(verified_array_digests)
         },
         "metadata_equivalence": equivalence.to_json(),
         "selector_eligible": False,

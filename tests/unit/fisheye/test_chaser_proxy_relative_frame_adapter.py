@@ -5,6 +5,7 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
+import pytest
 
 from fisheye.analysis_workflows import chaser_proxy_relative_frame_adapter as adapter
 from fisheye.analysis_workflows.chaser_input_provenance_proxy import (
@@ -86,7 +87,10 @@ class _Native:
             "metadata_equivalence": None,
         },
         "acquisition_frame_authority": {
-            "record_ref": "analysis/acquisition_frame_clock_runs/clock-v1",
+            "record_ref": (
+                "/analysis/acquisition_camera_frames/camera-1"
+                "@acquisition_camera_frame"
+            ),
             "record_sha256": "a" * 64,
         },
         "total_frames": 4,
@@ -286,7 +290,17 @@ def test_adapter_applies_typed_arena_to_camera_chain_without_timestamp_claim(
         camera_id="camera-1",
         clock_run_path="analysis/acquisition_frame_clock_runs/clock-v1",
         clock_record_sha256="a" * 64,
+        source_video_metadata_sha256="b" * 64,
         sha256="8" * 64,
+    )
+    acquisition_frame = SimpleNamespace(
+        record=SimpleNamespace(
+            recording_id="recording-1",
+            camera_id="camera-1",
+            frame_count=4,
+            source_total_frames=4,
+            source_video_metadata_sha256="b" * 64,
+        )
     )
     subject = SimpleNamespace(
         subject_ids=("fish-uuid",),
@@ -309,6 +323,11 @@ def test_adapter_applies_typed_arena_to_camera_chain_without_timestamp_claim(
         adapter,
         "load_provider_recording_timing_authority",
         lambda *args, **kwargs: timing,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_load_native_acquisition_frame",
+        lambda *args, **kwargs: acquisition_frame,
     )
     monkeypatch.setattr(
         adapter,
@@ -388,3 +407,49 @@ def test_adapter_rejects_proxy_bound_to_another_native_authority(monkeypatch) ->
         assert "exact reopened native provider" in str(exc)
     else:  # pragma: no cover - assertion helper
         raise AssertionError("mismatched native authority was accepted")
+
+
+def test_native_acquisition_frame_loader_requires_exact_bound_pointer(
+    monkeypatch,
+) -> None:
+    group_path = "analysis/acquisition_camera_frames/camera-1"
+    authority_node = object()
+    root = {group_path: authority_node}
+    ownership = object()
+    bound = SimpleNamespace(
+        record_ref=f"/{group_path}@acquisition_camera_frame",
+        record_sha256="a" * 64,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "load_acquisition_import_ownership",
+        lambda observed_root, observed_node: ownership,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "load_acquisition_camera_frame",
+        lambda observed_root, observed_node, *, import_ownership: bound,
+    )
+
+    assert (
+        adapter._load_native_acquisition_frame(
+            root,
+            pointer={
+                "record_ref": bound.record_ref,
+                "record_sha256": bound.record_sha256,
+            },
+        )
+        is bound
+    )
+
+    with pytest.raises(
+        adapter.ChaserProxyRelativeFrameAdapterError,
+        match="differs from its bound record",
+    ):
+        adapter._load_native_acquisition_frame(
+            root,
+            pointer={
+                "record_ref": bound.record_ref,
+                "record_sha256": "b" * 64,
+            },
+        )

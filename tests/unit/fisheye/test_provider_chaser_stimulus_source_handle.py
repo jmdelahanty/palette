@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import zarr
 
+import fisheye.analysis_workflows.provider_chaser_stimulus_source_handle as provider_handle_module
 from tests.unit.fisheye.test_provider_chaser_distance_candidates import _candidate
 from fisheye.analysis.provider_chaser_distance_candidates import (
     MANIFEST_ATTR,
@@ -71,9 +72,9 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
         )
         nearest_column = np.argmin(filled[any_finite], axis=1)
         nearest_index[any_finite] = arrays["chasers/chaser_index"][nearest_column]
-        nearest_distance[any_finite] = filled[
-            any_finite, nearest_column
-        ].astype(np.float32)
+        nearest_distance[any_finite] = filled[any_finite, nearest_column].astype(
+            np.float32
+        )
     arrays["distances/nearest_chaser_index"] = nearest_index
     arrays["distances/nearest_distance_mm"] = nearest_distance
     authority = {
@@ -98,7 +99,10 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
             "temporal_authority": {"record_ref": "time", "record_sha256": "2" * 64},
             "surface_manifest": {"record_ref": "surface", "record_sha256": "3" * 64},
             "output_manifest": {"record_ref": "output", "record_sha256": "4" * 64},
-            "transform_manifest": {"record_ref": "transform", "record_sha256": "5" * 64},
+            "transform_manifest": {
+                "record_ref": "transform",
+                "record_sha256": "5" * 64,
+            },
             "source_camera_frame": {"frame_id": "camera-native"},
         },
         "stimulus_epoch": {
@@ -112,7 +116,19 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
         "total_frames": candidate.total_frames,
         "stimulus_sample_count": 4,
         "fps": candidate.fps,
-        "fps_authority": {"recording_id": candidate.recording_id},
+        "fps_authority": {
+            "schema_id": "palette.provider_chaser_distance_fps_authority",
+            "schema_version": 1,
+            "recording_id": candidate.recording_id,
+            "camera_id": "camera-1",
+            "fps": candidate.fps,
+            "source_field": "source_video_metadata.fps",
+            "source_video_metadata": {
+                "record_ref": "/@source_video_metadata",
+                "record_sha256": "8" * 64,
+            },
+            "acquisition_frame_authority": {"recording_id": candidate.recording_id},
+        },
         "pixels_per_mm_projector": candidate.pixels_per_mm_projector,
         "temporal_join_policy": "preserve_unique_stimulus_frame_num_then_join_exact_source_acquisition_frame_index_v1",
         "numeric_transform": "source_camera_to_selected_canvas_then_inverse_arena_to_canvas_v1",
@@ -120,14 +136,18 @@ def _published_candidate(tmp_path: Path) -> tuple[Path, str]:
     candidate = replace(candidate, arrays=arrays, source_authority=authority)
     archive = tmp_path / "candidate.zarr"
     _materialize_local(candidate, local_zarr=archive)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     root.attrs["recording_id"] = candidate.recording_id
     consolidate_metadata_capture_expected_warnings(archive)
     return archive, candidate.run_name
 
 
 def _rewrite_manifest(archive: Path, run_name: str, mutate) -> None:
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     run = root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"]
     manifest = dict(run.attrs[MANIFEST_ATTR])
     payload = dict(manifest["payload"])
@@ -137,6 +157,28 @@ def _rewrite_manifest(archive: Path, run_name: str, mutate) -> None:
     run.attrs[MANIFEST_ATTR] = manifest
     run.attrs[MANIFEST_DIGEST_ATTR] = manifest["payload_digest"]
     consolidate_metadata_capture_expected_warnings(archive)
+
+
+def test_deep_validation_hashes_each_declared_array_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, run_name = _published_candidate(tmp_path)
+    calls = 0
+    original_hash = provider_handle_module.sha256_array
+
+    def counted_hash(value: object) -> str:
+        nonlocal calls
+        calls += 1
+        return original_hash(value)
+
+    monkeypatch.setattr(provider_handle_module, "sha256_array", counted_hash)
+
+    handle = load_provider_chaser_stimulus_source_handle(
+        archive,
+        run_name=run_name,
+    )
+
+    assert calls == len(handle.arrays)
 
 
 def test_published_writer_contract_fixture_exposes_native_samples_without_camera_deduplication(
@@ -203,16 +245,53 @@ def test_bare_run_name_rejects_selectors_traversal_and_nested_paths(
 
 def test_wrong_recording_identity_fails_closed(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     root.attrs["recording_id"] = "other-recording"
     consolidate_metadata_capture_expected_warnings(archive)
     with pytest.raises(ProviderChaserStimulusSourceHandleError, match="does not match"):
         load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
 
 
+def test_legacy_string_fps_authority_is_rejected(tmp_path: Path) -> None:
+    archive, run_name = _published_candidate(tmp_path)
+
+    def replace_authority(payload: dict) -> None:
+        payload["source_authority"][
+            "fps_authority"
+        ] = "acquisition.source_video_metadata.fps"
+
+    _rewrite_manifest(archive, run_name, replace_authority)
+    with pytest.raises(
+        ProviderChaserStimulusSourceHandleError,
+        match="fps_authority must be a string-keyed mapping",
+    ):
+        load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
+
+
+def test_fps_authority_must_bind_same_acquisition_frame_record(tmp_path: Path) -> None:
+    archive, run_name = _published_candidate(tmp_path)
+
+    def replace_frame_digest(payload: dict) -> None:
+        payload["source_authority"]["fps_authority"]["acquisition_frame_authority"] = {
+            "recording_id": "recording-1",
+            "record_sha256": "9" * 64,
+        }
+
+    _rewrite_manifest(archive, run_name, replace_frame_digest)
+    with pytest.raises(
+        ProviderChaserStimulusSourceHandleError,
+        match="FPS and acquisition-frame authorities disagree",
+    ):
+        load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
+
+
 def test_array_payload_tampering_is_rejected(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     run = root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"]
     run["samples/stimulus_frame_num"][0] = 99
     with pytest.raises(ProviderChaserStimulusSourceHandleError, match="content digest"):
@@ -221,10 +300,14 @@ def test_array_payload_tampering_is_rejected(tmp_path: Path) -> None:
 
 def test_stale_consolidated_metadata_is_rejected(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     run = root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"]
     run.attrs["row_axis"] = "acquisition_frames"
-    with pytest.raises(ProviderChaserStimulusSourceHandleError, match="direct/consolidated"):
+    with pytest.raises(
+        ProviderChaserStimulusSourceHandleError, match="direct/consolidated"
+    ):
         load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
 
 
@@ -272,7 +355,9 @@ def test_missing_or_extra_declarations_are_rejected(tmp_path: Path) -> None:
 
 def test_parent_selector_attribute_is_rejected(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     parent = root["analysis/provider_chaser_distance_candidate_runs"]
     parent.attrs["latest"] = run_name
     consolidate_metadata_capture_expected_warnings(archive)
@@ -283,7 +368,9 @@ def test_parent_selector_attribute_is_rejected(tmp_path: Path) -> None:
 def test_assert_current_rejects_post_seal_mutation(tmp_path: Path) -> None:
     archive, run_name = _published_candidate(tmp_path)
     handle = load_provider_chaser_stimulus_source_handle(archive, run_name=run_name)
-    root = zarr.open_group(str(archive), mode="a", zarr_format=3, use_consolidated=False)
+    root = zarr.open_group(
+        str(archive), mode="a", zarr_format=3, use_consolidated=False
+    )
     root[f"analysis/provider_chaser_distance_candidate_runs/{run_name}"][
         "samples/timestamp_ns"
     ][0] = 42

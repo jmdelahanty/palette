@@ -132,10 +132,12 @@ Current immutable evidence:
 
 - [ ] Do not submit the 84-recording production campaign from candidate success
   alone.
-- [ ] Record a timestamped provider-promotion decision binding the canary
-  evidence, estimator, policy version, and exact source manifests.
-- [ ] Add a provider-aware sealed chaser-distance contract with generic
-  `source_position_*` lineage while retaining the detection-specific v1 reader.
+- [x] Record a timestamped provider-default recommendation binding the canary
+      evidence, estimator, policy version, and exact source manifests. See
+      `docs/goodbatbadbat_position_provider_default_recommendation_2026-08-23.md`;
+      production activation remains pending required CI and explicit approval.
+- [x] Add a provider-aware sealed chaser-distance contract with generic
+      `source_position_*` lineage while retaining the detection-specific v1 reader.
 - [x] Pass the focused provider-position, motion, epoch, chaser-candidate, and
   Marimo projection test suites locally.
 - [ ] Pass all required CI before selector activation, production publication,

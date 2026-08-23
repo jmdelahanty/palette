@@ -399,8 +399,15 @@ def _canonical_detection_validity(
 
     if bbox_norm.ndim != 2 or bbox_norm.shape[1:] != (4,):
         _fail("bbox_norm_coords must have exact shape [N, 4].")
-    boxes = np.asarray(bbox_norm, dtype=np.float64)
-    half = 0.5
+    # Reconstruct normalized endpoints in the persisted floating-point dtype.
+    # Canonical detections store center/extent values as float32.  Promoting
+    # those rounded operands to float64 *before* reconstruction can turn an
+    # endpoint that is exactly 1.0 in the storage arithmetic into a value a
+    # few 1e-8 above 1.0.  That is not an out-of-frame box; it is a mixed-
+    # precision validation artifact.  The schema invariant applies to the
+    # persisted representation, so its arithmetic domain is authoritative.
+    boxes = np.asarray(bbox_norm)
+    half = np.asarray(0.5, dtype=boxes.dtype)
     x_min = boxes[:, 0] - boxes[:, 2] * half
     y_min = boxes[:, 1] - boxes[:, 3] * half
     x_max = boxes[:, 0] + boxes[:, 2] * half

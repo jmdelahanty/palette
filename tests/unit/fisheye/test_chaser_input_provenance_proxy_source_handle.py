@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import fisheye.analysis_workflows.chaser_input_provenance_proxy_source_handle as proxy_handle_module
+import fisheye.shared.zarr.chaser_input_provenance_proxy_schema as proxy_schema_module
 from fisheye.analysis_workflows.chaser_input_provenance_proxy_source_handle import (
     ChaserInputProvenanceProxySourceHandle,
     ChaserInputProvenanceProxySourceHandleError,
@@ -37,6 +39,37 @@ def _published(tmp_path: Path) -> Path:
     return archive
 
 
+def test_deep_validation_hashes_each_declared_array_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _published(tmp_path)
+    calls = 0
+    original_hash = proxy_schema_module.array_values_sha256
+
+    def counted_hash(value: object) -> str:
+        nonlocal calls
+        calls += 1
+        return original_hash(value)
+
+    def unexpected_duplicate_hash(value: object) -> str:
+        raise AssertionError("the verification document must reuse declaration hashes")
+
+    monkeypatch.setattr(proxy_schema_module, "array_values_sha256", counted_hash)
+    monkeypatch.setattr(
+        proxy_handle_module,
+        "array_values_sha256",
+        unexpected_duplicate_hash,
+        raising=False,
+    )
+
+    handle = load_chaser_input_provenance_proxy_source_handle(
+        archive,
+        run_name="proxy_v1",
+    )
+
+    assert calls == len(handle.arrays)
+
+
 def test_strict_handle_reads_exact_consolidated_candidate(tmp_path: Path) -> None:
     archive = _published(tmp_path)
     handle = load_chaser_input_provenance_proxy_source_handle(
@@ -45,9 +78,7 @@ def test_strict_handle_reads_exact_consolidated_candidate(tmp_path: Path) -> Non
         expected_recording_id="recording-1",
     )
 
-    assert handle.run_path == (
-        f"{CHASER_INPUT_PROVENANCE_PROXY_PARENT_PATH}/proxy_v1"
-    )
+    assert handle.run_path == (f"{CHASER_INPUT_PROVENANCE_PROXY_PARENT_PATH}/proxy_v1")
     assert handle.selector_eligible is False
     assert handle.dimensions.n_frames == 3
     assert handle.dimensions.n_candidates == 5
@@ -57,12 +88,13 @@ def test_strict_handle_reads_exact_consolidated_candidate(tmp_path: Path) -> Non
     np.testing.assert_array_equal(handle.selected, [True, True, True])
     assert handle.selected_chaser_position_xy.shape == (3, 2, 2)
     assert handle.acquisition_frame_index.flags.writeable is False
-    assert handle.acquisition_projection_record[
-        "temporal_alignment_class"
-    ] == "controller_input_provenance_proxy"
-    assert handle.acquisition_projection_record[
-        "physical_presentation_verified"
-    ] is False
+    assert (
+        handle.acquisition_projection_record["temporal_alignment_class"]
+        == "controller_input_provenance_proxy"
+    )
+    assert (
+        handle.acquisition_projection_record["physical_presentation_verified"] is False
+    )
     binding = handle.publication_binding_record
     assert binding["run_path"] == handle.run_path
     assert binding["manifest_sha256"] == handle.manifest_sha256
@@ -96,7 +128,9 @@ def test_loader_rejects_wrong_recording_and_manifest_expectations(
     tmp_path: Path,
 ) -> None:
     archive = _published(tmp_path)
-    with pytest.raises(ChaserInputProvenanceProxySourceHandleError, match="expectation"):
+    with pytest.raises(
+        ChaserInputProvenanceProxySourceHandleError, match="expectation"
+    ):
         load_chaser_input_provenance_proxy_source_handle(
             archive,
             run_name="proxy_v1",

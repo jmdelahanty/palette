@@ -1,0 +1,40 @@
+schema_id: palette.chaser_analysis_profile
+schema_version: 2
+profile_id: chaser_position_suite_v1
+profile_version: 1
+profile_scope: reduced
+
+# This profile intentionally claims only the sealed position-only suite. It
+# cannot publish full chaser-profile readiness and does not imply motion,
+# heading, body-frame, bout, gaze, trial, or escape support.
+policies:
+  position: explicit_position_provider_binding_required_v1
+  geometry: exact_registered_arena_and_chaser_geometry_v1
+  temporal_alignment: explicit_temporal_alignment_requirement_required_v1
+
+modules:
+  - id: stimulus_epochs
+    implementation: fisheye.analysis.stimulus_epoch_runs
+    schema_id: palette.stimulus_epoch_windows.v1
+    schema_version: 1
+    depends_on: []
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities: []
+
+  - id: provider_chaser_position_suite
+    implementation: fisheye.analysis.provider_chaser_position_suite
+    schema_id: palette.provider_chaser_position_suite
+    schema_version: 1
+    depends_on: [stimulus_epochs]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities:
+      - position_series
+      - positioned_chaser
+      - temporal_authority
+      - chaser_temporal_alignment
+      - chaser_geometry
+      - arena_geometry

@@ -41,7 +41,6 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STATUS_COMPLETE,
 )
 
-
 PROVIDER_CHASER_STIMULUS_SOURCE_HANDLE_SCHEMA_ID = (
     "palette.provider_chaser_stimulus_source_handle"
 )
@@ -253,16 +252,19 @@ def _array_paths(group: Any, *, prefix: str = "") -> set[str]:
     return paths
 
 
-def _strict_manifest(run: Any, *, run_name: str, exact_run_path: str) -> tuple[Mapping[str, Any], str]:
+def _strict_manifest(
+    run: Any, *, run_name: str, exact_run_path: str
+) -> tuple[Mapping[str, Any], str]:
     raw = run.attrs.get(writer.MANIFEST_ATTR)
     manifest = _require_mapping(raw, field=writer.MANIFEST_ATTR)
     if set(manifest) != {"schema_id", "schema_version", "payload", "payload_digest"}:
         raise ProviderChaserStimulusSourceHandleError(
             "Provider candidate manifest has missing or extra envelope fields."
         )
-    if manifest.get("schema_id") != writer.MANIFEST_SCHEMA_ID or manifest.get(
-        "schema_version"
-    ) != writer.MANIFEST_SCHEMA_VERSION:
+    if (
+        manifest.get("schema_id") != writer.MANIFEST_SCHEMA_ID
+        or manifest.get("schema_version") != writer.MANIFEST_SCHEMA_VERSION
+    ):
         raise ProviderChaserStimulusSourceHandleError(
             "Provider candidate manifest schema identity is invalid."
         )
@@ -351,8 +353,14 @@ def _validate_authorities(
     *,
     recording_id: str,
 ) -> Mapping[str, Any]:
-    authority = _require_mapping(payload.get("source_authority"), field="source_authority")
-    if authority.get("schema_id") != "palette.provider_chaser_distance_candidate_source_authority" or authority.get("schema_version") != 1:
+    authority = _require_mapping(
+        payload.get("source_authority"), field="source_authority"
+    )
+    if (
+        authority.get("schema_id")
+        != "palette.provider_chaser_distance_candidate_source_authority"
+        or authority.get("schema_version") != 1
+    ):
         raise ProviderChaserStimulusSourceHandleError(
             "Provider candidate source-authority schema identity is invalid."
         )
@@ -373,9 +381,68 @@ def _validate_authorities(
         raise ProviderChaserStimulusSourceHandleError(
             "source_authority.acquisition_frame_authority is missing."
         )
-    if not isinstance(authority.get("fps_authority"), Mapping):
+    fps_authority = _require_mapping(
+        authority.get("fps_authority"), field="source_authority.fps_authority"
+    )
+    if set(fps_authority) != {
+        "schema_id",
+        "schema_version",
+        "recording_id",
+        "camera_id",
+        "fps",
+        "source_field",
+        "source_video_metadata",
+        "acquisition_frame_authority",
+    }:
         raise ProviderChaserStimulusSourceHandleError(
-            "source_authority.fps_authority is missing."
+            "source_authority.fps_authority has missing or extra fields."
+        )
+    if (
+        fps_authority.get("schema_id") != writer.FPS_AUTHORITY_SCHEMA_ID
+        or fps_authority.get("schema_version") != writer.FPS_AUTHORITY_SCHEMA_VERSION
+        or fps_authority.get("recording_id") != recording_id
+        or fps_authority.get("source_field") != "source_video_metadata.fps"
+    ):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority.fps_authority identity is invalid."
+        )
+    camera_id = fps_authority.get("camera_id")
+    if type(camera_id) is not str or not camera_id or camera_id != camera_id.strip():
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority.fps_authority.camera_id is invalid."
+        )
+    fps = authority.get("fps")
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not np.isfinite(float(fps))
+        or float(fps) <= 0
+        or fps_authority.get("fps") != fps
+    ):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority FPS and its exact authority disagree."
+        )
+    metadata_authority = _require_mapping(
+        fps_authority.get("source_video_metadata"),
+        field="source_authority.fps_authority.source_video_metadata",
+    )
+    if set(metadata_authority) != {"record_ref", "record_sha256"} or (
+        metadata_authority.get("record_ref") != "/@source_video_metadata"
+    ):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority FPS metadata authority is invalid."
+        )
+    _require_digest(
+        metadata_authority.get("record_sha256"),
+        field="source_authority.fps_authority.source_video_metadata.record_sha256",
+    )
+    fps_frame_authority = _require_mapping(
+        fps_authority.get("acquisition_frame_authority"),
+        field="source_authority.fps_authority.acquisition_frame_authority",
+    )
+    if dict(fps_frame_authority) != dict(authority["acquisition_frame_authority"]):
+        raise ProviderChaserStimulusSourceHandleError(
+            "source_authority FPS and acquisition-frame authorities disagree."
         )
     for name in ("total_frames", "stimulus_sample_count"):
         value = authority.get(name)
@@ -397,7 +464,7 @@ def _validate_declarations(
     run: Any,
     *,
     payload: Mapping[str, Any],
-) -> tuple[dict[str, np.ndarray], list[Mapping[str, Any]]]:
+) -> tuple[dict[str, np.ndarray], list[Mapping[str, Any]], dict[str, str]]:
     raw_declarations = payload.get("arrays")
     if not isinstance(raw_declarations, list) or not raw_declarations:
         raise ProviderChaserStimulusSourceHandleError(
@@ -427,7 +494,9 @@ def _validate_declarations(
                 f"Provider candidate array {path!r} has no exact dtype declaration."
             )
         shape = declaration.get("shape")
-        if not isinstance(shape, list) or any(type(size) is not int or size < 0 for size in shape):
+        if not isinstance(shape, list) or any(
+            type(size) is not int or size < 0 for size in shape
+        ):
             raise ProviderChaserStimulusSourceHandleError(
                 f"Provider candidate array {path!r} has an invalid shape declaration."
             )
@@ -452,10 +521,14 @@ def _validate_declarations(
             f"missing={missing}, extra={extra}."
         )
     arrays: dict[str, np.ndarray] = {}
+    verified_digests: dict[str, str] = {}
     for declaration in declarations:
         path = str(declaration["path"])
         value = _readonly_snapshot(_array_node(run, path), path=path)
-        if value.dtype.str != declaration["dtype"] or list(value.shape) != declaration["shape"]:
+        if (
+            value.dtype.str != declaration["dtype"]
+            or list(value.shape) != declaration["shape"]
+        ):
             raise ProviderChaserStimulusSourceHandleError(
                 f"Provider candidate array {path!r} dtype or shape differs from its declaration."
             )
@@ -464,7 +537,8 @@ def _validate_declarations(
                 f"Provider candidate array {path!r} content digest differs from its declaration."
             )
         arrays[path] = value
-    return arrays, declarations
+        verified_digests[path] = str(declaration["sha256"])
+    return arrays, declarations, verified_digests
 
 
 def _validate_native_layout(
@@ -540,7 +614,9 @@ def _validate_native_layout(
         raise ProviderChaserStimulusSourceHandleError(
             "Chaser positions do not preserve the complete sample-by-chaser axis."
         )
-    if arrays["positions/chaser_valid"].shape != expected_pair or arrays["positions/chaser_valid"].dtype != np.dtype(bool):
+    if arrays["positions/chaser_valid"].shape != expected_pair or arrays[
+        "positions/chaser_valid"
+    ].dtype != np.dtype(bool):
         raise ProviderChaserStimulusSourceHandleError(
             "Chaser validity does not preserve the complete sample-by-chaser axis."
         )
@@ -548,7 +624,10 @@ def _validate_native_layout(
         raise ProviderChaserStimulusSourceHandleError(
             "Fish validity must be an exact bool array."
         )
-    for path in ("samples/source_stimulus_run_row_index", "samples/source_stimulus_source_row_index"):
+    for path in (
+        "samples/source_stimulus_run_row_index",
+        "samples/source_stimulus_source_row_index",
+    ):
         if (
             arrays[path].dtype != np.dtype("<i8")
             or arrays[path].shape != expected_pair
@@ -643,7 +722,9 @@ def _validate_native_layout(
     return dimensions, registries
 
 
-def _metadata_equivalence(archive: Path, *, run_path: str) -> MetadataEquivalenceReceipt:
+def _metadata_equivalence(
+    archive: Path, *, run_path: str
+) -> MetadataEquivalenceReceipt:
     try:
         return validate_direct_consolidated_subtree(archive, subtree_path=run_path)
     except (FileNotFoundError, OSError, TypeError, ValueError, RuntimeError) as exc:
@@ -675,17 +756,28 @@ class ProviderChaserStimulusSourceHandle:
     _expected_recording_id: str | None = field(repr=False, compare=False)
     _verification_seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _HANDLE_SEAL:
             raise ProviderChaserStimulusSourceHandleError(
                 "Provider chaser stimulus handles can only be minted by their loader."
             )
         for name, value in values.items():
-            if name in {"manifest", "provenance", "authorities", "registries", "metadata_equivalence"}:
+            if name in {
+                "manifest",
+                "provenance",
+                "authorities",
+                "registries",
+                "metadata_equivalence",
+            }:
                 value = _freeze(value)
             elif name == "arrays":
                 value = MappingProxyType(
-                    {path: _readonly_snapshot(array, path=path) for path, array in value.items()}
+                    {
+                        path: _readonly_snapshot(array, path=path)
+                        for path, array in value.items()
+                    }
                 )
             object.__setattr__(self, name, value)
         object.__setattr__(self, "_verification_seal", _HANDLE_SEAL)
@@ -837,23 +929,32 @@ def _load_once(
     manifest, manifest_sha256 = _strict_manifest(
         run, run_name=run_name, exact_run_path=exact_run_path
     )
-    if expected_manifest_sha256 is not None and manifest_sha256 != expected_manifest_sha256:
+    if (
+        expected_manifest_sha256 is not None
+        and manifest_sha256 != expected_manifest_sha256
+    ):
         raise ProviderChaserStimulusSourceHandleError(
             "Provider candidate manifest differs from the expected digest."
         )
-    recording_id = _require_text(run.attrs.get("recording_id"), field="run.recording_id")
+    recording_id = _require_text(
+        run.attrs.get("recording_id"), field="run.recording_id"
+    )
     if expected_recording_id is not None and recording_id != expected_recording_id:
         raise ProviderChaserStimulusSourceHandleError(
             "Provider candidate recording_id differs from the expected recording."
         )
-    root_recording_id = _require_text(root.attrs.get("recording_id"), field="root.recording_id")
+    root_recording_id = _require_text(
+        root.attrs.get("recording_id"), field="root.recording_id"
+    )
     if root_recording_id != recording_id:
         raise ProviderChaserStimulusSourceHandleError(
             "Provider candidate recording_id does not match the archive root."
         )
     authority = _validate_authorities(manifest["payload"], recording_id=recording_id)
     provenance = _validate_provenance(run, source_authority=authority)
-    arrays, _declarations = _validate_declarations(run, payload=manifest["payload"])
+    arrays, _declarations, verified_array_digests = _validate_declarations(
+        run, payload=manifest["payload"]
+    )
     total_frames = int(authority["total_frames"])
     dimensions, registries = _validate_native_layout(
         arrays, total_frames=total_frames, authority=authority
@@ -864,7 +965,10 @@ def _load_once(
         "run_path": exact_run_path,
         "recording_id": recording_id,
         "manifest_sha256": manifest_sha256,
-        "arrays": {path: sha256_array(value) for path, value in sorted(arrays.items())},
+        "arrays": {
+            path: verified_array_digests[path]
+            for path in sorted(verified_array_digests)
+        },
         "dimensions": {
             "total_frames": dimensions.total_frames,
             "n_samples": dimensions.n_samples,
@@ -939,7 +1043,12 @@ def load_provider_chaser_stimulus_source_handle(
         raise ProviderChaserStimulusSourceHandleError(
             "Archive-root consolidated recording identity is stale."
         )
-    snapshot = _load_once(
+    # validate_direct_consolidated_subtree has already proved that both
+    # metadata views describe the same exact arrays.  They resolve to the same
+    # physical chunks, so rereading and hashing the payload through the second
+    # view would not provide independent byte evidence.  Deep-validate the
+    # payload once through the caller-selected published view.
+    return _load_once(
         archive,
         exact_run_path=exact_run_path,
         run_name=name,
@@ -948,21 +1057,6 @@ def load_provider_chaser_stimulus_source_handle(
         expected_manifest_sha256=expected_manifest_sha256,
         equivalence=equivalence,
     )
-    if use_consolidated:
-        direct = _load_once(
-            archive,
-            exact_run_path=exact_run_path,
-            run_name=name,
-            use_consolidated=False,
-            expected_recording_id=expected_recording_id,
-            expected_manifest_sha256=snapshot.manifest_sha256,
-            equivalence=equivalence,
-        )
-        if direct.verification_digest != snapshot.verification_digest:
-            raise ProviderChaserStimulusSourceHandleError(
-                "Provider candidate direct and consolidated reads differ."
-            )
-    return snapshot
 
 
 def require_provider_chaser_stimulus_source_handle(

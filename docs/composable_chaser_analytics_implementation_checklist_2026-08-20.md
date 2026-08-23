@@ -378,11 +378,18 @@ extension.
 
 - [x] Add a provider-neutral read-only distance view over the validated common
       relative-frame publication without collapsing the complete chaser axis.
-- [ ] Publish the sealed provider-aware chaser-distance successor with generic
+- [x] Publish the sealed provider-aware chaser-distance successor with generic
       `source_position_*` lineage.
-- [ ] Migrate quadrant and radial occupancy to exact composable selections.
-- [ ] Migrate near-field occupancy v2 with valid-time entry denominators,
-      hysteresis, complete-visit dwell, and censoring unchanged.
+- [x] Implement selector-ineligible quadrant and moving-chaser radial occupancy
+      over exact caller-role-bound half-open epoch selections, one sealed
+      position provider, and one reviewed circular geometry/scale authority;
+      publish the resulting position-only suite as typed arrays in one exact
+      immutable analysis-Zarr run; and bind it to an explicitly reduced
+      profile and exact publication/readiness DAG.
+- [x] Implement the selector-ineligible near-field position suite with the
+      maintained valid-time entry denominator, invalid-gap reset, hysteresis,
+      complete-visit dwell, and boundary/gap censoring semantics unchanged.
+      Persisted visit-membership arrays remain Phase 5 work.
 - [ ] Migrate epoch behavior summary v2 to explicit selections and provider
       motion.
 - [ ] Migrate response regimes with distinct fish and chaser separation
@@ -391,8 +398,10 @@ extension.
       split, including onset distance, bout rate, duration, path length, peak
       speed, displacement, and distance-band summaries.
 - [ ] Validate static-object pre/post and moving-chaser calculations separately.
-- [ ] Validate detection and keypoint position providers against identical
-      selections without averaging or selecting a default.
+- [x] Validate detection and keypoint position providers against identical
+      selections without averaging them. The bounded eight-recording,
+      four-camera comparison remained evidence-only; the separate timestamped
+      provider decision retained detection as the GoodBatBadBat default.
 
 ### Phase 4: body-frame and heading integration
 
@@ -456,8 +465,15 @@ extension.
 
 - [ ] Freeze a cohort input manifest with exact recording, biological subject,
       protocol, chaser role, provider, and scientific-run identities.
-- [ ] Publish recording-balanced cohort products separately from pooled-event,
-      pooled-bout, or pooled-frame descriptive products.
+- [x] Freeze the bounded position-suite cohort task with exact recording,
+      provider manifest, epoch-role, geometry-selection, physical-scale, arena,
+      and camera identities. Biological-subject and generalized protocol
+      bindings remain open for the full production cohort manifest.
+- [x] Publish recording-balanced position-suite cohort products separately from
+      pooled-event, pooled-bout, or pooled-frame descriptive products. The
+      position canary explicitly declines inferential statistics and keeps one
+      recording as the aggregation unit; generalized event/bout cohort products
+      remain open.
 - [ ] Preserve visit, trial, event, recording, subject, camera, and acquisition
       batch as distinct statistical levels.
 - [ ] Add recording-local analysis and plot offers for every completed module
@@ -499,8 +515,11 @@ extension.
       trials, escape events, bearing, and provider disagreement.
 - [ ] Compare provider coverage and bias by camera, stimulus state, distance,
       visit, trial ordinal, and response class.
-- [ ] Record a timestamped position-provider promotion decision separately from
-      any body-frame-provider promotion decision.
+- [x] Record a timestamped position-provider default recommendation separately
+      from any body-frame-provider promotion decision. The bounded
+      GoodBatBadBat recommendation is in
+      `docs/goodbatbadbat_position_provider_default_recommendation_2026-08-23.md`;
+      selector activation remains pending required CI and explicit approval.
 - [ ] Pass every required CI check before integration, production selector
       activation, shared-checkout update, or full cohort campaign.
 - [ ] Launch production from a frozen cohort/profile plan and preserve task,
@@ -524,16 +543,39 @@ extension.
       selectors.
 - [x] A provider-neutral distance view can consume the validated relative-frame
       handle while retaining every chaser and exact frame-level lineage.
+- [x] Selector-ineligible, sealed, receipt-backed detection-bbox-centroid and
+      keypoint-triad chaser-distance canaries now exercise the generic
+      `source_position_*` publication and bounded reader.
 - [x] The recording explorer exposes read-only provider-aware bout-response rows
       and exact heading-bound egocentric bearing.
 - [x] Typed position, body-frame, tracking, timing, and provider-motion
       foundations exist, including explicit mixed-modality compatibility.
-- [ ] The provider-aware chaser-distance candidate is not a sealed production
-      base and no provider has been promoted for GoodBatBadBat.
-- [ ] Near-field, response-regime, trial, escape, gaze, and visualization
-      surfaces have not yet migrated to the new composable provider contracts.
-- [ ] Plot recipes, recording-local discovery, registry projection, full cohort
-      products, and production profile readiness remain open.
+- [x] A timestamped GoodBatBadBat decision retains
+      `detection_bbox_centroid.v1` as the current position-provider default,
+      based on an eight-recording, four-camera comparison. This is not a
+      body-frame/heading promotion and no production selector has been
+      activated.
+- [x] A single-recording selector-ineligible position suite now exercises
+      exact pre/training/post distance CDF, quadrant, moving-chaser radial,
+      near-field, and aggressive-minus-inert products from the detection
+      provider.
+- [x] A bounded eight-recording/four-camera successor now exercises the same
+      position suite with exact frozen per-recording provider, epoch, geometry,
+      and physical-scale authorities. Cohort summaries use one value per
+      recording, and radial plots require complete eight-recording support.
+- [x] An immutable selector-ineligible analysis-Zarr publication stores the
+      seven position-suite tables as typed arrays with compact readable
+      manifests, bounded receipts, and strict direct/consolidated readback.
+- [x] The reduced `chaser_position_suite_v1` profile and exact two-job LSF DAG
+      bind publication followed by a non-mutating readiness receipt. The
+      receipt separates scientific-candidate completeness from CI, selector,
+      production-authority, and registry-projection readiness.
+- [ ] Response-regime, persisted visit membership, trial, escape, gaze, and
+      immutable visualization recipes have not yet migrated to the new
+      composable provider contracts.
+- [ ] Immutable generalized plot recipes, recording-local discovery, explicit
+      selector promotion, serialized registry projection, non-position cohort
+      products, and full production-profile readiness remain open.
 - [ ] Required CI and integration remain separate gates for the implementation
       work described here.
 
@@ -560,6 +602,44 @@ Standard profile-runner integration, downstream module publication, registry
 projection, selector promotion, and required CI remain open before this branch
 is merge-ready or production-authoritative.
 
+### Implementation checkpoint: 2026-08-21
+
+Commit `bda296db0180cc6a1cffe4d4be89c7fa5f039075` was deployed through a
+commit-pinned cluster worktree and used to publish two selector-ineligible
+GoodBatBadBat canaries:
+
+- `provider_chaser_distance_detection_bbox_centroid_canary_20260821_v2`
+- `provider_chaser_distance_keypoint_triad_canary_20260821_v2`
+
+LSF jobs `153531902` and `153531903` succeeded. Each publication contains
+149,946 frames, two chasers, 299,892 rows, and 38 arrays. Neither publication
+updated a selector, registry, or production authority. The detection and
+keypoint manifest digests are respectively
+`df5ed6cc3b43f7672898a4cbee006266be0dca7ee25774209d5b91d316127710`
+and `5f4f6131e6cd48c495b61f739276c5a873e6b5c0cf50f73433717863bd265b7e`.
+
+The compact-validation correction is effective: the run metadata files are
+63,795 and 63,559 bytes, every atomic validation checkpoint declares row
+evidence in Zarr arrays, and none embeds an `arrays` object. Consolidating both
+runs increased the canonical root metadata by only 220,141 bytes. Both ordinary
+readers succeeded with dense hashing deliberately disabled, while explicit
+deep audits independently recomputed and passed all 38 declared output hashes.
+
+The canaries preserve identical frame, fish, track, chaser, and chaser-position
+lineage. Detection provides 148,963 valid source-position frames; keypoint
+triad provides 146,412, all of which overlap detection. Across those common
+frames, the median source-position difference is 6.56 px, the 95th percentile
+is 22.37 px, and nearest-chaser identity agrees for 99.943% of frames. This is
+bounded single-recording canary evidence only. It neither averages providers
+nor promotes a default; broader camera-, state-, and recording-stratified
+validation remains open.
+
+The failed oversized v1 publication attempts were archived with an inventory
+and whole-file digest before their canonical children were removed. They are
+not selector-visible evidence and must not be used as source authorities.
+Required CI has not run for `bda296db`; the branch and canaries therefore remain
+incomplete and non-production-authoritative under the integration contract.
+
 The producer audit establishes that a physical temporal projection from native
 stimulus states to camera exposures is unsupported for current recordings.
 `source_acquisition_frame_index` identifies the Orange acquisition used as
@@ -576,6 +656,167 @@ require explicit sample/frame multiplicity counts and a declared denominator.
 The current path-by-path behavior, producer verdict, proxy boundary, and
 statistical risks are recorded in
 [`chaser_stimulus_camera_temporal_projection_audit_2026-08-20.md`](chaser_stimulus_camera_temporal_projection_audit_2026-08-20.md).
+
+### Implementation checkpoint: 2026-08-23 position-only suite
+
+Commits `ac3103910bacc11a5bd12ac11fc26e87781f66f3` and
+`8ba71230f8a9acbe2652f3e8b8a7d1b7094457ea` add a pure provider-aware
+position suite and an atomic operational canary publisher. The suite requires:
+
+- one exact selector-ineligible sealed provider-chaser-distance run;
+- the exact epoch-v2 authority already bound by that provider source;
+- explicit caller bindings from source window IDs to analysis roles;
+- one exact reviewed arena-geometry selection and native-camera frame;
+- one exact physical camera scale; and
+- exactly one explicitly named treatment and baseline chaser role for paired
+  role contrasts.
+
+It computes exact half-open pre/training/post summaries, distance CDFs,
+native-camera/+Y-down quadrant occupancy, area-corrected moving-chaser radial
+occupancy, arena radius/wall distance, valid-time near-zone occupancy and
+hysteresis entries, and treatment-minus-baseline scalar/radial contrasts. It
+contains no motion, heading, body-frame, bout, gaze, trial, or escape inference.
+
+The reviewed GoodBatBadBat canary is:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_canary_20260823_v2`
+
+- artifact-manifest SHA-256:
+  `02de7583e6210c00a269a19505ac1c11d4efe5706ec22bc44308507fb3221910`;
+- software commit:
+  `8ba71230f8a9acbe2652f3e8b8a7d1b7094457ea` (clean worktree);
+- source provider: `detection_bbox_centroid.v1`;
+- source provider manifest SHA-256:
+  `7caac391aed297ba215a763eb08fa315f7be23f7fb95508a4c42cab63de038ce`;
+- selected geometry record SHA-256:
+  `4eac1c3560463db623f8ad1e7182e0b30cbbbe0679d4fe23cecb3501832e2884`;
+- disposition: selector-ineligible operational evidence, with no analysis-Zarr,
+  registry, or production-authority mutation.
+
+All eleven v2 artifacts independently revalidated against their manifest. The
+first immutable v1 canary remains as audit evidence; visual review found that
+its legacy 2--20 mm CDF ladder truncated the displayed distribution. V2 fixes
+that presentation policy by deriving the full CDF threshold axis from the
+selected arena radius plus the maximum bound chaser-center radius; it does not
+alter the underlying per-epoch metrics.
+
+The canary also records a strict equivalence policy for the stimulus-scoped and
+recording-scoped physical-frame records. Only their path-scoped `frame_id` and
+selected-evidence `record_ref` may differ. Camera identity, source-camera pixel
+authority, selected-evidence digest, coordinate semantics, scale, and physical
+extent must remain identical.
+
+Focused validation passed `27` tests covering the new suite, provider distance
+comparison, and fixed arena-grid authority. Required CI had not run. At this
+single-recording checkpoint, the full-cohort position canary, sealed
+analysis-Zarr publication, profile/registry projection, and production
+integration were still open; the cohort item is superseded by the checkpoint
+below.
+
+### Implementation checkpoint: 2026-08-23 bounded position cohort
+
+Commits `eb996682f1403f6001b3706b725b89dda5e4322d`,
+`27eacdc62b52cbfc8b83be3c1d924ac7aded164b`, and
+`909f28b1a159bcca6f6600b4f12edeeaac9327ff` add the bounded cohort planner,
+strict frozen-task runner, recording-balanced aggregation, atomic operational
+publication, and reviewed cohort plots.
+
+Planning is deliberately separate from execution. The no-write `plan` command
+resolved the same earliest/latest recording in each of arenas 1--4 used by the
+provider-comparison campaign, then froze every exact sealed provider manifest,
+reviewed arena-geometry selection, source-camera physical authority, camera,
+and pre/training/post epoch-role binding. The resulting task SHA-256 is:
+
+`21dd9f7079de39cac987442bf03a233fc57338b714e3c96cc080a74ca2d8da39`
+
+The reviewed immutable cohort successor is:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_cohort_canary_20260823_v3`
+
+- artifact-manifest SHA-256:
+  `1bb72ffda8f2dbf932005eed9cfe491f3ee43fc82265f219245ba7aa6123148d`;
+- software commit:
+  `909f28b1a159bcca6f6600b4f12edeeaac9327ff` (clean worktree);
+- selection SHA-256:
+  `07d350ad096c67e077ecb7aeae9197f7fa27300293a1407490317f113e5f8891`;
+- scope: eight recordings, two temporal extremes per arena, and cameras
+  `2010093`--`2010096`;
+- output: 107 independently hash-verified artifacts, including eight complete
+  per-recording evidence sets, recording/epoch/role tables, recording-balanced
+  summaries, and four cohort figures; and
+- disposition: selector-ineligible operational evidence, with no analysis-Zarr,
+  registry, selector, or production-authority mutation.
+
+Every epoch/chaser stratum contributes one value per recording to cohort
+summaries; frames are never pooled across recordings. All 42 scalar
+epoch/role/metric summaries contain eight recording-level observations. The
+minimum valid-distance fraction across the 48 recording/epoch/role rows is
+`0.9721035058430718`. Radial CSVs preserve all per-recording bins and explicit
+support counts, while the reviewed plot uses
+`complete_recording_support_only_v1` and therefore displays only bins with all
+eight recordings.
+
+Immutable v1 and v2 cohort attempts remain as audit evidence. Visual review of
+v1 found that tail bins with partial cohort support were still displayed; v2
+fixed that scientific display policy but had a clipped title. V3 retains the
+support correction and fixes the title without altering scientific rows.
+
+Focused outside-sandbox validation passed all 15 cohort and adjacent
+position-suite tests. Required CI has not run. Sealed analysis-Zarr
+publication and reduced profile/DAG integration are superseded by the
+checkpoint below. Generalized plot recipes, selector/registry integration, and
+the motion/bout/body-frame/gaze/trial/escape phases remain open.
+
+### Implementation checkpoint: 2026-08-23 sealed position-suite publication
+
+Commits `0f533c6bc3a7146c0b6f90605b84d674c1937713`,
+`e0de92e9eb007d18abd61c8a17e7d6d7b7330954`, and
+`5be4d47bb33bbe8d6a5aa36a452f24bad30faeaf` add the immutable analysis-Zarr
+publication, compact receipt correction, reduced profile, exact LSF workflow,
+and bounded readiness receipt for the provider-aware position-only suite.
+
+The selector-ineligible GoodBatBadBat publication canary is:
+
+`analysis/provider_chaser_position_suite_runs/provider_chaser_position_suite_detection_bbox_centroid_canary_20260823_v1`
+
+inside the canonical analysis Zarr for
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`. Its immutable manifest SHA-256
+is `7c20874695a18e8d356aaca4347dcc8972cd42793553e85c38f00815c86ec65d`.
+It contains 729 rows across seven typed tables and 148 arrays. The durable
+publication result is:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_publication_canary_20260823_v1/result.json`
+
+The ordinary reader validates exact run identity, compact manifest and
+declarations, array schemas and lengths, source bindings, and direct versus
+consolidated metadata without rehashing upstream dense inputs. Deep array
+rehashing remains an explicit audit mode. The canary changed no raw data,
+upstream provider publication, selector, production authority, or registry.
+
+`chaser_position_suite_v1` is intentionally reduced. It claims only stimulus
+epochs and the sealed provider-position suite; it cannot imply motion,
+body-frame, bout, gaze, trial, or escape readiness. Its exact two-job workflow
+publishes one immutable candidate and then writes a bounded readiness receipt
+outside the Zarr. That receipt truthfully reports the scientific candidate as
+complete while production remains blocked by required CI and explicit
+selector promotion. Registry projection remains ineligible and is not a job in
+this DAG.
+
+The exact canary was subsequently read through that strict path and produced
+the external readiness receipt:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_publication_canary_20260823_v1/readiness_receipt.json`
+
+Its payload digest is
+`ab2cf7d401cc5d99324eae79c7c7cb62c192fe45c40241de234d4e0b469367da`;
+its status is `candidate_complete_production_blocked`; and it records exact
+direct/consolidated equivalence for 149 declarations. This check did not write
+inside the analysis Zarr or update a selector, registry, or production status.
+
+Focused outside-sandbox validation passed 39 profile, computation,
+publication, workflow, and readiness tests. Ruff, `py_compile`, and
+`git diff --check` passed. Required CI has not run for this branch, so neither
+the commits nor the canary are merge-ready or production-authoritative.
 
 ## Explicit non-goals for the first implementation
 

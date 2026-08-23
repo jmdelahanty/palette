@@ -14,6 +14,7 @@ from fisheye.analysis.chaser_profiles import (
     default_goodcopbadcop_source_profile_path,
     full_chaser_analysis_profile_path,
     full_chaser_analysis_profile_v3_path,
+    position_chaser_analysis_profile_path,
     load_chaser_analysis_profile,
     load_chaser_protocol_profile,
     resolve_chaser_analysis_modules,
@@ -53,8 +54,7 @@ def test_schema_v1_normalized_payload_and_digest_remain_stable() -> None:
         assert "profile_scope" not in profile.to_dict()
         assert "policies" not in profile.to_dict()
         assert all(
-            "requirement_class" not in module
-            and "required_capabilities" not in module
+            "requirement_class" not in module and "required_capabilities" not in module
             for module in profile.to_dict()["modules"]
         )
         assert profile.sha256 == digest
@@ -102,9 +102,9 @@ def test_schema_v2_normalizes_scope_requirements_capabilities_and_policies() -> 
     assert profile.profile_scope == "full"
     assert profile.modules[1].required_capabilities == ("body_frame",)
     assert profile.to_dict()["policies"] == payload["policies"]
-    assert profile.sha256 == ChaserAnalysisProfile.from_mapping(
-        profile.to_dict()
-    ).sha256
+    assert (
+        profile.sha256 == ChaserAnalysisProfile.from_mapping(profile.to_dict()).sha256
+    )
 
 
 @pytest.mark.parametrize(
@@ -268,7 +268,9 @@ def test_full_profile_enables_the_complete_generic_module_catalog() -> None:
     validate_chaser_runner_modules(selected)
 
 
-def test_full_v3_profile_declares_complete_applicable_catalog_without_provider_guessing() -> None:
+def test_full_v3_profile_declares_complete_applicable_catalog_without_provider_guessing() -> (
+    None
+):
     profile = load_chaser_analysis_profile(full_chaser_analysis_profile_v3_path())
     selected = resolve_chaser_analysis_modules(profile)
 
@@ -281,9 +283,7 @@ def test_full_v3_profile_declares_complete_applicable_catalog_without_provider_g
     assert profile.policies["body_frame"] == (
         "explicit_body_frame_provider_binding_required_v1"
     )
-    assert profile.policies["plot_recipe"] == (
-        "full_applicable_recipe_catalog_v1"
-    )
+    assert profile.policies["plot_recipe"] == ("full_applicable_recipe_catalog_v1")
     assert profile.policies["temporal_alignment"] == (
         "explicit_temporal_alignment_requirement_required_v1"
     )
@@ -292,9 +292,33 @@ def test_full_v3_profile_declares_complete_applicable_catalog_without_provider_g
     )
     assert "chaser_temporal_alignment" in distance.required_capabilities
     assert all(module.default_enabled for module in profile.modules)
+    assert {module.requirement_class for module in profile.modules} <= {
+        "required",
+        "conditional_required",
+        "optional",
+    }
+    validate_chaser_runner_modules(selected)
+
+
+def test_position_suite_profile_is_explicitly_reduced_and_provider_bound() -> None:
+    profile = load_chaser_analysis_profile(position_chaser_analysis_profile_path())
+    selected = resolve_chaser_analysis_modules(profile)
+
+    assert profile.profile_id == "chaser_position_suite_v1"
+    assert profile.profile_scope == "reduced"
+    assert [module.module_id for module in selected] == [
+        "stimulus_epochs",
+        "provider_chaser_position_suite",
+    ]
+    suite = selected[-1]
+    assert suite.schema_id == "palette.provider_chaser_position_suite"
     assert {
-        module.requirement_class for module in profile.modules
-    } <= {"required", "conditional_required", "optional"}
+        "position_series",
+        "positioned_chaser",
+        "chaser_temporal_alignment",
+        "chaser_geometry",
+        "arena_geometry",
+    }.issubset(suite.required_capabilities)
     validate_chaser_runner_modules(selected)
 
 

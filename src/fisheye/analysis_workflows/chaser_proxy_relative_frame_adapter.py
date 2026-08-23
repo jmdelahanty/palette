@@ -55,6 +55,11 @@ from fisheye.analysis_workflows.provider_recording_timing_authority import (
     load_provider_recording_timing_authority,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.pixel_frame_authority import (
+    PixelFrameAuthorityError,
+    load_acquisition_camera_frame,
+    load_acquisition_import_ownership,
+)
 from fisheye.shared.stimulus_physical_coordinate import (
     load_stimulus_physical_coordinate_authority,
     require_bound_stimulus_physical_coordinate_authority,
@@ -129,6 +134,39 @@ def _pointer(value: object, *, field: str) -> dict[str, str]:
     ):
         _fail(f"{field} is not an exact record_ref/record_sha256 pointer.")
     return {"record_ref": ref, "record_sha256": digest}
+
+
+def _load_native_acquisition_frame(
+    root: Any,
+    *,
+    pointer: Mapping[str, str],
+) -> Any:
+    suffix = "@acquisition_camera_frame"
+    record_ref = pointer["record_ref"]
+    if not record_ref.startswith("/") or not record_ref.endswith(suffix):
+        _fail(
+            "Native acquisition-frame authority is not one canonical "
+            "acquisition_camera_frame attribute pointer."
+        )
+    group_path = record_ref[1 : -len(suffix)]
+    if not group_path or "@" in group_path:
+        _fail("Native acquisition-frame authority has an invalid group path.")
+    try:
+        authority_node = root[group_path]
+        ownership = load_acquisition_import_ownership(root, authority_node)
+        frame = load_acquisition_camera_frame(
+            root,
+            authority_node,
+            import_ownership=ownership,
+        )
+    except (KeyError, TypeError, ValueError, PixelFrameAuthorityError) as exc:
+        _fail(f"Native acquisition-frame authority is invalid: {exc}")
+    if pointer != {
+        "record_ref": frame.record_ref,
+        "record_sha256": frame.record_sha256,
+    }:
+        _fail("Native acquisition-frame pointer differs from its bound record.")
+    return frame
 
 
 def _protocol_payload(value: object) -> Mapping[str, Any]:
@@ -410,10 +448,19 @@ def prepare_proxy_relative_frame(
         native.source_authority["acquisition_frame_authority"],
         field="native acquisition_frame_authority",
     )
-    if acquisition_pointer != {
-        "record_ref": timing.clock_run_path,
-        "record_sha256": timing.clock_record_sha256,
-    }:
+    acquisition_frame = _load_native_acquisition_frame(
+        root,
+        pointer=acquisition_pointer,
+    )
+    acquisition_record = acquisition_frame.record
+    if (
+        acquisition_record.recording_id != timing.recording_id
+        or acquisition_record.camera_id != timing.camera_id
+        or acquisition_record.frame_count != timing.frame_count
+        or acquisition_record.source_total_frames != timing.frame_count
+        or acquisition_record.source_video_metadata_sha256
+        != timing.source_video_metadata_sha256
+    ):
         _fail("Native provider and recording timing use different frame domains.")
 
     frame_rows = _frame_source_rows(proxy, native)

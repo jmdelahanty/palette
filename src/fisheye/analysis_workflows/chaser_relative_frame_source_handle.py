@@ -50,6 +50,8 @@ from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
 from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_ATTR,
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
@@ -115,6 +117,7 @@ _AUTHORITY_FIELDS = frozenset(
     }
 )
 _HANDLE_SEAL = object()
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class ChaserRelativeFrameSourceHandleError(ValueError):
@@ -228,6 +231,14 @@ def _require_nonempty_text(value: object, *, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ChaserRelativeFrameSourceHandleError(
             f"{field} must be one non-empty exact string."
+        )
+    return value
+
+
+def _require_digest(value: object, *, field: str) -> str:
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+        raise ChaserRelativeFrameSourceHandleError(
+            f"{field} must be one lowercase SHA-256 digest."
         )
     return value
 
@@ -366,6 +377,42 @@ def _validate_completion_and_selection(run: Any, *, exact_run_path: str) -> None
         raise ChaserRelativeFrameSourceHandleError(
             "Published completion run name does not match the exact run path."
         )
+
+
+def _completion_authority(
+    root: Any,
+    run: Any,
+    *,
+    exact_run_path: str,
+    require_provenance_epoch: bool,
+) -> dict[str, Any]:
+    """Read the run completion plus its parent store epoch without payload IO."""
+
+    parent_path = exact_run_path.rsplit("/", 1)[0]
+    try:
+        parent = root[parent_path]
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ChaserRelativeFrameSourceHandleError(
+            f"Published run parent is unavailable for {exact_run_path!r}: {exc}"
+        ) from exc
+    contract = run.attrs.get(RUN_COMPLETION_CONTRACT_ATTR)
+    status = run.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+    epoch = parent.attrs.get(COMPLETION_EPOCH_ATTR)
+    if type(epoch) is not int or isinstance(epoch, bool):
+        if require_provenance_epoch:
+            raise ChaserRelativeFrameSourceHandleError(
+                "Published run parent has no exact provenance completion epoch."
+            )
+        epoch = None
+    if require_provenance_epoch and epoch < COMPLETION_EPOCH_REQUIRE_PROVENANCE:
+        raise ChaserRelativeFrameSourceHandleError(
+            "Published run parent completion epoch is not provenance-bearing."
+        )
+    return {
+        "contract": contract,
+        "status": status,
+        "epoch": epoch,
+    }
 
 
 def _validate_provenance(
@@ -602,6 +649,7 @@ def _validate_declarations_and_arrays(
     *,
     manifest: Mapping[str, Any],
     dimensions: ChaserRelativeFrameDimensions,
+    verify_content_hashes: bool = True,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray] | None, bool]:
     declarations_raw = manifest.get("array_declarations")
     if not isinstance(declarations_raw, list) or not declarations_raw:
@@ -682,7 +730,13 @@ def _validate_declarations_and_arrays(
             raise ChaserRelativeFrameSourceHandleError(
                 f"Published array {path!r} shape does not match its declaration."
             )
-        if type(declaration["content_sha256"]) is not str or array_values_sha256(value) != declaration["content_sha256"]:
+        _require_digest(
+            declaration["content_sha256"],
+            field=f"array_declaration[{path}].content_sha256",
+        )
+        if verify_content_hashes and array_values_sha256(value) != declaration[
+            "content_sha256"
+        ]:
             raise ChaserRelativeFrameSourceHandleError(
                 f"Published array {path!r} content digest does not match its declaration."
             )
@@ -748,14 +802,27 @@ class ChaserRelativeFrameSourceHandle:
     body_arrays: Mapping[str, np.ndarray] | None = field(repr=False, compare=False)
     metadata_equivalence: Mapping[str, Any] = field(repr=False)
     verification_digest: str
+    completion_authority: Mapping[str, Any] = field(repr=False)
+    verification_mode: str
+    receipt_digest: str | None
     _use_consolidated: bool = field(repr=False, compare=False)
+    _receipt_document: Mapping[str, Any] | None = field(repr=False, compare=False)
     _verification_seal: object = field(repr=False, compare=False)
 
     def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
         if _verification_seal is not _HANDLE_SEAL:
             raise TypeError("Chaser-relative-frame handles can only be minted by their loader.")
         for name, value in values.items():
-            if name in {"run_manifest", "run_provenance", "identity_registries", "source_authorities", "context", "metadata_equivalence"}:
+            if name in {
+                "run_manifest",
+                "run_provenance",
+                "identity_registries",
+                "source_authorities",
+                "context",
+                "metadata_equivalence",
+                "completion_authority",
+                "_receipt_document",
+            }:
                 value = _freeze_json(value)
             elif name == "base_arrays":
                 value = MappingProxyType({key: _readonly_snapshot(array, path=f"base/{key}") for key, array in value.items()})
@@ -798,6 +865,18 @@ class ChaserRelativeFrameSourceHandle:
     @property
     def body_available(self) -> bool:
         return self.body_arrays is not None
+
+    @property
+    def verification_authority(self) -> Mapping[str, Any]:
+        """Identify whether this handle is deep-audited or receipt-backed."""
+
+        return MappingProxyType(
+            {
+                "verification_mode": self.verification_mode,
+                "verification_digest": self.verification_digest,
+                "receipt_digest": self.receipt_digest,
+            }
+        )
 
     def array(self, path: str) -> np.ndarray:
         if type(path) is not str or path not in self.arrays:
@@ -845,12 +924,24 @@ class ChaserRelativeFrameSourceHandle:
     def assert_current(self) -> None:
         if self._verification_seal is not _HANDLE_SEAL:
             raise ChaserRelativeFrameSourceHandleError("Handle verification seal is absent.")
-        refreshed = load_chaser_relative_frame_source_handle(
-            self.analysis_zarr_path,
-            run_name=self.run_name,
-            expected_recording_id=self.recording_id,
-            use_consolidated=self._use_consolidated,
-        )
+        if self.verification_mode == "receipt_backed":
+            if self._receipt_document is None:
+                raise ChaserRelativeFrameSourceHandleError(
+                    "Receipt-backed handle has no sealed receipt authority."
+                )
+            refreshed = load_chaser_relative_frame_source_handle_from_receipt(
+                self.analysis_zarr_path,
+                receipt=_thaw_json(self._receipt_document),
+                expected_recording_id=self.recording_id,
+                use_consolidated=self._use_consolidated,
+            )
+        else:
+            refreshed = load_chaser_relative_frame_source_handle(
+                self.analysis_zarr_path,
+                run_name=self.run_name,
+                expected_recording_id=self.recording_id,
+                use_consolidated=self._use_consolidated,
+            )
         if refreshed.verification_digest != self.verification_digest:
             raise ChaserRelativeFrameSourceHandleError(
                 "Published chaser-relative-frame candidate changed after the handle was sealed."
@@ -918,6 +1009,12 @@ def load_chaser_relative_frame_source_handle(
             "Published run recording_id does not match the analysis archive root."
         )
     _validate_completion_and_selection(run, exact_run_path=exact_run_path)
+    completion_authority = _completion_authority(
+        root,
+        run,
+        exact_run_path=exact_run_path,
+        require_provenance_epoch=False,
+    )
     provenance = _validate_provenance(
         run,
         recording_id=recording_id,
@@ -947,18 +1044,13 @@ def load_chaser_relative_frame_source_handle(
         "recording_id": recording_id,
         "manifest_sha256": manifest_digest,
         "payload_digest": manifest["payload_digest"],
+        # _validate_declarations_and_arrays has already recomputed and checked
+        # every declared content digest.  Reuse those verified declarations in
+        # the audit document instead of rereading and hashing every array a
+        # second time.
         "arrays": {
-            path: array_values_sha256(value)
-            for path, value in sorted(
-                {
-                    **{f"base/{key}": value for key, value in base_arrays.items()},
-                    **(
-                        {}
-                        if body_arrays is None
-                        else {f"body/{key}": value for key, value in body_arrays.items()}
-                    ),
-                }.items()
-            )
+            declaration["path"]: declaration["content_sha256"]
+            for declaration in manifest["array_declarations"]
         },
         "metadata_equivalence": equivalence_payload,
         "selector_eligible": False,
@@ -983,9 +1075,233 @@ def load_chaser_relative_frame_source_handle(
         body_arrays=body_arrays,
         metadata_equivalence=equivalence_payload,
         verification_digest=canonical_json_sha256(verification_document),
+        completion_authority=completion_authority,
+        verification_mode="deep_audit",
+        receipt_digest=None,
         _use_consolidated=use_consolidated,
+        _receipt_document=None,
         _verification_seal=_HANDLE_SEAL,
     )
+
+
+def load_chaser_relative_frame_source_handle_from_receipt(
+    analysis_zarr_path: str | Path,
+    *,
+    receipt: Mapping[str, Any],
+    expected_recording_id: str | None = None,
+    use_consolidated: bool = True,
+) -> ChaserRelativeFrameSourceHandle:
+    """Load one exact relative-frame run using a sealed workflow receipt.
+
+    This is an intentionally separate path from
+    :func:`load_chaser_relative_frame_source_handle`.  The ordinary loader is
+    the deep-audit path and recomputes every dense array digest.  This loader
+    trusts the receipt's already-deep-validated relative verification digest,
+    checks current metadata and declaration bindings, and reads the scientific
+    arrays once for consumers without recomputing their content hashes.
+    """
+
+    if type(use_consolidated) is not bool:
+        raise ChaserRelativeFrameSourceHandleError(
+            "use_consolidated must be the exact boolean metadata-read choice."
+        )
+    if expected_recording_id is not None:
+        _require_nonempty_text(expected_recording_id, field="expected_recording_id")
+
+    # Import lazily: the receipt builder's deep-audit implementation imports
+    # this module, while the bounded envelope validator itself performs no
+    # source reopening or dense-array hashing.
+    from fisheye.analysis_workflows.chaser_proxy_candidate_receipt import (
+        validate_chaser_proxy_candidate_receipt_for_source_load,
+    )
+
+    archive = Path(analysis_zarr_path).expanduser().resolve()
+    receipt_map = validate_chaser_proxy_candidate_receipt_for_source_load(
+        receipt,
+        expected_analysis_zarr=archive,
+        expected_recording_id=expected_recording_id,
+    )
+    relative_record = receipt_map["relative_frame"]
+    if not isinstance(relative_record, Mapping):  # pragma: no cover - validator
+        raise ChaserRelativeFrameSourceHandleError(
+            "Bounded receipt relative_frame is not one object."
+        )
+    name = _require_exact_bare_run_name(
+        str(relative_record["run_path"]).rsplit("/", 1)[-1]
+    )
+    exact_run_path = f"{CHASER_RELATIVE_FRAME_RUNS_PREFIX}{name}"
+    if relative_record["run_path"] != exact_run_path:
+        raise ChaserRelativeFrameSourceHandleError(
+            "Bounded receipt relative-frame path is not the exact native run path."
+        )
+    if not archive.is_dir():
+        raise FileNotFoundError(f"Analysis Zarr archive does not exist: {archive}")
+
+    equivalence = _metadata_equivalence(archive, run_path=exact_run_path)
+    try:
+        root = open_zarr_root(archive, mode="r", use_consolidated=use_consolidated)
+        run = root[exact_run_path]
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ChaserRelativeFrameSourceHandleError(
+            f"Unable to open exact receipt-bound run {exact_run_path!r}: {exc}"
+        ) from exc
+    if not isinstance(run, zarr.Group):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Exact receipt-bound path is not a Zarr group."
+        )
+
+    try:
+        direct_root = open_zarr_root(archive, mode="r", use_consolidated=False)
+        if direct_root.attrs.get("recording_id") != root.attrs.get("recording_id"):
+            raise ChaserRelativeFrameSourceHandleError(
+                "Archive-root consolidated recording identity is stale."
+            )
+        root_recording_id = root.attrs.get("recording_id")
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ChaserRelativeFrameSourceHandleError(
+            f"Unable to validate archive-root recording identity: {exc}"
+        ) from exc
+
+    manifest, manifest_digest, dimensions = _validate_manifest_digest(
+        run,
+        expected_recording_id=str(receipt_map["recording_id"]),
+        exact_run_path=exact_run_path,
+    )
+    recording_id = manifest["recording_id"]
+    if root_recording_id != recording_id or manifest_digest != relative_record[
+        "manifest_sha256"
+    ]:
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound recording or manifest digest is stale."
+        )
+    if manifest["payload_digest"] != relative_record["payload_digest"]:
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound relative-frame payload digest is stale."
+        )
+    _validate_completion_and_selection(run, exact_run_path=exact_run_path)
+    completion_authority = _completion_authority(
+        root,
+        run,
+        exact_run_path=exact_run_path,
+        require_provenance_epoch=True,
+    )
+    if completion_authority != dict(relative_record["completion"]):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound completion state or epoch is stale."
+        )
+    provenance = _validate_provenance(
+        run,
+        recording_id=recording_id,
+        expected_payload_digest=manifest["payload_digest"],
+        run_name=name,
+    )
+
+    # This reads each scientific array once for the consumer, but deliberately
+    # skips array_values_sha256.  The exact declaration table is compared to
+    # the receipt after its typed metadata has been checked.
+    base_arrays, body_arrays, body_present = _validate_declarations_and_arrays(
+        run,
+        manifest=manifest,
+        dimensions=dimensions,
+        verify_content_hashes=False,
+    )
+    if manifest["array_declarations"] != list(relative_record["array_declarations"]):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound array declarations are stale or reordered."
+        )
+    if body_present != relative_record["body_extension_present"]:
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound body-extension declaration is stale."
+        )
+    equivalence_payload = equivalence.to_json()
+    if equivalence_payload != dict(relative_record["metadata_equivalence"]):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound direct/consolidated metadata equivalence is stale."
+        )
+
+    context, authorities = _validate_context_and_authorities(
+        manifest,
+        recording_id=recording_id,
+        body_present=body_present,
+    )
+    registries = _validate_identity_registries(
+        manifest,
+        n_chasers=int(manifest["dimensions"]["n_chasers"]),
+        base=base_arrays,
+    )
+
+    proxy_record = receipt_map["input_provenance_proxy"]
+    native_record = receipt_map["native_source"]
+    projection = context["acquisition_projection"]["record"]
+    publication = context["acquisition_projection_publication"]["record"]
+    if publication != dict(proxy_record["publication_binding"]):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound proxy publication binding differs from the run context."
+        )
+    for authority_field, expected in (
+        ("source_run_path", native_record["run_path"]),
+        ("source_manifest_sha256", native_record["manifest_sha256"]),
+        ("source_verification_digest", native_record["verification_digest"]),
+    ):
+        if projection.get(authority_field) != expected:
+            raise ChaserRelativeFrameSourceHandleError(
+                "Receipt-bound native source "
+                f"{authority_field} differs from the run context."
+            )
+    if projection.get("policy_id") != publication.get("policy_id"):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound proxy policy differs from the run context."
+        )
+
+    if manifest["timing_policy"] != dict(relative_record["timing_policy"]):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound timing policy differs from the current manifest."
+        )
+    if (
+        manifest["timing_policy"].get("timestamp_field") is not None
+        or np.any(base_arrays["timestamp_valid"])
+        or projection.get("physical_presentation_verified") is not False
+        or projection.get("presentation_timestamp_available") is not False
+        or projection.get("camera_presentation_clock_transform_available") is not False
+        or projection.get("camera_exposure_reference") != "unknown"
+    ):
+        raise ChaserRelativeFrameSourceHandleError(
+            "Receipt-bound temporal proxy caveats are no longer true."
+        )
+
+    return ChaserRelativeFrameSourceHandle(
+        analysis_zarr_path=archive,
+        run_path=exact_run_path,
+        run_name=name,
+        recording_id=recording_id,
+        selector_eligible=False,
+        selection="none",
+        n_frames=int(manifest["dimensions"]["n_frames"]),
+        n_chasers=int(manifest["dimensions"]["n_chasers"]),
+        n_rows=dimensions.n_rows,
+        run_manifest=manifest,
+        run_provenance=provenance,
+        identity_registries=registries,
+        source_authorities=authorities,
+        context=context,
+        base_arrays=base_arrays,
+        body_arrays=body_arrays,
+        metadata_equivalence=equivalence_payload,
+        verification_digest=str(relative_record["verification_digest"]),
+        completion_authority=completion_authority,
+        verification_mode="receipt_backed",
+        receipt_digest=str(receipt_map["record_sha256"]),
+        _use_consolidated=use_consolidated,
+        _receipt_document=receipt_map,
+        _verification_seal=_HANDLE_SEAL,
+    )
+
+
+# The longer spelling is retained as an explicit discoverable alias for call
+# sites that describe the verification mode rather than the receipt source.
+load_chaser_relative_frame_source_handle_receipt_backed = (
+    load_chaser_relative_frame_source_handle_from_receipt
+)
 
 
 def require_chaser_relative_frame_source_handle(
@@ -1011,5 +1327,7 @@ __all__ = [
     "ChaserRelativeFrameSourceHandle",
     "ChaserRelativeFrameSourceHandleError",
     "load_chaser_relative_frame_source_handle",
+    "load_chaser_relative_frame_source_handle_from_receipt",
+    "load_chaser_relative_frame_source_handle_receipt_backed",
     "require_chaser_relative_frame_source_handle",
 ]
