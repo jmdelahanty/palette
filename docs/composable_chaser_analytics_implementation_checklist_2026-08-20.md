@@ -382,9 +382,10 @@ extension.
       `source_position_*` lineage.
 - [x] Implement selector-ineligible quadrant and moving-chaser radial occupancy
       over exact caller-role-bound half-open epoch selections, one sealed
-      position provider, and one reviewed circular geometry/scale authority.
-      Sealed analysis-Zarr publication and profile-runner integration remain
-      open.
+      position provider, and one reviewed circular geometry/scale authority;
+      publish the resulting position-only suite as typed arrays in one exact
+      immutable analysis-Zarr run; and bind it to an explicitly reduced
+      profile and exact publication/readiness DAG.
 - [x] Implement the selector-ineligible near-field position suite with the
       maintained valid-time entry denominator, invalid-gap reset, hysteresis,
       complete-visit dwell, and boundary/gap censoring semantics unchanged.
@@ -562,12 +563,19 @@ extension.
       position suite with exact frozen per-recording provider, epoch, geometry,
       and physical-scale authorities. Cohort summaries use one value per
       recording, and radial plots require complete eight-recording support.
+- [x] An immutable selector-ineligible analysis-Zarr publication stores the
+      seven position-suite tables as typed arrays with compact readable
+      manifests, bounded receipts, and strict direct/consolidated readback.
+- [x] The reduced `chaser_position_suite_v1` profile and exact two-job LSF DAG
+      bind publication followed by a non-mutating readiness receipt. The
+      receipt separates scientific-candidate completeness from CI, selector,
+      production-authority, and registry-projection readiness.
 - [ ] Response-regime, persisted visit membership, trial, escape, gaze, and
       immutable visualization recipes have not yet migrated to the new
       composable provider contracts.
-- [ ] Immutable generalized plot recipes, recording-local discovery, registry
-      projection, non-position cohort products, and production profile
-      readiness remain open.
+- [ ] Immutable generalized plot recipes, recording-local discovery, explicit
+      selector promotion, serialized registry projection, non-position cohort
+      products, and full production-profile readiness remain open.
 - [ ] Required CI and integration remain separate gates for the implementation
       work described here.
 
@@ -755,8 +763,49 @@ support correction and fixes the title without altering scientific rows.
 
 Focused outside-sandbox validation passed all 15 cohort and adjacent
 position-suite tests. Required CI has not run. Sealed analysis-Zarr
-publication, generalized plot recipes, profile/registry integration, and the
-motion/bout/body-frame/gaze/trial/escape phases remain open.
+publication and reduced profile/DAG integration are superseded by the
+checkpoint below. Generalized plot recipes, selector/registry integration, and
+the motion/bout/body-frame/gaze/trial/escape phases remain open.
+
+### Implementation checkpoint: 2026-08-23 sealed position-suite publication
+
+Commits `0f533c6bc3a7146c0b6f90605b84d674c1937713`,
+`e0de92e9eb007d18abd61c8a17e7d6d7b7330954`, and
+`5be4d47bb33bbe8d6a5aa36a452f24bad30faeaf` add the immutable analysis-Zarr
+publication, compact receipt correction, reduced profile, exact LSF workflow,
+and bounded readiness receipt for the provider-aware position-only suite.
+
+The selector-ineligible GoodBatBadBat publication canary is:
+
+`analysis/provider_chaser_position_suite_runs/provider_chaser_position_suite_detection_bbox_centroid_canary_20260823_v1`
+
+inside the canonical analysis Zarr for
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`. Its immutable manifest SHA-256
+is `7c20874695a18e8d356aaca4347dcc8972cd42793553e85c38f00815c86ec65d`.
+It contains 729 rows across seven typed tables and 148 arrays. The durable
+publication result is:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_publication_canary_20260823_v1/result.json`
+
+The ordinary reader validates exact run identity, compact manifest and
+declarations, array schemas and lengths, source bindings, and direct versus
+consolidated metadata without rehashing upstream dense inputs. Deep array
+rehashing remains an explicit audit mode. The canary changed no raw data,
+upstream provider publication, selector, production authority, or registry.
+
+`chaser_position_suite_v1` is intentionally reduced. It claims only stimulus
+epochs and the sealed provider-position suite; it cannot imply motion,
+body-frame, bout, gaze, trial, or escape readiness. Its exact two-job workflow
+publishes one immutable candidate and then writes a bounded readiness receipt
+outside the Zarr. That receipt truthfully reports the scientific candidate as
+complete while production remains blocked by required CI and explicit
+selector promotion. Registry projection remains ineligible and is not a job in
+this DAG.
+
+Focused outside-sandbox validation passed 39 profile, computation,
+publication, workflow, and readiness tests. Ruff, `py_compile`, and
+`git diff --check` passed. Required CI has not run for this branch, so neither
+the commits nor the canary are merge-ready or production-authoritative.
 
 ## Explicit non-goals for the first implementation
 
