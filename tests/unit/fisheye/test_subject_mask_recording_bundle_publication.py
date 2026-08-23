@@ -19,11 +19,15 @@ from fisheye.analysis_workflows.materializers.subject_shape import (
     materialize_subject_shape,
 )
 from fisheye.cluster.subject_masks.publish_recording_bundle import (
+    _refined_arrays,
     publish_recording_subject_mask_bundle,
 )
 from fisheye.shared.subject_mask_attempt import (
     build_subject_mask_attempt,
     build_subject_mask_scientific_identity,
+)
+from fisheye.shared.subject_mask_crop_placement import (
+    normalize_subject_mask_crop_placement,
 )
 from fisheye.shared.subject_shape_coordinate_publication import (
     CANONICAL_SUBJECT_SHAPE_BUNDLE_METHOD,
@@ -301,6 +305,109 @@ def _draft(
             paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
         )
     return path
+
+
+def _stamp_signed_hybrid_crop(root: zarr.Group) -> dict[str, object]:
+    crop = root["crop_runs/crop_001"]
+    source_crop_xywh = np.asarray(crop["source_crop_xywh"][:], dtype=np.float64)
+    del crop["source_crop_xywh"]
+    crop.create_array("source_crop_xywh", data=source_crop_xywh)
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.asarray(source_crop_xywh[:, :2], dtype=np.int32),
+    )
+    crop.create_array(
+        "roi_sizes_full",
+        data=np.asarray(source_crop_xywh[:, 2:], dtype=np.int32),
+    )
+    frame_shape_authority = {
+        "height": 1024,
+        "width": 1280,
+        "source": "test_fixture",
+    }
+    provider_record = {
+        "schema_id": "palette.roi_pixel_provider_record.v1",
+        "schema_version": 1,
+        "crop_run": "crop_001",
+        "frame_shape": [1024, 1280],
+        "frame_shape_authority": frame_shape_authority,
+    }
+    crop.attrs.update(
+        {
+            "schema_id": "palette.hybrid_acquisition_offline_crop_run.v3",
+            "source_pixels": "hybrid_acquisition_crop_video_offline_supplement",
+            "provider_record": provider_record,
+            "provider_record_sha256": canonical_json_sha256(provider_record),
+            "source_full_frame_shape_authority": frame_shape_authority,
+        }
+    )
+    _placement, normalization = normalize_subject_mask_crop_placement(
+        crop,
+        crop_run="crop_001",
+        target_rows=np.arange(source_crop_xywh.shape[0], dtype=np.int64),
+        values=source_crop_xywh,
+    )
+    assert normalization is not None
+    return dict(normalization)
+
+
+def test_recording_publisher_normalizes_signed_hybrid_crop_placement(
+    tmp_path: Path,
+) -> None:
+    draft = _draft(tmp_path, raw_parent="subject_mask_shard_runs")
+    root = zarr.open_group(str(draft), mode="a", use_consolidated=False)
+    _stamp_signed_hybrid_crop(root)
+    crop = root["crop_runs/crop_001"]
+    source_crop_xywh = np.asarray(crop["source_crop_xywh"][:], dtype=np.float64)
+
+    arrays = _refined_arrays(
+        root["refined_subject_masks_runs/refined_draft"],
+        crop,
+        n_frames=4,
+    )
+
+    placement = np.asarray(arrays["source_crop_xywh"])
+    assert placement.dtype == np.dtype(np.float32)
+    np.testing.assert_array_equal(placement, source_crop_xywh)
+
+
+def test_recording_bundle_publishes_normalized_signed_hybrid_placement(
+    tmp_path: Path,
+) -> None:
+    draft = _draft(tmp_path, raw_parent="subject_mask_shard_runs")
+    draft_root = zarr.open_group(str(draft), mode="a", use_consolidated=False)
+    normalization = _stamp_signed_hybrid_crop(draft_root)
+    draft_root["refined_subject_masks_runs/refined_draft"].attrs[
+        "source_crop_xywh_normalization"
+    ] = normalization
+    analysis = tmp_path / "analysis_hybrid_placement.zarr"
+    analysis_root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    analysis_root.attrs["recording_id"] = "recording_001"
+
+    result = publish_recording_subject_mask_bundle(
+        analysis_zarr=analysis,
+        draft_zarr=draft,
+        crop_run="crop_001",
+        raw_draft_parent="subject_mask_shard_runs",
+        raw_draft_run="raw_draft",
+        refined_draft_run="refined_draft",
+        raw_run="raw_hybrid",
+        refined_run="refined_hybrid",
+        quality_run="quality_hybrid",
+        bundle_id="bundle_hybrid",
+        local_output_root=tmp_path / "hybrid_local_outputs",
+        quality_scratch_root=tmp_path / "hybrid_quality_scratch",
+        coordinate_contract_policy="legacy_allow_missing",
+    )
+
+    assert result["status"] == "complete"
+    published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    assert published["subject_mask_runs/raw_hybrid/source_crop_xywh"].dtype == (
+        np.dtype(np.float32)
+    )
+    refined = published["refined_subject_masks_runs/refined_hybrid"]
+    assert refined["source_crop_xywh"].dtype == np.dtype(np.float32)
+    assert refined.attrs["source_crop_xywh_normalization"] == normalization
 
 
 def _install_worker_sampled_contours(

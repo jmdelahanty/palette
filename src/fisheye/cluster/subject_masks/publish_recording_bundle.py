@@ -19,6 +19,9 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.shared.subject_mask_crop_placement import (
+    normalize_subject_mask_crop_placement,
+)
 from fisheye.shared.subject_mask_attempt import (
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
@@ -166,7 +169,7 @@ def _paths(group: Any, names: Sequence[str]) -> dict[str, Any]:
 
 
 def _crop_arrays(crop: Any) -> dict[str, Any]:
-    return _paths(
+    arrays = _paths(
         crop,
         (
             "instance_key",
@@ -175,6 +178,20 @@ def _crop_arrays(crop: Any) -> dict[str, Any]:
             "source_crop_xywh",
         ),
     )
+    arrays["source_crop_xywh"] = _subject_mask_crop_placement(crop)
+    return arrays
+
+
+def _subject_mask_crop_placement(crop: Any) -> np.ndarray:
+    row_count = int(crop["source_crop_xywh"].shape[0])
+    rows = np.arange(row_count, dtype=np.int64)
+    placement, _evidence = normalize_subject_mask_crop_placement(
+        crop,
+        crop_run=str(crop.path).strip("/").rsplit("/", 1)[-1],
+        target_rows=rows,
+        values=np.asarray(crop["source_crop_xywh"][:]),
+    )
+    return placement
 
 
 def _require_complete_order(run: Any, crop: Any, *, role: str) -> np.ndarray:
@@ -210,7 +227,7 @@ def _raw_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
     arrays["frame_row_offsets"] = derive_subject_mask_frame_row_offsets(
         frames, n_frames=n_frames
     )
-    arrays["source_crop_xywh"] = crop["source_crop_xywh"]
+    arrays["source_crop_xywh"] = _subject_mask_crop_placement(crop)
     return arrays
 
 
@@ -238,7 +255,7 @@ def _refined_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
             "frame_row_offsets": derive_subject_mask_frame_row_offsets(
                 frames, n_frames=n_frames
             ),
-            "source_crop_xywh": crop["source_crop_xywh"],
+            "source_crop_xywh": _subject_mask_crop_placement(crop),
         }
     )
     return arrays
@@ -346,7 +363,7 @@ def _raw_shard_collection(
                 np.asarray(crop["source_acquisition_frame_index"][:], dtype=np.int64),
                 n_frames=n_frames,
             ),
-            "source_crop_xywh": crop["source_crop_xywh"],
+            "source_crop_xywh": _subject_mask_crop_placement(crop),
             "available_channels": available,
         }
     )
@@ -414,7 +431,7 @@ def _refined_shard_collection(
                 frames,
                 n_frames=n_frames,
             ),
-            "source_crop_xywh": crop["source_crop_xywh"],
+            "source_crop_xywh": _subject_mask_crop_placement(crop),
             "available_channels": available,
         }
     )
@@ -573,6 +590,7 @@ def _consistent_refined_source_attrs(
         "assignment_keypoint_group",
         "assignment_keypoints_run",
         "assignment_keypoint_run",
+        "source_crop_xywh_normalization",
     )
     result: dict[str, Any] = {"mask_labels": [str(value) for value in labels]}
     for name in names:
@@ -789,6 +807,7 @@ def publish_recording_subject_mask_bundle(
                 "assignment_keypoint_group",
                 "assignment_keypoints_run",
                 "assignment_keypoint_run",
+                "source_crop_xywh_normalization",
                 _SCIENCE_ATTR,
                 _ATTEMPT_ATTR,
                 _WORKER_RECEIPT_ATTR,

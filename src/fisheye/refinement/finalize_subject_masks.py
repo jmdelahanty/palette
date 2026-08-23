@@ -73,6 +73,9 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_storage_row_chunk,
     refined_subject_mask_storage_chunks,
 )
+from ..shared.subject_mask_crop_placement import (
+    normalize_subject_mask_crop_placement,
+)
 from ..shared.subject_mask_registry_status import (
     emit_refined_subject_mask_stage_completion,
 )
@@ -348,6 +351,7 @@ class _SubjectMaskShardCollection:
     row_source_indices: np.ndarray
     row_local_indices: np.ndarray
     source_crop_row_ids: np.ndarray
+    source_crop_xywh_normalization: Mapping[str, object] | None = None
 
 
 _COLLECTION_WORKER_INDEX_PLAN_SCHEMA = "subject_mask_collection_worker_index_plan_v1"
@@ -387,8 +391,7 @@ def _validate_complete_recording_work_unit_partition(
     errors = validate_subject_mask_collection_partition_contract(contract)
     if errors:
         raise ValueError(
-            f"{path} has an invalid recording work-unit contract: "
-            + "; ".join(errors)
+            f"{path} has an invalid recording work-unit contract: " + "; ".join(errors)
         )
     assert isinstance(contract, Mapping)
     payload = contract["payload"]
@@ -415,10 +418,7 @@ def _validate_complete_recording_work_unit_partition(
             raise ValueError(
                 f"{path} recording work-unit {field_name} differs from the run attribute."
             )
-    if (
-        collection.get("source_work_unit_id")
-        != collection.get("source_shard_id")
-    ):
+    if collection.get("source_work_unit_id") != collection.get("source_shard_id"):
         raise ValueError(f"{path} recording work-unit identities disagree.")
 
     start_frame = int(frame_window["actual_start_frame"])
@@ -483,9 +483,7 @@ def _validate_complete_recording_work_unit_partition(
         crop["source_acquisition_frame_index"][source_rows], dtype=np.int64
     ).reshape(-1)
     if not np.array_equal(crop_frames, source_frames):
-        raise ValueError(
-            f"{path} frames differ from authoritative crop lineage."
-        )
+        raise ValueError(f"{path} frames differ from authoritative crop lineage.")
 
 
 @dataclass(frozen=True)
@@ -1275,13 +1273,28 @@ def _target_crop_lineage_array(
     crop_run: str,
     target_rows: np.ndarray,
     name: str,
-) -> np.ndarray | None:
+) -> tuple[np.ndarray | None, dict[str, object] | None]:
     crop_group = root.get(f"crop_runs/{crop_run}")
     if crop_group is None or name not in crop_group:
-        return None
-    return _array_data(crop_group[name])[
-        np.asarray(target_rows, dtype=np.int64).reshape(-1)
-    ]
+        return None, None
+    rows = np.asarray(target_rows, dtype=np.int64).reshape(-1)
+    source_array = crop_group[name]
+    if rows.size and np.array_equal(
+        rows,
+        np.arange(int(rows[0]), int(rows[0]) + int(rows.size), dtype=np.int64),
+    ):
+        values = np.asarray(source_array[int(rows[0]) : int(rows[-1]) + 1])
+    else:
+        values = np.asarray(source_array[rows])
+    if name == "source_crop_xywh":
+        normalized, evidence = normalize_subject_mask_crop_placement(
+            crop_group,
+            crop_run=str(crop_run),
+            target_rows=rows,
+            values=values,
+        )
+        return normalized, dict(evidence) if evidence is not None else None
+    return values, None
 
 
 def _load_subject_mask_source(
@@ -1409,9 +1422,10 @@ def _load_subject_mask_source(
                     local_indices=local_indices,
                 )
         arrays["source_crop_row_ids"] = sorted_crop_rows
+        source_crop_xywh_normalization: dict[str, object] | None = None
         if target_crop_run:
             for name in _CROP_REBASE_COPY_ARRAYS:
-                target_values = _target_crop_lineage_array(
+                target_values, normalization = _target_crop_lineage_array(
                     root,
                     crop_run=source_crop_run,
                     target_rows=sorted_crop_rows,
@@ -1419,6 +1433,8 @@ def _load_subject_mask_source(
                 )
                 if target_values is not None:
                     arrays[name] = np.asarray(target_values)
+                if normalization is not None:
+                    source_crop_xywh_normalization = dict(normalization)
         frame_counts = None
         if target_crop_run:
             crop_group = root.get(f"crop_runs/{source_crop_run}")
@@ -1449,6 +1465,10 @@ def _load_subject_mask_source(
                 "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
             }
         )
+        if source_crop_xywh_normalization is not None:
+            attrs["source_crop_xywh_normalization"] = dict(
+                source_crop_xywh_normalization
+            )
         source_crop_snapshot = dict(first_source.source_crop_snapshot)
         crop_group = root.get(f"crop_runs/{source_crop_run}")
         if crop_group is not None:
@@ -1510,6 +1530,7 @@ def _load_subject_mask_source(
             row_source_indices=source_indices,
             row_local_indices=local_indices,
             source_crop_row_ids=sorted_crop_rows,
+            source_crop_xywh_normalization=source_crop_xywh_normalization,
         )
         source = SourceSubjectMaskRun(
             run_name="subject_mask_shard_collection",
@@ -6578,6 +6599,10 @@ def finalize_subject_mask_run(
                 "source_crop_rebase_target_run": str(target_crop_run or ""),
             }
         )
+        if shard_collection.source_crop_xywh_normalization is not None:
+            summary["source_crop_xywh_normalization"] = dict(
+                shard_collection.source_crop_xywh_normalization
+            )
     if dry_run:
         return summary
 
@@ -6778,6 +6803,10 @@ def finalize_subject_mask_run(
                 "source_crop_rebase_target_run": str(target_crop_run or ""),
             }
         )
+        if shard_collection.source_crop_xywh_normalization is not None:
+            extra_attrs["source_crop_xywh_normalization"] = dict(
+                shard_collection.source_crop_xywh_normalization
+            )
     if eye_assignment_context is not None:
         extra_attrs.update(assignment_keypoint_attrs)
 
@@ -6838,6 +6867,10 @@ def finalize_subject_mask_run(
                 "source_crop_rebase_target_run": str(target_crop_run or ""),
             }
         )
+        if shard_collection.source_crop_xywh_normalization is not None:
+            provenance_inputs["source_crop_xywh_normalization"] = dict(
+                shard_collection.source_crop_xywh_normalization
+            )
     if eye_assignment_context is not None:
         provenance_inputs.update(assignment_keypoint_attrs)
 
@@ -6857,9 +6890,7 @@ def finalize_subject_mask_run(
                 create_dense_masks=not direct_bitpacked_output,
                 create_bitpacked_masks=direct_bitpacked_output,
                 publication_owner=canonical_publication_owner,
-                selector_eligible=not bool(
-                    require_production_proof or review_draft
-                ),
+                selector_eligible=not bool(require_production_proof or review_draft),
                 editable_draft=bool(review_draft),
             )
 
