@@ -335,7 +335,7 @@ def build_canary(
     treatment_role: str = "aggressive",
     baseline_role: str = "inert",
     radial_bin_width_mm: float = 2.0,
-    cdf_thresholds_mm: Sequence[float] = (2, 3, 4, 5, 6, 8, 10, 12, 15, 20),
+    cdf_thresholds_mm: Sequence[float] | None = None,
     near_zone_radius_mm: float = 5.0,
     near_entry_radius_mm: float = 5.0,
     near_exit_radius_mm: float = 6.0,
@@ -484,7 +484,9 @@ def build_canary(
         fps=selection.fps,
         config=PositionSuiteConfig(
             radial_bin_width_mm=radial_bin_width_mm,
-            cdf_thresholds_mm=tuple(cdf_thresholds_mm),
+            cdf_thresholds_mm=(
+                None if cdf_thresholds_mm is None else tuple(cdf_thresholds_mm)
+            ),
             near_zone_radius_mm=near_zone_radius_mm,
             near_entry_radius_mm=near_entry_radius_mm,
             near_exit_radius_mm=near_exit_radius_mm,
@@ -759,7 +761,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cdf-thresholds-mm",
         type=_parse_float_list,
-        default=(2, 3, 4, 5, 6, 8, 10, 12, 15, 20),
+        default=None,
+        help=(
+            "Optional explicit CDF thresholds. By default the complete exact radial "
+            "edge axis is used, avoiding a truncated display range."
+        ),
     )
     parser.add_argument("--near-zone-radius-mm", type=float, default=5.0)
     parser.add_argument("--near-entry-radius-mm", type=float, default=5.0)

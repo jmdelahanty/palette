@@ -26,7 +26,6 @@ from fisheye.analysis.chaser_near_field_occupancy import (
     compute_hysteresis_visits,
 )
 from fisheye.analysis.chaser_radial_occupancy import (
-    DEFAULT_CDF_THRESHOLDS_MM,
     DEFAULT_MIN_EXPECTED_COUNT,
     DEFAULT_PERIMETER_BAND_MM,
     DEFAULT_RADIAL_BIN_WIDTH_MM,
@@ -129,7 +128,7 @@ class CircularArena:
 @dataclass(frozen=True)
 class PositionSuiteConfig:
     radial_bin_width_mm: float = DEFAULT_RADIAL_BIN_WIDTH_MM
-    cdf_thresholds_mm: tuple[float, ...] = DEFAULT_CDF_THRESHOLDS_MM
+    cdf_thresholds_mm: tuple[float, ...] | None = None
     near_zone_radius_mm: float = DEFAULT_R_ZONE_MM
     near_entry_radius_mm: float = DEFAULT_R_IN_MM
     near_exit_radius_mm: float = DEFAULT_R_OUT_MM
@@ -157,18 +156,19 @@ class PositionSuiteConfig:
         object.__setattr__(self, "perimeter_band_mm", perimeter)
         if self.near_exit_radius_mm <= self.near_entry_radius_mm:
             _fail("Near-field exit radius must exceed the entry radius.")
-        thresholds = np.asarray(self.cdf_thresholds_mm, dtype=np.float64)
-        if (
-            thresholds.ndim != 1
-            or thresholds.size == 0
-            or not np.isfinite(thresholds).all()
-            or np.any(thresholds < 0)
-            or np.any(np.diff(thresholds) <= 0)
-        ):
-            _fail("CDF thresholds must be finite, non-negative, and increasing.")
-        object.__setattr__(
-            self, "cdf_thresholds_mm", tuple(float(v) for v in thresholds)
-        )
+        if self.cdf_thresholds_mm is not None:
+            thresholds = np.asarray(self.cdf_thresholds_mm, dtype=np.float64)
+            if (
+                thresholds.ndim != 1
+                or thresholds.size == 0
+                or not np.isfinite(thresholds).all()
+                or np.any(thresholds < 0)
+                or np.any(np.diff(thresholds) <= 0)
+            ):
+                _fail("CDF thresholds must be finite, non-negative, and increasing.")
+            object.__setattr__(
+                self, "cdf_thresholds_mm", tuple(float(v) for v in thresholds)
+            )
         treatment = _exact_text(self.treatment_role, field="config.treatment_role")
         baseline = _exact_text(self.baseline_role, field="config.baseline_role")
         if treatment == baseline:
@@ -425,7 +425,11 @@ def compute_provider_chaser_position_suite(
         maximum_radial_distance_mm,
         config.radial_bin_width_mm,
     )
-    cdf_thresholds = np.asarray(config.cdf_thresholds_mm, dtype=np.float64)
+    cdf_thresholds = (
+        radial_edges.copy()
+        if config.cdf_thresholds_mm is None
+        else np.asarray(config.cdf_thresholds_mm, dtype=np.float64)
+    )
     fish_quadrant = _quadrant(fish_xy, arena)
     chaser_quadrant = _quadrant(chaser_xy_array, arena)
     fish_radius_mm = (
@@ -808,7 +812,12 @@ def compute_provider_chaser_position_suite(
                 "selected_arena_radius_plus_max_bound_chaser_center_distance_v1"
             ),
             "radial_maximum_distance_mm": maximum_radial_distance_mm,
-            "cdf_thresholds_mm": list(config.cdf_thresholds_mm),
+            "cdf_thresholds_mm": cdf_thresholds.tolist(),
+            "cdf_threshold_policy": (
+                "derived_full_radial_edge_axis_v1"
+                if config.cdf_thresholds_mm is None
+                else "explicit_strictly_increasing_thresholds_v1"
+            ),
             "near_zone_radius_mm": config.near_zone_radius_mm,
             "near_entry_radius_mm": config.near_entry_radius_mm,
             "near_exit_radius_mm": config.near_exit_radius_mm,

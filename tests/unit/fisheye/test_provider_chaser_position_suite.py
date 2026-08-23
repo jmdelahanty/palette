@@ -160,6 +160,27 @@ def test_radial_geometric_null_and_explicit_role_contrast_are_materialized() -> 
     assert contrast[0]["treatment_minus_baseline"] == pytest.approx(1 / 3)
 
 
+def test_default_cdf_axis_covers_the_complete_bound_radial_extent() -> None:
+    values = _inputs()
+    values["config"] = PositionSuiteConfig(
+        radial_bin_width_mm=2,
+        cdf_thresholds_mm=None,
+        near_zone_radius_mm=3,
+        near_entry_radius_mm=3,
+        near_exit_radius_mm=4,
+        perimeter_band_mm=1,
+        min_expected_count=0.1,
+    )
+    result = compute_provider_chaser_position_suite(**values)
+
+    assert result["config"]["cdf_threshold_policy"] == (
+        "derived_full_radial_edge_axis_v1"
+    )
+    assert (
+        result["config"]["cdf_thresholds_mm"] == result["config"]["radial_bin_edges_mm"]
+    )
+
+
 def test_persisted_distance_must_match_coordinates_and_exact_scale() -> None:
     values = _inputs()
     wrong = np.asarray(values["distance_mm"]).copy()
