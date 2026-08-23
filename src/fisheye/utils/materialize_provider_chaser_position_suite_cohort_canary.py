@@ -855,8 +855,7 @@ def _plot_radial_summary(report: Mapping[str, Any], path: Path) -> None:
         ax.legend()
     axes[-1].set_xlabel("fish–chaser distance (mm)")
     fig.suptitle(
-        "Recording-balanced moving-chaser radial occupancy\n"
-        f"median and IQR; complete {required_recording_count}-recording support only"
+        f"Radial occupancy: median/IQR with all {required_recording_count} recordings"
     )
     fig.savefig(path, dpi=150)
     plt.close(fig)
