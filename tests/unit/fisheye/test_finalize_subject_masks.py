@@ -2327,6 +2327,8 @@ def test_finalize_subject_mask_run_can_materialize_bitpacked_mask_store(
         refined_run="refined_subject_masks_smart_bitpacked",
         chunk_size=1,
         mask_storage="dense_and_bitpacked",
+        write_component_contours=False,
+        write_sampled_component_contours=True,
     )
 
     assert summary["status"] == "updated"
@@ -2352,6 +2354,8 @@ def test_finalize_subject_mask_run_can_materialize_bitpacked_mask_store(
     assert run.attrs["mask_storage_authority"] == "masks_roi"
     assert run.attrs["editable_mask_surface"] == "masks_roi"
     assert run.attrs["derived_mask_caches_stale"] is False
+    assert run.attrs["contours_stale"] is False
+    assert run.attrs["sampled_component_contours_status"] == "computed"
     assert run.attrs["mask_bitpacked_stale"] is False
     assert run.attrs["mask_bitpacked_materialized"] is True
     assert (

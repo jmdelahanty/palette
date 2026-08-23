@@ -703,6 +703,8 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert target["assignment_keypoints_run"] == target["keypoint_run"]
     assert target["keypoint_refinement_mode"] == "canonical_passthrough_v1"
     assert "--publication-evidence-producer-commit" in package_task.command
+    validation_mode = package_task.command.index("--mask-rle-validation-mode") + 1
+    assert package_task.command[validation_mode] == "full"
     assert "--global-frame-start" in package_task.command
     assert "--global-frame-stop" in package_task.command
     assert validation_job.dependency.upstream_job_keys == (publish_job.job_key,)
