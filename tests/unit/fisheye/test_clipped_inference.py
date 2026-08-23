@@ -36,6 +36,7 @@ from fisheye.cluster.clipped_inference_validate import (
     _cache_validation_mode,
     _instance_keys,
     _refined_instance_keys,
+    _refined_clip_component_presence,
     _require_exact_instance_key_order,
     _require_exact_vector,
     _validate_run_frame_counts,
@@ -187,6 +188,64 @@ def test_clipped_validator_post_cleanup_mode_requires_all_caches_absent() -> Non
     )
     with pytest.raises(RuntimeError, match="partial cache set"):
         _cache_validation_mode(cleaned_cache_count=3, clip_count=22)
+
+
+def test_clipped_validator_reports_required_refined_components_per_clip() -> None:
+    class SlashGroup(dict):
+        def get(self, key, default=None):  # noqa: ANN001, ANN201
+            node = self
+            for part in str(key).split("/"):
+                if not isinstance(node, dict) or part not in node:
+                    return default
+                node = node[part]
+            return node
+
+    run = SlashGroup(
+        {
+            "metrics": {
+                "mask_present": np.asarray(
+                    [
+                        [True, True, True, False],
+                        [True, True, True, False],
+                        [True, True, True, True],
+                        [True, True, True, True],
+                    ],
+                    dtype=bool,
+                )
+            }
+        }
+    )
+    clips = [
+        {"clip_id": "clip_000000", "crop_row_start": 0, "crop_row_stop": 2},
+        {"clip_id": "clip_000001", "crop_row_start": 2, "crop_row_stop": 4},
+    ]
+    raw_reports = [
+        {"clip_id": clip["clip_id"], "instance_key": {"row_count": 2}} for clip in clips
+    ]
+    schema = {
+        "schema_id": "subject_v1_lr",
+        "labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+        "required_labels": [
+            "subject_body",
+            "eye_left",
+            "eye_right",
+            "swim_bladder",
+        ],
+    }
+
+    reports = _refined_clip_component_presence(
+        run,
+        clips=clips,
+        raw_mask_reports=raw_reports,
+        component_schema=schema,
+    )
+
+    assert reports[0]["component_presence_policy"]["missing_required_components"] == [
+        "swim_bladder"
+    ]
+    assert reports[0]["component_completeness"]["status"] == "failed"
+    assert reports[0]["component_completeness"]["publication_blocking"] is False
+    assert reports[1]["component_completeness"]["status"] == "passed"
 
 
 def _target(
