@@ -1297,6 +1297,45 @@ def _target_crop_lineage_array(
     return values, None
 
 
+def _selected_target_crop_frame_counts(
+    root: zarr.Group,
+    *,
+    crop_run: str,
+    target_rows: np.ndarray,
+) -> np.ndarray | None:
+    crop_group = root.get(f"crop_runs/{crop_run}")
+    if (
+        crop_group is None
+        or "frame_indices" not in crop_group
+        or "frame_counts" not in crop_group
+    ):
+        return None
+    frame_counts = crop_group["frame_counts"]
+    if len(frame_counts.shape) != 1:
+        raise ValueError(f"crop_runs/{crop_run}/frame_counts must be one-dimensional.")
+    selected_frames, _normalization = _target_crop_lineage_array(
+        root,
+        crop_run=crop_run,
+        target_rows=target_rows,
+        name="frame_indices",
+    )
+    if selected_frames is None:
+        return None
+    frames = np.asarray(selected_frames, dtype=np.int64).reshape(-1)
+    frame_domain_rows = int(frame_counts.shape[0])
+    if frames.size and (
+        int(frames.min()) < 0 or int(frames.max()) >= frame_domain_rows
+    ):
+        raise ValueError(
+            f"Selected crop_runs/{crop_run} frame_indices exceed the "
+            "frame_counts domain."
+        )
+    return np.bincount(frames, minlength=frame_domain_rows).astype(
+        np.int32,
+        copy=False,
+    )
+
+
 def _load_subject_mask_source(
     root: zarr.Group,
     *,
@@ -1437,9 +1476,11 @@ def _load_subject_mask_source(
                     source_crop_xywh_normalization = dict(normalization)
         frame_counts = None
         if target_crop_run:
-            crop_group = root.get(f"crop_runs/{source_crop_run}")
-            if crop_group is not None and "frame_counts" in crop_group:
-                frame_counts = np.asarray(crop_group["frame_counts"][:], dtype=np.int32)
+            frame_counts = _selected_target_crop_frame_counts(
+                root,
+                crop_run=source_crop_run,
+                target_rows=sorted_crop_rows,
+            )
         if frame_counts is None:
             frames = (
                 np.asarray(arrays["frame_indices"][:], dtype=np.int64).reshape(-1)
