@@ -499,8 +499,11 @@ extension.
       trials, escape events, bearing, and provider disagreement.
 - [ ] Compare provider coverage and bias by camera, stimulus state, distance,
       visit, trial ordinal, and response class.
-- [ ] Record a timestamped position-provider promotion decision separately from
-      any body-frame-provider promotion decision.
+- [x] Record a timestamped position-provider default recommendation separately
+      from any body-frame-provider promotion decision. The bounded
+      GoodBatBadBat recommendation is in
+      `docs/goodbatbadbat_position_provider_default_recommendation_2026-08-23.md`;
+      selector activation remains pending required CI and explicit approval.
 - [ ] Pass every required CI check before integration, production selector
       activation, shared-checkout update, or full cohort campaign.
 - [ ] Launch production from a frozen cohort/profile plan and preserve task,
