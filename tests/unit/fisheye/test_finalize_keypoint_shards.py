@@ -7,7 +7,11 @@ import pytest
 import zarr
 
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
-from fisheye.utils.finalize_keypoint_shards import finalize_keypoint_shards
+from fisheye.utils.finalize_keypoint_shards import (
+    DIRECT_SAME_CROP_MAPPING_MODE,
+    finalize_keypoint_shards,
+    preflight_same_crop_keypoint_finalization_target,
+)
 from fisheye.utils.merge_clipped_proxy_crop_runs import merge_clipped_proxy_crop_runs
 
 
@@ -231,6 +235,79 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     np.testing.assert_array_equal(run["n_keypoints"][:], np.array([3, 3, 3, 0, 0], dtype=np.int32))
 
 
+def test_finalize_keypoint_shards_preserves_direct_rows_for_exact_target_crop(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = _make_archive(zarr_path)
+    _write_shard(root, "shard_b", crop_rows=[2, 3])
+    _write_shard(root, "shard_a", crop_rows=[0, 1])
+
+    result = finalize_keypoint_shards(
+        zarr_path=zarr_path,
+        shard_runs=["shard_b", "shard_a"],
+        output_run="keypoints_collection_test",
+        target_crop_run="crop_proxy",
+    )
+
+    assert result["source_crop_mapping_mode"] == DIRECT_SAME_CROP_MAPPING_MODE
+    assert result["source_crop_run"] == "crop_proxy"
+    run = zarr.open_group(store=zarr_path, mode="r")[
+        "keypoints_runs/keypoints_collection_test"
+    ]
+    assert run.attrs["source_crop_mapping_mode"] == DIRECT_SAME_CROP_MAPPING_MODE
+    assert run.attrs["source_crop_mapping_target_run"] == "crop_proxy"
+    assert run.attrs["source_crop_rebase_target_run"] is None
+    assert run.attrs["source_crop_rebased_from_shards"] is False
+    np.testing.assert_array_equal(
+        run["source_crop_row_ids"][:],
+        np.array([0, 1, 2, 3], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        run["instance_key"][:],
+        np.array([1, 2, 3, 4], dtype=np.uint64),
+    )
+
+
+def test_same_crop_finalization_preflight_validates_modern_target_contract(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _make_archive(zarr_path)
+
+    result = preflight_same_crop_keypoint_finalization_target(
+        zarr_path=zarr_path,
+        target_crop_run="crop_proxy",
+        expected_row_count=5,
+    )
+
+    assert result == {
+        "ok": True,
+        "status": "validated",
+        "zarr_path": str(zarr_path.resolve()),
+        "target_crop_run": "crop_proxy",
+        "target_crop_path": "crop_runs/crop_proxy",
+        "mapping_mode": DIRECT_SAME_CROP_MAPPING_MODE,
+        "row_count": 5,
+        "instance_key_dtype": "uint64",
+        "instance_key_unique_count": 5,
+    }
+
+
+def test_same_crop_finalization_preflight_rejects_planned_row_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _make_archive(zarr_path)
+
+    with pytest.raises(ValueError, match="planned clip partition expects 6"):
+        preflight_same_crop_keypoint_finalization_target(
+            zarr_path=zarr_path,
+            target_crop_run="crop_proxy",
+            expected_row_count=6,
+        )
+
+
 def test_finalize_keypoint_shards_rejects_duplicate_source_crop_rows(tmp_path: Path) -> None:
     zarr_path = tmp_path / "sample_analysis.zarr"
     root = _make_archive(zarr_path)
@@ -369,6 +446,7 @@ def test_finalize_keypoint_shards_rebases_mixed_proxy_crop_runs_to_target(tmp_pa
     assert result["ok"] is True
     assert result["source_crop_run"] == "crop_proxy_collection"
     assert result["source_keypoint_shard_crop_runs"] == ["crop_proxy_a", "crop_proxy_b"]
+    assert result["source_crop_mapping_mode"] == "identity_rebase"
     assert result["sort_changed_order"] is True
     assert result["identity_validation"]["status"] == "exact"
     assert result["identity_validation"]["source_crop_run"] == "crop_proxy_collection"
@@ -376,6 +454,7 @@ def test_finalize_keypoint_shards_rebases_mixed_proxy_crop_runs_to_target(tmp_pa
     root_after = zarr.open_group(store=zarr_path, mode="r")
     run = root_after["keypoints_runs/keypoints_collection_test"]
     assert run.attrs["source_crop_run"] == "crop_proxy_collection"
+    assert run.attrs["source_crop_mapping_mode"] == "identity_rebase"
     assert run.attrs["source_crop_rebased_from_shards"] is True
     np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.array([0, 1, 2, 3], dtype=np.int64))
     np.testing.assert_array_equal(run["frame_indices"][:], np.array([10, 11, 20, 21], dtype=np.int64))
