@@ -64,17 +64,16 @@ CHASER_RUNNER_IMPLEMENTATIONS: Mapping[str, str] = {
     "chaser_distance": "fisheye.analysis.chaser_distance_runs",
     "chaser_quadrant_occupancy": "fisheye.analysis.chaser_quadrant_occupancy",
     "chaser_near_field_occupancy": "fisheye.analysis.chaser_near_field_occupancy",
-    "chaser_epoch_behavior_summary": (
-        "fisheye.analysis.chaser_epoch_behavior_summary"
-    ),
+    "chaser_epoch_behavior_summary": ("fisheye.analysis.chaser_epoch_behavior_summary"),
     "chaser_egocentric_bearing": "fisheye.analysis.chaser_egocentric_bearing",
     "chaser_gaze_tracking": "fisheye.analysis.chaser_gaze_tracking",
     "chaser_bout_response": "fisheye.analysis.chaser_bout_response",
     "chaser_escape_events": "fisheye.analysis.chaser_escape_events",
     "chaser_radial_occupancy": "fisheye.analysis.chaser_radial_occupancy",
     "chaser_response_regimes": "fisheye.analysis.chaser_response_regimes",
-    "chaser_escape_freeze_summary": (
-        "fisheye.analysis.chaser_escape_freeze_summary"
+    "chaser_escape_freeze_summary": ("fisheye.analysis.chaser_escape_freeze_summary"),
+    "provider_chaser_position_suite": (
+        "fisheye.analysis.provider_chaser_position_suite"
     ),
 }
 
@@ -711,6 +710,12 @@ def full_chaser_analysis_profile_v3_path() -> Path:
     return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_full_v3.yaml"
 
 
+def position_chaser_analysis_profile_path() -> Path:
+    return (
+        Path(__file__).resolve().parent / "profiles" / "chaser_position_suite_v1.yaml"
+    )
+
+
 __all__ = [
     "ANALYSIS_PROFILE_SCHEMA_ID",
     "ANALYSIS_PROFILE_SCHEMA_VERSION",
@@ -734,6 +739,7 @@ __all__ = [
     "default_goodcopbadcop_source_profile_path",
     "full_chaser_analysis_profile_path",
     "full_chaser_analysis_profile_v3_path",
+    "position_chaser_analysis_profile_path",
     "load_chaser_analysis_profile",
     "load_chaser_protocol_profile",
     "resolve_chaser_analysis_modules",
