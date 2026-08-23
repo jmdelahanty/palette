@@ -13,6 +13,7 @@ from fisheye.cluster.clipped_inference import (
     PLAN_SCHEMA,
     SUPPORTED_PLAN_SCHEMAS,
     _repo_commit,
+    assignment_keypoint_binding,
     build_ssh_bsub_runner,
 )
 from fisheye.cluster.clipped_lsf import (
@@ -405,30 +406,39 @@ def build_plan(
             )
         )
         refine_key = f"keypoint_refine:{target_safe}"
-        refine_prior = prior_by_key[refine_key]
-        jobs.append(
-            _job(
-                workflow_id=label,
-                repo=repo,
-                run_root=run_root,
-                job_key=refine_key,
-                stage="keypoint_refine",
-                command=_replace_run_root(
-                    _inner_command(refine_prior),
-                    prior_run_root=prior_run_root,
-                    recovery_run_root=run_root,
-                ),
-                resources=_resources(refine_prior),
-                upstream=(finalize_key,),
-                expected_outputs=(
-                    zarr_path
-                    / "refined_keypoints_runs"
-                    / str(target["refined_keypoint_run"])
-                    / "zarr.json",
-                ),
+        package_keypoint_upstream = finalize_key
+        assignment_group, _assignment_run = assignment_keypoint_binding(target)
+        if assignment_group == "refined_keypoints_runs":
+            if refine_key not in prior_by_key:
+                raise ValueError(
+                    "Historical refined-keypoint assignment requires the prior "
+                    f"refinement job {refine_key!r}."
+                )
+            refine_prior = prior_by_key[refine_key]
+            jobs.append(
+                _job(
+                    workflow_id=label,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=refine_key,
+                    stage="keypoint_refine",
+                    command=_replace_run_root(
+                        _inner_command(refine_prior),
+                        prior_run_root=prior_run_root,
+                        recovery_run_root=run_root,
+                    ),
+                    resources=_resources(refine_prior),
+                    upstream=(finalize_key,),
+                    expected_outputs=(
+                        zarr_path
+                        / "refined_keypoints_runs"
+                        / str(target["refined_keypoint_run"])
+                        / "zarr.json",
+                    ),
+                )
             )
-        )
-        package_upstream = [refine_key]
+            package_keypoint_upstream = refine_key
+        package_upstream = [package_keypoint_upstream]
         if mask_array_key is not None:
             package_upstream.append(mask_array_key)
 

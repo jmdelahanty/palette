@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import subprocess
@@ -29,6 +30,7 @@ from fisheye.cluster.clipped_detection import (
     compose_detection_workflow,
 )
 from fisheye.cluster.clipped_inference_cleanup import cleanup
+from fisheye.cluster.clipped_inference import assignment_keypoint_binding
 from fisheye.cluster.clipped_inference_validate import (
     _cache_manifest_report,
     _cache_validation_mode,
@@ -68,6 +70,28 @@ def test_clipped_validator_requires_exact_identity_order() -> None:
             np.asarray([10, 11], dtype=np.uint64),
             label="refined_subject_masks/instance_key",
             dtype=np.uint64,
+        )
+
+
+def test_clipped_validator_resolves_canonical_and_historical_assignment() -> None:
+    assert assignment_keypoint_binding(
+        {
+            "keypoint_run": "canonical",
+            "assignment_keypoint_group": "keypoints_runs",
+            "assignment_keypoints_run": "canonical",
+        }
+    ) == ("keypoints_runs", "canonical")
+    assert assignment_keypoint_binding(
+        {"keypoint_run": "canonical", "refined_keypoint_run": "historical"}
+    ) == ("refined_keypoints_runs", "historical")
+
+    with pytest.raises(RuntimeError, match="does not match keypoint_run"):
+        assignment_keypoint_binding(
+            {
+                "keypoint_run": "canonical",
+                "assignment_keypoint_group": "keypoints_runs",
+                "assignment_keypoints_run": "wrong",
+            }
         )
 
 
@@ -621,7 +645,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     clip_id = "clip_000000"
 
-    assert len(plan.lsf_workflow.jobs) == 21
+    assert len(plan.lsf_workflow.jobs) == 20
     keypoint_array = jobs[f"keypoints_array:{target_safe}"]
     subject_mask_array = jobs[f"subject_masks_array:{target_safe}"]
     package_array = jobs[f"mask_package_array:{target_safe}"]
@@ -629,8 +653,9 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert subject_mask_array.dependency.upstream_job_keys == (f"proxy:{target_safe}",)
     assert package_array.dependency.upstream_job_keys == (
         f"subject_masks_array:{target_safe}",
-        f"keypoint_refine:{target_safe}",
+        f"keypoint_finalize:{target_safe}",
     )
+    assert f"keypoint_refine:{target_safe}" not in jobs
     assert f"keypoints:{target_safe}:{clip_id}" in _execution_tasks(keypoint_array)
     assert f"subject_masks:{target_safe}:{clip_id}" in _execution_tasks(
         subject_mask_array
@@ -670,6 +695,13 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     package_task = _execution_tasks(package_array)[
         f"mask_package:{target_safe}:{clip_id}"
     ]
+    assignment_group = package_task.command.index("--assignment-keypoint-group") + 1
+    assignment_run = package_task.command.index("--assignment-keypoints-run") + 1
+    assert package_task.command[assignment_group] == "keypoints_runs"
+    assert package_task.command[assignment_run] == target["keypoint_run"]
+    assert target["assignment_keypoint_group"] == "keypoints_runs"
+    assert target["assignment_keypoints_run"] == target["keypoint_run"]
+    assert target["keypoint_refinement_mode"] == "canonical_passthrough_v1"
     assert "--publication-evidence-producer-commit" in package_task.command
     assert "--global-frame-start" in package_task.command
     assert "--global-frame-stop" in package_task.command
@@ -738,14 +770,15 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert fragments[3]["requires"] == [strict_output["evidence"]["artifact_key"]]
     assert fragments[4]["requires"] == [strict_output["storage"]["crop_artifact_key"]]
     assert fragments[5]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[5]["provides"] == [f"canonical_keypoints:{target_safe}"]
     assert fragments[6]["requires"] == [f"crop_roi_cache:{target_safe}"]
     assert fragments[7]["requires"] == [
         f"raw_subject_masks:{target_safe}",
-        f"refined_keypoints:{target_safe}",
+        f"canonical_keypoints:{target_safe}",
     ]
     assert fragments[7]["metadata"]["terminal_job_key"] == publish_job.job_key
     assert fragments[8]["requires"] == [
-        f"refined_keypoints:{target_safe}",
+        f"canonical_keypoints:{target_safe}",
         f"refined_subject_masks:{target_safe}",
     ]
     assert fragments[9]["provides"] == [
@@ -1145,13 +1178,13 @@ def test_encoded_mask_packages_add_global_grid_and_join(
     publish_key = f"mask_publish:{target_safe}"
 
     assert plan.encoded_mask_packages is True
-    assert len(plan.lsf_workflow.jobs) == 22
+    assert len(plan.lsf_workflow.jobs) == 21
     assert jobs[grid_key].dependency.upstream_job_keys == (
         f"keypoint_finalize:{target_safe}",
     )
     assert jobs[package_key].dependency.upstream_job_keys == (
         f"subject_masks_array:{target_safe}",
-        f"keypoint_refine:{target_safe}",
+        f"keypoint_finalize:{target_safe}",
         grid_key,
     )
     package_task = _execution_tasks(jobs[package_key])[
@@ -1241,7 +1274,7 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
     )
 
     assert len(plan.targets) == 2
-    assert len(plan.lsf_workflow.jobs) == 40
+    assert len(plan.lsf_workflow.jobs) == 38
     assert jobs[f"detect_artifact_array:{first_safe}"].dependency is None
     assert jobs[
         f"detect_artifact_array:{second_safe}"
@@ -1464,7 +1497,6 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
         f"keypoints_array:{target_safe}",
         f"subject_masks_array:{target_safe}",
         f"keypoint_finalize:{target_safe}",
-        f"keypoint_refine:{target_safe}",
         f"mask_package_array:{target_safe}",
         f"mask_publish:{target_safe}",
         f"validate:{target_safe}",
@@ -1523,6 +1555,13 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     finalize = " ".join(jobs[f"keypoint_finalize:{target_safe}"].command)
     assert f"--target-crop-run {hybrid_run}" in finalize
     assert "merge_clipped_proxy_crop_runs" not in finalize
+    package = _execution_tasks(jobs[f"mask_package_array:{target_safe}"])[
+        f"mask_package:{target_safe}:clip_000000"
+    ]
+    assert "--assignment-keypoint-group keypoints_runs" in " ".join(package.command)
+    assert f"--assignment-keypoints-run {target['keypoint_run']}" in " ".join(
+        package.command
+    )
 
 
 def test_downstream_crop_row_partition_rejects_gap_before_job_planning() -> None:
@@ -1634,14 +1673,15 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         str(target["target_id"]), default="target", max_length=56
     )
     keypoint_key = f"keypoints_array:{target_safe}"
-    refine_key = f"keypoint_refine:{target_safe}"
+    finalize_key = f"keypoint_finalize:{target_safe}"
     package_key = f"mask_package_array:{target_safe}"
 
-    assert len(plan.workflow.jobs) == 9
+    assert len(plan.workflow.jobs) == 8
     assert jobs[keypoint_key].dependency.upstream_job_keys == (
         "prepare_keypoint_recovery",
     )
-    assert jobs[package_key].dependency.upstream_job_keys == (refine_key,)
+    assert jobs[package_key].dependency.upstream_job_keys == (finalize_key,)
+    assert f"keypoint_refine:{target_safe}" not in jobs
     assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
     assert jobs[f"mask_import:{target_safe}"].resources.queue == "local"
     assert {
@@ -1659,6 +1699,79 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     coordinate_mode = keypoint_task.command.index("--coordinate-contract-mode") + 1
     assert keypoint_task.command[coordinate_mode] == "legacy_noncanonical"
     assert plan.payload["targets"] == source.to_json()["targets"]
+
+
+def test_keypoint_recovery_preserves_historical_refined_assignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_payload = source.to_json()
+    target = source_payload["targets"][0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    for key in (
+        "assignment_keypoint_group",
+        "assignment_keypoints_run",
+        "keypoint_refinement_mode",
+    ):
+        target.pop(key, None)
+
+    jobs = source_payload["lsf_workflow"]["jobs"]
+    finalize = next(
+        job
+        for job in jobs
+        if job["job_key"] == f"keypoint_finalize:{target_safe}"
+    )
+    refiner = copy.deepcopy(finalize)
+    refiner["job_key"] = f"keypoint_refine:{target_safe}"
+    separator = refiner["command"].index("--")
+    refiner["command"] = [
+        *refiner["command"][: separator + 1],
+        "scripts/py",
+        "-m",
+        "fisheye.refinement.refine_keypoints",
+        str(target["analysis_zarr"]),
+        "--keypoint-run",
+        str(target["keypoint_run"]),
+        "--run-name",
+        str(target["refined_keypoint_run"]),
+    ]
+    jobs.append(refiner)
+    package = next(
+        job
+        for job in jobs
+        if job["job_key"] == f"mask_package_array:{target_safe}"
+    )
+    for task in package["execution_group"]["tasks"]:
+        command = task["command"]
+        group_index = command.index("--assignment-keypoint-group") + 1
+        run_index = command.index("--assignment-keypoints-run") + 1
+        command[group_index] = "refined_keypoints_runs"
+        command[run_index] = str(target["refined_keypoint_run"])
+
+    source_plan = tmp_path / "historical_source_plan.json"
+    _write_json(source_plan, source_payload)
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+    )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
+
+    plan = recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "historical_recovery",
+        recovery_label="historical_keypoint_recovery",
+    )
+    recovery_jobs = {job.job_key: job for job in plan.workflow.jobs}
+    refine_key = f"keypoint_refine:{target_safe}"
+
+    assert refine_key in recovery_jobs
+    assert recovery_jobs[
+        f"mask_package_array:{target_safe}"
+    ].dependency.upstream_job_keys == (refine_key,)
 
 
 def test_keypoint_recovery_rejects_canonical_collection_shard(
@@ -1736,7 +1849,7 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     package_key = f"mask_package_array:{target_safe}"
     publish_key = f"mask_publish:{target_safe}"
     mask_key = f"subject_masks_array:{target_safe}"
-    refine_key = f"keypoint_refine:{target_safe}"
+    finalize_key = f"keypoint_finalize:{target_safe}"
 
     assert f"mask_import:{target_safe}" not in jobs
     assert mask_key in jobs
@@ -1747,7 +1860,7 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
         "prepare_keypoint_recovery",
     )
     assert jobs[package_key].dependency.upstream_job_keys == (
-        refine_key,
+        finalize_key,
         mask_key,
     )
     assert plan.workflow.metadata["recovered_raw_subject_mask_count"] == 1
@@ -1802,7 +1915,7 @@ def test_keypoint_recovery_supports_downstream_plan_and_repo_override(
     )
     jobs = {job.job_key: job for job in plan.workflow.jobs}
 
-    assert len(jobs) == 7
+    assert len(jobs) == 6
     assert "registry_finalize" not in jobs
     assert "nrs_cleanup" not in jobs
     assert plan.repo == deployment.resolve()
