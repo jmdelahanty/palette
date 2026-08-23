@@ -999,9 +999,13 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
         )
         for name, data in arrays.items():
             crop.create_array(name, data=data, overwrite=True)
+        frame_indices = np.asarray(arrays["frame_indices"], dtype=np.int64)
         crop.create_array(
             "frame_counts",
-            data=np.ones((int(arrays["frame_indices"].shape[0]),), dtype=np.int32),
+            data=np.bincount(
+                frame_indices,
+                minlength=int(frame_indices.max()) + 1,
+            ).astype(np.int32),
             overwrite=True,
         )
 
@@ -1583,6 +1587,37 @@ def test_collection_same_crop_target_does_not_require_clipped_rebase_identity() 
     )
     np.testing.assert_array_equal(collection.source_crop_row_ids, np.asarray([0]))
     np.testing.assert_array_equal(source.source_crop_row_ids[:], np.asarray([0]))
+
+
+def test_collection_target_crop_frame_counts_cover_only_selected_shard_rows(
+    monkeypatch,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_sharded_subject_mask_root()
+    target_crop = root["crop_runs/crop_collection"]
+    target_counts = np.zeros((12,), dtype=np.int32)
+    target_counts[[10, 11]] = 1
+    target_crop.create_array(
+        "frame_counts",
+        data=target_counts,
+        overwrite=True,
+    )
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_shard_runs=["subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+        refined_run="refined_subject_masks_clip_a",
+        components=["subject_body", "swim_bladder"],
+        chunk_size=1,
+    )
+
+    assert summary["status"] == "updated"
+    run = root["refined_subject_masks_runs/refined_subject_masks_clip_a"]
+    expected = np.zeros((12,), dtype=np.int32)
+    expected[10] = 1
+    np.testing.assert_array_equal(run["frame_counts"][:], expected)
+    assert int(np.sum(run["frame_counts"][:], dtype=np.int64)) == 1
 
 
 def test_collection_preserves_exact_v2_production_row_identity() -> None:
