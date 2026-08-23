@@ -1,7 +1,7 @@
 """Publish one selector-ineligible geometry-only crop production candidate.
 
 The future-facing path binds the approved refined-detection authority and its
-published source-video authority, materializes a complete immutable run on
+published source-pixel authority, materializes a complete immutable run on
 node-local scratch, validates it, atomically imports the run into the recording
 archive, reconsolidates archive metadata, and validates the imported run again.
 It deliberately does not update a selector, registry, or production default.
@@ -78,7 +78,7 @@ from fisheye.shared.zarr_run_completion import (
 
 
 CROP_SNAPSHOT_PUBLICATION_SCHEMA_ID = "palette.crop_geometry.production_publication"
-CROP_SNAPSHOT_PUBLICATION_SCHEMA_VERSION = 1
+CROP_SNAPSHOT_PUBLICATION_SCHEMA_VERSION = 2
 CROP_SNAPSHOT_PUBLICATION_POLICY = (
     "node_local_v1_materialization_then_atomic_selector_ineligible_import_v1"
 )
@@ -936,7 +936,16 @@ def publish_crop_geometry_production_candidate(
                 gate_evidence is not None and gate_evidence.get("applied") is True
             ),
             "source_pixel_authority_digest": pixels.binding_document_digest,
-            "source_video_path": str(pixels.source_video_path),
+            "source_video_path": (
+                None
+                if pixels.source_video_path is None
+                else str(pixels.source_video_path)
+            ),
+            "source_video_paths": [str(item) for item in pixels.source_video_paths],
+            "source_index_paths": [str(item) for item in pixels.source_index_paths],
+            "source_pixel_provider_profile": pixels.binding_document[
+                "provider_profile"
+            ],
             "geometry_origin_binding": origin_binding,
             "storage_profile_id": profile.profile_id,
             "selector_eligible": False,
