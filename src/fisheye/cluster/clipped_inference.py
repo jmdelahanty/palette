@@ -74,6 +74,10 @@ from fisheye.cluster.clipped_storage_finalization import (
     ClippedStorageFinalizationInputs,
     StrictClipRefinedDetectionInput,
 )
+from fisheye.cluster.crop_snapshot import (
+    CropSnapshotFragmentInputs,
+    build_crop_snapshot_fragment,
+)
 from fisheye.cluster.native_detection import (
     NativeDetectionClipSpec,
     NativeDetectionFragmentInputs,
@@ -465,6 +469,7 @@ def _refuse_output_collisions(
         outputs.extend(
             [
                 zarr / "crop_runs" / str(target_plan["hybrid_crop_run"]),
+                zarr / "crop_runs" / str(target_plan["geometry_crop_run"]),
                 zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
                 zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
                 zarr
@@ -532,6 +537,7 @@ def _refuse_output_collisions(
         outputs.extend(
             [
                 zarr / "crop_runs" / str(target_plan["merged_proxy_crop_run"]),
+                zarr / "crop_runs" / str(target_plan["geometry_crop_run"]),
                 zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
                 zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
                 zarr
@@ -758,6 +764,7 @@ def _build_downstream_target_pipeline(
         raise ValueError("Downstream target has no finalized refined-detection run.")
     clips = list(target_payload["clips"])
     hybrid_crop_run = str(target_payload["hybrid_crop_run"])
+    geometry_crop_run = str(target_payload["geometry_crop_run"])
     keypoint_run = str(target_payload["keypoint_run"])
     subject_mask_run = str(target_payload["subject_mask_run"])
     refined_subject_mask_run = str(target_payload["refined_subject_mask_run"])
@@ -863,6 +870,33 @@ def _build_downstream_target_pipeline(
             },
         )
     )
+
+    crop_snapshot = build_crop_snapshot_fragment(
+        CropSnapshotFragmentInputs(
+            workflow_id=workflow_id,
+            family=FAMILY,
+            target_id=target.target_id,
+            analysis_zarr=target.analysis_zarr,
+            repo=repo,
+            run_root=run_root,
+            run_id=geometry_crop_run,
+            purpose="keypoints_subject_masks",
+            roi_width=None,
+            roi_height=None,
+            camera_id=str(
+                target_payload["native_detection_authority"]["camera_serial"]
+            ),
+            source_refined_run=target.finalized_refined_detect_run,
+            registered_gate_requirement="from_source",
+            geometry_origin_provider_run=hybrid_crop_run,
+            roi_size_from_geometry_origin_provider=True,
+            upstream_job_keys=(hybrid_key,),
+            required_artifacts=(hybrid_artifact,),
+        )
+    )
+    jobs.extend(crop_snapshot.fragment.jobs)
+    fragments.append(crop_snapshot.fragment)
+    geometry_crop_artifact = crop_snapshot.outputs.artifact_key
 
     keypoint_array_key = f"keypoints_array:{target_safe}"
     subject_mask_array_key = f"subject_masks_array:{target_safe}"
@@ -985,6 +1019,8 @@ def _build_downstream_target_pipeline(
             "subject_mask_shard_runs",
             "--crop-run",
             hybrid_crop_run,
+            "--geometry-crop-run",
+            geometry_crop_run,
             "--source-crop-row-start",
             str(row_start),
             "--source-crop-row-stop",
@@ -1069,7 +1105,7 @@ def _build_downstream_target_pipeline(
             gpus=1,
             walltime="4:00",
         ),
-        upstream=(hybrid_key,),
+        upstream=(crop_snapshot.outputs.terminal_job_key,),
     )
     jobs.extend((keypoint_array_job, mask_array_job))
 
@@ -1129,13 +1165,14 @@ def _build_downstream_target_pipeline(
             LsfWorkflowFragment(
                 fragment_id=f"subject_mask_inference:{target_safe}",
                 jobs=(mask_array_job,),
-                requires=(hybrid_artifact,),
+                requires=(geometry_crop_artifact,),
                 provides=(raw_masks_artifact,),
                 metadata={
                     "module": "subject_mask_inference",
                     "target_id": target.target_id,
                     "work_partition": "clip_crop_row_intervals",
-                    "crop_run": hybrid_crop_run,
+                    "crop_run": geometry_crop_run,
+                    "pixel_crop_run": hybrid_crop_run,
                 },
             ),
         )
@@ -1158,7 +1195,7 @@ def _build_downstream_target_pipeline(
                     "--zarr",
                     str(target.analysis_zarr),
                     "--crop-run",
-                    hybrid_crop_run,
+                    geometry_crop_run,
                     "--output-manifest",
                     str(global_mask_grid_manifest),
                     "--mask-label",
@@ -1169,10 +1206,6 @@ def _build_downstream_target_pipeline(
                     "eye_right",
                     "--mask-label",
                     "swim_bladder",
-                    "--mask-height",
-                    "512",
-                    "--mask-width",
-                    "512",
                     "--dense-mask-row-chunk",
                     "128",
                     "--json",
@@ -1196,7 +1229,7 @@ def _build_downstream_target_pipeline(
             "--subject-shard-run",
             str(clip["subject_mask_shard_run"]),
             "--target-crop-run",
-            hybrid_crop_run,
+            geometry_crop_run,
             "--refined-run",
             str(clip["refined_mask_package_run"]),
             "--package-path",
@@ -1360,7 +1393,7 @@ def _build_downstream_target_pipeline(
         "--analysis-zarr",
         str(target.analysis_zarr),
         "--crop-run",
-        hybrid_crop_run,
+        geometry_crop_run,
         "--raw-run",
         subject_mask_run,
         "--refined-run",
@@ -1430,7 +1463,8 @@ def _build_downstream_target_pipeline(
             metadata={
                 "module": "subject_mask_refinement",
                 "target_id": target.target_id,
-                "crop_run": hybrid_crop_run,
+                "crop_run": geometry_crop_run,
+                "pixel_crop_run": hybrid_crop_run,
                 "selector_activation": False,
                 "assignment_keypoint_group": "keypoints_runs",
                 "assignment_keypoints_run": keypoint_run,
@@ -1473,7 +1507,7 @@ def _build_downstream_target_pipeline(
                 "module": "analysis_validation",
                 "target_id": target.target_id,
                 "source_refined_detect_run": target.finalized_refined_detect_run,
-                "crop_run": hybrid_crop_run,
+                "crop_run": geometry_crop_run,
                 "selector_activation": False,
             },
         )
@@ -1961,6 +1995,7 @@ def build_plan(
             )
 
         hybrid_crop_run = f"crop_hybrid_{target_label}"
+        geometry_crop_run = f"crop_v2_{target_label}"
         merged_proxy = (
             hybrid_crop_run
             if scope == WORKFLOW_SCOPE_DOWNSTREAM
@@ -2128,6 +2163,11 @@ def build_plan(
             "merged_proxy_crop_run": merged_proxy,
             "hybrid_crop_run": (
                 hybrid_crop_run if scope == WORKFLOW_SCOPE_DOWNSTREAM else None
+            ),
+            "geometry_crop_run": (
+                geometry_crop_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
             ),
             "hybrid_supplemental_manifest": (
                 str(
@@ -2579,7 +2619,7 @@ def build_plan(
                             f"{authority.recording_identity}:{target_label}",
                         )
                     ),
-                    crop_run_id=f"crop_v2_{target_label}",
+                    crop_run_id=geometry_crop_run,
                     recording_identity=authority.recording_identity,
                     crop_purpose="keypoints_subject_masks",
                     roi_width=512,
@@ -2607,6 +2647,33 @@ def build_plan(
             downstream_detection_authority = storage_modules.storage.outputs.to_json()
         else:
             target_payload["strict_detection_storage"] = None
+            assert canonical_refined_run is not None
+            crop_snapshot = build_crop_snapshot_fragment(
+                CropSnapshotFragmentInputs(
+                    workflow_id=workflow_id,
+                    family=FAMILY,
+                    target_id=target.target_id,
+                    analysis_zarr=target.analysis_zarr,
+                    repo=repo,
+                    run_root=run_root,
+                    run_id=geometry_crop_run,
+                    purpose="keypoints_subject_masks",
+                    roi_width=512,
+                    roi_height=512,
+                    camera_id=authority.camera_serial,
+                    source_refined_run=canonical_refined_run,
+                    registered_gate_requirement="from_source",
+                    upstream_job_keys=(downstream_detection_terminal,),
+                    required_artifacts=(downstream_detection_artifact,),
+                )
+            )
+            jobs.extend(crop_snapshot.fragment.jobs)
+            fragments.append(crop_snapshot.fragment)
+            geometry_crop_terminal = crop_snapshot.outputs.terminal_job_key
+            geometry_crop_artifact = crop_snapshot.outputs.artifact_key
+        if storage_modules is not None:
+            geometry_crop_terminal = storage_modules.storage.outputs.terminal_job_key
+            geometry_crop_artifact = storage_modules.storage.outputs.crop_artifact_key
         cache_array_key = f"cache_array:{target_safe}"
         cache_tasks: list[LsfExecutionTask] = []
         for bundle_index, start in enumerate(range(0, len(clips), cache_bundle_size)):
@@ -2797,6 +2864,8 @@ def build_plan(
                 "subject_mask_shard_runs",
                 "--crop-run",
                 str(clip["proxy_crop_run"]),
+                "--geometry-crop-run",
+                geometry_crop_run,
                 "--source-collection-id",
                 detection_outputs.collection_id,
                 "--source-collection-path",
@@ -2848,6 +2917,11 @@ def build_plan(
                     array_indexed=True,
                 )
             )
+        mask_inference_upstream = (
+            (proxy_key,)
+            if storage_modules is not None
+            else (proxy_key, geometry_crop_terminal)
+        )
         jobs.append(
             _task_group_job(
                 workflow_id=workflow_id,
@@ -2873,7 +2947,7 @@ def build_plan(
                 mode=LsfExecutionMode.ARRAY,
                 max_concurrent=gpu_array_concurrency,
                 resources=gpu,
-                upstream=(proxy_key,),
+                upstream=mask_inference_upstream,
             )
         )
 
@@ -2931,7 +3005,7 @@ def build_plan(
                 "--zarr",
                 str(target.analysis_zarr),
                 "--crop-run",
-                merged_proxy,
+                geometry_crop_run,
                 "--output-manifest",
                 str(global_mask_grid_manifest),
                 "--mask-label",
@@ -2942,10 +3016,6 @@ def build_plan(
                 "eye_right",
                 "--mask-label",
                 "swim_bladder",
-                "--mask-height",
-                "512",
-                "--mask-width",
-                "512",
                 "--dense-mask-row-chunk",
                 "128",
                 "--json",
@@ -2978,7 +3048,7 @@ def build_plan(
                 "--subject-shard-run",
                 str(clip["subject_mask_shard_run"]),
                 "--target-crop-run",
-                merged_proxy,
+                geometry_crop_run,
                 "--refined-run",
                 str(clip["refined_mask_package_run"]),
                 "--package-path",
@@ -3088,7 +3158,7 @@ def build_plan(
             "--output-run",
             refined_subject_mask_draft_run,
             "--expected-target-crop-run",
-            merged_proxy,
+            geometry_crop_run,
             "--array-copy-workers",
             "8",
             "--encoded-copy-workers",
@@ -3147,7 +3217,7 @@ def build_plan(
             "--analysis-zarr",
             str(target.analysis_zarr),
             "--crop-run",
-            merged_proxy,
+            geometry_crop_run,
             "--raw-run",
             subject_mask_run,
             "--refined-run",
@@ -3281,7 +3351,7 @@ def build_plan(
                 LsfWorkflowFragment(
                     fragment_id=f"subject_mask_inference:{target_safe}",
                     jobs=(job_by_key[subject_mask_array_key],),
-                    requires=(crop_cache_artifact,),
+                    requires=(crop_cache_artifact, geometry_crop_artifact),
                     provides=(raw_masks_artifact,),
                     metadata={
                         "module": "subject_mask_inference",

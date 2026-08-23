@@ -623,7 +623,25 @@ def test_required_geometry_uses_canonical_refined_collection_without_legacy_bypa
         for fragment in fragments
         if fragment["fragment_id"] == f"crop_roi_cache:{target_safe}"
     )
+    canonical_crop_fragment = next(
+        fragment
+        for fragment in fragments
+        if fragment["fragment_id"] == f"crop_snapshot:{target_safe}"
+    )
     assert crop_fragment["requires"] == [f"finalized_refined_detection:{target_safe}"]
+    assert canonical_crop_fragment["requires"] == [
+        f"finalized_refined_detection:{target_safe}"
+    ]
+    canonical_crop = jobs[f"crop_snapshot_publish:{target_safe}"]
+    assert canonical_crop.dependency.upstream_job_keys == (collection.job_key,)
+    assert "--registered-gate-requirement from_source" in " ".join(
+        canonical_crop.command
+    )
+    masks = jobs[f"subject_masks_array:{target_safe}"]
+    assert masks.dependency.upstream_job_keys == (
+        f"proxy:{target_safe}",
+        canonical_crop.job_key,
+    )
     assert target["strict_detection_storage"] is None
     assert target["registered_dish_geometry"] == {
         "gate_requirement": "required",
@@ -670,6 +688,9 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     coordinate_mode = keypoint_command.index("--coordinate-contract-mode") + 1
     assert keypoint_command[coordinate_mode] == "legacy_noncanonical"
     assert "fisheye.cluster.subject_masks.staged_inference" in subject_mask_command
+    assert "--geometry-crop-run" in subject_mask_command
+    geometry_index = subject_mask_command.index("--geometry-crop-run") + 1
+    assert subject_mask_command[geometry_index] == target["geometry_crop_run"]
     assert "--roi-cache-staging-dir" in subject_mask_command
     assert "--worker-receipt-json" in subject_mask_command
     assert any(
@@ -692,6 +713,8 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert publish_job.command.count("--refined-package") == len(target["clips"])
     assert "--producer-commit" in publish_job.command
     assert "--cache-run" in publish_job.command
+    publish_crop_index = publish_job.command.index("--crop-run") + 1
+    assert publish_job.command[publish_crop_index] == target["geometry_crop_run"]
     package_task = _execution_tasks(package_array)[
         f"mask_package:{target_safe}:{clip_id}"
     ]
@@ -699,6 +722,8 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assignment_run = package_task.command.index("--assignment-keypoints-run") + 1
     assert package_task.command[assignment_group] == "keypoints_runs"
     assert package_task.command[assignment_run] == target["keypoint_run"]
+    target_crop_index = package_task.command.index("--target-crop-run") + 1
+    assert package_task.command[target_crop_index] == target["geometry_crop_run"]
     assert target["assignment_keypoint_group"] == "keypoints_runs"
     assert target["assignment_keypoints_run"] == target["keypoint_run"]
     assert target["keypoint_refinement_mode"] == "canonical_passthrough_v1"
@@ -773,7 +798,10 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert fragments[4]["requires"] == [strict_output["storage"]["crop_artifact_key"]]
     assert fragments[5]["requires"] == [f"crop_roi_cache:{target_safe}"]
     assert fragments[5]["provides"] == [f"canonical_keypoints:{target_safe}"]
-    assert fragments[6]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[6]["requires"] == [
+        f"crop_roi_cache:{target_safe}",
+        strict_output["storage"]["crop_artifact_key"],
+    ]
     assert fragments[7]["requires"] == [
         f"raw_subject_masks:{target_safe}",
         f"canonical_keypoints:{target_safe}",
@@ -1495,6 +1523,7 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     assert set(jobs) == {
         f"acquisition_crop_ledger:{target_safe}",
         f"hybrid_crop:{target_safe}",
+        f"crop_snapshot_publish:{target_safe}",
         f"keypoint_finalize_preflight:{target_safe}",
         f"keypoints_array:{target_safe}",
         f"subject_masks_array:{target_safe}",
@@ -1511,10 +1540,18 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     assert jobs[f"subject_masks_array:{target_safe}"].resources.queue == "gpu_l4"
 
     hybrid_run = str(target["hybrid_crop_run"])
+    geometry_run = str(target["geometry_crop_run"])
     hybrid_command = " ".join(jobs[f"hybrid_crop:{target_safe}"].command)
     assert "build_hybrid_acquisition_offline_crop_run" in hybrid_command
     assert f"--run-name {hybrid_run}" in hybrid_command
     assert "--refined-detect-run finalized_refined_cam2010093" in hybrid_command
+    crop_snapshot = jobs[f"crop_snapshot_publish:{target_safe}"]
+    crop_snapshot_command = " ".join(crop_snapshot.command)
+    assert crop_snapshot.dependency.upstream_job_keys == (f"hybrid_crop:{target_safe}",)
+    assert f"--run-id {geometry_run}" in crop_snapshot_command
+    assert f"--geometry-origin-provider-run {hybrid_run}" in crop_snapshot_command
+    assert "--roi-size-from-geometry-origin-provider" in crop_snapshot_command
+    assert "--registered-gate-requirement from_source" in crop_snapshot_command
 
     preflight_key = f"keypoint_finalize_preflight:{target_safe}"
     preflight = " ".join(jobs[preflight_key].command)
@@ -1528,9 +1565,7 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     assert f"--target-crop-run {hybrid_run}" in preflight
     assert "--preflight-target-only" in preflight
     assert "--expected-target-row-count 200" in preflight
-    assert target["keypoint_finalization_mapping_mode"] == (
-        "direct_same_crop_row_ids"
-    )
+    assert target["keypoint_finalization_mapping_mode"] == ("direct_same_crop_row_ids")
 
     keypoint_tasks = _execution_tasks(jobs[f"keypoints_array:{target_safe}"])
     mask_tasks = _execution_tasks(jobs[f"subject_masks_array:{target_safe}"])
@@ -1550,9 +1585,14 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
         assert "--roi-cache-manifest" not in keypoint
         assert "--roi-cache-policy never" in keypoint
         assert f"--crop-run {hybrid_run}" in mask
+        assert f"--geometry-crop-run {geometry_run}" in mask
         assert expected_range in mask
         assert "--direct-crop-provider" in mask
         assert "--roi-cache-staging-dir" not in mask
+
+    assert jobs[f"subject_masks_array:{target_safe}"].dependency.upstream_job_keys == (
+        f"crop_snapshot_publish:{target_safe}",
+    )
 
     finalize = " ".join(jobs[f"keypoint_finalize:{target_safe}"].command)
     assert f"--target-crop-run {hybrid_run}" in finalize
@@ -1563,6 +1603,10 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     assert "--assignment-keypoint-group keypoints_runs" in " ".join(package.command)
     assert f"--assignment-keypoints-run {target['keypoint_run']}" in " ".join(
         package.command
+    )
+    assert f"--target-crop-run {geometry_run}" in " ".join(package.command)
+    assert f"--crop-run {geometry_run}" in " ".join(
+        jobs[f"mask_publish:{target_safe}"].command
     )
 
 
@@ -1722,9 +1766,7 @@ def test_keypoint_recovery_preserves_historical_refined_assignment(
 
     jobs = source_payload["lsf_workflow"]["jobs"]
     finalize = next(
-        job
-        for job in jobs
-        if job["job_key"] == f"keypoint_finalize:{target_safe}"
+        job for job in jobs if job["job_key"] == f"keypoint_finalize:{target_safe}"
     )
     refiner = copy.deepcopy(finalize)
     refiner["job_key"] = f"keypoint_refine:{target_safe}"
@@ -1742,9 +1784,7 @@ def test_keypoint_recovery_preserves_historical_refined_assignment(
     ]
     jobs.append(refiner)
     package = next(
-        job
-        for job in jobs
-        if job["job_key"] == f"mask_package_array:{target_safe}"
+        job for job in jobs if job["job_key"] == f"mask_package_array:{target_safe}"
     )
     for task in package["execution_group"]["tasks"]:
         command = task["command"]
@@ -1827,9 +1867,7 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
                     "clips": [
                         {
                             "clip_id": "clip_000000",
-                            "raw_subject_mask_action": (
-                                "remove_failed_and_rerun"
-                            ),
+                            "raw_subject_mask_action": ("remove_failed_and_rerun"),
                         }
                     ],
                 }
@@ -1858,9 +1896,7 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     assert set(_execution_tasks(jobs[mask_key])) == {
         f"subject_masks:{target_safe}:clip_000000"
     }
-    assert jobs[mask_key].dependency.upstream_job_keys == (
-        "prepare_keypoint_recovery",
-    )
+    assert jobs[mask_key].dependency.upstream_job_keys == ("prepare_keypoint_recovery",)
     assert jobs[package_key].dependency.upstream_job_keys == (
         finalize_key,
         mask_key,
@@ -1895,9 +1931,7 @@ def test_keypoint_recovery_supports_downstream_plan_and_repo_override(
     )
     deployment = tmp_path / "locked_deployment"
     deployment_commit = "d" * 40
-    monkeypatch.setattr(
-        recovery, "_repo_commit", lambda _repo: deployment_commit
-    )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: deployment_commit)
 
     with pytest.raises(ValueError, match="does not match the exact HEAD"):
         recovery.build_plan(

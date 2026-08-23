@@ -81,6 +81,7 @@ def test_receipt_composed_wrapper_assembles_workers_and_forces_strict_profile(
         producer_commit="c" * 40,
         local_output_root=tmp_path / "output",
         quality_scratch_root=tmp_path / "quality",
+        allow_signed_hybrid_crop_rebase=True,
     )
 
     assert result["publication_profile"] == "receipt_composed_clip_workers_v1"
@@ -88,6 +89,7 @@ def test_receipt_composed_wrapper_assembles_workers_and_forces_strict_profile(
     assert captured["require_worker_quality"] is True
     assert captured["require_worker_sampled_contours"] is True
     assert captured["activate"] is False
+    assert captured["allow_signed_hybrid_crop_rebase"] is True
     assert captured["refined_draft_runs"] == ("refined_clip_0",)
     assert captured["expected_work_units"] == [
         {
