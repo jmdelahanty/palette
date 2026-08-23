@@ -160,6 +160,7 @@ def publish_receipt_composed_bundle(
     local_output_root: Path,
     quality_scratch_root: Path,
     core_physical_unit_workers: int = 4,
+    allow_signed_hybrid_crop_rebase: bool = False,
 ) -> dict[str, object]:
     """Stage exact worker views and invoke the fail-closed composable publisher."""
 
@@ -208,6 +209,7 @@ def publish_receipt_composed_bundle(
             sampled_contour_worker_receipts=contours,
             require_worker_sampled_contours=True,
             sampled_contour_producer_commit=producer_commit,
+            allow_signed_hybrid_crop_rebase=allow_signed_hybrid_crop_rebase,
             expected_work_units=work_units,
             activate=False,
         )
@@ -236,6 +238,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-output-root", required=True, type=Path)
     parser.add_argument("--quality-scratch-root", required=True, type=Path)
     parser.add_argument("--core-physical-unit-workers", type=int, default=4)
+    parser.add_argument(
+        "--allow-signed-hybrid-crop-rebase",
+        action="store_true",
+        help=(
+            "Recovery-only: bind sealed signed-hybrid workers to the exact crop-v2 "
+            "candidate published from that provider."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -256,6 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         local_output_root=args.local_output_root,
         quality_scratch_root=args.quality_scratch_root,
         core_physical_unit_workers=int(args.core_physical_unit_workers),
+        allow_signed_hybrid_crop_rebase=bool(args.allow_signed_hybrid_crop_rebase),
     )
     print(
         json.dumps(json_ready(result), indent=None if args.json else 2, sort_keys=True)

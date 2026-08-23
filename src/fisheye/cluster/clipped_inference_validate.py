@@ -584,17 +584,17 @@ def validate_target(
                 "from the quality source."
             )
 
-    crop_run = str(target["merged_proxy_crop_run"])
+    crop_run = str(target.get("geometry_crop_run") or target["merged_proxy_crop_run"])
     crop = root.get(f"crop_runs/{crop_run}")
     if crop is None:
-        raise RuntimeError(f"Missing merged proxy crop run crop_runs/{crop_run}.")
+        raise RuntimeError(f"Missing authoritative crop run crop_runs/{crop_run}.")
     crop_identity, crop_keys = _instance_key_values(
         crop,
         label=f"crop_runs/{crop_run}",
     )
     if not np.array_equal(crop_keys, detection_keys):
         raise RuntimeError(
-            "Merged crop proxy instance_key order does not exactly match selected refined detections."
+            "Authoritative crop instance_key order does not exactly match selected refined detections."
         )
 
     keypoints = _require_complete_run(
@@ -674,21 +674,19 @@ def validate_target(
     ).reshape(-1)
     if int(crop_frames.size) != expected_rows:
         raise RuntimeError(
-            f"Merged crop proxy frame_indices row count {int(crop_frames.size)} != {expected_rows}."
+            f"Authoritative crop frame_indices row count {int(crop_frames.size)} != {expected_rows}."
         )
     if crop_frames.size and (
         int(crop_frames.min()) < 0 or int(crop_frames.max()) >= recording_frame_count
     ):
         raise RuntimeError(
-            "Merged crop proxy frame_indices fall outside the canonical recording frame universe."
+            "Authoritative crop frame_indices fall outside the canonical recording frame universe."
         )
     canonical_frame_counts = np.bincount(
         crop_acquisition_frames,
         minlength=recording_frame_count,
     ).astype(np.int64, copy=False)
-    keypoint_runs_to_check = [
-        (f"keypoints_runs/{target['keypoint_run']}", keypoints)
-    ]
+    keypoint_runs_to_check = [(f"keypoints_runs/{target['keypoint_run']}", keypoints)]
     if assignment_keypoints is not keypoints:
         keypoint_runs_to_check.append(
             (f"{assignment_group}/{assignment_run}", assignment_keypoints)
@@ -799,6 +797,8 @@ def validate_target(
         "cache_validation_mode": cache_validation_mode,
         "cleaned_cache_count": int(cleaned_cache_count),
         "crop_proxy": crop_identity,
+        "crop_authority": crop_identity,
+        "crop_run": crop_run,
         "keypoints": keypoint_identity,
         "refined_keypoints": refined_keypoint_identity,
         "assignment_keypoints": assignment_keypoint_identity,

@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+from typing import Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
@@ -59,7 +60,16 @@ from fisheye.shared.zarr.manifest_digest import (
     canonical_json_bytes,
     canonical_json_sha256,
 )
-from fisheye.shared.zarr.crop_manifest import build_coordinate_crop_run_manifest
+from fisheye.shared.zarr.crop_manifest import (
+    build_coordinate_crop_run_manifest,
+    build_crop_row_source_signatures,
+)
+from fisheye.shared.zarr.crop_schema import (
+    CropGeometryPolicy,
+    CropPaddingMode,
+    CropPlacementMode,
+    CropSizeMode,
+)
 from fisheye.shared.zarr.subject_mask_bundle_publication import (
     SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
     activate_subject_mask_bundle,
@@ -578,17 +588,46 @@ def _install_composable_final_layout_packages(
     return packages_by_kind[0], packages_by_kind[1]
 
 
-def _install_crop_v2(draft_path: Path) -> None:
+def _install_crop_v2(
+    draft_path: Path,
+    *,
+    signed_hybrid_provider_run: str | None = None,
+) -> None:
     root = zarr.open_group(str(draft_path), mode="a", use_consolidated=False)
     crop = root.require_group("crop_runs").require_group("crop_001")
     arrays = _crop_manifest_arrays()
     for path, values in arrays.items():
         _create_array(crop, path, values)
     plan, direct, consolidated = _crop_manifest_metadata()
+    policy = _crop_manifest_policy()
+    if signed_hybrid_provider_run is not None:
+        policy = CropGeometryPolicy(
+            purpose="subject_analysis",
+            size_mode=CropSizeMode.FIXED_PER_RUN,
+            fixed_size_wh=(8, 8),
+            padding_mode=CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME,
+            placement_mode=CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW,
+            placement_authority={
+                "schema_id": "palette.crop_geometry.explicit_origin_authority",
+                "schema_version": 1,
+                "authority_kind": "signed_hybrid_crop_provider",
+                "run_id": signed_hybrid_provider_run,
+                "provider_record_sha256": "1" * 64,
+                "source_rowset_fingerprint": "2" * 64,
+                "source_pixel_fingerprint": "3" * 64,
+                "source_row_signature_spec_digest": "4" * 64,
+            },
+        )
+        arrays["source_row_signature"] = build_crop_row_source_signatures(
+            arrays,
+            source=_crop_manifest_source(),
+            policy=policy,
+            pixel_authority=_crop_manifest_pixel(),
+        ).signatures
     crop.attrs["run_manifest"] = build_coordinate_crop_run_manifest(
         run_id="crop_001",
         dimensions=_crop_manifest_dimensions(),
-        policy=_crop_manifest_policy(),
+        policy=policy,
         storage_plan=plan,
         arrays=arrays,
         source=_crop_manifest_source(),
@@ -704,7 +743,13 @@ def _collection_partition_contract(start: int, stop: int) -> dict[str, object]:
     }
 
 
-def _upgrade_workers_to_coordinate_science_v2(draft_path: Path) -> None:
+def _upgrade_workers_to_coordinate_science_v2(
+    draft_path: Path,
+    *,
+    worker_crop_run: str = "crop_001",
+    bind_crop_manifest: bool = True,
+    signed_hybrid_signature: Mapping[str, object] | None = None,
+) -> None:
     root = zarr.open_group(str(draft_path), mode="a", use_consolidated=False)
     crop = root["crop_runs/crop_001"]
     crop_manifest = crop.attrs["run_manifest"]
@@ -731,13 +776,17 @@ def _upgrade_workers_to_coordinate_science_v2(draft_path: Path) -> None:
                 "label_schema_id": "pytest_subject_masks",
             },
             crop={
-                "run_id": "crop_001",
-                "run_group_path": "crop_runs/crop_001",
-                "run_manifest": {
-                    "schema_id": crop_manifest["schema_id"],
-                    "schema_version": crop_manifest["schema_version"],
-                    "payload_digest": crop_manifest["payload_digest"],
-                },
+                "run_id": worker_crop_run,
+                "run_group_path": worker_crop_run,
+                "run_manifest": (
+                    {
+                        "schema_id": crop_manifest["schema_id"],
+                        "schema_version": crop_manifest["schema_version"],
+                        "payload_digest": crop_manifest["payload_digest"],
+                    }
+                    if bind_crop_manifest
+                    else None
+                ),
                 "storage_mode": "geometry_only",
                 "roi_shape_hw": [8, 8],
                 "roi_coordinates_full": _array_reference(coordinates),
@@ -759,7 +808,18 @@ def _upgrade_workers_to_coordinate_science_v2(draft_path: Path) -> None:
                 "declared_pixels_sha256": "b" * 64,
                 "cache_key": f"pytest_cache_{start}",
                 "pixel_materialization_id": f"pytest_pixels_{start}",
-                "pixel_contract": {"schema": "palette_roi_pixel_contract_v1"},
+                "pixel_contract": {
+                    "schema": "palette_roi_pixel_contract_v1",
+                    **(
+                        {
+                            "source_pixels": (
+                                "hybrid_acquisition_crop_video_offline_supplement"
+                            )
+                        }
+                        if signed_hybrid_signature is not None
+                        else {}
+                    ),
+                },
                 "work_package_role": "complete_collection_partition",
             },
             row_identity={
@@ -829,8 +889,12 @@ def _upgrade_workers_to_coordinate_science_v2(draft_path: Path) -> None:
                 "source_input_binding": input_binding,
             },
             crop={
-                "run_id": "crop_001",
-                "source_crop_snapshot": {},
+                "run_id": worker_crop_run,
+                "source_crop_snapshot": (
+                    {"source_crop_signature": dict(signed_hybrid_signature)}
+                    if signed_hybrid_signature is not None
+                    else {}
+                ),
                 "roi_shape_hw": [8, 8],
             },
             pixels={
@@ -958,6 +1022,116 @@ def test_recording_bundle_requires_crop_v2_by_default(tmp_path: Path) -> None:
             local_output_root=tmp_path / "rejected_outputs",
             quality_scratch_root=tmp_path / "rejected_scratch",
         )
+
+
+def test_recording_bundle_signed_hybrid_rebase_is_explicit_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    provider_run = "crop_hybrid_provider_001"
+    signature = {
+        "schema_id": "palette.hybrid_crop_provider.signature",
+        "schema_version": 1,
+        "source_pixels": "hybrid_acquisition_crop_video_offline_supplement",
+        "provider_record_sha256": "1" * 64,
+        "source_rowset_fingerprint": "2" * 64,
+        "source_pixel_fingerprint": "3" * 64,
+        "source_row_signature_spec_digest": "4" * 64,
+    }
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_a": slice(0, 2), "raw_clip_b": slice(2, 4)},
+        refined_slices={
+            "refined_clip_a": slice(0, 2),
+            "refined_clip_b": slice(2, 4),
+        },
+    )
+    _install_crop_v2(draft, signed_hybrid_provider_run=provider_run)
+    _upgrade_workers_to_coordinate_science_v2(
+        draft,
+        worker_crop_run=provider_run,
+        bind_crop_manifest=False,
+        signed_hybrid_signature=signature,
+    )
+    analysis = tmp_path / "analysis_signed_hybrid_rebase.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "crop_manifest_test"
+    _install_source_camera_authorities(root, archive_path=analysis)
+    _install_crop_v2(analysis, signed_hybrid_provider_run=provider_run)
+    work_units = (
+        {
+            "work_unit_id": "pytest_collection:clip_0",
+            "work_unit_index": 0,
+            "source_clip_id": "clip_0",
+            "source_clip_index": 0,
+            "frame_start": 0,
+            "frame_stop": 2,
+            "row_start": 0,
+            "row_stop": 2,
+        },
+        {
+            "work_unit_id": "pytest_collection:clip_2",
+            "work_unit_index": 1,
+            "source_clip_id": "clip_2",
+            "source_clip_index": 1,
+            "frame_start": 2,
+            "frame_stop": 4,
+            "row_start": 2,
+            "row_stop": 4,
+        },
+    )
+    common = {
+        "analysis_zarr": analysis,
+        "draft_zarr": draft,
+        "crop_run": "crop_001",
+        "raw_draft_parent": "subject_mask_shard_runs",
+        "raw_draft_run": "raw_clip_a",
+        "raw_draft_runs": ("raw_clip_a", "raw_clip_b"),
+        "refined_draft_run": "refined_clip_a",
+        "refined_draft_runs": ("refined_clip_a", "refined_clip_b"),
+        "raw_run": "raw_signed_hybrid_rebase",
+        "refined_run": "refined_signed_hybrid_rebase",
+        "quality_run": "quality_signed_hybrid_rebase",
+        "bundle_id": "bundle_signed_hybrid_rebase",
+        "expected_work_units": work_units,
+    }
+
+    with pytest.raises(ValueError, match="differs from the crop-v2 authority"):
+        publish_recording_subject_mask_bundle(
+            **common,
+            local_output_root=tmp_path / "rebase_rejected_outputs",
+            quality_scratch_root=tmp_path / "rebase_rejected_quality",
+        )
+
+    _install_crop_v2(draft, signed_hybrid_provider_run="different_provider")
+    _install_crop_v2(analysis, signed_hybrid_provider_run="different_provider")
+    with pytest.raises(ValueError, match="differs from the crop-v2 authority"):
+        publish_recording_subject_mask_bundle(
+            **common,
+            local_output_root=tmp_path / "wrong_provider_rejected_outputs",
+            quality_scratch_root=tmp_path / "wrong_provider_rejected_quality",
+            allow_signed_hybrid_crop_rebase=True,
+        )
+
+    _install_crop_v2(draft, signed_hybrid_provider_run=provider_run)
+    _install_crop_v2(analysis, signed_hybrid_provider_run=provider_run)
+    result = publish_recording_subject_mask_bundle(
+        **common,
+        local_output_root=tmp_path / "rebase_accepted_outputs",
+        quality_scratch_root=tmp_path / "rebase_accepted_quality",
+        allow_signed_hybrid_crop_rebase=True,
+    )
+
+    assert result["status"] == "complete"
+    published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    manifest = published["subject_mask_runs/raw_signed_hybrid_rebase"].attrs[
+        "run_manifest"
+    ]
+    assert manifest["schema_version"] == 4
+    assert (
+        manifest["payload"]["coordinate_dependencies"]["document"]["crop"]["run_path"]
+        == "crop_runs/crop_001"
+    )
 
 
 def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v5(

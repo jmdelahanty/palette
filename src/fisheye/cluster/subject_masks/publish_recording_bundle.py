@@ -695,6 +695,7 @@ def publish_recording_subject_mask_bundle(
     require_worker_sampled_contours: bool = False,
     sampled_contour_producer_commit: str | None = None,
     coordinate_contract_policy: str = "require_crop_v2",
+    allow_signed_hybrid_crop_rebase: bool = False,
     expected_work_units: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
     if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
@@ -880,6 +881,7 @@ def publish_recording_subject_mask_bundle(
             source_run_path=raw_source_path,
             source_validation_receipt=raw_receipt,
             n_rois=raw_dimensions.n_rois,
+            allow_signed_hybrid_crop_rebase=allow_signed_hybrid_crop_rebase,
         )
         if crop_manifest is not None
         else None
@@ -967,6 +969,7 @@ def publish_recording_subject_mask_bundle(
             source_validation_receipt=refined_receipt,
             n_rois=refined_dimensions.n_rois,
             raw_core_manifest=raw_publication.manifest,
+            allow_signed_hybrid_crop_rebase=allow_signed_hybrid_crop_rebase,
         )
         if crop_manifest is not None
         else None
@@ -1157,6 +1160,11 @@ def publish_recording_subject_mask_bundle(
                 quality_publication.write_receipt["source_compute_workers_effective"]
             ),
             "core_validation_mode": resolved_core_validation_mode.value,
+            "coordinate_worker_binding_mode": (
+                "signed_hybrid_provider_to_crop_v2_exact_rebase_v1"
+                if allow_signed_hybrid_crop_rebase
+                else "direct_crop_v2_manifest_v1"
+            ),
             "parallel_write_policy": (
                 "single_writer_v1_future_workers_require_disjoint_whole_shards"
                 if int(core_physical_unit_workers) == 1
@@ -1340,6 +1348,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sampled-contour-producer-commit",
         help="Exact Palette commit recorded by every sampled-contour worker receipt.",
     )
+    parser.add_argument(
+        "--allow-signed-hybrid-crop-rebase",
+        action="store_true",
+        help=(
+            "Recovery-only: accept sealed workers bound to the exact signed hybrid "
+            "provider named by a crop-v2 explicit-origin authority. Row identity, "
+            "placement, and provider signatures remain fail-closed."
+        ),
+    )
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -1400,6 +1417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sampled_contour_worker_receipts=args.sampled_contour_worker_receipt,
         require_worker_sampled_contours=bool(args.require_worker_sampled_contours),
         sampled_contour_producer_commit=args.sampled_contour_producer_commit,
+        allow_signed_hybrid_crop_rebase=bool(args.allow_signed_hybrid_crop_rebase),
         activate=bool(args.activate),
         expected_work_units=expected_work_units,
     )
