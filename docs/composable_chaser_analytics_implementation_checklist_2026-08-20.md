@@ -802,6 +802,17 @@ complete while production remains blocked by required CI and explicit
 selector promotion. Registry projection remains ineligible and is not a job in
 this DAG.
 
+The exact canary was subsequently read through that strict path and produced
+the external readiness receipt:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_publication_canary_20260823_v1/readiness_receipt.json`
+
+Its payload digest is
+`ab2cf7d401cc5d99324eae79c7c7cb62c192fe45c40241de234d4e0b469367da`;
+its status is `candidate_complete_production_blocked`; and it records exact
+direct/consolidated equivalence for 149 declarations. This check did not write
+inside the analysis Zarr or update a selector, registry, or production status.
+
 Focused outside-sandbox validation passed 39 profile, computation,
 publication, workflow, and readiness tests. Ruff, `py_compile`, and
 `git diff --check` passed. Required CI has not run for this branch, so neither
