@@ -964,9 +964,7 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
             "source_detect_row_index": np.asarray([1000], dtype=np.int64),
             "detection_indices": np.asarray([0], dtype=np.int32),
             "instance_key": np.asarray([10000], dtype=np.uint64),
-            "source_crop_xywh": np.asarray(
-                [[4.0, 5.0, 10.0, 10.0]], dtype=np.float32
-            ),
+            "source_crop_xywh": np.asarray([[4.0, 5.0, 10.0, 10.0]], dtype=np.float32),
             "roi_coordinates_full": np.asarray([[4, 5]], dtype=np.int32),
         },
         "crop_clip_b": {
@@ -1057,9 +1055,7 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
         )
         run.create_array(
             "source_acquisition_frame_index",
-            data=np.asarray(
-                crop["source_acquisition_frame_index"][:], dtype=np.int64
-            ),
+            data=np.asarray(crop["source_acquisition_frame_index"][:], dtype=np.int64),
             overwrite=True,
         )
         run.create_array(
@@ -1108,6 +1104,51 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
             probs[0, 2, 6:9, 6:8] = 255
         run.create_array("mask_probs_roi", data=probs, overwrite=True)
     return root
+
+
+def _stamp_signed_hybrid_collection_crop(
+    root: zarr.Group,
+    *,
+    placement: np.ndarray | None = None,
+) -> zarr.Group:
+    crop = root["crop_runs/crop_collection"]
+    source_crop_xywh = np.asarray(
+        (
+            [[4.0, 5.0, 10.0, 10.0], [14.0, 15.0, 10.0, 10.0]]
+            if placement is None
+            else placement
+        ),
+        dtype=np.float64,
+    )
+    del crop["source_crop_xywh"]
+    crop.create_array("source_crop_xywh", data=source_crop_xywh, overwrite=True)
+    crop.create_array(
+        "roi_sizes_full",
+        data=np.asarray([[10, 10], [10, 10]], dtype=np.int32),
+        overwrite=True,
+    )
+    frame_shape_authority = {
+        "height": 1024,
+        "width": 1280,
+        "source": "test_fixture",
+    }
+    provider_record = {
+        "schema_id": "palette.roi_pixel_provider_record.v1",
+        "schema_version": 1,
+        "crop_run": "crop_collection",
+        "frame_shape": [1024, 1280],
+        "frame_shape_authority": frame_shape_authority,
+    }
+    crop.attrs.update(
+        {
+            "schema_id": "palette.hybrid_acquisition_offline_crop_run.v3",
+            "source_pixels": "hybrid_acquisition_crop_video_offline_supplement",
+            "provider_record": provider_record,
+            "provider_record_sha256": mod.canonical_json_sha256(provider_record),
+            "source_full_frame_shape_authority": frame_shape_authority,
+        }
+    )
+    return crop
 
 
 def _stamp_v2_shard_row_identity(root: zarr.Group) -> None:
@@ -1491,10 +1532,7 @@ def test_refined_shard_collection_preserves_exact_v2_row_identity_inventory() ->
     }
     assert row_identity["arrays"]["source_crop_row_ids"]["dtype"] == "int64"
     assert row_identity["arrays"]["instance_key"]["dtype"] == "uint64"
-    assert (
-        row_identity["arrays"]["source_acquisition_frame_index"]["dtype"]
-        == "int64"
-    )
+    assert row_identity["arrays"]["source_acquisition_frame_index"]["dtype"] == "int64"
     assert row_identity["arrays"]["source_crop_xywh"]["dtype"] == "float32"
     np.testing.assert_array_equal(
         source.group["source_acquisition_frame_index"][:],
@@ -1574,6 +1612,72 @@ def test_collection_preserves_exact_v2_production_row_identity() -> None:
         source.group["source_crop_xywh"][:],
         np.asarray([[4, 5, 10, 10], [14, 15, 10, 10]], dtype=np.float32),
     )
+
+
+def test_collection_normalizes_exact_signed_hybrid_placement_for_subject_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_sharded_subject_mask_root()
+    crop = _stamp_signed_hybrid_collection_crop(root)
+
+    source, collection = mod._load_subject_mask_source(
+        root,
+        subject_run=None,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+    )
+
+    assert collection is not None
+    normalization = collection.source_crop_xywh_normalization
+    assert normalization is not None
+    assert normalization["operation"] == (
+        "signed_hybrid_float64_to_float32_exact_roundtrip_v1"
+    )
+    assert (
+        normalization["provider_record_sha256"] == crop.attrs["provider_record_sha256"]
+    )
+    assert source.group["source_crop_xywh"].dtype == np.dtype(np.float32)
+    np.testing.assert_array_equal(
+        source.group["source_crop_xywh"][:],
+        np.asarray(crop["source_crop_xywh"][:], dtype=np.float32),
+    )
+    mod._validate_refined_production_row_identity_source(source)
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+        refined_run="refined_subject_masks_hybrid_collection",
+        components=["subject_body", "swim_bladder"],
+        chunk_size=1,
+    )
+
+    assert summary["source_crop_xywh_normalization"] == normalization
+    output = root["refined_subject_masks_runs/refined_subject_masks_hybrid_collection"]
+    assert output.attrs["source_crop_xywh_normalization"] == normalization
+
+
+def test_collection_rejects_lossy_signed_hybrid_placement_normalization() -> None:
+    root = _build_sharded_subject_mask_root()
+    _stamp_signed_hybrid_collection_crop(
+        root,
+        placement=np.asarray(
+            [[4.1, 5.0, 10.0, 10.0], [14.0, 15.0, 10.0, 10.0]],
+            dtype=np.float64,
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot be represented exactly as canonical float32 placement",
+    ):
+        mod._load_subject_mask_source(
+            root,
+            subject_run=None,
+            subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+            target_crop_run="crop_collection",
+        )
 
 
 def test_production_row_identity_preflight_rejects_missing_collection_placement(
