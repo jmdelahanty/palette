@@ -107,7 +107,7 @@ shows all of the following:
 6. a new timestamped decision binding the estimator, model, evidence,
    policies, and required-CI result.
 
-## Next authorized scientific implementation
+## Completed next scientific evidence step
 
 The first selector-ineligible provider-aware position-only canary is complete
 at
@@ -118,7 +118,23 @@ It exercises the explicit detection provider for radial position, quadrant
 occupancy, near-chaser occupancy, aggressive-versus-inert comparisons, and
 exact pre/training/post summaries without changing a selector or registry.
 
-The next authorized scientific step is a bounded multi-camera cohort canary,
-followed by a separate decision about sealed analysis-Zarr publication and
-profile integration. Provider-aware motion, bouts, body-frame, gaze, trial,
-and escape products remain separate later phases.
+The bounded multi-camera position-suite cohort canary is now complete at:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_cohort_canary_20260823_v3`
+
+It binds the exact frozen task SHA-256
+`21dd9f7079de39cac987442bf03a233fc57338b714e3c96cc080a74ca2d8da39`
+and artifact-manifest SHA-256
+`1bb72ffda8f2dbf932005eed9cfe491f3ee43fc82265f219245ba7aa6123148d`.
+The cohort contains the earliest and latest eligible recording in each arena,
+uses cameras `2010093`--`2010096`, and aggregates each metric over recordings
+rather than frames. All 107 artifacts independently revalidated. The radial
+cohort figure displays only bins supported by all eight recordings; sparse
+tail-bin evidence remains preserved with explicit support counts in CSV.
+
+This remains selector-ineligible operational evidence and does not change the
+provider recommendation, an analysis Zarr, the registry, or a production
+selector. The next separate decision is whether to implement sealed
+analysis-Zarr publication and profile integration for this position-only
+suite. Provider-aware motion, bouts, body-frame, gaze, trial, and escape
+products remain later phases, and required CI remains unrun.

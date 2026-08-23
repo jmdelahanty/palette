@@ -397,8 +397,10 @@ extension.
       split, including onset distance, bout rate, duration, path length, peak
       speed, displacement, and distance-band summaries.
 - [ ] Validate static-object pre/post and moving-chaser calculations separately.
-- [ ] Validate detection and keypoint position providers against identical
-      selections without averaging or selecting a default.
+- [x] Validate detection and keypoint position providers against identical
+      selections without averaging them. The bounded eight-recording,
+      four-camera comparison remained evidence-only; the separate timestamped
+      provider decision retained detection as the GoodBatBadBat default.
 
 ### Phase 4: body-frame and heading integration
 
@@ -462,8 +464,15 @@ extension.
 
 - [ ] Freeze a cohort input manifest with exact recording, biological subject,
       protocol, chaser role, provider, and scientific-run identities.
-- [ ] Publish recording-balanced cohort products separately from pooled-event,
-      pooled-bout, or pooled-frame descriptive products.
+- [x] Freeze the bounded position-suite cohort task with exact recording,
+      provider manifest, epoch-role, geometry-selection, physical-scale, arena,
+      and camera identities. Biological-subject and generalized protocol
+      bindings remain open for the full production cohort manifest.
+- [x] Publish recording-balanced position-suite cohort products separately from
+      pooled-event, pooled-bout, or pooled-frame descriptive products. The
+      position canary explicitly declines inferential statistics and keeps one
+      recording as the aggregation unit; generalized event/bout cohort products
+      remain open.
 - [ ] Preserve visit, trial, event, recording, subject, camera, and acquisition
       batch as distinct statistical levels.
 - [ ] Add recording-local analysis and plot offers for every completed module
@@ -549,11 +558,16 @@ extension.
       exact pre/training/post distance CDF, quadrant, moving-chaser radial,
       near-field, and aggressive-minus-inert products from the detection
       provider.
+- [x] A bounded eight-recording/four-camera successor now exercises the same
+      position suite with exact frozen per-recording provider, epoch, geometry,
+      and physical-scale authorities. Cohort summaries use one value per
+      recording, and radial plots require complete eight-recording support.
 - [ ] Response-regime, persisted visit membership, trial, escape, gaze, and
       immutable visualization recipes have not yet migrated to the new
       composable provider contracts.
-- [ ] Plot recipes, recording-local discovery, registry projection, full cohort
-      products, and production profile readiness remain open.
+- [ ] Immutable generalized plot recipes, recording-local discovery, registry
+      projection, non-position cohort products, and production profile
+      readiness remain open.
 - [ ] Required CI and integration remain separate gates for the implementation
       work described here.
 
@@ -685,9 +699,64 @@ authority, selected-evidence digest, coordinate semantics, scale, and physical
 extent must remain identical.
 
 Focused validation passed `27` tests covering the new suite, provider distance
-comparison, and fixed arena-grid authority. Required CI has not run. Full-cohort
-position-suite canaries, sealed analysis-Zarr publication, profile/registry
-projection, and production integration remain open.
+comparison, and fixed arena-grid authority. Required CI had not run. At this
+single-recording checkpoint, the full-cohort position canary, sealed
+analysis-Zarr publication, profile/registry projection, and production
+integration were still open; the cohort item is superseded by the checkpoint
+below.
+
+### Implementation checkpoint: 2026-08-23 bounded position cohort
+
+Commits `eb996682f1403f6001b3706b725b89dda5e4322d`,
+`27eacdc62b52cbfc8b83be3c1d924ac7aded164b`, and
+`909f28b1a159bcca6f6600b4f12edeeaac9327ff` add the bounded cohort planner,
+strict frozen-task runner, recording-balanced aggregation, atomic operational
+publication, and reviewed cohort plots.
+
+Planning is deliberately separate from execution. The no-write `plan` command
+resolved the same earliest/latest recording in each of arenas 1--4 used by the
+provider-comparison campaign, then froze every exact sealed provider manifest,
+reviewed arena-geometry selection, source-camera physical authority, camera,
+and pre/training/post epoch-role binding. The resulting task SHA-256 is:
+
+`21dd9f7079de39cac987442bf03a233fc57338b714e3c96cc080a74ca2d8da39`
+
+The reviewed immutable cohort successor is:
+
+`/groups/johnson/johnsonlab/jeremy/operations/provider_chaser_position_suite_cohort_canary_20260823_v3`
+
+- artifact-manifest SHA-256:
+  `1bb72ffda8f2dbf932005eed9cfe491f3ee43fc82265f219245ba7aa6123148d`;
+- software commit:
+  `909f28b1a159bcca6f6600b4f12edeeaac9327ff` (clean worktree);
+- selection SHA-256:
+  `07d350ad096c67e077ecb7aeae9197f7fa27300293a1407490317f113e5f8891`;
+- scope: eight recordings, two temporal extremes per arena, and cameras
+  `2010093`--`2010096`;
+- output: 107 independently hash-verified artifacts, including eight complete
+  per-recording evidence sets, recording/epoch/role tables, recording-balanced
+  summaries, and four cohort figures; and
+- disposition: selector-ineligible operational evidence, with no analysis-Zarr,
+  registry, selector, or production-authority mutation.
+
+Every epoch/chaser stratum contributes one value per recording to cohort
+summaries; frames are never pooled across recordings. All 42 scalar
+epoch/role/metric summaries contain eight recording-level observations. The
+minimum valid-distance fraction across the 48 recording/epoch/role rows is
+`0.9721035058430718`. Radial CSVs preserve all per-recording bins and explicit
+support counts, while the reviewed plot uses
+`complete_recording_support_only_v1` and therefore displays only bins with all
+eight recordings.
+
+Immutable v1 and v2 cohort attempts remain as audit evidence. Visual review of
+v1 found that tail bins with partial cohort support were still displayed; v2
+fixed that scientific display policy but had a clipped title. V3 retains the
+support correction and fixes the title without altering scientific rows.
+
+Focused outside-sandbox validation passed all 15 cohort and adjacent
+position-suite tests. Required CI has not run. Sealed analysis-Zarr
+publication, generalized plot recipes, profile/registry integration, and the
+motion/bout/body-frame/gaze/trial/escape phases remain open.
 
 ## Explicit non-goals for the first implementation
 
