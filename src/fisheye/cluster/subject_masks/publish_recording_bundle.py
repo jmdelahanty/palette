@@ -19,6 +19,9 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.shared.subject_mask_crop_placement import (
+    normalize_subject_mask_crop_placement,
+)
 from fisheye.shared.subject_mask_attempt import (
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
@@ -166,7 +169,7 @@ def _paths(group: Any, names: Sequence[str]) -> dict[str, Any]:
 
 
 def _crop_arrays(crop: Any) -> dict[str, Any]:
-    return _paths(
+    arrays = _paths(
         crop,
         (
             "instance_key",
@@ -175,6 +178,20 @@ def _crop_arrays(crop: Any) -> dict[str, Any]:
             "source_crop_xywh",
         ),
     )
+    arrays["source_crop_xywh"] = _subject_mask_crop_placement(crop)
+    return arrays
+
+
+def _subject_mask_crop_placement(crop: Any) -> np.ndarray:
+    row_count = int(crop["source_crop_xywh"].shape[0])
+    rows = np.arange(row_count, dtype=np.int64)
+    placement, _evidence = normalize_subject_mask_crop_placement(
+        crop,
+        crop_run=str(crop.path).strip("/").rsplit("/", 1)[-1],
+        target_rows=rows,
+        values=np.asarray(crop["source_crop_xywh"][:]),
+    )
+    return placement
 
 
 def _require_complete_order(run: Any, crop: Any, *, role: str) -> np.ndarray:
@@ -210,7 +227,7 @@ def _raw_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
     arrays["frame_row_offsets"] = derive_subject_mask_frame_row_offsets(
         frames, n_frames=n_frames
     )
-    arrays["source_crop_xywh"] = crop["source_crop_xywh"]
+    arrays["source_crop_xywh"] = _subject_mask_crop_placement(crop)
     return arrays
 
 
@@ -238,7 +255,7 @@ def _refined_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
             "frame_row_offsets": derive_subject_mask_frame_row_offsets(
                 frames, n_frames=n_frames
             ),
-            "source_crop_xywh": crop["source_crop_xywh"],
+            "source_crop_xywh": _subject_mask_crop_placement(crop),
         }
     )
     return arrays
@@ -346,7 +363,7 @@ def _raw_shard_collection(
                 np.asarray(crop["source_acquisition_frame_index"][:], dtype=np.int64),
                 n_frames=n_frames,
             ),
-            "source_crop_xywh": crop["source_crop_xywh"],
+            "source_crop_xywh": _subject_mask_crop_placement(crop),
             "available_channels": available,
         }
     )
@@ -414,7 +431,7 @@ def _refined_shard_collection(
                 frames,
                 n_frames=n_frames,
             ),
-            "source_crop_xywh": crop["source_crop_xywh"],
+            "source_crop_xywh": _subject_mask_crop_placement(crop),
             "available_channels": available,
         }
     )
@@ -573,6 +590,7 @@ def _consistent_refined_source_attrs(
         "assignment_keypoint_group",
         "assignment_keypoints_run",
         "assignment_keypoint_run",
+        "source_crop_xywh_normalization",
     )
     result: dict[str, Any] = {"mask_labels": [str(value) for value in labels]}
     for name in names:
@@ -677,6 +695,7 @@ def publish_recording_subject_mask_bundle(
     require_worker_sampled_contours: bool = False,
     sampled_contour_producer_commit: str | None = None,
     coordinate_contract_policy: str = "require_crop_v2",
+    allow_signed_hybrid_crop_rebase: bool = False,
     expected_work_units: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
     if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
@@ -789,6 +808,7 @@ def publish_recording_subject_mask_bundle(
                 "assignment_keypoint_group",
                 "assignment_keypoints_run",
                 "assignment_keypoint_run",
+                "source_crop_xywh_normalization",
                 _SCIENCE_ATTR,
                 _ATTEMPT_ATTR,
                 _WORKER_RECEIPT_ATTR,
@@ -861,6 +881,7 @@ def publish_recording_subject_mask_bundle(
             source_run_path=raw_source_path,
             source_validation_receipt=raw_receipt,
             n_rois=raw_dimensions.n_rois,
+            allow_signed_hybrid_crop_rebase=allow_signed_hybrid_crop_rebase,
         )
         if crop_manifest is not None
         else None
@@ -948,6 +969,7 @@ def publish_recording_subject_mask_bundle(
             source_validation_receipt=refined_receipt,
             n_rois=refined_dimensions.n_rois,
             raw_core_manifest=raw_publication.manifest,
+            allow_signed_hybrid_crop_rebase=allow_signed_hybrid_crop_rebase,
         )
         if crop_manifest is not None
         else None
@@ -1138,6 +1160,11 @@ def publish_recording_subject_mask_bundle(
                 quality_publication.write_receipt["source_compute_workers_effective"]
             ),
             "core_validation_mode": resolved_core_validation_mode.value,
+            "coordinate_worker_binding_mode": (
+                "signed_hybrid_provider_to_crop_v2_exact_rebase_v1"
+                if allow_signed_hybrid_crop_rebase
+                else "direct_crop_v2_manifest_v1"
+            ),
             "parallel_write_policy": (
                 "single_writer_v1_future_workers_require_disjoint_whole_shards"
                 if int(core_physical_unit_workers) == 1
@@ -1321,6 +1348,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sampled-contour-producer-commit",
         help="Exact Palette commit recorded by every sampled-contour worker receipt.",
     )
+    parser.add_argument(
+        "--allow-signed-hybrid-crop-rebase",
+        action="store_true",
+        help=(
+            "Recovery-only: accept sealed workers bound to the exact signed hybrid "
+            "provider named by a crop-v2 explicit-origin authority. Row identity, "
+            "placement, and provider signatures remain fail-closed."
+        ),
+    )
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -1381,6 +1417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sampled_contour_worker_receipts=args.sampled_contour_worker_receipt,
         require_worker_sampled_contours=bool(args.require_worker_sampled_contours),
         sampled_contour_producer_commit=args.sampled_contour_producer_commit,
+        allow_signed_hybrid_crop_rebase=bool(args.allow_signed_hybrid_crop_rebase),
         activate=bool(args.activate),
         expected_work_units=expected_work_units,
     )

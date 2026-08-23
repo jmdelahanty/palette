@@ -766,6 +766,133 @@ def test_crop_image_source_reads_acquisition_crop_video_with_pynvvc(
     source.close()
 
 
+def test_crop_image_source_routes_acquisition_rows_across_clip_members(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    member_paths = [tmp_path / "clip_0_crop.mp4", tmp_path / "clip_1_crop.mp4"]
+    for member_index, path in enumerate(member_paths):
+        path.write_bytes(bytes([member_index + 1]))
+    root = _make_acquisition_crop_video_root(str(member_paths[0]))
+    crop = root["crop_runs/crop_acquisition"]
+    crop.attrs.pop("source_crop_video_path")
+    crop.attrs["source_media_profile"] = "rolling_clip_collection_v1"
+    crop.attrs["source_media_members"] = [
+        {
+            "member_index": member_index,
+            "crop_video": {
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+                "mtime_ns": path.stat().st_mtime_ns,
+            },
+        }
+        for member_index, path in enumerate(member_paths)
+    ]
+    crop.create_array(
+        "source_crop_video_member_indices",
+        data=np.array([0, 1], dtype=np.int32),
+    )
+    crop.create_array(
+        "source_crop_video_frame_indices",
+        data=np.array([1, 0], dtype=np.int64),
+    )
+
+    class _FakePynvvcReader:
+        source_height = 3
+        source_width = 5
+
+        def __init__(
+            self, video_path: Path, *, start_frame: int = 0, gpu_id: int = 0
+        ) -> None:
+            self.member_index = member_paths.index(Path(video_path))
+
+        def iter_frames(self):
+            for frame_idx in range(3):
+                yield np.full(
+                    (3, 5), self.member_index * 10 + frame_idx, dtype=np.uint8
+                )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(crop_mod, "PynvvcLumaRgbReader", _FakePynvvcReader)
+
+    source = CropImageSource.open(root, crop_run="crop_acquisition")
+    batch = source.read_indices(np.array([1, 0], dtype=np.int64))
+
+    assert source.frame_source_path is None
+    np.testing.assert_array_equal(batch[0], np.full((3, 5), 10, dtype=np.uint8))
+    np.testing.assert_array_equal(batch[1], np.full((3, 5), 1, dtype=np.uint8))
+    source.close()
+
+
+def test_crop_image_source_partitions_collection_by_global_crop_rows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    member_paths = [tmp_path / "clip_0_crop.mp4", tmp_path / "clip_1_crop.mp4"]
+    for member_index, path in enumerate(member_paths):
+        path.write_bytes(bytes([member_index + 1]))
+    root = _make_acquisition_crop_video_root(str(member_paths[0]))
+    crop = root["crop_runs/crop_acquisition"]
+    crop.attrs.pop("source_crop_video_path")
+    crop.attrs["source_media_profile"] = "rolling_clip_collection_v1"
+    crop.attrs["source_media_members"] = [
+        {
+            "member_index": member_index,
+            "crop_video": {
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+                "mtime_ns": path.stat().st_mtime_ns,
+            },
+        }
+        for member_index, path in enumerate(member_paths)
+    ]
+    crop.create_array(
+        "source_crop_video_member_indices",
+        data=np.array([0, 1], dtype=np.int32),
+    )
+    crop.create_array(
+        "source_crop_video_frame_indices",
+        data=np.array([1, 0], dtype=np.int64),
+    )
+
+    class _FakePynvvcReader:
+        source_height = 3
+        source_width = 5
+
+        def __init__(
+            self, video_path: Path, *, start_frame: int = 0, gpu_id: int = 0
+        ) -> None:
+            self.member_index = member_paths.index(Path(video_path))
+
+        def iter_frames(self):
+            for frame_idx in range(3):
+                yield np.full(
+                    (3, 5), self.member_index * 10 + frame_idx, dtype=np.uint8
+                )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(crop_mod, "PynvvcLumaRgbReader", _FakePynvvcReader)
+
+    source = CropImageSource.open(
+        root,
+        crop_run="crop_acquisition",
+        source_crop_row_start=1,
+        source_crop_row_stop=2,
+    )
+    batch = source.read_slice(0, 1)
+
+    assert source.frame_indices.shape == (1,)
+    np.testing.assert_array_equal(
+        source.source_crop_row_ids, np.array([1], dtype=np.int64)
+    )
+    np.testing.assert_array_equal(batch[0], np.full((3, 5), 10, dtype=np.uint8))
+    source.close()
+
+
 def test_acquisition_crop_video_rejects_mismatched_flat_cache_contract(
     tmp_path: Path,
     monkeypatch,
@@ -1271,9 +1398,7 @@ def test_crop_image_source_external_geometry_live_gpu_uses_gpu_helper(
         crop_mod, "_read_external_video_live_gpu_batch", _fake_gpu_batch_reader
     )
 
-    def _unexpected_cpu_read(
-        self, roi_indices: np.ndarray
-    ) -> np.ndarray:  # noqa: ANN001
+    def _unexpected_cpu_read(self, roi_indices: np.ndarray) -> np.ndarray:  # noqa: ANN001
         raise AssertionError(f"CPU live read should not be used: {roi_indices}")
 
     monkeypatch.setattr(CropImageSource, "_read_live_indices_cpu", _unexpected_cpu_read)

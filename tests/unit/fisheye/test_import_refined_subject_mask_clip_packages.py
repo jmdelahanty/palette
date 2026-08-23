@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tarfile
 import time
+from typing import Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
@@ -29,7 +30,13 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     mark_run_complete,
 )
-from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
+from fisheye.shared.subject_mask_crop_placement import (
+    normalize_subject_mask_crop_placement,
+)
+from fisheye.shared.zarr.manifest_digest import (
+    canonical_json_bytes,
+    canonical_json_sha256,
+)
 from fisheye.shared.zarr.subject_mask_validation_receipt import (
     subject_mask_array_unit_document,
 )
@@ -70,6 +77,7 @@ def _write_package(
     frame_indices: list[int] | None = None,
     production_proof: bool = False,
     roi_shape: tuple[int, int] = (2, 3),
+    source_crop_xywh_normalization: Mapping[str, object] | None = None,
 ) -> Path:
     labels = labels or ["subject_body", "eye_left"]
     package_root = tmp_path / f"{package_name}_src"
@@ -78,6 +86,10 @@ def _write_package(
     run.attrs["mask_labels"] = labels
     run.attrs["label_schema_id"] = "subject_v1_lr"
     run.attrs["source_crop_run"] = source_crop_run
+    if source_crop_xywh_normalization is not None:
+        run.attrs["source_crop_xywh_normalization"] = dict(
+            source_crop_xywh_normalization
+        )
     run.attrs["summary_statistics"] = {"rows_total": len(crop_row_ids)}
     run.attrs["clip_package_host"] = f"{package_name}_host"
     run.attrs["clip_package_lsb_jobid"] = f"{package_name}_job"
@@ -638,6 +650,109 @@ def test_production_import_aggregates_two_clip_receipts_and_stays_inactive(
         run.attrs["run_manifest"]["payload_digest"]
         == result["source_manifest_payload_digest"]
     )
+
+
+def test_production_import_normalizes_exact_signed_hybrid_crop_placement(
+    tmp_path: Path,
+) -> None:
+    target_zarr = tmp_path / "hybrid_production_target.zarr"
+    root = zarr.open_group(str(target_zarr), mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "recording_id": "recording_hybrid",
+            "recording_frame_index_row_count": 4,
+        }
+    )
+    crop_run = "crop_hybrid_collection"
+    crop = root.require_group("crop_runs").create_group(crop_run)
+    crop.create_array(
+        "instance_key",
+        data=np.asarray([101, 102, 201, 301], dtype=np.uint64),
+    )
+    crop.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([0, 0, 2, 3], dtype=np.int64),
+    )
+    source_crop_xywh = np.asarray(
+        [[0, 0, 8, 8], [1, 0, 8, 8], [0, 1, 8, 8], [1, 1, 8, 8]],
+        dtype=np.float64,
+    )
+    crop.create_array("source_crop_xywh", data=source_crop_xywh)
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.asarray(source_crop_xywh[:, :2], dtype=np.int32),
+    )
+    crop.create_array(
+        "roi_sizes_full",
+        data=np.asarray(source_crop_xywh[:, 2:], dtype=np.int32),
+    )
+    frame_shape_authority = {
+        "height": 1024,
+        "width": 1280,
+        "source": "test_fixture",
+    }
+    provider_record = {
+        "schema_id": "palette.roi_pixel_provider_record.v1",
+        "schema_version": 1,
+        "crop_run": crop_run,
+        "frame_shape": [1024, 1280],
+        "frame_shape_authority": frame_shape_authority,
+    }
+    crop.attrs.update(
+        {
+            "schema_id": "palette.hybrid_acquisition_offline_crop_run.v3",
+            "source_pixels": "hybrid_acquisition_crop_video_offline_supplement",
+            "provider_record": provider_record,
+            "provider_record_sha256": canonical_json_sha256(provider_record),
+            "source_full_frame_shape_authority": frame_shape_authority,
+        }
+    )
+    normalized, normalization = normalize_subject_mask_crop_placement(
+        crop,
+        crop_run=crop_run,
+        target_rows=np.arange(4, dtype=np.int64),
+        values=source_crop_xywh,
+    )
+    assert normalized.dtype == np.dtype(np.float32)
+    assert normalization is not None
+
+    package_a = _write_package(
+        tmp_path,
+        package_name="hybrid_proof_clip_a",
+        run_name="refined_hybrid_proof_a",
+        crop_row_ids=[0, 1],
+        source_crop_run=crop_run,
+        frame_indices=[0, 0],
+        production_proof=True,
+        source_crop_xywh_normalization=normalization,
+    )
+    package_b = _write_package(
+        tmp_path,
+        package_name="hybrid_proof_clip_b",
+        run_name="refined_hybrid_proof_b",
+        crop_row_ids=[2, 3],
+        source_crop_run=crop_run,
+        frame_indices=[2, 3],
+        production_proof=True,
+        source_crop_xywh_normalization=normalization,
+    )
+
+    result = import_refined_subject_mask_clip_packages(
+        zarr_path=target_zarr,
+        package_paths=(package_b, package_a),
+        output_run="refined_hybrid_recording_draft",
+        expected_target_crop_run=crop_run,
+        require_production_proof=True,
+        array_copy_workers=2,
+    )
+
+    assert result["status"] == "ok"
+    run = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)[
+        "refined_subject_masks_runs/refined_hybrid_recording_draft"
+    ]
+    assert run.attrs["source_crop_xywh_normalization"] == normalization
+    assert result["source_manifest_payload_digest"]
+    assert result["source_validation_receipt_payload_digest"]
 
 
 def test_import_refined_subject_mask_clip_packages_rejects_duplicate_source_crop_rows(

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import tempfile
 from typing import Any, Callable, Iterator, Mapping
 import uuid
@@ -31,6 +32,10 @@ class RegistryValidation:
     path: str
     integrity_check: str
     foreign_key_issue_count: int
+    sqlite_runtime_version: str
+    sqlite_python_module_version: str
+    python_executable: str
+    validation_backend: str = "python_stdlib_sqlite3"
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -96,6 +101,9 @@ def validate_registry_sqlite(path: str | Path) -> RegistryValidation:
         path=str(resolved),
         integrity_check="ok",
         foreign_key_issue_count=0,
+        sqlite_runtime_version=sqlite3.sqlite_version,
+        sqlite_python_module_version=sqlite3.version,
+        python_executable=sys.executable,
     )
 
 

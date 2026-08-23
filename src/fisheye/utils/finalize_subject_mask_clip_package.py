@@ -25,6 +25,13 @@ from fisheye.refinement.finalize_subject_masks import (
     REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR,
     REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR,
 )
+from fisheye.shared.mask_store import MASK_RLE_VALIDATION_MODES
+from fisheye.shared.refined_subject_mask_encoded_chunks import (
+    ENCODED_MASK_PAYLOAD_NAME,
+    ENCODED_PACKAGE_SCHEMA_ID,
+    build_global_encoded_mask_payload,
+)
+from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.subject_mask_attempt import (
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
@@ -34,12 +41,6 @@ from fisheye.shared.subject_mask_worker_receipt import (
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     validate_subject_mask_worker_semantic_receipt,
 )
-from fisheye.shared.refined_subject_mask_encoded_chunks import (
-    ENCODED_MASK_PAYLOAD_NAME,
-    ENCODED_PACKAGE_SCHEMA_ID,
-    build_global_encoded_mask_payload,
-)
-from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
     build_subject_mask_final_layout_unit_package,
 )
@@ -52,6 +53,10 @@ from fisheye.shared.zarr.subject_mask_sampled_contour_worker_receipt import (
 from fisheye.shared.zarr.subject_mask_schema import SubjectMaskDimensions
 
 PACKAGE_SCHEMA_ID = "palette_refined_subject_mask_clip_package_v1"
+_COMPACT_DERIVED_MASK_STORAGES = frozenset(
+    {"dense_and_bitpacked", "dense_and_rle", "dense_bitpacked_and_rle"}
+)
+_MASK_VALIDATION_MODES = frozenset(MASK_RLE_VALIDATION_MODES)
 
 
 def _utc_now() -> str:
@@ -64,6 +69,43 @@ def _default_staging_root() -> Path:
     job_index = os.environ.get("LSB_JOBINDEX")
     work_unit = f"{job_id}_{job_index}" if job_index else job_id
     return Path(base) / f"palette_refined_subject_mask_clip_package_{work_unit}"
+
+
+def _resolve_mask_validation_mode(
+    *,
+    mask_storage: str,
+    requested_mode: str | None,
+    publication_evidence_requested: bool,
+) -> str:
+    """Resolve compact-cache validation before any expensive staging work."""
+
+    storage = str(mask_storage).strip()
+    mode = (
+        str(requested_mode).strip().lower()
+        if requested_mode is not None
+        else (
+            "full"
+            if publication_evidence_requested
+            and storage in _COMPACT_DERIVED_MASK_STORAGES
+            else "invariants"
+        )
+    )
+    if mode not in _MASK_VALIDATION_MODES:
+        raise ValueError(
+            "mask_rle_validation_mode must be one of "
+            f"{tuple(sorted(_MASK_VALIDATION_MODES))}; got {requested_mode!r}."
+        )
+    if (
+        publication_evidence_requested
+        and storage in _COMPACT_DERIVED_MASK_STORAGES
+        and mode != "full"
+    ):
+        raise ValueError(
+            "Receipt-composed publication with a materialized compact mask cache "
+            "requires --mask-rle-validation-mode full so derived cache freshness "
+            "has exact round-trip proof."
+        )
+    return mode
 
 
 def _remove_path(path: Path) -> None:
@@ -402,7 +444,7 @@ def finalize_subject_mask_clip_package(
     chunk_size: int = 256,
     metric_level: str = "cheap",
     mask_storage: str = "dense_and_bitpacked",
-    mask_rle_validation_mode: str = "invariants",
+    mask_rle_validation_mode: str | None = None,
     dense_mask_row_chunk: int | None = None,
     execution_backend: str = "process_shards",
     num_workers: int | None = None,
@@ -430,6 +472,35 @@ def finalize_subject_mask_clip_package(
     cleanup: bool = True,
 ) -> dict[str, Any]:
     source_zarr = source_zarr.expanduser().resolve()
+    publication_evidence_requested = publication_evidence_producer_commit is not None
+    effective_mask_validation_mode = _resolve_mask_validation_mode(
+        mask_storage=mask_storage,
+        requested_mode=mask_rle_validation_mode,
+        publication_evidence_requested=publication_evidence_requested,
+    )
+    if publication_evidence_requested:
+        if not require_production_proof:
+            raise ValueError(
+                "Publication evidence requires --require-production-proof."
+            )
+        if not write_sampled_component_contours:
+            raise ValueError(
+                "Publication evidence requires sampled component contours."
+            )
+        required = {
+            "work_unit_id": work_unit_id,
+            "work_unit_index": work_unit_index,
+            "source_clip_id": source_clip_id,
+            "source_clip_index": source_clip_index,
+            "global_frame_start": global_frame_start,
+            "global_frame_stop": global_frame_stop,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "Publication evidence lacks exact work-unit fields: "
+                + ", ".join(missing)
+            )
     staging_root = staging_root or _default_staging_root()
     safe_run = (
         "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in refined_run).strip(
@@ -456,7 +527,7 @@ def finalize_subject_mask_clip_package(
             chunk_size=int(chunk_size),
             metric_level=metric_level,
             mask_storage=mask_storage,
-            mask_rle_validation_mode=mask_rle_validation_mode,
+            mask_rle_validation_mode=effective_mask_validation_mode,
             dense_mask_row_chunk=dense_mask_row_chunk,
             execution_backend=execution_backend,
             num_workers=num_workers,
@@ -487,6 +558,18 @@ def finalize_subject_mask_clip_package(
         run.attrs["clip_package_host"] = socket.gethostname()
         run.attrs["clip_package_lsb_jobid"] = os.environ.get("LSB_JOBID")
         run.attrs["clip_package_lsb_jobindex"] = os.environ.get("LSB_JOBINDEX")
+        run.attrs["clip_package_requested_mask_validation_mode"] = (
+            str(mask_rle_validation_mode)
+            if mask_rle_validation_mode is not None
+            else "auto"
+        )
+        run.attrs["clip_package_effective_mask_validation_mode"] = (
+            effective_mask_validation_mode
+        )
+        run.attrs["clip_package_publication_exact_compact_validation_required"] = bool(
+            publication_evidence_requested
+            and str(mask_storage).strip() in _COMPACT_DERIVED_MASK_STORAGES
+        )
         encoded_payload_summary: dict[str, Any] | None = None
         encoded_payload_path: Path | None = None
         publication_evidence_summary: dict[str, Any] | None = None
@@ -505,24 +588,6 @@ def finalize_subject_mask_clip_package(
                 json_ready(encoded_payload_summary)
             )
         if publication_evidence_producer_commit is not None:
-            if not require_production_proof:
-                raise ValueError(
-                    "Publication evidence requires --require-production-proof."
-                )
-            required = {
-                "work_unit_id": work_unit_id,
-                "work_unit_index": work_unit_index,
-                "source_clip_id": source_clip_id,
-                "source_clip_index": source_clip_index,
-                "global_frame_start": global_frame_start,
-                "global_frame_stop": global_frame_stop,
-            }
-            missing = [name for name, value in required.items() if value is None]
-            if missing:
-                raise ValueError(
-                    "Publication evidence lacks exact work-unit fields: "
-                    + ", ".join(missing)
-                )
             publication_evidence_path = staged_zarr / "publication_evidence"
             publication_evidence_summary = _build_publication_evidence(
                 root=root,
@@ -559,6 +624,12 @@ def finalize_subject_mask_clip_package(
                 "worker_proof": worker_proof,
                 "encoded_global_masks_roi": encoded_payload_summary,
                 "publication_evidence": publication_evidence_summary,
+                "requested_mask_validation_mode": (
+                    str(mask_rle_validation_mode)
+                    if mask_rle_validation_mode is not None
+                    else "auto"
+                ),
+                "effective_mask_validation_mode": effective_mask_validation_mode,
             },
             overwrite=bool(overwrite),
             schema_id=package_schema_id,
@@ -581,6 +652,12 @@ def finalize_subject_mask_clip_package(
             "worker_proof": worker_proof,
             "encoded_global_masks_roi": encoded_payload_summary,
             "publication_evidence": publication_evidence_summary,
+            "requested_mask_validation_mode": (
+                str(mask_rle_validation_mode)
+                if mask_rle_validation_mode is not None
+                else "auto"
+            ),
+            "effective_mask_validation_mode": effective_mask_validation_mode,
             "cleanup": bool(cleanup),
         }
     finally:
@@ -604,7 +681,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--metric-level", default="cheap")
     parser.add_argument("--mask-storage", default="dense_and_bitpacked")
-    parser.add_argument("--mask-rle-validation-mode", default="invariants")
+    parser.add_argument(
+        "--mask-rle-validation-mode",
+        choices=tuple(sorted(_MASK_VALIDATION_MODES)),
+        default=None,
+        help=(
+            "Compact-cache validation policy. Defaults to full for receipt-composed "
+            "publication and invariants otherwise."
+        ),
+    )
     parser.add_argument("--dense-mask-row-chunk", type=int)
     parser.add_argument(
         "--execution-backend",

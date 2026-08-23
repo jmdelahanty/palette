@@ -12,6 +12,8 @@ from fisheye.cluster.clipped_inference import (
     FAMILY,
     PLAN_SCHEMA,
     SUPPORTED_PLAN_SCHEMAS,
+    _repo_commit,
+    assignment_keypoint_binding,
     build_ssh_bsub_runner,
 )
 from fisheye.cluster.clipped_lsf import (
@@ -133,11 +135,88 @@ def _replace_run_root(
     return tuple(str(value).replace(old, new) for value in command)
 
 
+def _recovery_expected_outputs(
+    prior: Mapping[str, Any],
+    *,
+    prior_run_root: Path,
+    recovery_run_root: Path,
+) -> tuple[Path, ...]:
+    outputs = prior.get("expected_outputs")
+    if not isinstance(outputs, list) or not outputs:
+        raise ValueError(f"Prior task has no expected outputs: {prior.get('job_key')}")
+    old = str(prior_run_root)
+    new = str(recovery_run_root)
+    return tuple(Path(str(value).replace(old, new)) for value in outputs)
+
+
+def _raw_masks_to_recover(
+    preflight: Mapping[str, Any], *, target_id: str
+) -> set[str]:
+    targets = preflight.get("targets")
+    if not isinstance(targets, list):
+        return set()
+    target = next(
+        (
+            item
+            for item in targets
+            if isinstance(item, Mapping) and str(item.get("target_id")) == target_id
+        ),
+        None,
+    )
+    clips = target.get("clips") if isinstance(target, Mapping) else None
+    if not isinstance(clips, list):
+        return set()
+    return {
+        str(clip["clip_id"])
+        for clip in clips
+        if isinstance(clip, Mapping)
+        and clip.get("clip_id")
+        and clip.get("raw_subject_mask_action") != "reuse_complete"
+    }
+
+
+def _recovery_keypoint_command(
+    command: Sequence[str],
+    *,
+    prior_run_root: Path,
+    recovery_run_root: Path,
+) -> tuple[str, ...]:
+    """Upgrade a prior collection-shard command to the required source label."""
+
+    updated = list(
+        _replace_run_root(
+            command,
+            prior_run_root=prior_run_root,
+            recovery_run_root=recovery_run_root,
+        )
+    )
+    module = "fisheye.utils.run_keypoints_with_registry_model"
+    if module not in updated or "--output-parent" not in updated:
+        raise ValueError("Prior keypoint recovery task is not a registry shard command.")
+    output_parent_index = updated.index("--output-parent") + 1
+    if output_parent_index >= len(updated) or updated[output_parent_index] != (
+        "keypoint_shard_runs"
+    ):
+        raise ValueError("Keypoint recovery requires keypoint_shard_runs output.")
+    flag = "--coordinate-contract-mode"
+    if flag in updated:
+        value_index = updated.index(flag) + 1
+        if value_index >= len(updated) or updated[value_index] != "legacy_noncanonical":
+            raise ValueError(
+                "Keypoint recovery shard has an incompatible coordinate contract."
+            )
+    else:
+        updated.extend((flag, "legacy_noncanonical"))
+    return tuple(updated)
+
+
 def build_plan(
     *,
     source_plan_path: Path,
     run_root: Path,
     recovery_label: str,
+    repo: Path | None = None,
+    palette_commit: str | None = None,
 ) -> KeypointRecoveryPlan:
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
@@ -155,7 +234,19 @@ def build_plan(
     if not isinstance(targets, list) or not targets or not isinstance(prior_jobs, list):
         raise ValueError("Source plan requires targets and an LSF workflow.")
     label = safe_component(recovery_label, default="keypoint_recovery", max_length=72)
-    repo = Path(str(source["repo"])).expanduser().resolve()
+    repo = (
+        repo if repo is not None else Path(str(source["repo"]))
+    ).expanduser().resolve()
+    actual_palette_commit = _repo_commit(repo)
+    requested_palette_commit = str(palette_commit or "").strip().lower()
+    if (
+        requested_palette_commit
+        and requested_palette_commit != actual_palette_commit
+    ):
+        raise ValueError(
+            "Requested palette_commit does not match the exact HEAD at repo."
+        )
+    palette_commit = actual_palette_commit
     registry = Path(str(source["registry"])).expanduser().resolve()
     prior_run_root = Path(str(source["run_root"])).expanduser().resolve()
     prior_by_key = _prior_jobs_by_task_key(prior_jobs)
@@ -164,6 +255,7 @@ def build_plan(
         raise RuntimeError("Keypoint recovery preflight did not pass.")
 
     jobs: list[LsfJob] = []
+    raw_mask_recovery_count = 0
     preparation_key = "prepare_keypoint_recovery"
     preparation_report = run_root / "recovery" / "preparation.json"
     jobs.append(
@@ -196,13 +288,63 @@ def build_plan(
             str(target["target_id"]), default="target", max_length=56
         )
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
+        raw_mask_clip_ids = _raw_masks_to_recover(
+            preflight,
+            target_id=str(target["target_id"]),
+        )
+        mask_array_key: str | None = None
+        if raw_mask_clip_ids:
+            mask_tasks: list[LsfExecutionTask] = []
+            mask_priors: list[Mapping[str, Any]] = []
+            for clip in target["clips"]:
+                clip_id = str(clip["clip_id"])
+                if clip_id not in raw_mask_clip_ids:
+                    continue
+                key = f"subject_masks:{target_safe}:{clip_id}"
+                prior = prior_by_key[key]
+                mask_tasks.append(
+                    _execution_task(
+                        run_root=run_root,
+                        task_key=key,
+                        stage="subject_mask_inference",
+                        command=_replace_run_root(
+                            _inner_command(prior),
+                            prior_run_root=prior_run_root,
+                            recovery_run_root=run_root,
+                        ),
+                        expected_outputs=_recovery_expected_outputs(
+                            prior,
+                            prior_run_root=prior_run_root,
+                            recovery_run_root=run_root,
+                        ),
+                        array_indexed=True,
+                    )
+                )
+                mask_priors.append(prior)
+            mask_array_key = f"subject_masks_array:{target_safe}"
+            jobs.append(
+                _task_group_job(
+                    workflow_id=label,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=mask_array_key,
+                    stage="subject_mask_inference",
+                    tasks=mask_tasks,
+                    mode=LsfExecutionMode.ARRAY,
+                    max_concurrent=_prior_group_limit(mask_priors[0], default=4),
+                    resources=_resources(mask_priors[0]),
+                    upstream=(preparation_key,),
+                )
+            )
+            raw_mask_recovery_count += len(mask_tasks)
+
         keypoint_tasks: list[LsfExecutionTask] = []
         keypoint_priors: list[Mapping[str, Any]] = []
         for clip in target["clips"]:
             clip_id = str(clip["clip_id"])
             key = f"keypoints:{target_safe}:{clip_id}"
             prior = prior_by_key[key]
-            command = _replace_run_root(
+            command = _recovery_keypoint_command(
                 _inner_command(prior),
                 prior_run_root=prior_run_root,
                 recovery_run_root=run_root,
@@ -264,29 +406,41 @@ def build_plan(
             )
         )
         refine_key = f"keypoint_refine:{target_safe}"
-        refine_prior = prior_by_key[refine_key]
-        jobs.append(
-            _job(
-                workflow_id=label,
-                repo=repo,
-                run_root=run_root,
-                job_key=refine_key,
-                stage="keypoint_refine",
-                command=_replace_run_root(
-                    _inner_command(refine_prior),
-                    prior_run_root=prior_run_root,
-                    recovery_run_root=run_root,
-                ),
-                resources=_resources(refine_prior),
-                upstream=(finalize_key,),
-                expected_outputs=(
-                    zarr_path
-                    / "refined_keypoints_runs"
-                    / str(target["refined_keypoint_run"])
-                    / "zarr.json",
-                ),
+        package_keypoint_upstream = finalize_key
+        assignment_group, _assignment_run = assignment_keypoint_binding(target)
+        if assignment_group == "refined_keypoints_runs":
+            if refine_key not in prior_by_key:
+                raise ValueError(
+                    "Historical refined-keypoint assignment requires the prior "
+                    f"refinement job {refine_key!r}."
+                )
+            refine_prior = prior_by_key[refine_key]
+            jobs.append(
+                _job(
+                    workflow_id=label,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=refine_key,
+                    stage="keypoint_refine",
+                    command=_replace_run_root(
+                        _inner_command(refine_prior),
+                        prior_run_root=prior_run_root,
+                        recovery_run_root=run_root,
+                    ),
+                    resources=_resources(refine_prior),
+                    upstream=(finalize_key,),
+                    expected_outputs=(
+                        zarr_path
+                        / "refined_keypoints_runs"
+                        / str(target["refined_keypoint_run"])
+                        / "zarr.json",
+                    ),
+                )
             )
-        )
+            package_keypoint_upstream = refine_key
+        package_upstream = [package_keypoint_upstream]
+        if mask_array_key is not None:
+            package_upstream.append(mask_array_key)
 
         package_tasks: list[LsfExecutionTask] = []
         package_priors: list[Mapping[str, Any]] = []
@@ -321,7 +475,7 @@ def build_plan(
                 mode=LsfExecutionMode.ARRAY,
                 max_concurrent=_prior_group_limit(package_priors[0], default=4),
                 resources=_resources(package_priors[0]),
-                upstream=(refine_key,),
+                upstream=tuple(package_upstream),
             )
         )
 
@@ -405,30 +559,35 @@ def build_plan(
         )
         validation_keys.append(validation_key)
 
-    registry_report = run_root / "registry" / "reconcile.json"
-    registry_prior = prior_by_key["registry_finalize"]
-    jobs.append(
-        _job(
-            workflow_id=label,
-            repo=repo,
-            run_root=run_root,
-            job_key="registry_finalize",
-            stage="registry_finalize",
-            command=(
-                "scripts/py",
-                "-m",
-                "fisheye.cluster.clipped_inference_registry_finalize",
-                "--plan",
-                str(run_root / "plan.json"),
-                "--output-json",
-                str(registry_report),
-            ),
-            resources=_resources(registry_prior),
-            upstream=tuple(validation_keys),
-            expected_outputs=(registry_report,),
+    if "registry_finalize" in prior_by_key:
+        registry_report = run_root / "registry" / "reconcile.json"
+        registry_prior = prior_by_key["registry_finalize"]
+        jobs.append(
+            _job(
+                workflow_id=label,
+                repo=repo,
+                run_root=run_root,
+                job_key="registry_finalize",
+                stage="registry_finalize",
+                command=(
+                    "scripts/py",
+                    "-m",
+                    "fisheye.cluster.clipped_inference_registry_finalize",
+                    "--plan",
+                    str(run_root / "plan.json"),
+                    "--output-json",
+                    str(registry_report),
+                ),
+                resources=_resources(registry_prior),
+                upstream=tuple(validation_keys),
+                expected_outputs=(registry_report,),
+            )
         )
-    )
     if bool(source.get("cleanup_nrs_after_success")):
+        if "registry_finalize" not in prior_by_key:
+            raise ValueError(
+                "Source plan requests NRS cleanup without registry finalization."
+            )
         cleanup_prior = prior_by_key["nrs_cleanup"]
         jobs.append(
             _job(
@@ -456,7 +615,9 @@ def build_plan(
             "recovery_schema": RECOVERY_SCHEMA,
             "source_plan": str(source_plan_path),
             "reused_completed_raw_subject_masks": True,
+            "recovered_raw_subject_mask_count": raw_mask_recovery_count,
             "reused_completed_roi_caches": True,
+            "palette_commit": palette_commit,
         },
     )
     payload = {
@@ -466,6 +627,7 @@ def build_plan(
         "workflow_id": label,
         "run_root": str(run_root),
         "repo": str(repo),
+        "palette_commit": palette_commit,
         "registry": str(registry),
         "recovery": {
             "schema": RECOVERY_SCHEMA,
@@ -527,6 +689,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-plan", required=True, type=Path)
     parser.add_argument("--run-root", required=True, type=Path)
     parser.add_argument("--recovery-label", required=True)
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        help="Commit-pinned Palette checkout used to execute recovery jobs.",
+    )
+    parser.add_argument(
+        "--palette-commit",
+        help="Expected full Git HEAD of the commit-pinned Palette checkout.",
+    )
     parser.add_argument("--submit-host", default="login1-citrus-poller")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
@@ -537,6 +708,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_plan_path=args.source_plan,
         run_root=args.run_root,
         recovery_label=args.recovery_label,
+        repo=args.repo,
+        palette_commit=args.palette_commit,
     )
     result = (
         apply_plan(plan, submit_host=args.submit_host)

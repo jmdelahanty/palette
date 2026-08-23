@@ -39,6 +39,8 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
+    NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
+    NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_VERSION,
     validate_canonical_detection_publication,
 )
 from fisheye.shared.zarr.canonical_detection_shadow import (
@@ -64,10 +66,6 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 
-NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID = (
-    "palette.native_canonical_detection.production_publication"
-)
-NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_VERSION = 1
 NATIVE_CANONICAL_DETECTION_PUBLICATION_POLICY = (
     "node_local_native_manifest_v2_then_atomic_selector_ineligible_import_v1"
 )

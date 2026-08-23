@@ -19,6 +19,7 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.utils.finalize_recording_refined_detection_v1 import (
     _validate_gate_binding,
+    _validate_gate_policy_binding,
     finalize_recording_refined_detection_v1,
 )
 from tests.unit.fisheye.test_native_canonical_detection_publication import (
@@ -45,6 +46,7 @@ def _run(requirement: str, *, status: str, applied: bool, gate_run: str | None):
                 "gate_run": gate_run,
                 "selection_run": "selection_001",
                 "selection_digest": "a" * 64,
+                "selection_record_schema_version": 2,
                 "comparison_policy_id": "manual_review_only_v1",
             },
         }
@@ -59,6 +61,87 @@ def test_required_finalization_preserves_exact_applied_gate_binding() -> None:
     )
     assert evidence["gate_run"] == "gate_001"
     assert evidence["selection_digest"] == "a" * 64
+
+
+def test_finalization_accepts_comparison_bound_v2_policy() -> None:
+    evidence = _validate_gate_binding(
+        _run("required", status="applied", applied=True, gate_run="gate_001"),
+        requirement="required",
+        expected_gate_run="gate_001",
+    )
+
+    _validate_gate_policy_binding(
+        evidence,
+        configured_policy_id="manual_review_only_v1",
+    )
+
+
+def test_finalization_maps_reviewed_palette_v3_to_manual_review_policy() -> None:
+    evidence = _validate_gate_binding(
+        _run("required", status="applied", applied=True, gate_run="gate_001"),
+        requirement="required",
+        expected_gate_run="gate_001",
+    )
+    evidence.update(
+        {
+            "selection_record_schema_version": 3,
+            "selection_policy": "manual_reviewed_palette_candidate_exact_binding_v3",
+            "selection_decision_source": "manual_review",
+            "comparison_run": None,
+            "comparison_policy_id": None,
+        }
+    )
+
+    _validate_gate_policy_binding(
+        evidence,
+        configured_policy_id="manual_review_only_v1",
+    )
+
+
+def test_finalization_rejects_reviewed_palette_v3_as_corroborated_policy() -> None:
+    evidence = _validate_gate_binding(
+        _run("required", status="applied", applied=True, gate_run="gate_001"),
+        requirement="required",
+        expected_gate_run="gate_001",
+    )
+    evidence.update(
+        {
+            "selection_record_schema_version": 3,
+            "selection_policy": "manual_reviewed_palette_candidate_exact_binding_v3",
+            "selection_decision_source": "manual_review",
+            "comparison_run": None,
+            "comparison_policy_id": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="differs from the policy bound"):
+        _validate_gate_policy_binding(
+            evidence,
+            configured_policy_id="corroborated_acquisition_v1",
+        )
+
+
+def test_finalization_rejects_unrecognized_comparison_free_gate_policy() -> None:
+    evidence = _validate_gate_binding(
+        _run("required", status="applied", applied=True, gate_run="gate_001"),
+        requirement="required",
+        expected_gate_run="gate_001",
+    )
+    evidence.update(
+        {
+            "selection_record_schema_version": 3,
+            "selection_policy": "unreviewed_or_unknown",
+            "selection_decision_source": "manual_review",
+            "comparison_run": None,
+            "comparison_policy_id": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="lacks a supported selection-policy"):
+        _validate_gate_policy_binding(
+            evidence,
+            configured_policy_id="manual_review_only_v1",
+        )
 
 
 @pytest.mark.parametrize(
@@ -105,7 +188,27 @@ def test_if_available_finalization_preserves_explicit_unavailable_state() -> Non
     assert evidence["applied"] is False
 
 
-def _write_working_refined(archive: Path) -> None:
+def _reviewed_palette_v3_gate_evidence() -> dict[str, object]:
+    return {
+        "requirement": "required",
+        "status": "applied",
+        "applied": True,
+        "gate_run": "gate_001",
+        "selection_run": "selection_001",
+        "selection_digest": "b" * 64,
+        "selection_record_schema_version": 3,
+        "selection_policy": "manual_reviewed_palette_candidate_exact_binding_v3",
+        "selection_decision_source": "manual_review",
+        "comparison_run": None,
+        "comparison_policy_id": None,
+    }
+
+
+def _write_working_refined(
+    archive: Path,
+    *,
+    gate_evidence: dict[str, object] | None = None,
+) -> None:
     root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
     source = root["detect_runs"][RUN_ID]["instances"]
     parent = require_runs_parent(
@@ -119,13 +222,15 @@ def _write_working_refined(archive: Path) -> None:
             "palette_run_completion_status": "complete",
             "source_detect_run": RUN_ID,
             "registered_detection_gate_requirement": "required",
-            "registered_detection_gate": {
+            "registered_detection_gate": gate_evidence
+            or {
                 "requirement": "required",
                 "status": "applied",
                 "applied": True,
                 "gate_run": "gate_001",
                 "selection_run": "selection_001",
                 "selection_digest": "a" * 64,
+                "selection_record_schema_version": 2,
                 "comparison_policy_id": "manual_review_only_v1",
             },
         }
@@ -209,3 +314,37 @@ def test_finalizer_publishes_crop_bindable_immutable_authority(tmp_path: Path) -
         "gate_001"
     )
     assert bound.manifest["payload_digest"] == result["run_manifest_digest"]
+
+
+def test_finalizer_publishes_from_reviewed_palette_v3_gate(tmp_path: Path) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    frame, pixel = _archive(archive)
+    candidate = _candidate(tmp_path, frame, pixel)
+    publish_native_canonical_detection_candidate(
+        analysis_zarr=archive,
+        candidate_zarr=candidate.output_path,
+        run_id=RUN_ID,
+        recording_identity=RECORDING_IDENTITY,
+    )
+    _write_working_refined(
+        archive,
+        gate_evidence=_reviewed_palette_v3_gate_evidence(),
+    )
+    scratch = tmp_path / "scratch" / "job"
+    scratch.mkdir(parents=True)
+
+    result = finalize_recording_refined_detection_v1(
+        analysis_zarr=archive,
+        canonical_detect_run=RUN_ID,
+        working_refined_run="refined_working",
+        output_run="refined_final",
+        recording_identity=RECORDING_IDENTITY,
+        registered_gate_requirement="required",
+        registered_gate_run="gate_001",
+        selection_policy_id="manual_review_only_v1",
+        scratch_root=scratch,
+    )
+
+    assert result["status"] == "complete"
+    assert result["registered_detection_gate"]["selection_record_schema_version"] == 3
+    assert result["selection_policy_id"] == "manual_review_only_v1"

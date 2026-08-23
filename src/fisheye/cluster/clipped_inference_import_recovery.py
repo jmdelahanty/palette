@@ -12,6 +12,7 @@ from fisheye.cluster.clipped_inference import (
     FAMILY,
     PLAN_SCHEMA,
     SUPPORTED_PLAN_SCHEMAS,
+    assignment_keypoint_binding,
     build_ssh_bsub_runner,
 )
 from fisheye.cluster.clipped_lsf import build_job as _job
@@ -67,16 +68,15 @@ def _preflight(
     reports: list[dict[str, Any]] = []
     for target in source["targets"]:
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
-        refined_keypoints = (
-            zarr_path / "refined_keypoints_runs" / str(target["refined_keypoint_run"])
-        )
-        keypoint_attrs = _group_attrs(refined_keypoints)
+        assignment_group, assignment_run = assignment_keypoint_binding(target)
+        assignment_keypoints = zarr_path / assignment_group / assignment_run
+        keypoint_attrs = _group_attrs(assignment_keypoints)
         if (
             not keypoint_attrs
             or keypoint_attrs.get("palette_run_completion_status") != "complete"
         ):
             raise RuntimeError(
-                f"Refined keypoints are not complete: {refined_keypoints}"
+                f"Assignment keypoints are not complete: {assignment_keypoints}"
             )
 
         packages: list[dict[str, Any]] = []
@@ -119,7 +119,14 @@ def _preflight(
                 "package_count": len(packages),
                 "package_bytes": sum(row["size_bytes"] for row in packages),
                 "packages": packages,
-                "refined_keypoints_status": "complete",
+                "assignment_keypoint_group": assignment_group,
+                "assignment_keypoints_run": assignment_run,
+                "assignment_keypoints_status": "complete",
+                "refined_keypoints_status": (
+                    "complete"
+                    if assignment_group == "refined_keypoints_runs"
+                    else "not_required_canonical_assignment"
+                ),
                 "partial_output": str(output),
                 "partial_output_status": output_status,
                 "import_action": (

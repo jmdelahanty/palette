@@ -40,6 +40,10 @@ from fisheye.shared.zarr.crop_manifest import (
     CROP_RUN_MANIFEST_SCHEMA_ID,
     validate_crop_run_manifest,
 )
+from fisheye.shared.zarr.crop_schema import (
+    CropPlacementMode,
+    crop_geometry_policy_from_manifest,
+)
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_bytes,
@@ -197,6 +201,7 @@ def _validate_worker_crop_coordinate_bindings(
     crop_run_path: str,
     crop_manifest: Mapping[str, Any],
     source_crop_arrays: Mapping[str, Any],
+    allow_signed_hybrid_crop_rebase: bool = False,
 ) -> None:
     """Join every worker's narrow row claims to the exact crop-v2 authority."""
 
@@ -216,6 +221,25 @@ def _validate_worker_crop_coordinate_bindings(
     if len(nonempty_units) != len(workers):
         raise ValueError("Worker crop joins do not match the nonempty work units.")
     offsets = np.asarray(source_crop_arrays["frame_row_offsets"][:], dtype=np.int64)
+    logical_schema = crop_payload.get("logical_schema")
+    raw_policy = (
+        logical_schema.get("crop_policy")
+        if isinstance(logical_schema, Mapping)
+        else None
+    )
+    try:
+        crop_policy = crop_geometry_policy_from_manifest(raw_policy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Crop-v2 placement policy is invalid.") from exc
+    signed_hybrid_authority = (
+        crop_policy.placement_authority
+        if crop_policy.placement_mode is CropPlacementMode.VERIFIED_EXPLICIT_PER_ROW
+        and isinstance(crop_policy.placement_authority, Mapping)
+        and crop_policy.placement_authority.get("authority_kind")
+        == "signed_hybrid_crop_provider"
+        else None
+    )
+
     for worker, unit in zip(workers, nonempty_units, strict=True):
         interval = worker["global_row_interval"]
         start = int(interval["start_row"])
@@ -260,7 +284,15 @@ def _validate_worker_crop_coordinate_bindings(
                 )
 
         crop = science_payload["crop"]
-        if crop.get("run_id") != crop_run_id:
+        worker_crop_run = str(crop.get("run_id") or "")
+        direct_crop_binding = worker_crop_run == crop_run_id
+        signed_hybrid_rebase = (
+            allow_signed_hybrid_crop_rebase
+            and not direct_crop_binding
+            and signed_hybrid_authority is not None
+            and worker_crop_run == signed_hybrid_authority.get("run_id")
+        )
+        if not direct_crop_binding and not signed_hybrid_rebase:
             raise ValueError("Worker crop run differs from the crop-v2 authority.")
         xywh = np.ascontiguousarray(
             np.asarray(source_crop_arrays["source_crop_xywh"][start:stop])
@@ -278,7 +310,23 @@ def _validate_worker_crop_coordinate_bindings(
             # still bind exactly to the current crop authority.
             recorded_path = str(crop.get("run_group_path") or "").strip().strip("/")
             accepted_paths = {normalized_path, crop_run_id}
-            if recorded_path not in accepted_paths or manifest_ref != expected_ref:
+            if signed_hybrid_rebase:
+                accepted_provider_paths = {
+                    worker_crop_run,
+                    f"crop_runs/{worker_crop_run}",
+                }
+                pixel_contract = science_payload.get("pixels", {}).get("pixel_contract")
+                if (
+                    recorded_path not in accepted_provider_paths
+                    or manifest_ref is not None
+                    or not isinstance(pixel_contract, Mapping)
+                    or pixel_contract.get("source_pixels")
+                    != "hybrid_acquisition_crop_video_offline_supplement"
+                ):
+                    raise ValueError(
+                        "Raw worker lacks the exact signed-hybrid crop rebase evidence."
+                    )
+            elif recorded_path not in accepted_paths or manifest_ref != expected_ref:
                 raise ValueError(
                     "Raw worker does not bind the exact crop-v2 manifest and path."
                 )
@@ -288,6 +336,35 @@ def _validate_worker_crop_coordinate_bindings(
             ):
                 raise ValueError(
                     "Raw worker ROI placement differs from its crop-v2 slice."
+                )
+        elif signed_hybrid_rebase:
+            snapshot = crop.get("source_crop_snapshot")
+            signature = (
+                snapshot.get("source_crop_signature")
+                if isinstance(snapshot, Mapping)
+                else None
+            )
+            expected_signature = {
+                "schema_id": "palette.hybrid_crop_provider.signature",
+                "schema_version": 1,
+                "source_pixels": ("hybrid_acquisition_crop_video_offline_supplement"),
+                "provider_record_sha256": signed_hybrid_authority.get(
+                    "provider_record_sha256"
+                ),
+                "source_pixel_fingerprint": signed_hybrid_authority.get(
+                    "source_pixel_fingerprint"
+                ),
+                "source_row_signature_spec_digest": signed_hybrid_authority.get(
+                    "source_row_signature_spec_digest"
+                ),
+                "source_rowset_fingerprint": signed_hybrid_authority.get(
+                    "source_rowset_fingerprint"
+                ),
+            }
+            if signature != expected_signature:
+                raise ValueError(
+                    "Refined worker signed-hybrid identity differs from the "
+                    "crop-v2 origin authority."
                 )
         roi_shape = crop.get("roi_shape_hw")
         if (
@@ -309,6 +386,7 @@ def build_subject_mask_core_coordinate_dependencies(
     source_validation_receipt: Mapping[str, Any],
     n_rois: int,
     raw_core_manifest: Mapping[str, Any] | None = None,
+    allow_signed_hybrid_crop_rebase: bool = False,
 ) -> dict[str, object]:
     """Bind one recording core to crop, worker, and optional raw authorities."""
 
@@ -413,6 +491,7 @@ def build_subject_mask_core_coordinate_dependencies(
         crop_run_path=crop_path,
         crop_manifest=crop_manifest,
         source_crop_arrays=source_crop_arrays,
+        allow_signed_hybrid_crop_rebase=allow_signed_hybrid_crop_rebase,
     )
 
     raw_binding: dict[str, object] | None = None

@@ -563,6 +563,8 @@ def run_keypoints_with_registry_model(
     roi_cache_dir: Optional[Path] = None,
     roi_cache_manifest: Optional[Path] = None,
     roi_cache_expected_archive_path: Optional[Path] = None,
+    source_crop_row_start: Optional[int] = None,
+    source_crop_row_stop: Optional[int] = None,
     stage_roi_cache_to_scratch: bool = False,
     roi_cache_staging_dir: Optional[Path] = None,
     profile_timings: bool = False,
@@ -611,6 +613,8 @@ def run_keypoints_with_registry_model(
         roi_cache_dir=roi_cache_dir,
         roi_cache_manifest=roi_cache_manifest,
         roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+        source_crop_row_start=source_crop_row_start,
+        source_crop_row_stop=source_crop_row_stop,
         stage_roi_cache_to_scratch=bool(stage_roi_cache_to_scratch),
         roi_cache_staging_dir=roi_cache_staging_dir,
         profile_timings=bool(profile_timings),
@@ -828,6 +832,8 @@ def run_keypoints_with_registry_model(
             roi_cache_dir=roi_cache_dir,
             roi_cache_manifest=effective_roi_cache_manifest,
             roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+            source_crop_row_start=source_crop_row_start,
+            source_crop_row_stop=source_crop_row_stop,
             roi_cache_source_tier=roi_cache_staging_details.get("effective_source_tier"),
             roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
             roi_cache_staging_details=roi_cache_staging_details or None,
@@ -1007,6 +1013,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "compute shell."
         ),
     )
+    parser.add_argument("--source-crop-row-start", type=int, default=None)
+    parser.add_argument("--source-crop-row-stop", type=int, default=None)
     parser.add_argument(
         "--stage-roi-cache-to-scratch",
         action="store_true",
@@ -1096,6 +1104,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
         roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
+        source_crop_row_start=args.source_crop_row_start,
+        source_crop_row_stop=args.source_crop_row_stop,
         stage_roi_cache_to_scratch=bool(args.stage_roi_cache_to_scratch),
         roi_cache_staging_dir=args.roi_cache_staging_dir,
         profile_timings=bool(args.profile_timings),

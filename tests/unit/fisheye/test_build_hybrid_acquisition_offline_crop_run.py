@@ -12,6 +12,7 @@ from fisheye.utils.build_hybrid_acquisition_offline_crop_run import (
     ROUTING_REASON_CODE_MAP,
     _prepare_canonical_ledger_hybrid_payload,
     _prepare_hybrid_payload,
+    _resolve_full_frame_shape_for_source,
     build_hybrid_acquisition_offline_crop_run,
 )
 from fisheye.shared.acquisition_crop_stream_ledger import (
@@ -202,7 +203,9 @@ def _make_canonical_ledger_source_archive(tmp_path: Path) -> tuple[Path, Path, s
         manifest,
         imported_at_utc="2026-08-15T12:00:00+00:00",
     )
-    refined = root.create_group("refined_detect_runs").create_group("refined_detect_ledger")
+    refined = root.create_group("refined_detect_runs").create_group(
+        "refined_detect_ledger"
+    )
     refined.attrs["detect_review_status"] = {
         "state": "approved",
         "intended_use": "analysis_and_training",
@@ -384,9 +387,7 @@ def test_reviewed_hybrid_payload_routes_incompatible_and_manual_rows_to_suppleme
 def test_build_hybrid_refuses_unapproved_refined_input(tmp_path: Path) -> None:
     zarr_path, source_video = _make_hybrid_source_archive(tmp_path)
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    del root["refined_detect_runs/refined_detect_001"].attrs[
-        "detect_review_status"
-    ]
+    del root["refined_detect_runs/refined_detect_001"].attrs["detect_review_status"]
 
     with pytest.raises(ValueError, match="requires an approved refined-detection"):
         build_hybrid_acquisition_offline_crop_run(
@@ -438,9 +439,10 @@ def test_build_hybrid_apply_keeps_reviewed_candidate_selector_ineligible(
     assert "selected_live_detection_bbox_img_xyxy" not in run
     consolidated = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
     consolidated_run = consolidated["crop_runs/crop_hybrid_reviewed_v2"]
-    assert consolidated_run.attrs["provider_record_sha256"] == report[
-        "provider_record_sha256"
-    ]
+    assert (
+        consolidated_run.attrs["provider_record_sha256"]
+        == report["provider_record_sha256"]
+    )
     assert "unexpected_warning_count" in report["metadata_consolidation"]
 
 
@@ -453,7 +455,10 @@ def test_build_hybrid_consolidation_failure_marks_run_failed(
     monkeypatch.setattr(
         mod,
         "_write_supplemental_cache",
-        lambda **_kwargs: {"schema": "fake.test.flat_roi_cache", "cache_complete": True},
+        lambda **_kwargs: {
+            "schema": "fake.test.flat_roi_cache",
+            "cache_complete": True,
+        },
     )
     calls = 0
 
@@ -519,6 +524,44 @@ def test_canonical_ledger_routing_uses_frame_identity_and_preserves_refined_keys
             ROUTING_REASON_CODE_MAP["coordinate_or_extent_mismatch"],
         ],
     )
+
+
+def test_canonical_collection_ledger_propagates_exact_media_members(
+    tmp_path: Path,
+) -> None:
+    zarr_path, _source_video, _ledger_digest = _make_canonical_ledger_source_archive(
+        tmp_path
+    )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    stream = root["analysis/acquisition_video_streams/streams/crop"]
+    ledger = stream["ledger_runs"][stream.attrs["canonical_ledger_run"]]
+    _create_array(
+        ledger,
+        "source_crop_video_member_indices",
+        np.array([0, 0, 1, 1], dtype=np.int32),
+    )
+    _create_array(
+        ledger,
+        "source_full_video_member_indices",
+        np.array([0, 0, 1, 1], dtype=np.int32),
+    )
+    refined = root["refined_detect_runs/refined_detect_ledger"]
+
+    payload = _prepare_canonical_ledger_hybrid_payload(
+        root=root,
+        ledger_group=ledger,
+        refined_payload=extract_present_curated_rows(refined),
+        frame_width=1000,
+        frame_height=1000,
+        roi_shape=(384, 384),
+    )
+
+    np.testing.assert_array_equal(
+        payload["source_crop_video_member_indices"], [0, 0, 1, 1]
+    )
+    np.testing.assert_array_equal(
+        payload["source_full_video_member_indices"], [0, 0, 1, 1]
+    )
     np.testing.assert_array_equal(
         payload["supplemental_cache_row_indices"], [-1, 0, 1, 2]
     )
@@ -529,6 +572,81 @@ def test_canonical_ledger_routing_uses_frame_identity_and_preserves_refined_keys
     np.testing.assert_allclose(
         np.asarray(payload["source_crop_xywh"])[0], [100, 100, 384, 384]
     )
+
+
+def test_collection_full_frame_shape_probes_every_bound_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "shape.zarr"), mode="w")
+    members = []
+    observed_paths = []
+    for index in range(2):
+        path = tmp_path / f"clip_{index}.mp4"
+        path.write_bytes(b"video")
+        members.append(
+            {
+                "member_index": index,
+                "clip_id": f"clip_{index:06d}",
+                "full_video": {
+                    "path": str(path),
+                    "fingerprint": str(index) * 64,
+                },
+            }
+        )
+
+    def _probe(path: Path) -> dict[str, int]:
+        observed_paths.append(Path(path))
+        return {"width": 2048, "height": 2048}
+
+    monkeypatch.setattr(mod, "probe_ffprobe_video_metadata", _probe)
+    shape, authority = _resolve_full_frame_shape_for_source(
+        root,
+        collection_members=members,
+    )
+
+    assert shape == (2048, 2048)
+    assert observed_paths == [
+        tmp_path / "clip_0.mp4",
+        tmp_path / "clip_1.mp4",
+    ]
+    assert authority["authority"] == "bound_collection_full_video_ffprobe_v1"
+    assert authority["member_count"] == 2
+    assert authority["declared_zarr_shape"] is None
+    assert len(authority["member_observations_sha256"]) == 64
+
+
+def test_collection_full_frame_shape_rejects_member_disagreement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "shape.zarr"), mode="w")
+    members = []
+    for index in range(2):
+        path = tmp_path / f"clip_{index}.mp4"
+        path.write_bytes(b"video")
+        members.append(
+            {
+                "member_index": index,
+                "clip_id": f"clip_{index:06d}",
+                "full_video": {
+                    "path": str(path),
+                    "fingerprint": str(index) * 64,
+                },
+            }
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "probe_ffprobe_video_metadata",
+        lambda path: {
+            "width": 2048 if Path(path).stem.endswith("0") else 1920,
+            "height": 2048 if Path(path).stem.endswith("0") else 1080,
+        },
+    )
+
+    with pytest.raises(ValueError, match="disagree on full-frame shape"):
+        _resolve_full_frame_shape_for_source(root, collection_members=members)
 
 
 def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
@@ -542,7 +660,10 @@ def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
     monkeypatch.setattr(
         mod,
         "_write_supplemental_cache",
-        lambda **_kwargs: {"schema": "fake.test.flat_roi_cache", "cache_complete": True},
+        lambda **_kwargs: {
+            "schema": "fake.test.flat_roi_cache",
+            "cache_complete": True,
+        },
     )
     report = build_hybrid_acquisition_offline_crop_run(
         zarr_path,
@@ -568,22 +689,16 @@ def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
     assert run.attrs["stage_selector_eligible"] is False
     assert run["source_row_signature"].shape == (4, 32)
     assert run["source_row_signature"].dtype == np.dtype(np.uint8)
-    assert run.attrs["source_rowset_fingerprint"] == report[
-        "source_rowset_fingerprint"
-    ]
+    assert run.attrs["source_rowset_fingerprint"] == report["source_rowset_fingerprint"]
     signature_spec = load_row_source_signature_spec(run.attrs)
-    assert signature_spec.spec_digest == report[
-        "source_row_signature_spec_digest"
-    ]
+    assert signature_spec.spec_digest == report["source_row_signature_spec_digest"]
     reference = build_crop_run_reference(
         run,
         run_id="crop_hybrid_ledger_v1",
     )
     assert reference["profile"] == CROP_RUN_REFERENCE_SIGNED_PROFILE
     package_binding = _source_binding(run, run_id="crop_hybrid_ledger_v1")
-    assert package_binding["source_binding_profile"] == (
-        SIGNED_SOURCE_BINDING_PROFILE
-    )
+    assert package_binding["source_binding_profile"] == (SIGNED_SOURCE_BINDING_PROFILE)
     np.testing.assert_array_equal(run["instance_key"][:], [501, 502, 503, 504])
     np.testing.assert_array_equal(run["routing_reason_codes"][:], [0, 1, 4, 6])
     binding = validate_crop_run_provider_record(
@@ -594,9 +709,7 @@ def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
     assert binding is not None
     assert binding["row_count"] == 4
     assert binding["acquisition_ledger_record_sha256"] == ledger_digest
-    assert binding["source_rowset_fingerprint"] == report[
-        "source_rowset_fingerprint"
-    ]
+    assert binding["source_rowset_fingerprint"] == report["source_rowset_fingerprint"]
     with pytest.raises(ValueError, match="digest mismatch"):
         validate_crop_run_provider_record(
             analysis_zarr=zarr_path,
@@ -605,9 +718,7 @@ def test_canonical_ledger_build_binds_provider_record_and_stays_ineligible(
         )
 
     writable = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    signature_array = writable[
-        "crop_runs/crop_hybrid_ledger_v1/source_row_signature"
-    ]
+    signature_array = writable["crop_runs/crop_hybrid_ledger_v1/source_row_signature"]
     signature_array[0, 0] = np.uint8(int(signature_array[0, 0]) ^ 1)
     with pytest.raises(ValueError, match="source_row_signature payload is stale"):
         _source_binding(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import subprocess
@@ -29,11 +30,13 @@ from fisheye.cluster.clipped_detection import (
     compose_detection_workflow,
 )
 from fisheye.cluster.clipped_inference_cleanup import cleanup
+from fisheye.cluster.clipped_inference import assignment_keypoint_binding
 from fisheye.cluster.clipped_inference_validate import (
     _cache_manifest_report,
     _cache_validation_mode,
     _instance_keys,
     _refined_instance_keys,
+    _refined_clip_component_presence,
     _require_exact_instance_key_order,
     _require_exact_vector,
     _validate_run_frame_counts,
@@ -68,6 +71,28 @@ def test_clipped_validator_requires_exact_identity_order() -> None:
             np.asarray([10, 11], dtype=np.uint64),
             label="refined_subject_masks/instance_key",
             dtype=np.uint64,
+        )
+
+
+def test_clipped_validator_resolves_canonical_and_historical_assignment() -> None:
+    assert assignment_keypoint_binding(
+        {
+            "keypoint_run": "canonical",
+            "assignment_keypoint_group": "keypoints_runs",
+            "assignment_keypoints_run": "canonical",
+        }
+    ) == ("keypoints_runs", "canonical")
+    assert assignment_keypoint_binding(
+        {"keypoint_run": "canonical", "refined_keypoint_run": "historical"}
+    ) == ("refined_keypoints_runs", "historical")
+
+    with pytest.raises(RuntimeError, match="does not match keypoint_run"):
+        assignment_keypoint_binding(
+            {
+                "keypoint_run": "canonical",
+                "assignment_keypoint_group": "keypoints_runs",
+                "assignment_keypoints_run": "wrong",
+            }
         )
 
 
@@ -165,8 +190,69 @@ def test_clipped_validator_post_cleanup_mode_requires_all_caches_absent() -> Non
         _cache_validation_mode(cleaned_cache_count=3, clip_count=22)
 
 
+def test_clipped_validator_reports_required_refined_components_per_clip() -> None:
+    class SlashGroup(dict):
+        def get(self, key, default=None):  # noqa: ANN001, ANN201
+            node = self
+            for part in str(key).split("/"):
+                if not isinstance(node, dict) or part not in node:
+                    return default
+                node = node[part]
+            return node
+
+    run = SlashGroup(
+        {
+            "metrics": {
+                "mask_present": np.asarray(
+                    [
+                        [True, True, True, False],
+                        [True, True, True, False],
+                        [True, True, True, True],
+                        [True, True, True, True],
+                    ],
+                    dtype=bool,
+                )
+            }
+        }
+    )
+    clips = [
+        {"clip_id": "clip_000000", "crop_row_start": 0, "crop_row_stop": 2},
+        {"clip_id": "clip_000001", "crop_row_start": 2, "crop_row_stop": 4},
+    ]
+    raw_reports = [
+        {"clip_id": clip["clip_id"], "instance_key": {"row_count": 2}} for clip in clips
+    ]
+    schema = {
+        "schema_id": "subject_v1_lr",
+        "labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+        "required_labels": [
+            "subject_body",
+            "eye_left",
+            "eye_right",
+            "swim_bladder",
+        ],
+    }
+
+    reports = _refined_clip_component_presence(
+        run,
+        clips=clips,
+        raw_mask_reports=raw_reports,
+        component_schema=schema,
+    )
+
+    assert reports[0]["component_presence_policy"]["missing_required_components"] == [
+        "swim_bladder"
+    ]
+    assert reports[0]["component_completeness"]["status"] == "failed"
+    assert reports[0]["component_completeness"]["publication_blocking"] is False
+    assert reports[1]["component_completeness"]["status"] == "passed"
+
+
 def _target(
-    tmp_path: Path, name: str = "sleepyfish_cam2010093"
+    tmp_path: Path,
+    name: str = "sleepyfish_cam2010093",
+    *,
+    finalized_refined_detect_run: str | None = None,
 ) -> workflow.CampaignTarget:
     recording = tmp_path / "recordings" / name
     zarr = recording / "zarr" / f"{name}_analysis.zarr"
@@ -179,6 +265,7 @@ def _target(
         recording_id=f"{name}:zfixture",
         recording_dir=recording,
         analysis_zarr=zarr,
+        finalized_refined_detect_run=finalized_refined_detect_run,
     )
 
 
@@ -297,7 +384,15 @@ def _build_fixture_plan(
     )
     (repo / "configs" / "fisheye" / "default.yaml").write_text("{}\n", encoding="utf-8")
     targets = tuple(
-        _target(tmp_path, f"sleepyfish_cam{2010093 + index}")
+        _target(
+            tmp_path,
+            f"sleepyfish_cam{2010093 + index}",
+            finalized_refined_detect_run=(
+                f"finalized_refined_cam{2010093 + index}"
+                if workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+                else None
+            ),
+        )
         for index in range(target_count)
     )
     targets_by_recording = {
@@ -381,6 +476,26 @@ def _build_fixture_plan(
             work_unit_count=work_unit_count,
         ),
     )
+    if workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM:
+        monkeypatch.setattr(
+            workflow,
+            "_clipped_layout_work_units",
+            lambda target, **_kwargs: list(
+                _detection_plan(
+                    target,
+                    "downstream_layout",
+                    work_unit_count=work_unit_count,
+                )["work_units"]
+            ),
+        )
+        monkeypatch.setattr(
+            workflow,
+            "_refined_clip_crop_row_intervals",
+            lambda **_kwargs: {
+                (index, f"clip_{index:06d}"): (index * 100, (index + 1) * 100)
+                for index in range(work_unit_count)
+            },
+        )
     if resume_existing_detections:
         monkeypatch.setattr(
             workflow,
@@ -431,6 +546,56 @@ def test_detection_work_units_allow_single_indexed_clip() -> None:
     )
 
     assert ordered == [work_unit]
+
+
+def test_downstream_clip_rows_bind_finalized_recording_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _target(
+        tmp_path,
+        finalized_refined_detect_run="finalized_refined_v1",
+    )
+    instances = {
+        "frame_indices": np.asarray([0, 1, 2, 3], dtype=np.int32),
+        "source_acquisition_frame_index": np.asarray([0, 1, 2, 3], dtype=np.int64),
+    }
+    bound = SimpleNamespace(
+        run_id="finalized_refined_v1",
+        run_group=SimpleNamespace(
+            attrs={
+                "status": "complete",
+                "finalized_recording_authority": True,
+                "immutable_snapshot": True,
+                "registered_detection_gate_requirement": "required",
+                "registered_detection_gate": {
+                    "status": "applied",
+                    "applied": True,
+                    "ordered_instance_key_coverage_exact": True,
+                },
+            }
+        ),
+        instances_group=instances,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "bind_refined_detection_crop_source",
+        lambda *_args, **_kwargs: bound,
+    )
+
+    intervals = workflow._refined_clip_crop_row_intervals(
+        target=target,
+        refined_run_name="finalized_refined_v1",
+        frame_intervals={
+            (0, "clip_000000"): (0, 2),
+            (1, "clip_000001"): (2, 4),
+        },
+    )
+
+    assert intervals == {
+        (0, "clip_000000"): (0, 2),
+        (1, "clip_000001"): (2, 4),
+    }
 
 
 def test_detection_work_units_require_exact_once_only_index_coverage() -> None:
@@ -517,7 +682,25 @@ def test_required_geometry_uses_canonical_refined_collection_without_legacy_bypa
         for fragment in fragments
         if fragment["fragment_id"] == f"crop_roi_cache:{target_safe}"
     )
+    canonical_crop_fragment = next(
+        fragment
+        for fragment in fragments
+        if fragment["fragment_id"] == f"crop_snapshot:{target_safe}"
+    )
     assert crop_fragment["requires"] == [f"finalized_refined_detection:{target_safe}"]
+    assert canonical_crop_fragment["requires"] == [
+        f"finalized_refined_detection:{target_safe}"
+    ]
+    canonical_crop = jobs[f"crop_snapshot_publish:{target_safe}"]
+    assert canonical_crop.dependency.upstream_job_keys == (collection.job_key,)
+    assert "--registered-gate-requirement from_source" in " ".join(
+        canonical_crop.command
+    )
+    masks = jobs[f"subject_masks_array:{target_safe}"]
+    assert masks.dependency.upstream_job_keys == (
+        f"proxy:{target_safe}",
+        canonical_crop.job_key,
+    )
     assert target["strict_detection_storage"] is None
     assert target["registered_dish_geometry"] == {
         "gate_requirement": "required",
@@ -539,7 +722,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     clip_id = "clip_000000"
 
-    assert len(plan.lsf_workflow.jobs) == 21
+    assert len(plan.lsf_workflow.jobs) == 20
     keypoint_array = jobs[f"keypoints_array:{target_safe}"]
     subject_mask_array = jobs[f"subject_masks_array:{target_safe}"]
     package_array = jobs[f"mask_package_array:{target_safe}"]
@@ -547,8 +730,9 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert subject_mask_array.dependency.upstream_job_keys == (f"proxy:{target_safe}",)
     assert package_array.dependency.upstream_job_keys == (
         f"subject_masks_array:{target_safe}",
-        f"keypoint_refine:{target_safe}",
+        f"keypoint_finalize:{target_safe}",
     )
+    assert f"keypoint_refine:{target_safe}" not in jobs
     assert f"keypoints:{target_safe}:{clip_id}" in _execution_tasks(keypoint_array)
     assert f"subject_masks:{target_safe}:{clip_id}" in _execution_tasks(
         subject_mask_array
@@ -557,7 +741,15 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
         f"subject_masks:{target_safe}:{clip_id}"
     ]
     subject_mask_command = list(subject_mask_task.command)
+    keypoint_command = list(
+        _execution_tasks(keypoint_array)[f"keypoints:{target_safe}:{clip_id}"].command
+    )
+    coordinate_mode = keypoint_command.index("--coordinate-contract-mode") + 1
+    assert keypoint_command[coordinate_mode] == "legacy_noncanonical"
     assert "fisheye.cluster.subject_masks.staged_inference" in subject_mask_command
+    assert "--geometry-crop-run" in subject_mask_command
+    geometry_index = subject_mask_command.index("--geometry-crop-run") + 1
+    assert subject_mask_command[geometry_index] == target["geometry_crop_run"]
     assert "--roi-cache-staging-dir" in subject_mask_command
     assert "--worker-receipt-json" in subject_mask_command
     assert any(
@@ -580,10 +772,23 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert publish_job.command.count("--refined-package") == len(target["clips"])
     assert "--producer-commit" in publish_job.command
     assert "--cache-run" in publish_job.command
+    publish_crop_index = publish_job.command.index("--crop-run") + 1
+    assert publish_job.command[publish_crop_index] == target["geometry_crop_run"]
     package_task = _execution_tasks(package_array)[
         f"mask_package:{target_safe}:{clip_id}"
     ]
+    assignment_group = package_task.command.index("--assignment-keypoint-group") + 1
+    assignment_run = package_task.command.index("--assignment-keypoints-run") + 1
+    assert package_task.command[assignment_group] == "keypoints_runs"
+    assert package_task.command[assignment_run] == target["keypoint_run"]
+    target_crop_index = package_task.command.index("--target-crop-run") + 1
+    assert package_task.command[target_crop_index] == target["geometry_crop_run"]
+    assert target["assignment_keypoint_group"] == "keypoints_runs"
+    assert target["assignment_keypoints_run"] == target["keypoint_run"]
+    assert target["keypoint_refinement_mode"] == "canonical_passthrough_v1"
     assert "--publication-evidence-producer-commit" in package_task.command
+    validation_mode = package_task.command.index("--mask-rle-validation-mode") + 1
+    assert package_task.command[validation_mode] == "full"
     assert "--global-frame-start" in package_task.command
     assert "--global-frame-stop" in package_task.command
     assert validation_job.dependency.upstream_job_keys == (publish_job.job_key,)
@@ -651,14 +856,18 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert fragments[3]["requires"] == [strict_output["evidence"]["artifact_key"]]
     assert fragments[4]["requires"] == [strict_output["storage"]["crop_artifact_key"]]
     assert fragments[5]["requires"] == [f"crop_roi_cache:{target_safe}"]
-    assert fragments[6]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[5]["provides"] == [f"canonical_keypoints:{target_safe}"]
+    assert fragments[6]["requires"] == [
+        f"crop_roi_cache:{target_safe}",
+        strict_output["storage"]["crop_artifact_key"],
+    ]
     assert fragments[7]["requires"] == [
         f"raw_subject_masks:{target_safe}",
-        f"refined_keypoints:{target_safe}",
+        f"canonical_keypoints:{target_safe}",
     ]
     assert fragments[7]["metadata"]["terminal_job_key"] == publish_job.job_key
     assert fragments[8]["requires"] == [
-        f"refined_keypoints:{target_safe}",
+        f"canonical_keypoints:{target_safe}",
         f"refined_subject_masks:{target_safe}",
     ]
     assert fragments[9]["provides"] == [
@@ -1058,13 +1267,13 @@ def test_encoded_mask_packages_add_global_grid_and_join(
     publish_key = f"mask_publish:{target_safe}"
 
     assert plan.encoded_mask_packages is True
-    assert len(plan.lsf_workflow.jobs) == 22
+    assert len(plan.lsf_workflow.jobs) == 21
     assert jobs[grid_key].dependency.upstream_job_keys == (
         f"keypoint_finalize:{target_safe}",
     )
     assert jobs[package_key].dependency.upstream_job_keys == (
         f"subject_masks_array:{target_safe}",
-        f"keypoint_refine:{target_safe}",
+        f"keypoint_finalize:{target_safe}",
         grid_key,
     )
     package_task = _execution_tasks(jobs[package_key])[
@@ -1154,7 +1363,7 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
     )
 
     assert len(plan.targets) == 2
-    assert len(plan.lsf_workflow.jobs) == 40
+    assert len(plan.lsf_workflow.jobs) == 38
     assert jobs[f"detect_artifact_array:{first_safe}"].dependency is None
     assert jobs[
         f"detect_artifact_array:{second_safe}"
@@ -1345,6 +1554,188 @@ def test_detection_scope_cli_does_not_require_downstream_model_arguments() -> No
     assert args.subject_mask_set_id is None
 
 
+def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DOWNSTREAM,
+    )
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+
+    assert plan.workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+    assert plan.palette_commit == "c" * 40
+    assert plan.to_json()["palette_commit"] == "c" * 40
+    assert set(plan.model_bindings) == {"pose", "subject_masks"}
+    assert plan.cleanup_nrs_after_success is False
+    assert plan.lsf_workflow.metadata["workflow_scope"] == (
+        "downstream_from_finalized_detection"
+    )
+    assert plan.lsf_workflow.metadata["selector_activation"] is False
+    assert set(jobs) == {
+        f"acquisition_crop_ledger:{target_safe}",
+        f"hybrid_crop:{target_safe}",
+        f"crop_snapshot_publish:{target_safe}",
+        f"keypoint_finalize_preflight:{target_safe}",
+        f"keypoints_array:{target_safe}",
+        f"subject_masks_array:{target_safe}",
+        f"keypoint_finalize:{target_safe}",
+        f"mask_package_array:{target_safe}",
+        f"mask_publish:{target_safe}",
+        f"validate:{target_safe}",
+    }
+    assert not any("detect_artifact" in key for key in jobs)
+    assert not any(key.startswith("cache_array:") for key in jobs)
+    assert not any(key.startswith("proxy:") for key in jobs)
+    assert "registry_finalize" not in jobs
+    assert jobs[f"keypoints_array:{target_safe}"].resources.queue == "gpu_t4"
+    assert jobs[f"subject_masks_array:{target_safe}"].resources.queue == "gpu_l4"
+
+    hybrid_run = str(target["hybrid_crop_run"])
+    geometry_run = str(target["geometry_crop_run"])
+    hybrid_command = " ".join(jobs[f"hybrid_crop:{target_safe}"].command)
+    assert "build_hybrid_acquisition_offline_crop_run" in hybrid_command
+    assert f"--run-name {hybrid_run}" in hybrid_command
+    assert "--refined-detect-run finalized_refined_cam2010093" in hybrid_command
+    crop_snapshot = jobs[f"crop_snapshot_publish:{target_safe}"]
+    crop_snapshot_command = " ".join(crop_snapshot.command)
+    assert crop_snapshot.dependency.upstream_job_keys == (f"hybrid_crop:{target_safe}",)
+    assert f"--run-id {geometry_run}" in crop_snapshot_command
+    assert f"--geometry-origin-provider-run {hybrid_run}" in crop_snapshot_command
+    assert "--roi-size-from-geometry-origin-provider" in crop_snapshot_command
+    assert "--registered-gate-requirement from_source" in crop_snapshot_command
+
+    preflight_key = f"keypoint_finalize_preflight:{target_safe}"
+    preflight = " ".join(jobs[preflight_key].command)
+    assert jobs[preflight_key].dependency.upstream_job_keys == (
+        f"hybrid_crop:{target_safe}",
+    )
+    assert jobs[f"keypoints_array:{target_safe}"].dependency.upstream_job_keys == (
+        preflight_key,
+    )
+    assert "fisheye.utils.finalize_keypoint_shards" in preflight
+    assert f"--target-crop-run {hybrid_run}" in preflight
+    assert "--preflight-target-only" in preflight
+    assert "--expected-target-row-count 200" in preflight
+    assert target["keypoint_finalization_mapping_mode"] == ("direct_same_crop_row_ids")
+
+    keypoint_tasks = _execution_tasks(jobs[f"keypoints_array:{target_safe}"])
+    mask_tasks = _execution_tasks(jobs[f"subject_masks_array:{target_safe}"])
+    for index, clip in enumerate(target["clips"]):
+        clip_id = str(clip["clip_id"])
+        keypoint = " ".join(
+            keypoint_tasks[f"keypoints:{target_safe}:{clip_id}"].command
+        )
+        mask = " ".join(mask_tasks[f"subject_masks:{target_safe}:{clip_id}"].command)
+        expected_range = (
+            f"--source-crop-row-start {index * 100} "
+            f"--source-crop-row-stop {(index + 1) * 100}"
+        )
+        assert f"--crop-run {hybrid_run}" in keypoint
+        assert expected_range in keypoint
+        assert "--coordinate-contract-mode legacy_noncanonical" in keypoint
+        assert "--roi-cache-manifest" not in keypoint
+        assert "--roi-cache-policy never" in keypoint
+        assert f"--crop-run {hybrid_run}" in mask
+        assert f"--geometry-crop-run {geometry_run}" in mask
+        assert expected_range in mask
+        assert "--direct-crop-provider" in mask
+        assert "--roi-cache-staging-dir" not in mask
+
+    assert jobs[f"subject_masks_array:{target_safe}"].dependency.upstream_job_keys == (
+        f"crop_snapshot_publish:{target_safe}",
+    )
+
+    finalize = " ".join(jobs[f"keypoint_finalize:{target_safe}"].command)
+    assert f"--target-crop-run {hybrid_run}" in finalize
+    assert "merge_clipped_proxy_crop_runs" not in finalize
+    package = _execution_tasks(jobs[f"mask_package_array:{target_safe}"])[
+        f"mask_package:{target_safe}:clip_000000"
+    ]
+    assert "--assignment-keypoint-group keypoints_runs" in " ".join(package.command)
+    assert f"--assignment-keypoints-run {target['keypoint_run']}" in " ".join(
+        package.command
+    )
+    assert f"--target-crop-run {geometry_run}" in " ".join(package.command)
+    assert f"--crop-run {geometry_run}" in " ".join(
+        jobs[f"mask_publish:{target_safe}"].command
+    )
+
+
+def test_downstream_crop_row_partition_rejects_gap_before_job_planning() -> None:
+    with pytest.raises(ValueError, match="starts at 101, expected 100"):
+        workflow._planned_crop_row_count(
+            [
+                {
+                    "clip_id": "clip_000000",
+                    "crop_row_start": 0,
+                    "crop_row_stop": 100,
+                },
+                {
+                    "clip_id": "clip_000001",
+                    "crop_row_start": 101,
+                    "crop_row_stop": 200,
+                },
+            ]
+        )
+
+
+def test_downstream_scope_materializes_without_a_detection_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DOWNSTREAM,
+    )
+
+    payload = workflow.materialize_plan_bundle(plan)
+
+    assert payload["workflow_scope"] == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+    evidence = json.loads(
+        Path(plan.target_plans[0]["detection_plan_path"]).read_text(encoding="utf-8")
+    )
+    assert evidence["schema"] == "palette.clipped_downstream_layout_plan.v1"
+    assert evidence["external_refined_detect_run"] == ("finalized_refined_cam2010093")
+
+
+def test_downstream_scope_cli_does_not_require_detection_model_arguments() -> None:
+    args = workflow._parser().parse_args(
+        [
+            "--workflow-scope",
+            "downstream",
+            "--manifest",
+            "targets.json",
+            "--run-label",
+            "downstream_only",
+            "--run-root",
+            "run",
+            "--pose-set-id",
+            "pose_set",
+            "--pose-run-id",
+            "pose_run",
+            "--subject-mask-set-id",
+            "mask_set",
+            "--subject-mask-run-id",
+            "mask_run",
+            "--dry-run",
+        ]
+    )
+
+    assert args.workflow_scope == workflow.WORKFLOW_SCOPE_DOWNSTREAM
+    assert args.detection_set_id is None
+    assert args.detection_run_id is None
+
+
 def test_keypoint_recovery_reuses_cache_and_raw_masks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1358,12 +1749,22 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         ),
     )
     source_plan = tmp_path / "source_plan.json"
-    _write_json(source_plan, source.to_json())
+    source_payload = source.to_json()
+    source_keypoint_job = next(
+        job
+        for job in source_payload["lsf_workflow"]["jobs"]
+        if job["job_key"].startswith("keypoints_array:")
+    )
+    legacy_command = source_keypoint_job["execution_group"]["tasks"][0]["command"]
+    legacy_flag = legacy_command.index("--coordinate-contract-mode")
+    del legacy_command[legacy_flag : legacy_flag + 2]
+    _write_json(source_plan, source_payload)
     monkeypatch.setattr(
         recovery,
         "prepare_keypoint_recovery",
         lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
     )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
 
     recovery_root = tmp_path / "recovery"
     plan = recovery.build_plan(
@@ -1377,14 +1778,15 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         str(target["target_id"]), default="target", max_length=56
     )
     keypoint_key = f"keypoints_array:{target_safe}"
-    refine_key = f"keypoint_refine:{target_safe}"
+    finalize_key = f"keypoint_finalize:{target_safe}"
     package_key = f"mask_package_array:{target_safe}"
 
-    assert len(plan.workflow.jobs) == 9
+    assert len(plan.workflow.jobs) == 8
     assert jobs[keypoint_key].dependency.upstream_job_keys == (
         "prepare_keypoint_recovery",
     )
-    assert jobs[package_key].dependency.upstream_job_keys == (refine_key,)
+    assert jobs[package_key].dependency.upstream_job_keys == (finalize_key,)
+    assert f"keypoint_refine:{target_safe}" not in jobs
     assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
     assert jobs[f"mask_import:{target_safe}"].resources.queue == "local"
     assert {
@@ -1399,7 +1801,109 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     ]
     assert any(str(recovery_root) in value for value in keypoint_task.command)
     assert all(str(source.run_root) not in value for value in keypoint_task.command)
+    coordinate_mode = keypoint_task.command.index("--coordinate-contract-mode") + 1
+    assert keypoint_task.command[coordinate_mode] == "legacy_noncanonical"
     assert plan.payload["targets"] == source.to_json()["targets"]
+
+
+def test_keypoint_recovery_preserves_historical_refined_assignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_payload = source.to_json()
+    target = source_payload["targets"][0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    for key in (
+        "assignment_keypoint_group",
+        "assignment_keypoints_run",
+        "keypoint_refinement_mode",
+    ):
+        target.pop(key, None)
+
+    jobs = source_payload["lsf_workflow"]["jobs"]
+    finalize = next(
+        job for job in jobs if job["job_key"] == f"keypoint_finalize:{target_safe}"
+    )
+    refiner = copy.deepcopy(finalize)
+    refiner["job_key"] = f"keypoint_refine:{target_safe}"
+    separator = refiner["command"].index("--")
+    refiner["command"] = [
+        *refiner["command"][: separator + 1],
+        "scripts/py",
+        "-m",
+        "fisheye.refinement.refine_keypoints",
+        str(target["analysis_zarr"]),
+        "--keypoint-run",
+        str(target["keypoint_run"]),
+        "--run-name",
+        str(target["refined_keypoint_run"]),
+    ]
+    jobs.append(refiner)
+    package = next(
+        job for job in jobs if job["job_key"] == f"mask_package_array:{target_safe}"
+    )
+    for task in package["execution_group"]["tasks"]:
+        command = task["command"]
+        group_index = command.index("--assignment-keypoint-group") + 1
+        run_index = command.index("--assignment-keypoints-run") + 1
+        command[group_index] = "refined_keypoints_runs"
+        command[run_index] = str(target["refined_keypoint_run"])
+
+    source_plan = tmp_path / "historical_source_plan.json"
+    _write_json(source_plan, source_payload)
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+    )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
+
+    plan = recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "historical_recovery",
+        recovery_label="historical_keypoint_recovery",
+    )
+    recovery_jobs = {job.job_key: job for job in plan.workflow.jobs}
+    refine_key = f"keypoint_refine:{target_safe}"
+
+    assert refine_key in recovery_jobs
+    assert recovery_jobs[
+        f"mask_package_array:{target_safe}"
+    ].dependency.upstream_job_keys == (refine_key,)
+
+
+def test_keypoint_recovery_rejects_canonical_collection_shard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_payload = source.to_json()
+    source_keypoint_job = next(
+        job
+        for job in source_payload["lsf_workflow"]["jobs"]
+        if job["job_key"].startswith("keypoints_array:")
+    )
+    command = source_keypoint_job["execution_group"]["tasks"][0]["command"]
+    coordinate_mode = command.index("--coordinate-contract-mode") + 1
+    command[coordinate_mode] = "canonical"
+    source_plan = tmp_path / "source_canonical_plan.json"
+    _write_json(source_plan, source_payload)
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+    )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
+
+    with pytest.raises(ValueError, match="incompatible coordinate contract"):
+        recovery.build_plan(
+            source_plan_path=source_plan,
+            run_root=tmp_path / "canonical_recovery",
+            recovery_label="canonical_keypoint_recovery",
+        )
 
 
 def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
@@ -1407,13 +1911,29 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_target = source.target_plans[0]
     source_plan = tmp_path / "source_receipt_plan.json"
     _write_json(source_plan, source.to_json())
     monkeypatch.setattr(
         recovery,
         "prepare_keypoint_recovery",
-        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "clip_count": 22,
+            "targets": [
+                {
+                    "target_id": source_target["target_id"],
+                    "clips": [
+                        {
+                            "clip_id": "clip_000000",
+                            "raw_subject_mask_action": ("remove_failed_and_rerun"),
+                        }
+                    ],
+                }
+            ],
+        },
     )
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: "f" * 40)
 
     plan = recovery.build_plan(
         source_plan_path=source_plan,
@@ -1421,14 +1941,26 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
         recovery_label="sleepyfish_receipt_keypoint_recovery",
     )
     jobs = {job.job_key: job for job in plan.workflow.jobs}
-    target = source.target_plans[0]
+    target = source_target
     target_safe = workflow.safe_component(
         str(target["target_id"]), default="target", max_length=56
     )
     package_key = f"mask_package_array:{target_safe}"
     publish_key = f"mask_publish:{target_safe}"
+    mask_key = f"subject_masks_array:{target_safe}"
+    finalize_key = f"keypoint_finalize:{target_safe}"
 
     assert f"mask_import:{target_safe}" not in jobs
+    assert mask_key in jobs
+    assert set(_execution_tasks(jobs[mask_key])) == {
+        f"subject_masks:{target_safe}:clip_000000"
+    }
+    assert jobs[mask_key].dependency.upstream_job_keys == ("prepare_keypoint_recovery",)
+    assert jobs[package_key].dependency.upstream_job_keys == (
+        finalize_key,
+        mask_key,
+    )
+    assert plan.workflow.metadata["recovered_raw_subject_mask_count"] == 1
     assert publish_key in jobs
     assert jobs[publish_key].dependency.upstream_job_keys == (package_key,)
     assert "fisheye.cluster.subject_masks.publish_receipt_composed_bundle" in (
@@ -1437,6 +1969,55 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     assert jobs[f"validate:{target_safe}"].dependency.upstream_job_keys == (
         publish_key,
     )
+
+
+def test_keypoint_recovery_supports_downstream_plan_and_repo_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        work_unit_count=2,
+        workflow_scope=workflow.WORKFLOW_SCOPE_DOWNSTREAM,
+    )
+    source_plan = tmp_path / "source_downstream_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 2},
+    )
+    deployment = tmp_path / "locked_deployment"
+    deployment_commit = "d" * 40
+    monkeypatch.setattr(recovery, "_repo_commit", lambda _repo: deployment_commit)
+
+    with pytest.raises(ValueError, match="does not match the exact HEAD"):
+        recovery.build_plan(
+            source_plan_path=source_plan,
+            run_root=tmp_path / "mismatched_recovery",
+            recovery_label="sleepyfish_mismatched_recovery",
+            repo=deployment,
+            palette_commit="e" * 40,
+        )
+
+    plan = recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "downstream_recovery",
+        recovery_label="sleepyfish_downstream_keypoint_recovery",
+        repo=deployment,
+        palette_commit=deployment_commit,
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+
+    assert len(jobs) == 6
+    assert "registry_finalize" not in jobs
+    assert "nrs_cleanup" not in jobs
+    assert plan.repo == deployment.resolve()
+    assert plan.payload["repo"] == str(deployment.resolve())
+    assert plan.payload["palette_commit"] == deployment_commit
+    assert plan.workflow.metadata["palette_commit"] == deployment_commit
+    assert all(str(deployment.resolve()) in job.command for job in jobs.values())
 
 
 def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(

@@ -522,7 +522,7 @@ def _apply_registered_detection_gate(
             source_group_path=source_detect_path,
             gate_run=str(gate_run),
             expected_instance_keys=raw_instance_keys,
-            require_comparison_bound_selection=True,
+            require_modern_operational_selection=True,
         )
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
@@ -903,26 +903,40 @@ def _select_per_frame_top_k_raw_indices(
     if int(np.min(candidates)) < 0 or int(np.max(candidates)) >= frame_indices.shape[0]:
         raise ValueError("candidate_raw_indices contains out-of-range rows.")
 
-    selected: list[int] = []
-    duplicate: list[int] = []
     candidate_frames = frame_indices[candidates]
-    frames_with_duplicates = 0
-    for frame in np.unique(candidate_frames):
-        rows = candidates[candidate_frames == frame]
-        row_scores = scores[rows]
-        rank_scores = np.where(np.isfinite(row_scores), row_scores, -np.inf)
-        # Primary key: score descending. Tie-breaker: source row ascending for determinism.
-        order = np.lexsort((rows, -rank_scores))
-        ranked = rows[order]
-        keep = ranked[:k]
-        drop = ranked[k:]
-        selected.extend(int(row) for row in keep.tolist())
-        duplicate.extend(int(row) for row in drop.tolist())
-        if drop.size:
-            frames_with_duplicates += 1
+    candidate_scores = scores[candidates]
+    rank_scores = np.where(np.isfinite(candidate_scores), candidate_scores, -np.inf)
 
-    selected_arr = np.asarray(sorted(selected), dtype=np.int32)
-    duplicate_arr = np.asarray(sorted(duplicate), dtype=np.int32)
+    # Rank every candidate in one grouped sort.  The former implementation
+    # selected each frame with ``candidate_frames == frame`` inside a loop over
+    # all unique frames.  That repeatedly scanned the complete candidate array
+    # and became quadratic for long clipped recordings with one detection in
+    # nearly every frame.
+    #
+    # np.lexsort uses the final key as the primary key, so rows are ordered by
+    # frame, score descending, then source row ascending.  The latter preserves
+    # the existing deterministic tie-break contract.
+    order = np.lexsort((candidates, -rank_scores, candidate_frames))
+    ranked_candidates = candidates[order]
+    ranked_frames = candidate_frames[order]
+
+    group_start = np.empty(ranked_frames.shape[0], dtype=bool)
+    group_start[0] = True
+    group_start[1:] = ranked_frames[1:] != ranked_frames[:-1]
+    group_starts = np.flatnonzero(group_start)
+    group_ids = np.cumsum(group_start, dtype=np.int64) - 1
+    rank_within_frame = (
+        np.arange(ranked_candidates.shape[0], dtype=np.int64)
+        - group_starts[group_ids]
+    )
+    selected_mask = rank_within_frame < k
+
+    selected_arr = np.sort(ranked_candidates[selected_mask]).astype(np.int32, copy=False)
+    duplicate_arr = np.sort(ranked_candidates[~selected_mask]).astype(np.int32, copy=False)
+    group_sizes = np.diff(
+        np.append(group_starts, np.asarray([ranked_candidates.shape[0]], dtype=np.int64))
+    )
+    frames_with_duplicates = int(np.count_nonzero(group_sizes > k))
     return (
         selected_arr,
         duplicate_arr,

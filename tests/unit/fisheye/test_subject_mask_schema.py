@@ -9,11 +9,14 @@ from fisheye.shared.zarr.subject_mask_schema import (
     RAW_SUBJECT_MASK_FLOAT16_SCHEMA_V1,
     RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
     REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
+    SUBJECT_V1_LR_COMPONENT_SCHEMA,
+    SUBJECT_V1_UNION_COMPONENT_SCHEMA,
     SubjectMaskComponentRegistry,
     SubjectMaskDimensions,
     SubjectMaskSchemaError,
     derive_subject_mask_frame_row_offsets,
     derive_subject_mask_metrics,
+    resolve_subject_mask_component_schema,
 )
 
 
@@ -97,6 +100,44 @@ def _refined_arrays(raw: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         "metrics/bbox_valid",
     }
     return {name: values.copy() for name, values in raw.items() if name in keep}
+
+
+def test_named_component_schemas_declare_all_current_components_required() -> None:
+    assert SUBJECT_V1_UNION_COMPONENT_SCHEMA.required_labels == (
+        "subject_body",
+        "eyes_union",
+        "swim_bladder",
+    )
+    assert SUBJECT_V1_UNION_COMPONENT_SCHEMA.optional_labels == ()
+    assert SUBJECT_V1_LR_COMPONENT_SCHEMA.required_labels == (
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    )
+    assert SUBJECT_V1_LR_COMPONENT_SCHEMA.optional_labels == ()
+
+
+def test_component_schema_resolution_requires_exact_declared_labels() -> None:
+    assert (
+        resolve_subject_mask_component_schema(
+            schema_id="subject_v1_union",
+            labels=("subject_body", "eyes_union", "swim_bladder"),
+        )
+        is SUBJECT_V1_UNION_COMPONENT_SCHEMA
+    )
+    assert (
+        resolve_subject_mask_component_schema(
+            schema_id=None,
+            labels=("subject_body", "eye_left", "eye_right", "swim_bladder"),
+        )
+        is SUBJECT_V1_LR_COMPONENT_SCHEMA
+    )
+    with pytest.raises(ValueError, match="do not match"):
+        resolve_subject_mask_component_schema(
+            schema_id="subject_v1_union",
+            labels=("subject_body", "eyes_union", "unknown"),
+        )
 
 
 def test_raw_uint8_schema_accepts_empty_and_multi_observation_frames() -> None:

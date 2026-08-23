@@ -9,6 +9,18 @@
 - Do not run install or dependency mutation commands unless the user explicitly approves in chat first.
 - Blocked without approval: `pip install`, `conda install`, `mamba install`, `poetry add`, `uv pip install`.
 
+## Registry SQLite Runtime Rule
+
+- Palette registry acceptance must use the SQLite library loaded by
+  `scripts/py`, never a separately installed `sqlite3` command-line binary.
+- Use `scripts/py -m fisheye.utils.registry_integrity --registry PATH` for
+  complete `PRAGMA integrity_check` and `PRAGMA foreign_key_check` validation.
+- Use `scripts/backup_palette_registry.sh` for backups. It delegates backup and
+  validation to the same Palette Python SQLite runtime and records that runtime
+  in its receipt.
+- A system `sqlite3` result may be collected as supplementary diagnostic
+  evidence, but it cannot override or satisfy Palette's acceptance gate.
+
 ## Git Push Rule
 
 - Pushes from this repository require the Palette workstation SSH key and should run outside the Codex sandbox because sandbox DNS/network access can fail.

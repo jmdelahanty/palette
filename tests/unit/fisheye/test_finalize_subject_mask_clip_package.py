@@ -163,6 +163,7 @@ def test_finalize_clip_package_embeds_receipt_composed_publication_evidence(
     root.require_group("subject_mask_shard_runs").create_group("subject_clip")
 
     def fake_finalize(root, **kwargs):  # noqa: ANN001, ANN003
+        assert kwargs["mask_rle_validation_mode"] == "full"
         refined = root.require_group("refined_subject_masks_runs").create_group(
             kwargs["refined_run"]
         )
@@ -228,6 +229,81 @@ def test_finalize_clip_package_embeds_receipt_composed_publication_evidence(
     assert "publication_evidence/quality_partition" in names
     assert "publication_evidence/sampled_contour_receipt.json" in names
     assert manifest["publication_evidence"]["producer_commit"] == "c" * 40
+    assert manifest["requested_mask_validation_mode"] == "auto"
+    assert manifest["effective_mask_validation_mode"] == "full"
+    assert result["requested_mask_validation_mode"] == "auto"
+    assert result["effective_mask_validation_mode"] == "full"
+
+
+def test_publication_evidence_rejects_inexact_compact_validation_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged = False
+
+    def unexpected_stage(**_kwargs):  # noqa: ANN003
+        nonlocal staged
+        staged = True
+        raise AssertionError("staging must not start for an invalid publication plan")
+
+    monkeypatch.setattr(mod, "_stage_zarr_with_local_refined_parent", unexpected_stage)
+
+    with pytest.raises(ValueError, match="requires --mask-rle-validation-mode full"):
+        mod.finalize_subject_mask_clip_package(
+            source_zarr=tmp_path / "source.zarr",
+            subject_shard_run="subject_clip",
+            target_crop_run="crop_collection",
+            refined_run="refined_clip",
+            package_path=tmp_path / "refined_clip.tar.gz",
+            mask_storage="dense_and_bitpacked",
+            mask_rle_validation_mode="invariants",
+            require_production_proof=True,
+            publication_evidence_producer_commit="c" * 40,
+            work_unit_id="unit_0",
+            work_unit_index=0,
+            source_clip_id="clip_0",
+            source_clip_index=0,
+            global_frame_start=0,
+            global_frame_stop=10,
+        )
+
+    assert staged is False
+
+
+def test_publication_evidence_requires_sampled_contours_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged = False
+
+    def unexpected_stage(**_kwargs):  # noqa: ANN003
+        nonlocal staged
+        staged = True
+        raise AssertionError("staging must not start for an invalid publication plan")
+
+    monkeypatch.setattr(mod, "_stage_zarr_with_local_refined_parent", unexpected_stage)
+
+    with pytest.raises(ValueError, match="requires sampled component contours"):
+        mod.finalize_subject_mask_clip_package(
+            source_zarr=tmp_path / "source.zarr",
+            subject_shard_run="subject_clip",
+            target_crop_run="crop_collection",
+            refined_run="refined_clip",
+            package_path=tmp_path / "refined_clip.tar.gz",
+            mask_storage="dense_and_bitpacked",
+            mask_rle_validation_mode="full",
+            write_sampled_component_contours=False,
+            require_production_proof=True,
+            publication_evidence_producer_commit="c" * 40,
+            work_unit_id="unit_0",
+            work_unit_index=0,
+            source_clip_id="clip_0",
+            source_clip_index=0,
+            global_frame_start=0,
+            global_frame_stop=10,
+        )
+
+    assert staged is False
 
 
 def test_publication_evidence_binds_real_worker_receipts_and_values(

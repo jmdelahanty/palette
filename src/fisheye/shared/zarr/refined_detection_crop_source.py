@@ -156,12 +156,18 @@ def bind_refined_detection_crop_source(
     *,
     run_id: str | None = None,
     allow_selector_ineligible_benchmark: bool = False,
+    allow_mutable_archive_direct_metadata: bool = False,
     parent_manifest: Mapping[str, Any] | None = None,
     parent_arrays: Mapping[str, Any] | None = None,
     clipped_source_evidence: tuple[RefinedDetectionBoundClipEvidence, ...]
     | None = None,
 ) -> BoundRefinedDetectionCropSource:
     """Open and prove one refined-v1 source before any crop write is planned."""
+
+    if type(allow_mutable_archive_direct_metadata) is not bool:
+        raise TypeError(
+            "allow_mutable_archive_direct_metadata must be an exact bool."
+        )
 
     path = archive_path.expanduser().resolve()
     if not path.is_dir() or path.suffix != ".zarr":
@@ -222,6 +228,16 @@ def bind_refined_detection_crop_source(
         raise RefinedDetectionCropSourceError(
             "Production crop planning requires a selector-eligible refined run."
         )
+    if allow_mutable_archive_direct_metadata and (
+        run_id is None
+        or eligible is not False
+        or run.attrs.get("immutable_snapshot") is not True
+        or run.attrs.get("finalized_recording_authority") is not True
+    ):
+        raise RefinedDetectionCropSourceError(
+            "Mutable-archive direct metadata validation requires one explicit, "
+            "immutable, finalized, selector-ineligible refined run."
+        )
     if authority is not None:
         authority_payload = authority["payload"]
         if (
@@ -240,6 +256,9 @@ def bind_refined_detection_crop_source(
             path,
             run_id=selected,
             plans=plans,
+            allow_missing_root_consolidated=(
+                allow_mutable_archive_direct_metadata
+            ),
         )
     except (KeyError, OSError, TypeError, ValueError) as exc:
         raise RefinedDetectionCropSourceError(

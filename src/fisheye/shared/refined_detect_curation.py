@@ -805,6 +805,15 @@ def _resolve_image_dimensions(
         if width is not None and height is not None and width > 0 and height > 0:
             return width, height
 
+    source_video_metadata = root.attrs.get("source_video_metadata")
+    if isinstance(source_video_metadata, Mapping):
+        width, height = _positive_width_height(
+            source_video_metadata.get("width"),
+            source_video_metadata.get("height"),
+        )
+        if width is not None and height is not None:
+            return width, height
+
     width, height = _positive_width_height(root.attrs.get("source_video_width"), root.attrs.get("source_video_height"))
     if width is not None and height is not None:
         return width, height
@@ -2062,7 +2071,7 @@ def _sync_dense_curated_refined_root_from_sparse_views(
 ) -> None:
     width, height = _resolve_image_dimensions(root, refined_run=refined_run)
     if width is None or height is None or width <= 0 or height <= 0:
-        raise ValueError("Root attrs must include positive width and height.")
+        raise ValueError("Could not resolve positive source image width and height.")
     norm_width, norm_height = _resolve_bbox_norm_reference_dimensions(root, refined_run=refined_run)
 
     total_frames = _resolved_total_frames(root, refined_run)
@@ -2508,7 +2517,7 @@ def write_curated_refined_detect_surfaces(
     refined_run = _open_named_child_group(refined_parent, resolved_refined_run_name, mode="a")
     width, height = _resolve_image_dimensions(root, refined_run=refined_run)
     if width is None or height is None or width <= 0 or height <= 0:
-        raise ValueError("Root attrs must include positive width and height.")
+        raise ValueError("Could not resolve positive source image width and height.")
     norm_width, norm_height = _resolve_bbox_norm_reference_dimensions(root, refined_run=refined_run)
     total_frames = _resolved_total_frames(root, refined_run)
 

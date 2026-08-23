@@ -9,6 +9,11 @@ from fisheye.detection.detect_keypoints_yolo import (
     DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     detect_keypoints_yolo,
 )
+from fisheye.shared.hybrid_crop_provider import HYBRID_CROP_RUN_SCHEMA_ID
+from fisheye.shared.roi_pixel_contract import (
+    SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 class _FakeArray:
@@ -153,6 +158,72 @@ def test_resolve_full_image_shape_uses_strict_crop_v2_authority(
 
     assert shape == (4_512, 4_512)
     assert total_frames == 23_287
+
+
+def _hybrid_crop_attrs(*, run_id: str) -> dict[str, Any]:
+    authority = {
+        "authority": "bound_collection_full_video_ffprobe_v1",
+        "height": 4_512,
+        "width": 4_512,
+        "member_count": 55,
+        "member_observations_sha256": "a" * 64,
+        "declared_zarr_shape": None,
+    }
+    record = {
+        "schema_id": "palette.roi_pixel_provider_record.v1",
+        "schema_version": 1,
+        "crop_run": run_id,
+        "frame_shape": [4_512, 4_512],
+        "frame_shape_authority": authority,
+    }
+    return {
+        "schema_id": HYBRID_CROP_RUN_SCHEMA_ID,
+        "source_pixels": SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME,
+        "source_full_frame_shape_authority": authority,
+        "provider_record": record,
+        "provider_record_sha256": canonical_json_sha256(record),
+    }
+
+
+def test_resolve_full_image_shape_uses_signed_hybrid_provider_authority() -> None:
+    run_id = "hybrid_crop_collection"
+    shape, total_frames = yolo_mod._resolve_full_image_shape(
+        _FakeGroup(attrs={}),
+        _FakeGroup(attrs=_hybrid_crop_attrs(run_id=run_id)),
+        crop_run_id=run_id,
+    )
+
+    assert shape == (4_512, 4_512)
+    assert total_frames is None
+
+
+def test_resolve_full_image_shape_rejects_stale_hybrid_dimension_authority() -> None:
+    run_id = "hybrid_crop_collection"
+    attrs = _hybrid_crop_attrs(run_id=run_id)
+    attrs["source_full_frame_shape_authority"] = {
+        **attrs["source_full_frame_shape_authority"],
+        "width": 4_511,
+    }
+
+    with pytest.raises(ValueError, match="differs from its signed record"):
+        yolo_mod._resolve_full_image_shape(
+            _FakeGroup(attrs={}),
+            _FakeGroup(attrs=attrs),
+            crop_run_id=run_id,
+        )
+
+
+def test_resolve_full_image_shape_rejects_invalid_hybrid_provider_digest() -> None:
+    run_id = "hybrid_crop_collection"
+    attrs = _hybrid_crop_attrs(run_id=run_id)
+    attrs["provider_record"]["frame_shape"] = [4_511, 4_512]
+
+    with pytest.raises(ValueError, match="provider_record digest is invalid"):
+        yolo_mod._resolve_full_image_shape(
+            _FakeGroup(attrs={}),
+            _FakeGroup(attrs=attrs),
+            crop_run_id=run_id,
+        )
 
 
 def test_resolve_full_image_shape_uses_root_dimension_aliases_without_raw_video() -> None:

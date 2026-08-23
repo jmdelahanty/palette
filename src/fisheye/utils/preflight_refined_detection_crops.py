@@ -33,7 +33,7 @@ from fisheye.shared.zarr.refined_detection_crop_source import (
 
 
 PREFLIGHT_SCHEMA_ID = "palette.refined_detection.crop_v2_preflight"
-PREFLIGHT_SCHEMA_VERSION = 1
+PREFLIGHT_SCHEMA_VERSION = 2
 COHORT_PREFLIGHT_SCHEMA_ID = "palette.refined_detection.crop_v2_cohort_preflight"
 COHORT_PREFLIGHT_SCHEMA_VERSION = 1
 
@@ -119,7 +119,18 @@ def inspect_refined_detection_crop_preflight(
             "policy": policy.as_manifest(),
             "pixel_authority": {
                 "binding_document_digest": pixels.binding_document_digest,
-                "source_video_path": str(pixels.source_video_path),
+                "source_video_path": (
+                    None
+                    if pixels.source_video_path is None
+                    else str(pixels.source_video_path)
+                ),
+                "source_video_paths": [
+                    str(item) for item in pixels.source_video_paths
+                ],
+                "source_index_paths": [
+                    str(item) for item in pixels.source_index_paths
+                ],
+                "provider_profile": pixels.binding_document["provider_profile"],
                 "authority": pixels.pixel_authority.as_manifest(),
             },
             "padding": {

@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import pytest
 import zarr
@@ -277,7 +279,10 @@ def test_registered_gate_modes_are_explicit_and_fail_closed(
             gate_run=None,
         )
 
-    def valid_gate(*_args, **_kwargs):
+    gate_calls = {}
+
+    def valid_gate(*_args, **kwargs):
+        gate_calls.update(kwargs)
         return {
             "inside": np.asarray([True, False, True]),
             "gate_run": "gate_exact",
@@ -303,6 +308,8 @@ def test_registered_gate_modes_are_explicit_and_fail_closed(
     assert gated_labels.tolist() == [0, 6, 0]
     assert applied["status"] == "applied"
     assert applied["rejected_count"] == 1
+    assert gate_calls["require_modern_operational_selection"] is True
+    assert "require_comparison_bound_selection" not in gate_calls
     assert _filtered_reason_from_quality_label(6) == (
         "outside_registered_detection_gate"
     )
@@ -546,6 +553,94 @@ def test_per_frame_top_k_keeps_highest_score_and_marks_duplicates() -> None:
         "per_frame_top_k_excluded",
         "clean",
     ]
+
+
+def test_per_frame_top_k_preserves_ties_nonfinite_scores_and_candidate_order() -> None:
+    raw_frame_indices = np.asarray([4, 3, 4, 3, 4, 3, 5], dtype=np.int32)
+    raw_scores = np.asarray([0.8, np.nan, 0.8, -np.inf, np.inf, 0.2, 0.1], dtype=np.float32)
+    candidates = np.asarray([6, 5, 4, 3, 2, 1, 0], dtype=np.int32)
+
+    selected, duplicate, stats = _select_per_frame_top_k_raw_indices(
+        raw_frame_indices=raw_frame_indices,
+        raw_scores=raw_scores,
+        candidate_raw_indices=candidates,
+        per_frame_top_k=2,
+        score_field="scores",
+    )
+
+    # Frame 3 keeps score 0.2 and then the lower source row among the two
+    # non-finite scores. Frame 4 keeps both finite 0.8 scores; +inf is treated
+    # as non-finite by the established ranking contract. Final row surfaces
+    # remain in source-row order.
+    assert selected.tolist() == [0, 1, 2, 5, 6]
+    assert duplicate.tolist() == [3, 4]
+    assert stats == {
+        "enabled": True,
+        "per_frame_top_k": 2,
+        "score_field": "scores",
+        "candidate_rows": 7,
+        "selected_rows": 5,
+        "duplicate_rows": 2,
+        "frames_with_duplicates": 2,
+    }
+
+
+def test_per_frame_top_k_scales_to_long_single_candidate_recordings() -> None:
+    row_count = 250_000
+    raw_frame_indices = np.arange(row_count, dtype=np.int32)
+    raw_scores = np.ones(row_count, dtype=np.float32)
+    candidates = np.arange(row_count, dtype=np.int32)
+
+    started = time.perf_counter()
+    selected, duplicate, stats = _select_per_frame_top_k_raw_indices(
+        raw_frame_indices=raw_frame_indices,
+        raw_scores=raw_scores,
+        candidate_raw_indices=candidates,
+        per_frame_top_k=1,
+        score_field="scores",
+    )
+    elapsed = time.perf_counter() - started
+
+    assert np.array_equal(selected, candidates)
+    assert duplicate.size == 0
+    assert stats["frames_with_duplicates"] == 0
+    # This is deliberately generous for shared CI runners. The quadratic
+    # implementation cannot satisfy it for this many distinct frames.
+    assert elapsed < 5.0
+
+
+def test_per_frame_top_k_grouped_sort_matches_reference_ranking() -> None:
+    rng = np.random.default_rng(20260821)
+    raw_frame_indices = rng.integers(0, 23, size=400, dtype=np.int32)
+    raw_scores = rng.normal(size=400).astype(np.float32)
+    raw_scores[[7, 41, 129]] = np.asarray([np.nan, np.inf, -np.inf], dtype=np.float32)
+    candidates = rng.permutation(400).astype(np.int32)[37:]
+
+    for k in (1, 2, 5):
+        expected_selected: list[int] = []
+        expected_duplicate: list[int] = []
+        expected_frames_with_duplicates = 0
+        candidate_frames = raw_frame_indices[candidates]
+        for frame in np.unique(candidate_frames):
+            rows = candidates[candidate_frames == frame]
+            row_scores = raw_scores[rows]
+            rank_scores = np.where(np.isfinite(row_scores), row_scores, -np.inf)
+            ranked = rows[np.lexsort((rows, -rank_scores))]
+            expected_selected.extend(int(row) for row in ranked[:k])
+            expected_duplicate.extend(int(row) for row in ranked[k:])
+            expected_frames_with_duplicates += int(ranked.shape[0] > k)
+
+        selected, duplicate, stats = _select_per_frame_top_k_raw_indices(
+            raw_frame_indices=raw_frame_indices,
+            raw_scores=raw_scores,
+            candidate_raw_indices=candidates,
+            per_frame_top_k=k,
+            score_field="scores",
+        )
+
+        assert selected.tolist() == sorted(expected_selected)
+        assert duplicate.tolist() == sorted(expected_duplicate)
+        assert stats["frames_with_duplicates"] == expected_frames_with_duplicates
 
 
 def test_dish_mask_gate_marks_clean_outside_candidates_before_top_k() -> None:

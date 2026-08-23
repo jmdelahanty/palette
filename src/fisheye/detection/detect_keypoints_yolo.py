@@ -36,6 +36,7 @@ from ..registry.db import RegistryPaths
 from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
+from ..shared.hybrid_crop_provider import resolve_hybrid_crop_source_frame_shape
 from ..shared.zarr.crop_consumer import strict_crop_source_dimensions
 from ..shared.zarr.training_crop_materialization import (
     bind_training_crop_materialization,
@@ -96,6 +97,7 @@ from ..shared.run_provenance import (
     build_run_provenance,
 )
 from ..shared.type_conversions import normalize_attr
+from ..shared.transient_io import retry_read_only_estale
 from ..shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
@@ -1399,6 +1401,12 @@ def _resolve_full_image_shape(
                     "authority."
                 )
             return (strict_height, strict_width), strict_frames
+        hybrid_shape = resolve_hybrid_crop_source_frame_shape(
+            crop_group,
+            run_id=crop_run_id,
+        )
+        if hybrid_shape is not None:
+            return hybrid_shape, total_frames
 
     width_names = (
         "video_width",
@@ -1425,7 +1433,8 @@ def _resolve_full_image_shape(
         raise ValueError(
             "Unable to determine full-resolution image dimensions. "
             "Expected raw_video/images_full, root video_width/video_height attrs, "
-            "strict crop-v2 source-pixel authority, or crop-run width/height attrs."
+            "strict crop-v2 source-pixel authority, signed hybrid provider "
+            "authority, or crop-run width/height attrs."
         )
     return (int(img_h), int(img_w)), total_frames
 
@@ -1435,6 +1444,32 @@ def _resolve_crop_run_frame_count_from_domains(root: zarr.Group, crop_group: zar
         return int(FrameDomains(root=root, run_group=crop_group).count(FrameDomain.RUN_FRAME))
     except FrameDomainError:
         return None
+
+
+def _preflight_noncanonical_coordinate_domains(
+    root: zarr.Group,
+    crop_group: zarr.Group,
+    *,
+    crop_run_id: str,
+    frame_indices: np.ndarray,
+) -> tuple[tuple[int, int], int]:
+    """Resolve read-only coordinate domains before creating a shard run."""
+
+    def resolve() -> tuple[tuple[int, int], int]:
+        full_img_shape, total_frames = _resolve_full_image_shape(
+            root,
+            crop_group,
+            crop_run_id=crop_run_id,
+        )
+        if total_frames is None:
+            total_frames = _resolve_crop_run_frame_count_from_domains(root, crop_group)
+        if total_frames is None:
+            total_frames = (
+                int(frame_indices.max() + 1) if frame_indices.size > 0 else 0
+            )
+        return full_img_shape, int(total_frames)
+
+    return retry_read_only_estale(resolve, sleep=time.sleep)
 
 
 def _tensor_input_blocker(
@@ -1769,6 +1804,8 @@ def detect_keypoints_yolo(
     roi_cache_manifest: Optional[Path] = None,
     roi_cache_expected_archive_path: Optional[Path] = None,
     roi_work_package_manifest: Optional[Path] = None,
+    source_crop_row_start: Optional[int] = None,
+    source_crop_row_stop: Optional[int] = None,
     roi_cache_source_tier: Optional[str] = None,
     roi_cache_staged_to_node_scratch: bool = False,
     roi_cache_staging_details: Optional[Dict[str, Any]] = None,
@@ -1829,6 +1866,19 @@ def detect_keypoints_yolo(
         raise ValueError(
             "roi_cache_manifest and roi_work_package_manifest are mutually exclusive."
         )
+    if (source_crop_row_start is None) != (source_crop_row_stop is None):
+        raise ValueError(
+            "source_crop_row_start and source_crop_row_stop must be provided together."
+        )
+    if source_crop_row_start is not None:
+        if roi_work_package_manifest is not None or roi_cache_manifest is not None:
+            raise ValueError(
+                "Direct crop-row partitions cannot be combined with a cache or work package."
+            )
+        if output_parent_name != "keypoint_shard_runs":
+            raise ValueError(
+                "Direct crop-row partitions must write keypoint_shard_runs outputs."
+            )
     if (
         roi_cache_expected_archive_path is not None
         and roi_cache_manifest is None
@@ -1984,6 +2034,8 @@ def detect_keypoints_yolo(
             roi_cache_dir=roi_cache_dir,
             roi_cache_manifest=roi_cache_manifest,
             roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+            source_crop_row_start=source_crop_row_start,
+            source_crop_row_stop=source_crop_row_stop,
             console=console,
         )
     boundary = _ACTIVE_KEYPOINT_ATTEMPT.get()
@@ -2129,6 +2181,19 @@ def detect_keypoints_yolo(
         model_stride=model_stride,
     )
 
+    # Collection shards use the legacy noncanonical coordinate adapter until
+    # they are finalized against the recording-level crop authority. Resolve
+    # every required read-only coordinate domain before creating any output
+    # group, so metadata faults cannot leave a failed/incomplete shard behind.
+    noncanonical_coordinate_preflight: tuple[tuple[int, int], int] | None = None
+    if canonical_crop_source is None:
+        noncanonical_coordinate_preflight = _preflight_noncanonical_coordinate_domains(
+            root,
+            crop_group,
+            crop_run_id=latest_crop,
+            frame_indices=frame_indices,
+        )
+
     run_parent, run_group, resolved_run_name = _prepare_run_group_for_parent(
         root,
         run_name,
@@ -2258,19 +2323,11 @@ def detect_keypoints_yolo(
             keypoint_coordinate_context.source.crop_geometry.source_geometry.frame_evidence.acquisition_frame.record.source_total_frames
         )
     else:
-        full_img_shape, total_frames = _resolve_full_image_shape(
-            root,
-            crop_group,
-            crop_run_id=latest_crop,
-        )
+        if noncanonical_coordinate_preflight is None:
+            raise AssertionError("missing noncanonical coordinate preflight")
+        full_img_shape, total_frames = noncanonical_coordinate_preflight
 
     norm_factor = np.array([full_img_shape[1], full_img_shape[0]], dtype="f8")
-
-    if total_frames is None:
-        total_frames = _resolve_crop_run_frame_count_from_domains(root, crop_group)
-
-    if total_frames is None:
-        total_frames = int(frame_indices.max() + 1) if frame_indices.size > 0 else 0
 
     if "frame_counts" in lineage_result.copied:
         frame_counts_total = run_group["frame_counts"][:].astype("i4", copy=False)
@@ -3421,6 +3478,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
     )
+    parser.add_argument("--source-crop-row-start", type=int, default=None)
+    parser.add_argument("--source-crop-row-stop", type=int, default=None)
     parser.add_argument(
         "--roi-cache-expected-archive-path",
         type=Path,
@@ -3536,6 +3595,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_manifest=args.roi_cache_manifest,
         roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
         roi_work_package_manifest=args.roi_work_package_manifest,
+        source_crop_row_start=args.source_crop_row_start,
+        source_crop_row_stop=args.source_crop_row_stop,
         roi_cache_source_tier=args.roi_cache_source_tier,
         roi_cache_staged_to_node_scratch=bool(args.roi_cache_staged_to_node_scratch),
         input_mode=args.input_mode,

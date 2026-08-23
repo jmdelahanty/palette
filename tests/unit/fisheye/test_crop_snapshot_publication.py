@@ -36,6 +36,18 @@ class _BoundPixels:
     fail_on_verification: int | None = None
     verification_count: int = 0
 
+    @property
+    def source_video_paths(self) -> tuple[Path, ...]:
+        return (self.source_video_path,)
+
+    @property
+    def source_index_paths(self) -> tuple[Path, ...]:
+        return ()
+
+    @property
+    def binding_document(self) -> dict[str, str]:
+        return {"provider_profile": "published_external_full_frame_video_v1"}
+
     def assert_verified(self) -> None:
         self.verification_count += 1
         if self.verification_count == self.fail_on_verification:
@@ -142,6 +154,20 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
         str(source.archive_path), mode="a", use_consolidated=False
     )
     writable_run = writable_root["refined_detect_runs"][source.run_id]
+    detection = writable_root.require_group("detect_runs").create_group(
+        "detect_source"
+    )
+    detection.attrs.update(
+        {
+            "run_manifest": {
+                "payload_digest": "a" * 64,
+                "payload": {
+                    "publication": {"stage_selector_eligible": True},
+                },
+            },
+            "stage_selector_eligible": True,
+        }
+    )
     source = replace(
         source,
         run_group=writable_run,
@@ -152,7 +178,7 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
         "status": "applied",
         "applied": True,
         "gate_run": "gate_001",
-        "source_detection_group_path": "detect_runs/detect_001",
+        "source_detection_group_path": "detect_runs/detect_source",
         "selection_run": "selection_001",
         "selection_record_sha256": "a" * 64,
         "row_count": source.dimensions.n_source_detections,
@@ -172,14 +198,18 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
         source_video_path=tmp_path / "camera.mp4",
     )
     _wire_authorities(monkeypatch, source, pixels)
-    def gate_validator(*_args, **_kwargs):
+    gate_calls = {}
+
+    def gate_validator(*args, **kwargs):
+        assert args == (source.archive_path,)
+        gate_calls.update(kwargs)
         return {
             "inside": np.ones(
                 source.dimensions.n_source_detections,
                 dtype=np.bool_,
             ),
             "gate_run": "gate_001",
-            "source_detection_group_path": "detect_runs/detect_001",
+            "source_detection_group_path": "detect_runs/detect_source",
             "selection_run": "selection_001",
             "selection_record_sha256": "a" * 64,
             "row_count": source.dimensions.n_source_detections,
@@ -199,12 +229,91 @@ def test_required_candidate_binds_exact_finalized_gated_refined_authority(
 
     assert result["registered_gate_applied"] is True
     assert result["source_refined_run_id"] == source.run_id
+    assert gate_calls["require_modern_operational_selection"] is True
+    assert gate_calls["allow_selector_ineligible_source"] is False
+    assert "require_comparison_bound_selection" not in gate_calls
     root = zarr.open_group(
         str(source.archive_path), mode="r", use_consolidated=False
     )
     assert root["crop_runs"].attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
     crop = root["crop_runs"]["crop_required"]
     assert crop.attrs["source_registered_detection_gate"] == gate_evidence
+
+
+def test_registered_gate_source_mode_uses_exact_raw_detection_authority(
+    tmp_path: Path,
+) -> None:
+    source = _refined_source(tmp_path)
+    root = zarr.open_group(
+        str(source.archive_path), mode="a", use_consolidated=False
+    )
+    detection = root.require_group("detect_runs").create_group("detect_source")
+    manifest = {
+        "payload_digest": "a" * 64,
+        "payload": {"publication": {"stage_selector_eligible": True}},
+    }
+    detection.attrs.update(
+        {
+            "run_manifest": manifest,
+            "stage_selector_eligible": True,
+        }
+    )
+    evidence = {"source_detection_group_path": "detect_runs/detect_source"}
+
+    assert (
+        module._registered_gate_source_allows_selector_ineligible(
+            archive=source.archive_path,
+            source=source,
+            gate_evidence=evidence,
+        )
+        is False
+    )
+
+    with pytest.raises(RuntimeError, match="identities differ"):
+        module._registered_gate_source_allows_selector_ineligible(
+            archive=source.archive_path,
+            source=source,
+            gate_evidence={
+                "source_detection_group_path": "detect_runs/detect_other"
+            },
+        )
+
+    detection.attrs["run_manifest"] = {
+        **manifest,
+        "payload_digest": "b" * 64,
+    }
+    with pytest.raises(RuntimeError, match="manifest identity changed"):
+        module._registered_gate_source_allows_selector_ineligible(
+            archive=source.archive_path,
+            source=source,
+            gate_evidence=evidence,
+        )
+    detection.attrs["run_manifest"] = manifest
+
+    manifest["payload"]["publication"]["stage_selector_eligible"] = False
+    detection.attrs.update(
+        {
+            "run_manifest": manifest,
+            "stage_selector_eligible": False,
+            "production_candidate": True,
+        }
+    )
+    assert (
+        module._registered_gate_source_allows_selector_ineligible(
+            archive=source.archive_path,
+            source=source,
+            gate_evidence=evidence,
+        )
+        is True
+    )
+
+    detection.attrs["production_candidate"] = False
+    with pytest.raises(RuntimeError, match="neither an active authority"):
+        module._registered_gate_source_allows_selector_ineligible(
+            archive=source.archive_path,
+            source=source,
+            gate_evidence=evidence,
+        )
 
 
 def test_candidate_is_atomically_imported_consolidated_and_unselected(
@@ -247,6 +356,12 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
     assert result["selector_eligible"] is False
     assert result["registry_updated"] is False
     assert result["storage_profile_id"] == "published_http_v1"
+    assert result["source_video_path"] == str(tmp_path / "camera.mp4")
+    assert result["source_video_paths"] == [str(tmp_path / "camera.mp4")]
+    assert result["source_index_paths"] == []
+    assert result["source_pixel_provider_profile"] == (
+        "published_external_full_frame_video_v1"
+    )
     assert result["validation"] == {
         "local_errors": [],
         "published_errors": [],

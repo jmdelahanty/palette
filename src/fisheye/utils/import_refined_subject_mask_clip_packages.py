@@ -32,6 +32,9 @@ from fisheye.shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
 )
+from fisheye.shared.subject_mask_crop_placement import (
+    normalize_subject_mask_crop_placement,
+)
 from fisheye.shared.subject_mask_attempt import (
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
@@ -1034,6 +1037,25 @@ def _recording_core_arrays(
             f"Canonical crop run lacks recording publication arrays: {missing!r}."
         )
     frames = np.asarray(crop["source_acquisition_frame_index"][:], dtype=np.int64)
+    placement_rows = np.arange(int(rows.shape[0]), dtype=np.int64)
+    source_crop_xywh, normalization = normalize_subject_mask_crop_placement(
+        crop,
+        crop_run=str(crop_run),
+        target_rows=placement_rows,
+        values=np.asarray(crop["source_crop_xywh"][:]),
+    )
+    declared_normalization = run.attrs.get("source_crop_xywh_normalization")
+    if normalization is None:
+        if declared_normalization is not None:
+            raise ValueError(
+                "Refined package union declares crop-placement normalization "
+                "for a target crop that does not require it."
+            )
+    elif dict(normalization) != declared_normalization:
+        raise ValueError(
+            "Refined package union crop-placement normalization differs from "
+            "the exact target hybrid crop."
+        )
     arrays: dict[str, Any] = {
         "source_crop_row_ids": run["source_crop_row_ids"],
         "instance_key": crop["instance_key"],
@@ -1041,7 +1063,7 @@ def _recording_core_arrays(
         "frame_row_offsets": derive_subject_mask_frame_row_offsets(
             frames, n_frames=int(n_frames)
         ),
-        "source_crop_xywh": crop["source_crop_xywh"],
+        "source_crop_xywh": source_crop_xywh,
         "masks_roi": run["masks_roi"],
         "available_channels": run["available_channels"],
     }
@@ -1181,6 +1203,9 @@ def _validate_package_schema(packages: Sequence[ClipPackage]) -> None:
     reference_schema = str(reference.attrs.get("label_schema_id") or "")
     reference_shape = tuple(int(value) for value in reference["masks_roi"].shape[1:])
     reference_paths = set(_iter_array_paths(reference))
+    reference_placement_normalization = reference.attrs.get(
+        "source_crop_xywh_normalization"
+    )
     encoded_count = sum(
         package.encoded_mask_summary is not None for package in packages
     )
@@ -1215,6 +1240,14 @@ def _validate_package_schema(packages: Sequence[ClipPackage]) -> None:
         if shape != reference_shape:
             raise ValueError(
                 f"Package {package.package_path} masks_roi row shape {shape} != {reference_shape}."
+            )
+        if (
+            package.group.attrs.get("source_crop_xywh_normalization")
+            != reference_placement_normalization
+        ):
+            raise ValueError(
+                f"Package {package.package_path} crop-placement normalization "
+                "does not match the collection."
             )
         paths = set(_iter_array_paths(package.group))
         if paths != reference_paths:

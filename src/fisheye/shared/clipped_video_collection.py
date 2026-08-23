@@ -8,6 +8,7 @@ copying or decoding video payloads.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -26,6 +27,20 @@ SOURCE_VIDEO_COLLECTION_LAYOUT = "clipped_video_collection"
 SOURCE_VIDEO_COLLECTION_SCHEMA_ID = "palette.clipped_video_collection.v1"
 SOURCE_VIDEO_COLLECTION_LOCATOR_KIND = "recording_relative_frame_index"
 SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY = "member_stat_and_index_sha256_v1"
+
+
+class ClippedVideoCollectionEvidenceError(ValueError):
+    """Raised when persisted clipped-source evidence differs from live files."""
+
+
+@dataclass(frozen=True)
+class VerifiedClippedVideoCollectionFiles:
+    """Exact live files selected by one persisted clipped collection contract."""
+
+    recording_dir: Path
+    index_paths: tuple[Path, Path, Path]
+    member_paths: tuple[Path, ...]
+    collection_sha256: str
 
 
 def _canonical_json(value: Any) -> str:
@@ -71,6 +86,199 @@ def _file_evidence(recording_dir: Path, path: Path) -> dict[str, Any]:
         "size_bytes": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
     }
+
+
+def _verify_file_evidence(
+    recording_dir: Path,
+    value: Any,
+    *,
+    label: str,
+) -> Path:
+    if not isinstance(value, Mapping):
+        raise ClippedVideoCollectionEvidenceError(f"{label} evidence is missing.")
+    expected_fields = {"relative_path", "sha256", "size_bytes", "mtime_ns"}
+    if set(value) != expected_fields:
+        raise ClippedVideoCollectionEvidenceError(
+            f"{label} evidence has an unexpected field set."
+        )
+    try:
+        path = _resolve_under(
+            recording_dir,
+            value["relative_path"],
+            label=label,
+        )
+        stat = path.stat()
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise ClippedVideoCollectionEvidenceError(
+            f"Cannot resolve live {label}: {exc}"
+        ) from exc
+    if (
+        type(value["size_bytes"]) is not int
+        or type(value["mtime_ns"]) is not int
+        or int(stat.st_size) != value["size_bytes"]
+        or int(stat.st_mtime_ns) != value["mtime_ns"]
+    ):
+        raise ClippedVideoCollectionEvidenceError(
+            f"Live {label} stat differs from persisted evidence."
+        )
+    expected_sha256 = value["sha256"]
+    if (
+        type(expected_sha256) is not str
+        or len(expected_sha256) != 64
+        or _file_sha256(path) != expected_sha256
+    ):
+        raise ClippedVideoCollectionEvidenceError(
+            f"Live {label} content differs from persisted SHA-256 evidence."
+        )
+    return path
+
+
+def verify_clipped_video_collection_live_files(
+    recording_dir: str | Path,
+    metadata: Mapping[str, Any],
+) -> VerifiedClippedVideoCollectionFiles:
+    """Resolve and verify every file named by canonical clipped-source metadata.
+
+    The importer already validates video geometry and constructs the exact
+    recording-wide frame map.  This read-side verifier checks that the three
+    indexed mapping artifacts still have their persisted content hashes and
+    that every encoded member still has the exact cheap ``stat_v1`` identity
+    captured at import.  It intentionally does not decode or content-hash the
+    large videos.
+    """
+
+    recording = Path(recording_dir).expanduser().resolve()
+    if not recording.is_dir():
+        raise ClippedVideoCollectionEvidenceError(
+            f"Clipped recording directory not found: {recording}"
+        )
+    if not isinstance(metadata, Mapping) or (
+        metadata.get("schema_id") != SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID
+        or metadata.get("layout") != SOURCE_VIDEO_COLLECTION_LAYOUT
+    ):
+        raise ClippedVideoCollectionEvidenceError(
+            "Canonical clipped source-video metadata is required."
+        )
+    collection = metadata.get("collection")
+    if not isinstance(collection, Mapping) or (
+        collection.get("schema_id") != SOURCE_VIDEO_COLLECTION_SCHEMA_ID
+        or collection.get("schema_version") != 1
+        or collection.get("fingerprint_strategy")
+        != SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY
+    ):
+        raise ClippedVideoCollectionEvidenceError(
+            "Canonical clipped collection evidence is required."
+        )
+
+    index_paths = tuple(
+        _verify_file_evidence(
+            recording,
+            collection.get(name),
+            label=name,
+        )
+        for name in (
+            "recording_clip_index",
+            "recording_frame_index",
+            "recording_frame_index_manifest",
+        )
+    )
+    raw_members = collection.get("members")
+    if not isinstance(raw_members, list) or not raw_members:
+        raise ClippedVideoCollectionEvidenceError(
+            "Clipped collection contains no source-video members."
+        )
+    camera_id = metadata.get("camera_id")
+    member_paths: list[Path] = []
+    seen_paths: set[Path] = set()
+    expected_start = 0
+    previous_clip_index = -1
+    for member_index, member in enumerate(raw_members):
+        label = f"collection member {member_index}"
+        if not isinstance(member, Mapping):
+            raise ClippedVideoCollectionEvidenceError(f"{label} is not an object.")
+        try:
+            path = _resolve_under(
+                recording,
+                member.get("relative_path"),
+                label=label,
+            )
+            clip_index = member["clip_index"]
+            frame_count = member["frame_count"]
+            first_frame = member["first_frame_index"]
+            last_frame = member["last_frame_index_inclusive"]
+        except (FileNotFoundError, KeyError, OSError, ValueError) as exc:
+            raise ClippedVideoCollectionEvidenceError(
+                f"Cannot resolve live {label}: {exc}"
+            ) from exc
+        if path in seen_paths:
+            raise ClippedVideoCollectionEvidenceError(
+                "Clipped collection resolves multiple members to the same video file."
+            )
+        seen_paths.add(path)
+        if (
+            type(clip_index) is not int
+            or clip_index <= previous_clip_index
+            or type(frame_count) is not int
+            or frame_count <= 0
+            or type(first_frame) is not int
+            or first_frame != expected_start
+            or type(last_frame) is not int
+            or last_frame != expected_start + frame_count - 1
+        ):
+            raise ClippedVideoCollectionEvidenceError(
+                "Clipped collection members do not exactly tile the acquisition "
+                "timeline in clip-index order."
+            )
+        previous_clip_index = clip_index
+        expected_start += frame_count
+        try:
+            fingerprint = source_stat_fingerprint_attrs(
+                path,
+                attr_prefix="source_video",
+                extra={
+                    "relative_path": member["relative_path"],
+                    "clip_id": member["clip_id"],
+                    "clip_index": clip_index,
+                    "camera_id": camera_id,
+                    "width": member["width"],
+                    "height": member["height"],
+                    "fps": member["fps"],
+                    "frame_count": frame_count,
+                    "codec": member["codec"],
+                    "pix_fmt": member["pix_fmt"],
+                },
+            )
+        except (KeyError, OSError) as exc:
+            raise ClippedVideoCollectionEvidenceError(
+                f"Cannot fingerprint live {label}: {exc}"
+            ) from exc
+        live_identity = {
+            "strategy": fingerprint["source_video_fingerprint_strategy"],
+            "value": fingerprint["source_video_fingerprint"],
+            "size_bytes": fingerprint["source_video_size_bytes"],
+            "mtime_ns": fingerprint["source_video_mtime_ns"],
+            "relocation_stable": False,
+        }
+        if member.get("file_fingerprint") != live_identity:
+            raise ClippedVideoCollectionEvidenceError(
+                f"Live {label} differs from its persisted stat_v1 fingerprint."
+            )
+        member_paths.append(path)
+    if expected_start != metadata.get("total_frames"):
+        raise ClippedVideoCollectionEvidenceError(
+            "Clipped collection coverage differs from source total_frames."
+        )
+    collection_sha256 = collection.get("collection_sha256")
+    if type(collection_sha256) is not str or len(collection_sha256) != 64:
+        raise ClippedVideoCollectionEvidenceError(
+            "Clipped collection digest is missing or malformed."
+        )
+    return VerifiedClippedVideoCollectionFiles(
+        recording_dir=recording,
+        index_paths=index_paths,
+        member_paths=tuple(member_paths),
+        collection_sha256=collection_sha256,
+    )
 
 
 def _clip_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -460,11 +668,14 @@ def clipped_video_collection_summary(metadata: Mapping[str, Any]) -> dict[str, A
 
 
 __all__ = [
+    "ClippedVideoCollectionEvidenceError",
     "SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY",
     "SOURCE_VIDEO_COLLECTION_LAYOUT",
     "SOURCE_VIDEO_COLLECTION_LOCATOR_KIND",
     "SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID",
     "SOURCE_VIDEO_COLLECTION_SCHEMA_ID",
+    "VerifiedClippedVideoCollectionFiles",
     "build_clipped_video_collection_metadata",
     "clipped_video_collection_summary",
+    "verify_clipped_video_collection_live_files",
 ]

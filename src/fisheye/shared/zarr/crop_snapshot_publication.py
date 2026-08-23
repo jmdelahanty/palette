@@ -1,7 +1,7 @@
 """Publish one selector-ineligible geometry-only crop production candidate.
 
 The future-facing path binds the approved refined-detection authority and its
-published source-video authority, materializes a complete immutable run on
+published source-pixel authority, materializes a complete immutable run on
 node-local scratch, validates it, atomically imports the run into the recording
 archive, reconsolidates archive metadata, and validates the imported run again.
 It deliberately does not update a selector, registry, or production default.
@@ -78,7 +78,7 @@ from fisheye.shared.zarr_run_completion import (
 
 
 CROP_SNAPSHOT_PUBLICATION_SCHEMA_ID = "palette.crop_geometry.production_publication"
-CROP_SNAPSHOT_PUBLICATION_SCHEMA_VERSION = 1
+CROP_SNAPSHOT_PUBLICATION_SCHEMA_VERSION = 2
 CROP_SNAPSHOT_PUBLICATION_POLICY = (
     "node_local_v1_materialization_then_atomic_selector_ineligible_import_v1"
 )
@@ -308,6 +308,7 @@ def _rebind_authorities(
             archive,
             run_id=source.run_id,
             allow_selector_ineligible_benchmark=True,
+            allow_mutable_archive_direct_metadata=True,
         )
         if explicit_refined_source
         else bind_refined_detection_crop_source(archive)
@@ -319,6 +320,70 @@ def _rebind_authorities(
             "Bound source-pixel camera identity changed during publication."
         )
     return observed
+
+
+def _registered_gate_source_allows_selector_ineligible(
+    *,
+    archive: Path,
+    source: BoundRefinedDetectionCropSource,
+    gate_evidence: Mapping[str, Any],
+) -> bool:
+    """Select the strict raw-detection authority mode from persisted lineage."""
+
+    source_identity = source.manifest["payload"].get("source_detection")
+    if not isinstance(source_identity, Mapping) or (
+        source_identity.get("authority_kind") != "canonical_run"
+    ):
+        raise RuntimeError(
+            "Finalized refined source lacks one canonical raw-detection identity."
+        )
+    run_id = str(source_identity.get("run_id") or "").strip()
+    expected_path = f"detect_runs/{run_id}"
+    evidence_path = str(
+        gate_evidence.get("source_detection_group_path")
+        or gate_evidence.get("source_detection_path")
+        or ""
+    ).strip()
+    if not run_id or evidence_path != expected_path:
+        raise RuntimeError(
+            "Finalized refined and registered-gate raw-detection identities differ."
+        )
+
+    root = open_zarr_root(archive, mode="r", use_consolidated=False)
+    try:
+        detection = root[expected_path]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Finalized refined raw-detection source is missing: {expected_path}"
+        ) from exc
+    manifest = detection.attrs.get("run_manifest")
+    if not isinstance(manifest, Mapping) or (
+        manifest.get("payload_digest")
+        != source_identity.get("run_manifest_digest")
+    ):
+        raise RuntimeError(
+            "Finalized refined raw-detection manifest identity changed."
+        )
+    payload = manifest.get("payload")
+    publication = payload.get("publication") if isinstance(payload, Mapping) else None
+    manifest_eligible = (
+        publication.get("stage_selector_eligible")
+        if isinstance(publication, Mapping)
+        else None
+    )
+    run_eligible = detection.attrs.get("stage_selector_eligible")
+    if manifest_eligible is True and run_eligible is True:
+        return False
+    if (
+        manifest_eligible is False
+        and run_eligible is False
+        and detection.attrs.get("production_candidate") is True
+    ):
+        return True
+    raise RuntimeError(
+        "Finalized refined raw-detection source is neither an active authority "
+        "nor an exact selector-ineligible production candidate."
+    )
 
 
 def _mark_local_production_candidate(
@@ -519,6 +584,7 @@ def publish_crop_geometry_production_candidate(
             archive,
             run_id=str(source_refined_run_id).strip(),
             allow_selector_ineligible_benchmark=True,
+            allow_mutable_archive_direct_metadata=True,
         )
         if explicit_refined_source
         else bind_refined_detection_crop_source(archive)
@@ -576,6 +642,13 @@ def publish_crop_geometry_production_candidate(
                     "Applied registered geometry requires an explicit current-gate "
                     "validator at the crop publication boundary."
                 )
+            allow_selector_ineligible_gate_source = (
+                _registered_gate_source_allows_selector_ineligible(
+                    archive=archive,
+                    source=source,
+                    gate_evidence=gate_evidence,
+                )
+            )
             current_gate = registered_gate_validator(
                 archive,
                 source_group_path=str(
@@ -588,8 +661,10 @@ def publish_crop_geometry_production_candidate(
                     source.arrays["source_detections/instance_key"][...],
                     dtype=np.uint64,
                 ),
-                require_comparison_bound_selection=True,
-                allow_selector_ineligible_source=explicit_refined_source,
+                require_modern_operational_selection=True,
+                allow_selector_ineligible_source=(
+                    allow_selector_ineligible_gate_source
+                ),
             )
             current_gate.pop("inside", None)
             mismatched = [
@@ -861,7 +936,16 @@ def publish_crop_geometry_production_candidate(
                 gate_evidence is not None and gate_evidence.get("applied") is True
             ),
             "source_pixel_authority_digest": pixels.binding_document_digest,
-            "source_video_path": str(pixels.source_video_path),
+            "source_video_path": (
+                None
+                if pixels.source_video_path is None
+                else str(pixels.source_video_path)
+            ),
+            "source_video_paths": [str(item) for item in pixels.source_video_paths],
+            "source_index_paths": [str(item) for item in pixels.source_index_paths],
+            "source_pixel_provider_profile": pixels.binding_document[
+                "provider_profile"
+            ],
             "geometry_origin_binding": origin_binding,
             "storage_profile_id": profile.profile_id,
             "selector_eligible": False,

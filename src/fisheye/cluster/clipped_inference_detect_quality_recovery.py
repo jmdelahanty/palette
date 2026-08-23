@@ -18,6 +18,7 @@ from fisheye.cluster.clipped_inference import (
     FAMILY,
     PLAN_SCHEMA,
     SUPPORTED_PLAN_SCHEMAS,
+    assignment_keypoint_binding,
     build_ssh_bsub_runner,
 )
 from fisheye.cluster.clipped_inference_keypoint_recovery import (
@@ -265,12 +266,18 @@ def _preflight(
             zarr_path / "experiment_index" / "finalized_runs" / str(target["collection_id"]),
             zarr_path / "crop_runs" / str(target["merged_proxy_crop_run"]),
             zarr_path / "keypoints_runs" / str(target["keypoint_run"]),
-            zarr_path / "refined_keypoints_runs" / str(target["refined_keypoint_run"]),
             zarr_path / "refined_subject_masks_runs" / str(target["refined_subject_mask_run"]),
             Path(str(target["cache_dir"])),
             Path(str(target["package_dir"])),
         ]
     )
+    assignment_group, assignment_run = assignment_keypoint_binding(target)
+    if assignment_group == "refined_keypoints_runs":
+        planned_outputs.append(
+            zarr_path
+            / "refined_keypoints_runs"
+            / assignment_run
+        )
     collisions = [str(path) for path in planned_outputs if path.exists()]
     if collisions:
         raise FileExistsError(

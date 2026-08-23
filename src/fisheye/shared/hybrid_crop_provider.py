@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -51,6 +51,10 @@ _CONTENT_COMPONENTS: tuple[tuple[str, Any, tuple[int, ...]], ...] = (
     ("source_refined_row_ids", np.int64, ()),
     ("supplemental_cache_row_indices", np.int64, ()),
 )
+_COLLECTION_CONTENT_COMPONENTS: tuple[tuple[str, Any, tuple[int, ...]], ...] = (
+    ("source_crop_video_member_indices", np.int32, ()),
+    ("source_full_video_member_indices", np.int32, ()),
+)
 
 
 @dataclass(frozen=True)
@@ -76,9 +80,95 @@ class HybridCropProviderIdentity:
 
 def _require_sha256(value: object, *, label: str) -> str:
     digest = str(value).strip()
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
         raise ValueError(f"{label} must be a lowercase SHA-256 digest.")
     return digest
+
+
+def _require_positive_dimension(value: object, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a positive integer.")
+    try:
+        dimension = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer.") from exc
+    if dimension <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return dimension
+
+
+def resolve_hybrid_crop_source_frame_shape(
+    group: Any,
+    *,
+    run_id: str,
+) -> tuple[int, int] | None:
+    """Return signed hybrid source dimensions as ``(height, width)``.
+
+    Non-hybrid crop runs return ``None``. A run that claims either half of the
+    hybrid identity must satisfy the complete provider-record contract, and its
+    top-level dimension authority must exactly match the canonical signed
+    record before dimensions are exposed to a consumer.
+    """
+
+    attrs = group.attrs
+    schema_id = str(attrs.get("schema_id") or "")
+    source_pixels = str(attrs.get("source_pixels") or "")
+    hybrid_source = SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME
+    if schema_id != HYBRID_CROP_RUN_SCHEMA_ID and source_pixels != hybrid_source:
+        return None
+    if schema_id != HYBRID_CROP_RUN_SCHEMA_ID or source_pixels != hybrid_source:
+        raise ValueError("Hybrid crop run identity is incomplete.")
+
+    provider_digest = _require_sha256(
+        attrs.get("provider_record_sha256"),
+        label="provider_record_sha256",
+    )
+    record = attrs.get("provider_record")
+    if not isinstance(record, Mapping):
+        raise ValueError("Hybrid crop run lacks its provider_record object.")
+    if canonical_json_sha256(record) != provider_digest:
+        raise ValueError("Hybrid crop run provider_record digest is invalid.")
+    if (
+        record.get("schema_id") != "palette.roi_pixel_provider_record.v1"
+        or record.get("schema_version") != 1
+    ):
+        raise ValueError("Hybrid crop run provider_record schema is unsupported.")
+    if str(record.get("crop_run") or "") != str(run_id):
+        raise ValueError("Hybrid crop run provider_record binds a different run.")
+
+    authority = attrs.get("source_full_frame_shape_authority")
+    record_authority = record.get("frame_shape_authority")
+    if not isinstance(authority, Mapping) or not isinstance(
+        record_authority, Mapping
+    ):
+        raise ValueError("Hybrid crop run lacks signed full-frame shape authority.")
+    if dict(authority) != dict(record_authority):
+        raise ValueError(
+            "Hybrid crop run full-frame shape authority differs from its signed record."
+        )
+    height = _require_positive_dimension(
+        authority.get("height"), label="Hybrid source height"
+    )
+    width = _require_positive_dimension(
+        authority.get("width"), label="Hybrid source width"
+    )
+    frame_shape = record.get("frame_shape")
+    if (
+        not isinstance(frame_shape, Sequence)
+        or isinstance(frame_shape, (str, bytes))
+        or len(frame_shape) != 2
+        or [
+            _require_positive_dimension(frame_shape[0], label="Hybrid frame height"),
+            _require_positive_dimension(frame_shape[1], label="Hybrid frame width"),
+        ]
+        != [height, width]
+    ):
+        raise ValueError(
+            "Hybrid crop run frame_shape differs from its signed dimension authority."
+        )
+    return height, width
 
 
 def _content_arrays(
@@ -98,6 +188,23 @@ def _content_arrays(
                 f"{expected}, got {values.shape}."
             )
         content[name] = values
+    collection_names = [name for name, _dtype, _shape in _COLLECTION_CONTENT_COMPONENTS]
+    collection_present = [name in arrays for name in collection_names]
+    if any(collection_present) and not all(collection_present):
+        raise ValueError(
+            "Hybrid collection provider identity requires both crop-video and "
+            "full-video member index arrays."
+        )
+    if all(collection_present):
+        for name, dtype, trailing_shape in _COLLECTION_CONTENT_COMPONENTS:
+            values = np.asarray(arrays[name], dtype=dtype)
+            expected = (row_count, *trailing_shape)
+            if tuple(values.shape) != expected:
+                raise ValueError(
+                    f"Hybrid crop provider identity {name!r} must have shape "
+                    f"{expected}, got {values.shape}."
+                )
+            content[name] = values
     return content
 
 
@@ -193,20 +300,41 @@ def validate_hybrid_crop_signed_identity(
     )
     if str(group.attrs.get("schema_id") or "") != HYBRID_CROP_RUN_SCHEMA_ID:
         raise ValueError("Hybrid crop run schema identity is incompatible.")
-    if str(group.attrs.get("source_pixels") or "") != SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME:
+    if (
+        str(group.attrs.get("source_pixels") or "")
+        != SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME
+    ):
         raise ValueError("Hybrid crop run source-pixel identity is incompatible.")
     if str(group.attrs.get("provider_record_sha256") or "") != expected_provider:
-        raise ValueError("Hybrid crop signed identity binds a different provider record.")
+        raise ValueError(
+            "Hybrid crop signed identity binds a different provider record."
+        )
 
     routing_policy = str(group.attrs.get("source_pixel_routing_policy") or "").strip()
     crop_policy = str(group.attrs.get("crop_policy_id") or "").strip()
-    required_arrays = ("instance_key", "source_row_signature", *[item[0] for item in _CONTENT_COMPONENTS])
+    required_arrays = (
+        "instance_key",
+        "source_row_signature",
+        *[item[0] for item in _CONTENT_COMPONENTS],
+    )
     missing = [name for name in required_arrays if name not in group]
     if missing:
         raise ValueError(
             "Hybrid crop signed identity lacks required arrays: " + ", ".join(missing)
         )
-    arrays = {name: group[name][:] for name in required_arrays if name != "source_row_signature"}
+    arrays = {
+        name: group[name][:]
+        for name in required_arrays
+        if name != "source_row_signature"
+    }
+    collection_names = [name for name, _dtype, _shape in _COLLECTION_CONTENT_COMPONENTS]
+    collection_present = [name in group for name in collection_names]
+    if any(collection_present) and not all(collection_present):
+        raise ValueError(
+            "Hybrid collection signed identity has an incomplete member-index binding."
+        )
+    if all(collection_present):
+        arrays.update({name: group[name][:] for name in collection_names})
     identity = build_hybrid_crop_provider_identity(
         arrays,
         provider_record_sha256=expected_provider,
@@ -259,5 +387,6 @@ __all__ = [
     "HYBRID_CROP_SIGNATURE_SCHEMA_VERSION",
     "HybridCropProviderIdentity",
     "build_hybrid_crop_provider_identity",
+    "resolve_hybrid_crop_source_frame_shape",
     "validate_hybrid_crop_signed_identity",
 ]

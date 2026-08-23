@@ -603,6 +603,22 @@ def test_manual_palette_selection_is_explicit_and_gate_ready(
     assert gate_plan.selection_record["schema_version"] == (
         selection.MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION
     )
+    gate.publish_registered_detection_gate(
+        gate_plan,
+        scratch_root=tmp_path / "manual-gate-scratch",
+    )
+    consumed = gate.validate_registered_detection_gate_consumption(
+        archive,
+        source_group_path=source,
+        gate_run=gate_plan.output_run,
+        expected_instance_keys=np.asarray([10, 20, 30], dtype=np.uint64),
+        require_modern_operational_selection=True,
+    )
+    assert consumed["selection_record_schema_version"] == (
+        selection.MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION
+    )
+    assert consumed["selection_decision_source"] == "manual_review"
+    assert consumed["comparison_run"] is None
 
     tampered = {
         **record,

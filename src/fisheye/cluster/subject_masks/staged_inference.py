@@ -52,8 +52,10 @@ def _write_receipt(path: Path, payload: dict[str, object]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--roi-cache-manifest", required=True, type=Path)
-    parser.add_argument("--roi-cache-staging-dir", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--roi-cache-manifest", type=Path)
+    source.add_argument("--direct-crop-provider", action="store_true")
+    parser.add_argument("--roi-cache-staging-dir", type=Path)
     parser.add_argument("--worker-receipt-json", required=True, type=Path)
     return parser
 
@@ -156,6 +158,8 @@ def _completed_run_evidence(arguments: Sequence[str]) -> dict[str, object]:
         "attempt_payload_digest": attempt["payload_digest"],
         "scientific_identity_digest": science["digest"],
         "source_roi_pixels_sha256": run.attrs.get("source_roi_pixels_sha256"),
+        "source_crop_run": run.attrs.get("source_crop_run"),
+        "source_crop_signature": run.attrs.get("source_crop_signature"),
         "model_artifact_sha256": science["payload"]["model"].get("artifact_sha256"),
         "semantic_receipt_payload_digest": validated_receipt["payload_digest"],
         "semantic_receipt_document_sha256": binding["document_sha256"],
@@ -176,8 +180,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         != infer_unet_subject_masks.SUBJECT_MASK_SHARD_OUTPUT_PARENT
     ):
         raise ValueError(
-            "Staged cache inference requires --output-parent "
-            "subject_mask_shard_runs."
+            "Staged cache inference requires --output-parent subject_mask_shard_runs."
+        )
+    if args.roi_cache_manifest is not None and args.roi_cache_staging_dir is None:
+        raise ValueError(
+            "--roi-cache-staging-dir is required with --roi-cache-manifest."
+        )
+    if args.direct_crop_provider and inference_args.roi_cache_manifest is not None:
+        raise ValueError(
+            "--direct-crop-provider cannot forward a separate ROI cache manifest."
         )
     attempt_id = inference_args.attempt_id or str(uuid4())
     effective_forwarded = list(forwarded)
@@ -190,10 +201,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         "schema_version": WORKER_RECEIPT_SCHEMA_VERSION,
         "status": "running",
         "started_at_utc": started_at,
-        "source_roi_cache_manifest": str(
-            args.roi_cache_manifest.expanduser().resolve()
+        "pixel_source_mode": (
+            "direct_crop_provider"
+            if args.direct_crop_provider
+            else "staged_flat_roi_cache"
         ),
-        "staging_dir": str(args.roi_cache_staging_dir.expanduser().resolve()),
+        "source_roi_cache_manifest": (
+            str(args.roi_cache_manifest.expanduser().resolve())
+            if args.roi_cache_manifest is not None
+            else None
+        ),
+        "staging_dir": (
+            str(args.roi_cache_staging_dir.expanduser().resolve())
+            if args.roi_cache_staging_dir is not None
+            else None
+        ),
         "forwarded_arguments": list(effective_forwarded),
         "attempt_id": attempt_id,
         "lsb_jobid": os.environ.get("LSB_JOBID"),
@@ -201,24 +223,41 @@ def main(argv: Sequence[str] | None = None) -> None:
     }
     _write_receipt(args.worker_receipt_json, receipt)
     try:
-        staged_manifest, staging = stage_flat_roi_cache_manifest(
-            args.roi_cache_manifest,
-            staging_dir=args.roi_cache_staging_dir,
-        )
-        receipt["roi_cache_staging"] = staging
-        infer_unet_subject_masks.main(
-            [*effective_forwarded, "--roi-cache-manifest", str(staged_manifest)]
-        )
-        run_evidence = _completed_run_evidence(
-            [*effective_forwarded, "--roi-cache-manifest", str(staged_manifest)]
-        )
+        if args.roi_cache_manifest is not None:
+            assert args.roi_cache_staging_dir is not None
+            staged_manifest, staging = stage_flat_roi_cache_manifest(
+                args.roi_cache_manifest,
+                staging_dir=args.roi_cache_staging_dir,
+            )
+            receipt["roi_cache_staging"] = staging
+            effective_inference_args = [
+                *effective_forwarded,
+                "--roi-cache-manifest",
+                str(staged_manifest),
+            ]
+        else:
+            staging = None
+            effective_inference_args = list(effective_forwarded)
+        infer_unet_subject_masks.main(effective_inference_args)
+        run_evidence = _completed_run_evidence(effective_inference_args)
         if run_evidence["attempt_id"] != attempt_id:
             raise RuntimeError(
                 "Persisted subject-mask attempt differs from worker attempt."
             )
-        if run_evidence["source_roi_pixels_sha256"] != staging["copy"]["source_sha256"]:
+        if (
+            staging is not None
+            and run_evidence["source_roi_pixels_sha256"]
+            != staging["copy"]["source_sha256"]
+        ):
             raise RuntimeError(
                 "Persisted subject-mask pixel identity differs from staged cache."
+            )
+        if (
+            args.direct_crop_provider
+            and run_evidence["source_crop_run"] != inference_args.crop_run
+        ):
+            raise RuntimeError(
+                "Persisted subject-mask source differs from the direct crop provider."
             )
         receipt.update(
             {

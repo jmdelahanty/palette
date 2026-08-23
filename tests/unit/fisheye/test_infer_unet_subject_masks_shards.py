@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 import inspect
 from pathlib import Path
 import textwrap
@@ -11,6 +12,10 @@ import zarr
 from fisheye.segmentation import infer_unet_subject_masks as mod
 import fisheye.shared.subject_mask_coordinate_publication as publication_module
 from fisheye.shared.run_provenance import build_writer_run_provenance
+from fisheye.shared.subject_mask_attempt import (
+    build_subject_mask_attempt,
+    build_subject_mask_scientific_identity,
+)
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR, mark_run_complete
 
 
@@ -20,6 +25,54 @@ def _provenance(output_parent: str) -> dict[str, object]:
         params={"output_parent": output_parent},
         input_run_ids={"crop": "crop_001"},
     )
+
+
+def test_subject_mask_lineage_retries_transient_stale_parent_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StaleParent(dict[str, object]):
+        path = "subject_mask_shard_runs"
+        key_calls = 0
+
+        def keys(self):
+            self.key_calls += 1
+            if self.key_calls < 3:
+                raise OSError(errno.ESTALE, "stale file handle")
+            return super().keys()
+
+    science = build_subject_mask_scientific_identity(
+        stage_kind="raw_subject_mask",
+        model={"artifact_sha256": "a" * 64},
+        crop={"run_id": "crop"},
+        pixels={"decoded_pixels_sha256": "b" * 64},
+        row_identity={"instance_key_sha256": "c" * 64},
+        inference_contract={"label_schema_id": "subject_v1_union"},
+        schema_version=1,
+    )
+    attempt = build_subject_mask_attempt(
+        scientific_identity=science,
+        run_path="subject_mask_shard_runs/candidate",
+    )
+    parent = StaleParent()
+    sleeps: list[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+
+    evidence = mod._resolve_subject_mask_attempt_lineage(
+        parent=parent,
+        current_run_name="candidate",
+        scientific_identity=science,
+        attempt=attempt,
+        retry_of_attempt_id=None,
+        supersedes_run=None,
+    )
+
+    assert evidence == {
+        "retry_of": None,
+        "supersedes": None,
+        "lineage_policy": "explicit_terminal_sibling_binding_v1",
+    }
+    assert parent.key_calls == 3
+    assert sleeps == [0.1, 0.25]
 
 
 def test_prepare_subject_mask_shard_run_does_not_touch_canonical_parent(tmp_path: Path) -> None:

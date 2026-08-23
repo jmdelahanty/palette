@@ -65,6 +65,7 @@ from ..shared.subject_mask_attempt import (
     validate_subject_mask_attempt,
     validate_subject_mask_scientific_identity,
 )
+from ..shared.transient_io import retry_read_only_estale
 from ..shared.subject_mask_worker_receipt import (
     RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     build_subject_mask_worker_semantic_receipt,
@@ -152,9 +153,7 @@ MASK_PROBS_DIRECT_SHARDING_SCHEMA = (
     "palette.subject_mask_probability_double_buffered_shards.v1"
 )
 MASK_PROBS_DESTINATION_VALIDATION_FULL = "full_decoded_reread_v1"
-MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT = (
-    "receipt_bound_final_layout_unit_v1"
-)
+MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT = "receipt_bound_final_layout_unit_v1"
 MASK_PROBS_DESTINATION_VALIDATION_MODES = (
     MASK_PROBS_DESTINATION_VALIDATION_FULL,
     MASK_PROBS_DESTINATION_VALIDATION_FINAL_LAYOUT,
@@ -252,7 +251,7 @@ def _restore_owned_subject_mask_selectors(
                 failures.append(f"{name}: {exc}")
     if failures:
         raise RuntimeError(
-            "Subject-mask owned selector rollback was incomplete: " f"{failures!r}."
+            f"Subject-mask owned selector rollback was incomplete: {failures!r}."
         )
 
 
@@ -1536,8 +1535,7 @@ def _require_complete_recording_work_unit_attrs(
     units = document.get("units") if isinstance(document, Mapping) else None
     if (
         not isinstance(document, Mapping)
-        or document.get("schema_id")
-        != "palette.subject_mask.expected_work_units"
+        or document.get("schema_id") != "palette.subject_mask.expected_work_units"
         or document.get("schema_version") != 1
         or not isinstance(units, list)
         or len(units) != 1
@@ -1580,8 +1578,7 @@ def _require_complete_recording_work_unit_attrs(
         )
     if (
         required_arguments["source_collection_path"] != str(manifest_path)
-        or required_arguments["source_collection_id"]
-        != unit.get("source_clip_id")
+        or required_arguments["source_collection_id"] != unit.get("source_clip_id")
         or required_arguments["source_clip_id"] != unit.get("source_clip_id")
         or required_arguments["source_clip_index"] != unit.get("source_clip_index")
         or required_arguments["source_work_unit_id"] != unit.get("work_unit_id")
@@ -1610,9 +1607,7 @@ def _require_complete_recording_work_unit_attrs(
         raise ValueError(
             "Recording work-unit inference requires crop frame_row_offsets."
         )
-    offsets = np.asarray(crop_group["frame_row_offsets"][:], dtype=np.int64).reshape(
-        -1
-    )
+    offsets = np.asarray(crop_group["frame_row_offsets"][:], dtype=np.int64).reshape(-1)
     n_frames = int(offsets.size - 1)
     if (
         offsets.ndim != 1
@@ -1641,9 +1636,7 @@ def _require_complete_recording_work_unit_attrs(
     pixel_manifest = _source_pixel_manifest(crop_source)
     array = pixel_manifest.get("array") if isinstance(pixel_manifest, Mapping) else None
     cache_key = (
-        pixel_manifest.get("cache_key")
-        if isinstance(pixel_manifest, Mapping)
-        else None
+        pixel_manifest.get("cache_key") if isinstance(pixel_manifest, Mapping) else None
     )
     array_sha256 = array.get("sha256") if isinstance(array, Mapping) else None
     array_shape = array.get("shape") if isinstance(array, Mapping) else None
@@ -1658,11 +1651,14 @@ def _require_complete_recording_work_unit_attrs(
         or not isinstance(array_sha256, str)
         or len(array_sha256) != 64
         or any(
-            character not in "0123456789abcdef"
-            for character in array_sha256.lower()
+            character not in "0123456789abcdef" for character in array_sha256.lower()
         )
         or array_shape
-        != [crop_row_count, int(crop_source.roi_shape[0]), int(crop_source.roi_shape[1])]
+        != [
+            crop_row_count,
+            int(crop_source.roi_shape[0]),
+            int(crop_source.roi_shape[1]),
+        ]
     ):
         raise ValueError(
             "Recording work-unit inference requires one complete authenticated flat ROI cache."
@@ -1733,9 +1729,7 @@ def _roi_work_package_publication_attrs(
     total_rois: int,
     args: argparse.Namespace,
 ) -> dict[str, object]:
-    expected_work_units_manifest = getattr(
-        args, "expected_work_units_manifest", None
-    )
+    expected_work_units_manifest = getattr(args, "expected_work_units_manifest", None)
     package_id = getattr(crop_source, "pixel_materialization_id", None)
     if expected_work_units_manifest is not None:
         if (
@@ -1965,7 +1959,7 @@ def _subject_mask_scientific_documents(
     )
 
 
-def _resolve_subject_mask_attempt_lineage(
+def _resolve_subject_mask_attempt_lineage_once(
     *,
     parent: zarr.Group,
     current_run_name: str,
@@ -2070,6 +2064,30 @@ def _resolve_subject_mask_attempt_lineage(
         "supersedes": supersedes_evidence,
         "lineage_policy": "explicit_terminal_sibling_binding_v1",
     }
+
+
+def _resolve_subject_mask_attempt_lineage(
+    *,
+    parent: zarr.Group,
+    current_run_name: str,
+    scientific_identity: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    retry_of_attempt_id: str | None,
+    supersedes_run: str | None,
+) -> dict[str, object]:
+    """Retry read-only sibling discovery across transient NFS ESTALE faults."""
+
+    return retry_read_only_estale(
+        lambda: _resolve_subject_mask_attempt_lineage_once(
+            parent=parent,
+            current_run_name=current_run_name,
+            scientific_identity=scientific_identity,
+            attempt=attempt,
+            retry_of_attempt_id=retry_of_attempt_id,
+            supersedes_run=supersedes_run,
+        ),
+        sleep=time.sleep,
+    )
 
 
 def _subject_mask_stage_path(
@@ -2604,9 +2622,7 @@ def _write_subject_mask_outputs(
     validation_accumulators: (
         Mapping[str, SubjectMaskArrayUnitAccumulator] | None
     ) = None,
-    mask_probs_destination_validation: str = (
-        MASK_PROBS_DESTINATION_VALIDATION_FULL
-    ),
+    mask_probs_destination_validation: str = (MASK_PROBS_DESTINATION_VALIDATION_FULL),
 ) -> float:
     total_rois = int(roi_source.total_rois)
     height, width = map(int, roi_source.roi_shape)
@@ -2629,10 +2645,7 @@ def _write_subject_mask_outputs(
                 "--mask-probs-shard-rois must exceed and be an integer multiple of "
                 f"the effective inner chunk rows ({int(storage_chunks[0])}); got {shard_rows}."
             )
-    elif (
-        mask_probs_destination_validation
-        != MASK_PROBS_DESTINATION_VALIDATION_FULL
-    ):
+    elif mask_probs_destination_validation != MASK_PROBS_DESTINATION_VALIDATION_FULL:
         raise ValueError(
             "Deferred probability destination validation requires indexed sharding."
         )
@@ -3146,6 +3159,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "archive is the original recording zarr."
         ),
     )
+    parser.add_argument("--source-crop-row-start", type=int, default=None)
+    parser.add_argument("--source-crop-row-stop", type=int, default=None)
     parser.add_argument(
         "--roi-live-acceleration",
         choices=("auto", "cpu", "gpu"),
@@ -3315,9 +3330,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "--expected-work-units-manifest is mutually exclusive with crop "
             "work-package inference."
         )
-    if (
-        args.expected_work_units_manifest is not None
-        and not _is_shard_output_parent(output_parent)
+    if args.expected_work_units_manifest is not None and not _is_shard_output_parent(
+        output_parent
     ):
         raise ValueError(
             "Recording work-unit inference may write only to "
@@ -3327,9 +3341,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         args.expected_work_units_manifest is not None
         and args.roi_cache_manifest is None
     ):
-        raise ValueError(
-            "Recording work-unit inference requires --roi-cache-manifest."
-        )
+        raise ValueError("Recording work-unit inference requires --roi-cache-manifest.")
     if args.roi_work_package_manifest is not None and not _is_shard_output_parent(
         output_parent
     ):
@@ -3337,6 +3349,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "Crop pixel work packages may write only to subject_mask_shard_runs; "
             "finalize shards before publishing a canonical subject-mask run."
         )
+    if (args.source_crop_row_start is None) != (args.source_crop_row_stop is None):
+        raise ValueError(
+            "--source-crop-row-start and --source-crop-row-stop must be provided together."
+        )
+    if args.source_crop_row_start is not None:
+        if (
+            args.roi_cache_manifest is not None
+            or args.roi_work_package_manifest is not None
+        ):
+            raise ValueError(
+                "Direct crop-row partitions cannot be combined with ROI cache or work-package manifests."
+            )
+        if not _is_shard_output_parent(output_parent):
+            raise ValueError(
+                "Direct crop-row partitions may write only subject_mask_shard_runs outputs."
+            )
     if (
         args.roi_work_package_role is not None
         and args.roi_work_package_manifest is None
@@ -3477,6 +3505,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             roi_cache_dir=args.roi_cache_dir,
             roi_cache_manifest=args.roi_cache_manifest,
             roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
+            source_crop_row_start=args.source_crop_row_start,
+            source_crop_row_stop=args.source_crop_row_stop,
             console=console,
         )
     if args.geometry_crop_run is not None:

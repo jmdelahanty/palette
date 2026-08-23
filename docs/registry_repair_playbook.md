@@ -507,9 +507,16 @@ sqlite3 "$REG" "
 "
 ```
 
+Run the runtime-bound complete SQLite acceptance gate after the transaction:
+
 ```bash
-sqlite3 -header -column "$REG" "PRAGMA foreign_key_check;"
+scripts/py -m fisheye.utils.registry_integrity \
+  --registry "$REG" \
+  --result-json /path/to/registry_integrity.json
 ```
+
+Do not use a separately installed `sqlite3` binary as acceptance evidence; it
+may embed a different SQLite engine from the one used by Palette writers.
 
 ### Phase D: Rewrite `training_sets.dataset_ids_json`
 

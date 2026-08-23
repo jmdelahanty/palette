@@ -79,6 +79,32 @@ def test_required_crop_fragment_binds_exact_finalized_gate_authority(
     assert "--registered-gate-run gate_001" in command
 
 
+def test_crop_fragment_can_bind_signed_hybrid_provider_and_derive_authorities(
+    tmp_path: Path,
+) -> None:
+    values = _inputs(tmp_path, family="analysis.clipped")
+    module = build_crop_snapshot_fragment(
+        CropSnapshotFragmentInputs(
+            **{
+                **values.__dict__,
+                "roi_width": None,
+                "roi_height": None,
+                "source_refined_run": "refined_final",
+                "registered_gate_requirement": "from_source",
+                "geometry_origin_provider_run": "crop_hybrid_provider",
+                "roi_size_from_geometry_origin_provider": True,
+            }
+        )
+    )
+
+    command = " ".join(module.fragment.jobs[0].command)
+    assert "--geometry-origin-provider-run crop_hybrid_provider" in command
+    assert "--roi-size-from-geometry-origin-provider" in command
+    assert "--registered-gate-requirement from_source" in command
+    assert "--roi-width" not in command
+    assert "--roi-height" not in command
+
+
 def test_crop_candidate_cli_builds_fixed_policy_and_writes_receipt(
     monkeypatch,
     tmp_path: Path,
@@ -125,6 +151,56 @@ def test_crop_candidate_cli_builds_fixed_policy_and_writes_receipt(
     assert policy.fixed_size_wh == (512, 384)
     assert policy.padding_mode is CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME
     assert captured["expected_camera_identity"] == "2010093"
+
+
+def test_crop_candidate_cli_derives_provider_size_and_source_gate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        cli, "_fixed_signed_provider_roi_size", lambda *_a, **_k: (384, 320)
+    )
+    monkeypatch.setattr(
+        cli,
+        "_registered_gate_from_source",
+        lambda *_a, **_k: ("required", "gate_exact"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "publish_crop_geometry_production_candidate",
+        lambda **kwargs: captured.update(kwargs) or {"status": "complete"},
+    )
+
+    exit_code = cli.main(
+        [
+            "--analysis-zarr",
+            str(tmp_path / "analysis.zarr"),
+            "--run-id",
+            "crop_a",
+            "--purpose",
+            "subject_masks",
+            "--camera-id",
+            "2010093",
+            "--source-refined-run",
+            "refined_final",
+            "--registered-gate-requirement",
+            "from_source",
+            "--geometry-origin-provider-run",
+            "crop_hybrid_provider",
+            "--roi-size-from-geometry-origin-provider",
+            "--scratch-root",
+            str(tmp_path / "scratch"),
+            "--result-json",
+            str(tmp_path / "result.json"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["policy"].fixed_size_wh == (384, 320)
+    assert captured["registered_gate_requirement"] == "required"
+    assert captured["registered_gate_run"] == "gate_exact"
+    assert captured["geometry_origin_provider_run_id"] == "crop_hybrid_provider"
 
 
 def test_crop_candidate_cli_defaults_to_shared_zebrafish_size_and_zero_padding(

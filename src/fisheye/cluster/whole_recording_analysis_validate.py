@@ -21,13 +21,19 @@ from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
 from fisheye.shared.zarr.subject_mask_bundle_publication import (
     validate_subject_mask_bundle_candidate,
 )
+from fisheye.shared.zarr.subject_mask_schema import (
+    SUBJECT_V1_LR_COMPONENT_SCHEMA,
+    SUBJECT_V1_UNION_COMPONENT_SCHEMA,
+    SubjectMaskComponentSchema,
+    resolve_subject_mask_component_schema,
+)
 from fisheye.utils.validate_refined_subject_mask_contract import (
     validate_refined_subject_mask_contract,
 )
 
-REPORT_SCHEMA = "palette.whole_recording_analysis_validation.v1"
-RAW_LABELS = ("subject_body", "eyes_union", "swim_bladder")
-REFINED_LABELS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
+REPORT_SCHEMA = "palette.whole_recording_analysis_validation.v2"
+RAW_LABELS = SUBJECT_V1_UNION_COMPONENT_SCHEMA.labels
+REFINED_LABELS = SUBJECT_V1_LR_COMPONENT_SCHEMA.labels
 
 
 def _labels(value: object) -> tuple[str, ...]:
@@ -55,6 +61,191 @@ def _read_rows(array: Any, row_indices: np.ndarray) -> np.ndarray:
     return np.asarray(array[selection_key])
 
 
+def _component_presence_report(
+    labels: tuple[str, ...],
+    present: np.ndarray,
+    *,
+    required_labels: tuple[str, ...],
+) -> dict[str, Any]:
+    required = set(required_labels)
+    unknown_required = required.difference(labels)
+    if unknown_required:
+        raise RuntimeError(
+            "Component presence policy references unknown labels: "
+            + ", ".join(sorted(unknown_required))
+        )
+    values = np.asarray(present, dtype=bool)
+    if values.shape != (len(labels),):
+        raise RuntimeError(
+            "Component presence summary has invalid shape: "
+            f"{values.shape!r} versus {(len(labels),)!r}."
+        )
+    missing_required = [
+        label
+        for label, is_present in zip(labels, values, strict=True)
+        if label in required and not bool(is_present)
+    ]
+    absent_optional = [
+        label
+        for label, is_present in zip(labels, values, strict=True)
+        if label not in required and not bool(is_present)
+    ]
+    return {
+        "status": "failed" if missing_required else "passed",
+        "required_components": [label for label in labels if label in required],
+        "optional_components": [label for label in labels if label not in required],
+        "missing_required_components": missing_required,
+        "absent_optional_components": absent_optional,
+    }
+
+
+def _mapping_attr(value: object) -> Mapping[str, Any] | None:
+    return value if isinstance(value, Mapping) else None
+
+
+def _component_presence_contract(
+    run: Any,
+) -> tuple[tuple[str, ...], SubjectMaskComponentSchema, dict[str, Any]]:
+    labels = _labels(run.attrs.get("mask_labels"))
+    if not labels:
+        raise RuntimeError("Subject-mask run is missing mask_labels.")
+
+    component_registry = _mapping_attr(run.attrs.get("component_registry"))
+    if component_registry is not None:
+        registry_labels = _labels(component_registry.get("labels"))
+        if registry_labels != labels:
+            raise RuntimeError(
+                "Subject-mask component_registry labels do not match mask_labels: "
+                f"{registry_labels!r} versus {labels!r}."
+            )
+
+    logical_schema = _mapping_attr(run.attrs.get("logical_schema"))
+    logical_components = (
+        _mapping_attr(logical_schema.get("components"))
+        if logical_schema is not None
+        else None
+    )
+    if logical_components is not None:
+        logical_labels = _labels(logical_components.get("labels"))
+        if logical_labels != labels:
+            raise RuntimeError(
+                "Subject-mask logical-schema components do not match mask_labels: "
+                f"{logical_labels!r} versus {labels!r}."
+            )
+
+    declared_schema_id = str(
+        normalize_attr(run.attrs.get("label_schema_id")) or ""
+    ).strip()
+    try:
+        schema = resolve_subject_mask_component_schema(
+            schema_id=declared_schema_id or None,
+            labels=labels,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    available_array = run.get("available_channels")
+    if available_array is None:
+        raise RuntimeError("Subject-mask run is missing available_channels.")
+    available = np.asarray(available_array[:])
+    if available.dtype != np.dtype(bool) or available.shape != (len(labels),):
+        raise RuntimeError(
+            "Subject-mask available_channels must be bool with shape "
+            f"{(len(labels),)!r}; got {available.dtype} {available.shape!r}."
+        )
+    unavailable_required = [
+        label
+        for label, is_available in zip(labels, available, strict=True)
+        if label in schema.required_labels and not bool(is_available)
+    ]
+    if unavailable_required:
+        raise RuntimeError(
+            "Required subject-mask schema components are marked unavailable: "
+            + ", ".join(unavailable_required)
+        )
+
+    schema_basis = "label_schema_id" if declared_schema_id else "exact_component_labels"
+    return (
+        labels,
+        schema,
+        {
+            **schema.as_manifest(),
+            "resolution_basis": schema_basis,
+            "available_channels": {
+                label: bool(value)
+                for label, value in zip(labels, available, strict=True)
+            },
+            "component_registry_present": component_registry is not None,
+            "logical_schema_components_present": logical_components is not None,
+        },
+    )
+
+
+def _component_completeness_report(
+    component_presence: Mapping[str, Any],
+    sample_presence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    failures = [
+        {
+            "code": "required_component_has_no_present_masks",
+            "scope": "all_rows",
+            "component": str(component),
+        }
+        for component in component_presence.get("missing_required_components", ())
+    ]
+    sample_observations = [
+        {
+            "code": "required_component_not_observed_in_uniform_sample",
+            "scope": "uniform_sample",
+            "component": str(component),
+        }
+        for component in (
+            sample_presence.get("missing_required_components", ())
+            if sample_presence is not None
+            else ()
+        )
+    ]
+    return {
+        "status": "failed" if failures else "passed",
+        "publication_blocking": False,
+        "failure_count": len(failures),
+        "failures": failures,
+        "sample_observation_count": len(sample_observations),
+        "sample_observations": sample_observations,
+    }
+
+
+def _aggregate_component_completeness(
+    entries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    failures: list[dict[str, Any]] = []
+    sample_observations: list[dict[str, Any]] = []
+    for entry in entries:
+        stage = str(entry.get("stage") or "")
+        clip_id = str(entry.get("clip_id") or "") or None
+        report = entry.get("report")
+        if not isinstance(report, Mapping):
+            raise TypeError("Component completeness entry is missing its report.")
+        completeness = report.get("component_completeness")
+        if not isinstance(completeness, Mapping):
+            raise TypeError("Mask report is missing component_completeness.")
+        context = {"stage": stage}
+        if clip_id is not None:
+            context["clip_id"] = clip_id
+        for finding in completeness.get("failures", ()):
+            failures.append({**context, **dict(finding)})
+        for finding in completeness.get("sample_observations", ()):
+            sample_observations.append({**context, **dict(finding)})
+    return {
+        "status": "failed" if failures else "passed",
+        "publication_blocking": False,
+        "failure_count": len(failures),
+        "failures": failures,
+        "sample_observation_count": len(sample_observations),
+        "sample_observations": sample_observations,
+    }
+
+
 def _require_complete_run(root: Any, parent_name: str, run_name: str) -> Any:
     parent = root.get(parent_name)
     if parent is None or run_name not in parent:
@@ -68,11 +259,7 @@ def _require_complete_run(root: Any, parent_name: str, run_name: str) -> Any:
 def _validate_raw_masks(
     root: Any, run: Any, *, run_name: str, sample_rows: int
 ) -> dict[str, Any]:
-    labels = _labels(run.attrs.get("mask_labels"))
-    if labels != RAW_LABELS:
-        raise RuntimeError(
-            f"Raw mask labels {labels!r} do not match expected {RAW_LABELS!r}."
-        )
+    labels, component_schema, schema_report = _component_presence_contract(run)
     probabilities = run.get("mask_probs_roi")
     if (
         probabilities is None
@@ -88,7 +275,7 @@ def _validate_raw_masks(
     if probabilities is None:
         raise RuntimeError("Raw run is missing mask_probs_roi.")
     shape = tuple(int(value) for value in probabilities.shape)
-    if len(shape) != 4 or shape[0] <= 0 or shape[1] != len(RAW_LABELS):
+    if len(shape) != 4 or shape[0] <= 0 or shape[1] != len(labels):
         raise RuntimeError(f"Invalid raw probability shape: {shape!r}.")
     if np.dtype(probabilities.dtype) != np.dtype(np.uint8):
         raise RuntimeError(
@@ -99,15 +286,11 @@ def _validate_raw_masks(
     component_max = sampled.reshape(sampled.shape[0], sampled.shape[1], -1).max(
         axis=(0, 2)
     )
-    if np.any(component_max <= 1):
-        raise RuntimeError(
-            "Sampled encoded probabilities are empty or binary for components: "
-            + ", ".join(
-                label
-                for label, maximum in zip(labels, component_max, strict=True)
-                if int(maximum) <= 1
-            )
-        )
+    sample_presence = _component_presence_report(
+        labels,
+        component_max > 1,
+        required_labels=component_schema.required_labels,
+    )
     metrics = run.get("metrics/mask_present")
     if metrics is None:
         raise RuntimeError("Raw run is missing metrics/mask_present.")
@@ -118,9 +301,13 @@ def _validate_raw_masks(
             f"{present.shape!r} versus {(shape[0], len(labels))!r}."
         )
     present_counts = present.sum(axis=0, dtype=np.int64)
-    if np.any(present_counts <= 0):
-        raise RuntimeError("At least one raw component has no present masks.")
+    component_presence = _component_presence_report(
+        labels,
+        present_counts > 0,
+        required_labels=component_schema.required_labels,
+    )
     return {
+        "component_schema": schema_report,
         "shape": list(shape),
         "dtype": str(np.dtype(probabilities.dtype)),
         "sample_indices": indices.tolist(),
@@ -132,20 +319,22 @@ def _validate_raw_masks(
             label: int(value)
             for label, value in zip(labels, present_counts, strict=True)
         },
+        "component_presence_policy": component_presence,
+        "sample_component_presence_policy": sample_presence,
+        "component_completeness": _component_completeness_report(
+            component_presence,
+            sample_presence,
+        ),
     }
 
 
 def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
-    labels = _labels(run.attrs.get("mask_labels"))
-    if labels != REFINED_LABELS:
-        raise RuntimeError(
-            f"Refined mask labels {labels!r} do not match expected {REFINED_LABELS!r}."
-        )
+    labels, component_schema, schema_report = _component_presence_contract(run)
     masks = run.get("masks_roi")
     if masks is None:
         raise RuntimeError("Refined run is missing authoritative dense masks_roi.")
     shape = tuple(int(value) for value in masks.shape)
-    if len(shape) != 4 or shape[0] <= 0 or shape[1] != len(REFINED_LABELS):
+    if len(shape) != 4 or shape[0] <= 0 or shape[1] != len(labels):
         raise RuntimeError(f"Invalid refined mask shape: {shape!r}.")
     if np.dtype(masks.dtype) != np.dtype(np.uint8):
         raise RuntimeError(f"Refined masks_roi dtype must be uint8, got {masks.dtype}.")
@@ -159,15 +348,11 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
     sampled_present = sampled.reshape(sampled.shape[0], sampled.shape[1], -1).any(
         axis=(0, 2)
     )
-    if not np.all(sampled_present):
-        raise RuntimeError(
-            "Sampled refined masks are empty for components: "
-            + ", ".join(
-                label
-                for label, is_present in zip(labels, sampled_present, strict=True)
-                if not bool(is_present)
-            )
-        )
+    sample_presence = _component_presence_report(
+        labels,
+        sampled_present,
+        required_labels=component_schema.required_labels,
+    )
     metrics = run.get("metrics/mask_present")
     if metrics is None:
         raise RuntimeError("Refined run is missing metrics/mask_present.")
@@ -178,9 +363,13 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
             f"{present.shape!r} versus {(shape[0], len(labels))!r}."
         )
     present_counts = present.sum(axis=0, dtype=np.int64)
-    if np.any(present_counts <= 0):
-        raise RuntimeError("At least one refined component has no present masks.")
+    component_presence = _component_presence_report(
+        labels,
+        present_counts > 0,
+        required_labels=component_schema.required_labels,
+    )
     return {
+        "component_schema": schema_report,
         "shape": list(shape),
         "dtype": str(np.dtype(masks.dtype)),
         "sample_indices": indices.tolist(),
@@ -193,6 +382,12 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
             label: int(value)
             for label, value in zip(labels, present_counts, strict=True)
         },
+        "component_presence_policy": component_presence,
+        "sample_component_presence_policy": sample_presence,
+        "component_completeness": _component_completeness_report(
+            component_presence,
+            sample_presence,
+        ),
         "authoritative_surface": "masks_roi",
     }
 
@@ -258,6 +453,22 @@ def _validate_target(
                 "Refined subject-mask contract validation failed: "
                 + json.dumps(contract.get("errors") or [], sort_keys=True)
             )
+    raw_report = _validate_raw_masks(
+        root,
+        subject_run,
+        run_name=subject_run_name,
+        sample_rows=sample_rows,
+    )
+    refined_report = _validate_refined_masks(
+        refined_run,
+        sample_rows=sample_rows,
+    )
+    component_completeness = _aggregate_component_completeness(
+        (
+            {"stage": "raw_subject_masks", "report": raw_report},
+            {"stage": "refined_subject_masks", "report": refined_report},
+        )
+    )
     return {
         "target_id": str(raw.get("target_id") or ""),
         "analysis_zarr": str(zarr_path),
@@ -269,16 +480,9 @@ def _validate_target(
         "subject_mask_bundle_id": bundle_id or None,
         "assignment_keypoint_group": actual_assignment[0],
         "assignment_keypoint_run": actual_assignment[1],
-        "raw_masks": _validate_raw_masks(
-            root,
-            subject_run,
-            run_name=subject_run_name,
-            sample_rows=sample_rows,
-        ),
-        "refined_masks": _validate_refined_masks(
-            refined_run,
-            sample_rows=sample_rows,
-        ),
+        "raw_masks": raw_report,
+        "refined_masks": refined_report,
+        "subject_mask_component_completeness": component_completeness,
         "refined_contract": contract,
         "subject_mask_bundle": bundle,
         "status": "ok",
@@ -330,6 +534,13 @@ def validate_analysis_plan(
                 }
             )
     invalid = [report for report in reports if report["status"] != "ok"]
+    completeness_failed = [
+        report
+        for report in reports
+        if report.get("status") == "ok"
+        and isinstance(report.get("subject_mask_component_completeness"), Mapping)
+        and report["subject_mask_component_completeness"].get("status") == "failed"
+    ]
     return {
         "schema": REPORT_SCHEMA,
         "status": "ok" if not invalid else "invalid",
@@ -338,6 +549,10 @@ def validate_analysis_plan(
         "target_count": len(reports),
         "ok_count": len(reports) - len(invalid),
         "invalid_count": len(invalid),
+        "component_completeness_failed_target_count": len(completeness_failed),
+        "component_completeness_status": (
+            "failed" if completeness_failed else "passed"
+        ),
         "targets": reports,
     }
 
