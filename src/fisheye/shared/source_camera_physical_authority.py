@@ -9,6 +9,7 @@ same authority without pretending that manifest evidence originated in H5.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -20,6 +21,7 @@ from fisheye.shared.coordinate_frame_record import (
     build_physical_frame_calibration_record,
     load_bound_physical_frame_calibration,
     load_bound_selected_camera_frame_evidence,
+    parse_physical_frame_calibration_record,
     stamp_physical_frame_calibration_record,
     stamp_selected_camera_frame_evidence,
     verify_bound_coordinate_frame,
@@ -33,6 +35,7 @@ from fisheye.shared.coordinate_record import (
 from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
     load_source_camera_pixel_frame_authority,
+    require_trusted_coordinate_attrs,
     stamp_source_camera_pixel_frame_authority,
 )
 from fisheye.shared.selected_calibration import (
@@ -289,6 +292,155 @@ def publish_source_camera_physical_authority(
     return load_source_camera_physical_authority(root)
 
 
+def rebind_source_camera_physical_authority(
+    root: Any,
+    *,
+    source_camera_evidence: VerifiedSelectedCameraSourceEvidence,
+    source_kind: str,
+    provenance: Mapping[str, Any],
+) -> BoundSourceCameraPhysicalAuthority:
+    """Replace one copied donor binding with an authority bound to ``root``.
+
+    This is deliberately narrower than ordinary publication.  The existing
+    selected-camera evidence must be a valid, digest-bound record and must
+    exactly equal freshly verified evidence rebuilt from the named source H5.
+    The existing physical record must also agree with that camera and scale.
+    Only then are the selected evidence, physical record, and manifest replaced
+    transactionally so their source-camera pointer binds this archive's
+    acquisition authority.
+    """
+
+    evidence = require_verified_selected_camera_source_evidence(source_camera_evidence)
+    container = _container(root)
+    manifest = bind_persisted_coordinate_record(
+        container,
+        attr_name=SOURCE_CAMERA_PHYSICAL_MANIFEST_ATTR,
+        digest_attr_name=SOURCE_CAMERA_PHYSICAL_MANIFEST_DIGEST_ATTR,
+    )
+    manifest_payload = manifest.record
+    if (
+        manifest_payload.get("schema_id") != SOURCE_CAMERA_PHYSICAL_SCHEMA_ID
+        or manifest_payload.get("schema_version")
+        != SOURCE_CAMERA_PHYSICAL_SCHEMA_VERSION
+        or set(manifest_payload)
+        != {
+            "schema_id",
+            "schema_version",
+            "camera_id",
+            "source_kind",
+            "selected_camera_evidence",
+            "physical_frame",
+            "source_camera_frame",
+            "mm_per_pixel",
+            "provenance",
+        }
+        or manifest_payload.get("camera_id") != evidence.active_camera_id
+    ):
+        raise SourceCameraPhysicalAuthorityError(
+            "Existing source-camera physical manifest does not identify the "
+            "verified donor camera."
+        )
+
+    selected_pointer = manifest_payload.get("selected_camera_evidence")
+    if not isinstance(selected_pointer, Mapping) or set(selected_pointer) != {
+        "record_ref",
+        "record_sha256",
+    }:
+        raise SourceCameraPhysicalAuthorityError(
+            "Existing selected-camera evidence pointer is not closed."
+        )
+    selected_node = container["selected_camera_evidence"]
+    selected = load_bound_selected_camera_frame_evidence(
+        selected_node,
+        expected_record_ref=selected_pointer["record_ref"],
+        expected_record_sha256=selected_pointer["record_sha256"],
+        expected_camera_id=evidence.active_camera_id,
+    )
+    if selected.record.source_camera != evidence.to_dict():
+        raise SourceCameraPhysicalAuthorityError(
+            "Existing selected-camera record differs from freshly verified "
+            "source-H5 evidence."
+        )
+
+    physical_pointer = manifest_payload.get("physical_frame")
+    if not isinstance(physical_pointer, Mapping) or set(physical_pointer) != {
+        "record_ref",
+        "record_sha256",
+    }:
+        raise SourceCameraPhysicalAuthorityError(
+            "Existing physical-frame pointer is not closed."
+        )
+    physical_node = container["source_camera_physical_mm"]
+    raw_physical = physical_node.attrs.get(PHYSICAL_FRAME_CALIBRATION_ATTR)
+    existing_physical = parse_physical_frame_calibration_record(raw_physical)
+    physical_digest = existing_physical.digest()
+    source_pointer = manifest_payload.get("source_camera_frame")
+    if (
+        physical_node.attrs.get(f"{PHYSICAL_FRAME_CALIBRATION_ATTR}_sha256")
+        != physical_digest
+        or physical_pointer["record_ref"]
+        != f"/{physical_node.path}@{PHYSICAL_FRAME_CALIBRATION_ATTR}"
+        or physical_pointer["record_sha256"] != physical_digest
+        or existing_physical.camera_id != evidence.active_camera_id
+        or evidence.pixels_per_mm_camera is None
+        or existing_physical.pixels_per_mm_camera != evidence.pixels_per_mm_camera
+        or existing_physical.selected_camera_evidence != selected.ref
+        or not isinstance(source_pointer, Mapping)
+        or set(source_pointer) != {"record_ref", "record_sha256"}
+        or existing_physical.source_camera_pixels.record_ref
+        != source_pointer["record_ref"]
+        or existing_physical.source_camera_pixels.record_sha256
+        != source_pointer["record_sha256"]
+        or existing_physical.physical_extent.width
+        != float(evidence.native_width_px) / evidence.pixels_per_mm_camera
+        or existing_physical.physical_extent.height
+        != float(evidence.native_height_px) / evidence.pixels_per_mm_camera
+    ):
+        raise SourceCameraPhysicalAuthorityError(
+            "Existing donor physical record does not exactly agree with the "
+            "verified camera evidence."
+        )
+
+    nodes = (container, selected_node, physical_node)
+    attrs = tuple(
+        require_trusted_coordinate_attrs(node, label="Donor authority repair")
+        for node in nodes
+    )
+    snapshots = tuple(copy.deepcopy(dict(value)) for value in attrs)
+    try:
+        del attrs[0][SOURCE_CAMERA_PHYSICAL_MANIFEST_ATTR]
+        del attrs[0][SOURCE_CAMERA_PHYSICAL_MANIFEST_DIGEST_ATTR]
+        rebound = publish_source_camera_physical_authority(
+            root,
+            source_camera_evidence=evidence,
+            source_kind=source_kind,
+            provenance=provenance,
+        )
+        rebound.assert_verified()
+        return rebound
+    except Exception as exc:
+        rollback_error: Exception | None = None
+        for current, snapshot in zip(attrs, snapshots, strict=True):
+            try:
+                for name in tuple(current.keys()):
+                    del current[name]
+                current.update(copy.deepcopy(snapshot))
+                if dict(current) != snapshot:
+                    raise RuntimeError("restored attrs differ from snapshot")
+            except Exception as restore_exc:  # pragma: no cover - hostile attrs
+                rollback_error = restore_exc
+        if rollback_error is not None:
+            raise SourceCameraPhysicalAuthorityError(
+                "Source-camera authority repair failed and rollback was "
+                f"incomplete: {rollback_error}."
+            ) from exc
+        if isinstance(exc, SourceCameraPhysicalAuthorityError):
+            raise
+        raise SourceCameraPhysicalAuthorityError(
+            f"Source-camera authority repair failed: {exc}."
+        ) from exc
+
+
 def load_source_camera_physical_authority(
     root: Any,
 ) -> BoundSourceCameraPhysicalAuthority:
@@ -406,5 +558,6 @@ __all__ = [
     "SourceCameraPhysicalAuthorityError",
     "load_source_camera_physical_authority",
     "publish_source_camera_physical_authority",
+    "rebind_source_camera_physical_authority",
     "require_bound_source_camera_physical_authority",
 ]
