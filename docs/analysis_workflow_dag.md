@@ -188,8 +188,14 @@ crop declared by the selected keypoint authority, runs spatial arena assignment
 for the recording's experiment setup, and publishes exact-named
 `single_subject_per_arena` tracking. Canonical clipped keypoints and original
 refined keypoints therefore use the same tracking writer and downstream motion
-infrastructure. An already complete track-kinematics run remains reusable
-without recreating its tracking ancestors.
+infrastructure. Single-dish assignment first resolves the active, complete
+`analysis/arena_geometry_selection` native-camera circle through the shared
+selection contract and records the exact selection, candidate, and record
+digest in its arena definition. A present but malformed or half-activated
+modern selection fails closed; the legacy `analysis_metadata.dish_mask` path
+is used only when the modern selection family is absent. An already complete
+track-kinematics run remains reusable without recreating its tracking
+ancestors.
 
 The track-kinematics visualization stage writes the bounded PNG snapshot and
 interactive explorer contract inside its selected track-kinematics run. It

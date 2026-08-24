@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+from io import StringIO
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import zarr
+from rich.console import Console
 
 import fisheye.tracking.arena_assignment as mod
+from fisheye.shared.json_safety import strict_json_dumps
 from fisheye.tracking.arena_assignment import assign_arenas_spatial
 from fisheye.tracking.single_subject_per_arena import TrackingConflictError
 
@@ -141,6 +145,150 @@ def _build_root() -> _FakeGroup:
 
     root.create_group("arena_assignment_runs")
     return root
+
+
+def _add_active_registered_geometry(root: _FakeGroup) -> tuple[_FakeGroup, str]:
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("arena_geometry_selection")
+    parent.attrs["palette_completion_epoch"] = 2
+    run_name = "arena_geometry_selection_fixture"
+    record = {
+        "schema_id": "palette.arena_geometry_selection_record",
+        "schema_version": 3,
+        "selection_policy": "manual_reviewed_palette_candidate_exact_binding_v3",
+        "selected_candidate": {
+            "run_name": "arena-geometry-palette-fixture",
+            "candidate_id": "arena-geometry-palette-fixture",
+            "candidate_kind": "palette_recording_image_fit",
+            "candidate_record_sha256": "a" * 64,
+            "arena_binding": {
+                "rig_id": "omnifin0",
+                "canvas_name": "shadow",
+                "arena_id": "arena_1",
+                "camera_serial": "2010093",
+            },
+            "coordinate_binding": {
+                "space_id": "source_camera_image_px",
+                "profile_id": "source_camera_image_px.top_left_y_down.v1",
+                "pixel_convention": "continuous",
+                "units": "px",
+                "origin": "top_left",
+                "positive_x": "right",
+                "positive_y": "down",
+                "native_width_px": 640,
+                "native_height_px": 480,
+            },
+            "valid_detection_region": {
+                "coordinate_space": "camera_native_pixels",
+                "geometry": {
+                    "type": "circle",
+                    "center_px": {"x": 320.0, "y": 240.0},
+                    "radius_px": 205.0,
+                },
+            },
+            "boundary_observation": {"role": "observed_visible_dish_top_rim"},
+            "observed_boundary": {"type": "circle"},
+            "physical_inner_rim": None,
+        },
+        "decision": {
+            "selected_by": "reviewer@example.org",
+            "decision_reason": "reviewed fixture geometry",
+            "decision_source": "manual_review",
+            "comparison_binding": None,
+        },
+        "candidate_mutated": False,
+        "legacy_dish_mask_projection_written": False,
+    }
+    digest = hashlib.sha256(strict_json_dumps(record).encode("utf-8")).hexdigest()
+    run = parent.create_group(run_name)
+    run.attrs.update({
+        "schema_id": "palette.arena_geometry_selection_run",
+        "schema_version": 1,
+        "selection_id": run_name,
+        "selection_record": record,
+        "selection_record_sha256": digest,
+        "operational_selection_status": "selected",
+        "detection_gate_applied": False,
+        "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+        "palette_run_completion_status": "complete",
+        "stage_selector_eligible": True,
+    })
+    parent.attrs.update({"latest": run_name, "latest_complete": run_name})
+    return parent, run_name
+
+
+def test_single_dish_roi_prefers_active_registered_geometry() -> None:
+    root = _build_root()
+    root.attrs["camera_id"] = "2010093"
+    _add_active_registered_geometry(root)
+    root.create_group("analysis_metadata").attrs["dish_mask"] = {
+        "shape": "rectangle",
+        "rectangle": {"roi": [1, 2, 3, 4]},
+    }
+
+    result = mod.get_single_dish_roi_from_mask(
+        root, Console(file=StringIO(), force_terminal=False)
+    )
+
+    assert result is not None
+    assert result == [{
+        "id": 0,
+        "roi_pixels": [115, 35, 410, 410],
+        "source": "active_registered_arena_geometry_circle",
+        "image_shape": [480, 640],
+        "selection_run": "arena_geometry_selection_fixture",
+        "selection_record_sha256": result[0]["selection_record_sha256"],
+        "candidate_run": "arena-geometry-palette-fixture",
+        "camera_serial": "2010093",
+    }]
+    assert len(result[0]["selection_record_sha256"]) == 64
+
+
+def test_present_but_inactive_registered_geometry_fails_closed() -> None:
+    root = _build_root()
+    root.attrs["camera_id"] = "2010093"
+    parent, _run_name = _add_active_registered_geometry(root)
+    parent.attrs["latest"] = "arena_geometry_selection_unpublished"
+    root.create_group("analysis_metadata").attrs["dish_mask"] = {
+        "shape": "rectangle",
+        "rectangle": {"roi": [1, 2, 3, 4]},
+    }
+
+    with pytest.raises(ValueError, match="matching active complete selector"):
+        mod.get_single_dish_roi_from_mask(
+            root, Console(file=StringIO(), force_terminal=False)
+        )
+
+
+def test_registered_geometry_camera_mismatch_fails_closed() -> None:
+    root = _build_root()
+    root.attrs["camera_id"] = "2010094"
+    _add_active_registered_geometry(root)
+
+    with pytest.raises(ValueError, match="camera binding does not match"):
+        mod.get_single_dish_roi_from_mask(
+            root, Console(file=StringIO(), force_terminal=False)
+        )
+
+
+def test_single_dish_roi_keeps_legacy_fallback_without_modern_family() -> None:
+    root = _build_root()
+    root.create_group("analysis_metadata").attrs["dish_mask"] = {
+        "shape": "rectangle",
+        "rectangle": {"roi": [1, 2, 3, 4]},
+        "metrics": {"image_shape": [100, 100]},
+    }
+
+    result = mod.get_single_dish_roi_from_mask(
+        root, Console(file=StringIO(), force_terminal=False)
+    )
+
+    assert result == [{
+        "id": 0,
+        "roi_pixels": [1, 2, 3, 4],
+        "source": "dish_mask_rectangle",
+        "image_shape": [100, 100],
+    }]
 
 
 def _legacy_infer_num_frames(root, detection_group, frame_indices: np.ndarray) -> int:

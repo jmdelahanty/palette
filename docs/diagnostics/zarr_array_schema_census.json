@@ -388,7 +388,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-f9ea40b79bedb397"
+            "schema-writer-8701fc565643c7f6"
           ],
           "shape": "len(bbox_coords)"
         },
@@ -5600,7 +5600,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-89bc6f2f45841390"
+            "schema-writer-f7ebc9da05382489"
           ],
           "shape": "(num_frames, n_masks)"
         },
@@ -60840,8 +60840,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/tracking/arena_assignment.py",
-      "line": 1026,
-      "occurrence_id": "schema-writer-f9ea40b79bedb397",
+      "line": 1063,
+      "occurrence_id": "schema-writer-8701fc565643c7f6",
       "path_pattern": "<assign_group>/arena_ids",
       "required": null,
       "shape_expression": "len(bbox_coords)",
@@ -60853,7 +60853,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-4ab1b7c9d0935b41"
+      "writer_site_id": "writer-70d6bcc6c843f63e"
     },
     {
       "access_pattern": "unclassified",
@@ -60874,8 +60874,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/tracking/arena_assignment.py",
-      "line": 1046,
-      "occurrence_id": "schema-writer-89bc6f2f45841390",
+      "line": 1083,
+      "occurrence_id": "schema-writer-f7ebc9da05382489",
       "path_pattern": "<assign_group>/n_detections_per_arena",
       "required": null,
       "shape_expression": "(num_frames, n_masks)",
@@ -60887,7 +60887,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-4f54afdb6ef0229a"
+      "writer_site_id": "writer-bf7dd1b84f2a79a3"
     },
     {
       "access_pattern": "unclassified",
@@ -74865,7 +74865,7 @@
     "parsed_writer_candidate_module_count": 229,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 629,
-    "scanned_python_module_count": 1566,
+    "scanned_python_module_count": 1567,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

@@ -33,6 +33,9 @@ from ..shared.zarr.schema import get_run_group
 from ..shared.zarr.keypoint_bundle_activation import (
     resolve_active_keypoint_bundle_from_root,
 )
+from ..shared.zarr.arena_geometry_selection import (
+    resolve_active_arena_geometry_circle,
+)
 from ..shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     is_run_complete_in_parent,
@@ -496,6 +499,40 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
     Returns:
         List with single ROI dictionary, or None if no dish mask found
     """
+    selected_circle = resolve_active_arena_geometry_circle(root)
+    if selected_circle is not None:
+        x = int(selected_circle.center_x_px - selected_circle.radius_px)
+        y = int(selected_circle.center_y_px - selected_circle.radius_px)
+        width = int(selected_circle.radius_px * 2)
+        height = int(selected_circle.radius_px * 2)
+        console.print(
+            "[green]\u2713 Using active registered arena geometry as single ROI[/green]"
+        )
+        console.print(
+            "  Selection: "
+            f"{selected_circle.selection_run} "
+            f"(candidate {selected_circle.candidate_run})"
+        )
+        console.print(
+            "  Circle center: "
+            f"[{selected_circle.center_x_px}, {selected_circle.center_y_px}], "
+            f"radius: {selected_circle.radius_px}"
+        )
+        console.print(f"  Bounding box: x={x}, y={y}, w={width}, h={height}")
+        return [{
+            "id": 0,
+            "roi_pixels": [x, y, width, height],
+            "source": "active_registered_arena_geometry_circle",
+            "image_shape": [
+                selected_circle.native_height_px,
+                selected_circle.native_width_px,
+            ],
+            "selection_run": selected_circle.selection_run,
+            "selection_record_sha256": selected_circle.selection_record_sha256,
+            "candidate_run": selected_circle.candidate_run,
+            "camera_serial": selected_circle.camera_serial,
+        }]
+
     # Try to get dish mask from analysis_metadata
     if 'analysis_metadata' not in root:
         return None
