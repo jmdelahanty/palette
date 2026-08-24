@@ -306,7 +306,7 @@ def _resolve_shard(
     root: zarr.Group,
     shard_name: str,
     *,
-    crop_identity_cache: dict[str, tuple[np.ndarray, np.ndarray]],
+    crop_identity_cache: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> Shard:
     shard_parent = root.get(KEYPOINT_SHARD_PARENT)
     if shard_parent is None:
@@ -347,6 +347,8 @@ def _resolve_shard(
         raise ValueError(
             f"crop_runs/{source_crop_run} is missing required array 'frame_indices'."
         )
+    if crop_identity_cache is None:
+        crop_identity_cache = {}
     cached_identity = crop_identity_cache.get(source_crop_run)
     if cached_identity is None:
         crop_rows = int(crop_group["frame_indices"].shape[0])
