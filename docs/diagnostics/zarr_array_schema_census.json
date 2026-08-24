@@ -3573,7 +3573,7 @@
             "schema-required-9bac30f3fd9b5940",
             "schema-required-bea06e39b110f7da",
             "schema-required-e394324e26ed4b7e",
-            "schema-required-fd79144a6f8da836",
+            "schema-required-f45a129fbcf21c22",
             "schema-writer-251a0ca610e787bc"
           ],
           "shape": "<unresolved>"
@@ -4390,8 +4390,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
+            "schema-required-0d2bdaebdb8a4956",
             "schema-required-180a61c34a238b38",
-            "schema-required-d0690087a7be7d7e",
             "schema-required-d51b019f52dc3fc2",
             "schema-required-e016a5aa27658a7a"
           ],
@@ -6874,8 +6874,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-required-31bb9a6076046e24",
-            "schema-required-8557529c3c47b50c"
+            "schema-required-218deb2fe3dc4ebd",
+            "schema-required-31bb9a6076046e24"
           ],
           "shape": "<unresolved>"
         },
@@ -8057,7 +8057,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-f0a57870cfb5ddb7",
-            "schema-required-f6ed44a9708aae7f"
+            "schema-required-f906f13ecf56c26f"
           ],
           "shape": "<unresolved>"
         },
@@ -71046,8 +71046,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 77,
-      "occurrence_id": "schema-required-fd79144a6f8da836",
+      "line": 88,
+      "occurrence_id": "schema-required-f45a129fbcf21c22",
       "path_pattern": "crop_runs/<run>/frame_indices",
       "required": true,
       "shape_expression": null,
@@ -71079,8 +71079,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 77,
-      "occurrence_id": "schema-required-d0690087a7be7d7e",
+      "line": 88,
+      "occurrence_id": "schema-required-0d2bdaebdb8a4956",
       "path_pattern": "crop_runs/<run>/instance_key",
       "required": true,
       "shape_expression": null,
@@ -71112,8 +71112,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 77,
-      "occurrence_id": "schema-required-8557529c3c47b50c",
+      "line": 88,
+      "occurrence_id": "schema-required-218deb2fe3dc4ebd",
       "path_pattern": "crop_runs/<run>/roi_coordinates_full",
       "required": true,
       "shape_expression": null,
@@ -71145,8 +71145,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 77,
-      "occurrence_id": "schema-required-f6ed44a9708aae7f",
+      "line": 88,
+      "occurrence_id": "schema-required-f906f13ecf56c26f",
       "path_pattern": "crop_runs/<run>/source_refined_row_ids",
       "required": true,
       "shape_expression": null,

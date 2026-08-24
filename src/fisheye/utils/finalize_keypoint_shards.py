@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import sys
@@ -33,6 +34,13 @@ from fisheye.shared.zarr.chunk_profiles import (
     geometry_preload_chunks_for_data,
 )
 from fisheye.shared.zarr.crop_shadow import open_persisted_crop_geometry_publication
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
+from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    reconsolidate_zarr_metadata,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
@@ -49,6 +57,9 @@ from fisheye.shared.zarr_run_completion import (
 KEYPOINT_SHARD_PARENT = "keypoint_shard_runs"
 KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
 FINALIZER_SCHEMA = "palette_keypoint_shard_collection_finalizer_v1"
+KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY = (
+    "keypoint_shard_collection_finalization_v1"
+)
 DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS = 131_072
 DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS = 131_072
 
@@ -875,6 +886,74 @@ def _load_shard_names_from_file(path: Path) -> list[str]:
     raise ValueError(f"Could not read shard run list from {path}; expected list or mapping with shard_runs.")
 
 
+def _snapshot_attrs(attrs: Any, names: Sequence[str]) -> dict[str, tuple[bool, Any]]:
+    return {
+        name: (name in attrs, copy.deepcopy(attrs.get(name)))
+        for name in names
+    }
+
+
+def _restore_attrs(attrs: Any, snapshot: Mapping[str, tuple[bool, Any]]) -> None:
+    for name, (present, value) in snapshot.items():
+        if present:
+            attrs[name] = copy.deepcopy(value)
+        elif name in attrs:
+            del attrs[name]
+
+
+def _validate_published_keypoint_visibility(
+    archive: Path,
+    *,
+    run_name: str,
+) -> dict[str, Any]:
+    run_path = f"{KEYPOINT_OUTPUT_PARENT}/{run_name}"
+    receipt = validate_direct_consolidated_subtree(
+        archive,
+        subtree_path=run_path,
+    )
+    direct = open_zarr_root(archive, mode="r", use_consolidated=False)
+    consolidated = open_zarr_root(archive, mode="r", use_consolidated=True)
+    direct_parent = direct[KEYPOINT_OUTPUT_PARENT]
+    consolidated_parent = consolidated[KEYPOINT_OUTPUT_PARENT]
+    selector_names = ("latest", "latest_complete", "latest_pending")
+    for name in selector_names:
+        direct_present = name in direct_parent.attrs
+        consolidated_present = name in consolidated_parent.attrs
+        if direct_present != consolidated_present or (
+            direct_present
+            and direct_parent.attrs.get(name) != consolidated_parent.attrs.get(name)
+        ):
+            raise RuntimeError(
+                "Keypoint selector differs between direct and consolidated "
+                f"metadata: {name!r}."
+            )
+    for label, root, parent in (
+        ("direct", direct, direct_parent),
+        ("consolidated", consolidated, consolidated_parent),
+    ):
+        run = parent[run_name]
+        if (
+            parent.attrs.get("latest") != run_name
+            or parent.attrs.get("latest_complete") != run_name
+            or run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != "complete"
+            or run.attrs.get("stage_selector_eligible") is not True
+            or root.attrs.get("current_keypoint_group_path") != run_path
+        ):
+            raise RuntimeError(
+                f"{label} keypoint publication is not selected, complete, "
+                "selector eligible, and current."
+            )
+    return {
+        "policy": KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY,
+        "subtree_equivalence": receipt.to_json(),
+        "selectors": {
+            name: copy.deepcopy(direct_parent.attrs.get(name))
+            for name in selector_names
+            if name in direct_parent.attrs
+        },
+    }
+
+
 def finalize_keypoint_shards(
     *,
     zarr_path: str | Path,
@@ -957,15 +1036,31 @@ def finalize_keypoint_shards(
         KEYPOINT_OUTPUT_PARENT,
         completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     )
-    if resolved_output_run in parent:
-        if not overwrite:
-            raise ValueError(f"{KEYPOINT_OUTPUT_PARENT}/{resolved_output_run} already exists. Pass --overwrite to replace it.")
-        del parent[resolved_output_run]
-
-    start = time.perf_counter()
-    run_group = parent.create_group(resolved_output_run)
-    mark_run_started(run_group, run_name=resolved_output_run, stage="keypoints")
-    note_pending_latest(parent, resolved_output_run)
+    selector_names = ("latest", "latest_complete", "latest_pending")
+    with archive_metadata_publication_lock(archive):
+        if resolved_output_run in parent:
+            if not overwrite:
+                raise ValueError(f"{KEYPOINT_OUTPUT_PARENT}/{resolved_output_run} already exists. Pass --overwrite to replace it.")
+            selected_by = [
+                name
+                for name in ("latest", "latest_complete")
+                if parent.attrs.get(name) == resolved_output_run
+            ]
+            if selected_by:
+                raise ValueError(
+                    f"Cannot overwrite selector-visible {KEYPOINT_OUTPUT_PARENT}/"
+                    f"{resolved_output_run}; selected by {selected_by}."
+                )
+            del parent[resolved_output_run]
+        selector_snapshot = _snapshot_attrs(parent.attrs, selector_names)
+        current_snapshot = _snapshot_attrs(
+            root.attrs,
+            ("current_keypoint_group_path",),
+        )
+        start = time.perf_counter()
+        run_group = parent.create_group(resolved_output_run)
+        mark_run_started(run_group, run_name=resolved_output_run, stage="keypoints")
+        note_pending_latest(parent, resolved_output_run)
     try:
         for name, data in row_arrays.items():
             source_array = shards[0].group.get(name)
@@ -1075,19 +1170,57 @@ def finalize_keypoint_shards(
             cwd=Path.cwd(),
         )
         run_group.attrs[RUN_PROVENANCE_ATTR] = run_provenance
-        mark_run_complete(
-            run_group,
-            parent_group=parent,
-            run_name=resolved_output_run,
-            run_provenance=run_provenance,
-        )
-        root.attrs["current_keypoint_group_path"] = run_group.path
         duration = time.perf_counter() - start
         run_group.attrs["finalization_duration_seconds"] = float(duration)
         result["finalization_duration_seconds"] = float(duration)
+        with archive_metadata_publication_lock(archive):
+            mark_run_complete(
+                run_group,
+                parent_group=parent,
+                run_name=resolved_output_run,
+                run_provenance=run_provenance,
+            )
+            root.attrs["current_keypoint_group_path"] = run_group.path
+            consolidation = reconsolidate_zarr_metadata(
+                archive,
+                policy=KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY,
+                fail_on_error=True,
+            )
+            visibility = _validate_published_keypoint_visibility(
+                archive,
+                run_name=resolved_output_run,
+            )
+        result["metadata_publication"] = {
+            **visibility,
+            "consolidation": consolidation,
+        }
         return result
     except Exception as exc:
-        mark_run_failed(run_group, error=str(exc))
+        rollback_errors: list[str] = []
+        try:
+            with archive_metadata_publication_lock(archive):
+                mark_run_failed(
+                    run_group,
+                    parent_group=parent,
+                    run_name=resolved_output_run,
+                    error=str(exc),
+                )
+                run_group.attrs["stage_selector_eligible"] = False
+                _restore_attrs(parent.attrs, selector_snapshot)
+                _restore_attrs(root.attrs, current_snapshot)
+                reconsolidate_zarr_metadata(
+                    archive,
+                    policy=f"{KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY}_rollback",
+                    fail_on_error=True,
+                )
+        except Exception as rollback_exc:
+            rollback_errors.append(
+                f"{type(rollback_exc).__name__}: {rollback_exc}"
+            )
+        if rollback_errors and hasattr(exc, "add_note"):
+            exc.add_note(
+                "Keypoint publication rollback errors: " + "; ".join(rollback_errors)
+            )
         raise
 
 

@@ -7,6 +7,10 @@ import numpy as np
 import pytest
 import zarr
 
+import fisheye.utils.finalize_keypoint_shards as finalizer_mod
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils.finalize_keypoint_shards import (
     DIRECT_SAME_CROP_MAPPING_MODE,
@@ -237,6 +241,11 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     assert result["ok"] is True
     assert result["total_rois"] == 3
     assert result["sort_changed_order"] is True
+    assert result["metadata_publication"]["policy"] == (
+        "keypoint_shard_collection_finalization_v1"
+    )
+    assert result["metadata_publication"]["consolidation"]["status"] == "ok"
+    assert result["metadata_publication"]["subtree_equivalence"]["array_count"] > 0
     assert result["identity_validation"] == {
         "mode": "instance_key",
         "status": "exact",
@@ -269,6 +278,73 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     np.testing.assert_array_equal(run["frame_counts"][:], np.array([1, 1, 1, 0, 0], dtype=np.int32))
     np.testing.assert_array_equal(run["n_rois"][:], np.array([1, 1, 1, 0, 0], dtype=np.int32))
     np.testing.assert_array_equal(run["n_keypoints"][:], np.array([3, 3, 3, 0, 0], dtype=np.int32))
+
+    receipt = validate_direct_consolidated_subtree(
+        zarr_path,
+        subtree_path="keypoints_runs/keypoints_collection_test",
+    )
+    assert receipt.array_count > 0
+    consolidated = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        zarr_format=3,
+        use_consolidated=True,
+    )
+    assert consolidated["keypoints_runs"].attrs["latest"] == "keypoints_collection_test"
+    assert (
+        consolidated.attrs["current_keypoint_group_path"]
+        == "keypoints_runs/keypoints_collection_test"
+    )
+
+
+def test_finalize_keypoint_shards_rolls_back_selectors_when_consolidation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = _make_archive(zarr_path)
+    _write_shard(root, "shard_a", crop_rows=[0, 1])
+    parent = root.require_group("keypoints_runs")
+    old = parent.create_group("old_keypoints")
+    old.attrs.update(
+        {
+            RUN_COMPLETION_STATUS_ATTR: "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+    parent.attrs["latest"] = "old_keypoints"
+    parent.attrs["latest_complete"] = "old_keypoints"
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/old_keypoints"
+
+    def _fail_consolidation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("injected consolidation failure")
+
+    monkeypatch.setattr(
+        finalizer_mod,
+        "reconsolidate_zarr_metadata",
+        _fail_consolidation,
+    )
+    with pytest.raises(RuntimeError, match="injected consolidation failure"):
+        finalize_keypoint_shards(
+            zarr_path=zarr_path,
+            shard_runs=["shard_a"],
+            output_run="new_keypoints",
+        )
+
+    direct = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    direct_parent = direct["keypoints_runs"]
+    assert direct_parent.attrs["latest"] == "old_keypoints"
+    assert direct_parent.attrs["latest_complete"] == "old_keypoints"
+    assert "latest_pending" not in direct_parent.attrs
+    assert direct.attrs["current_keypoint_group_path"] == "keypoints_runs/old_keypoints"
+    failed = direct_parent["new_keypoints"]
+    assert failed.attrs[RUN_COMPLETION_STATUS_ATTR] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
 
 
 def test_finalize_keypoint_shards_preserves_direct_rows_for_exact_target_crop(
