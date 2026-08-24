@@ -114,7 +114,7 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
     command.extend(
         (
             "--keypoint-run",
-            f"refined/{context.dependency_run('refined_keypoints')}",
+            context.dependency_run("refined_keypoints"),
             "--run-name",
             context.output_run,
             "--output-shard-rows",
@@ -135,6 +135,29 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
             "0.05",
             "--smoothing-alignment",
             "causal",
+        )
+    )
+    return tuple(command)
+
+
+def _tracks_command(context: StageCommandContext) -> tuple[str, ...]:
+    """Create lineage-matched one-subject tracking from keypoint row authority."""
+
+    arena_run = _safe_name(
+        f"arena_assignment_{context.output_run}",
+        label="arena-assignment output run name",
+    )
+    command = _module_command(context, "fisheye.tracking.arena_assignment")
+    command.extend(
+        (
+            "--source-keypoint-run",
+            context.dependency_run("refined_keypoints"),
+            "--arena-run-name",
+            arena_run,
+            "--tracking-run-name",
+            context.output_run,
+            "--tracking-method",
+            "single_subject_per_arena",
         )
     )
     return tuple(command)
@@ -316,10 +339,18 @@ def _subject_shape_command(context: StageCommandContext) -> tuple[str, ...]:
         context,
         "fisheye.analysis_workflows.materializers.subject_shape",
     )
+    mask_authority = context.dependency_run("refined_subject_masks")
+    if mask_authority.startswith("bundle/"):
+        bundle_id = mask_authority.split("/", 1)[1]
+        if not SAFE_RUN_NAME.fullmatch(bundle_id):
+            raise WorkflowExecutionError(
+                f"unsafe subject-mask bundle selection: {mask_authority!r}"
+            )
+        command.extend(("--subject-mask-bundle-id", bundle_id))
+    else:
+        command.extend(("--refined-run", mask_authority))
     command.extend(
         (
-            "--refined-run",
-            context.dependency_run("refined_subject_masks"),
             "--run-name",
             context.output_run,
             "--block-rows",
@@ -641,6 +672,7 @@ def _activity_spatial_export_command(
 
 STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
+        "tracks": _tracks_command,
         "track_kinematics": _track_kinematics_command,
         "swim_bouts": _swim_bout_command,
         "track_kinematics_visualization": _track_kinematics_visualization_command,
@@ -720,7 +752,12 @@ def build_workflow_execution_plan(
             run_name,
             label=f"output run for {stage_id}",
         )
-    run_nodes = [node for node in workflow_plan.nodes if node.action == "run"]
+    executable_node_ids = set(workflow_plan.execution_order)
+    run_nodes = [
+        node
+        for node in workflow_plan.nodes
+        if node.action == "run" and node.node_id in executable_node_ids
+    ]
     run_stage_ids = {node.stage_id for node in run_nodes if node.stage_id is not None}
     unused_overrides = sorted(set(overrides) - run_stage_ids)
     if unused_overrides:
@@ -802,14 +839,22 @@ def build_workflow_execution_plan(
                     f"reused node {node.node_id!r} has no selected run"
                 )
             resolved_runs[node.node_id] = node.selected_run
-        elif node.action == "run" and node.kind == "export":
+        elif (
+            node.action == "run"
+            and node.node_id in executable_node_ids
+            and node.kind == "export"
+        ):
             output_run = export_overrides.get(node.node_id) or default_output_run_name(
                 execution_id=execution_id,
                 node_id=node.node_id,
             )
             export_runs[node.node_id] = output_run
             resolved_runs[node.node_id] = output_run
-        elif node.action == "run" and node.stage_id is not None:
+        elif (
+            node.action == "run"
+            and node.node_id in executable_node_ids
+            and node.stage_id is not None
+        ):
             workflow_node = workflow_nodes[node.node_id]
             if workflow_node.output_run_from is not None:
                 if node.stage_id in overrides:

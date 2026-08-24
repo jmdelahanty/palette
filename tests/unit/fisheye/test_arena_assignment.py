@@ -443,6 +443,97 @@ def test_assign_arenas_spatial_can_track_explicit_crop_rowset(
     assert result["assigned_detections"] == 3
 
 
+def test_assign_arenas_spatial_resolves_canonical_keypoint_crop_and_exact_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    keypoints = root.create_group("keypoints_runs")
+    canonical = keypoints.create_group("canonical_a")
+    canonical.attrs["source_crop_run"] = "crop_001"
+    captured: dict[str, object] = {}
+
+    def fake_open(_path: str, mode: str = "a"):
+        assert mode == "a"
+        return root
+
+    def fake_get_single_dish_roi_from_mask(_root, _console):
+        return [
+            {
+                "id": 3,
+                "roi_pixels": [0, 0, 100, 100],
+                "source": "mask",
+                "image_shape": [100, 100],
+            }
+        ]
+
+    def fake_write_tracking_run(**kwargs):
+        captured.update(kwargs)
+        track = root["arena_assignment_runs"][
+            "arena_assignment_tracks_a"
+        ].create_group("tracks")
+        return "tracks_a", track, {"ok": True}
+
+    monkeypatch.setattr(mod, "open_zarr_root", fake_open)
+    monkeypatch.setattr(mod, "is_run_complete_in_parent", lambda *_a, **_k: True)
+    monkeypatch.setattr(mod, "is_run_selector_eligible", lambda _group: True)
+    monkeypatch.setattr(
+        mod,
+        "require_runs_parent",
+        lambda _root, name, **_kwargs: _root[name],
+    )
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(
+            setup_type="single_dish",
+            num_dishes=1,
+            source="experiment_setup",
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_single_dish_roi_from_mask",
+        fake_get_single_dish_roi_from_mask,
+    )
+    monkeypatch.setattr(mod, "write_tracking_run", fake_write_tracking_run)
+    monkeypatch.setattr(mod, "emit_stage_completion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "build_stage_provenance", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(mod, "write_stage_provenance", lambda *args, **kwargs: None)
+
+    result = assign_arenas_spatial(
+        "/tmp/fake.zarr",
+        config={},
+        console=None,
+        source_keypoint_run="canonical_a",
+        arena_assignment_run_name="arena_assignment_tracks_a",
+        tracking_run_name="tracks_a",
+    )
+
+    assert captured["source_rowset_path"] == "crop_runs/crop_001"
+    assert captured["exact_run_name"] == "tracks_a"
+    assert captured["source_detect_run"] == "detect_source_001"
+    assert result["assigned_detections"] == 3
+
+
+def test_crop_lineage_resolves_finalized_refined_working_source_detect() -> None:
+    root = _build_root()
+    crop = root["crop_runs"]["crop_001"]
+    crop.attrs.clear()
+    crop.attrs["provenance"] = {
+        "inputs": {"source_refined_detect_run": "refined_final"}
+    }
+    refined = root["refined_detect_runs"]
+    final = refined.create_group("refined_final")
+    final.attrs["source_working_refined_run"] = "refined_working"
+    working = refined.create_group("refined_working")
+    working.attrs["source_detect_run"] = "detect_native_a"
+
+    refined_name = mod._source_refined_run_from_attrs(crop.attrs)
+
+    assert refined_name == "refined_final"
+    assert mod._source_detect_run_from_refined(root, refined_name) == "detect_native_a"
+
+
 def test_assign_arenas_spatial_accepts_external_crop_recorder_rowset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

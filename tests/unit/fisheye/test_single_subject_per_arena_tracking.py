@@ -258,6 +258,27 @@ def test_tracking_run_persists_modern_identity_and_rowset_fingerprint() -> None:
     )
 
 
+def test_tracking_writer_can_publish_exact_selector_eligible_run_name() -> None:
+    root = _memory_root()
+
+    run_name, run_group, _summary = write_single_subject_per_arena_tracking_run(
+        root=root,
+        arena_ids=np.array([0, 0], dtype=np.int32),
+        frame_indices=np.array([0, 1], dtype=np.int32),
+        instance_key=np.array([10, 11], dtype=np.uint64),
+        source_detect_run="detect_a",
+        source_arena_assignment_run="arena_a",
+        source_rowset_path="crop_runs/crop_a",
+        exact_run_name="tracks_exact_a",
+        stage_selector_eligible=True,
+    )
+
+    assert run_name == "tracks_exact_a"
+    assert run_group.attrs["stage_selector_eligible"] is True
+    assert root["tracking_runs"].attrs["latest"] == "tracks_exact_a"
+    assert root["tracking_runs"].attrs["latest_complete"] == "tracks_exact_a"
+
+
 def test_tracking_manifest_v1_remains_readable_after_generic_source_upgrade() -> None:
     root = _memory_root()
     run_name, run_group, _ = write_single_subject_per_arena_tracking_run(

@@ -218,10 +218,6 @@ def write_tracking_run(
 
     if type(stage_selector_eligible) is not bool:
         raise TypeError("stage_selector_eligible must be an exact bool.")
-    if exact_run_name is not None and stage_selector_eligible:
-        raise ValueError(
-            "Exact-name tracking publication is reserved for selector-ineligible candidates."
-        )
     if source_subject_position_run is not None:
         if source_detect_run is not None or source_arena_assignment_run is not None:
             raise ValueError(
@@ -291,7 +287,7 @@ def write_tracking_run(
         run_group = tracking_parent.create_group(run_name)
     if tracking_parent is not None:
         mark_run_started(run_group, run_name=run_name, stage="track")
-        if exact_run_name is None:
+        if exact_run_name is None or stage_selector_eligible:
             note_pending_latest(tracking_parent, run_name)
 
     n_rows = int(result.track_ids.shape[0])

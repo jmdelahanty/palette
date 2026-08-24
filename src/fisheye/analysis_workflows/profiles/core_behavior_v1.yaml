@@ -39,19 +39,27 @@ nodes:
     kind: prerequisite
     stage_id: refined_keypoints
     runnable: false
-    description: Curated keypoint authority required by downstream track kinematics.
+    description: >-
+      Curated keypoint authority required downstream. This resolves either an
+      active refined keypoint bundle or a selector-eligible canonical
+      passthrough run produced by clipped inference.
 
   - id: refined_subject_masks
     kind: prerequisite
     stage_id: refined_subject_masks
     runnable: false
-    description: Curated dense subject-mask authority required by eyes and body shape.
+    description: >-
+      Active recording subject-mask bundle authority required by eyes and body
+      shape, with legacy refined-run selection retained for compatibility.
 
   - id: tracks
-    kind: prerequisite
+    kind: analysis
     stage_id: tracks
-    runnable: false
-    description: Lineage-matched subject identities required by track kinematics.
+    depends_on: [refined_keypoints]
+    description: >-
+      Lineage-matched subject identities, materialized from the exact keypoint
+      source crop rowset for one-subject recordings when no track authority is
+      already selected.
 
   - id: track_kinematics
     kind: analysis
