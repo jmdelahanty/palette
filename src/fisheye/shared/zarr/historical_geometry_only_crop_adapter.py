@@ -1,10 +1,10 @@
-"""Successor-only adapter for the sealed historical geometry-only crop v2.
+"""Temporary successor-publication bridge for sealed geometry-only crop v2.
 
 The ordinary keypoint and subject-mask coordinate loaders intentionally require
-an eligible, materialized canonical crop.  A small set of immutable historical
-inference runs was produced from the crop-geometry publication instead: its
-manifest and row arrays are complete, but its pixels lived in a disposable flat
-cache.  This module proves that exact topology for coordinate-only successors.
+an eligible, materialized crop profile. Immutable geometry-only inference runs
+are produced from the crop-geometry publication instead. Each manifest and its
+row arrays are complete, while the pixels live in a disposable flat cache. This
+module proves that exact topology for coordinate-only successors.
 
 It never promotes or edits the crop run and never treats the disposable pixel
 cache as an input.  The adapter is installed only around successor preparation
@@ -97,7 +97,7 @@ _LOADER_OVERRIDE_LOCK = RLock()
 
 
 class HistoricalGeometryOnlyCropAdapterError(ValueError):
-    """Raised when a historical geometry-only crop cannot be proven exactly."""
+    """Raised when a sealed geometry-only crop cannot be proven exactly."""
 
 
 @dataclass(frozen=True)
@@ -957,13 +957,13 @@ def bind_historical_geometry_only_crop_source(
     source_run_path: str,
     model_input_transform: ModelInputTransform,
 ) -> HistoricalGeometryOnlyCropBinding:
-    """Prove and bind the one supported historical geometry-only crop topology."""
+    """Prove and bind the supported sealed geometry-only crop-v2 topology."""
 
     archive = analysis_zarr.expanduser().resolve()
     crop_path = str(crop_reference.get("run_path") or "").strip("/")
     if not crop_path.startswith("crop_runs/") or len(crop_path.split("/")) != 2:
         raise HistoricalGeometryOnlyCropAdapterError(
-            "Historical crop adapter requires one exact crop_runs/<run> path."
+            "Geometry-only crop bridge requires one exact crop_runs/<run> path."
         )
     run_id = crop_path.split("/", 1)[1]
     publication = open_persisted_crop_geometry_publication(archive, run_id=run_id)
@@ -971,7 +971,7 @@ def bind_historical_geometry_only_crop_source(
     errors = validate_crop_run_manifest(manifest)
     if errors:
         raise HistoricalGeometryOnlyCropAdapterError(
-            "Historical crop manifest is invalid: " + "; ".join(errors)
+            "Geometry-only crop manifest is invalid: " + "; ".join(errors)
         )
     if manifest.get("schema_version") != CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
         raise HistoricalGeometryOnlyCropAdapterError(

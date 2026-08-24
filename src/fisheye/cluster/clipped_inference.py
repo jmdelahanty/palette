@@ -914,14 +914,14 @@ def _build_downstream_target_pipeline(
             "fisheye.utils.finalize_keypoint_shards",
             str(target.analysis_zarr),
             "--target-crop-run",
-            hybrid_crop_run,
+            geometry_crop_run,
             "--preflight-target-only",
             "--expected-target-row-count",
             str(expected_target_crop_rows),
             "--json",
         ),
         resources=cpu,
-        upstream=(hybrid_key,),
+        upstream=(crop_snapshot.outputs.terminal_job_key,),
     )
     jobs.append(keypoint_preflight_job)
     keypoint_tasks: list[LsfExecutionTask] = []
@@ -1116,7 +1116,7 @@ def _build_downstream_target_pipeline(
         "fisheye.utils.finalize_keypoint_shards",
         str(target.analysis_zarr),
         "--target-crop-run",
-        hybrid_crop_run,
+        geometry_crop_run,
         "--output-run",
         keypoint_run,
         "--json",
@@ -2184,11 +2184,7 @@ def build_plan(
                 else None
             ),
             "keypoint_run": keypoint_run,
-            "keypoint_finalization_mapping_mode": (
-                "direct_same_crop_row_ids"
-                if scope == WORKFLOW_SCOPE_DOWNSTREAM
-                else "identity_rebase"
-            ),
+            "keypoint_finalization_mapping_mode": "identity_rebase",
             "refined_keypoint_run": refined_keypoint_run,
             "assignment_keypoint_group": "keypoints_runs",
             "assignment_keypoints_run": keypoint_run,

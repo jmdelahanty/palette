@@ -2624,9 +2624,8 @@ def crop_from_external_video(
         crop_storage_mode = _normalize_crop_storage_mode(crop_storage_mode)
         if crop_storage_mode != "materialized":
             raise OrdinaryCropCoordinateError(
-                "Future-canonical ordinary crop does not publish geometry-only runs. "
-                "Use a materialized run; historical geometry-only data remains readable "
-                "only as an explicit compatibility surface."
+                "This materialized-crop publisher does not emit geometry-only runs. "
+                "Use the sealed geometry-only crop publisher for that supported profile."
             )
         source_path = str(source_path).strip().strip("/")
         source_group = root[source_path]

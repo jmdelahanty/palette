@@ -4739,10 +4739,17 @@ def load_persisted_source_camera_position_surface(
     has_mapping = DETECTION_ACQUISITION_MAPPING_ATTR in attrs
     has_selection = CROP_GEOMETRY_SELECTION_ATTR in attrs
     has_proxy_successor = COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR in attrs
-    if sum((has_mapping, has_selection, has_proxy_successor)) != 1:
+    from fisheye.shared.manifest_crop_position_authority import (
+        _is_manifest_bound_crop_position_rowset,
+        _load_manifest_crop_position_proof,
+        _require_manifest_crop_position_proof,
+    )
+
+    has_manifest_crop = _is_manifest_bound_crop_position_rowset(rowset)
+    if sum((has_mapping, has_selection, has_proxy_successor, has_manifest_crop)) != 1:
         _fail(
             "Canonical position rowset must declare exactly one detection, crop, "
-            "or collection-proxy-successor lineage."
+            "manifest-crop, or collection-proxy-successor lineage."
         )
     if has_mapping:
         geometry = load_persisted_detection_observation_geometry(
@@ -4751,12 +4758,21 @@ def load_persisted_source_camera_position_surface(
         )
     elif has_selection:
         geometry = load_persisted_crop_observation_geometry(root_node, rowset_path)
-    else:
+    elif has_proxy_successor:
         geometry = load_persisted_collection_proxy_successor_geometry(
             root_node,
             rowset_path,
         )
-    return require_bound_source_camera_position_surface(geometry.position_surface)
+    else:
+        proof = _require_manifest_crop_position_proof(
+            _load_manifest_crop_position_proof(root_node, rowset_path)
+        )
+        return require_bound_source_camera_position_surface(
+            _position_surface(proof.coordinates, proof.temporal_authority)
+        )
+    return require_bound_source_camera_position_surface(
+        geometry.position_surface
+    )
 
 
 __all__ = [

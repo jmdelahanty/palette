@@ -7,9 +7,19 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.pixel_frame_authority import (
+    load_persisted_acquisition_camera_authority,
+    stamp_acquisition_camera_frame,
+    stamp_acquisition_import_ownership,
+    stamp_source_camera_pixel_frame_authority,
+)
+from fisheye.shared.observation_coordinate_publication import (
+    load_persisted_source_camera_position_surface,
+)
 from fisheye.shared.zarr import crop_snapshot_publication as module
 from fisheye.shared.zarr.crop_manifest import (
     CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    CROP_RUN_MANIFEST_SCHEMA_ID,
 )
 from fisheye.shared.zarr.crop_snapshot_publication import (
     CROP_SNAPSHOT_PUBLICATION_SCHEMA_ID,
@@ -54,7 +64,73 @@ class _BoundPixels:
             raise RuntimeError("pixel authority drift")
 
 
+def _install_position_authorities(source) -> None:
+    root = zarr.open_group(
+        str(source.archive_path), mode="a", use_consolidated=False
+    )
+    root.attrs.update(
+        {
+            "recording_id": "crop_shadow_multi_subject",
+            "camera_serials": ["cam2010095"],
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "camera_id": "cam2010095",
+                "source_path": "/recording/cams/cam2010095.mp4",
+                "width": 100,
+                "height": 80,
+                "total_frames": 4,
+                "locator": {
+                    "kind": "recording_relative",
+                    "relative_path": "cams/cam2010095.mp4",
+                },
+                "file_fingerprint": {
+                    "strategy": "size_mtime_sha256_v1",
+                    "value": "d" * 64,
+                    "size_bytes": 1234,
+                    "mtime_ns": 5678,
+                    "relocation_stable": False,
+                },
+            },
+        }
+    )
+    authority = root.require_group(
+        "analysis/acquisition_camera_frames/cam2010095"
+    )
+    ownership = stamp_acquisition_import_ownership(root, authority)
+    stamp_acquisition_camera_frame(
+        root,
+        authority,
+        import_ownership=ownership,
+    )
+    _, acquisition = load_persisted_acquisition_camera_authority(
+        root,
+        expected_camera_id="cam2010095",
+    )
+    point_frame = root.require_group(
+        "analysis/coordinate_frames/source_camera/cam2010095/continuous"
+    )
+    stamp_source_camera_pixel_frame_authority(
+        point_frame,
+        frame_id="cam2010095_source_camera",
+        pixel_convention="continuous",
+        acquisition_frame=acquisition,
+    )
+    detection = root.require_group("detect_runs").require_group("detect_source")
+    attrs = dict(detection.attrs)
+    attrs.setdefault(
+        "run_manifest",
+        {
+            "payload_digest": "a" * 64,
+            "payload": {"publication": {"stage_selector_eligible": True}},
+        },
+    )
+    attrs.setdefault("stage_selector_eligible", True)
+    detection.attrs.put(attrs)
+
+
 def _wire_authorities(monkeypatch, source, pixels: _BoundPixels) -> list[Path]:
+    _install_position_authorities(source)
     calls: list[Path] = []
 
     def bind_source(path: Path, **_kwargs):
@@ -428,6 +504,88 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
     assert rebound.run_id == "crop_candidate_v2"
     assert rebound.plans.profile.profile_id == "published_http_v1"
     assert rebound.receipt["persisted_archive_path"] == str(archive)
+    surface = load_persisted_source_camera_position_surface(
+        direct_root,
+        "crop_runs/crop_candidate_v2",
+    )
+    assert surface.coordinates.coordinate_node.path == (
+        "crop_runs/crop_candidate_v2/centers_img_xy"
+    )
+    assert [
+        record.record["schema_id"] for record in surface.coordinates.lineage_records
+    ] == [CROP_RUN_MANIFEST_SCHEMA_ID]
+    from fisheye.analysis.track_kinematics import (
+        _canonical_crop_detection_rowset_path,
+        load_canonical_offline_position_source,
+        resolve_detection_from_path,
+    )
+
+    offline = load_canonical_offline_position_source(
+        direct_root,
+        direct_root["crop_runs/crop_candidate_v2"],
+        crop_run_name="crop_candidate_v2",
+    )
+    detection_path = _canonical_crop_detection_rowset_path(
+        offline.position_surface.coordinates
+    )
+    assert detection_path == "refined_detect_runs/refined_crop_source"
+    detection = resolve_detection_from_path(direct_root, detection_path)
+    assert detection.run_name == "refined_crop_source"
+    assert detection.source_detect_run == "detect_source"
+
+    mutable_root = zarr.open_group(
+        str(archive), mode="a", use_consolidated=False
+    )
+    crop = mutable_root["crop_runs/crop_candidate_v2"]
+    crop.attrs["crop_geometry_selection"] = {}
+    with pytest.raises(ValueError, match="exactly one detection, crop"):
+        load_persisted_source_camera_position_surface(
+            mutable_root,
+            "crop_runs/crop_candidate_v2",
+        )
+
+
+def test_manifest_position_authority_rejects_center_tampering(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = replace(
+        _refined_source(tmp_path),
+        selection_mode="approved_authoritative_refined_v1",
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pixels = _BoundPixels(
+        pixel_authority=_pixel(),
+        source_video_path=tmp_path / "camera.mp4",
+    )
+    _wire_authorities(monkeypatch, source, pixels)
+    publish_crop_geometry_production_candidate(
+        analysis_zarr=source.archive_path,
+        run_id="crop_position_tamper",
+        policy=_policy(),
+        expected_camera_identity="cam2010095",
+        scratch_root=scratch,
+    )
+    writable = zarr.open_group(
+        str(source.archive_path), mode="a", use_consolidated=False
+    )
+    centers = writable["crop_runs/crop_position_tamper/centers_img_xy"]
+    changed = np.asarray(centers[0], dtype=np.float32)
+    changed[0] += np.float32(1.0)
+    centers[0] = changed
+
+    fresh = zarr.open_group(
+        str(source.archive_path), mode="r", use_consolidated=False
+    )
+    with pytest.raises(
+        ValueError,
+        match="Persisted crop publication is invalid.*center_projection_mismatch",
+    ):
+        load_persisted_source_camera_position_surface(
+            fresh,
+            "crop_runs/crop_position_tamper",
+        )
 
 
 def test_authority_drift_fails_before_archive_import(
