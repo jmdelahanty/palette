@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,14 @@ from fisheye.utils.finalize_keypoint_shards import (
     preflight_same_crop_keypoint_finalization_target,
 )
 from fisheye.utils.merge_clipped_proxy_crop_runs import merge_clipped_proxy_crop_runs
+from fisheye.shared.zarr.crop_snapshot_publication import (
+    publish_crop_geometry_production_candidate,
+)
+from tests.unit.fisheye.test_crop_shadow import _pixel, _policy, _refined_source
+from tests.unit.fisheye.test_crop_snapshot_publication import (
+    _BoundPixels,
+    _wire_authorities,
+)
 
 
 def _counts(frames: np.ndarray, *, frame_axis_len: int) -> np.ndarray:
@@ -184,6 +193,33 @@ def _write_shard(
             "model_name": "pose.pt",
         }
     )
+
+
+def _write_split_pixel_crop_from_geometry(
+    root: zarr.Group,
+    *,
+    source_run: str,
+    geometry_run: str,
+) -> np.ndarray:
+    geometry = root[f"crop_runs/{geometry_run}"]
+    row_count = int(geometry["instance_key"].shape[0])
+    order = np.arange(row_count - 1, -1, -1, dtype=np.int64)
+    source = root["crop_runs"].create_group(source_run)
+    for name in (
+        "instance_key",
+        "source_refined_row_ids",
+        "frame_indices",
+        "roi_coordinates_full",
+        "source_acquisition_frame_index",
+        "roi_sizes_full",
+        "source_crop_xywh",
+        "bbox_img_xyxy",
+        "bbox_norm_coords",
+        "bbox_roi_xyxy",
+    ):
+        if name in geometry:
+            source.create_array(name, data=np.asarray(geometry[name][:])[order])
+    return order
 
 
 def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) -> None:
@@ -461,7 +497,66 @@ def test_finalize_keypoint_shards_rebases_mixed_proxy_crop_runs_to_target(tmp_pa
     np.testing.assert_array_equal(run["detection_indices"][:], np.array([0, 1, 2, 3], dtype=np.int64))
 
 
-def test_finalize_keypoint_shards_rebase_rejects_target_instance_key_mismatch(
+def test_real_geometry_crop_profile_accepts_split_pixel_keypoint_shards(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = replace(
+        _refined_source(tmp_path),
+        selection_mode="approved_authoritative_refined_v1",
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pixels = _BoundPixels(
+        pixel_authority=_pixel(),
+        source_video_path=tmp_path / "camera.mp4",
+    )
+    _wire_authorities(monkeypatch, source, pixels)
+    publish_crop_geometry_production_candidate(
+        analysis_zarr=source.archive_path,
+        run_id="crop_geometry",
+        policy=_policy(),
+        expected_camera_identity="cam2010095",
+        scratch_root=scratch,
+    )
+
+    root = zarr.open_group(str(source.archive_path), mode="a", use_consolidated=False)
+    geometry = root["crop_runs/crop_geometry"]
+    for legacy_name in (
+        "source_clip_indices",
+        "source_clip_local_frame_indices",
+        "source_detect_row_index",
+    ):
+        assert legacy_name not in geometry
+    order = _write_split_pixel_crop_from_geometry(
+        root,
+        source_run="crop_hybrid_pixels",
+        geometry_run="crop_geometry",
+    )
+    _write_shard(
+        root,
+        "shard_pixels",
+        crop_rows=list(range(int(order.shape[0]))),
+        source_crop_run="crop_hybrid_pixels",
+    )
+
+    result = finalize_keypoint_shards(
+        zarr_path=source.archive_path,
+        shard_runs=["shard_pixels"],
+        output_run="keypoints_geometry",
+        target_crop_run="crop_geometry",
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "would_write"
+    assert result["source_crop_run"] == "crop_geometry"
+    assert result["source_crop_mapping_mode"] == "identity_rebase"
+    assert result["identity_validation"]["status"] == "exact"
+    assert result["total_rois"] == int(order.shape[0])
+
+
+def test_keypoint_rebase_rejects_matching_keys_with_geometry_disagreement(
     tmp_path: Path,
 ) -> None:
     zarr_path = tmp_path / "sample_analysis.zarr"
@@ -469,6 +564,41 @@ def test_finalize_keypoint_shards_rebase_rejects_target_instance_key_mismatch(
     root.create_group("crop_runs")
     _write_proxy_crop(root, "crop_proxy_a", frames=[10, 11], clip_index=0, refined_offset=100)
     _write_proxy_crop(root, "crop_proxy_b", frames=[20, 21], clip_index=1, refined_offset=200)
+    merge_clipped_proxy_crop_runs(
+        zarr_path=zarr_path,
+        source_crop_runs=["crop_proxy_b", "crop_proxy_a"],
+        output_run="crop_proxy_collection",
+    )
+    reopened = zarr.open_group(store=zarr_path, mode="a")
+    _write_shard(reopened, "shard_a", crop_rows=[0, 1], source_crop_run="crop_proxy_a")
+    _write_shard(reopened, "shard_b", crop_rows=[0, 1], source_crop_run="crop_proxy_b")
+    target_roi = reopened["crop_runs/crop_proxy_collection/roi_coordinates_full"]
+    target_roi[0, 0] = int(target_roi[0, 0]) + 1
+
+    with pytest.raises(
+        ValueError,
+        match="authority array 'roi_coordinates_full' disagrees",
+    ):
+        finalize_keypoint_shards(
+            zarr_path=zarr_path,
+            shard_runs=["shard_b", "shard_a"],
+            output_run="keypoints_collection_test",
+            target_crop_run="crop_proxy_collection",
+        )
+
+
+def test_finalize_keypoint_shards_rebase_rejects_target_instance_key_mismatch(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = zarr.open_group(store=zarr_path, mode="w")
+    root.create_group("crop_runs")
+    _write_proxy_crop(
+        root, "crop_proxy_a", frames=[10, 11], clip_index=0, refined_offset=100
+    )
+    _write_proxy_crop(
+        root, "crop_proxy_b", frames=[20, 21], clip_index=1, refined_offset=200
+    )
     merge_clipped_proxy_crop_runs(
         zarr_path=zarr_path,
         source_crop_runs=["crop_proxy_b", "crop_proxy_a"],
