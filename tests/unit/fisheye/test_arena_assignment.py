@@ -682,6 +682,42 @@ def test_crop_lineage_resolves_finalized_refined_working_source_detect() -> None
     assert mod._source_detect_run_from_refined(root, refined_name) == "detect_native_a"
 
 
+def test_canonical_crop_assignment_uses_shared_position_authority_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    coordinates = object()
+    calls: list[tuple[str, object]] = []
+
+    def fake_load(selected_root, rowset_path):
+        calls.append((rowset_path, selected_root))
+        return SimpleNamespace(coordinates=coordinates)
+
+    def fake_lineage(selected_coordinates):
+        assert selected_coordinates is coordinates
+        return "refined_detect_runs/refined_001"
+
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        fake_load,
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_source_detection_rowset_from_position_coordinates",
+        fake_lineage,
+    )
+
+    refined_run, detect_run = mod._canonical_crop_assignment_lineage(
+        root,
+        "crop_runs/crop_001",
+    )
+
+    assert calls == [("crop_runs/crop_001", root)]
+    assert refined_run == "refined_001"
+    assert detect_run == "detect_source_001"
+
+
 def test_assign_arenas_spatial_accepts_external_crop_recorder_rowset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

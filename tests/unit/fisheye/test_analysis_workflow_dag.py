@@ -17,6 +17,7 @@ from fisheye.analysis_workflows import (
     load_analysis_workflow,
     plan_analysis_workflow,
 )
+from fisheye.utils.plan_analysis_workflow import build_availability
 
 
 def _write_zarr_metadata(path: Path, attributes: dict[str, object] | None = None) -> None:
@@ -342,6 +343,91 @@ def test_availability_resolver_discovers_tracking_authority(tmp_path: Path) -> N
     assert status.available is True
     assert status.run_name == "tracking_a"
     assert status.artifact_path == "tracking_runs/tracking_a"
+
+
+def _write_keypoint_crop_tracking_lineage(
+    root: Path,
+    *,
+    tracking_crop: str,
+) -> None:
+    _write_zarr_metadata(root)
+    _write_zarr_metadata(
+        root / "keypoints_runs",
+        {"latest": "canonical_a", "latest_complete": "canonical_a"},
+    )
+    _write_zarr_metadata(
+        root / "keypoints_runs" / "canonical_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_crop_run": "crop_geometry_a",
+            "keypoints_processed": 4,
+        },
+    )
+    _write_zarr_metadata(
+        root / "crop_runs" / "crop_geometry_a",
+        {
+            "status": "complete",
+            "artifact_class": "geometry_only_analysis",
+            "stage_selector_eligible": False,
+            "run_manifest": {
+                "payload": {
+                    "source_refined_snapshot": {"run_id": "refined_a"}
+                }
+            },
+        },
+    )
+    _write_zarr_metadata(
+        root / "tracking_runs",
+        {"latest": "tracking_a", "latest_complete": "tracking_a"},
+    )
+    _write_zarr_metadata(
+        root / "tracking_runs" / "tracking_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_rowset_path": f"crop_runs/{tracking_crop}",
+            "source_rowset_row_count": 4,
+            "source_refined_run": "refined_a",
+        },
+    )
+
+
+def test_tracking_availability_rejects_selected_keypoint_crop_mismatch(
+    tmp_path: Path,
+) -> None:
+    _write_keypoint_crop_tracking_lineage(
+        tmp_path,
+        tracking_crop="crop_hybrid_old",
+    )
+
+    status = discover_stage_availability(
+        tmp_path,
+        "tracks",
+        dependency_runs={"refined_keypoints": "canonical_a"},
+    )
+
+    assert status.available is False
+    assert status.run_name == "tracking_a"
+    assert "does not match the selected keypoint crop lineage" in status.reason
+    assert "crop_geometry_a" in status.reason
+
+
+def test_workflow_availability_passes_keypoint_lineage_to_tracking_gate(
+    tmp_path: Path,
+) -> None:
+    _write_keypoint_crop_tracking_lineage(
+        tmp_path,
+        tracking_crop="crop_geometry_a",
+    )
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+
+    statuses = build_availability(workflow, tmp_path)
+
+    assert statuses["refined_keypoints"].available is True
+    assert statuses["tracks"].available is True
+    assert statuses["tracks"].run_name == "tracking_a"
+    assert "matches the selected keypoint crop lineage" in statuses["tracks"].reason
 
 
 def test_keypoint_authority_resolver_accepts_clipped_canonical_passthrough(

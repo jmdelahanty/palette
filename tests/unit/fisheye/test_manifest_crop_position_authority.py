@@ -16,6 +16,7 @@ from fisheye.shared import manifest_crop_position_authority as profile_mod
 from fisheye.shared import observation_coordinate_publication as position_mod
 from fisheye.shared.observation_coordinate_publication import (
     load_persisted_source_camera_position_surface,
+    resolve_source_detection_rowset_from_position_coordinates,
 )
 from fisheye.shared.zarr.crop_snapshot_publication import (
     publish_crop_geometry_production_candidate,
@@ -77,7 +78,7 @@ def test_real_geometry_crop_publisher_round_trips_track_motion_v2(
         root["crop_runs/crop_track_roundtrip"],
         crop_run_name="crop_track_roundtrip",
     )
-    detection_path = track_mod._canonical_crop_detection_rowset_path(
+    detection_path = resolve_source_detection_rowset_from_position_coordinates(
         surface.coordinates
     )
     assert detection_path == "refined_detect_runs/refined_crop_source"

@@ -515,9 +515,11 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
         record.record["schema_id"] for record in surface.coordinates.lineage_records
     ] == [CROP_RUN_MANIFEST_SCHEMA_ID]
     from fisheye.analysis.track_kinematics import (
-        _canonical_crop_detection_rowset_path,
         load_canonical_offline_position_source,
         resolve_detection_from_path,
+    )
+    from fisheye.shared.observation_coordinate_publication import (
+        resolve_source_detection_rowset_from_position_coordinates,
     )
 
     offline = load_canonical_offline_position_source(
@@ -525,7 +527,7 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
         direct_root["crop_runs/crop_candidate_v2"],
         crop_run_name="crop_candidate_v2",
     )
-    detection_path = _canonical_crop_detection_rowset_path(
+    detection_path = resolve_source_detection_rowset_from_position_coordinates(
         offline.position_surface.coordinates
     )
     assert detection_path == "refined_detect_runs/refined_crop_source"

@@ -374,6 +374,191 @@ def _keypoint_authority_availability(
     )
 
 
+def _keypoint_crop_lineage(
+    root: Path,
+    *,
+    selected_keypoint_run: str,
+) -> tuple[str, int | None, str | None] | StageAvailability:
+    """Resolve the exact crop rowset named by one selected keypoint authority."""
+
+    keypoints = _keypoint_authority_availability(
+        root,
+        requested_run=selected_keypoint_run,
+    )
+    if not keypoints.available or not keypoints.artifact_path:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            reason=(
+                "selected keypoint dependency is unavailable: "
+                f"{keypoints.reason}"
+            ),
+        )
+    keypoint_path = root / keypoints.artifact_path
+    keypoint_attrs = _attrs(keypoint_path)
+    if keypoints.artifact_path.startswith("refined_keypoints_runs/"):
+        raw_name = str(keypoint_attrs.get("source_keypoints_run") or "").strip()
+        if not raw_name or "/" in raw_name:
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=keypoints.artifact_path,
+                run_name=keypoints.run_name,
+                reason="selected refined keypoint authority lacks its exact base run",
+            )
+        raw_parent = root / "keypoints_runs"
+        raw_path = raw_parent / raw_name
+        if not (raw_parent / "zarr.json").is_file() or not (
+            raw_path / "zarr.json"
+        ).is_file():
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=f"keypoints_runs/{raw_name}",
+                run_name=keypoints.run_name,
+                reason="selected refined keypoint base-run metadata is missing",
+            )
+        raw_attrs = _attrs(raw_path)
+        if not is_run_complete_in_parent_attrs(
+            _attrs(raw_parent),
+            raw_attrs,
+            legacy_default=False,
+        ):
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=f"keypoints_runs/{raw_name}",
+                run_name=keypoints.run_name,
+                reason="selected refined keypoint base run is incomplete",
+            )
+        keypoint_attrs = raw_attrs
+
+    crop_name = str(keypoint_attrs.get("source_crop_run") or "").strip()
+    if not crop_name or "/" in crop_name:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=keypoints.artifact_path,
+            run_name=keypoints.run_name,
+            reason="selected keypoint authority lacks its exact source crop run",
+        )
+    crop_path = root / "crop_runs" / crop_name
+    if not (crop_path / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=f"crop_runs/{crop_name}",
+            run_name=keypoints.run_name,
+            reason="selected keypoint source-crop metadata is missing",
+        )
+    crop_attrs = _attrs(crop_path)
+    refined_name = str(
+        crop_attrs.get("source_refined_run")
+        or crop_attrs.get("source_refined_detect_run")
+        or ""
+    ).strip()
+    if not refined_name:
+        source = crop_attrs.get("source_refined_snapshot")
+        if not isinstance(source, Mapping):
+            manifest = crop_attrs.get("run_manifest")
+            payload = manifest.get("payload") if isinstance(manifest, Mapping) else None
+            source = (
+                payload.get("source_refined_snapshot")
+                if isinstance(payload, Mapping)
+                else None
+            )
+        refined_name = (
+            str(source.get("run_id") or "").strip()
+            if isinstance(source, Mapping)
+            else ""
+        )
+    if refined_name and "/" in refined_name:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=f"crop_runs/{crop_name}",
+            run_name=keypoints.run_name,
+            reason="selected keypoint source-crop refined lineage is malformed",
+        )
+    row_count_value = keypoint_attrs.get("keypoints_processed")
+    row_count = (
+        int(row_count_value)
+        if type(row_count_value) is int and row_count_value >= 0
+        else None
+    )
+    return f"crop_runs/{crop_name}", row_count, refined_name or None
+
+
+def _tracking_authority_availability(
+    root: Path,
+    *,
+    requested_run: str | None,
+    selected_keypoint_run: str,
+) -> StageAvailability:
+    """Require selected tracks to bind the selected keypoint crop authority."""
+
+    selected = discover_stage_availability(
+        root,
+        "tracks",
+        requested_run=requested_run,
+    )
+    if not selected.available or not selected.artifact_path:
+        return selected
+    lineage = _keypoint_crop_lineage(
+        root,
+        selected_keypoint_run=selected_keypoint_run,
+    )
+    if isinstance(lineage, StageAvailability):
+        return lineage
+    expected_path, expected_rows, expected_refined = lineage
+    tracking_attrs = _attrs(root / selected.artifact_path)
+    actual_path = str(tracking_attrs.get("source_rowset_path") or "").strip().strip("/")
+    actual_refined = str(tracking_attrs.get("source_refined_run") or "").strip()
+    actual_rows_value = tracking_attrs.get("source_rowset_row_count")
+    actual_rows = (
+        int(actual_rows_value)
+        if type(actual_rows_value) is int and actual_rows_value >= 0
+        else None
+    )
+    mismatches: list[str] = []
+    if actual_path != expected_path:
+        mismatches.append(
+            f"source_rowset_path={actual_path!r}, expected {expected_path!r}"
+        )
+    if expected_refined is not None and actual_refined != expected_refined:
+        mismatches.append(
+            f"source_refined_run={actual_refined!r}, expected {expected_refined!r}"
+        )
+    if (
+        expected_rows is not None
+        and actual_rows is not None
+        and actual_rows != expected_rows
+    ):
+        mismatches.append(
+            f"source_rowset_row_count={actual_rows}, expected {expected_rows}"
+        )
+    if mismatches:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=selected.artifact_path,
+            run_name=selected.run_name,
+            reason=(
+                "selected tracking authority does not match the selected "
+                "keypoint crop lineage: " + "; ".join(mismatches)
+            ),
+            completion_status=selected.completion_status,
+        )
+    return StageAvailability(
+        stage_id="tracks",
+        available=True,
+        artifact_path=selected.artifact_path,
+        run_name=selected.run_name,
+        reason="persisted tracking authority matches the selected keypoint crop lineage",
+        completion_status=selected.completion_status,
+    )
+
+
 def _active_subject_mask_bundle_selection(
     root: Path,
 ) -> tuple[str, str] | None:
@@ -681,6 +866,14 @@ def discover_stage_availability(
         )
         if bundle_status is not None:
             return bundle_status
+    if canonical == "tracks" and dependency_runs:
+        selected_keypoints = dependency_runs.get("refined_keypoints")
+        if selected_keypoints:
+            return _tracking_authority_availability(
+                root,
+                requested_run=requested_run,
+                selected_keypoint_run=selected_keypoints,
+            )
     if canonical == TRACK_KINEMATICS_VISUALIZATION_STAGE:
         return _track_kinematics_visualization_availability(
             root,

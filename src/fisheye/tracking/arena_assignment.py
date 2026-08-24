@@ -33,6 +33,12 @@ from ..shared.zarr.schema import get_run_group
 from ..shared.zarr.keypoint_bundle_activation import (
     resolve_active_keypoint_bundle_from_root,
 )
+from ..shared.observation_coordinate_publication import (
+    CROP_GEOMETRY_SELECTION_ATTR,
+    load_persisted_source_camera_position_surface,
+    resolve_source_detection_rowset_from_position_coordinates,
+)
+from ..shared.zarr.crop_manifest import CROP_RUN_MANIFEST_ATTRIBUTE
 from ..shared.zarr.arena_geometry_selection import (
     resolve_active_arena_geometry_circle,
 )
@@ -153,6 +159,46 @@ def _source_detect_run_from_refined(
     if working and working in parent:
         return _source_detect_run_from_attrs(parent[working].attrs)
     return None
+
+
+def _declares_canonical_crop_position_profile(attrs: Mapping[str, Any]) -> bool:
+    """Return whether a crop must pass the shared position-authority resolver."""
+
+    return bool(
+        CROP_GEOMETRY_SELECTION_ATTR in attrs
+        or isinstance(attrs.get(CROP_RUN_MANIFEST_ATTRIBUTE), Mapping)
+    )
+
+
+def _canonical_crop_assignment_lineage(
+    root: zarr.Group,
+    rowset_path: str,
+) -> tuple[Optional[str], str]:
+    """Resolve assignment lineage only through the shared position gate."""
+
+    surface = load_persisted_source_camera_position_surface(root, rowset_path)
+    detection_path = resolve_source_detection_rowset_from_position_coordinates(
+        surface.coordinates
+    )
+    parts = detection_path.split("/")
+    if len(parts) != 2 or not parts[1]:
+        raise ValueError(
+            "Canonical crop position authority resolved malformed detection lineage."
+        )
+    if parts[0] == "detect_runs":
+        return None, parts[1]
+    if parts[0] != "refined_detect_runs":
+        raise ValueError(
+            "Canonical crop position authority resolved unsupported detection lineage."
+        )
+    refined_run = parts[1]
+    source_detect = _source_detect_run_from_refined(root, refined_run)
+    if not source_detect:
+        raise ValueError(
+            "Canonical crop position authority's refined-detection source lacks "
+            "its exact detect-run lineage."
+        )
+    return refined_run, source_detect
 
 
 def _selected_keypoint_source_rowset(
@@ -889,13 +935,25 @@ def assign_arenas_spatial(
         parts = source_rowset_path.split("/")
         head = parts[0] if parts else ""
         if head == "crop_runs":
-            refined_run_name = _source_refined_run_from_attrs(detection_group.attrs)
-            source_detect_run = _source_detect_run_from_attrs(detection_group.attrs)
-            if refined_run_name and not source_detect_run:
-                source_detect_run = _source_detect_run_from_refined(
-                    root,
-                    refined_run_name,
+            if _declares_canonical_crop_position_profile(detection_group.attrs):
+                refined_run_name, source_detect_run = (
+                    _canonical_crop_assignment_lineage(
+                        root,
+                        source_rowset_path,
+                    )
                 )
+            else:
+                refined_run_name = _source_refined_run_from_attrs(
+                    detection_group.attrs
+                )
+                source_detect_run = _source_detect_run_from_attrs(
+                    detection_group.attrs
+                )
+                if refined_run_name and not source_detect_run:
+                    source_detect_run = _source_detect_run_from_refined(
+                        root,
+                        refined_run_name,
+                    )
             assignment_source = "explicit_crop_rows"
         elif head == "refined_detect_runs":
             if len(parts) < 2:

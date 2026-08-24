@@ -1075,6 +1075,116 @@ def require_bound_source_camera_position_surface(
     return value
 
 
+def resolve_source_detection_rowset_from_position_coordinates(
+    value: BoundCanonicalCoordinateDescriptor,
+) -> str:
+    """Project one validated crop-position proof to its detection rowset.
+
+    Consumers use this profile-neutral projection after the shared position
+    resolver has validated the selected crop grammar. They never inspect crop
+    attrs or manifests themselves.
+    """
+
+    coordinates = require_bound_canonical_coordinate_descriptor(value)
+    from fisheye.shared.zarr.crop_manifest import (
+        CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+        CROP_RUN_MANIFEST_SCHEMA_ID,
+    )
+
+    matches: list[str] = []
+    expected_leaves = (
+        "instance_key",
+        "source_acquisition_frame_index",
+        "bbox_norm_coords",
+        "bbox_img_xyxy",
+        "centers_img_xy",
+    )
+    for bound_record in coordinates.lineage_records:
+        bound_record.assert_verified()
+        record = bound_record.record
+        schema_id = record.get("schema_id")
+        if schema_id == CROP_RUN_MANIFEST_SCHEMA_ID:
+            if record.get("schema_version") != (
+                CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            ):
+                _fail(
+                    "Canonical geometry-only crop lineage uses an unsupported "
+                    "manifest version."
+                )
+            payload = record.get("payload")
+            refined_source = (
+                payload.get("source_refined_snapshot")
+                if isinstance(payload, Mapping)
+                else None
+            )
+            refined_run_id = (
+                refined_source.get("run_id")
+                if isinstance(refined_source, Mapping)
+                else None
+            )
+            if (
+                not isinstance(refined_run_id, str)
+                or not refined_run_id
+                or "/" in refined_run_id
+            ):
+                _fail(
+                    "Canonical geometry-only crop lineage has a malformed "
+                    "refined-detection reference."
+                )
+            matches.append(f"refined_detect_runs/{refined_run_id}")
+            continue
+        if schema_id != CROP_GEOMETRY_SELECTION_SCHEMA_ID:
+            continue
+        if (
+            record.get("schema_version")
+            != CROP_GEOMETRY_SELECTION_SCHEMA_VERSION
+            or record.get("operation") != CROP_GEOMETRY_SELECTION_OPERATION
+        ):
+            _fail(
+                "Canonical crop position lineage uses an unsupported selection "
+                "record version or operation."
+            )
+        source_rowset = record.get("source_rowset")
+        if type(source_rowset) is not dict:
+            _fail("Canonical crop selection lacks one exact source rowset record.")
+        rowset_path: str | None = None
+        for leaf in expected_leaves:
+            payload = source_rowset.get(leaf)
+            array_ref = payload.get("array_ref") if type(payload) is dict else None
+            suffix = f"/{leaf}"
+            if (
+                not isinstance(array_ref, str)
+                or not array_ref.startswith("/")
+                or not array_ref.endswith(suffix)
+            ):
+                _fail(
+                    "Canonical crop selection source-rowset array references are "
+                    "missing or malformed."
+                )
+            candidate = array_ref[1 : -len(suffix)]
+            if not candidate or (rowset_path is not None and candidate != rowset_path):
+                _fail(
+                    "Canonical crop selection source arrays do not share one exact "
+                    "detection rowset."
+                )
+            rowset_path = candidate
+        if rowset_path is None or not (
+            rowset_path.startswith("detect_runs/")
+            or rowset_path.startswith("refined_detect_runs/")
+        ):
+            _fail(
+                "Canonical crop selection does not identify a supported detection "
+                "rowset."
+            )
+        matches.append(rowset_path)
+    if len(matches) != 1:
+        _fail(
+            "Canonical crop position lineage must contain exactly one bound crop "
+            "selection or geometry-only crop manifest record."
+        )
+    return matches[0]
+
+
 @dataclass(frozen=True, init=False)
 class BoundDetectionObservationGeometry:
     """Freshly validated canonical detection bbox and center surfaces."""
@@ -4844,6 +4954,7 @@ __all__ = [
     "load_persisted_ordinary_crop_observation_geometry",
     "load_persisted_sampled_training_detection_geometry",
     "load_persisted_source_camera_position_surface",
+    "resolve_source_detection_rowset_from_position_coordinates",
     "publish_crop_observation_geometry",
     "publish_collection_proxy_successor_mapping",
     "publish_crop_roi_geometry",
