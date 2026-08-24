@@ -1600,6 +1600,21 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
 
     hybrid_run = str(target["hybrid_crop_run"])
     geometry_run = str(target["geometry_crop_run"])
+    fragments = {
+        fragment["fragment_id"]: fragment
+        for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    }
+    keypoint_fragment = fragments[f"keypoints:{target_safe}"]
+    assert keypoint_fragment["requires"] == [
+        f"hybrid_crop_provider:{target_safe}",
+        f"crop_snapshot:{target_safe}",
+    ]
+    assert keypoint_fragment["metadata"]["crop_run"] == geometry_run
+    assert keypoint_fragment["metadata"]["geometry_crop_run"] == geometry_run
+    assert keypoint_fragment["metadata"]["pixel_crop_run"] == hybrid_run
+    assert keypoint_fragment["metadata"]["finalization_mapping_mode"] == (
+        "identity_rebase"
+    )
     hybrid_command = " ".join(jobs[f"hybrid_crop:{target_safe}"].command)
     assert "build_hybrid_acquisition_offline_crop_run" in hybrid_command
     assert f"--run-name {hybrid_run}" in hybrid_command
