@@ -292,24 +292,11 @@ def publish_source_camera_physical_authority(
     return load_source_camera_physical_authority(root)
 
 
-def rebind_source_camera_physical_authority(
+def _validated_rebind_state(
     root: Any,
     *,
     source_camera_evidence: VerifiedSelectedCameraSourceEvidence,
-    source_kind: str,
-    provenance: Mapping[str, Any],
-) -> BoundSourceCameraPhysicalAuthority:
-    """Replace one copied donor binding with an authority bound to ``root``.
-
-    This is deliberately narrower than ordinary publication.  The existing
-    selected-camera evidence must be a valid, digest-bound record and must
-    exactly equal freshly verified evidence rebuilt from the named source H5.
-    The existing physical record must also agree with that camera and scale.
-    Only then are the selected evidence, physical record, and manifest replaced
-    transactionally so their source-camera pointer binds this archive's
-    acquisition authority.
-    """
-
+) -> tuple[VerifiedSelectedCameraSourceEvidence, Any, Any, Any]:
     evidence = require_verified_selected_camera_source_evidence(source_camera_evidence)
     container = _container(root)
     manifest = bind_persisted_coordinate_record(
@@ -392,14 +379,52 @@ def rebind_source_camera_physical_authority(
         or existing_physical.source_camera_pixels.record_sha256
         != source_pointer["record_sha256"]
         or existing_physical.physical_extent.width
-        != float(evidence.native_width_px) / evidence.pixels_per_mm_camera
+        != float(evidence.native_width_px) * (1.0 / evidence.pixels_per_mm_camera)
         or existing_physical.physical_extent.height
-        != float(evidence.native_height_px) / evidence.pixels_per_mm_camera
+        != float(evidence.native_height_px) * (1.0 / evidence.pixels_per_mm_camera)
     ):
         raise SourceCameraPhysicalAuthorityError(
             "Existing donor physical record does not exactly agree with the "
             "verified camera evidence."
         )
+    return evidence, container, selected_node, physical_node
+
+
+def validate_source_camera_physical_authority_rebind(
+    root: Any,
+    *,
+    source_camera_evidence: VerifiedSelectedCameraSourceEvidence,
+) -> None:
+    """Prove a copied donor authority is eligible for target rebinding."""
+
+    _validated_rebind_state(
+        root,
+        source_camera_evidence=source_camera_evidence,
+    )
+
+
+def rebind_source_camera_physical_authority(
+    root: Any,
+    *,
+    source_camera_evidence: VerifiedSelectedCameraSourceEvidence,
+    source_kind: str,
+    provenance: Mapping[str, Any],
+) -> BoundSourceCameraPhysicalAuthority:
+    """Replace one copied donor binding with an authority bound to ``root``.
+
+    This is deliberately narrower than ordinary publication.  The existing
+    selected-camera evidence must be a valid, digest-bound record and must
+    exactly equal freshly verified evidence rebuilt from the named source H5.
+    The existing physical record must also agree with that camera and scale.
+    Only then are the selected evidence, physical record, and manifest replaced
+    transactionally so their source-camera pointer binds this archive's
+    acquisition authority.
+    """
+
+    evidence, container, selected_node, physical_node = _validated_rebind_state(
+        root,
+        source_camera_evidence=source_camera_evidence,
+    )
 
     nodes = (container, selected_node, physical_node)
     attrs = tuple(
@@ -560,4 +585,5 @@ __all__ = [
     "publish_source_camera_physical_authority",
     "rebind_source_camera_physical_authority",
     "require_bound_source_camera_physical_authority",
+    "validate_source_camera_physical_authority_rebind",
 ]

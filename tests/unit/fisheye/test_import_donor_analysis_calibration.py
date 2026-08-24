@@ -90,7 +90,12 @@ def _write_target(path: Path, *, camera: str = "2010093") -> Path:
     return path
 
 
-def _write_source_h5(path: Path, *, camera: str) -> tuple[bytes, dict[str, float]]:
+def _write_source_h5(
+    path: Path,
+    *,
+    camera: str,
+    pixels_per_mm: float,
+) -> tuple[bytes, dict[str, float]]:
     arena = {
         "active_camera_id": camera,
         "calculated_z_eff_mm": 20.0,
@@ -99,7 +104,7 @@ def _write_source_h5(path: Path, *, camera: str) -> tuple[bytes, dict[str, float
                 "camera_id": camera,
                 "native_width_px": 4512,
                 "native_height_px": 4512,
-                "pixels_per_mm_camera": 50.0,
+                "pixels_per_mm_camera": pixels_per_mm,
                 "pixels_per_mm_projector": 4.0,
                 "real_world_ref_mm": 10.0,
             }
@@ -107,7 +112,7 @@ def _write_source_h5(path: Path, *, camera: str) -> tuple[bytes, dict[str, float
     }
     raw = json.dumps(arena, sort_keys=True).encode("utf-8")
     attrs = {
-        "pixels_per_mm_camera": 50.0,
+        "pixels_per_mm_camera": pixels_per_mm,
         "pixels_per_mm_projector": 4.0,
         "real_world_ref_mm": 10.0,
     }
@@ -119,9 +124,18 @@ def _write_source_h5(path: Path, *, camera: str) -> tuple[bytes, dict[str, float
     return raw, attrs
 
 
-def _write_donor(path: Path, *, camera: str = "2010093") -> Path:
+def _write_donor(
+    path: Path,
+    *,
+    camera: str = "2010093",
+    pixels_per_mm: float = 50.0,
+) -> Path:
     source_h5 = path.with_suffix(".h5")
-    arena_raw, camera_attrs = _write_source_h5(source_h5, camera=camera)
+    arena_raw, camera_attrs = _write_source_h5(
+        source_h5,
+        camera=camera,
+        pixels_per_mm=pixels_per_mm,
+    )
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
     root.attrs.update({"recording_id": "donor", "camera_serials": [camera]})
     root.require_group("analysis")
@@ -131,8 +145,8 @@ def _write_donor(path: Path, *, camera: str = "2010093") -> Path:
         {
             "active_camera_id": camera,
             "primary_camera_id": camera,
-            "pixels_per_mm_camera": 50.0,
-            "pixel_to_mm": 0.02,
+            "pixels_per_mm_camera": pixels_per_mm,
+            "pixel_to_mm": 1.0 / pixels_per_mm,
             "pixels_per_mm_projector": 4.0,
             "native_width_px": 4512,
             "native_height_px": 4512,
@@ -212,7 +226,10 @@ def test_import_donor_calibration_rebinds_complete_group_to_target(
 
 def test_repair_existing_rebinds_legacy_copied_authority(tmp_path: Path) -> None:
     target = _write_target(tmp_path / "recording/zarr/target_analysis.zarr")
-    donor = _write_donor(tmp_path / "donor_analysis.zarr")
+    donor = _write_donor(
+        tmp_path / "donor_analysis.zarr",
+        pixels_per_mm=53.4031982421875,
+    )
     _copy_as_legacy_import(target, donor)
 
     with pytest.raises(ValueError, match="physical_authority_mismatch"):
@@ -264,6 +281,35 @@ def test_repair_existing_rejects_unapproved_target_calibration(tmp_path: Path) -
             operator_note="same physical rig",
             repair_existing=True,
         )
+
+
+def test_repair_preflight_rejects_invalid_physical_record_without_writes(
+    tmp_path: Path,
+) -> None:
+    target = _write_target(tmp_path / "recording/zarr/target_analysis.zarr")
+    donor = _write_donor(tmp_path / "donor_analysis.zarr")
+    _copy_as_legacy_import(target, donor)
+    root = zarr.open_group(str(target), mode="r+", use_consolidated=False)
+    calibration = root["analysis/calibration"]
+    physical = calibration["coordinate_frames/source_camera_physical_mm"]
+    record = dict(physical.attrs["physical_frame_calibration"])
+    record["physical_extent"] = dict(record["physical_extent"])
+    record["physical_extent"]["width"] += 1.0
+    physical.attrs["physical_frame_calibration"] = record
+    before = dict(calibration.attrs)
+
+    with pytest.raises(ValueError, match="does not exactly agree"):
+        import_donor_calibration(
+            target,
+            donor,
+            expected_camera="2010093",
+            operator_note="same physical rig",
+            apply=True,
+            repair_existing=True,
+        )
+
+    assert dict(calibration.attrs) == before
+    assert "physical_authority_repaired_at_utc" not in calibration.attrs
 
 
 def test_import_donor_calibration_rejects_camera_mismatch(tmp_path: Path) -> None:

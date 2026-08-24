@@ -42,6 +42,7 @@ from fisheye.shared.selected_calibration import (
 from fisheye.shared.source_camera_physical_authority import (
     load_source_camera_physical_authority,
     rebind_source_camera_physical_authority,
+    validate_source_camera_physical_authority_rebind,
 )
 
 MODULE_NAME = "fisheye.utils.import_donor_analysis_calibration"
@@ -266,6 +267,10 @@ def _validate_existing_import(
     try:
         bound = load_source_camera_physical_authority(target_root)
     except (KeyError, ValueError) as exc:
+        validate_source_camera_physical_authority_rebind(
+            target_root,
+            source_camera_evidence=evidence,
+        )
         return {
             "target_authority_status": "requires_rebind",
             "target_authority_error": str(exc),
@@ -462,6 +467,24 @@ def import_donor_calibration(
 
     target_root = _open_group(target_path, mode="r+")
     calibration = target_root["analysis/calibration"]
+    if preflight.get("target_authority_status") == "already_valid":
+        authority = load_source_camera_physical_authority(target_root)
+    else:
+        authority = rebind_source_camera_physical_authority(
+            target_root,
+            source_camera_evidence=evidence,
+            source_kind=SOURCE_KIND,
+            provenance={
+                "generated_by": MODULE_NAME,
+                "immediate_donor_zarr": str(donor_path),
+                "immediate_donor_recording_id": preflight["donor_recording_id"],
+                "source_h5": evidence.source_h5_path,
+                "operator_configuration_verified": True,
+                "operator_configuration_verification_note": operator_note.strip(),
+                "target_recording_id": preflight["target_recording_id"],
+            },
+        )
+
     calibration.attrs.update(
         {
             "immediate_donor_zarr": str(donor_path),
@@ -482,24 +505,6 @@ def import_donor_calibration(
                 "physical_authority_repaired_by": MODULE_NAME,
                 "physical_authority_repair_note": operator_note.strip(),
             }
-        )
-
-    if preflight.get("target_authority_status") == "already_valid":
-        authority = load_source_camera_physical_authority(target_root)
-    else:
-        authority = rebind_source_camera_physical_authority(
-            target_root,
-            source_camera_evidence=evidence,
-            source_kind=SOURCE_KIND,
-            provenance={
-                "generated_by": MODULE_NAME,
-                "immediate_donor_zarr": str(donor_path),
-                "immediate_donor_recording_id": preflight["donor_recording_id"],
-                "source_h5": evidence.source_h5_path,
-                "operator_configuration_verified": True,
-                "operator_configuration_verification_note": operator_note.strip(),
-                "target_recording_id": preflight["target_recording_id"],
-            },
         )
 
     imported_matrix = np.asarray(calibration["homography_matrix"][:], dtype=np.float64)
