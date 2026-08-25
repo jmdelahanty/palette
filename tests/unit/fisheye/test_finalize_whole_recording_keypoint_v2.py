@@ -9,6 +9,9 @@ import pytest
 import zarr
 
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.keypoint_terminal_pixel_evidence import (
+    build_direct_hybrid_terminal_pixel_evidence,
+)
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.keypoint_manifest import KeypointPreprocessingReference
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -79,8 +82,11 @@ def test_terminal_hybrid_provider_must_exactly_match_crop_v2_geometry(
     }
     monkeypatch.setattr(
         mod,
-        "validate_hybrid_crop_signed_identity",
-        lambda *_a, **_k: signed,
+        "validate_hybrid_provider_strict_crop_geometry",
+        lambda *_a, **_k: {
+            **signed,
+            "exact_geometry_paths": list(arrays),
+        },
     )
     cache_manifest = tmp_path / "cache.json"
     write_json_atomic(
@@ -123,8 +129,15 @@ def test_terminal_hybrid_provider_must_exactly_match_crop_v2_geometry(
     )
     assert binding["ordered_geometry_coverage_exact"] is True
 
-    provider._arrays["roi_coordinates_full"] = np.asarray(
-        [[10, 20], [31, 40]], dtype=np.int32
+    monkeypatch.setattr(
+        mod,
+        "validate_hybrid_provider_strict_crop_geometry",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            ValueError(
+                "Hybrid pixel provider differs from crop-v2 geometry at: "
+                "roi_coordinates_full"
+            )
+        ),
     )
     with pytest.raises(ValueError, match="roi_coordinates_full"):
         mod._require_terminal_crop_provider_compatible(
@@ -133,6 +146,94 @@ def test_terminal_hybrid_provider_must_exactly_match_crop_v2_geometry(
             terminal_crop_run="provider_v1",
             terminal_receipt=terminal_receipt,
         )
+
+
+def test_terminal_direct_hybrid_evidence_needs_no_cache_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    arrays = {
+        "instance_key": np.asarray([11, 12], dtype=np.uint64),
+        "source_refined_row_ids": np.asarray([3, 4], dtype=np.int64),
+        "frame_indices": np.asarray([5, 6], dtype=np.int64),
+        "source_acquisition_frame_index": np.asarray([5, 6], dtype=np.int64),
+        "roi_coordinates_full": np.asarray([[10, 20], [30, 40]], dtype=np.int32),
+        "roi_sizes_full": np.asarray([[384, 384], [384, 384]], dtype=np.int32),
+    }
+    provider = _FakeCropProvider(arrays)
+    monkeypatch.setattr(
+        mod.zarr,
+        "open_group",
+        lambda *_a, **_k: {"crop_runs/provider_v1": provider},
+    )
+    reference = {
+        "schema_id": "palette.crop_geometry.run_reference",
+        "schema_version": 1,
+        "profile": "signed_current_source_v1",
+        "run_id": "provider_v1",
+        "crop_signature": {"provider": "test"},
+        "crop_revision": 1,
+    }
+    monkeypatch.setattr(mod, "build_crop_run_reference", lambda *_a, **_k: reference)
+    monkeypatch.setattr(mod, "validate_crop_run_reference", lambda value: value)
+    signed = {
+        "provider_record_sha256": "a" * 64,
+        "source_pixel_fingerprint": "b" * 64,
+        "source_rowset_fingerprint": "c" * 64,
+        "source_row_signature_spec_digest": "d" * 64,
+    }
+    monkeypatch.setattr(
+        mod,
+        "validate_hybrid_provider_strict_crop_geometry",
+        lambda *_a, **_k: {
+            **signed,
+            "exact_geometry_paths": list(arrays),
+        },
+    )
+    crop = SimpleNamespace(
+        run_id="crop_v2",
+        arrays={name: np.array(values, copy=True) for name, values in arrays.items()},
+        manifest={
+            "payload_digest": "e" * 64,
+            "payload": {"source_refined_snapshot": {"run_id": "refined_v1"}},
+        },
+    )
+    evidence = build_direct_hybrid_terminal_pixel_evidence(
+        provider_run="provider_v1",
+        provider_reference=reference,
+        provider_binding=signed,
+        geometry_crop_run="crop_v2",
+        geometry_crop_manifest_digest=canonical_json_sha256(crop.manifest),
+        source_shard_runs=("shard_0",),
+        source_shard_evidence_digest="f" * 64,
+    )
+    terminal_receipt = {
+        "schema_version": mod.DIRECT_HYBRID_TERMINAL_RECEIPT_SCHEMA_VERSION,
+        "payload": {
+            "pixel_evidence": evidence,
+            "preprocessing": {
+                "document": {
+                    "roi_provider": {
+                        "crop_run": "provider_v1",
+                        "record_sha256": "a" * 64,
+                        "source_pixel_fingerprint": "b" * 64,
+                        "source_rowset_fingerprint": "c" * 64,
+                        "source_row_signature_spec_digest": "d" * 64,
+                    }
+                }
+            },
+        },
+    }
+
+    binding = mod._require_terminal_crop_provider_compatible(
+        archive=tmp_path,
+        crop=crop,
+        terminal_crop_run="provider_v1",
+        terminal_receipt=terminal_receipt,
+    )
+
+    assert binding["terminal_pixel_evidence_profile"] == evidence["profile"]
+    assert binding["ordered_geometry_coverage_exact"] is True
 
 
 def test_finalizer_publishes_four_crop_bound_candidates_without_activation(

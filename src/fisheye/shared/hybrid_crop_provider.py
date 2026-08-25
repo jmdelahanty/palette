@@ -51,6 +51,19 @@ _CONTENT_COMPONENTS: tuple[tuple[str, Any, tuple[int, ...]], ...] = (
     ("source_refined_row_ids", np.int64, ()),
     ("supplemental_cache_row_indices", np.int64, ()),
 )
+_COLLECTION_CONTENT_COMPONENTS: tuple[tuple[str, Any, tuple[int, ...]], ...] = (
+    ("source_crop_video_member_indices", np.int32, ()),
+    ("source_full_video_member_indices", np.int32, ()),
+)
+
+HYBRID_STRICT_CROP_GEOMETRY_PATHS = (
+    "instance_key",
+    "source_refined_row_ids",
+    "frame_indices",
+    "source_acquisition_frame_index",
+    "roi_coordinates_full",
+    "roi_sizes_full",
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +111,25 @@ def _content_arrays(
                 f"{expected}, got {values.shape}."
             )
         content[name] = values
+    collection_names = [
+        name for name, _dtype, _shape in _COLLECTION_CONTENT_COMPONENTS
+    ]
+    collection_present = [name in arrays for name in collection_names]
+    if any(collection_present) and not all(collection_present):
+        raise ValueError(
+            "Hybrid collection provider identity requires both crop-video and "
+            "full-video member index arrays."
+        )
+    if all(collection_present):
+        for name, dtype, trailing_shape in _COLLECTION_CONTENT_COMPONENTS:
+            values = np.asarray(arrays[name], dtype=dtype)
+            expected = (row_count, *trailing_shape)
+            if tuple(values.shape) != expected:
+                raise ValueError(
+                    f"Hybrid crop provider identity {name!r} must have shape "
+                    f"{expected}, got {values.shape}."
+                )
+            content[name] = values
     return content
 
 
@@ -207,6 +239,16 @@ def validate_hybrid_crop_signed_identity(
             "Hybrid crop signed identity lacks required arrays: " + ", ".join(missing)
         )
     arrays = {name: group[name][:] for name in required_arrays if name != "source_row_signature"}
+    collection_names = [
+        name for name, _dtype, _shape in _COLLECTION_CONTENT_COMPONENTS
+    ]
+    collection_present = [name in group for name in collection_names]
+    if any(collection_present) and not all(collection_present):
+        raise ValueError(
+            "Hybrid collection signed identity has an incomplete member-index binding."
+        )
+    if all(collection_present):
+        arrays.update({name: group[name][:] for name in collection_names})
     identity = build_hybrid_crop_provider_identity(
         arrays,
         provider_record_sha256=expected_provider,
@@ -248,6 +290,67 @@ def validate_hybrid_crop_signed_identity(
     }
 
 
+def validate_hybrid_provider_strict_crop_geometry(
+    provider: Any,
+    crop: Any,
+    *,
+    expected_provider_record_sha256: str,
+) -> dict[str, Any]:
+    """Resolve one signed hybrid pixel provider against one strict crop-v2.
+
+    This is the shared admission boundary for the split crop publication
+    shape: pixels are supplied by a signed hybrid provider while coordinates
+    are supplied by an independently sealed geometry-only crop publication.
+    Consumers must not implement their own subsets of these checks.
+    """
+
+    signed = validate_hybrid_crop_signed_identity(
+        provider,
+        expected_provider_record_sha256=expected_provider_record_sha256,
+    )
+    crop_payload = getattr(crop, "manifest", {}).get("payload")
+    crop_source = (
+        crop_payload.get("source_refined_snapshot")
+        if isinstance(crop_payload, Mapping)
+        else None
+    )
+    if not isinstance(crop_source, Mapping) or provider.attrs.get(
+        "source_refined_run_id"
+    ) != crop_source.get("run_id"):
+        raise ValueError(
+            "Hybrid pixel provider and crop-v2 bind different refined sources."
+        )
+
+    crop_arrays = getattr(crop, "arrays", None)
+    if not isinstance(crop_arrays, Mapping):
+        raise ValueError("Strict crop-v2 publication lacks its validated arrays.")
+    mismatched: list[str] = []
+    for path in HYBRID_STRICT_CROP_GEOMETRY_PATHS:
+        if (
+            path not in provider
+            or path not in crop_arrays
+            or not np.array_equal(
+                np.asarray(provider[path][...]),
+                np.asarray(crop_arrays[path][...]),
+            )
+        ):
+            mismatched.append(path)
+    if mismatched:
+        raise ValueError(
+            "Hybrid pixel provider differs from crop-v2 geometry at: "
+            + ", ".join(mismatched)
+        )
+    return {
+        **signed,
+        "geometry_crop_run": str(getattr(crop, "run_id", "")),
+        "geometry_crop_manifest_digest": str(
+            getattr(crop, "manifest", {}).get("payload_digest") or ""
+        ),
+        "ordered_geometry_coverage_exact": True,
+        "exact_geometry_paths": list(HYBRID_STRICT_CROP_GEOMETRY_PATHS),
+    }
+
+
 __all__ = [
     "HYBRID_CROP_IDENTITY_SCHEMA_ID",
     "HYBRID_CROP_IDENTITY_SCHEMA_VERSION",
@@ -257,7 +360,9 @@ __all__ = [
     "HYBRID_CROP_RUN_SCHEMA_ID",
     "HYBRID_CROP_SIGNATURE_SCHEMA_ID",
     "HYBRID_CROP_SIGNATURE_SCHEMA_VERSION",
+    "HYBRID_STRICT_CROP_GEOMETRY_PATHS",
     "HybridCropProviderIdentity",
     "build_hybrid_crop_provider_identity",
     "validate_hybrid_crop_signed_identity",
+    "validate_hybrid_provider_strict_crop_geometry",
 ]
