@@ -293,6 +293,56 @@ def test_track_kinematics_plan_materializes_missing_tracking_authority() -> None
     assert plan.execution_order == ("tracks", "track_kinematics")
 
 
+def test_availability_refuses_child_when_dependency_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = AnalysisWorkflow(
+        schema_id=ANALYSIS_WORKFLOW_SCHEMA_ID,
+        schema_version=ANALYSIS_WORKFLOW_SCHEMA_VERSION,
+        workflow_id="dependency_refresh",
+        description="dependency refresh fixture",
+        nodes=(
+            WorkflowNode(
+                node_id="track_kinematics",
+                kind="analysis",
+                stage_id="track_kinematics",
+            ),
+            WorkflowNode(
+                node_id="swim_bouts",
+                kind="analysis",
+                stage_id="swim_bouts",
+                depends_on=("track_kinematics",),
+            ),
+        ),
+        targets=("swim_bouts",),
+    )
+
+    def discover(_zarr_path, stage_id, **_kwargs):
+        if stage_id == "swim_bouts":
+            pytest.fail("child discovery must not bypass an unavailable dependency")
+        return StageAvailability(
+            stage_id=stage_id,
+            available=False,
+            reason="selected track authority is unavailable",
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.plan_analysis_workflow.discover_stage_availability",
+        discover,
+    )
+    availability = build_availability(workflow, Path("recording.zarr"))
+
+    plan = plan_analysis_workflow(workflow, availability)
+
+    assert plan.ready is True
+    assert plan.node_by_id["track_kinematics"].action == "run"
+    assert plan.node_by_id["swim_bouts"].action == "run"
+    assert plan.node_by_id["swim_bouts"].reason == (
+        "workflow dependency inputs are unavailable: track_kinematics"
+    )
+    assert plan.execution_order == ("track_kinematics", "swim_bouts")
+
+
 def test_workflow_rejects_dependency_cycles() -> None:
     with pytest.raises(ValueError, match="dependency cycle"):
         AnalysisWorkflow(
