@@ -277,6 +277,7 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
         str(tmp_path / "recording_analysis.zarr"),
     )
     assert shape[shape.index("--refined-run") + 1] == "refined_masks_a"
+    assert shape[shape.index("--storage-profile") + 1] == "legacy_explicit_chunks"
     assert shape[shape.index("--execution-backend") + 1] == "dask_worker_chunks"
     assert shape[shape.index("--num-workers") + 1] == "8"
     assert shape[shape.index("--block-rows") + 1] == "1024"
@@ -705,7 +706,7 @@ def test_apply_validates_manifest_selected_eye_trace_export(
         validate,
     )
     monkeypatch.setattr(
-        "fisheye.utils.execute_analysis_workflow.discover_stage_availability",
+        "fisheye.utils.execute_analysis_workflow.verify_persisted_stage_output",
         lambda *_args, **_kwargs: pytest.fail(
             "Parquet exports must not enter Zarr stage discovery"
         ),
@@ -886,6 +887,9 @@ def test_execution_composes_clipped_tracking_and_active_mask_bundle(
 
     shape = commands["subject_shape"].argv
     assert shape[shape.index("--subject-mask-bundle-id") + 1] == "masks_bundle_a"
+    assert shape[shape.index("--storage-profile") + 1] == (
+        "subject_shape_access_aware_v1"
+    )
     assert "--refined-run" not in shape
 
 
