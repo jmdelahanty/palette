@@ -1005,17 +1005,23 @@ def test_cli_renders_sleepyfish_style_swim_bout_command(
 ) -> None:
     zarr_path = tmp_path / "sleepyfish_analysis.zarr"
     _write_group(zarr_path)
-    refined_parent = zarr_path / "refined_keypoints_runs"
+    refined_parent = zarr_path / "keypoints_runs"
     _write_group(
         refined_parent,
-        {"latest": "refined_kp_a", "latest_complete": "refined_kp_a"},
+        {"latest": "keypoints_a", "latest_complete": "keypoints_a"},
     )
     _write_group(
-        refined_parent / "refined_kp_a",
+        refined_parent / "keypoints_a",
         {
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
+            "source_crop_run": "crop_a",
+            "keypoints_processed": 10,
         },
+    )
+    _write_group(
+        zarr_path / "crop_runs" / "crop_a",
+        {"source_refined_run": "detect_a"},
     )
     tracks_parent = zarr_path / "tracking_runs"
     _write_group(
@@ -1027,6 +1033,9 @@ def test_cli_renders_sleepyfish_style_swim_bout_command(
         {
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
+            "source_rowset_path": "crop_runs/crop_a",
+            "source_refined_run": "detect_a",
+            "source_rowset_row_count": 10,
         },
     )
     track_parent = zarr_path / "analysis" / "track_kinematics_runs" / "offline"

@@ -92,9 +92,12 @@ flowchart LR
 Targets select a dependency closure. For example, planning only
 `kinematics_samples` does not inspect or schedule the eye and tail branches.
 When more than one target shares a dependency, that dependency appears once in
-the stable topological order. A reused downstream authority closes its branch:
-missing ancestors of that already-complete authority remain visible in the
-structural plan but are not recreated during execution.
+the stable topological order. A downstream authority is eligible for reuse only
+after every declared dependency resolves to one exact available run. An
+unavailable dependency prevents the generic complete/eligible gate from
+reusing a child from an older lineage epoch. Once dependency resolution and
+the stage-specific availability gate both succeed, the reused authority closes
+its branch and its available ancestors are not recreated during execution.
 
 ## Read-only planning
 
@@ -194,8 +197,9 @@ selection contract and records the exact selection, candidate, and record
 digest in its arena definition. A present but malformed or half-activated
 modern selection fails closed; the legacy `analysis_metadata.dish_mask` path
 is used only when the modern selection family is absent. An already complete
-track-kinematics run remains reusable without recreating its tracking
-ancestors.
+track-kinematics run remains reusable when its declared keypoint and tracking
+dependencies resolve to exact available runs; those available ancestors are
+not recreated.
 
 The track-kinematics visualization stage writes the bounded PNG snapshot and
 interactive explorer contract inside its selected track-kinematics run. It
