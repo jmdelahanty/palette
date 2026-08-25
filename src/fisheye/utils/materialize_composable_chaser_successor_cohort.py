@@ -979,7 +979,7 @@ def run_one(
             field="relative-frame receipt directory",
         )
         receipt_bound_relative = True
-        relative_receipt_dir = plot_dir / receipt_directory
+        relative_receipt_dir = plot_dir / receipt_directory / commit
         if apply:
             relative_receipt_dir.mkdir(parents=True, exist_ok=True)
     raw_h5 = _mapping(entry["raw_h5"], field="raw-H5 binding")

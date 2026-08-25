@@ -328,6 +328,10 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(tmp_path: Path
     for stage in (spatial, detailed):
         assert "--keypoint-relative-frame-receipt" in stage["command"]
         assert "--detection-relative-frame-receipt" in stage["command"]
+        keypoint_receipt = stage["command"][
+            stage["command"].index("--keypoint-relative-frame-receipt") + 1
+        ]
+        assert commit in keypoint_receipt
     assert dashboard["command"][-2:] == [
         "--bundle-name",
         cohort.DASHBOARD_RECIPE_BUNDLE_NAME,

@@ -352,6 +352,12 @@ def test_reusable_receipt_targets_arrays_without_archive_root_reparse(tmp_path):
         created["run_manifest"]
     )
     assert created["validation_policy"]["archive_root_consolidated_metadata_reparse"] is False
+    assert created["direct_subtree_validation"]["policy_id"] == (
+        "streaming_all_declared_arrays_direct_content_sha256_v1"
+    )
+    assert created["direct_subtree_validation"][
+        "maximum_requested_block_bytes"
+    ] == 32 * 1024 * 1024
     assert handle.verification_mode == "receipt_bound_targeted_array_rehash_v1"
     np.testing.assert_array_equal(
         handle.frame_array("acquisition_frame_id"),

@@ -31,7 +31,6 @@ from fisheye.analysis_workflows.materializers.chaser_relative_frame import (
     MANIFEST_ATTR,
     MANIFEST_DIGEST_ATTR,
     PARENT_PATH,
-    validate_chaser_relative_frame_run,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.json_safety import write_json_atomic
@@ -46,12 +45,15 @@ RECEIPT_SCHEMA_VERSION = 1
 RECEIPT_STATUS = "complete_selector_ineligible_direct_subtree_audit"
 VERIFICATION_MODE = "receipt_bound_targeted_array_rehash_v1"
 VALIDATION_POLICY = {
-    "initial_validation": "all_declared_arrays_direct_content_sha256",
+    "initial_validation": (
+        "streaming_all_declared_arrays_direct_content_sha256_v1"
+    ),
     "reuse_metadata_validation": "all_direct_subtree_zarr_json_sha256",
     "reuse_array_validation": "consumer_required_arrays_content_sha256",
     "archive_root_consolidated_metadata_reparse": False,
     "immutable_child_required": True,
 }
+STREAMING_HASH_BLOCK_BYTES = 32 * 1024 * 1024
 
 OCCUPANCY_FRAME_ARRAY_NAMES = (
     "acquisition_frame_id",
@@ -199,6 +201,117 @@ def _metadata_inventory(run_directory: Path) -> dict[str, Any]:
     }
 
 
+def _streaming_array_values_sha256(
+    node: Any,
+    *,
+    expected_dtype: str,
+    expected_shape: Sequence[int],
+) -> str:
+    """Hash one Zarr array in bounded row-major slabs using Palette grammar."""
+
+    dtype = np.dtype(node.dtype)
+    shape = tuple(int(value) for value in node.shape)
+    if dtype.str != expected_dtype or shape != tuple(expected_shape):
+        _fail("Declared relative-frame array shape or dtype changed.")
+    if dtype.hasobject or dtype.kind in {"U", "S"}:
+        _fail("Declared relative-frame array dtype is not deterministic numeric data.")
+    header = {
+        "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "dtype": np.lib.format.dtype_to_descr(dtype),
+        "shape": list(shape),
+    }
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            header,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    digest.update(b"\x00")
+    if not shape:
+        block = np.ascontiguousarray(np.asarray(node[...]))
+        digest.update(block.tobytes(order="C"))
+        return digest.hexdigest()
+    trailing_elements = int(np.prod(shape[1:], dtype=np.int64)) if shape[1:] else 1
+    row_bytes = max(1, trailing_elements * dtype.itemsize)
+    rows_per_block = max(1, STREAMING_HASH_BLOCK_BYTES // row_bytes)
+    for start in range(0, shape[0], rows_per_block):
+        stop = min(shape[0], start + rows_per_block)
+        block = np.ascontiguousarray(np.asarray(node[start:stop, ...]))
+        expected_block_shape = (stop - start, *shape[1:])
+        if block.dtype.str != expected_dtype or block.shape != expected_block_shape:
+            _fail("Relative-frame array changed during its streaming content audit.")
+        digest.update(block.tobytes(order="C"))
+        del block
+    return digest.hexdigest()
+
+
+def _streaming_direct_subtree_audit(
+    run_directory: Path,
+    *,
+    manifest: Mapping[str, Any],
+    manifest_sha256: str,
+) -> dict[str, Any]:
+    """Rehash every declared array without retaining the complete run in RAM."""
+
+    declarations = manifest.get("array_declarations")
+    if not isinstance(declarations, list) or not declarations:
+        _fail("Relative-frame manifest lacks array declarations.")
+    declared_by_path: dict[str, Mapping[str, Any]] = {}
+    for declaration in declarations:
+        if not isinstance(declaration, Mapping):
+            _fail("Relative-frame array declaration is not one object.")
+        path = declaration.get("path")
+        if type(path) is not str or path in declared_by_path or "/" not in path:
+            _fail("Relative-frame array declaration paths are invalid or duplicated.")
+        prefix, _name = path.split("/", 1)
+        if prefix not in {"base", "body"}:
+            _fail("Relative-frame array declaration leaves base/body.")
+        declared_by_path[path] = declaration
+    run = open_zarr_root(run_directory, mode="r", use_consolidated=False)
+    actual_paths: set[str] = set()
+    expected_prefixes = {path.split("/", 1)[0] for path in declared_by_path}
+    actual_prefixes = set(str(name) for name in run.group_keys())
+    if actual_prefixes != expected_prefixes:
+        _fail("Relative-frame direct child groups differ from its declarations.")
+    for prefix in sorted(expected_prefixes):
+        group = run[prefix]
+        if tuple(group.group_keys()):
+            _fail("Relative-frame array group contains an unexpected nested group.")
+        actual_paths.update(f"{prefix}/{name}" for name in group.array_keys())
+    if actual_paths != set(declared_by_path):
+        _fail("Relative-frame direct child arrays differ from its declarations.")
+    content_bindings: dict[str, str] = {}
+    for path, declaration in declared_by_path.items():
+        expected_digest = _digest(
+            declaration.get("content_sha256"),
+            field=f"array_declarations[{path}].content_sha256",
+        )
+        observed = _streaming_array_values_sha256(
+            run[path],
+            expected_dtype=_text(
+                declaration.get("dtype"),
+                field=f"array_declarations[{path}].dtype",
+            ),
+            expected_shape=declaration.get("shape", ()),
+        )
+        if observed != expected_digest:
+            _fail(f"Relative-frame array {path!r} content digest changed.")
+        content_bindings[path] = observed
+    return {
+        "valid": True,
+        "errors": [],
+        "manifest_sha256": manifest_sha256,
+        "array_count": len(declarations),
+        "policy_id": "streaming_all_declared_arrays_direct_content_sha256_v1",
+        "maximum_requested_block_bytes": STREAMING_HASH_BLOCK_BYTES,
+        "content_bindings_sha256": canonical_json_sha256(content_bindings),
+    }
+
+
 def _current_run_document(
     analysis_zarr: str | Path,
     *,
@@ -264,10 +377,10 @@ def build_chaser_relative_frame_validation_receipt(
         or attrs.get("selection") != "none"
     ):
         _fail("Relative-frame child is not one completed selector-ineligible run.")
-    direct_validation = validate_chaser_relative_frame_run(
+    direct_validation = _streaming_direct_subtree_audit(
         run_directory,
-        expected_manifest=manifest,
-        use_consolidated=False,
+        manifest=manifest,
+        manifest_sha256=manifest_digest,
     )
     if direct_validation.get("valid") is not True:
         _fail(f"Direct relative-frame deep audit failed: {direct_validation}")

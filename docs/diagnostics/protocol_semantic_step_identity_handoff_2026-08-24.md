@@ -675,9 +675,10 @@ relative-frame consumers.
 The local receipt-bound successor now:
 
 - performs one complete direct-subtree audit of every declared relative-frame
-  array and seals the exact child manifest, completion authority, provenance,
-  direct metadata inventory, archive/run/recording identity, and Palette
-  commit in
+  array in bounded 32 MiB row-major slabs and seals the exact child manifest,
+  completion authority, provenance, direct metadata inventory,
+  archive/run/recording identity, and Palette commit in a commit-specific
+  receipt directory using
   `palette.analysis.chaser_relative_frame.reusable_validation_receipt` v1;
 - revalidates the small immutable child metadata generation on reuse and
   content-rehashes only the exact arrays requested by the consumer; it never
@@ -716,6 +717,19 @@ It was derived without reparsing archive roots in 8.10 seconds with 37,864 KiB
 maximum RSS; all 84 entries reuse their completed upstream outputs and remain
 `resume` only for the new receipts, v2 occupancy successor, and versioned plot
 recipes.
+
+The first commit-pinned task-2 canary (`153743207[2]`, commit `03d08dd0`) was
+operator-terminated before occupancy publication after reaching 6.3 GiB RSS.
+It proved that archive-root parsing was gone, but also exposed that the reused
+direct validator retained all uncompressed child arrays for its final schema
+check. No spatial successor or versioned plot was written. The two fully
+written experimental receipts remain isolated under the task-2 plot directory
+and are bound to `03d08dd0`; later execution paths use a Palette-commit
+subdirectory and cannot mistake them for current evidence. Receipt creation
+now reproduces Palette's canonical array digest grammar in bounded 32 MiB
+row-major slabs, retaining the publisher's completed scientific schema audit
+as the publication authority while independently rehashing every declared
+array. A new high-metadata canary is required for this streaming successor.
 
 This remains experimental implementation evidence. A commit-pinned
 high-metadata canary, required CI, and review of the first generated occupancy
