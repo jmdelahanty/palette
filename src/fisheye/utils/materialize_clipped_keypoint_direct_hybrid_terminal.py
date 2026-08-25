@@ -240,7 +240,12 @@ def materialize_direct_hybrid_terminal(
         raise FileExistsError(f"Temporary terminal output already exists: {temporary}")
     temporary.mkdir(parents=False)
     try:
-        terminal_root = zarr.open_group(str(temporary), mode="w", zarr_format=3)
+        terminal_root = zarr.open_group(
+            str(temporary),
+            mode="w",
+            zarr_format=3,
+            use_consolidated=False,
+        )
         parent = require_runs_parent(terminal_root, "keypoint_terminal_runs")
         terminal = parent.create_group(terminal_run_id)
         mark_run_started(terminal, run_name=terminal_run_id, stage="keypoint_terminal")
