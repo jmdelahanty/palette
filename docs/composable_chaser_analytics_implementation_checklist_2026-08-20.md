@@ -1201,10 +1201,11 @@ Each worker serially performs, or exactly reuses after validation: historical
 semantic stimulus publication; v1 compatibility and v2 immutable epoch
 publication; protocol-semantic selection; keypoint and detection relative
 frames; controller-trial, generalized bout-response, and escape/freeze
-successors; both radial/near-field providers; and both dashboard and detailed
-plot bundles. Dynamic epoch-manifest identity is read only after the preceding
-immutable publication completes. No `latest`, `latest_complete`, or other
-scientific selector is resolved during execution.
+successors; both radial/near-field providers; paired-provider exact-epoch
+spatial occupancy; and dashboard, detailed, and spatial-occupancy plot bundles.
+Dynamic epoch-manifest identity is read only after the preceding immutable
+publication completes. No `latest`, `latest_complete`, or other scientific
+selector is resolved during execution.
 
 The LSF renderer is:
 
@@ -1224,11 +1225,83 @@ plot recipes. A second real no-write check against task 1 rendered the full
 11-stage chain with its exact v1 motion/bout exception. Combined focused
 outside-sandbox validation passes 20 cohort, plot, and radial tests.
 
-The array has not been submitted. The current worktree is uncommitted and
-required CI is unrun, so no clean commit-pinned cluster deployment exists yet.
-A commit-pinned experimental deployment may be used to obtain the cohort
-evidence, but it must remain selector-ineligible and not be described as
-merge-ready until every required CI check is green.
+The original 11-stage implementation was committed as
+`900c97ce5b90b4c2462c24433bab2afb596299df` and deployed in a clean,
+commit-pinned cluster worktree. LSF array `153742886` completed 80 recordings
+and failed closed on all four cameras from
+`2026-08-12T21-14-36Z`. Those four archives encode legacy step 0 as
+`[468, 30469]` while step 1 begins at `30469`; exact half-open endpoint
+authority cannot be recovered from that equality. They retain the semantic
+products that were safe to publish, but no relative-frame or dependent
+successor was produced. The 80 successful receipts all report
+`complete_selector_ineligible`, exact commit/task/safety bindings, and no
+nonzero return code.
+
+The original cohort publication produced 400 PNGs, 400 PDFs, and 160 external
+plot receipts below:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_activity_orthogonal_v3/cohort_plots`
+
+Required CI remains unrun. These executions are experimental, immutable,
+selector-ineligible evidence; they did not update SQLite, activate a selector,
+or change production authority and are not merge-ready.
+
+### Exact protocol-epoch spatial occupancy heatmaps: 2026-08-25
+
+The missing per-epoch two-dimensional occupancy product is now a first-class
+paired-provider successor rather than a reuse of the historical
+detection-only occupancy surface. It is published below:
+
+`analysis/chaser_spatial_occupancy_runs/goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_exact_epochs_v1`
+
+The successor binds explicit immutable keypoint and detection relative-frame
+runs, the exact protocol-semantic selection, and both reviewed-geometry-bound
+radial successors. It requires identical acquisition-frame, timestamp,
+semantic-selection, chaser, geometry, coordinate, and physical-scale
+authorities while requiring the two fish-position provider identities to stay
+distinct. It uses one shared 2 mm arena-centered physical grid, excludes
+finite points outside the reviewed circular arena, and stores integer counts,
+conditional valid-in-arena density, candidate-epoch-normalized occupancy,
+coverage, invalid-position counts, and out-of-arena counts for exactly
+`chaser_pre`, `chaser_training`, and `chaser_post`. Missing positions are not
+interpolated. Exact semantic rows must all exist in the relative-frame source;
+additional selected source rows outside the semantic epoch union remain
+explicit evidence but are excluded from the epoch histograms.
+
+The deeply audited plot recipe produces a 3-by-3 figure: keypoint and detection
+occupancy rows plus a detection-minus-keypoint difference row, with pre,
+training, and post columns on byte-identical physical bins. Titles report
+whole-epoch coverage so conditional spatial normalization cannot hide missing
+positions. PNG/PDF receipts bind the exact source manifest and scientific
+payload and remain selector-ineligible.
+
+Implementation commit `5b2bd068186281206b546c8a927b11d2ea83a14a` passed
+Ruff, `py_compile`, `bash -n`, `git diff --check`, and 28 focused
+outside-sandbox tests. A real no-write computation canary on task 81 produced a
+42-by-42 grid with scientific payload
+`5bdd96b8c014a7344263e1834392731ade2407eb5310994c3f5d7b1d0cb90a62`.
+The selector-ineligible write/plot canary was LSF job `153743120`; it completed
+in 53 seconds and its output was visually reviewed.
+
+LSF array `153743122` then ran only the 80 scientifically resolvable indices
+`1-76,81-84` from the frozen task SHA-256
+`0cb0a8b77d7f77e851b7f6543da5a760c42ab2743949476504eba7afd7dced8b`.
+All 80 elements completed `DONE`. Receipt audit found 80 expected and no
+unexpected indices, 80 unique worker payloads, 13 stages per recording, exact
+commit/task/safety bindings, and no nonzero return code. Plot audit found 80
+unique source manifests and scientific payloads, 80 PNGs, 80 PDFs, and 80 plot
+receipts. Independent rehashing matched all 160 output file sizes and SHA-256
+digests. The plot root now contains 480 PNGs, 480 PDFs, and 240 plot receipts
+across the five dashboard/detailed figures plus the new spatial-occupancy
+figure for each successful recording.
+
+The array receipts are under:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_spatial_occupancy_followup_20260825/composable_chaser_successors_goodbatbadbat80_occupancy_5b2bd068_20260825`
+
+The four ambiguous indices `77-80` were never submitted to the occupancy
+follow-up. This evidence remains selector-ineligible and required CI remains
+unrun.
 
 ### Deferred publication-performance successor
 
@@ -1241,6 +1314,14 @@ merge-ready until every required CI check is green.
       retries to reuse it only after revalidating those bindings.
 - [ ] Evaluate reflink or storage-native immutable copies and safe batching of
       candidate publications before one final visibility update.
+- [ ] Make strict relative-frame source validation expose a targeted,
+      streaming scientific-array audit mode for consumers that require only
+      frame-axis position/selection evidence. Preserve the exact manifest and
+      array-content proofs without materializing all frame-by-chaser arrays in
+      memory. Occupancy task 2 (`2026-08-10T17-20-55Z_arena_2_goodbatbadbat`)
+      completed correctly but took 955 seconds and peaked at 11,477 MB while
+      the other 79 follow-up tasks completed much sooner; this is optimization
+      evidence, not permission to weaken deep validation.
 
 This optimization is deliberately outside the plot-critical path. The
 2026-08-25 epoch-v2 canary spent 1.7 seconds rematerializing the scientific
