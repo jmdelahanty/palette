@@ -236,9 +236,11 @@ def test_terminal_direct_hybrid_evidence_needs_no_cache_manifest(
     assert binding["ordered_geometry_coverage_exact"] is True
 
 
+@pytest.mark.parametrize("terminal_profile", ("cache", "direct_hybrid"))
 def test_finalizer_publishes_four_crop_bound_candidates_without_activation(
     tmp_path: Path,
     monkeypatch,
+    terminal_profile: str,
 ) -> None:
     crop = _crop(tmp_path)
     archive = tmp_path / "recording_analysis.zarr"
@@ -316,15 +318,53 @@ def test_finalizer_publishes_four_crop_bound_candidates_without_activation(
         input_mode="flat_bin_node_scratch",
         document={"cache": "test"},
     ).as_manifest()
+    if terminal_profile == "cache":
+        receipt_version = WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION
+        terminal_source_evidence = {
+            "cache": {
+                "manifest_path": str(cache_manifest),
+                "manifest_sha256": hashlib.sha256(
+                    cache_manifest.read_bytes()
+                ).hexdigest(),
+            }
+        }
+        expected_input_evidence_digest = terminal_source_evidence["cache"][
+            "manifest_sha256"
+        ]
+    else:
+        receipt_version = mod.DIRECT_HYBRID_TERMINAL_RECEIPT_SCHEMA_VERSION
+        provider_reference = {
+            "schema_id": "palette.crop_geometry.run_reference",
+            "schema_version": 1,
+            "profile": "signed_current_source_v1",
+            "run_id": crop.run_id,
+            "crop_signature": {"provider": "direct_hybrid_test"},
+            "crop_revision": 1,
+        }
+        provider_binding = {
+            "provider_record_sha256": "a" * 64,
+            "source_pixel_fingerprint": "b" * 64,
+            "source_rowset_fingerprint": "c" * 64,
+            "source_row_signature_spec_digest": "d" * 64,
+        }
+        pixel_evidence = build_direct_hybrid_terminal_pixel_evidence(
+            provider_run=crop.run_id,
+            provider_reference=provider_reference,
+            provider_binding=provider_binding,
+            geometry_crop_run=crop.run_id,
+            geometry_crop_manifest_digest=canonical_json_sha256(crop.manifest),
+            source_shard_runs=("shard_0",),
+            source_shard_evidence_digest="e" * 64,
+        )
+        terminal_source_evidence = {"pixel_evidence": pixel_evidence}
+        expected_input_evidence_digest = canonical_json_sha256(pixel_evidence)
+
     payload = {
         "status": "complete",
         "analysis_zarr": str(archive.resolve()),
         "crop_run": crop.run_id,
         "terminal_run_id": "terminal",
-        "cache": {
-            "manifest_path": str(cache_manifest),
-            "manifest_sha256": hashlib.sha256(cache_manifest.read_bytes()).hexdigest(),
-        },
+        **terminal_source_evidence,
         "model": {
             "pose_model_schema_binding": binding,
             "pose_model_schema_binding_digest": canonical_json_sha256(binding),
@@ -336,12 +376,26 @@ def test_finalizer_publishes_four_crop_bound_candidates_without_activation(
     }
     receipt = {
         "schema_id": WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_ID,
-        "schema_version": WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION,
+        "schema_version": receipt_version,
         "payload_digest": canonical_json_sha256(payload),
         "payload": payload,
     }
     write_json_atomic(terminal / TERMINAL_RECEIPT_NAME, receipt)
     result_json = tmp_path / "result.json"
+    observed_input_evidence_digests: list[str] = []
+    clip_terminal_result_from_yolo_arrays = mod.clip_terminal_result_from_yolo_arrays
+
+    def capture_input_evidence_digest(*args, **kwargs):
+        observed_input_evidence_digests.append(
+            kwargs["input_package_manifest_digest"]
+        )
+        return clip_terminal_result_from_yolo_arrays(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "clip_terminal_result_from_yolo_arrays",
+        capture_input_evidence_digest,
+    )
 
     result = mod.finalize_whole_recording_keypoint_v2(
         analysis_zarr=archive,
@@ -361,6 +415,7 @@ def test_finalizer_publishes_four_crop_bound_candidates_without_activation(
     assert result["status"] == "complete"
     assert result["selector_eligible"] is False
     assert result["registry_updated"] is False
+    assert observed_input_evidence_digests == [expected_input_evidence_digest]
     assert result_json.is_file()
     published = zarr.open_group(str(archive), mode="r", use_consolidated=True)
     for path in (
