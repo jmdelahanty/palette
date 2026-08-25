@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -86,7 +85,7 @@ class _DenseReadTrap:
         raise AssertionError(f"dense or companion payload was indexed: {key!r}")
 
 
-def test_complete_historical_successor_reinstalls_its_sealed_crop_adapter(
+def test_complete_successor_validates_sealed_crop_evidence_without_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, _parent, run = _subject_fixture(monkeypatch, published=True, fresh=True)
@@ -94,36 +93,20 @@ def test_complete_historical_successor_reinstalls_its_sealed_crop_adapter(
         "schema_id": "test.adapter",
         "schema_version": 1,
     }
-    binding = object()
+    resolved_source = object()
+    binding = type("Binding", (), {"source": resolved_source})()
     sentinel = object()
-    active = False
+    calls: list[str] = []
 
     monkeypatch.setattr(
         publication_module,
-        "_load_persisted_historical_crop_successor_binding",
-        lambda *_args, **_kwargs: binding,
+        "_load_persisted_sealed_crop_successor_binding",
+        lambda *_args, **_kwargs: calls.append("evidence") or binding,
     )
 
-    @contextmanager
-    def adapter_scope(value: Any) -> Any:
-        nonlocal active
-        assert value is binding
-        active = True
-        try:
-            yield
-        finally:
-            active = False
-
-    import fisheye.shared.zarr.historical_geometry_only_crop_adapter as adapter_module
-
-    monkeypatch.setattr(
-        adapter_module,
-        "historical_geometry_only_crop_loader",
-        adapter_scope,
-    )
-
-    def load_impl(*_args: Any, **_kwargs: Any) -> Any:
-        assert active is True
+    def load_impl(*_args: Any, **kwargs: Any) -> Any:
+        assert kwargs["resolved_crop_source"] is resolved_source
+        calls.append("load")
         return sentinel
 
     monkeypatch.setattr(
@@ -138,7 +121,7 @@ def test_complete_historical_successor_reinstalls_its_sealed_crop_adapter(
         expected_selector_eligible=False,
     )
     assert result is sentinel
-    assert active is False
+    assert calls == ["evidence", "load"]
 
 
 def _pointer(value: Any) -> dict[str, str]:

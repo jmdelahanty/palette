@@ -14,9 +14,18 @@ from fisheye.shared import coordinate_identity as identity_mod
 from fisheye.shared import coordinate_record as record_mod
 from fisheye.shared import manifest_crop_position_authority as profile_mod
 from fisheye.shared import observation_coordinate_publication as position_mod
+from fisheye.shared.zarr import crop_snapshot_publication as crop_publication_mod
+from fisheye.shared.keypoint_coordinate_publication import (
+    KeypointCoordinatePublicationError,
+    load_persisted_keypoint_crop_source,
+    require_direct_keypoint_crop_pixel_source,
+)
 from fisheye.shared.observation_coordinate_publication import (
     load_persisted_source_camera_position_surface,
     resolve_source_detection_rowset_from_position_coordinates,
+)
+from fisheye.shared.subject_mask_coordinate_publication import (
+    load_persisted_subject_mask_crop_source,
 )
 from fisheye.shared.zarr.crop_snapshot_publication import (
     publish_crop_geometry_production_candidate,
@@ -37,6 +46,102 @@ def test_geometry_crop_profile_has_one_advertised_position_interface() -> None:
     assert "bind_manifest_row_identity_contract" not in identity_mod.__all__
     assert "bind_manifest_source_row_temporal_authority" not in identity_mod.__all__
     assert "load_persisted_source_camera_position_surface" in position_mod.__all__
+
+
+def test_real_geometry_crop_publisher_round_trips_shared_crop_source_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Guard the real writer -> unpatched keypoint/mask resolver boundary."""
+
+    source = replace(
+        _refined_source(tmp_path),
+        selection_mode="approved_authoritative_refined_v1",
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pixels = _BoundPixels(
+        pixel_authority=_pixel(),
+        source_video_path=tmp_path / "camera.mp4",
+    )
+    _wire_authorities(monkeypatch, source, pixels)
+    writable_root = zarr.open_group(
+        str(source.archive_path),
+        mode="a",
+        use_consolidated=False,
+    )
+    provider = writable_root.require_group("crop_runs").create_group(
+        "hybrid_provider"
+    )
+    provider.attrs.update(
+        {
+            "status": "completed",
+            "stage_selector_eligible": False,
+            "provider_record_sha256": "a" * 64,
+            "source_refined_run_id": source.run_id,
+            "source_refined_manifest_digest": source.manifest["payload_digest"],
+        }
+    )
+    source_paths = {
+        "instance_key": "instances/instance_key",
+        "source_refined_row_ids": "instances/refined_row_ids",
+        "frame_indices": "instances/frame_indices",
+        "source_acquisition_frame_index": (
+            "instances/source_acquisition_frame_index"
+        ),
+    }
+    for provider_path, source_path in source_paths.items():
+        provider.create_array(
+            provider_path,
+            data=np.asarray(source.arrays[source_path][...]),
+        )
+    provider.create_array(
+        "roi_coordinates_full",
+        data=np.asarray([[14, 10], [67, 11], [46, 51], [20, 55]], dtype=np.int32),
+    )
+    provider.create_array(
+        "roi_sizes_full",
+        data=np.full((4, 2), 8, dtype=np.int32),
+    )
+    monkeypatch.setattr(
+        crop_publication_mod,
+        "validate_hybrid_crop_signed_identity",
+        lambda *_args, **_kwargs: {
+            "provider_record_sha256": "a" * 64,
+            "row_count": 4,
+            "source_row_signature_spec_digest": "b" * 64,
+            "source_pixel_fingerprint": "c" * 64,
+            "source_rowset_fingerprint": "d" * 64,
+        },
+    )
+    publish_crop_geometry_production_candidate(
+        analysis_zarr=source.archive_path,
+        run_id="crop_shared_resolver_roundtrip",
+        policy=_policy(),
+        expected_camera_identity="cam2010095",
+        scratch_root=scratch,
+        geometry_origin_provider_run_id="hybrid_provider",
+    )
+
+    root = zarr.open_group(
+        str(source.archive_path),
+        mode="a",
+        use_consolidated=False,
+    )
+    path = "crop_runs/crop_shared_resolver_roundtrip"
+    keypoint_source = load_persisted_keypoint_crop_source(root, path)
+    mask_source = load_persisted_subject_mask_crop_source(root, path)
+
+    assert keypoint_source.crop_profile == "sealed_geometry_only_v2"
+    assert mask_source.crop_profile == keypoint_source.crop_profile
+    assert mask_source.crop_path == keypoint_source.crop_path == path
+    assert keypoint_source._roi_images_node is None
+    assert keypoint_source.crop_geometry.row_identity.leading_dimension > 0
+    with pytest.raises(KeypointCoordinatePublicationError):
+        require_direct_keypoint_crop_pixel_source(
+            keypoint_source,
+            root[f"{path}/centers_img_xy"],
+        )
 
 
 def test_real_geometry_crop_publisher_round_trips_track_motion_v2(

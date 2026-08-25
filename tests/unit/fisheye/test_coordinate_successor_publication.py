@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,11 +29,12 @@ from fisheye.shared.zarr.coordinate_successor_files import (
     metadata_tree_sha256,
 )
 from fisheye.shared.model_input_transform import ModelInputTransform
+from fisheye.shared.proof_verification import proof_verification_scope
 from fisheye.shared.zarr import keypoint_coordinate_successor as keypoint_successor
 from fisheye.shared.zarr import (
     subject_mask_coordinate_successor as subject_mask_successor,
 )
-from fisheye.shared.zarr import historical_geometry_only_crop_adapter as historical_crop
+from fisheye.shared.zarr import sealed_geometry_crop_profile as sealed_crop
 from fisheye.shared.zarr.crop_schema import (
     CROP_GEOMETRY_SCHEMA_V1,
     CropGeometryPolicy,
@@ -46,6 +46,8 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.pixel_frame_authority import (
     CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
     CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID,
+    CROP_PLACEMENT_PADDED_LEGACY_PRODUCER,
+    CROP_PLACEMENT_PADDED_PRODUCER,
     CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
     CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
     CROP_PLACEMENT_PADDED_PROVENANCE_ATTR,
@@ -447,7 +449,7 @@ def test_subject_mask_successor_fresh_archive_child_retains_record_path(
     fresh_root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
     fresh_run = fresh_root["subject_mask_runs/successor"]
 
-    assert historical_crop.bind_persisted_run_attribute_record(
+    assert sealed_crop.bind_persisted_run_attribute_record(
         fresh_run, attr_name="test_record"
     ) == {
         "record_ref": "/subject_mask_runs/successor@test_record",
@@ -455,25 +457,14 @@ def test_subject_mask_successor_fresh_archive_child_retains_record_path(
     }
 
 
-def test_subject_mask_successor_keeps_adapter_active_for_refined_publication(
+def test_subject_mask_successor_uses_shared_resolver_for_refined_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    active = False
     calls: list[str] = []
     expected_surfaces = object()
     expected_root = {"refined_subject_masks_runs/refined": "refined-run"}
 
-    class _AdapterScope:
-        def __enter__(self):
-            nonlocal active
-            active = True
-
-        def __exit__(self, *_args):
-            nonlocal active
-            active = False
-
     def fake_prepare(root, run_path, **kwargs):
-        assert active
         assert root is expected_root
         assert run_path == "refined_subject_masks_runs/refined"
         assert kwargs["source_subject_mask_path"] == "subject_mask_runs/raw"
@@ -481,24 +472,17 @@ def test_subject_mask_successor_keeps_adapter_active_for_refined_publication(
         calls.append("prepare")
 
     def fake_stamp(run, binding):
-        assert active
         assert run == "refined-run"
-        assert binding == "historical-crop"
+        assert binding == "sealed-crop"
         calls.append("stamp")
 
     def fake_publish(root, run_path, **kwargs):
-        assert active
         assert root is expected_root
         assert run_path == "refined_subject_masks_runs/refined"
         assert kwargs["expected_publication_owner"] == "owner"
         calls.append("publish")
         return expected_surfaces
 
-    monkeypatch.setattr(
-        subject_mask_successor,
-        "historical_geometry_only_crop_loader",
-        lambda _binding: _AdapterScope(),
-    )
     monkeypatch.setattr(
         subject_mask_successor,
         "prepare_refined_subject_mask_coordinate_context",
@@ -515,21 +499,20 @@ def test_subject_mask_successor_keeps_adapter_active_for_refined_publication(
         fake_publish,
     )
 
-    observed = subject_mask_successor._publish_refined_with_historical_crop(
+    observed = subject_mask_successor._publish_refined_with_sealed_crop(
         expected_root,
         refined_run_path="refined_subject_masks_runs/refined",
         refined_owner="owner",
         raw_run_path="subject_mask_runs/raw",
         mask_labels=["subject_body"],
-        historical_crop="historical-crop",
+        sealed_crop="sealed-crop",
     )
 
     assert observed is expected_surfaces
     assert calls == ["stamp", "prepare", "publish"]
-    assert active is False
 
 
-def _historical_crop_fixture(tmp_path: Path):
+def _sealed_crop_fixture(tmp_path: Path):
     n_frames = 5
     n_instances = 4
     width = height = 100
@@ -684,24 +667,24 @@ def _historical_crop_fixture(tmp_path: Path):
     }
 
 
-def _patch_historical_crop_fixture(monkeypatch, fixture) -> None:
+def _patch_sealed_crop_fixture(monkeypatch, fixture) -> None:
     monkeypatch.setattr(
-        historical_crop,
+        sealed_crop,
         "open_persisted_crop_geometry_publication",
         lambda archive, run_id: SimpleNamespace(
             manifest=fixture["manifest"], arrays=fixture["crop_arrays"]
         ),
     )
     monkeypatch.setattr(
-        historical_crop, "validate_crop_run_manifest", lambda manifest: ()
+        sealed_crop, "validate_crop_run_manifest", lambda manifest: ()
     )
     monkeypatch.setattr(
-        historical_crop,
+        sealed_crop,
         "load_persisted_acquisition_camera_authority",
         lambda root: (None, fixture["acquisition"]),
     )
     monkeypatch.setattr(
-        historical_crop,
+        sealed_crop,
         "load_source_camera_pixel_frame_authority",
         lambda node, *, acquisition_frame: node,
     )
@@ -823,13 +806,14 @@ def test_successor_copy_separates_metadata_and_hardlinks_payload(
     assert (source / "keypoints" / "c" / "0").read_bytes() == b"payload"
 
 
-def test_historical_geometry_only_adapter_proves_keypoint_source_and_records_no_pixels(
+def test_sealed_geometry_crop_profile_proves_keypoint_source_and_records_no_pixels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _historical_crop_fixture(tmp_path)
-    _patch_historical_crop_fixture(monkeypatch, fixture)
+    fixture = _sealed_crop_fixture(tmp_path)
+    fixture["root"]._coordinate_archive_token = object()
+    _patch_sealed_crop_fixture(monkeypatch, fixture)
 
-    binding = historical_crop.bind_historical_geometry_only_crop_source(
+    binding = sealed_crop.bind_sealed_geometry_crop_successor_source(
         analysis_zarr=fixture["archive"],
         root=fixture["root"],
         crop_reference=fixture["crop_reference"],
@@ -873,12 +857,13 @@ def test_historical_geometry_only_adapter_proves_keypoint_source_and_records_no_
     assert record["padded_crop_lineage"]["max_padding_ltrb"] == [0, 0, 289, 290]
 
 
-def test_historical_geometry_only_adapter_is_shared_by_all_coordinate_paths(
+def test_sealed_geometry_profile_is_shared_by_keypoint_and_mask_resolvers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _historical_crop_fixture(tmp_path)
-    _patch_historical_crop_fixture(monkeypatch, fixture)
-    binding = historical_crop.bind_historical_geometry_only_crop_source(
+    fixture = _sealed_crop_fixture(tmp_path)
+    fixture["root"]._coordinate_archive_token = object()
+    _patch_sealed_crop_fixture(monkeypatch, fixture)
+    binding = sealed_crop.bind_sealed_geometry_crop_successor_source(
         analysis_zarr=fixture["archive"],
         root=fixture["root"],
         crop_reference=fixture["crop_reference"],
@@ -888,28 +873,16 @@ def test_historical_geometry_only_adapter_is_shared_by_all_coordinate_paths(
         model_input_transform=fixture["transform"],
     )
     from fisheye.shared import keypoint_coordinate_publication as keypoint_publication
-    from fisheye.shared import (
-        refined_subject_mask_coordinate_publication as refined_mask_publication,
-    )
     from fisheye.shared import subject_mask_coordinate_publication as mask_publication
 
     original_keypoint_loader = keypoint_publication.load_persisted_keypoint_crop_source
     original_mask_loader = mask_publication.load_persisted_subject_mask_crop_source
-    original_keypoint_attrs = (
-        keypoint_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-        keypoint_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    monkeypatch.setattr(
+        sealed_crop,
+        "load_sealed_geometry_crop_source",
+        lambda root, path: binding.source,
     )
-    original_mask_attrs = (
-        mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-        mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-        mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-    )
-    original_refined_mask_attrs = (
-        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-    )
-    with historical_crop.historical_geometry_only_crop_loader(binding):
+    with proof_verification_scope():
         assert (
             keypoint_publication.load_persisted_keypoint_crop_source(
                 fixture["root"], binding.crop_path
@@ -923,34 +896,15 @@ def test_historical_geometry_only_adapter_is_shared_by_all_coordinate_paths(
             is binding.source
         )
         assert (
-            keypoint_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-            keypoint_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-        ) == (
-            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
-            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
-        )
-        assert (
-            mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-            mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-            mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+            binding.source.placement_ownership_attr,
+            binding.source.placement_pixel_center_ownership_attr,
+            binding.source.placement_pixel_edge_ownership_attr,
         ) == (
             CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
             CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
             CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
         )
-        assert (
-            refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-            refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-            refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-        ) == (
-            CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
-            CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
-            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
-        )
-        with pytest.raises(historical_crop.HistoricalGeometryOnlyCropAdapterError):
-            keypoint_publication.load_persisted_keypoint_crop_source(
-                object(), binding.crop_path
-            )
+    assert not hasattr(sealed_crop, "historical_geometry_only_crop_loader")
     assert (
         keypoint_publication.load_persisted_keypoint_crop_source
         is original_keypoint_loader
@@ -958,69 +912,37 @@ def test_historical_geometry_only_adapter_is_shared_by_all_coordinate_paths(
     assert (
         mask_publication.load_persisted_subject_mask_crop_source is original_mask_loader
     )
-    assert (
-        keypoint_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-        keypoint_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-    ) == original_keypoint_attrs
-    assert (
-        mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-        mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-        mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-    ) == original_mask_attrs
-    assert (
-        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-    ) == original_refined_mask_attrs
-    with pytest.raises(RuntimeError, match="restore"):
-        with historical_crop.historical_geometry_only_crop_loader(binding):
-            raise RuntimeError("restore")
-    assert (
-        keypoint_publication.load_persisted_keypoint_crop_source
-        is original_keypoint_loader
-    )
-    assert (
-        mask_publication.load_persisted_subject_mask_crop_source is original_mask_loader
-    )
-    assert (
-        refined_mask_publication.CROP_PLACEMENT_OWNERSHIP_ATTR,
-        refined_mask_publication.CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-        refined_mask_publication.CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
-    ) == original_refined_mask_attrs
 
 
-def test_ordinary_keypoint_crop_loader_still_rejects_geometry_only_layout(
+def test_shared_keypoint_crop_loader_dispatches_geometry_only_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _historical_crop_fixture(tmp_path)
+    fixture = _sealed_crop_fixture(tmp_path)
     from fisheye.shared import keypoint_coordinate_publication as keypoint_publication
 
-    geometry = SimpleNamespace(_rowset_node=fixture["crop_group"])
+    expected = object()
     monkeypatch.setattr(
-        keypoint_publication,
-        "load_persisted_crop_observation_geometry",
-        lambda root, path: geometry,
-    )
-    monkeypatch.setattr(
-        keypoint_publication,
-        "require_bound_crop_observation_geometry",
-        lambda value: value,
+        sealed_crop,
+        "load_sealed_geometry_crop_source",
+        lambda root, path: expected,
     )
 
-    with pytest.raises(Exception, match="completion contract|canonical_v2"):
+    assert (
         keypoint_publication._load_persisted_keypoint_crop_source_fresh(
             fixture["root"], "crop_runs/crop"
         )
+        is expected
+    )
 
 
 @pytest.mark.parametrize(
     "mutation", ["manifest_digest", "extent", "missing_array", "model"]
 )
-def test_historical_geometry_only_adapter_rejects_mismatches(
+def test_sealed_geometry_crop_profile_rejects_mismatches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
-    fixture = _historical_crop_fixture(tmp_path)
-    _patch_historical_crop_fixture(monkeypatch, fixture)
+    fixture = _sealed_crop_fixture(tmp_path)
+    _patch_sealed_crop_fixture(monkeypatch, fixture)
     crop_reference = dict(fixture["crop_reference"])
     transform = fixture["transform"]
     if mutation == "manifest_digest":
@@ -1039,8 +961,8 @@ def test_historical_geometry_only_adapter_rejects_mismatches(
             model_width=384,
         )
 
-    with pytest.raises(historical_crop.HistoricalGeometryOnlyCropAdapterError):
-        historical_crop.bind_historical_geometry_only_crop_source(
+    with pytest.raises(sealed_crop.SealedGeometryCropProfileError):
+        sealed_crop.bind_sealed_geometry_crop_successor_source(
             analysis_zarr=fixture["archive"],
             root=fixture["root"],
             crop_reference=crop_reference,
@@ -1051,11 +973,11 @@ def test_historical_geometry_only_adapter_rejects_mismatches(
         )
 
 
-def test_historical_geometry_only_adapter_rejects_raw_mask_rowset_mismatch(
+def test_sealed_geometry_crop_profile_rejects_raw_mask_rowset_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _historical_crop_fixture(tmp_path)
-    _patch_historical_crop_fixture(monkeypatch, fixture)
+    fixture = _sealed_crop_fixture(tmp_path)
+    _patch_sealed_crop_fixture(monkeypatch, fixture)
     source_arrays = {
         "source_crop_row_ids": fixture["source_arrays"]["source_crop_row_ids"],
         "instance_key": fixture["source_arrays"]["instance_key"],
@@ -1068,10 +990,10 @@ def test_historical_geometry_only_adapter_rejects_raw_mask_rowset_mismatch(
         ),
     }
     with pytest.raises(
-        historical_crop.HistoricalGeometryOnlyCropAdapterError,
+        sealed_crop.SealedGeometryCropProfileError,
         match="placement",
     ):
-        historical_crop.bind_historical_geometry_only_crop_source(
+        sealed_crop.bind_sealed_geometry_crop_successor_source(
             analysis_zarr=fixture["archive"],
             root=fixture["root"],
             crop_reference=fixture["crop_reference"],
@@ -1092,11 +1014,11 @@ def test_historical_geometry_only_adapter_rejects_raw_mask_rowset_mismatch(
         ((100, 100), [0, 0, 0, 0]),
     ],
 )
-def test_historical_padded_crop_lineage_freezes_each_boundary(
+def test_sealed_geometry_padded_crop_lineage_freezes_each_boundary(
     origin: tuple[int, int], expected: list[int]
 ) -> None:
     values = np.asarray([[origin[0], origin[1], 384, 384]], dtype="<f4")
-    record = historical_crop._padded_lineage_summary(
+    record = sealed_crop._padded_lineage_summary(
         values,
         source_width=4512,
         source_height=4512,
@@ -1113,9 +1035,9 @@ def test_historical_padded_crop_lineage_freezes_each_boundary(
     )
 
 
-def test_historical_padded_crop_lineage_freezes_exact_clipping_and_transform() -> None:
+def test_sealed_geometry_padded_crop_lineage_freezes_exact_clipping_and_transform() -> None:
     values = np.asarray([[-32, -19, 384, 384]], dtype="<f4")
-    record = historical_crop._padded_lineage_summary(
+    record = sealed_crop._padded_lineage_summary(
         values,
         source_width=4512,
         source_height=4512,
@@ -1147,11 +1069,11 @@ def test_historical_padded_crop_lineage_freezes_exact_clipping_and_transform() -
         np.asarray([[0, 0, np.nan, 384]], dtype="<f4"),
     ],
 )
-def test_historical_padded_crop_lineage_rejects_malformed_or_excess_windows(
+def test_sealed_geometry_padded_crop_lineage_rejects_malformed_or_excess_windows(
     values: np.ndarray,
 ) -> None:
-    with pytest.raises(historical_crop.HistoricalGeometryOnlyCropAdapterError):
-        historical_crop._padded_lineage_summary(
+    with pytest.raises(sealed_crop.SealedGeometryCropProfileError):
+        sealed_crop._padded_lineage_summary(
             values,
             source_width=4512,
             source_height=4512,
@@ -1166,13 +1088,13 @@ def test_historical_padded_crop_lineage_rejects_malformed_or_excess_windows(
 def test_keypoint_auxiliary_plan_materializes_missing_arrays_without_overwriting_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _historical_crop_fixture(tmp_path)
-    _patch_historical_crop_fixture(monkeypatch, fixture)
+    fixture = _sealed_crop_fixture(tmp_path)
+    _patch_sealed_crop_fixture(monkeypatch, fixture)
     source_manifest = deepcopy(fixture["source_manifest"])
     source_manifest["payload"]["storage_plan"] = {
         "storage_profile": PUBLISHED_HTTP_V1.as_manifest()
     }
-    binding = historical_crop.bind_historical_geometry_only_crop_source(
+    binding = sealed_crop.bind_sealed_geometry_crop_successor_source(
         analysis_zarr=fixture["archive"],
         root=fixture["root"],
         crop_reference=fixture["crop_reference"],
@@ -1222,7 +1144,7 @@ def test_keypoint_auxiliary_plan_materializes_missing_arrays_without_overwriting
     plan = keypoint_successor._plan_keypoint_auxiliaries(
         source_run=source,
         source_manifest=source_manifest,
-        historical_crop=binding,
+        sealed_crop=binding,
     )
     assert set(plan.values) == {
         "source_crop_xywh",
@@ -1258,7 +1180,7 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
     )
     canonical_geometry = canonical_source.crop_geometry
     canonical_frames = canonical_geometry.source_geometry.frame_evidence
-    source = SimpleNamespace(
+    source = sealed_crop.BoundSealedGeometryCropSource(
         crop_geometry=SimpleNamespace(
             source_geometry=SimpleNamespace(
                 frame_evidence=SimpleNamespace(
@@ -1279,11 +1201,19 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         roi_frame=canonical_source.roi_frame,
         bbox_roi_frame=canonical_source.bbox_roi_frame,
         crop_path=canonical_source.crop_path,
+        crop_profile="sealed_geometry_only_v2",
+        placement_ownership_attr=CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+        placement_pixel_center_ownership_attr=(
+            CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR
+        ),
+        placement_pixel_edge_ownership_attr=(
+            CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR
+        ),
         _root=canonical_source._root,
         _rowset_node=canonical_source._rowset_node,
         _placement_node=canonical_source._placement_node,
-        _roi_images_node=canonical_source._roi_images_node,
-        _seal=None,
+        _roi_images_node=None,
+        _verification_seal=sealed_crop._BOUND_SEALED_GEOMETRY_CROP_SOURCE_SEAL,
     )
 
     source_rows = np.asarray(run["source_crop_row_ids"][:])
@@ -1311,7 +1241,7 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         dtype=bbox_roi.dtype,
     )
 
-    padded_lineage = historical_crop._padded_lineage_summary(
+    padded_lineage = sealed_crop._padded_lineage_summary(
         placements,
         source_width=100,
         source_height=80,
@@ -1321,7 +1251,7 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         origin_authority_digest="b" * 64,
         provider_record_sha256="c" * 64,
     )
-    binding = historical_crop.HistoricalGeometryOnlyCropBinding(
+    binding = sealed_crop.SealedGeometryCropSuccessorBinding(
         source=source,
         crop_path="crop_runs/c1",
         manifest={},
@@ -1336,16 +1266,16 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         source_height=80,
         source_run_path="keypoints_runs/source",
         padded_lineage=padded_lineage,
-        adapter_record={
-            "schema_id": historical_crop.HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_ID,
-            "schema_version": historical_crop.HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_SCHEMA_VERSION,
-            "adapter_kind": historical_crop.HISTORICAL_GEOMETRY_ONLY_CROP_ADAPTER_KIND,
+        successor_evidence_record={
+            "schema_id": sealed_crop.SEALED_GEOMETRY_CROP_SUCCESSOR_EVIDENCE_SCHEMA_ID,
+            "schema_version": sealed_crop.SEALED_GEOMETRY_CROP_SUCCESSOR_EVIDENCE_SCHEMA_VERSION,
+            "adapter_kind": sealed_crop.SEALED_GEOMETRY_CROP_SUCCESSOR_EVIDENCE_KIND,
             "crop_path": "crop_runs/c1",
         },
     )
-    historical_crop.stamp_persisted_padded_placement_provenance(run, binding)
+    sealed_crop.stamp_persisted_padded_placement_provenance(run, binding)
     publication_binding = (
-        historical_crop.bind_historical_bbox_normalization_to_successor(
+        sealed_crop.bind_sealed_geometry_bbox_normalization_to_successor(
             binding,
             root=root,
             successor_run=run,
@@ -1360,24 +1290,36 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         model_height=40,
         model_width=40,
     )
-    with historical_crop.historical_geometry_only_crop_loader(publication_binding):
-        keypoint_coordinate_publication.prepare_keypoint_coordinate_context(
-            root,
-            "keypoints_runs/k1",
-            crop_path="crop_runs/c1",
-            model_input_transform=transform,
-            preprocessing_input_mode="numpy-list",
-            model_artifact=_keypoint_artifact(),
-        )
-        surfaces = keypoint_coordinate_publication.publish_keypoint_coordinate_surfaces(
-            root, "keypoints_runs/k1"
-        )
+    monkeypatch.setattr(
+        sealed_crop,
+        "require_bound_sealed_geometry_crop_source",
+        lambda value, **_kwargs: value,
+    )
+    keypoint_coordinate_publication.prepare_keypoint_coordinate_context(
+        root,
+        "keypoints_runs/k1",
+        crop_path="crop_runs/c1",
+        model_input_transform=transform,
+        preprocessing_input_mode="numpy-list",
+        model_artifact=_keypoint_artifact(),
+        _resolved_crop_source=publication_binding.source,
+    )
+    surfaces = keypoint_coordinate_publication.publish_keypoint_coordinate_surfaces(
+        root,
+        "keypoints_runs/k1",
+        _resolved_crop_source=publication_binding.source,
+    )
 
     ownership = run["source_crop_xywh"].attrs[CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR]
     assert ownership["schema_id"] == CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID
     assert ownership["window_geometry"]["padded_row_count"] == 1
+    legacy_ownership = deepcopy(ownership)
+    legacy_ownership["producer"] = CROP_PLACEMENT_PADDED_LEGACY_PRODUCER
+    assert parse_crop_placement_ownership(legacy_ownership).producer == (
+        CROP_PLACEMENT_PADDED_LEGACY_PRODUCER
+    )
     assert surfaces.source_crop_xywh.descriptor.source_camera_overlay.status == "direct"
-    bbox_evidence = run.attrs[historical_crop.HISTORICAL_BBOX_NORMALIZATION_ATTR]
+    bbox_evidence = run.attrs[sealed_crop.SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR]
     assert bbox_evidence["normalized_frame"]["record_ref"].startswith(
         "/keypoints_runs/k1/coordinate_frames/"
     )
@@ -1388,7 +1330,7 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
     run.attrs["status"] = RUN_STATUS_COMPLETE
     run.attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_COMPLETE
     reloaded_binding = (
-        historical_crop.load_historical_bbox_normalization_from_successor(
+        sealed_crop.load_sealed_geometry_bbox_normalization_from_successor(
             binding,
             root=root,
             successor_run=run,
@@ -1409,14 +1351,7 @@ def test_actual_keypoint_prepare_and_publish_accept_explicit_padded_crop_authori
         item["record_ref"]
         for item in bbox_evidence["normalized_to_source_camera"]
     ]
-    fresh_root = type(root)(root._coordinate_archive_token)
-    with historical_crop.historical_geometry_only_crop_loader(publication_binding):
-        assert (
-            keypoint_coordinate_publication.load_persisted_keypoint_crop_source(
-                fresh_root, "crop_runs/c1"
-            )
-            is publication_binding.source
-        )
+    assert not hasattr(sealed_crop, "historical_geometry_only_crop_loader")
 
 
 def test_actual_subject_mask_prepare_and_publish_accept_explicit_padded_crop_authority(
@@ -1425,6 +1360,22 @@ def test_actual_subject_mask_prepare_and_publish_accept_explicit_padded_crop_aut
     """Exercise all unmocked subject-mask placement conventions with padding."""
 
     root, _parent, run, source = _subject_fixture_with_source(monkeypatch, fresh=True)
+    source = copy(source)
+    object.__setattr__(
+        source,
+        "placement_ownership_attr",
+        CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
+    )
+    object.__setattr__(
+        source,
+        "placement_pixel_center_ownership_attr",
+        CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
+    )
+    object.__setattr__(
+        source,
+        "placement_pixel_edge_ownership_attr",
+        CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
+    )
     source_rows = np.asarray(run["source_crop_row_ids"][:])
     placements = np.asarray(run["source_crop_xywh"][:], dtype="<f4").copy()
     placements[0, 1] = -7.0
@@ -1435,7 +1386,7 @@ def test_actual_subject_mask_prepare_and_publish_accept_explicit_padded_crop_aut
     source._placement_node.data = crop_placements
     source._placement_node.dtype = crop_placements.dtype
 
-    padded_lineage = historical_crop._padded_lineage_summary(
+    padded_lineage = sealed_crop._padded_lineage_summary(
         placements,
         source_width=100,
         source_height=80,
@@ -1450,25 +1401,31 @@ def test_actual_subject_mask_prepare_and_publish_accept_explicit_padded_crop_aut
         crop_path="crop_runs/c1",
         padded_lineage=padded_lineage,
     )
-    historical_crop.stamp_persisted_padded_placement_provenance(run, binding)
+    sealed_crop.stamp_persisted_padded_placement_provenance(run, binding)
 
     owner = _subject_mask_owner(run)
-    with historical_crop.historical_geometry_only_crop_loader(binding):
-        subject_mask_coordinate_publication.prepare_subject_mask_coordinate_context(
-            root,
-            "subject_mask_runs/s1",
-            expected_publication_owner=owner,
-            crop_path="crop_runs/c1",
-            mask_labels=SUBJECT_MASK_LABELS,
-            model_input_transform=SUBJECT_MASK_MODEL_TRANSFORM,
-            model_artifact=SUBJECT_MASK_MODEL_ARTIFACT,
-            mask_probability_threshold=0.5,
-        )
-        surfaces = subject_mask_coordinate_publication.publish_subject_mask_coordinate_surfaces(
-            root,
-            "subject_mask_runs/s1",
-            expected_publication_owner=owner,
-        )
+    monkeypatch.setattr(
+        keypoint_coordinate_publication,
+        "require_bound_keypoint_crop_source",
+        lambda value: value,
+    )
+    subject_mask_coordinate_publication.prepare_subject_mask_coordinate_context(
+        root,
+        "subject_mask_runs/s1",
+        expected_publication_owner=owner,
+        crop_path="crop_runs/c1",
+        mask_labels=SUBJECT_MASK_LABELS,
+        model_input_transform=SUBJECT_MASK_MODEL_TRANSFORM,
+        model_artifact=SUBJECT_MASK_MODEL_ARTIFACT,
+        mask_probability_threshold=0.5,
+        _resolved_crop_source=source,
+    )
+    surfaces = subject_mask_coordinate_publication.publish_subject_mask_coordinate_surfaces(
+        root,
+        "subject_mask_runs/s1",
+        expected_publication_owner=owner,
+        _resolved_crop_source=source,
+    )
 
     placement_attrs = run["source_crop_xywh"].attrs
     for attr_name in (
@@ -1586,7 +1543,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
             source_arrays["source_crop_row_ids"]
         ),
     )
-    padded_lineage = historical_crop._padded_lineage_summary(
+    padded_lineage = sealed_crop._padded_lineage_summary(
         values["source_crop_xywh"],
         source_width=4512,
         source_height=4512,
@@ -1597,6 +1554,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         provider_record_sha256="c" * 64,
     )
     binding = SimpleNamespace(
+        source=object(),
         padded_lineage=padded_lineage,
         as_record=lambda: {"adapter_kind": "test_historical_adapter"},
     )
@@ -1620,7 +1578,8 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         ),
     )
 
-    def fake_prepare(target_root, target_path, **_kwargs):
+    def fake_prepare(target_root, target_path, **kwargs):
+        assert kwargs["_resolved_crop_source"] is binding.source
         target = target_root[target_path]
         assert "source_crop_xywh" in target
         assert target.attrs["keypoint_labels"] == ["swim_bladder"]
@@ -1630,7 +1589,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         ownership = {
             "schema_id": CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID,
             "schema_version": 1,
-            "producer": "palette.coordinate_successor.historical_geometry_only_crop_adapter.v1",
+            "producer": CROP_PLACEMENT_PADDED_PRODUCER,
             "layout": "xywh",
             "window_policy": "requested_window_zero_padded_v1",
             "crop_placement": {"record_ref": "/target/source_crop_xywh"},
@@ -1707,7 +1666,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
     )
     monkeypatch.setattr(
         keypoint_successor,
-        "bind_historical_geometry_only_crop_source",
+        "bind_sealed_geometry_crop_successor_source",
         lambda **_kwargs: binding,
     )
 
@@ -1715,19 +1674,19 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         del root
         target = successor_run
         record = {
-            "schema_id": historical_crop.HISTORICAL_BBOX_NORMALIZATION_SCHEMA_ID,
-            "schema_version": historical_crop.HISTORICAL_BBOX_NORMALIZATION_SCHEMA_VERSION,
+            "schema_id": sealed_crop.SEALED_GEOMETRY_BBOX_NORMALIZATION_SCHEMA_ID,
+            "schema_version": sealed_crop.SEALED_GEOMETRY_BBOX_NORMALIZATION_SCHEMA_VERSION,
             "successor_run_path": successor_run_path,
         }
-        target.attrs[historical_crop.HISTORICAL_BBOX_NORMALIZATION_ATTR] = record
-        target.attrs[f"{historical_crop.HISTORICAL_BBOX_NORMALIZATION_ATTR}_sha256"] = (
+        target.attrs[sealed_crop.SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR] = record
+        target.attrs[f"{sealed_crop.SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR}_sha256"] = (
             canonical_json_sha256(record)
         )
         return bound
 
     monkeypatch.setattr(
         keypoint_successor,
-        "bind_historical_bbox_normalization_to_successor",
+        "bind_sealed_geometry_bbox_normalization_to_successor",
         fake_bind_bbox_normalization,
     )
     monkeypatch.setattr(
@@ -1736,15 +1695,11 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         lambda **_kwargs: auxiliary_plan,
     )
     monkeypatch.setattr(
-        keypoint_successor,
-        "historical_geometry_only_crop_loader",
-        lambda _binding: nullcontext(),
-    )
-    monkeypatch.setattr(
         keypoint_successor, "prepare_keypoint_coordinate_context", fake_prepare
     )
 
-    def fake_publish(target_root, target_path):
+    def fake_publish(target_root, target_path, **kwargs):
+        assert kwargs["_resolved_crop_source"] is binding.source
         fresh_target = target_root[target_path]
         fresh_target.attrs["coordinate_contract"] = "canonical_v2"
         surfaces.context._run_group = fresh_target
@@ -1840,7 +1795,7 @@ def test_padded_ownership_parser_requires_explicit_window_geometry() -> None:
     record = {
         "schema_id": "palette.coordinate_successor.padded_crop_placement_ownership",
         "schema_version": 1,
-        "producer": "palette.coordinate_successor.historical_geometry_only_crop_adapter.v1",
+        "producer": CROP_PLACEMENT_PADDED_PRODUCER,
         "layout": "xywh",
         "window_policy": "requested_window_zero_padded_v1",
         "crop_placement": {},

@@ -171,7 +171,8 @@ CROP_PLACEMENT_OWNERSHIP_ATTRS = frozenset(
 )
 CROP_PLACEMENT_PRODUCER = "palette.crop_writer.v1"
 CROP_PLACEMENT_WINDOW_POLICY = "contained_actual_source_window_v1"
-CROP_PLACEMENT_PADDED_PRODUCER = (
+CROP_PLACEMENT_PADDED_PRODUCER = "palette.sealed_geometry_crop_profile.v1"
+CROP_PLACEMENT_PADDED_LEGACY_PRODUCER = (
     "palette.coordinate_successor.historical_geometry_only_crop_adapter.v1"
 )
 CROP_PLACEMENT_PADDED_WINDOW_POLICY = "requested_window_zero_padded_v1"
@@ -4044,6 +4045,7 @@ def _crop_ownership_record(
     source_camera_frame: BoundPixelFrameAuthority,
     *,
     allow_zero_padded: bool = False,
+    padded_producer: str = CROP_PLACEMENT_PADDED_PRODUCER,
 ) -> CropPlacementOwnershipRecord:
     try:
         row_identity.assert_verified()
@@ -4070,6 +4072,13 @@ def _crop_ownership_record(
     schema_id = CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID
     schema_version = CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION
     if allow_zero_padded:
+        if padded_producer not in {
+            CROP_PLACEMENT_PADDED_PRODUCER,
+            CROP_PLACEMENT_PADDED_LEGACY_PRODUCER,
+        }:
+            raise PixelFrameAuthorityError(
+                "Unsupported padded crop placement producer."
+            )
         attrs = getattr(placement_node, "attrs", None)
         provenance = (
             attrs.get(CROP_PLACEMENT_PADDED_PROVENANCE_ATTR)
@@ -4163,7 +4172,7 @@ def _crop_ownership_record(
             },
             "crop_policy_provenance": copy.deepcopy(dict(provenance)),
         }
-        producer = CROP_PLACEMENT_PADDED_PRODUCER
+        producer = padded_producer
         window_policy = CROP_PLACEMENT_PADDED_WINDOW_POLICY
         schema_id = CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_ID
         schema_version = CROP_PLACEMENT_PADDED_OWNERSHIP_SCHEMA_VERSION
@@ -4232,7 +4241,11 @@ def parse_crop_placement_ownership(value: Any) -> CropPlacementOwnershipRecord:
             )
         padded = True
         if not (
-            payload["producer"] == CROP_PLACEMENT_PADDED_PRODUCER
+            payload["producer"]
+            in {
+                CROP_PLACEMENT_PADDED_PRODUCER,
+                CROP_PLACEMENT_PADDED_LEGACY_PRODUCER,
+            }
             and payload["layout"] == "xywh"
             and payload["window_policy"] == CROP_PLACEMENT_PADDED_WINDOW_POLICY
         ):
@@ -4347,12 +4360,6 @@ def load_crop_placement_ownership(
             f"The {expected_convention} crop-placement ownership attr requires "
             f"a {expected_convention} source-camera frame."
         )
-    expected = _crop_ownership_record(
-        placement_node,
-        row_identity,
-        camera,
-        allow_zero_padded=attr_name.startswith("coordinate_successor_padded_"),
-    )
     try:
         archive = require_same_archive(
             placement_node,
@@ -4368,6 +4375,13 @@ def load_crop_placement_ownership(
     digest_attr = f"{attr_name}_sha256"
     raw = attrs.get(attr_name)
     record = parse_crop_placement_ownership(raw)
+    expected = _crop_ownership_record(
+        placement_node,
+        row_identity,
+        camera,
+        allow_zero_padded=attr_name.startswith("coordinate_successor_padded_"),
+        padded_producer=record.producer,
+    )
     if not isinstance(raw, Mapping) or not _exact_json_equal(raw, record.to_dict()):
         raise PixelFrameAuthorityError(
             "Raw crop ownership is not its exact canonical mapping."

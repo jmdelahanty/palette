@@ -562,7 +562,7 @@ def _canonical_crop_arrays(
     instance_key = payload.get("instance_key")
     if instance_key is None:
         raise OrdinaryCropCoordinateError(
-            "Future-canonical ordinary crop requires source instance_key identity."
+            "The materialized crop profile requires source instance_key identity."
         )
     if not np.array_equal(
         np.asarray(instance_key, dtype=np.uint64),
@@ -681,7 +681,7 @@ def _preflight_ordinary_crop_coordinates(
     parts = normalized_source_path.split("/")
     if len(parts) != 2 or parts[0] != "detect_runs":
         raise OrdinaryCropCoordinateError(
-            "Future-canonical ordinary crop currently supports only exact "
+            "The materialized crop profile currently supports only exact "
             "detect_runs/<run> sources. Refined and legacy sparse sources need a "
             "canonical row-selection publication before they can be cropped."
         )
@@ -706,7 +706,7 @@ def _preflight_ordinary_crop_coordinates(
     status = load_acquisition_authority_publication_status(root)
     if status.status != ACQUISITION_AUTHORITY_PUBLISHED:
         raise OrdinaryCropCoordinateError(
-            "Future-canonical ordinary crop requires a published acquisition "
+            "The materialized crop profile requires a published acquisition "
             f"authority; found status={status.status!r}."
         )
     ownership, acquisition = load_persisted_acquisition_camera_authority(root)
@@ -915,7 +915,7 @@ def _publish_ordinary_crop_coordinate_contract(
 
     if "roi_images" not in crop_group:
         raise OrdinaryCropCoordinateError(
-            "Future-canonical ordinary crop completion requires materialized roi_images."
+            "The materialized crop profile requires roi_images at completion."
         )
     persisted_coordinates = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32)
     if not np.array_equal(persisted_coordinates, preflight.roi_coordinates_full):
@@ -4073,7 +4073,7 @@ def _crop_detections_impl(
 
     if crop_storage_mode_resolved != "materialized":
         raise OrdinaryCropCoordinateError(
-            "Future-canonical ordinary crop does not publish geometry-only runs. "
+            "The materialized crop profile does not publish geometry-only runs. "
             "Use crop_storage_mode='materialized'."
         )
     canonical_preflight = _preflight_ordinary_crop_coordinates(

@@ -116,6 +116,15 @@ def _install_position_authorities(source) -> None:
         pixel_convention="continuous",
         acquisition_frame=acquisition,
     )
+    bbox_frame = root.require_group(
+        "analysis/coordinate_frames/source_camera/cam2010095/pixel_edge_half_open"
+    )
+    stamp_source_camera_pixel_frame_authority(
+        bbox_frame,
+        frame_id="cam2010095_source_camera_pixel_edges",
+        pixel_convention="pixel_edge_half_open",
+        acquisition_frame=acquisition,
+    )
     detection = root.require_group("detect_runs").require_group("detect_source")
     attrs = dict(detection.attrs)
     attrs.setdefault(
