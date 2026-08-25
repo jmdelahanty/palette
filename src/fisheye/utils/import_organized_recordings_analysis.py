@@ -4,7 +4,8 @@
 This is intentionally import-only. It creates/updates analysis archives with
 recording metadata, source-video metadata, and optional H5 stimulus metadata.
 It does not run detect, refine, or keypoints. When --registry is provided,
-successful imports and skipped existing archives are scanned into that registry.
+current-profile imports are receipt-finalized and already-bound existing
+archives are verified before their non-identity registry metadata is refreshed.
 """
 
 from __future__ import annotations
@@ -22,18 +23,15 @@ from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PUBLISHED,
     load_acquisition_authority_publication_status,
 )
-from fisheye.registry.db import Registry
+from fisheye.registry.shadow_publish import shadow_synchronize_recording_import
 from fisheye.shared.batch_logging import JsonLogger, make_run_id, utc_now
+from fisheye.shared.recording_import_receipt import RecordingImportReceipt
 from fisheye.utils.import_recording_analysis import (
     RecordingAnalysisPlan,
     RecordingImportOptions,
     process_recording_import,
     resolve_single_recording_plan,
     stimulus_runs_present,
-)
-from fisheye.utils.recording_manifest_import_status import (
-    ManifestImportStatusUpdate,
-    write_manifest_import_status,
 )
 from fisheye.shared.recording_preflight import preflight_gate_reason
 
@@ -276,11 +274,21 @@ def _log_plan(logger: Optional[JsonLogger], plan: OrganizedImportPlan) -> None:
     )
 
 
-def _sync_registry(registry_path: Path, zarr_path: Path) -> RegistrySyncResult:
+def _sync_registry(
+    registry_path: Path,
+    zarr_path: Path,
+    *,
+    receipt: RecordingImportReceipt | None = None,
+) -> RegistrySyncResult:
     resolved_registry = registry_path.expanduser().resolve()
-    registry = Registry(resolved_registry)
     try:
-        dataset_id = registry.scan_zarr(zarr_path)
+        publication = shadow_synchronize_recording_import(
+            canonical_registry=resolved_registry,
+            zarr_path=zarr_path,
+            receipt=receipt,
+            decided_by="fisheye.utils.import_organized_recordings_analysis",
+        )
+        dataset_id = str(publication.mutation_result["dataset_id"])
     except Exception as exc:
         return RegistrySyncResult(
             ok=False,
@@ -288,8 +296,6 @@ def _sync_registry(registry_path: Path, zarr_path: Path) -> RegistrySyncResult:
             zarr_path=zarr_path,
             error=str(exc),
         )
-    finally:
-        registry.close()
     return RegistrySyncResult(
         ok=True,
         registry_path=resolved_registry,
@@ -315,57 +321,6 @@ def _log_registry_sync(
         dataset_id=result.dataset_id,
         error=result.error,
     )
-
-
-def _log_manifest_update(
-    logger: Optional[JsonLogger],
-    *,
-    recording_dir: Path,
-    result_status: str,
-    error: Optional[str],
-) -> None:
-    if logger is None:
-        return
-    logger.log(
-        "recording_manifest_import_status",
-        recording_dir=str(recording_dir),
-        status=result_status,
-        error=error,
-    )
-
-
-def _update_manifest_import_status(
-    *,
-    recording_dir: Path,
-    zarr_path: Path,
-    status: str,
-    logger: Optional[JsonLogger],
-    error: Optional[str] = None,
-    registry_path: Optional[Path] = None,
-    registry_dataset_id: Optional[str] = None,
-) -> bool:
-    imported_at_utc = utc_now()
-    result = write_manifest_import_status(
-        ManifestImportStatusUpdate(
-            recording_dir=recording_dir,
-            zarr_path=zarr_path,
-            status=status,
-            import_log=logger.path if logger is not None else None,
-            imported_at_utc=imported_at_utc,
-            import_run_id=logger.run_id if logger is not None else None,
-            error=error,
-            registry_path=registry_path,
-            registry_dataset_id=registry_dataset_id,
-            registry_synced_at_utc=imported_at_utc if registry_dataset_id else None,
-        )
-    )
-    _log_manifest_update(
-        logger,
-        recording_dir=recording_dir,
-        result_status=result.status,
-        error=result.error,
-    )
-    return result.error is None
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -459,9 +414,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--registry",
         type=Path,
         help=(
-            "Registry SQLite path to scan after successful imports. Existing "
-            "analysis zarrs skipped by --skip-existing are also scanned so "
-            "registry-backed tools can discover them."
+            "Registry SQLite path to finalize after successful imports. "
+            "Existing current-profile archives require a prior receipt binding; "
+            "unprofiled compatibility archives retain generic scanning."
         ),
     )
     parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging.")
@@ -536,8 +491,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     missing = 0
     registry_synced = 0
     registry_failed = 0
-    manifest_updated = 0
-    manifest_failed = 0
     for plan in plans:
         _log_plan(logger, plan)
         if plan.status == "missing":
@@ -582,19 +535,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                     )
                     continue
             skipped += 1
-            if _update_manifest_import_status(
-                recording_dir=plan.recording_dir,
-                zarr_path=plan.zarr_path,
-                status="ok",
-                logger=logger,
-                registry_path=args.registry.expanduser().resolve() if args.registry is not None else None,
-                registry_dataset_id=sync_result.dataset_id if args.registry is not None and sync_result.ok else None,
-            ):
-                manifest_updated += 1
-            else:
-                manifest_failed += 1
-                failed += 1
-                continue
             print(f"Skipping existing analysis zarr: {plan.zarr_path}")
             if logger is not None:
                 logger.log(
@@ -624,16 +564,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         result = process_recording_import(import_plan, opts, logger=(logger.log if logger else None))
         if not result.ok:
             failed += 1
-            if _update_manifest_import_status(
-                recording_dir=plan.recording_dir,
-                zarr_path=plan.zarr_path,
-                status="failed",
-                logger=logger,
-                error=result.error or result.failed_step,
-            ):
-                manifest_updated += 1
-            else:
-                manifest_failed += 1
             print(
                 f"Import failed for {plan.recording_dir}: step={result.failed_step or 'unknown'}"
                 + (f" returncode={result.returncode}" if result.returncode is not None else "")
@@ -650,7 +580,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             continue
         if args.registry is not None:
-            sync_result = _sync_registry(args.registry, plan.zarr_path)
+            sync_result = _sync_registry(
+                args.registry,
+                plan.zarr_path,
+                receipt=result.receipt,
+            )
             if not sync_result.ok:
                 registry_failed += 1
                 failed += 1
@@ -683,20 +617,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                 result=sync_result,
             )
 
-        if _update_manifest_import_status(
-            recording_dir=plan.recording_dir,
-            zarr_path=plan.zarr_path,
-            status="ok",
-            logger=logger,
-            registry_path=args.registry.expanduser().resolve() if args.registry is not None else None,
-            registry_dataset_id=sync_result.dataset_id if args.registry is not None and sync_result.ok else None,
-        ):
-            manifest_updated += 1
-        else:
-            manifest_failed += 1
-            failed += 1
-            continue
-
         ok += 1
         print(f"Imported analysis zarr: {plan.zarr_path}")
         if logger is not None:
@@ -714,8 +634,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.registry is not None:
         print(f"  registry_synced: {registry_synced}")
         print(f"  registry_failed: {registry_failed}")
-    print(f"  manifest_updated: {manifest_updated}")
-    print(f"  manifest_failed: {manifest_failed}")
     if logger is not None:
         logger.log(
             "run_end",
@@ -725,8 +643,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             missing=missing,
             registry_synced=registry_synced,
             registry_failed=registry_failed,
-            manifest_updated=manifest_updated,
-            manifest_failed=manifest_failed,
             dry_run=False,
         )
         logger.close()

@@ -38,6 +38,11 @@ from fisheye.shared.subject_metadata import (
     resolve_subject_metadata,
     subject_metadata_sha256,
 )
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SourceRecordingIdentityError,
+    load_source_recording_identity_profile,
+)
 
 
 TOOL_NAME = "fisheye.utils.set_recording_subject_metadata"
@@ -147,6 +152,13 @@ def plan_recording(
         "subject_metadata": metadata,
     }
     conflicts = _conflicts(manifest, manifest_fields)
+    if (
+        load_source_recording_identity_profile(zarr_path)
+        == SOURCE_RECORDING_IDENTITY_PROFILE
+    ):
+        conflicts.append(
+            "current-profile source recordings are unsupported by this legacy tool"
+        )
 
     root = _open_root(zarr_path, mode="r")
     try:
@@ -269,6 +281,19 @@ def apply_plan(
         raise ValueError(f"refusing conflicting plan for {plan['recording']}")
     if plan.get("status") == "unchanged":
         return {**dict(plan), "status": "unchanged", "registry_dataset_id": None}
+    zarr_path = Path(str(plan["zarr_path"]))
+    try:
+        source_profile = load_source_recording_identity_profile(zarr_path)
+    except SourceRecordingIdentityError as exc:
+        raise ValueError(
+            "current-profile source classification is invalid; legacy mutation "
+            "is forbidden"
+        ) from exc
+    if source_profile == SOURCE_RECORDING_IDENTITY_PROFILE:
+        raise ValueError(
+            "legacy manual subject metadata tool does not mutate "
+            "current-profile source recordings"
+        )
 
     fresh = plan_recording(
         Path(str(plan["recording_dir"])),
@@ -278,10 +303,9 @@ def apply_plan(
     )
     if fresh != plan:
         raise ValueError(f"apply-time plan changed for {plan['recording']}")
-    _patch_manifest(plan, repair_id=repair_id, reason=reason)
 
     manifest_path = Path(str(plan["manifest_path"]))
-    zarr_path = Path(str(plan["zarr_path"]))
+    _patch_manifest(plan, repair_id=repair_id, reason=reason)
     metadata = dict(plan["desired"]["subject_metadata"])
     artifact = _source_artifact(manifest_path)
     root = _open_root(zarr_path, mode="r+")
@@ -314,7 +338,7 @@ def apply_plan(
 
     registry_dataset_id = None
     if registry is not None:
-        registry_dataset_id = registry.register_from_root(root, zarr_path)
+        registry_dataset_id = registry.scan_zarr(zarr_path)
     return {
         **dict(plan),
         "status": "applied",

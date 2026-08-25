@@ -38,6 +38,10 @@ from fisheye.shared.subject_metadata import (
     resolve_subject_metadata,
     subject_metadata_sha256,
 )
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    load_source_recording_identity_profile,
+)
 
 
 REPORT_SCHEMA_ID = "palette.subject_experiment_setup_backfill.v1"
@@ -226,6 +230,16 @@ def plan_target(target: BackfillTarget) -> dict[str, Any]:
             disposition="blocked",
             action="none",
             reason="zarr_v3_metadata_missing",
+        )
+    if (
+        load_source_recording_identity_profile(target.zarr_path)
+        == SOURCE_RECORDING_IDENTITY_PROFILE
+    ):
+        return _finish(
+            row,
+            disposition="blocked",
+            action="none",
+            reason="current_source_profile_unsupported",
         )
 
     recording_dir, warnings = _recording_dir(target)
@@ -442,6 +456,14 @@ def apply_backfill_plan(
                     )
                 if fresh.get("desired") != desired:
                     raise ValueError("Apply-time authority plan differs from dry run")
+                if (
+                    load_source_recording_identity_profile(zarr_path)
+                    == SOURCE_RECORDING_IDENTITY_PROFILE
+                ):
+                    raise ValueError(
+                        "historical subject/setup backfill does not mutate "
+                        "current-profile source recordings"
+                    )
 
                 root = _open_root(zarr_path, mode="r+")
                 metadata = read_h5_subject_metadata(h5_path)
@@ -464,7 +486,7 @@ def apply_backfill_plan(
                 _validate_published(root, desired)
                 refreshed_dataset_id = None
                 if registry is not None:
-                    refreshed_dataset_id = registry.register_from_root(root, zarr_path)
+                    refreshed_dataset_id = registry.scan_zarr(zarr_path)
                     if refreshed_dataset_id != row["dataset_id"]:
                         raise ValueError(
                             "Registry refresh changed dataset identity: "

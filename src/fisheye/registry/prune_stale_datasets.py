@@ -54,6 +54,18 @@ DEPENDENT_DATASET_TABLES: tuple[DependentTable, ...] = (
     DependentTable("training_image_profile", ("dataset_id",)),
 )
 
+# These rows are authority pointers, not ordinary dependents.  Generic stale
+# pruning must leave them and their datasets untouched; retirement requires a
+# dedicated identity-authority transition.
+PROTECTED_DATASET_TABLES = frozenset(
+    {
+        "dataset_recording_identity_current",
+        # Import receipts are immutable authority evidence.  They can only be
+        # retired by the dedicated identity transition, never generic prune.
+        "recording_import_receipt_bindings",
+    }
+)
+
 
 @dataclass(frozen=True)
 class DatasetCandidate:
@@ -65,6 +77,7 @@ class DatasetCandidate:
     status: str | None
     path_class: str
     path_exists: bool
+    authority_bound: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +89,7 @@ class DatasetCandidate:
             "status": self.status,
             "path_class": self.path_class,
             "path_exists": self.path_exists,
+            "authority_bound": self.authority_bound,
         }
 
 
@@ -178,8 +192,19 @@ def scan_candidates(conn: sqlite3.Connection) -> dict[str, list[DatasetCandidate
         "dev-shm": [],
         "home-review": [],
         "unowned-analysis-review": [],
+        "authority-bound-review": [],
     }
+    table_names = _table_names(conn)
+    authority_bound_ids: set[str] = set()
+    if "dataset_recording_identity_current" in table_names:
+        authority_bound_ids = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT dataset_id FROM dataset_recording_identity_current;"
+            ).fetchall()
+        }
     for row in _all_dataset_rows(conn):
+        authority_bound = str(row["dataset_id"]) in authority_bound_ids
         path_class = classify_zarr_path(str(row["zarr_path"]))
         recording_id = str(row["recording_id"] or "").strip() or None
         if (
@@ -189,6 +214,8 @@ def scan_candidates(conn: sqlite3.Connection) -> dict[str, list[DatasetCandidate
             and recording_id is None
         ):
             path_class = "unowned-analysis-review"
+        if authority_bound and path_class is not None:
+            path_class = "authority-bound-review"
         if path_class not in grouped:
             continue
         path = Path(str(row["zarr_path"]))
@@ -204,6 +231,7 @@ def scan_candidates(conn: sqlite3.Connection) -> dict[str, list[DatasetCandidate
                 status=str(row["status"]) if row["status"] is not None else None,
                 path_class=path_class,
                 path_exists=path.exists(),
+                authority_bound=authority_bound,
             )
         )
     return grouped
@@ -239,7 +267,7 @@ def assert_dependent_table_map_covers_schema(conn: sqlite3.Connection) -> None:
         for table in table_names
         if table != "datasets" and "dataset_id" in _table_columns(conn, table)
     }
-    uncovered = sorted(live_dataset_id_tables - mapped)
+    uncovered = sorted(live_dataset_id_tables - mapped - PROTECTED_DATASET_TABLES)
     if uncovered:
         joined = ", ".join(uncovered)
         raise RuntimeError(f"Dependent table map does not cover dataset_id table(s): {joined}")
@@ -328,6 +356,7 @@ def _build_report(
     temp_ids = _flatten_ids(candidates, temp_class_names)
     home_candidates = candidates["home-review"]
     unowned_candidates = candidates["unowned-analysis-review"]
+    authority_bound_candidates = candidates["authority-bound-review"]
     review_by_id = {
         candidate.dataset_id: candidate
         for candidate in (*home_candidates, *unowned_candidates)
@@ -371,6 +400,7 @@ def _build_report(
             "unowned_analysis_review_dataset_count": len(unowned_candidates),
             "selected_dataset_count": len(selected_ids),
             "selected_recording_count": recordings_by_class["selected"],
+            "authority_bound_review_dataset_count": len(authority_bound_candidates),
         },
         "classes": {
             class_name: {
@@ -397,6 +427,12 @@ def _build_report(
             ),
             "datasets": [candidate.as_dict() for candidate in unowned_candidates],
         },
+        "authority_bound_review": {
+            "path_class": "authority-bound-review",
+            "dataset_count": len(authority_bound_candidates),
+            "deletion_policy": "dedicated_identity_authority_transition_required",
+            "datasets": [candidate.as_dict() for candidate in authority_bound_candidates],
+        },
         "selected": {
             "dataset_ids": selected_ids,
             "dependent_row_counts": dependent_by_class["selected"],
@@ -406,6 +442,7 @@ def _build_report(
             {"table": entry.table, "columns": list(entry.columns)}
             for entry in DEPENDENT_DATASET_TABLES
         ],
+        "protected_dataset_tables": sorted(PROTECTED_DATASET_TABLES),
     }
 
 
@@ -457,6 +494,11 @@ def _print_report(report: Mapping[str, Any]) -> None:
     print(f"NEEDS-MAINTAINER-REVIEW unowned analysis rows: {unowned['dataset_count']}")
     for candidate in unowned["datasets"]:
         print(f"  {candidate['dataset_id']}  {candidate['zarr_path']}")
+    protected = report["authority_bound_review"]
+    print("")
+    print(f"PROTECTED identity-authority rows: {protected['dataset_count']}")
+    for candidate in protected["datasets"]:
+        print(f"  {candidate['dataset_id']}  {candidate['zarr_path']}")
 
 
 def create_backup(source: Path, backup: Path) -> None:
@@ -503,8 +545,18 @@ def _delete_recordings(conn: sqlite3.Connection, recording_ids: Sequence[str]) -
 
 def _remaining_temp_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     rows = _all_dataset_rows(conn)
+    authority_bound_ids: set[str] = set()
+    if "dataset_recording_identity_current" in _table_names(conn):
+        authority_bound_ids = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT dataset_id FROM dataset_recording_identity_current;"
+            ).fetchall()
+        }
     remaining = []
     for row in rows:
+        if str(row["dataset_id"]) in authority_bound_ids:
+            continue
         path_class = classify_zarr_path(str(row["zarr_path"]))
         if path_class in {"pytest-tmp", "tmp", "var-tmp", "dev-shm"}:
             remaining.append(row)

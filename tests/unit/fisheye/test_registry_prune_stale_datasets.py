@@ -7,12 +7,29 @@ from pathlib import Path
 import pytest
 
 from fisheye.registry.db import Registry
+from fisheye.registry import recording_identity_authority as authority_module
+from fisheye.registry.recording_identity_authority import (
+    collect_regular_source_recording_identity,
+)
 from fisheye.registry.prune_stale_datasets import (
+    PROTECTED_DATASET_TABLES,
     assert_dependent_table_map_covers_schema,
     connect_read_only,
     main,
 )
 from fisheye.registry.status_ledger import upsert_recording_step_status
+from fisheye.shared.recording_import_receipt import (
+    CURRENT_RECORDING_IMPORT_PRODUCER_ID,
+    RecordingImportReceipt,
+    publish_recording_import_receipt,
+)
+from fisheye.shared.source_recording_identity import (
+    SOURCE_ANALYSIS_CLASSIFICATION,
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    SourceRecordingIdentity,
+    SourceRecordingIdentityClaim,
+)
 
 
 def _seed_dataset(
@@ -128,6 +145,88 @@ def _make_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Pat
 
 def _count(conn: sqlite3.Connection, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0])
+
+
+def test_authority_bound_dataset_is_reported_but_never_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recording_dir = tmp_path / "recordings" / "recording-a"
+    zarr_path = recording_dir / "zarr" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    identity = {
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+        "recording_id": "recording-a",
+        "session_uuid": "session-a",
+        "camera_id": "2010093",
+    }
+    root_attributes = {
+        **identity,
+        **SOURCE_ANALYSIS_CLASSIFICATION,
+    }
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps(identity), encoding="utf-8"
+    )
+    (zarr_path / "zarr.json").write_text(
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": root_attributes,
+            }
+        ),
+        encoding="utf-8",
+    )
+    identity_claim = SourceRecordingIdentityClaim.create(
+        SourceRecordingIdentity.from_mapping(identity)
+    )
+    assert collect_regular_source_recording_identity(zarr_path) == identity_claim
+    receipt = RecordingImportReceipt.create(
+        producer_id=CURRENT_RECORDING_IMPORT_PRODUCER_ID,
+        producer_git_sha="0" * 40,
+        config_sha256="1" * 64,
+        target_relative_path="zarr/analysis.zarr",
+        identity_claim=identity_claim,
+        acquisition_ownership_ref="registry://acquisition/ownership/test",
+        acquisition_ownership_sha256="2" * 64,
+        acquisition_frame_ref="registry://acquisition/frame/test",
+        acquisition_frame_sha256="3" * 64,
+    )
+    publish_recording_import_receipt(zarr_path, receipt)
+    monkeypatch.setattr(
+        authority_module,
+        "_verify_live_import_receipt",
+        lambda **_kwargs: (receipt.receipt_sha256, object(), object(), "fixture"),
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    registry = Registry(registry_path)
+    try:
+        result = registry.project_regular_source_recording_identity(
+            zarr_path=zarr_path,
+            decided_by="pytest",
+            decided_at_utc="2026-08-25T12:00:00+00:00",
+            import_receipt=receipt,
+        )
+    finally:
+        registry.close()
+
+    report_path = tmp_path / "authority-bound.json"
+    assert main(
+        [
+            "--registry",
+            str(registry_path),
+            "--include-temp-root",
+            "all-temp",
+            "--json",
+            str(report_path),
+        ]
+    ) == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["authority_bound_review"]["dataset_count"] == 1
+    assert report["authority_bound_review"]["datasets"][0]["dataset_id"] == (
+        result.dataset_id
+    )
+    assert report["selection"]["selected_dataset_count"] == 0
 
 
 def test_dry_run_counts_match_and_writes_json(
@@ -302,6 +401,18 @@ def test_drift_guard_catches_uncovered_dataset_id_table(
         conn.commit()
         with pytest.raises(RuntimeError, match="future_dataset_metrics"):
             assert_dependent_table_map_covers_schema(conn)
+
+
+def test_drift_guard_protects_import_receipt_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path, _fake_tmp = _make_registry(tmp_path, monkeypatch)
+
+    with sqlite3.connect(registry_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert_dependent_table_map_covers_schema(conn)
+        assert "recording_import_receipt_bindings" in PROTECTED_DATASET_TABLES
 
 
 def test_read_only_connection_sets_query_only(

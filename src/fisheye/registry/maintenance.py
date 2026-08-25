@@ -29,8 +29,17 @@ from .extractors.masks import (
     _extract_subject_mask_performance_rows,
 )
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
+from .recording_identity_authority import (
+    RecordingIdentityAuthorityError,
+    recording_directory_for_source_target,
+)
 from .registered_geometry_readiness import project_registered_geometry_stages
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SourceRecordingIdentityError,
+    load_source_recording_identity_profile,
+)
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
@@ -816,11 +825,45 @@ def _backfill_recording_entities(
             continue
 
         recordings_scanned += 1
+        has_root_metadata = any(
+            (zarr_path / name).is_file() for name in ("zarr.json", ".zgroup")
+        )
         try:
-            recording_dir = zarr_path.parent.parent
-        except Exception:
-            manifests_missing += 1
-            continue
+            source_profile = (
+                load_source_recording_identity_profile(zarr_path)
+                if has_root_metadata
+                else None
+            )
+        except SourceRecordingIdentityError as exc:
+            raise RecordingIdentityAuthorityError(
+                "current-profile source evidence is invalid and requires "
+                "receipt-bound finalization before registry maintenance"
+            ) from exc
+        authority_binding = registry.conn.execute(
+            """
+            SELECT 1 FROM recording_import_receipt_bindings
+            WHERE dataset_id = ? LIMIT 1;
+            """,
+            (dataset_id,),
+        ).fetchone()
+        if (
+            source_profile == SOURCE_RECORDING_IDENTITY_PROFILE
+            and authority_binding is None
+        ):
+            raise RecordingIdentityAuthorityError(
+                "profiled current source recordings require receipt-bound "
+                "finalization before registry maintenance"
+            )
+        verified_import = (
+            registry.read_verified_recording_import(dataset_id)
+            if authority_binding is not None
+            else None
+        )
+        recording_dir = (
+            recording_directory_for_source_target(zarr_path.resolve())
+            if verified_import is not None
+            else zarr_path.parent.parent
+        )
         manifest_path = recording_dir / "recording_manifest.json"
         if not manifest_path.exists():
             manifests_missing += 1
@@ -832,9 +875,14 @@ def _backfill_recording_entities(
             continue
 
         manifest_session_uuid = manifest.get("session_uuid")
-        recording_id = _normalize_recording_id(
-            session_uuid=str(manifest_session_uuid or session_uuid or "").strip() or None,
-            recording_dir=recording_dir,
+        recording_id = (
+            verified_import.identity.recording_id
+            if verified_import is not None
+            else _normalize_recording_id(
+                session_uuid=str(manifest_session_uuid or session_uuid or "").strip()
+                or None,
+                recording_dir=recording_dir,
+            )
         )
         now = registry.conn.execute("SELECT datetime('now') AS now;").fetchone()["now"]
         recording_name = manifest.get("recording_name") or recording_dir.name
@@ -896,7 +944,7 @@ def _backfill_recording_entities(
         if existing_recording is None:
             recordings_upserted += 1
 
-        if not dry_run:
+        if not dry_run and verified_import is None:
             registry.conn.execute(
                 """
                 INSERT INTO recordings (
@@ -970,7 +1018,13 @@ def _backfill_recording_entities(
 
         current_recording_id = row["recording_id"]
         current_artifact_kind = row["artifact_kind"]
-        if current_recording_id != recording_id or current_artifact_kind != "source_recording":
+        if (
+            verified_import is None
+            and (
+                current_recording_id != recording_id
+                or current_artifact_kind != "source_recording"
+            )
+        ):
             datasets_linked += 1
             if not dry_run:
                 registry.conn.execute(

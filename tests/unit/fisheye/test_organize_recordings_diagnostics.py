@@ -7,6 +7,10 @@ import h5py
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
 from fisheye.utils import organize_recordings
 
 
@@ -16,6 +20,8 @@ def _write_video_only_metadata_csv(path: Path, source_video_name: str) -> None:
             handle,
             fieldnames=[
                 "source_video",
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+                "recording_id",
                 "session_uuid",
                 "recording_name",
                 "dish_design",
@@ -26,6 +32,8 @@ def _write_video_only_metadata_csv(path: Path, source_video_name: str) -> None:
         writer.writerow(
             {
                 "source_video": source_video_name,
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+                "recording_id": "recording_cam2010093",
                 "session_uuid": "2026-03-09_colleague_set_001",
                 "recording_name": "Colleague Set 001",
                 "dish_design": "cedar",

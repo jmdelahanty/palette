@@ -111,6 +111,7 @@ def test_build_plans_skips_existing_analysis_only_after_completion_contract(
 def test_main_apply_uses_import_only_process(monkeypatch, tmp_path: Path) -> None:
     rec = _recording(tmp_path)
     calls: list[tuple[Path, bool]] = []
+    manifest_before = (rec / "recording_manifest.json").read_bytes()
 
     def _fake_process(plan, opts, **_kwargs):
         calls.append((plan.recording_dir, opts.import_stimulus))
@@ -128,34 +129,39 @@ def test_main_apply_uses_import_only_process(monkeypatch, tmp_path: Path) -> Non
 
     assert rc == 0
     assert calls == [(rec.resolve(), True)]
-    manifest = json.loads((rec / "recording_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["import_status"] == "ok"
-    assert manifest["analysis_zarr_path"].endswith(f"{rec.name}_analysis.zarr")
+    assert (rec / "recording_manifest.json").read_bytes() == manifest_before
 
 
 def test_main_apply_syncs_successful_import_when_registry_is_provided(monkeypatch, tmp_path: Path) -> None:
     rec = _recording(tmp_path)
     registry_path = tmp_path / "registry.sqlite"
     process_calls: list[Path] = []
-    registry_calls: list[tuple[Path, Path]] = []
+    gateway_calls: list[tuple[Path, Path, object, str]] = []
+    receipt = object()
+    manifest_before = (rec / "recording_manifest.json").read_bytes()
 
     def _fake_process(plan, _opts, **_kwargs):
         process_calls.append(plan.recording_dir)
-        return SimpleNamespace(ok=True, failed_step=None, error=None, returncode=None)
+        return SimpleNamespace(
+            ok=True,
+            failed_step=None,
+            error=None,
+            returncode=None,
+            receipt=receipt,
+        )
 
-    class _Registry:
-        def __init__(self, path: Path) -> None:
-            self.path = path
-
-        def scan_zarr(self, zarr_path: Path) -> str:
-            registry_calls.append((self.path, zarr_path))
-            return "dataset-1"
-
-        def close(self) -> None:
-            pass
+    def _fake_shadow_sync(
+        *,
+        canonical_registry: Path,
+        zarr_path: Path,
+        receipt: object,
+        decided_by: str,
+    ) -> object:
+        gateway_calls.append((canonical_registry, zarr_path, receipt, decided_by))
+        return SimpleNamespace(mutation_result={"dataset_id": "dataset-1"})
 
     monkeypatch.setattr(mod, "process_recording_import", _fake_process)
-    monkeypatch.setattr(mod, "Registry", _Registry)
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _fake_shadow_sync)
 
     rc = mod.main(
         [
@@ -170,10 +176,15 @@ def test_main_apply_syncs_successful_import_when_registry_is_provided(monkeypatc
     expected_zarr = rec.resolve() / "zarr" / f"{rec.name}_analysis.zarr"
     assert rc == 0
     assert process_calls == [rec.resolve()]
-    assert registry_calls == [(registry_path.resolve(), expected_zarr)]
-    manifest = json.loads((rec / "recording_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["import_status"] == "ok"
-    assert manifest["registry_dataset_id"] == "dataset-1"
+    assert gateway_calls == [
+        (
+            registry_path.resolve(),
+            expected_zarr,
+            receipt,
+            "fisheye.utils.import_organized_recordings_analysis",
+        )
+    ]
+    assert (rec / "recording_manifest.json").read_bytes() == manifest_before
 
 
 def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch, tmp_path: Path) -> None:
@@ -181,24 +192,24 @@ def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch,
     zarr_path = rec / "zarr" / f"{rec.name}_analysis.zarr"
     zarr_path.mkdir(parents=True)
     registry_path = tmp_path / "registry.sqlite"
-    registry_calls: list[Path] = []
+    gateway_calls: list[tuple[Path, Path, object, str]] = []
+    manifest_before = (rec / "recording_manifest.json").read_bytes()
 
     def _unexpected_process(*_args, **_kwargs):
         raise AssertionError("existing zarr should be skipped, not imported")
 
-    class _Registry:
-        def __init__(self, _path: Path) -> None:
-            pass
-
-        def scan_zarr(self, path: Path) -> str:
-            registry_calls.append(path)
-            return "dataset-existing"
-
-        def close(self) -> None:
-            pass
+    def _fake_shadow_sync(
+        *,
+        canonical_registry: Path,
+        zarr_path: Path,
+        receipt: object,
+        decided_by: str,
+    ) -> object:
+        gateway_calls.append((canonical_registry, zarr_path, receipt, decided_by))
+        return SimpleNamespace(mutation_result={"dataset_id": "dataset-existing"})
 
     monkeypatch.setattr(mod, "process_recording_import", _unexpected_process)
-    monkeypatch.setattr(mod, "Registry", _Registry)
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _fake_shadow_sync)
     monkeypatch.setattr(
         mod,
         "_existing_analysis_complete",
@@ -216,30 +227,34 @@ def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch,
     )
 
     assert rc == 0
-    assert registry_calls == [zarr_path.resolve()]
-    manifest = json.loads((rec / "recording_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["import_status"] == "ok"
-    assert manifest["registry_dataset_id"] == "dataset-existing"
+    assert gateway_calls == [
+        (
+            registry_path.resolve(),
+            zarr_path.resolve(),
+            None,
+            "fisheye.utils.import_organized_recordings_analysis",
+        )
+    ]
+    assert (rec / "recording_manifest.json").read_bytes() == manifest_before
 
 
 def test_main_registry_sync_failure_marks_run_failed(monkeypatch, tmp_path: Path) -> None:
     _recording(tmp_path)
 
     def _fake_process(_plan, _opts, **_kwargs):
-        return SimpleNamespace(ok=True, failed_step=None, error=None, returncode=None)
+        return SimpleNamespace(
+            ok=True,
+            failed_step=None,
+            error=None,
+            returncode=None,
+            receipt=object(),
+        )
 
-    class _Registry:
-        def __init__(self, _path: Path) -> None:
-            pass
-
-        def scan_zarr(self, _path: Path) -> str:
-            raise RuntimeError("registry unavailable")
-
-        def close(self) -> None:
-            pass
+    def _fake_shadow_sync(**_kwargs: object) -> object:
+        raise RuntimeError("registry unavailable")
 
     monkeypatch.setattr(mod, "process_recording_import", _fake_process)
-    monkeypatch.setattr(mod, "Registry", _Registry)
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _fake_shadow_sync)
 
     rc = mod.main(
         [

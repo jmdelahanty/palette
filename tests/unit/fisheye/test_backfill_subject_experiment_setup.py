@@ -11,6 +11,10 @@ from fisheye.shared.subject_metadata import (
     publish_subject_metadata,
     resolve_subject_metadata,
 )
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
 from fisheye.utils.backfill_subject_experiment_setup import (
     apply_backfill_plan,
     build_backfill_plan,
@@ -121,6 +125,28 @@ def test_backfill_dry_run_apply_refresh_and_idempotency(tmp_path: Path) -> None:
     reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     assert list(reopened["analysis/subject_metadata_runs"].group_keys()) == subject_runs
     assert list(reopened["analysis/experiment_setup_runs"].group_keys()) == setup_runs
+
+
+def test_historical_backfill_fences_current_profile_before_mutation(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path, root = _archive(tmp_path, "current_profile")
+    _write_subject_h5(zarr_path)
+    _register(registry_path, zarr_path)
+    plan = build_backfill_plan(
+        select_backfill_targets(registry_path, all_recordings=True)
+    )
+    root.attrs[SOURCE_RECORDING_IDENTITY_PROFILE_ATTR] = (
+        SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+
+    result = apply_backfill_plan(registry_path, plan)
+
+    assert result["disposition_counts"] == {"error": 1}
+    reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert "analysis/subject_metadata_runs" not in reopened
+    assert "analysis/experiment_setup_runs" not in reopened
 
 
 def test_backfill_skips_missing_source_identity_and_excludes_training(

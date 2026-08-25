@@ -17,6 +17,9 @@ from typing import Any, Callable, List, Mapping, Optional
 
 import zarr
 
+from fisheye.registry.recording_identity_authority import (
+    collect_regular_source_recording_identity,
+)
 from fisheye.shared.acquisition_frame_clock import import_acquisition_frame_clock
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
 from fisheye.shared.acquisition_crop_stream_ledger import (
@@ -38,6 +41,23 @@ from fisheye.shared.import_video_metadata import (
     write_video_metadata,
 )
 from fisheye.shared.recording_preflight import preflight_gate_reason
+from fisheye.shared.recording_import_receipt import (
+    CURRENT_RECORDING_IMPORT_PRODUCER_ID,
+    RecordingImportReceipt,
+    RecordingImportReceiptError,
+    publish_recording_import_receipt,
+    recording_import_receipt_paths,
+)
+from fisheye.shared.run_provenance import git_identity
+from fisheye.shared.source_recording_identity import (
+    SOURCE_ANALYSIS_CLASSIFICATION,
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    SourceRecordingIdentity,
+    SourceRecordingIdentityError,
+    load_source_recording_identity,
+    load_source_recording_identity_profile,
+)
 from fisheye.shared.subject_metadata import (
     publish_subject_metadata,
     read_h5_subject_metadata,
@@ -47,6 +67,7 @@ from fisheye.shared.zarr_run_completion import (
     PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION,
     resolve_latest_complete_run_name,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 @dataclass
@@ -76,6 +97,8 @@ class RecordingImportResult:
     failed_step: Optional[str] = None
     error: Optional[str] = None
     returncode: Optional[int] = None
+    receipt: RecordingImportReceipt | None = None
+    receipt_path: Path | None = None
 
 
 # Backward-compatible aliases during refactor window.
@@ -84,6 +107,7 @@ RecordingAnalysisResult = RecordingImportResult
 
 
 EventLogger = Callable[[str], None]
+RECORDING_IMPORT_CONFIG_SCHEMA_ID = "palette.recording_import_config.v1"
 
 
 def _load_recording_manifest(recording_dir: Path) -> dict[str, object]:
@@ -199,8 +223,18 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
 
 
 def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, object]]:
-    plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
     archive_exists = plan.zarr_path.exists()
+    manifest_path = plan.recording_dir / "recording_manifest.json"
+    manifest: dict[str, object]
+    identity: SourceRecordingIdentity | None = None
+    if archive_exists:
+        manifest = _load_recording_manifest(plan.recording_dir)
+    else:
+        # Current artifacts require an exact producer declaration. This runs
+        # before even the output parent is created.
+        manifest, identity = load_source_recording_identity(manifest_path)
+
+    plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if archive_exists else "w"
     root = zarr.open_group(
         str(plan.zarr_path),
@@ -209,13 +243,49 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
         use_consolidated=False,
     )
     attrs = dict(root.attrs)
+    existing_profile = attrs.get(SOURCE_RECORDING_IDENTITY_PROFILE_ATTR)
+    if archive_exists and existing_profile is not None:
+        if existing_profile != SOURCE_RECORDING_IDENTITY_PROFILE:
+            raise SourceRecordingIdentityError(
+                f"unsupported existing {SOURCE_RECORDING_IDENTITY_PROFILE_ATTR}: "
+                f"{existing_profile!r}"
+            )
+        manifest, identity = load_source_recording_identity(manifest_path)
+        expected = identity.analysis_root_fields()
+        conflicts = [
+            field
+            for field, value in expected.items()
+            if attrs.get(field) != value
+        ]
+        if conflicts:
+            raise SourceRecordingIdentityError(
+                "existing current-profile analysis root conflicts with its manifest: "
+                + ", ".join(conflicts)
+            )
+        recording_id = identity.recording_id
+    elif archive_exists:
+        manifest_profile = manifest.get(SOURCE_RECORDING_IDENTITY_PROFILE_ATTR)
+        if manifest_profile is not None:
+            raise SourceRecordingIdentityError(
+                "existing unprofiled analysis root cannot consume a profiled manifest: "
+                f"{manifest_profile!r}"
+            )
     if not archive_exists:
+        assert identity is not None
         attrs[PALETTE_STORE_EPOCH_ATTR] = PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION
-    recording_id = plan.recording_dir.name
-    manifest = _load_recording_manifest(plan.recording_dir)
-    attrs["zarr_purpose"] = "analysis"
-    attrs.setdefault("session_uuid", _manifest_text(manifest, "session_uuid") or recording_id)
-    attrs.setdefault("recording_id", recording_id)
+        attrs.update(identity.analysis_root_fields())
+        recording_id = identity.recording_id
+    else:
+        # Historical unmarked roots remain on their existing compatibility
+        # path; this does not stamp the current profile onto them.
+        if existing_profile is None:
+            recording_id = plan.recording_dir.name
+            attrs["zarr_purpose"] = "analysis"
+            attrs.setdefault(
+                "session_uuid",
+                _manifest_text(manifest, "session_uuid") or recording_id,
+            )
+            attrs.setdefault("recording_id", recording_id)
     attrs.setdefault("recording_name", _manifest_text(manifest, "recording_name") or recording_id)
     attrs.setdefault("recording_path", str(plan.recording_dir))
     attrs.setdefault("recording_type", _manifest_text(manifest, "recording_type") or "behavior")
@@ -245,9 +315,9 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
                         "Existing archive camera_id conflicts with recording_manifest.json."
                     )
             attrs.setdefault(key, value)
-    manifest_recording_id = _manifest_text(manifest, "recording_id")
-    if manifest_recording_id and manifest_recording_id != recording_id:
-        attrs.setdefault("organizer_recording_id", manifest_recording_id)
+    organizer_recording_id = _manifest_text(manifest, "organizer_recording_id")
+    if organizer_recording_id:
+        attrs.setdefault("organizer_recording_id", organizer_recording_id)
     if manifest:
         attrs.setdefault("recording_manifest_path", str(plan.recording_dir / "recording_manifest.json"))
     attrs.setdefault("source_video", plan.cam_video.name)
@@ -270,7 +340,11 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
     return write_acquisition_video_stream_inventory(root, plan.recording_dir, manifest)
 
 
-def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dict[str, int]:
+def apply_video_metadata(
+    plan: RecordingAnalysisPlan,
+    *,
+    overwrite: bool,
+) -> dict[str, object]:
     root = zarr.open_group(str(plan.zarr_path), mode="r+")
     try:
         publication = load_acquisition_authority_publication_status(root)
@@ -288,11 +362,12 @@ def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dic
         import_purpose="analysis",
         recording_path=plan.recording_dir,
     )
-    publish_external_video_acquisition_authority(root)
+    authority = publish_external_video_acquisition_authority(root)
     h5_updates = _write_source_h5_fingerprint(root, plan.h5_path, overwrite=overwrite)
     return {
         "root_attrs_updated": len(updates.get("root", {})) + h5_updates["root_attrs_updated"],
         "raw_video_attrs_updated": len(updates.get("raw_video", {})) + h5_updates["raw_video_attrs_updated"],
+        **authority,
     }
 
 
@@ -423,6 +498,115 @@ def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) ->
         logger(event, **fields)
 
 
+def _mint_recording_import_receipt(
+    plan: RecordingAnalysisPlan,
+    opts: RecordingImportOptions,
+    acquisition_authority: Mapping[str, object],
+    *,
+    producer_code: Mapping[str, object],
+) -> tuple[RecordingImportReceipt, Path]:
+    """Mint the small import witness after every publication step succeeds."""
+
+    identity_claim = collect_regular_source_recording_identity(plan.zarr_path)
+    if collect_regular_source_recording_identity(plan.zarr_path) != identity_claim:
+        raise SourceRecordingIdentityError(
+            "source-recording identity changed while the receipt was minted"
+        )
+    code = _clean_importer_code_identity()
+    if code != dict(producer_code):
+        raise ValueError(
+            "Palette producer identity changed during recording import"
+        )
+    config = {
+        "schema_id": RECORDING_IMPORT_CONFIG_SCHEMA_ID,
+        "import_video_metadata": opts.import_video_metadata,
+        "video_metadata_overwrite": opts.video_metadata_overwrite,
+        "import_stimulus": opts.import_stimulus,
+        "stimulus_always": opts.stimulus_always,
+        "stimulus_run_name": opts.stimulus_run_name,
+        "stimulus_overwrite": opts.stimulus_overwrite,
+        "stimulus_quiet": opts.stimulus_quiet,
+        "allow_preflight_failures": opts.allow_preflight_failures,
+        "stimulus_metadata_and_calibration_only": (
+            opts.stimulus_metadata_and_calibration_only
+        ),
+    }
+    try:
+        target_relative_path = plan.zarr_path.resolve().relative_to(
+            plan.recording_dir.resolve()
+        ).as_posix()
+    except ValueError as exc:
+        raise ValueError("analysis Zarr must be inside its recording directory") from exc
+    receipt = RecordingImportReceipt.create(
+        producer_id=CURRENT_RECORDING_IMPORT_PRODUCER_ID,
+        producer_git_sha=code.get("git_sha"),
+        producer_git_dirty=code.get("git_dirty"),
+        config_sha256=canonical_json_sha256(config),
+        target_relative_path=target_relative_path,
+        identity_claim=identity_claim,
+        acquisition_ownership_ref=acquisition_authority.get(
+            "ownership_record_ref"
+        ),
+        acquisition_ownership_sha256=acquisition_authority.get(
+            "ownership_record_sha256"
+        ),
+        acquisition_frame_ref=acquisition_authority.get("frame_record_ref"),
+        acquisition_frame_sha256=acquisition_authority.get(
+            "frame_record_sha256"
+        ),
+    )
+    return receipt, publish_recording_import_receipt(plan.zarr_path, receipt)
+
+
+def _clean_importer_code_identity() -> dict[str, object]:
+    code = git_identity(cwd=Path(__file__).resolve().parents[3])
+    sha = code.get("git_sha")
+    if (
+        type(sha) is not str
+        or len(sha) != 40
+        or any(char not in "0123456789abcdef" for char in sha)
+        or code.get("git_dirty") is not False
+    ):
+        raise ValueError(
+            "current recording imports require a clean commit-pinned Palette checkout"
+        )
+    return {"git_sha": sha, "git_dirty": False}
+
+
+def _consolidate_current_source_publication(
+    plan: RecordingAnalysisPlan,
+    *,
+    crop_ledger_sha256: str | None,
+) -> None:
+    """Publish and verify one current source archive's metadata generation."""
+
+    consolidate_metadata_capture_expected_warnings(plan.zarr_path)
+    consolidated = zarr.open_group(
+        str(plan.zarr_path),
+        mode="r",
+        use_consolidated=True,
+    )
+    _manifest, manifest_identity = load_source_recording_identity(
+        plan.recording_dir / "recording_manifest.json"
+    )
+    root_attributes = dict(consolidated.attrs)
+    consolidated_identity = SourceRecordingIdentity.from_mapping(root_attributes)
+    if consolidated_identity != manifest_identity:
+        raise SourceRecordingIdentityError(
+            "consolidated source identity differs from the recording manifest"
+        )
+    for field, expected in SOURCE_ANALYSIS_CLASSIFICATION.items():
+        if root_attributes.get(field) != expected:
+            raise SourceRecordingIdentityError(
+                f"consolidated source root requires exact {field}={expected!r}"
+            )
+    if crop_ledger_sha256 is not None:
+        validate_current_acquisition_crop_stream_ledger(
+            consolidated,
+            expected_record_sha256=crop_ledger_sha256,
+        )
+
+
 def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOptions) -> tuple[bool, int, List[str]]:
     if plan.h5_path is None:
         return False, 2, ["missing_h5_for_stimulus_import"]
@@ -465,6 +649,56 @@ def process_recording_import(
         )
         return RecordingImportResult(ok=False, failed_step="preflight_gate", error=gate_reason)
 
+    manifest_declaration = _load_recording_manifest(plan.recording_dir)
+    current_manifest = (
+        manifest_declaration.get(SOURCE_RECORDING_IDENTITY_PROFILE_ATTR)
+        == SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    if current_manifest and not opts.import_video_metadata:
+        return RecordingImportResult(
+            ok=False,
+            failed_step="recording_import_preflight",
+            error=(
+                "current source imports require video metadata and a published "
+                "acquisition authority"
+            ),
+        )
+
+    if plan.zarr_path.exists():
+        try:
+            profile = load_source_recording_identity_profile(plan.zarr_path)
+            receipt_paths = (
+                recording_import_receipt_paths(plan.zarr_path)
+                if profile == SOURCE_RECORDING_IDENTITY_PROFILE
+                else ()
+            )
+        except (SourceRecordingIdentityError, RecordingImportReceiptError) as exc:
+            return RecordingImportResult(
+                ok=False,
+                failed_step="recording_import_preflight",
+                error=str(exc),
+            )
+        if receipt_paths:
+            return RecordingImportResult(
+                ok=False,
+                failed_step="recording_import_sealed",
+                error=(
+                    "current source import already has immutable receipt evidence; "
+                    "use receipt-bound registry refresh instead of re-importing"
+                ),
+            )
+
+    producer_code: Mapping[str, object] | None = None
+    if opts.import_video_metadata:
+        try:
+            producer_code = _clean_importer_code_identity()
+        except Exception as exc:
+            return RecordingImportResult(
+                ok=False,
+                failed_step="recording_import_preflight",
+                error=str(exc),
+            )
+
     try:
         stream_inventory = ensure_analysis_archive(plan)
     except Exception as exc:
@@ -481,11 +715,13 @@ def process_recording_import(
             inventory_status=stream_inventory.get("inventory_status"),
         )
 
+    acquisition_authority: Mapping[str, object] | None = None
     if opts.import_video_metadata:
         try:
             updates = apply_video_metadata(plan, overwrite=bool(opts.video_metadata_overwrite))
         except Exception as exc:
             return RecordingImportResult(ok=False, failed_step="import_video_metadata", error=str(exc))
+        acquisition_authority = updates
         _log(
             logger,
             "video_metadata_imported",
@@ -566,32 +802,66 @@ def process_recording_import(
         if isinstance(stream_inventory, dict)
         else {}
     )
-    if crop_ledger:
+    if current_manifest:
         try:
-            expected_digest = str(crop_ledger["canonical_ledger_record_sha256"])
-            consolidate_metadata_capture_expected_warnings(plan.zarr_path)
-            consolidated = zarr.open_group(
-                str(plan.zarr_path), mode="r", use_consolidated=True
+            expected_digest = (
+                str(crop_ledger["canonical_ledger_record_sha256"])
+                if crop_ledger
+                else None
             )
-            validate_current_acquisition_crop_stream_ledger(
-                consolidated,
-                expected_record_sha256=expected_digest,
+            _consolidate_current_source_publication(
+                plan,
+                crop_ledger_sha256=expected_digest,
             )
         except Exception as exc:
             return RecordingImportResult(
                 ok=False,
-                failed_step="consolidate_acquisition_crop_ledger",
+                failed_step="consolidate_current_source_publication",
                 error=str(exc),
             )
         _log(
             logger,
-            "acquisition_crop_ledger_consolidated",
+            "current_source_publication_consolidated",
             recording_dir=str(plan.recording_dir),
             zarr_path=str(plan.zarr_path),
             record_sha256=expected_digest,
         )
 
-    return RecordingImportResult(ok=True)
+    if acquisition_authority is None:
+        _log(
+            logger,
+            "recording_import_receipt_unavailable",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            reason="video_metadata_and_acquisition_authority_not_imported",
+        )
+        return RecordingImportResult(ok=True)
+    try:
+        receipt, receipt_path = _mint_recording_import_receipt(
+            plan,
+            opts,
+            acquisition_authority,
+            producer_code=producer_code or {},
+        )
+    except Exception as exc:
+        return RecordingImportResult(
+            ok=False,
+            failed_step="recording_import_receipt",
+            error=str(exc),
+        )
+    _log(
+        logger,
+        "recording_import_receipt_published",
+        recording_dir=str(plan.recording_dir),
+        zarr_path=str(plan.zarr_path),
+        receipt_path=str(receipt_path),
+        receipt_sha256=receipt.receipt_sha256,
+    )
+    return RecordingImportResult(
+        ok=True,
+        receipt=receipt,
+        receipt_path=receipt_path,
+    )
 
 
 # Backward-compatible alias name.
