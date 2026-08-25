@@ -5,14 +5,21 @@
 **Method:** eight parallel read-only Luna xhigh reviews of recording identity,
 frame authority, epochs and speed, run selection and completion, mirrors and
 manifest coverage, registry reconciliation, omitted authority paths, and the
-cross-cutting architecture, followed by direct source confirmation.
+cross-cutting architecture, followed by direct source confirmation, the
+Step 1 recording-identity census, and parallel review of that evidence.
 
-**Repo state:** branch
+**Original review state:** branch
 `agent/palette/clipped-geometry-acquisition-authority-20260821`, HEAD
 `e58443c3` (`docs: record track reader optimization audit`).
 
-**Status:** design and sequencing record. This review changes no production
-authority, selector, registry, or reader implementation.
+**Implementation update:** branch
+`agent/palette/recording-identity-evidence-20260825`, HEAD `d816771d11cb`
+(`registry: add read-only recording identity census`).
+
+**Status:** living design and sequencing record. The recording-identity slice
+of Step 1 is implemented as a read-only diagnostic. It changes no production
+authority, selector, registry row, or reader implementation. Required
+repository CI has not run, so this branch is not merge-ready.
 
 **Companion audits:**
 [`redundancy_campaign_2026-08-24.md`](redundancy_campaign_2026-08-24.md),
@@ -20,7 +27,9 @@ authority, selector, registry, or reader implementation.
 [`track_motion_reader_optimization_2026-08-24.md`](track_motion_reader_optimization_2026-08-24.md),
 [`crop_contract_split_audit_2026-08-24.md`](crop_contract_split_audit_2026-08-24.md),
 [`contract_enforcement_divergence_review_2026-08-21.md`](contract_enforcement_divergence_review_2026-08-21.md),
-and [`subtraction_queue_2026-08-21.md`](subtraction_queue_2026-08-21.md).
+[`subtraction_queue_2026-08-21.md`](subtraction_queue_2026-08-21.md), and the
+implemented Step 1 evidence record
+[`recording_identity_census_2026-08-25.md`](recording_identity_census_2026-08-25.md).
 
 ---
 
@@ -54,6 +63,15 @@ written or read under opposing precedence without an effective conflict gate.
 Receipt-backed performance work remains important, but it depends on cleaner
 metadata, run-resolution, lifecycle, and digest boundaries.
 
+The recording-identity census is now a bounded evidence baseline, not a
+writer-generation census. Its `explicit_source_layout` predicate selects
+active source-recording analysis artifacts with registry layout markers; it
+does not identify the Palette commit that produced them. The identity slice of
+Step 1 is complete, but the remaining fact-family census and proof of the
+current writer remain open. Step 2 therefore starts with synthetic
+writer-to-unpatched-reader tests and a commit-pinned source canary held outside
+production locators and authority, not with repair of the observed corpus.
+
 The intended shape is:
 
 ```text
@@ -64,7 +82,7 @@ observed evidence from manifests, Zarr, probes, and ledgers
                               |
               +---------------+----------------+
               |               |                |
-       effective fact   bound projection   exact mirror
+        resolved fact   bound projection   exact mirror
               |                                |
               +-------> registry/index <-------+
 
@@ -87,7 +105,7 @@ dispositions before code is removed or a new contract is added.
 | Lifecycle or selector state | Mutable publication state such as completion, eligibility, and active selection. | Kept outside the immutable scientific digest/claim, even when physically colocated, and checked against the selected manifest, owner, and generation. |
 | Supported profile | A distinct, intentional publication grammar serving a real workflow. | Reachable through the shared resolver, fully validated, and covered by a real-writer-to-unpatched-reader test. |
 
-This taxonomy produces five immediate rules:
+This taxonomy produces seven immediate rules:
 
 1. Names such as `total_frames`, `latest`, `status`, and `speed` are not
    sufficiently typed to be authorities by themselves.
@@ -101,6 +119,12 @@ This taxonomy produces five immediate rules:
    [`registry_data_governance_policy.md`](../registry_data_governance_policy.md).
 5. Deletion follows migration evidence. A compatibility path is removed only
    after its callers are migrated or its profile is explicitly tombstoned.
+6. A schema or layout marker identifies a contract shape, not the exact code
+   revision that produced an artifact. Producer generation requires explicit,
+   immutable producer evidence.
+7. A bounded diagnostic that reaches an observation, traversal, or cardinality
+   cap is incomplete and must fail closed. Such a cap is not a scientific data
+   threshold and must never be interpreted as a frame-row limit.
 
 ### 1.1 Vertical versus horizontal checks
 
@@ -170,6 +194,10 @@ or architectural corrections that must be carried into implementation.
 
 | Prior wording | Corrected finding |
 |---|---|
+| The 31 artifacts selected by the recording census represent the current implementation. | They are the `explicit_source_layout` evidence cohort: 23 `analysis_zarr` rows and 8 `rolling_clips` rows selected by registry layout markers. The predicate does not establish writer generation. Batman's 36 and Goodbatbadbat's 84 active source-analysis rows are excluded because those registry markers are null; their `recording_analysis_v1` root schema marker does not prove that they are legacy or came from a different writer. |
+| Eight million-row frame indexes imply 31 long recordings or duplicated frame data. | The 31 count is per-camera source-artifact/registry entities, not acquisition sessions or frame indexes. The 8 Parquets are two acquisition families times four cameras. Their 1,188,000- or 2,937,604-row counts are expected; row count alone is not a defect. A separate whole-file hash check found no duplicate Parquet files. |
+| Existing downstream provenance proves which Palette importer created a recording root. | Modern `run_provenance` and `stage_provenance` often bind downstream code, config, inputs, and runtime, but they identify the downstream producer. Root schema/layout markers and the acquisition producer label do not bind the exact Palette importer commit. New source publication needs its own immutable import receipt. |
+| A run marked `complete` necessarily passed producer-provenance validation. | Parentless completion skips the strict parent-scoped provenance gate. A bounded Goodbat review found 355 selector-ineligible, unselected runs marked complete with `run_provenance.git_sha=null` and one failed run. None was authoritative, but the completion contract still has a loophole. |
 | The ordinary `recordings` upsert freezes an existing `session_uuid`. | `COALESCE(excluded.session_uuid, recordings.session_uuid)` at `registry/db.py:2618` lets any non-null incoming value overwrite the existing value; it preserves the existing value only when the incoming value is null. The maintenance writer at `registry/maintenance.py:914` hard-overwrites and can also erase with null. Both are last-writer-sensitive. |
 | The identity problem is confined to `recordings`. | `datasets` is also mutable in conflict with policy: `session_uuid=excluded.session_uuid` and a non-null incoming `recording_id` wins at `registry/db.py:2534-2536`. Governance declares `datasets.session_uuid` immutable generally and `datasets.recording_id` immutable for `artifact_kind='source_recording'`. Joined views can therefore consume identity from different registry copies. |
 | There are two central frame-count resolvers. | There are at least three: `shared/frame_domains.py:492-503`, `analysis/stimulus_epoch_runs.py:132-145`, and `shared/metadata.py`'s compatibility resolver. The first two already apply opposite source-versus-stored precedence. |
@@ -202,7 +230,56 @@ real trust-boundary check or turning mutable telemetry into scientific truth.
 
 ## 4. First implementation target: recording identity
 
-### 4.1 Why precedence cleanup is insufficient
+### 4.1 Implemented evidence baseline and its limits
+
+The read-only census committed at `d816771d11cb` establishes the first bounded
+baseline. Its default `explicit_source_layout` cohort selected 31 active
+source-recording analysis artifacts with registry layout evidence:
+
+| Evidence slice | Result | Interpretation |
+|---|---:|---|
+| `analysis_zarr` rows | 23 | Per-camera source-artifact/registry entities, not acquisition sessions. |
+| `rolling_clips` rows | 8 | Two acquisition families times four cameras. |
+| Frame-index Parquets | 8 | All identity projections were single-valued and complete. Million-row indexes are expected. |
+| Zarr artifact scopes | 28 complete, 3 incomplete | The three incomplete scopes contain non-finite JSON `Infinity`; they were not accepted as evidence. |
+| Findings | 24 action-required, 23 expected | Action-required: 8 artifact conflicts, 5 missing artifact identity fields, 8 recording-sidecar conflicts, and 3 incomplete Zarr scopes due to non-finite metadata. The 23 expected findings record `dataset_id == session_uuid`. |
+
+The eight clipped artifacts describe two four-camera failure families, not 24
+independent root causes. The census chooses no precedence winner, emits no
+effective identity, authorizes no repair, and reports
+`proves_writer_generation=false`. Its v5 evidence binds registry snapshot
+SHA-256
+`f37c8f2155904becd2a61a613b1e6036fa5d58b02c505cc536f5136d2c598d1b`
+to report-body SHA-256
+`5f35c874f3cab45cfa0f7481e5b6a6f9bafcb9ddba3a4b8adf5d791ba5444420`;
+the detailed interpretation and command are in the companion census document.
+Focused census validation at that commit passed 20 tests, `py_compile`, and
+`git diff --check`. Required repository CI remains unrun.
+
+The default 100,000 observation cap bounds accumulated identity observations
+within a metadata scan scope. It is not a frame-row, Parquet-row, array-size,
+or artifact-count limit. Zarr traversal and Parquet distinct identity
+cardinality have separate bounds. Reaching any bound makes the affected scope
+incomplete and the command non-successful; observation/traversal coverage caps
+are `unresolved`, while identity-cardinality overflow is `action_required`.
+Absence of a conflict cannot be inferred from capped evidence. No selected
+live scope reached those bounds. The three incomplete scopes failed because of
+`Infinity`, not scale.
+
+Batman's 36 and Goodbatbadbat's 84 active source-analysis rows are outside this
+cohort because both registry layout markers are null. All 120 roots carry the
+`recording_analysis_v1` schema marker, but that marker identifies a data
+contract, not a writer commit. Their compatibility and repair disposition is
+deferred; they must not be labeled legacy merely from this exclusion.
+
+Downstream `palette.run_provenance.v1` and stage provenance often identify the
+exact producer of a derived run. They do not identify the Palette importer that
+created the recording root. `source_layout`, `source_frame_index_schema`,
+`recording_analysis_v1`, and versioned acquisition producer labels likewise do
+not bind an exact Palette code revision. Current-writer safety therefore cannot
+be inferred from this corpus.
+
+### 4.2 Why precedence cleanup is insufficient
 
 `resolve_dataset_id()` prefers existing Zarr identity attrs and consults the
 manifest only when they are absent (`registry/db.py:606-612`). Normal recording
@@ -235,22 +312,25 @@ The target semantics are:
   are not cryptographically or structurally immutable merely because they are
   attrs.
 - `recordings`, `datasets`, profile tables, and status views are registry
-  projections over one effective identity decision.
+  projections over one resolved identity decision.
 - Corrections are append-only revisions with actor, reason, evidence, prior
   revision, and compare-and-swap protection. The acquisition-batch assignment
   pattern in
   [`acquisition_batch_registry_contract.md`](../acquisition_batch_registry_contract.md)
   is the in-repo model.
 
-### 4.2 Proposed resolver shape
+### 4.3 Proposed resolver shape
 
 Introduce a read-only `RecordingIdentityEvidence` result before changing any
-writer. Its exact implementation name is open, but it should return:
+writer. Its exact implementation name is open, but it should return optional
+resolved values only after all required evidence agrees or an approved
+correction revision applies:
 
 ```text
-effective_recording_id
-effective_session_uuid
-effective_revision_or_digest
+resolved_recording_id?
+resolved_session_uuid?
+authority_revision?
+evidence_digest
 observations[]:
   source_kind
   source_locator
@@ -264,9 +344,10 @@ resolution_status
 The resolver should observe the capture manifest, Zarr artifact snapshot,
 current registry rows, and any approved correction revision. An absent value
 may be filled from compatible evidence. Two conflicting non-null values must
-produce a conflict, not a precedence winner.
+produce a conflict, not a precedence winner; unresolved results do not carry a
+resolved identity.
 
-### 4.3 One projection writer
+### 4.4 One projection writer and a separate import receipt
 
 Replace the maintenance raw SQL and normal registration divergence with one
 writer that:
@@ -295,11 +376,34 @@ the same recording before identity attrs are copied. In particular,
 without a canonical same-recording comparison. Keep the evidence; remove its
 ability to manufacture a competing identity.
 
-### 4.4 First evidence and acceptance gates
+New source publications also need an immutable `recording_import_receipt_v1`
+or equivalent that binds:
 
-Before mutations, run a dry-run census of manifest, root, `recordings`,
-`datasets`, and profile identities. Report missing values separately from
-conflicting non-null values.
+- exact Palette commit and dirty state;
+- importer/profile identity and canonical import-configuration hash;
+- source manifest, source-media, and frame-index locators/fingerprints;
+- the resolved `recording_id` and `session_uuid` evidence/decision digest; and
+- publication identity, generation, and the receipt schema/producer version.
+
+That receipt is producer evidence, not a second identity authority. A new
+publisher that cannot establish its code identity must fail or create an
+explicitly quarantined source artifact under a root-level publication-
+eligibility contract that production readers and registry authority reject.
+Historical missing receipts remain `unknown`; downstream run provenance must
+not be used to backfill them.
+
+The direct mutator in `registry/repair_recording_identities.py` remains
+deferred. If retained, it must become a client of the explicit correction
+revision and projection writer; it cannot remain an independent repair
+authority.
+
+### 4.5 First evidence and acceptance gates
+
+The committed census is the failing-before-change baseline. It reports missing
+values separately from conflicting non-null values, chooses no winner, and
+authorizes no corpus mutation. Existing-artifact repair, including the
+unmarked Batman and Goodbatbadbat cohort, remains deferred while the current
+implementation boundary is consolidated.
 
 Acceptance requires synthetic and fixture coverage for:
 
@@ -310,9 +414,19 @@ Acceptance requires synthetic and fixture coverage for:
 - idempotent repeated registration and maintenance;
 - source-recording `datasets` and `recordings` projection parity;
 - clipped sidecars that disagree with one another or with a donor Zarr and fail
-  before output creation; and
+  before output creation;
 - an explicit correction revision that succeeds once and rejects a stale
-  compare-and-swap attempt.
+  compare-and-swap attempt;
+- regular and clipped real-writer-to-unpatched-reader round trips that validate
+  the import receipt and registry projection;
+- both known four-camera conflict families failing before output creation when
+  sidecar, donor, root, camera, or frame-map bindings disagree;
+- missing root `session_uuid` and non-finite metadata remaining unresolved,
+  never accepted through fallback; and
+- a commit-pinned source canary, held outside production locators and authority
+  under an explicit quarantine contract, proving the consolidated current
+  writer/reader boundary before any production publication or repair is
+  enabled.
 
 ## 5. Second implementation target: typed frame domains
 
@@ -421,18 +535,38 @@ authority, evidence, projection, exact mirror, cache, receipt, supported
 profile, migrate, or tombstone. Include a dry-run conflict census for identity,
 frame domains, run selectors, status, geometry/calibration, epochs, and mirrors.
 
-**Gate:** no proposed deletion or new authority proceeds without an explicit
-disposition and a named consumer migration.
+The recording-identity slice is implemented at `d816771d11cb`. It inventories
+the registry schema globally but applies row-level artifact findings only to
+the declared `explicit_source_layout` scope. The result closes the bounded
+identity-evidence subtask; it does not close writer-generation coverage,
+unmarked-artifact reconciliation, compatibility repair, or the remaining
+fact-family census. Its observation cap is per metadata scan scope and never a
+frame-row limit; a reached cap makes coverage incomplete and the command
+non-successful.
+
+**Gate:** for the identity slice, the report is read-only, emits no effective
+identity or repair, records capped evidence as incomplete/non-success with
+severity determined by cap type, and is bound to the registry snapshot it
+inspected. For every other slice, no proposed deletion or new authority
+proceeds without an explicit disposition and a named consumer migration.
 
 ### Step 2 — Consolidate recording identity, including `datasets`
 
 Land the read-only evidence resolver, conflict report, explicit correction
 revision, and one registry projection writer. Route both normal registration
-and maintenance through it, then normalize profile/status joins.
+and maintenance through it, then normalize profile/status joins. Add the
+source-import receipt that binds the exact producer commit, dirty state,
+configuration, source evidence, and identity decision. Do not use the selected
+existing corpus or downstream run provenance as a current-writer oracle.
 
-**Gate:** ordinary backfill cannot change a non-null identity or erase one with
-null; explicit corrections are versioned, audited, and compare-and-swap
-guarded.
+**Gate:** `recording_id` and `session_uuid` remain separate; ordinary backfill
+cannot change a non-null identity or erase one with null; explicit corrections
+are versioned, audited, and compare-and-swap guarded; sidecar, donor, camera,
+and frame-map conflicts fail before output. Regular and clipped synthetic
+writer-to-unpatched-reader round trips pass, followed by a commit-pinned,
+quarantined source canary held outside production locators and registry
+authority. Superseded SQL and precedence branches are deleted only after all
+current callers migrate. Existing-artifact repair remains out of scope.
 
 ### Step 3 — Consolidate typed frame domains and guard authority seeding
 
@@ -460,10 +594,34 @@ Authoritative/latest scientific-consumption modes require both completion and
 selector eligibility. Inventory modes may expose incomplete or ineligible runs
 but cannot feed scientific consumption.
 
-Include parentless `is_run_complete(run)` calls in the migration census.
-Without the parent selector/generation context, those calls inherit legacy
-acceptance and cannot establish authoritative consumption. Canonical paths use
-the parent-scoped resolver with explicit strictness.
+Include both parentless `is_run_complete(run)` and
+`mark_run_complete(..., parent_group=None)` calls in the migration census.
+Without the parent selector/generation context, checks inherit legacy
+acceptance, and completion currently skips the strict provenance gate at
+`shared/zarr_run_completion.py:197-209`. Parent scope controls selector and
+generation validation; its absence must not waive producer-provenance
+validation, and merely supplying a legacy parent is insufficient: strict mode
+must require the parent's
+`completion_epoch >= COMPLETION_EPOCH_REQUIRE_PROVENANCE` (currently 2).
+Authoritative readers separately set `legacy_default=False`; that reader guard
+is not a substitute for the parent completion epoch. Missing or invalid
+provenance must fail the normal `mark_run_complete()` path. Existing explicit
+`allow_missing_run_provenance=True` callers are temporary compatibility or
+maintenance boundaries: migrate them to a named non-complete,
+non-authoritative lifecycle state that cannot become selector-eligible, and
+that `is_run_complete()` never treats as complete.
+
+The explicit-bypass disposition must include completion-epoch backfill,
+training-review refresh, detection-snapshot publication, and provider-position
+comparison. Their maintenance or candidate purpose may remain, but normal
+`complete` cannot continue to encode a weaker guarantee for those callers.
+
+A bounded Goodbat review illustrates the gap without overstating impact: 356
+runs had `run_provenance.git_sha=null`; 355 were marked complete and one
+failed. All were selector-ineligible, no parent selector referenced them, and
+none was authoritative. The fix is still required because `complete` must not
+silently mean different provenance guarantees according to whether the caller
+supplied a parent group.
 
 Collapse recording-step status writes into the shared ledger, including a
 decision on whether `stale` is a status or structured detail. Eliminate raw SQL
@@ -479,7 +637,9 @@ scientific publication.
 
 **Gate:** direct and consolidated views agree for published selectors; every
 run selection declares its mode; all recording-step status producers use the
-allowed vocabulary and the same writer.
+allowed vocabulary and the same writer. Missing or bypassed run provenance is
+a first-class state, cannot become selector-eligible through fallback, and
+cannot be presented as authoritative completion.
 
 ### Step 5 — Add one serial detection finalizer
 
@@ -506,7 +666,10 @@ does not necessarily invalidate scientifically valid Zarr bytes, but it must
 prevent the registry projection from appearing successfully finalized.
 
 **Gate:** no registry row can claim a detection run that the canonical Zarr
-resolver rejects; retry is idempotent; partial failure remains visible.
+resolver rejects. The selected run must have parent-scoped completion under
+strict semantics, selector eligibility, and valid producer provenance;
+`complete` alone is insufficient. Retry is idempotent and partial failure
+remains visible.
 
 ### Step 6 — Unify arena geometry, calibration, and crop authority consumption
 
@@ -646,9 +809,18 @@ add-then-migrate interval, but a step is not complete while its superseded live
 writer, resolver, fallback ladder, adapter, or rescan remains without a dated
 compatibility disposition.
 
+The current checkpoint has not reduced repository size. The Step 1 census
+commit added 3,082 lines of diagnostic source, 763 focused-test lines, and a
+362-line evidence document: 4,207 lines total. The diagnostic is not imported
+by production modules and creates no runtime authority, but it is still real
+maintenance surface. This additive checkpoint is justified only if Step 2 uses
+its evidence to delete the competing writers and precedence paths. Report
+runtime production, diagnostic/maintenance, tests, and docs separately so a
+large diagnostic cannot be hidden inside a claimed net reduction.
+
 | Step | Small canonical addition | Subtraction it must unlock |
 |---:|---|---|
-| 1 | Taxonomy and generated census only; no new runtime authority. | Delete proposals that have no remaining caller can proceed safely; duplicate inventories stop being maintained by hand. |
+| 1 | Taxonomy and a read-only generated census; the recording-identity slice is now implemented with no runtime authority. | It does not itself subtract code. It supplies the disposition evidence needed for Step 2 and prevents duplicate inventories from being maintained by hand. |
 | 2 | Identity evidence type, correction record, and one projection writer. | Remove the maintenance `recordings` SQL implementation, competing source-precedence code, routine `datasets` identity mutation, and duplicated profile identity extraction where the shared resolver covers it. |
 | 3 | Typed frame-count/domain result and guarded source seed. | Retire `stimulus_epoch_runs._resolve_dimensions`, `shared.metadata.get_total_frames`, local six-attr ladders, implicit identity conversions, and caller-specific count arithmetic as each caller migrates. |
 | 4 | One lifecycle-aware opener, typed run/status resolver, and projection reconcile entry point. | Remove registry opener wrappers and implicit fallbacks, reverse-lexical authoritative selectors, the maintenance status SQL writer, and duplicate projection-refresh orchestration. |
@@ -664,7 +836,9 @@ tests can be longer than one unsafe fallback. The campaign should nevertheless
 be **net-negative in production code**. Tests, fixtures, and migration evidence
 may grow. Each implementation handoff should report:
 
-- production lines added and removed;
+- runtime production lines added and removed;
+- diagnostic and maintenance lines added and removed;
+- test and documentation lines added and removed;
 - live implementations before and after;
 - migrated call sites and deleted fallback sites;
 - compatibility branches remaining, with owner and retirement condition;
@@ -692,9 +866,11 @@ applicable gates below.
 4. **Published metadata is lifecycle-correct.** Writers and mutable readers use
    direct metadata. Consolidation is the final visibility step for immutable
    publication, and published readers validate the consolidated generation.
-5. **Compatibility is tested, not assumed.** Each supported grammar has a
-   real-writer-to-unpatched-reader test. An adapter is not evidence that a
-   profile is fully supported.
+5. **Compatibility scope is explicit.** Historical compatibility debt may be
+   deferred, but it cannot silently feed current authority. Each currently
+   supported grammar has a real-writer-to-unpatched-reader test. An adapter is
+   not evidence that a profile is fully supported, and an unmarked artifact is
+   not labeled legacy merely because it falls outside a census cohort.
 6. **Receipts have bounded claims.** Integrity, scientific validation,
    publication, selector eligibility, and telemetry remain distinguishable, as
    required by
@@ -709,6 +885,17 @@ applicable gates below.
    `skip_validation` mode.
 10. **Deletion is last.** Static grep alone is insufficient for public APIs,
     command entry points, recovery modes, and configuration-driven branches.
+11. **Producer scopes do not substitute for one another.** Downstream run or
+    stage provenance cannot backfill source-root importer provenance. Missing,
+    unknown, and explicitly bypassed producer evidence remain first-class
+    states.
+12. **Current-writer proof is generated deliberately.** Schema/layout markers
+    and an old corpus do not identify a writer revision. Acceptance uses
+    synthetic writer-to-unpatched-reader tests and a commit-pinned source
+    canary held outside production locators and authority before activation.
+13. **Bounded evidence fails closed.** Observation, metadata-node, or identity-
+    cardinality caps make a scope incomplete and produce a non-success result.
+    Large frame-index row counts remain valid and are not treated as caps.
 
 ## 9. Deferrals and non-goals
 
@@ -728,20 +915,39 @@ applicable gates below.
 - It does not authorize scheduled automatic repair, selector activation,
   production publication, or compatibility deletion. Those require the
   implementation and acceptance evidence above.
+- It does not repair or classify the unmarked Batman and Goodbatbadbat corpus,
+  reconstruct missing historical importer commits, or require the entire old
+  corpus to satisfy current conventions. Those are explicit deferred
+  compatibility tasks. Current implementations must still reject unresolved
+  identity/provenance rather than interpreting deferred artifacts by fallback.
+- It does not authorize `registry/repair_recording_identities.py` to mutate the
+  observed conflicts. That tool remains deferred until it is routed through
+  the versioned correction and projection-writer boundary or retired.
 
 ## 10. Source map
 
 The main governing contracts and implementations for this plan are:
 
+- Implemented recording-identity evidence baseline:
+  [`recording_identity_census_2026-08-25.md`](recording_identity_census_2026-08-25.md),
+  `registry/recording_identity_census.py:1-3082`, and
+  `tests/unit/fisheye/test_recording_identity_census.py`.
 - Registry authority and immutable identity policy:
   [`registry_data_governance_policy.md`](../registry_data_governance_policy.md),
   `registry/db.py:606-612,730-761,2534-2536,2601-2618`, and
   `registry/maintenance.py:824-948`, with joined-view identity sources at
-  `registry/migration_bodies.py:4430-4477,6580-6582,6760-6764`.
+  `registry/migration_bodies.py:4430-4477,6580-6582,6760-6764`; the independent
+  direct mutator requiring disposition is
+  `registry/repair_recording_identities.py:1-6,132-183,214-274`.
 - Identity normalization history:
   [`recording_registry_normalization_todo.md`](../recording_registry_normalization_todo.md)
   and
   [`acquisition_batch_registry_contract.md`](../acquisition_batch_registry_contract.md).
+- Source-import versus downstream producer provenance:
+  `utils/import_recording_analysis.py:201-296`,
+  `shared/import_video_metadata.py:393-535`,
+  `shared/run_provenance.py:114-133,241-289,405-435`, and
+  `shared/stage_provenance.py:136-201`.
 - Clipped-shell identity evidence and donor binding:
   `utils/create_clipped_analysis_zarr.py:536-560,584-591,661-679` and
   `utils/create_clipped_training_zarr.py:52-69,285-327,474-532,620-622`.
@@ -756,8 +962,18 @@ The main governing contracts and implementations for this plan are:
 - Run-resolution semantics:
   [`run_resolution_semantics.md`](../run_resolution_semantics.md),
   `shared/run_resolution.py:20-44,73-79,175-305`,
-  `shared/zarr_run_completion.py:427-443,506-681`, and
-  `registry/maintenance.py:4097-4134,4164-4194`.
+  `shared/zarr_run_completion.py:107-116,197-231,258-307,397-443,506-681`, and
+  `registry/maintenance.py:4097-4134,4164-4194`; representative parentless
+  completion/provenance call sites are
+  `analysis_workflows/materializers/subject_position.py:399-410,811-816`,
+  `analysis_workflows/materializers/provider_epoch_behavior_summary.py:955-975,1138-1145`,
+  and
+  `analysis_workflows/materializers/provider_track_motion.py:1012-1032,1497-1502`.
+- Explicit missing-provenance bypasses requiring non-complete disposition:
+  `utils/backfill_completion_epoch.py:361-368`,
+  `utils/refresh_training_review_status.py:281-288`,
+  `shared/zarr/detection_snapshot_publication.py:627-635,967-975`, and
+  `analysis_workflows/materializers/provider_position_comparison.py:507-513,540-548`.
 - Zarr metadata lifecycle:
   `shared/zarr_io.py:14-48`, `registry/db.py:206-216`,
   `registry/maintenance.py:132-142`, `registry/chaser_metadata.py:85-90`, and
