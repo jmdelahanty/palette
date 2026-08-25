@@ -8777,7 +8777,11 @@ def _validate_motion_core_numeric_invariants(
     )
     expected_resultant = np.zeros(seconds.size, dtype=np.float32)
     for index, second in enumerate(seconds):
-        mask = (seconds_per_sample == second) & heading_finite
+        mask = (
+            (seconds_per_sample == second)
+            & heading_finite
+            & validity["angular_sample_valid"]
+        )
         valid_angles = heading_radians_kernel[mask]
         if valid_angles.size:
             mean_vector = np.mean(np.exp(1j * valid_angles))
